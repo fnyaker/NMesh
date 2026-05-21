@@ -133,6 +133,11 @@ class Packet:
 
     def decrypt_payload(self, session: SessionKey) -> bytes:
         return session.decrypt(self.__payload, self.__nonce, self.__gcm_tag, self.aad())
+
+    def with_decremented_ttl(self) -> 'Packet':
+        return Packet(self.__version, self.__type, self.__ttl - 1,
+                      self.__src_id, self.__dst_id, self.__msg_id,
+                      self.__nonce, self.__gcm_tag, self.__payload)
         
     
 

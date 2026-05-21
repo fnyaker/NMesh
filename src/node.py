@@ -1,11 +1,14 @@
 import asyncio
 import struct
+import time
+from collections import OrderedDict
 from .node_id import NodeID
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
 from .packet import Packet
 from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
+from .trust import TrustTable
 from .transport import BaseServer
 from .tcp_transport import TCPServer, TCPTransport
 
@@ -72,6 +75,13 @@ def _decode_handshake_ack(data: bytes) -> tuple[bytes, bytes, bytes]:
     return ciphertext, dsa_pub, data[offset:]
 
 
+_DIRECT_TYPES   = {PING, PONG, FIND_NODE, FOUND_NODE}
+_ROUTABLE_TYPES = {DATA}
+_POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
+_BROADCAST_ID   = b"\xff" * 20
+_MSG_DEDUP_MAX  = 10_000
+
+
 class _Peer:
     """État par connexion : transport, session crypto, pending state."""
 
@@ -81,6 +91,9 @@ class _Peer:
         self.pending_kem_secret: bytes | None = None
         self.join_code: str | None = None
         self.pending_challenge: bytes | None = None
+        self.authenticated_id: NodeID | None = None
+        self.invite_accepted: bool = False
+        self.is_routing_peer: bool = False
         self._task: asyncio.Task | None = None
 
     async def start(self, on_packet) -> None:
@@ -112,14 +125,16 @@ class MeshNode:
     def __init__(self,
                  transport_factory: type[BaseTransport] = TCPTransport,
                  server_factory: type[BaseServer] = TCPServer) -> None:
-        self._id = NodeID.generate()
         self._identity = CryptoIdentity()
+        self._id = NodeID.from_public_key(self._identity.dsa_public_key)
         self._routing = RoutingTable(self._id)
         self._address: str = ""
         self._running = False
         self._peers: list[_Peer] = []
         self._server: BaseServer | None = None
         self._invite = InviteManager()
+        self._trust = TrustTable()
+        self._seen_msgs: OrderedDict[int, float] = OrderedDict()
         self._data_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._transport_factory = transport_factory
         self._server_factory = server_factory
@@ -211,6 +226,19 @@ class MeshNode:
                                NodeID(b"\xff" * 20).raw, challenge)
         await peer.send(packet)
 
+    async def _connect_routing(self, node_id: NodeID) -> _Peer | None:
+        """Open a direct connection to a known peer (already in routing table)."""
+        entry = self._routing.get(node_id)
+        if entry is None:
+            return None
+        transport = self._transport_factory()
+        await transport.connect(entry.address)
+        peer = _Peer(transport)
+        peer.is_routing_peer = True
+        self._peers.append(peer)
+        await peer.start(self._handle_packet)
+        return peer
+
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
         """For testing only — injects a fake transport as a peer."""
         peer = _Peer(transport)
@@ -219,7 +247,43 @@ class MeshNode:
         await peer.start(self._handle_packet)
         return peer
 
+    def _is_seen(self, msg_id: int) -> bool:
+        if msg_id in self._seen_msgs:
+            return True
+        if len(self._seen_msgs) >= _MSG_DEDUP_MAX:
+            self._seen_msgs.popitem(last=False)
+        self._seen_msgs[msg_id] = time.monotonic()
+        return False
+
+    async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
+        if packet.ttl <= 1:
+            return
+        if self._is_seen(packet.msg_id):
+            return
+        target = NodeID(packet.dst_id)
+        candidates = [
+            p for p in self._peers
+            if p is not from_peer
+            and p.authenticated_id is not None
+            and p.session is not None
+        ]
+        if not candidates:
+            return
+        best = min(candidates, key=lambda p: target.distance(p.authenticated_id))
+        await best.send(packet.with_decremented_ttl())
+
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
+        if packet.type in _DIRECT_TYPES:
+            if peer.authenticated_id is None:
+                return
+            if packet.src_id != peer.authenticated_id.raw:
+                return
+        if packet.type in _ROUTABLE_TYPES:
+            if peer.authenticated_id is None:
+                return
+            if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
+                await self._forward_packet(peer, packet)
+                return
         handlers = {
             DATA:          self._handle_data,
             PING:          self._handle_ping,
@@ -265,6 +329,9 @@ class MeshNode:
             self._routing.add(entry.node_id, entry.address)
 
     async def _handle_challenge(self, peer: _Peer, packet: Packet) -> None:
+        if peer.is_routing_peer:
+            await self.initiate_handshake(peer)
+            return
         if peer.join_code is None:
             return
         response = compute_response(peer.join_code, packet.payload)
@@ -282,6 +349,7 @@ class MeshNode:
             return
         self._invite.consume(peer.pending_challenge, packet.payload)
         peer.pending_challenge = None
+        peer.invite_accepted = True
         ack = Packet.create(INVITE_ACK, self._id.raw, packet.src_id,
                             bytes([_ACK_ACCEPTED]))
         await peer.send(ack)
@@ -292,9 +360,19 @@ class MeshNode:
             await self.initiate_handshake(peer)
 
     async def _handle_handshake(self, peer: _Peer, packet: Packet) -> None:
+        if peer.authenticated_id is not None:
+            return
         kem_pub, bob_dsa_pub, signature = _decode_handshake(packet.payload)
         if not self._identity.verify(kem_pub + bob_dsa_pub, signature, bob_dsa_pub):
             return
+        claimed_id = NodeID.from_public_key(bob_dsa_pub)
+        if claimed_id != NodeID(packet.src_id):
+            return
+        if not peer.invite_accepted and not self._trust.contains(claimed_id):
+            return
+        if not self._trust.add(claimed_id, bob_dsa_pub):
+            return
+        peer.authenticated_id = NodeID(packet.src_id)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
         dsa_pub = self._identity.dsa_public_key
@@ -309,6 +387,12 @@ class MeshNode:
         ciphertext, alice_dsa_pub, signature = _decode_handshake_ack(packet.payload)
         if not self._identity.verify(ciphertext + alice_dsa_pub, signature, alice_dsa_pub):
             return
+        if NodeID.from_public_key(alice_dsa_pub) != NodeID(packet.src_id):
+            return
+        claimed_id = NodeID(packet.src_id)
+        if not self._trust.add(claimed_id, alice_dsa_pub):
+            return
+        peer.authenticated_id = claimed_id
         shared_secret = self._identity.kem_decapsulate(ciphertext,
                                                         peer.pending_kem_secret)
         peer.session = SessionKey(shared_secret)

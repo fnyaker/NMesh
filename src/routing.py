@@ -77,3 +77,10 @@ class RoutingTable:
             all_entries.extend(bucket.entries)
         all_entries.sort(key=lambda e: target.distance(e.node_id))
         return all_entries[:count]
+
+    def get(self, node_id: NodeID) -> NodeEntry | None:
+        idx = self._bucket_index(node_id)
+        return self._buckets[idx].get(node_id)
+
+    def contains(self, node_id: NodeID) -> bool:
+        return self.get(node_id) is not None

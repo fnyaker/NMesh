@@ -9,6 +9,9 @@ from tests.conftest import FakeTransport, make_node
 async def make_connected_pair() -> tuple[MeshNode, FakeTransport, MeshNode, FakeTransport]:
     node_a, fake_a = await make_node()
     node_b, fake_b = await make_node()
+    # simulate completed invite flow on both sides
+    node_b._peers[0].invite_accepted = True
+    node_a._peers[0].invite_accepted = True
     await node_a.initiate_handshake(node_a._peers[0])
     fake_b.inject(fake_a.sent[-1])
     await asyncio.sleep(0.1)

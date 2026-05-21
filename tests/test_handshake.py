@@ -38,6 +38,7 @@ class TestHandleHandshake:
     async def test_sends_handshake_ack(self):
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -48,6 +49,7 @@ class TestHandleHandshake:
     async def test_sets_session_on_responder(self):
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -74,6 +76,7 @@ class TestFullHandshakeRoundtrip:
     async def test_both_nodes_get_session(self):
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -88,6 +91,7 @@ class TestFullHandshakeRoundtrip:
     async def test_sessions_are_symmetric(self):
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -103,6 +107,7 @@ class TestFullHandshakeRoundtrip:
     async def test_ack_without_pending_secret_ignored(self):
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
         peer_a = node_a._peers[0]
         await node_a.initiate_handshake(peer_a)
         fake_b.inject(fake_a.sent[0])

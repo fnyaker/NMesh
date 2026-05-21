@@ -1,3 +1,4 @@
+import hashlib
 import os
 
 
@@ -11,6 +12,10 @@ class NodeID:
     @classmethod
     def generate(cls) -> 'NodeID':
         return cls(os.urandom(20))
+
+    @classmethod
+    def from_public_key(cls, dsa_pub: bytes) -> 'NodeID':
+        return cls(hashlib.sha256(dsa_pub).digest()[:20])
 
     @classmethod
     def from_hex(cls, hex_str: str) -> 'NodeID':

@@ -41,6 +41,7 @@ class TestHandlePing:
     async def test_handle_ping_sends_pong(self):
         node, fake = await make_node()
         sender_id = NodeID.generate()
+        node._peers[0].authenticated_id = sender_id
         ping = Packet.create(PING, sender_id.raw, node.id.raw, b"127.0.0.1:9001")
         fake.inject(ping)
         await asyncio.sleep(0.05)
@@ -50,6 +51,7 @@ class TestHandlePing:
     async def test_handle_ping_adds_sender_to_routing(self):
         node, fake = await make_node()
         sender_id = NodeID.generate()
+        node._peers[0].authenticated_id = sender_id
         ping = Packet.create(PING, sender_id.raw, node.id.raw, b"127.0.0.1:9001")
         fake.inject(ping)
         await asyncio.sleep(0.05)
@@ -61,8 +63,10 @@ class TestHandlePing:
 class TestHandleFindNode:
     async def test_handle_find_node_sends_found_node(self):
         node, fake = await make_node()
+        sender_id = NodeID.generate()
         target = NodeID.generate()
-        query = Packet.create(FIND_NODE, NodeID.generate().raw, node.id.raw, target.raw)
+        node._peers[0].authenticated_id = sender_id
+        query = Packet.create(FIND_NODE, sender_id.raw, node.id.raw, target.raw)
         fake.inject(query)
         await asyncio.sleep(0.05)
         await node.stop()
@@ -72,9 +76,11 @@ class TestHandleFindNode:
 class TestHandleFoundNode:
     async def test_handle_found_node_populates_routing(self):
         node, fake = await make_node()
+        sender_id = NodeID.generate()
+        node._peers[0].authenticated_id = sender_id
         remote_id = NodeID.generate()
         entries = [NodeEntry(remote_id, "127.0.0.1:9002")]
-        found = Packet.create(FOUND_NODE, NodeID.generate().raw, node.id.raw,
+        found = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                               _encode_entries(entries))
         fake.inject(found)
         await asyncio.sleep(0.05)
