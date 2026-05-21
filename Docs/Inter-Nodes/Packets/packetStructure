@@ -1,0 +1,72 @@
+# Format des paquets inter-nœuds
+
+## Contraintes générales
+
+- Taille maximale du payload : **60 000 octets**
+- Le transport TCP utilise un préfixe 2 octets (uint16) pour le framing — max 65535 octets au total
+- Le payload est chiffré via AES-256-GCM
+- Le header est en clair mais authentifié (AAD du GCM)
+
+---
+
+## Structure du header
+
+| Champ        | Taille    | Description                                              |
+|--------------|-----------|----------------------------------------------------------|
+| version      | 1 octet   | Version du protocole                                     |
+| type         | 1 octet   | Type de paquet (voir ci-dessous)                         |
+| TTL          | 1 octet   | Décrémenté à chaque hop — exclu du AAD                   |
+| src_id       | 20 octets | ID Kademlia de l'émetteur (160 bits)                     |
+| dst_id       | 20 octets | ID Kademlia du destinataire (160 bits)                   |
+| msg_id       | 4 octets  | CRC32(header + payload) sans TTL ni msg_id               |
+| nonce        | 12 octets | Aléatoire par paquet (os.urandom), requis par AES-GCM    |
+| gcm_tag      | 16 octets | Tag d'authenticité AES-256-GCM                           |
+| **Total**    | **75 octets** |                                                      |
+
+**Payload chiffré disponible : 437 octets**
+
+---
+
+## Chiffrement AES-256-GCM
+
+- **Clé** : dérivée de la clé de session négociée au handshake (ML-KEM)
+- **Nonce** : 12 octets aléatoires générés par `os.urandom()` — unique par paquet
+- **AAD** (données authentifiées mais non chiffrées) : header complet sans TTL
+- **Payload** : chiffré
+- **GCM tag** : couvre AAD + payload → garantit intégrité et authenticité
+
+Le TTL est exclu du AAD car il est décrémenté à chaque hop par les nœuds relais.
+
+---
+
+## Calcul de msg_id
+
+`msg_id` = CRC32(header + payload), TTL et msg_id exclus du calcul.
+
+Sert à la déduplication dans le mesh : un paquet qui boucle est détecté et jeté.
+
+---
+
+## Types de paquets
+
+### DATA
+Données applicatives — priorité basse.
+
+### CONTROL
+Messages de routage et gestion réseau — priorité haute.
+
+| Sous-type       | Valeur | Description                                        |
+|-----------------|--------|----------------------------------------------------|
+| PING            | 0x01   | Vérifier qu'un nœud est vivant                     |
+| PONG            | 0x02   | Réponse au PING                                    |
+| FIND_NODE       | 0x03   | Chercher les nœuds proches d'un ID                 |
+| FOUND_NODE      | 0x04   | Réponse avec liste de nœuds proches                |
+| FIND_VALUE      | 0x05   | Chercher une valeur par clé (Kademlia DHT)         |
+| FOUND_VALUE     | 0x06   | Réponse avec la valeur trouvée                     |
+| STORE           | 0x07   | Stocker une valeur sur un nœud                     |
+| HANDSHAKE       | 0x08   | Initier une session (échange ML-KEM + ML-DSA)      |
+| HANDSHAKE_ACK   | 0x09   | Confirmation de handshake                          |
+| INVITE          | 0x0A   | Présenter un code d'invitation                     |
+| INVITE_ACK      | 0x0B   | Validation ou rejet d'une invitation               |
+
+> FIND_VALUE, FOUND_VALUE, STORE : réservés pour l'implémentation Kademlia complète (étape 4).

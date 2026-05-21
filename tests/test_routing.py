@@ -1,0 +1,104 @@
+import pytest
+from src.routing import KBucket, RoutingTable, NodeEntry
+from src.node_id import NodeID
+
+
+def make_id(byte: int) -> NodeID:
+    return NodeID(bytes([byte]) + b"\x00" * 19)
+
+
+class TestKBucket:
+    def test_add_single(self):
+        b = KBucket()
+        entry = NodeEntry(make_id(1), "addr1")
+        result = b.add(entry)
+        assert result is None
+        assert len(b) == 1
+
+    def test_add_updates_existing(self):
+        b = KBucket()
+        n = make_id(1)
+        b.add(NodeEntry(n, "addr1"))
+        b.add(NodeEntry(n, "addr2"))
+        assert len(b) == 1
+        assert b.get(n).address == "addr2"
+
+    def test_updated_node_moves_to_end(self):
+        b = KBucket()
+        n1 = make_id(1)
+        n2 = make_id(2)
+        b.add(NodeEntry(n1, "addr1"))
+        b.add(NodeEntry(n2, "addr2"))
+        b.add(NodeEntry(n1, "addr1_updated"))
+        assert b.entries[-1].node_id == n1
+
+    def test_full_bucket_returns_oldest(self):
+        b = KBucket()
+        for i in range(KBucket.K):
+            b.add(NodeEntry(make_id(i), f"addr{i}"))
+        oldest = b.oldest
+        candidate = b.add(NodeEntry(make_id(100), "new"))
+        assert candidate == oldest
+
+    def test_evict_oldest(self):
+        b = KBucket()
+        for i in range(KBucket.K):
+            b.add(NodeEntry(make_id(i), f"addr{i}"))
+        new_entry = NodeEntry(make_id(200), "new")
+        b.evict_oldest(new_entry)
+        assert len(b) == KBucket.K
+        assert b.entries[-1] == new_entry
+
+    def test_remove(self):
+        b = KBucket()
+        n = make_id(1)
+        b.add(NodeEntry(n, "addr"))
+        b.remove(n)
+        assert len(b) == 0
+
+    def test_oldest_empty_bucket(self):
+        assert KBucket().oldest is None
+
+
+class TestRoutingTable:
+    def setup_method(self):
+        self.own = NodeID(b"\x00" * 20)
+        self.rt = RoutingTable(self.own)
+
+    def test_add_self_ignored(self):
+        self.rt.add(self.own, "self")
+        assert self.rt.get_closest(self.own) == []
+
+    def test_add_and_find(self):
+        n = make_id(1)
+        self.rt.add(n, "addr1")
+        closest = self.rt.get_closest(n, 1)
+        assert closest[0].node_id == n
+
+    def test_remove(self):
+        n = make_id(1)
+        self.rt.add(n, "addr1")
+        self.rt.remove(n)
+        assert self.rt.get_closest(n) == []
+
+    def test_get_closest_sorted_by_distance(self):
+        nodes = [make_id(i) for i in range(1, 6)]
+        for n in nodes:
+            self.rt.add(n, f"addr{n.raw[0]}")
+        target = make_id(3)
+        closest = self.rt.get_closest(target, 3)
+        distances = [target.distance(e.node_id) for e in closest]
+        assert distances == sorted(distances)
+
+    def test_get_closest_count_respected(self):
+        for i in range(1, 10):
+            self.rt.add(make_id(i), f"addr{i}")
+        assert len(self.rt.get_closest(make_id(1), 3)) == 3
+
+    def test_evict_and_add(self):
+        for i in range(KBucket.K):
+            self.rt.add(NodeID(bytes([0x80 | i]) + b"\x00" * 19), f"addr{i}")
+        new_id = NodeID(bytes([0xff]) + b"\x00" * 19)
+        self.rt.evict_and_add(new_id, "new_addr")
+        closest = self.rt.get_closest(new_id)
+        assert any(e.node_id == new_id for e in closest)

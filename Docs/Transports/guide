@@ -1,0 +1,79 @@
+# Créer un transport NMesh
+
+Un transport est la couche qui fait circuler les bytes entre deux nœuds.
+NMesh est totalement agnostique du medium : TCP, Bluetooth, LoRa, WebSocket,
+UART série, pigeons voyageurs — tout ce qui peut transmettre des bytes fonctionne.
+
+---
+
+## Les deux interfaces
+
+### BaseTransport — une connexion
+
+Représente un lien bidirectionnel entre deux nœuds.
+Une instance = un canal. Le transport doit :
+- Délimiter les paquets (framing) si le protocole sous-jacent est orienté flux
+- Sérialiser/désérialiser les objets Packet
+
+```
+BaseTransport
+├── connect(address)   — ouvre une connexion sortante
+├── send(packet)       — envoie un paquet
+├── receive()          — reçoit un paquet (bloquant)
+└── close()            — ferme le lien
+```
+
+`listen(address)` reste dans BaseTransport pour le cas mono-connexion (tests,
+liaisons point-à-point). Pour les nœuds qui acceptent plusieurs clients,
+utilisez BaseServer.
+
+
+### BaseServer — plusieurs connexions entrantes
+
+Écoute sur une adresse et crée un nouveau BaseTransport par client accepté.
+
+```
+BaseServer
+├── listen(address)   — démarre l'écoute (non-bloquant)
+└── close()           — arrête d'accepter
+```
+
+Callback à setter avant listen() :
+
+    server.on_new_connection = async def(transport: BaseTransport) -> None
+
+---
+
+## Intégration avec MeshNode
+
+```python
+node = MeshNode(
+    transport_factory=MonTransport,   # utilisé pour join()
+    server_factory=MonServeur,        # utilisé pour start()
+)
+await node.start("mon://adresse")
+await node.join("mon://autre_adresse", code)
+```
+
+Par défaut : TCPTransport + TCPServer.
+
+---
+
+## Framing
+
+TCP est un flux d'octets sans frontières entre messages. Votre transport doit
+délimiter les paquets. Stratégie recommandée : préfixe 2 octets (uint16 big-endian)
+indiquant la taille du paquet suivant.
+
+```
+[0x00][0x4B]  →  75 octets suivants = un Packet
+```
+
+Pour les protocoles orientés datagramme (UDP, LoRa, BLE), pas de framing
+nécessaire : un datagramme = un paquet.
+
+---
+
+## Exemple : transport en mémoire (pour tests)
+
+Voir Docs/Transports/template.py

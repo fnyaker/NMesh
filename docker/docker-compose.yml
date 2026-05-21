@@ -1,0 +1,131 @@
+services:
+  node_1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: host
+      NODE_ADDR: "0.0.0.0:9000"
+      NODE_COUNT: "9"
+    volumes:
+      - shared_data:/data
+
+  node_2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9001"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "2"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9002"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "3"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9003"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "4"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9004"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "5"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9005"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "6"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_7:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9006"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "7"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_8:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9007"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "8"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_9:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9008"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "9"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+  node_10:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      MODE: join
+      NODE_ADDR: "0.0.0.0:9009"
+      HOST_ADDR: "node_1:9000"
+      NODE_INDEX: "10"
+    depends_on: [node_1]
+    volumes:
+      - shared_data:/data
+
+volumes:
+  shared_data:
