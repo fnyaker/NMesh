@@ -1,7 +1,10 @@
+import time
 import oqs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
+from .node_id import NodeID
+from .cert import Certificate
 
 KEM_ALG = "ML-KEM-768"
 DSA_ALG = "ML-DSA-65"
@@ -42,6 +45,65 @@ class CryptoIdentity:
     def kem_decapsulate(self, ciphertext: bytes, secret_key: bytes) -> bytes:
         with oqs.KeyEncapsulation(KEM_ALG, secret_key) as kem:
             return kem.decap_secret(ciphertext)
+
+    def save(self, path: str) -> None:
+        """Persiste la paire de clés DSA sur disque (format binaire brut)."""
+        import struct, os
+        pub = self._dsa_public
+        secret = self._signer.export_secret_key()
+        data = struct.pack('!HH', len(pub), len(secret)) + pub + secret
+        tmp = path + ".tmp"
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str) -> 'CryptoIdentity':
+        """Charge une identité depuis le disque. Crée une nouvelle si introuvable."""
+        import struct
+        identity = cls.__new__(cls)
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+            if len(data) < 4:
+                raise ValueError("identity file too short")
+            pub_len, secret_len = struct.unpack_from('!HH', data, 0)
+            if 4 + pub_len + secret_len > len(data):
+                raise ValueError("identity file truncated")
+            pub    = data[4:4 + pub_len]
+            secret = data[4 + pub_len:4 + pub_len + secret_len]
+            identity._signer = oqs.Signature(DSA_ALG, secret)
+            identity._dsa_public = pub
+        except (FileNotFoundError, Exception):
+            identity._signer = oqs.Signature(DSA_ALG)
+            identity._dsa_public = identity._signer.generate_keypair()
+        return identity
+
+    def self_signed_cert(self) -> Certificate:
+        """Émet un certificat auto-signé (identité racine)."""
+        own_id = NodeID.from_public_key(self._dsa_public)
+        now = int(time.time())
+        cert = Certificate(own_id, self._dsa_public,
+                           own_id, self._dsa_public,
+                           now, 0, b"")
+        sig = self._signer.sign(cert.signed_body())
+        return Certificate(own_id, self._dsa_public,
+                           own_id, self._dsa_public,
+                           now, 0, sig)
+
+    def issue_cert(self, subject_id: NodeID, subject_pub: bytes,
+                   ttl_seconds: int = 365 * 86400) -> Certificate:
+        """Émet un certificat pour un sujet, signé par cette identité."""
+        own_id = NodeID.from_public_key(self._dsa_public)
+        now = int(time.time())
+        expires = now + ttl_seconds
+        cert = Certificate(subject_id, subject_pub,
+                           own_id, self._dsa_public,
+                           now, expires, b"")
+        sig = self._signer.sign(cert.signed_body())
+        return Certificate(subject_id, subject_pub,
+                           own_id, self._dsa_public,
+                           now, expires, sig)
 
 
 class SessionKey:

@@ -1,3 +1,5 @@
+import json
+import os
 from .node_id import NodeID
 
 
@@ -32,3 +34,28 @@ class TrustTable:
 
     def __len__(self) -> int:
         return len(self._keys)
+
+    def save(self, path: str) -> None:
+        data = {k.hex(): v.hex() for k, v in self._keys.items()}
+        tmp = path + ".tmp"
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str) -> 'TrustTable':
+        tt = cls()
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            for k_hex, v_hex in data.items():
+                try:
+                    raw_id = bytes.fromhex(k_hex)
+                    dsa_pub = bytes.fromhex(v_hex)
+                    if len(raw_id) == 20:
+                        tt._keys[raw_id] = dsa_pub
+                except (ValueError, KeyError):
+                    pass
+        except FileNotFoundError:
+            pass
+        return tt

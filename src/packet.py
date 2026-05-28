@@ -1,12 +1,12 @@
 from __future__ import annotations
+import hashlib
 import struct
-import zlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .crypto import SessionKey
 
-HEADER_FORMAT = '!BBB20s20sI12s16s'
+HEADER_FORMAT = '!BBB20s20sQ12s16s'   # msg_id est désormais uint64 (8 octets)
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 MSG_ID_FORMAT = '!BB20s20s12s16s'
 
@@ -71,7 +71,7 @@ class Packet:
             self.__nonce,
             self.__gcm_tag,
         ) + self.__payload
-        return zlib.crc32(data) & 0xFFFFFFFF
+        return int.from_bytes(hashlib.sha256(data).digest()[:8], 'big')
 
     @classmethod
     def create(cls, type: int, src_id: bytes, dst_id: bytes,

@@ -118,18 +118,20 @@ class TestHandleInvite:
         node, fake = await make_node()
         node.generate_invite()
         challenge = node._invite.generate_challenge()
-        node._peers[0].pending_challenge = challenge
+        peer = node._peers[0]
+        peer.pending_challenge = challenge
         pkt = Packet.create(INVITE, NodeID.generate().raw, node.id.raw, b"wrong" * 6)
         fake.inject(pkt)
         await asyncio.sleep(0.05)
+        assert peer._invite_failures == 1
         await node.stop()
-        assert node._invite._failures == 1
 
 
 class TestHandleInviteAck:
     async def test_accepted_ack_initiates_handshake(self):
         node, fake = await make_node()
         node._peers[0].join_code = "testcode12"
+        node._peers[0].invite_sent = True
         pkt = Packet.create(INVITE_ACK, NodeID.generate().raw, node.id.raw,
                             bytes([_ACK_ACCEPTED]))
         fake.inject(pkt)
@@ -141,6 +143,7 @@ class TestHandleInviteAck:
         node, fake = await make_node()
         peer = node._peers[0]
         peer.join_code = "testcode12"
+        peer.invite_sent = True
         pkt = Packet.create(INVITE_ACK, NodeID.generate().raw, node.id.raw,
                             bytes([_ACK_ACCEPTED]))
         fake.inject(pkt)
@@ -151,8 +154,20 @@ class TestHandleInviteAck:
     async def test_rejected_ack_does_not_handshake(self):
         node, fake = await make_node()
         node._peers[0].join_code = "testcode12"
+        node._peers[0].invite_sent = True
         pkt = Packet.create(INVITE_ACK, NodeID.generate().raw, node.id.raw,
                             bytes([_ACK_REJECTED]))
+        fake.inject(pkt)
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert not any(p.type == HANDSHAKE for p in fake.sent)
+
+    async def test_unsolicited_invite_ack_dropped(self):
+        node, fake = await make_node()
+        node._peers[0].join_code = "testcode12"
+        # invite_sent is False — not set
+        pkt = Packet.create(INVITE_ACK, NodeID.generate().raw, node.id.raw,
+                            bytes([_ACK_ACCEPTED]))
         fake.inject(pkt)
         await asyncio.sleep(0.05)
         await node.stop()

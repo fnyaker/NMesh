@@ -1,0 +1,175 @@
+# NMesh — Routing test: 2 isolated Docker networks bridged by 2 dual-homed nodes
+#
+# Topology:
+#   net_a: n1 n2 n3 n4  ──►  bridge1 (net_a + net_b, port 9000)
+#                                 │
+#                              bridge2 (net_b only, port 9002)
+#                                 │
+#   net_b:               n5 n6 n7 n8  ────────────────────────────────
+#
+# bridge1 listens on 0.0.0.0:9000 → reachable from BOTH networks.
+# bridge2 connects to bridge1:9000 via net_b, then hosts net_b cluster.
+#
+# Speed test: n1 (net_a) → bridge1 → bridge2 → n8 (net_b)
+#
+# Run:
+#   cd docker && docker compose -f docker-compose-routing.yml up --build
+#
+# Tail one node:
+#   docker compose -f docker-compose-routing.yml logs -f n1
+
+networks:
+  net_a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  net_b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+volumes:
+  shared_data:
+
+x-base: &base
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  volumes:
+    - shared_data:/data
+
+services:
+
+  # ── Primary bridge — dual-homed, single port ────────────────────────────────
+  bridge1:
+    <<: *base
+    hostname: bridge1
+    networks: [net_a, net_b]
+    environment:
+      MODE:           bridge1
+      NAME:           bridge1
+      LISTEN_ADDR:    "0.0.0.0:9000"
+      ADVERTISE:      "bridge1:9000"
+      MEMBER_A_COUNT: "4"
+    expose: ["9000"]
+
+  # ── Secondary bridge — net_b only ──────────────────────────────────────────
+  bridge2:
+    <<: *base
+    hostname: bridge2
+    networks: [net_b]
+    environment:
+      MODE:           bridge2
+      NAME:           bridge2
+      HOST_ADDR:      "bridge1:9000"
+      LISTEN_ADDR:    "0.0.0.0:9002"
+      ADVERTISE:      "bridge2:9002"
+      MEMBER_B_COUNT: "4"
+    expose: ["9002"]
+    depends_on: [bridge1]
+
+  # ── net_a members ───────────────────────────────────────────────────────────
+  n1:
+    <<: *base
+    hostname: n1
+    networks: [net_a]
+    environment:
+      MODE:           member
+      NAME:           n1
+      HOST_ADDR:      "bridge1:9000"
+      LISTEN_ADDR:    "0.0.0.0:9100"
+      IS_SENDER:      "1"
+      SENDER_TARGET:  "n8"
+      MSG_COUNT:      "300"
+      MSG_SIZE:       "512"
+    expose: ["9100"]
+    depends_on: [bridge1]
+
+  n2:
+    <<: *base
+    hostname: n2
+    networks: [net_a]
+    environment:
+      MODE:        member
+      NAME:        n2
+      HOST_ADDR:   "bridge1:9000"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge1]
+
+  n3:
+    <<: *base
+    hostname: n3
+    networks: [net_a]
+    environment:
+      MODE:        member
+      NAME:        n3
+      HOST_ADDR:   "bridge1:9000"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge1]
+
+  n4:
+    <<: *base
+    hostname: n4
+    networks: [net_a]
+    environment:
+      MODE:        member
+      NAME:        n4
+      HOST_ADDR:   "bridge1:9000"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge1]
+
+  # ── net_b members ───────────────────────────────────────────────────────────
+  n5:
+    <<: *base
+    hostname: n5
+    networks: [net_b]
+    environment:
+      MODE:        member
+      NAME:        n5
+      HOST_ADDR:   "bridge2:9002"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge2]
+
+  n6:
+    <<: *base
+    hostname: n6
+    networks: [net_b]
+    environment:
+      MODE:        member
+      NAME:        n6
+      HOST_ADDR:   "bridge2:9002"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge2]
+
+  n7:
+    <<: *base
+    hostname: n7
+    networks: [net_b]
+    environment:
+      MODE:        member
+      NAME:        n7
+      HOST_ADDR:   "bridge2:9002"
+      LISTEN_ADDR: "0.0.0.0:9100"
+    expose: ["9100"]
+    depends_on: [bridge2]
+
+  n8:
+    <<: *base
+    hostname: n8
+    networks: [net_b]
+    environment:
+      MODE:        member
+      NAME:        n8
+      HOST_ADDR:   "bridge2:9002"
+      LISTEN_ADDR: "0.0.0.0:9100"
+      SENDER_NAME: "n1"
+      MSG_COUNT:   "300"
+    expose: ["9100"]
+    depends_on: [bridge2]

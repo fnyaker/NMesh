@@ -26,7 +26,7 @@ class TestPackUnpack:
 
     def test_pack_size(self):
         p = make_packet()
-        assert len(p.pack()) == 75 + len(PAYLOAD)
+        assert len(p.pack()) == 79 + len(PAYLOAD)
 
     def test_empty_payload(self):
         p = make_packet(payload=b"")
@@ -46,8 +46,8 @@ class TestMsgId:
         p = make_packet()
         assert p.compute_msg_id() == p.compute_msg_id()
 
-    def test_fits_32bits(self):
-        assert make_packet().compute_msg_id() <= 0xFFFFFFFF
+    def test_fits_64bits(self):
+        assert make_packet().compute_msg_id() <= 0xFFFFFFFFFFFFFFFF
 
     def test_different_payload_different_id(self):
         p1 = make_packet(payload=b"aaa")

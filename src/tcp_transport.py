@@ -4,6 +4,7 @@ from .transport import BaseTransport, BaseServer
 from .packet import Packet
 
 _FRAME = struct.Struct('!H')
+_READ_TIMEOUT = 60.0
 
 
 class TCPTransport(BaseTransport):
@@ -50,8 +51,15 @@ class TCPTransport(BaseTransport):
     async def receive(self) -> Packet:
         if self._reader is None:
             raise ConnectionError("not connected")
-        length = _FRAME.unpack(await self._reader.readexactly(_FRAME.size))[0]
-        return Packet.unpack(await self._reader.readexactly(length))
+        try:
+            raw_len = await asyncio.wait_for(
+                self._reader.readexactly(_FRAME.size), _READ_TIMEOUT)
+            length = _FRAME.unpack(raw_len)[0]
+            data = await asyncio.wait_for(
+                self._reader.readexactly(length), _READ_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ConnectionError("read timeout")
+        return Packet.unpack(data)
 
     async def close(self) -> None:
         if self._writer:

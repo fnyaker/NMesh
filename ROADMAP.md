@@ -2,14 +2,6 @@
 
 ## En attente (mis de côté pendant fix sécurité)
 
-### Point 3 — Connexion à la demande (on-demand routing)
-Quand on doit forwarder vers un nœud non directement connecté :
-- Chercher l'adresse dans la routing table
-- Ouvrir un nouveau transport vers ce nœud
-- Attendre l'établissement de session
-- Puis forwarder le paquet
-
-Dépend de C4 (FOUND_NODE avec clé publique) et de C1 (chiffrement multi-hop).
 
 ### Point 4 — Test Docker 10 nœuds
 Rebuild avec `--build` pour valider le fix multi-code `InviteManager`.

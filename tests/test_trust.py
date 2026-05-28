@@ -1,90 +1,111 @@
+"""Tests de CertStore — remplace les anciens tests TrustTable."""
 import pytest
-from src.trust import TrustTable
+from src.cert_store import CertStore
+from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 
 
-class TestAdd:
-    def test_first_contact_accepted(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        assert tt.add(nid, b"pubkey_a") is True
-
-    def test_same_key_accepted(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey_a")
-        assert tt.add(nid, b"pubkey_a") is True
-
-    def test_changed_key_rejected(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey_a")
-        assert tt.add(nid, b"pubkey_b") is False
-
-    def test_different_nodes_independent(self):
-        tt = TrustTable()
-        nid1, nid2 = NodeID.generate(), NodeID.generate()
-        tt.add(nid1, b"key_1")
-        tt.add(nid2, b"key_2")
-        assert tt.add(nid1, b"key_1") is True
-        assert tt.add(nid2, b"key_2") is True
+def _make_identity():
+    return CryptoIdentity()
 
 
-class TestContains:
-    def test_unknown_node(self):
-        assert not TrustTable().contains(NodeID.generate())
+class TestCertStoreBasics:
+    def test_own_id_is_root(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        assert store.is_root(own_id)
 
-    def test_known_node(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey")
-        assert tt.contains(nid)
+    def test_add_self_signed_cert(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        cert = identity.self_signed_cert()
+        assert store.add(cert)
 
+    def test_add_cert_deduplication(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        cert = identity.self_signed_cert()
+        store.add(cert)
+        assert store.add(cert)  # second add is idempotent
 
-class TestGetKey:
-    def test_returns_none_for_unknown(self):
-        assert TrustTable().get_key(NodeID.generate()) is None
+    def test_add_root(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        other_id = NodeID.generate()
+        assert not store.is_root(other_id)
+        store.add_root(other_id)
+        assert store.is_root(other_id)
 
-    def test_returns_stored_key(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey")
-        assert tt.get_key(nid) == b"pubkey"
+    def test_chain_to_root_returns_self_signed(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        cert = identity.self_signed_cert()
+        store.add(cert)
+        chain = store.get_chain_to_root(own_id)
+        assert chain is not None
+        assert len(chain) == 1
+        assert chain[0].is_self_signed
 
+    def test_chain_to_root_issued_cert(self):
+        root = _make_identity()
+        root_id = NodeID.from_public_key(root.dsa_public_key)
+        peer = _make_identity()
+        peer_id = NodeID.from_public_key(peer.dsa_public_key)
 
-class TestRemove:
-    def test_remove_known_node(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey")
-        tt.remove(nid)
-        assert not tt.contains(nid)
+        store = CertStore(root_id)
+        store.add(root.self_signed_cert())
+        cert_peer = root.issue_cert(peer_id, peer.dsa_public_key)
+        store.add(cert_peer)
 
-    def test_remove_unknown_node_no_error(self):
-        tt = TrustTable()
-        tt.remove(NodeID.generate())
+        chain = store.get_chain_to_root(peer_id)
+        assert chain is not None
+        assert chain[0].subject_id == peer_id
+        assert chain[-1].is_self_signed
+        assert chain[-1].subject_id == root_id
 
-    def test_removed_node_can_be_readded(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"pubkey_a")
-        tt.remove(nid)
-        assert tt.add(nid, b"pubkey_b") is True
+    def test_chain_to_unknown_node_returns_none(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        assert store.get_chain_to_root(NodeID.generate()) is None
 
+    def test_verify_chain_valid(self):
+        root = _make_identity()
+        root_id = NodeID.from_public_key(root.dsa_public_key)
+        peer = _make_identity()
+        peer_id = NodeID.from_public_key(peer.dsa_public_key)
 
-class TestLen:
-    def test_empty(self):
-        assert len(TrustTable()) == 0
+        store = CertStore(root_id)
+        store.add(root.self_signed_cert())
+        cert_peer = root.issue_cert(peer_id, peer.dsa_public_key)
+        store.add(cert_peer)
 
-    def test_grows_with_adds(self):
-        tt = TrustTable()
-        for _ in range(5):
-            tt.add(NodeID.generate(), b"key")
-        assert len(tt) == 5
+        chain = store.get_chain_to_root(peer_id)
+        assert store.verify_chain(chain) == root_id
 
-    def test_same_node_does_not_grow(self):
-        tt = TrustTable()
-        nid = NodeID.generate()
-        tt.add(nid, b"key")
-        tt.add(nid, b"key")
-        assert len(tt) == 1
+    def test_verify_chain_empty_returns_none(self):
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        assert store.verify_chain([]) is None
+
+    def test_verify_chain_wrong_root_returns_none(self):
+        root = _make_identity()
+        root_id = NodeID.from_public_key(root.dsa_public_key)
+        peer = _make_identity()
+        peer_id = NodeID.from_public_key(peer.dsa_public_key)
+
+        # Build a valid chain but store with DIFFERENT root
+        other_root_id = NodeID.from_public_key(_make_identity().dsa_public_key)
+        store = CertStore(other_root_id)
+
+        cert_peer = root.issue_cert(peer_id, peer.dsa_public_key)
+        root_self  = root.self_signed_cert()
+        chain = [cert_peer, root_self]
+        # root_id is not in store's roots
+        assert store.verify_chain(chain) is None

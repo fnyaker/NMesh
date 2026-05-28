@@ -10,6 +10,14 @@ from src.crypto import CryptoIdentity
 from tests.conftest import FakeTransport, make_node
 
 
+def _setup_challenge_pair(node_a, node_b) -> bytes:
+    """Set matching challenge on both sides to satisfy C3 binding."""
+    challenge = os.urandom(32)
+    node_b._peers[0].pending_challenge = challenge
+    node_a._peers[0].received_challenge = challenge
+    return challenge
+
+
 class TestInitiateHandshake:
     async def test_sends_handshake_type(self):
         node, fake = await make_node()
@@ -21,7 +29,7 @@ class TestInitiateHandshake:
         node, fake = await make_node()
         await node.initiate_handshake(node._peers[0])
         await node.stop()
-        kem_pub, dsa_pub, signature = _decode_handshake(fake.sent[0].payload)
+        kem_pub, dsa_pub, chain, signature = _decode_handshake(fake.sent[0].payload)
         assert len(kem_pub) > 0
         assert len(dsa_pub) > 0
         assert len(signature) > 0
@@ -39,6 +47,7 @@ class TestHandleHandshake:
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
         node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -50,6 +59,7 @@ class TestHandleHandshake:
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
         node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -63,7 +73,7 @@ class TestHandleHandshake:
         kem_pub, _ = identity.generate_kem_keypair()
         dsa_pub = identity.dsa_public_key
         bad_sig = bytes(len(identity.sign(kem_pub + dsa_pub)))
-        payload = _encode_handshake(kem_pub, dsa_pub, bad_sig)
+        payload = _encode_handshake(kem_pub, dsa_pub, [], bad_sig)
         pkt = Packet.create(HANDSHAKE, NodeID.generate().raw, node_b.id.raw, payload)
         fake_b.inject(pkt)
         await asyncio.sleep(0.1)
@@ -77,6 +87,7 @@ class TestFullHandshakeRoundtrip:
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
         node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -92,6 +103,7 @@ class TestFullHandshakeRoundtrip:
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
         node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
         await node_a.initiate_handshake(node_a._peers[0])
         fake_b.inject(fake_a.sent[0])
         await asyncio.sleep(0.1)
@@ -108,6 +120,7 @@ class TestFullHandshakeRoundtrip:
         node_a, fake_a = await make_node()
         node_b, fake_b = await make_node()
         node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
         peer_a = node_a._peers[0]
         await node_a.initiate_handshake(peer_a)
         fake_b.inject(fake_a.sent[0])

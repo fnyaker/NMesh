@@ -1,94 +1,217 @@
 import asyncio
 import pytest
 from src.transport_manager import TransportManager, TransportError
-from src.transport import BaseTransport
+from src.transport import BaseTransport, BaseServer
 from src.packet import Packet
-
-SRC     = bytes(range(20))
-DST     = bytes(range(20, 40))
-NONCE   = bytes(range(12))
-GCM_TAG = bytes(range(16))
+from tests.conftest import FakeTransport, FakeServer
 
 
-def make_packet(payload: bytes = b"hello") -> Packet:
-    return Packet(
-        version=1, type=0x01, ttl=64,
-        src_id=SRC, dst_id=DST, msg_id=0,
-        nonce=NONCE, gcm_tag=GCM_TAG,
-        payload=payload,
-    )
+def make_manager() -> TransportManager:
+    m = TransportManager()
+    m.register("fake", FakeTransport, FakeServer)
+    return m
 
 
-class FakeTransport(BaseTransport):
-    def __init__(self) -> None:
-        self.sent: list[Packet] = []
-        self._queue: asyncio.Queue[Packet] = asyncio.Queue()
+# ---------------------------------------------------------------------------
+# register()
+# ---------------------------------------------------------------------------
 
-    async def connect(self, address: str) -> None: ...
-    async def listen(self, address: str) -> None: ...
-    async def close(self) -> None: ...
+class TestRegister:
+    def test_register_valid_scheme(self):
+        m = TransportManager()
+        m.register("tcp", FakeTransport, FakeServer)
+        assert m.is_supported("tcp")
 
-    async def send(self, packet: Packet) -> None:
-        self.sent.append(packet)
-
-    async def receive(self) -> Packet:
-        return await self._queue.get()
-
-    def inject(self, packet: Packet) -> None:
-        self._queue.put_nowait(packet)
-
-
-class TestTransportManager:
-    async def test_send(self):
-        tm = TransportManager()
-        fake = FakeTransport()
-        tm.register(fake)
-        p = make_packet()
-        await tm.send(p)
-        assert fake.sent == [p]
-
-    async def test_receive(self):
-        tm = TransportManager()
-        fake = FakeTransport()
-        tm.register(fake)
-        await tm.start()
-        p = make_packet()
-        fake.inject(p)
-        received = await asyncio.wait_for(tm.receive(), timeout=1.0)
-        assert received.pack() == p.pack()
-        await tm.stop()
-
-    async def test_double_register_raises(self):
-        tm = TransportManager()
-        tm.register(FakeTransport())
+    def test_register_invalid_scheme_uppercase(self):
+        m = TransportManager()
         with pytest.raises(TransportError):
-            tm.register(FakeTransport())
+            m.register("TCP", FakeTransport, FakeServer)
 
-    async def test_send_no_transport_raises(self):
-        tm = TransportManager()
+    def test_register_invalid_scheme_empty(self):
+        m = TransportManager()
         with pytest.raises(TransportError):
-            await tm.send(make_packet())
+            m.register("", FakeTransport, FakeServer)
 
-    async def test_start_no_transport_raises(self):
-        tm = TransportManager()
+    def test_register_invalid_scheme_too_long(self):
+        m = TransportManager()
         with pytest.raises(TransportError):
-            await tm.start()
+            m.register("a" * 17, FakeTransport, FakeServer)
 
-    async def test_unregister_then_reregister(self):
-        tm = TransportManager()
+    def test_register_invalid_scheme_starts_with_digit(self):
+        m = TransportManager()
+        with pytest.raises(TransportError):
+            m.register("1tcp", FakeTransport, FakeServer)
+
+    def test_register_duplicate_scheme_rejected(self):
+        m = TransportManager()
+        m.register("tcp", FakeTransport, FakeServer)
+        with pytest.raises(TransportError):
+            m.register("tcp", FakeTransport, FakeServer)
+
+    def test_register_bad_transport_cls(self):
+        m = TransportManager()
+        with pytest.raises(TransportError):
+            m.register("tcp", object, FakeServer)
+
+    def test_register_bad_server_cls(self):
+        m = TransportManager()
+        with pytest.raises(TransportError):
+            m.register("tcp", FakeTransport, object)
+
+
+# ---------------------------------------------------------------------------
+# connect()
+# ---------------------------------------------------------------------------
+
+class TestConnect:
+    async def test_connect_unknown_scheme_raises(self):
+        m = TransportManager()
+        with pytest.raises(TransportError):
+            await m.connect("tcp://127.0.0.1:9000")
+
+    async def test_connect_malformed_uri_raises(self):
+        m = make_manager()
+        with pytest.raises(TransportError):
+            await m.connect("not-a-uri")
+
+    async def test_connect_returns_transport(self):
+        m = make_manager()
+        t = await m.connect("fake://anything")
+        assert isinstance(t, FakeTransport)
+
+    async def test_connect_failure_closes_transport(self):
+        """A connect() that raises must close the partially-initialised transport."""
+        closed: list[bool] = []
+
+        class FailingTransport(FakeTransport):
+            async def connect(self, address: str) -> None:
+                raise ConnectionRefusedError("nope")
+
+            async def close(self) -> None:
+                closed.append(True)
+
+        m = TransportManager()
+        m.register("fail", FailingTransport, FakeServer)
+        with pytest.raises(TransportError):
+            await m.connect("fail://host")
+        assert closed == [True]
+
+
+# ---------------------------------------------------------------------------
+# listen()
+# ---------------------------------------------------------------------------
+
+class TestListen:
+    async def test_listen_starts_server(self):
+        m = make_manager()
+        await m.listen("fake://anything")
+        assert "fake" in m._servers
+
+    async def test_listen_failure_no_server_stored(self):
+        class FailingServer(FakeServer):
+            async def listen(self, address: str) -> None:
+                raise OSError("bind failed")
+
+        m = TransportManager()
+        m.register("fail", FakeTransport, FailingServer)
+        with pytest.raises(OSError):
+            await m.listen("fail://anything")
+        assert "fail" not in m._servers
+
+    async def test_listen_duplicate_scheme_rejected(self):
+        m = make_manager()
+        await m.listen("fake://first")
+        with pytest.raises(TransportError):
+            await m.listen("fake://second")
+
+    async def test_listen_unknown_scheme_raises(self):
+        m = TransportManager()
+        with pytest.raises(TransportError):
+            await m.listen("tcp://127.0.0.1:9000")
+
+    async def test_listen_malformed_uri_raises(self):
+        m = make_manager()
+        with pytest.raises(TransportError):
+            await m.listen("not-a-uri")
+
+
+# ---------------------------------------------------------------------------
+# close_all()
+# ---------------------------------------------------------------------------
+
+class TestCloseAll:
+    async def test_close_all_stops_all_servers(self):
+        closed: list[str] = []
+
+        class TrackingServer(FakeServer):
+            def __init__(self, name: str) -> None:
+                super().__init__()
+                self._name = name
+
+            async def close(self) -> None:
+                closed.append(self._name)
+
+        class TrackingServerA(TrackingServer):
+            def __init__(self) -> None:
+                super().__init__("a")
+
+        class TrackingServerB(TrackingServer):
+            def __init__(self) -> None:
+                super().__init__("b")
+
+        m = TransportManager()
+        m.register("scha", FakeTransport, TrackingServerA)
+        m.register("schb", FakeTransport, TrackingServerB)
+        await m.listen("scha://x")
+        await m.listen("schb://x")
+        await m.close_all()
+        assert set(closed) == {"a", "b"}
+        assert m._servers == {}
+
+    async def test_close_all_continues_on_error(self):
+        closed: list[str] = []
+
+        class ErrorServer(FakeServer):
+            async def close(self) -> None:
+                raise RuntimeError("boom")
+
+        class OkServer(FakeServer):
+            async def close(self) -> None:
+                closed.append("ok")
+
+        m = TransportManager()
+        m.register("err", FakeTransport, ErrorServer)
+        m.register("ok", FakeTransport, OkServer)
+        await m.listen("err://x")
+        await m.listen("ok://x")
+        await m.close_all()  # should not raise
+        assert "ok" in closed
+
+
+# ---------------------------------------------------------------------------
+# _dispatch_incoming()
+# ---------------------------------------------------------------------------
+
+class TestDispatch:
+    async def test_incoming_connection_dispatched_to_callback(self):
+        received: list[BaseTransport] = []
+
+        async def on_conn(t: BaseTransport) -> None:
+            received.append(t)
+
+        m = make_manager()
+        m.on_new_connection = on_conn
         fake = FakeTransport()
-        tm.register(fake)
-        tm.unregister()
-        fake2 = FakeTransport()
-        tm.register(fake2)
-        p = make_packet()
-        await tm.send(p)
-        assert fake2.sent == [p]
-        assert fake.sent == []
+        await m._dispatch_incoming(fake)
+        assert received == [fake]
 
-    async def test_stop_cancels_loop(self):
-        tm = TransportManager()
-        tm.register(FakeTransport())
-        await tm.start()
-        await tm.stop()
-        assert tm._task is None
+    async def test_incoming_connection_closed_when_no_callback(self):
+        closed: list[bool] = []
+
+        class TrackingTransport(FakeTransport):
+            async def close(self) -> None:
+                closed.append(True)
+
+        m = make_manager()
+        await m._dispatch_incoming(TrackingTransport())
+        assert closed == [True]

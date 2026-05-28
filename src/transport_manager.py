@@ -1,6 +1,6 @@
-import asyncio
-from .transport import BaseTransport
-from .packet import Packet
+from collections.abc import Callable, Awaitable
+from .transport import BaseTransport, BaseServer
+from .uri import _validate_uri, _SCHEME_RE
 
 
 class TransportError(Exception):
@@ -10,46 +10,66 @@ class TransportError(Exception):
 class TransportManager:
 
     def __init__(self) -> None:
-        self._transport: BaseTransport | None = None
-        self._queue: asyncio.Queue[Packet] = asyncio.Queue()
-        self._task: asyncio.Task | None = None
+        self._registry: dict[str, tuple[type[BaseTransport], type[BaseServer]]] = {}
+        self._servers: dict[str, BaseServer] = {}
+        self.on_new_connection: Callable[[BaseTransport], Awaitable[None]] | None = None
 
-    def register(self, transport: BaseTransport) -> None:
-        if self._transport is not None:
-            raise TransportError("a transport is already registered")
-        self._transport = transport
+    def register(self, scheme: str, transport_cls: type[BaseTransport],
+                 server_cls: type[BaseServer]) -> None:
+        if not _SCHEME_RE.match(scheme):
+            raise TransportError(f"invalid scheme: {scheme!r}")
+        if scheme in self._registry:
+            raise TransportError(f"scheme already registered: {scheme!r}")
+        if not (isinstance(transport_cls, type) and issubclass(transport_cls, BaseTransport)):
+            raise TransportError("transport_cls must be a subclass of BaseTransport")
+        if not (isinstance(server_cls, type) and issubclass(server_cls, BaseServer)):
+            raise TransportError("server_cls must be a subclass of BaseServer")
+        self._registry[scheme] = (transport_cls, server_cls)
 
-    def unregister(self) -> None:
-        self._transport = None
+    def is_supported(self, scheme: str) -> bool:
+        return scheme in self._registry
 
-    async def start(self) -> None:
-        if self._transport is None:
-            raise TransportError("no transport registered")
-        self._task = asyncio.create_task(self._receive_loop())
-
-    async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        if self._transport is not None:
-            await self._transport.close()
-
-    async def send(self, packet: Packet) -> None:
-        if self._transport is None:
-            raise TransportError("no transport registered")
-        await self._transport.send(packet)
-
-    async def receive(self) -> Packet:
-        return await self._queue.get()
-
-    async def _receive_loop(self) -> None:
+    async def connect(self, uri: str) -> BaseTransport:
+        result = _validate_uri(uri)
+        if result is None:
+            raise TransportError(f"invalid URI: {uri!r}")
+        scheme, opaque = result
+        if scheme not in self._registry:
+            raise TransportError(f"scheme not registered: {scheme!r}")
+        transport_cls, _ = self._registry[scheme]
+        transport = transport_cls()
         try:
-            while True:
-                packet = await self._transport.receive()
-                await self._queue.put(packet)
-        except (asyncio.IncompleteReadError, ConnectionError):
-            pass
+            await transport.connect(opaque)
+        except Exception as exc:
+            await transport.close()
+            raise TransportError(f"connect failed: {exc}") from exc
+        return transport
+
+    async def listen(self, uri: str) -> None:
+        result = _validate_uri(uri)
+        if result is None:
+            raise TransportError(f"invalid URI: {uri!r}")
+        scheme, opaque = result
+        if scheme not in self._registry:
+            raise TransportError(f"scheme not registered: {scheme!r}")
+        if scheme in self._servers:
+            raise TransportError(f"already listening on scheme: {scheme!r}")
+        _, server_cls = self._registry[scheme]
+        server = server_cls()
+        server.on_new_connection = self._dispatch_incoming
+        await server.listen(opaque)
+        self._servers[scheme] = server
+
+    async def _dispatch_incoming(self, transport: BaseTransport) -> None:
+        if self.on_new_connection is None:
+            await transport.close()
+            return
+        await self.on_new_connection(transport)
+
+    async def close_all(self) -> None:
+        for server in list(self._servers.values()):
+            try:
+                await server.close()
+            except Exception:
+                pass
+        self._servers.clear()
