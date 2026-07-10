@@ -66,12 +66,18 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Un nœud peut écouter plusieurs `spool://` distincts → topologie
   A—clé1—B—clé2—C débloquée.
 
+### Persistance des liens directs (table de routage) — fait
+- La table de routage (pairs connus, adresses, clés publiques) est persistée
+  chiffrée au repos. Au redémarrage, le nœud retrouve ses pairs et reconstruit
+  les liens à la demande, **ré-authentifiés via le cert store persisté** (chemin
+  cert-chain existant, sans ré-invitation). Les sessions E2E survivent déjà.
+- Le client mémorise l'adresse composée et l'enregistre dans le routage, ce qui
+  rend le pair reconnectable après redémarrage.
+- Testé : redémarrage sur lien TCP réel, reprise sans ré-invitation.
+
 ## Prochaines étapes (vision « Jarvis / Edith »)
 
 ### Store-and-forward — approfondissement delay-tolerant
-- Persistance de l'état de session **du lien direct** (handshake de hop adjacent)
-  pour reprise instantanée sans re-handshake après redémarrage (les sessions
-  E2E de bout en bout, elles, survivent déjà).
 - Mode drop unidirectionnel (bundle déposé sans round-trip interactif).
 - File d'émission persistante par pair + reprise après coupure.
 

@@ -9,6 +9,9 @@ Exclus de la suite par défaut (voir pyproject addopts) ; lancer explicitement :
     pytest tests/integration -q
 """
 import asyncio
+import os
+import tempfile
+
 import pytest
 
 from src import MeshNode
@@ -17,10 +20,23 @@ from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 
 
-def make_node() -> MeshNode:
+def _mgr() -> TransportManager:
     mgr = TransportManager()
     mgr.register("tcp", TCPTransport, TCPServer)
-    return MeshNode(mgr)
+    return mgr
+
+
+def make_node() -> MeshNode:
+    return MeshNode(_mgr())
+
+
+def persistent_node(state_dir: str, name: str) -> MeshNode:
+    return MeshNode(
+        _mgr(),
+        identity_path=os.path.join(state_dir, f"{name}.key"),
+        cert_store_path=os.path.join(state_dir, f"{name}.certs"),
+        session_store_path=os.path.join(state_dir, f"{name}.sessions"),
+    )
 
 
 async def establish_session(host_addr: str, guest_addr: str) -> tuple[MeshNode, MeshNode]:
@@ -192,3 +208,43 @@ class TestSelfHealing:
             await asyncio.sleep(0.05)
         assert host._peers == []
         await host.stop()
+
+
+# ---------------------------------------------------------------------------
+# Direct-link persistence: a restarted node resumes its links and its E2E
+# sessions from disk, with no re-invitation.
+# ---------------------------------------------------------------------------
+
+class TestRestartRecovery:
+    async def test_resume_after_restart_without_reinvite(self):
+        with tempfile.TemporaryDirectory() as d:
+            addr = "127.0.0.1:19150"
+            host = persistent_node(d, "host")
+            guest = persistent_node(d, "guest")
+            guest_id = guest.id
+
+            code = host.generate_invite()
+            await host.start([f"tcp://{addr}"])
+            await guest.join(f"tcp://{addr}", code)
+            await guest.wait_for_session(timeout=15.0)
+            await host.wait_for_session(timeout=15.0)
+
+            await guest.send_data(host.id, b"before restart")
+            src, data = await asyncio.wait_for(host.receive_data(), timeout=15.0)
+            assert data == b"before restart"
+
+            # Restart the guest process: brand-new instance, same state dir,
+            # no invite, no join call — everything comes from disk.
+            await guest.stop()
+            guest2 = persistent_node(d, "guest")
+            assert guest2.id == guest_id
+            assert guest2._routing.contains(host.id)          # link restored
+            assert host.id in guest2._e2e_sessions            # E2E restored
+
+            await guest2.send_data(host.id, b"after restart")
+            src, data = await asyncio.wait_for(host.receive_data(), timeout=20.0)
+            assert data == b"after restart"
+            assert src == guest_id
+
+            await guest2.stop()
+            await host.stop()

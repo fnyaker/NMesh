@@ -33,15 +33,17 @@ _MAX_FILE = 16 * 1024 * 1024   # 16 MiB ceiling on the on-disk blob
 
 
 class SessionState:
-    """Plain container for the persisted pieces of E2E state."""
+    """Plain container for the persisted pieces of E2E + routing state."""
 
-    __slots__ = ("e2e_sessions", "pending_kem", "pending_nonce", "pending_data")
+    __slots__ = ("e2e_sessions", "pending_kem", "pending_nonce", "pending_data",
+                 "routing")
 
     def __init__(self) -> None:
         self.e2e_sessions: dict[NodeID, SessionKey] = {}
         self.pending_kem: dict[NodeID, bytes] = {}
         self.pending_nonce: dict[NodeID, bytes] = {}
         self.pending_data: dict[NodeID, list[bytes]] = {}
+        self.routing: list[dict] = []
 
 
 class SessionStore:
@@ -51,7 +53,8 @@ class SessionStore:
 
     # -- save -------------------------------------------------------------
 
-    def save(self, e2e_sessions, pending_kem, pending_nonce, pending_data) -> None:
+    def save(self, e2e_sessions, pending_kem, pending_nonce, pending_data,
+             routing=None) -> None:
         doc = {
             "e2e_sessions": {n.raw.hex(): s.key_bytes.hex()
                              for n, s in e2e_sessions.items()},
@@ -59,6 +62,7 @@ class SessionStore:
             "pending_nonce": {n.raw.hex(): v.hex() for n, v in pending_nonce.items()},
             "pending_data": {n.raw.hex(): [p.hex() for p in lst]
                              for n, lst in pending_data.items()},
+            "routing": routing or [],
         }
         plaintext = json.dumps(doc).encode("utf-8")
         nonce = os.urandom(_NONCE_LEN)
@@ -98,6 +102,9 @@ class SessionStore:
         _load_map(doc.get("pending_kem"), state.pending_kem, _as_bytes)
         _load_map(doc.get("pending_nonce"), state.pending_nonce, _as_bytes)
         _load_map(doc.get("pending_data"), state.pending_data, _as_byte_list)
+        routing = doc.get("routing")
+        if isinstance(routing, list):
+            state.routing = [r for r in routing if isinstance(r, dict)]
         return state
 
 

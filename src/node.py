@@ -317,6 +317,7 @@ class _Peer:
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
         self.is_client_side: bool = is_client_side
+        self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         self.dsa_pub: bytes = b""
@@ -437,6 +438,10 @@ class MeshNode:
             self._e2e_pending_kem.update(restored.pending_kem)
             self._e2e_pending_nonce.update(restored.pending_nonce)
             self._e2e_pending_data.update(restored.pending_data)
+            # Restore known peers so links can be rebuilt on demand after a
+            # restart — re-authenticated via the persisted cert store, so no
+            # re-invitation is needed.
+            self._routing.import_entries(restored.routing)
         transport_manager.on_new_connection = self._on_new_transport
 
     @property
@@ -464,6 +469,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
+        peer.remote_addr = address
         peer.join_code = code
         self._peers.append(peer)
         self._running = True
@@ -471,7 +477,7 @@ class MeshNode:
 
     async def stop(self) -> None:
         self._running = False
-        self._persist_sessions()
+        self._persist_state()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -499,7 +505,7 @@ class MeshNode:
                 del queue[0]  # drop oldest — bounded backlog per target
             if target not in self._e2e_pending_kem:
                 await self._initiate_e2e_handshake(target)
-            self._persist_sessions()
+            self._persist_state()
             return
         session = self._e2e_sessions[target]
         packet = Packet.create_encrypted(DATA, self._id.raw, target.raw, payload, session)
@@ -747,7 +753,7 @@ class MeshNode:
         payload = _encode_e2e_handshake(nonce, kem_pub, dsa_pub, cert_chain, signature)
         self._e2e_pending_kem[target] = kem_secret
         self._e2e_pending_nonce[target] = nonce
-        self._persist_sessions()
+        self._persist_state()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
         await self._route_outbound(packet)
 
@@ -784,6 +790,7 @@ class MeshNode:
             peer = _Peer(transport, is_client_side=True)
             peer.on_dead = self._reap_peer
             peer.total = self._metrics.total
+            peer.remote_addr = uri
             self._peers.append(peer)
             await peer.start(self._handle_packet)
             return peer
@@ -816,15 +823,16 @@ class MeshNode:
         except Exception:
             pass
 
-    def _persist_sessions(self) -> None:
-        """Snapshot E2E state to the encrypted store, if persistence is on.
-        Never raises — a disk problem must not take the node down."""
+    def _persist_state(self) -> None:
+        """Snapshot E2E + routing state to the encrypted store, if persistence
+        is on. Never raises — a disk problem must not take the node down."""
         if self._session_store is None:
             return
         try:
             self._session_store.save(
                 self._e2e_sessions, self._e2e_pending_kem,
                 self._e2e_pending_nonce, self._e2e_pending_data,
+                self._routing.export_entries(),
             )
         except Exception:
             pass
@@ -1125,7 +1133,7 @@ class MeshNode:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
             await self._route_outbound(pkt)
-        self._persist_sessions()
+        self._persist_state()
 
     async def _handle_e2e_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         try:
@@ -1153,7 +1161,7 @@ class MeshNode:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
             await self._route_outbound(pkt)
-        self._persist_sessions()
+        self._persist_state()
 
     async def _handle_handshake(self, peer: _Peer, packet: Packet) -> None:
         if peer.authenticated_id is not None:
@@ -1197,6 +1205,7 @@ class MeshNode:
         peer.pending_challenge = None
         ack = Packet.create(HANDSHAKE_ACK, self._id.raw, packet.src_id, payload)
         await peer.send(ack)
+        self._persist_state()  # persist the newly-known peer for restart recovery
 
     async def _handle_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         if peer.pending_kem_secret is None:
@@ -1239,8 +1248,13 @@ class MeshNode:
 
         peer.authenticated_id = server_id
         peer.dsa_pub = alice_dsa_pub
-        self._routing.add(server_id, [], alice_dsa_pub)
+        # Record the address we dialled so this peer is reconnectable after a
+        # restart (validated before advertising it to anyone else).
+        addrs = ([peer.remote_addr]
+                 if peer.remote_addr and _validate_uri(peer.remote_addr) else [])
+        self._routing.add(server_id, addrs, alice_dsa_pub)
         shared_secret         = self._identity.kem_decapsulate(ciphertext,
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
+        self._persist_state()  # persist the newly-known peer for restart recovery
