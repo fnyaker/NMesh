@@ -75,13 +75,17 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Mode drop unidirectionnel (bundle déposé sans round-trip interactif).
 - File d'émission persistante par pair + reprise après coupure.
 
-### Intégration applicative (voie données — distincte de la console de gestion)
-1. **Connecteur socket local** : le nœud écoute sur une socket (TCP loopback /
-   Unix), authentifiée par certificat auto-généré en RAM, pour brancher des
-   apps locales ou des conteneurs Docker sur le flux **de données** du mesh
-   (la console web, elle, est le plan de *gestion*).
-2. **Lanceur de sous-processus** : le nœud lance des programmes déclarés et les
-   raccorde au réseau (le nœud devient le pont réseau de l'app).
+### Connecteur de données (`src/data_connector.py`) — fait
+- Socket local (TCP loopback ou Unix 0600, TLS optionnel) par lequel une app
+  envoie/reçoit des messages E2E du mesh. Auth par jeton (compare_digest),
+  trames bornées, clients plafonnés. Plan de *données* (distinct de la console).
+- Testé app→mesh→app de bout en bout. Doc : `Docs/DataConnector/guide`.
+  Démo : `console_demo.py --connector-port N`.
+
+### Intégration applicative — suite
+1. **Lanceur de sous-processus** : le nœud lance des programmes déclarés et les
+   raccorde au réseau via le connecteur (le nœud devient le pont réseau de
+   l'app), en injectant le jeton du connecteur.
 
 ### Écosystème d'applications
 - App de démonstration : chat texte + échange de fichiers.
