@@ -1,0 +1,59 @@
+# Connecteur de données — brancher une app sur le mesh
+
+Le connecteur expose un socket local par lequel une application (sur le même
+hôte, ou un conteneur Docker qui monte le socket) envoie et reçoit des messages
+**de bout en bout** sur le mesh. C'est le **plan de données** (distinct de la
+console web, qui est le plan de *gestion*).
+
+Le nœud devient ainsi le pont réseau de l'app : une app de chat, une supervision,
+n'importe quoi qui veut parler à d'autres nœuds du mesh.
+
+## Lancer
+
+```bash
+python scripts/console_demo.py --connector-port 8790
+# -> Data connector: 127.0.0.1:8790   token=<jeton généré>
+```
+
+Ou dans votre code :
+
+```python
+from src.data_connector import DataConnector
+conn = DataConnector(node, host="127.0.0.1", port=8790)   # ou unix_path="/run/nmesh.sock"
+await conn.start()
+print(conn.token)
+```
+
+## Protocole
+
+Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | corps`.
+
+| Sens | Type | Corps | Effet |
+|------|------|-------|-------|
+| →    | `AUTH` (0x01)       | jeton (utf-8)               | authentifie la connexion |
+| ←    | `AUTH_OK` (0x81)    | —                           | authentifié |
+| ←    | `AUTH_FAIL` (0x82)  | —                           | jeton invalide, fermeture |
+| →    | `SEND` (0x02)       | `id_cible(20) + payload`    | `node.send_data(cible, payload)` |
+| →    | `WHOAMI` (0x03)     | —                           | demande notre id de nœud |
+| ←    | `WHOAMI` (0x84)     | `id_noeud(20)`              | réponse |
+| ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant, poussé |
+
+La première trame **doit** être `AUTH`. Ensuite l'app envoie des `SEND` et reçoit
+des `RECV` au fil de l'eau.
+
+## Sécurité
+
+- **Jeton obligatoire** (comparaison en temps constant) avant toute action ;
+  rien n'est accepté avant `AUTH`.
+- Trames **bornées** en taille, nombre de clients **plafonné**.
+- **Loopback par défaut** ; ou **socket Unix** (chmod 0600) pour l'IPC de
+  conteneurs ; un `ssl_context` peut envelopper l'écoute TCP.
+- Le connecteur possède la boucle `node.receive_data()` et **diffuse** chaque
+  message entrant à tous les clients authentifiés (un client = cas usuel).
+
+## Vers le partage d'applications
+
+Ce connecteur est la brique de base : une app déclarée (manifeste + fichiers)
+lancée par le nœud s'y branche pour parler au réseau. Le partage d'apps via DHT
+reste à venir (voir ROADMAP).
+</content>
