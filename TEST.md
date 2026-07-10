@@ -2,92 +2,58 @@
 
 ## Tests unitaires
 
-Tests rapides, sans réseau réel ni Docker. Couvrent toute la logique interne.
+Rapides, sans réseau réel. Couvrent toute la logique interne, y compris le
+fuzzing (aucun octet hostile ne crashe un parseur).
 
 ```bash
 pip install -r requirements.txt
 pytest
 ```
 
-Résultat attendu : ~100 tests en < 10 secondes.
+Environ 280 tests en ~20 secondes.
 
 ---
 
-## Tests d'intégration locaux
+## Tests d'intégration
 
-Tests avec deux nœuds TCP réels sur localhost. Crypto réelle, réseau réel.
-Plus lents que les tests unitaires (~30 secondes).
+Nœuds réels, crypto post-quantique réelle, vraie pile réseau. Exclus par défaut
+(voir `pyproject.toml`) ; à lancer explicitement :
 
 ```bash
-pytest tests/integration/
+pytest tests/integration
 ```
 
-Ces tests vérifient :
-- Le flow complet invitation → handshake → session AES-256-GCM
-- L'envoi/réception de données chiffrées
-- Le rejet d'un mauvais code d'invitation
-- L'usage unique du code d'invitation
+Ils vérifient notamment :
+- Le flow complet invitation → handshake → session → data E2E, sur **TCP** et
+  sur le transport **spool** (répertoire/fichier, sans socket).
+- Le routage **multi-hop A→B→C** (les extrémités ne se parlent qu'à travers le
+  relais), y compris sur deux médias fichier distincts.
+- La reprise **après redémarrage** sans ré-invitation (routage + sessions E2E
+  restaurés depuis le disque).
+- L'**auto-réparation** (purge d'un pair mort) et le trajet **app→mesh→app** via
+  les connecteurs de données.
 
 ---
 
-## Tests Docker (réseau multi-containers)
+## CI
 
-Simule un vrai réseau maillé avec 3 nœuds distincts dans des containers isolés.
-
-### Prérequis
-
-- Docker
-- Docker Compose
-
-### Lancer les tests
-
-```bash
-cd docker
-docker-compose up --build --abort-on-container-exit
-```
-
-`--abort-on-container-exit` arrête tout dès qu'un container se termine.
-Le code de sortie global reflète le succès ou l'échec.
-
-### Ce qui se passe
-
-1. `node_a` démarre, génère un code d'invitation, l'écrit dans `/data/invite_code`
-2. `node_b` et `node_c` lisent le code et rejoignent `node_a`
-3. Chaque guest envoie un message à `node_a`
-4. `node_a` affiche les messages reçus dans ses logs
-
-### Lire les logs
-
-```bash
-docker-compose logs node_a
-docker-compose logs node_b
-docker-compose logs node_c
-```
-
-### Nettoyer
-
-```bash
-cd docker
-docker-compose down -v
-```
+La CI GitHub (`.github/workflows/ci.yml`) exécute les tests unitaires puis
+d'intégration à chaque push sur `main` et à chaque pull request.
 
 ---
 
-## Structure des tests
+## Où sont les tests
 
 ```
 tests/
-├── test_packet.py          — sérialisation / validation des paquets
-├── test_tcp_transport.py   — transport TCP (framing, send/receive)
-├── test_transport_manager.py — gestion du transport
-├── test_node_id.py         — ID Kademlia (génération, distance XOR)
-├── test_routing.py         — k-buckets, routing table
-├── test_node.py            — MeshNode (PING, FIND_NODE, bootstrap)
-├── test_crypto.py          — ML-KEM, ML-DSA, AES-256-GCM
-├── test_handshake.py       — handshake complet entre deux nœuds
-├── test_data.py            — envoi/réception de données chiffrées
-├── test_invite.py          — InviteManager (HMAC, expiration, rate limiting)
-├── test_invite_flow.py     — flow invitation dans MeshNode
-└── integration/
-    └── test_local.py       — tests end-to-end sur TCP localhost
+├── test_packet.py / test_crypto.py / test_cert.py   — primitives
+├── test_node.py / test_routing.py / test_handshake.py — nœud & routage
+├── test_e2e.py / test_data.py                        — chiffrement E2E
+├── test_invite*.py / test_trust.py                   — invitations & confiance
+├── test_fuzz.py                                       — entrées hostiles
+├── test_spool.py                                      — bundle & transport fichier
+├── test_webconsole.py / test_data_connector.py       — console & connecteur
+├── test_session_store.py                             — persistance (chiffrée)
+└── integration/                                       — nœuds réels (TCP + spool)
 ```
+</content>
