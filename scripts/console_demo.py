@@ -18,12 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
+from src.spool_transport import SpoolTransport, SpoolServer
 from src.webconsole import WebConsole
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", default="0.0.0.0:9000", help="node TCP listen addr")
+    ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
     ap.add_argument("--console-host", default="127.0.0.1")
     ap.add_argument("--console-port", type=int, default=8787)
     ap.add_argument("--no-tls", action="store_true")
@@ -35,12 +37,16 @@ async def main() -> None:
 
     mgr = TransportManager()
     mgr.register("tcp", TCPTransport, TCPServer)
+    mgr.register("spool", SpoolTransport, SpoolServer)
     node = MeshNode(
         mgr,
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
         cert_store_path=os.path.join(args.data, "node.certs") if args.data else None,
     )
-    await node.start([f"tcp://{args.listen}"])
+    listen_uris = [f"tcp://{args.listen}"]
+    if args.spool:
+        listen_uris.append(f"spool://{args.spool}")
+    await node.start(listen_uris)
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
                          state_dir=args.data, use_tls=not args.no_tls)
@@ -48,6 +54,8 @@ async def main() -> None:
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
+    if args.spool:
+        print(f"  Spool link    : spool://{args.spool}   (store-and-forward)")
     print(f"  Web console   : {console.url}")
     if console.generated_password:
         print(f"  Password      : {console.generated_password}   (shown once — save it)")

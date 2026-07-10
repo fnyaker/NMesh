@@ -1,0 +1,66 @@
+# Transport spool — le mesh sur un medium fichier (store-and-forward)
+
+Le transport `spool` fait tourner tout le mesh (invite, handshake, routage,
+E2E) sur un **répertoire partagé** au lieu d'une socket. C'est le substrat du
+store-and-forward : le répertoire peut vivre sur un medium amovible (clé USB).
+
+Schéma d'URL : `spool://<chemin_du_répertoire>`
+(ex. `spool:///mnt/usb/mesh`, `spool://./link`).
+
+## Comment ça marche
+
+Un lien = un répertoire contenant, par session, deux fichiers journaux
+append-only, un par sens :
+
+```
+<link>/sess-<aléatoire>/
+    c2s.spool   client → serveur
+    s2c.spool   serveur → client
+```
+
+- **Client** (`node.join("spool://<link>", code)`) : crée un sous-répertoire de
+  session, écrit dans `c2s.spool`, lit `s2c.spool`.
+- **Serveur** (`node.start(["spool://<link>"])`) : surveille le répertoire, crée
+  un transport par nouvelle session détectée (multi-client), écrit `s2c.spool`,
+  lit `c2s.spool`.
+
+Chaque paquet est écrit comme un enregistrement `magic | longueur | crc32 |
+payload`, **fsync**é (survit à une coupure de courant ou au retrait de la clé).
+Le lecteur suit un offset et **resynchronise** sur corruption (le medium est
+hostile) : un enregistrement au CRC invalide est sauté, pas fatal.
+
+Quand les deux bouts sont en ligne sur le même répertoire, le lien se comporte
+comme une liaison vive (mais asynchrone). Emporter un fichier hors-ligne vers
+une autre machine, c'est le cas tolérant au délai.
+
+## Conteneur portable : `Bundle`
+
+Pour emporter un lot de paquets en un seul fichier (le « fichier de la clé
+USB »), `src/spool.py` fournit `Bundle` :
+
+```python
+from src.spool import write_bundle, read_bundle
+write_bundle("/mnt/usb/carry.bundle", [pkt.pack() for pkt in packets])
+raw_packets = read_bundle("/mnt/usb/carry.bundle")   # lève BundleError si corrompu
+```
+
+Intégrité SHA-256 sur tout le conteneur : toute troncature ou altération sur le
+medium est **détectée et rejetée**. La confidentialité et l'authenticité restent
+au niveau paquet (déjà chiffré/authentifié E2E) — le porteur ne peut ni lire ni
+forger.
+
+## Sécurité
+
+- Medium **non fiable** : chaque paquet transporté est déjà chiffré E2E ; le
+  chemin de réception durci du nœud rejette tout paquet mal formé ou forgé.
+- Intégrité au niveau enregistrement (CRC) et conteneur (SHA-256).
+- Écritures durables (fsync fichier + répertoire).
+
+## Limite connue
+
+`TransportManager` n'accepte **qu'un serveur par schéma**. Un même nœud ne peut
+donc pas écouter simultanément sur deux répertoires `spool://` distincts
+(topologie A—cléUSB1—B—cléUSB2—C). Contournement actuel : plusieurs clients
+rejoignent le même répertoire hôte (le `SpoolServer` est multi-client). Support
+multi-écouteurs par schéma : voir ROADMAP.
+</content>
