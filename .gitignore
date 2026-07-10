@@ -9,6 +9,10 @@ venv/
 # Runtime node state (identities, cert stores, generated ids/invites)
 *.key
 *.certs
+*.sessions
 *.id
 /data/
 invite_*
+
+# Build artifacts
+*.pyz
