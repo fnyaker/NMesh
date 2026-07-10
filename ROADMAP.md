@@ -44,12 +44,25 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   handshake → data sur les 9 guests.
 - Topologie chaîne A→B→C→D pour le forwarding multi-hop en conditions réelles.
 
+### Store-and-forward — medium fichier (`src/spool_transport.py`, `src/spool.py`)
+- Transport `spool://` : tout le mesh (invite/handshake/routage/E2E) tourne sur
+  un **répertoire partagé**, sans socket. Journaux append durables (fsync),
+  framing CRC par enregistrement, resync sur corruption, multi-client.
+- Conteneur portable `Bundle` : lot de paquets en un fichier intégrité SHA-256
+  (le « fichier de la clé USB »), troncature/altération rejetées.
+- Testé : session + data E2E via fichiers, routage multi-hop en étoile,
+  sneakernet (livraison offline via Bundle), fuzzing du conteneur et du framing.
+- Doc : `Docs/Transports/spool`. Démo : `console_demo.py --spool DIR`.
+
 ## Prochaines étapes (vision « Jarvis / Edith »)
 
-### Conditions dégradées & transport asynchrone
-- Transport **store-and-forward** (delay-tolerant) : file persistante de
-  paquets à remettre plus tard, tolérant à des latences de plusieurs jours
-  (scénario « clé USB portée à la main »). Correction d'erreur + retry.
+### Store-and-forward — approfondissement delay-tolerant
+- Persistance de l'état de session (handshake) pour survivre à un aller-retour
+  hors-ligne de plusieurs jours et à un redémarrage de nœud.
+- Mode drop unidirectionnel (bundle déposé sans round-trip interactif).
+- Support **multi-écouteurs par schéma** dans `TransportManager` (aujourd'hui
+  un seul serveur par schéma → un nœud ne peut écouter deux `spool://` à la
+  fois ; nécessaire pour A—clé1—B—clé2—C).
 - File d'émission persistante par pair + reprise après coupure.
 
 ### Intégration applicative (voie données — distincte de la console de gestion)
