@@ -49,6 +49,9 @@ _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
 _BROADCAST_ID    = b"\xff" * 20
 _MSG_DEDUP_MAX         = 10_000
 _MAX_PEERS             = 128
+_MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
+_MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
+_MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
 _ON_DEMAND_TIMEOUT     = 5.0    # transport open + handshake
 _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 2
@@ -314,28 +317,56 @@ class _Peer:
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         self.dsa_pub: bytes = b""
+        self._malformed: int = 0
+        # Invoked when the receive loop exits on its own (dead link or abuse),
+        # so the node can prune this peer. Cleared on intentional stop().
+        self.on_dead = None
         self._task: asyncio.Task | None = None
 
     async def start(self, on_packet) -> None:
-        self._task = asyncio.create_task(self._loop(on_packet))
+        self._task = asyncio.create_task(self._run(on_packet))
+
+    async def _run(self, on_packet) -> None:
+        try:
+            await self._loop(on_packet)
+        finally:
+            cb = self.on_dead
+            if cb is not None:
+                self.on_dead = None
+                try:
+                    await cb(self)
+                except Exception:
+                    pass
 
     async def _loop(self, on_packet) -> None:
         while True:
             try:
                 packet = await self.transport.receive()
-            except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
-                return
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.IncompleteReadError, ConnectionError, OSError, EOFError):
+                return  # link is dead — exit so the node reaps this peer
+            except Exception:
+                # Malformed frame on a still-live link (e.g. bad length prefix,
+                # oversized payload). One bad packet must never kill the link:
+                # drop it, count the abuse, and keep serving. Persistent garbage
+                # is treated as hostile and the peer is cut.
+                self._malformed += 1
+                if self._malformed > _MAX_MALFORMED:
+                    return
+                continue
             try:
                 await on_packet(self, packet)
             except asyncio.CancelledError:
-                return
+                raise
             except Exception:
-                pass  # malformed packet or handler bug — drop, loop continues
+                pass  # malformed payload or handler bug — drop, loop continues
 
     async def send(self, packet: Packet) -> None:
         await self.transport.send(packet)
 
     async def stop(self) -> None:
+        self.on_dead = None  # intentional shutdown — do not trigger reaping
         if self._task:
             self._task.cancel()
             try:
@@ -405,6 +436,7 @@ class MeshNode:
     async def join(self, address: str, code: str) -> None:
         transport = await self._transport_manager.connect(address)
         peer = _Peer(transport, is_client_side=True)
+        peer.on_dead = self._reap_peer
         peer.join_code = code
         self._peers.append(peer)
         self._running = True
@@ -428,7 +460,15 @@ class MeshNode:
         if target == self._id:
             raise ValueError("cannot send to self")
         if target not in self._e2e_sessions:
-            self._e2e_pending_data.setdefault(target, []).append(payload)
+            pending = self._e2e_pending_data
+            # Cap half-open destinations so an app flooding unreachable targets
+            # can't exhaust memory; evict the oldest destination if needed.
+            if target not in pending and len(pending) >= _MAX_PENDING_TARGETS:
+                del pending[next(iter(pending))]
+            queue = pending.setdefault(target, [])
+            queue.append(payload)
+            if len(queue) > _MAX_PENDING_PER_TARGET:
+                del queue[0]  # drop oldest — bounded backlog per target
             if target not in self._e2e_pending_kem:
                 await self._initiate_e2e_handshake(target)
             return
@@ -686,6 +726,7 @@ class MeshNode:
             await transport.close()
             return
         peer = _Peer(transport, is_client_side=False)
+        peer.on_dead = self._reap_peer
         self._peers.append(peer)
         await peer.start(self._handle_packet)
         challenge = self._invite.generate_challenge()
@@ -710,6 +751,7 @@ class MeshNode:
             except Exception:
                 continue
             peer = _Peer(transport, is_client_side=True)
+            peer.on_dead = self._reap_peer
             self._peers.append(peer)
             await peer.start(self._handle_packet)
             return peer
@@ -718,10 +760,28 @@ class MeshNode:
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
         """For testing only — injects a fake transport as a client-side peer."""
         peer = _Peer(transport, is_client_side=True)
+        peer.on_dead = self._reap_peer
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
         return peer
+
+    async def _reap_peer(self, peer: _Peer) -> None:
+        """Prune a peer whose link died or which was cut for abuse.
+
+        Called from the peer's own receive task, so it must not cancel that
+        task (that is stop()'s job) — it just drops the peer from routing and
+        releases the transport. On-demand routing re-establishes any link that
+        is needed again, so the mesh self-heals without explicit reconnect.
+        """
+        try:
+            self._peers.remove(peer)
+        except ValueError:
+            pass
+        try:
+            await peer.transport.close()
+        except Exception:
+            pass
 
     def _cert_add(self, cert: Certificate) -> bool:
         ok = self._cert_store.add(cert)
@@ -782,6 +842,11 @@ class MeshNode:
                 return
         if packet.type in _ROUTABLE_TYPES:
             if peer.authenticated_id is None:
+                return
+            # msg_id must commit to the packet's content. This stops a relay from
+            # minting fresh msg_ids for the same payload to slip past dedup and
+            # amplify a flood — any tampering to change the id also breaks it.
+            if packet.msg_id != packet.compute_msg_id():
                 return
             if self._is_seen(packet.msg_id):
                 return
@@ -928,23 +993,38 @@ class MeshNode:
             nonce, kem_pub, dsa_pub, cert_chain, signature = _decode_e2e_handshake(packet.payload)
         except Exception:
             return
-        if NodeID.from_public_key(dsa_pub) != NodeID(packet.src_id):
+        src = NodeID(packet.src_id)
+        if NodeID.from_public_key(dsa_pub) != src:
             return
         if self._cert_store.verify_chain(cert_chain) is None:
             return
         if not self._identity.verify(nonce + kem_pub + dsa_pub, signature, dsa_pub):
             return
-        ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
-        self._e2e_sessions[NodeID(packet.src_id)] = SessionKey(shared_secret)
+        # Simultaneous-open (glare) resolution: if we also have a handshake
+        # in flight to this peer, only one may win or the two ends settle on
+        # different keys and deadlock. The lower NodeID is the canonical
+        # initiator; if that's us, ignore their handshake and let ours win.
+        if src in self._e2e_pending_nonce and self._id.raw < src.raw:
+            return
+        self._e2e_pending_nonce.pop(src, None)
+        self._e2e_pending_kem.pop(src, None)
         my_cert_chain = self._cert_store.get_chain_to_root(self._id)
         if my_cert_chain is None:
             return
+        ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
+        self._e2e_sessions[src] = SessionKey(shared_secret)
         ack_sig = self._identity.sign(nonce + ciphertext + self._identity.dsa_public_key)
         ack_payload = _encode_e2e_handshake_ack(
             nonce, ciphertext, self._identity.dsa_public_key, my_cert_chain, ack_sig
         )
         ack = Packet.create(E2E_HANDSHAKE_ACK, self._id.raw, packet.src_id, ack_payload)
         await self._route_outbound(ack)
+        # We became the responder — flush anything we had queued for this peer,
+        # otherwise data sent before the session existed is stranded forever.
+        for payload in self._e2e_pending_data.pop(src, []):
+            pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
+                                          self._e2e_sessions[src])
+            await self._route_outbound(pkt)
 
     async def _handle_e2e_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         try:

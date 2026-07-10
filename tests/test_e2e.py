@@ -423,6 +423,58 @@ class TestE2ETTL:
 
 
 # ---------------------------------------------------------------------------
+# 12.3b — Simultaneous open (glare)
+# ---------------------------------------------------------------------------
+
+async def _pump_pair(fake_a: FakeTransport, fake_b: FakeTransport,
+                     rounds: int = 8) -> None:
+    """Shuttle every newly-sent packet across the A↔B link until quiescent."""
+    ia = ib = 0
+    for _ in range(rounds):
+        new_a, ia = fake_a.sent[ia:], len(fake_a.sent)
+        new_b, ib = fake_b.sent[ib:], len(fake_b.sent)
+        for p in new_a:
+            fake_b.inject(p)
+        for p in new_b:
+            fake_a.inject(p)
+        await asyncio.sleep(0.05)
+
+
+class TestE2EGlare:
+    async def test_simultaneous_open_converges(self):
+        """Both peers initiate an E2E handshake at once. They must settle on a
+        single shared key — proven by data flowing correctly in both
+        directions — instead of racing to two mismatched sessions."""
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        _cross_trust(node_a, node_b)
+        await _make_authed_pair(node_a, fake_a, node_b, fake_b)
+
+        # Glare: both sides kick off a handshake before either has replied.
+        await node_a.send_data(node_b.id, b"a->b")
+        await node_b.send_data(node_a.id, b"b->a")
+        await _pump_pair(fake_a, fake_b)
+
+        assert node_b.id in node_a._e2e_sessions
+        assert node_a.id in node_b._e2e_sessions
+
+        # The queued payloads must arrive intact on both ends.
+        src_b, data_b = await asyncio.wait_for(node_b.receive_data(), timeout=1.0)
+        src_a, data_a = await asyncio.wait_for(node_a.receive_data(), timeout=1.0)
+        assert (src_b, data_b) == (node_a.id, b"a->b")
+        assert (src_a, data_a) == (node_b.id, b"b->a")
+
+        # And a fresh message still round-trips on the converged key.
+        await node_a.send_data(node_b.id, b"again")
+        await _pump_pair(fake_a, fake_b)
+        src, data = await asyncio.wait_for(node_b.receive_data(), timeout=1.0)
+        assert (src, data) == (node_a.id, b"again")
+
+        await node_a.stop()
+        await node_b.stop()
+
+
+# ---------------------------------------------------------------------------
 # 12.4 — Error cases
 # ---------------------------------------------------------------------------
 
