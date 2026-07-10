@@ -11,6 +11,8 @@ class TransportManager:
 
     def __init__(self) -> None:
         self._registry: dict[str, tuple[type[BaseTransport], type[BaseServer]]] = {}
+        # Active listeners, keyed by their full URI so a node can listen on
+        # several addresses of the same scheme (e.g. two spool:// directories).
         self._servers: dict[str, BaseServer] = {}
         self.on_new_connection: Callable[[BaseTransport], Awaitable[None]] | None = None
 
@@ -52,13 +54,17 @@ class TransportManager:
         scheme, opaque = result
         if scheme not in self._registry:
             raise TransportError(f"scheme not registered: {scheme!r}")
-        if scheme in self._servers:
-            raise TransportError(f"already listening on scheme: {scheme!r}")
+        # Key by the exact URI. This both allows multiple listeners per scheme
+        # and rejects a duplicate address — important for media with no OS-level
+        # bind conflict (e.g. two spool servers on the same directory would
+        # otherwise both accept the same sessions and double every peer).
+        if uri in self._servers:
+            raise TransportError(f"already listening on URI: {uri!r}")
         _, server_cls = self._registry[scheme]
         server = server_cls()
         server.on_new_connection = self._dispatch_incoming
         await server.listen(opaque)
-        self._servers[scheme] = server
+        self._servers[uri] = server
 
     async def _dispatch_incoming(self, transport: BaseTransport) -> None:
         if self.on_new_connection is None:
