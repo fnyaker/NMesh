@@ -91,3 +91,30 @@ class TestSpoolMesh:
 
             for n in (a, b, c):
                 await n.stop()
+
+    async def test_multi_hop_two_media(self):
+        # The real sneakernet topology: A—(dir1)—B—(dir2)—C. B listens on TWO
+        # distinct spool directories at once (now that a node may hold several
+        # listeners of the same scheme), so A and C sit on separate media.
+        with tempfile.TemporaryDirectory() as d:
+            link_ab = os.path.join(d, "ab")
+            link_bc = os.path.join(d, "bc")
+            b = make_node()
+            a = make_node()
+            c = make_node()
+            code_a = b.generate_invite()
+            code_c = b.generate_invite()
+
+            await b.start([f"spool://{link_ab}", f"spool://{link_bc}"])
+            await a.join(f"spool://{link_ab}", code_a)
+            await c.join(f"spool://{link_bc}", code_c)
+            await a.wait_for_session(timeout=25.0)
+            await c.wait_for_session(timeout=25.0)
+
+            await a.send_data(c.id, b"across two usb keys")
+            src, data = await asyncio.wait_for(c.receive_data(), timeout=30.0)
+            assert data == b"across two usb keys"
+            assert src == a.id
+
+            for n in (a, b, c):
+                await n.stop()
