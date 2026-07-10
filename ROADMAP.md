@@ -54,15 +54,25 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   sneakernet (livraison offline via Bundle), fuzzing du conteneur et du framing.
 - Doc : `Docs/Transports/spool`. Démo : `console_demo.py --spool DIR`.
 
+### Persistance de session (`src/session_store.py`) — opt-in
+- Survit au redémarrage et à l'aller-retour offline : sessions E2E, handshakes
+  en vol (kem/nonce), et données en attente sont persistés.
+- **Chiffré au repos** (AES-256-GCM) sous une clé HKDF dérivée de l'identité —
+  même frontière de confiance que le fichier d'identité déjà sur disque.
+  Par défaut désactivé (clés en RAM). Activé via `session_store_path`.
+- Chargement bulletproof (fichier hostile → repart à vide, jamais de crash).
+
+### Multi-écouteurs par schéma (`TransportManager`) — fait
+- Un nœud peut écouter plusieurs `spool://` distincts → topologie
+  A—clé1—B—clé2—C débloquée.
+
 ## Prochaines étapes (vision « Jarvis / Edith »)
 
 ### Store-and-forward — approfondissement delay-tolerant
-- Persistance de l'état de session (handshake) pour survivre à un aller-retour
-  hors-ligne de plusieurs jours et à un redémarrage de nœud.
+- Persistance de l'état de session **du lien direct** (handshake de hop adjacent)
+  pour reprise instantanée sans re-handshake après redémarrage (les sessions
+  E2E de bout en bout, elles, survivent déjà).
 - Mode drop unidirectionnel (bundle déposé sans round-trip interactif).
-- Support **multi-écouteurs par schéma** dans `TransportManager` (aujourd'hui
-  un seul serveur par schéma → un nœud ne peut écouter deux `spool://` à la
-  fois ; nécessaire pour A—clé1—B—clé2—C).
 - File d'émission persistante par pair + reprise après coupure.
 
 ### Intégration applicative (voie données — distincte de la console de gestion)
