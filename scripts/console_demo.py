@@ -20,6 +20,7 @@ from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.spool_transport import SpoolTransport, SpoolServer
 from src.webconsole import WebConsole
+from src.data_connector import DataConnector
 
 
 async def main() -> None:
@@ -28,6 +29,8 @@ async def main() -> None:
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
     ap.add_argument("--console-host", default="127.0.0.1")
     ap.add_argument("--console-port", type=int, default=8787)
+    ap.add_argument("--connector-port", type=int, default=None,
+                    help="expose a data connector on this loopback port for apps")
     ap.add_argument("--no-tls", action="store_true")
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
     args = ap.parse_args()
@@ -53,6 +56,11 @@ async def main() -> None:
                          state_dir=args.data, use_tls=not args.no_tls)
     console.start(loop=asyncio.get_running_loop())
 
+    connector = None
+    if args.connector_port is not None:
+        connector = DataConnector(node, host="127.0.0.1", port=args.connector_port)
+        await connector.start()
+
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
     if args.spool:
@@ -64,6 +72,8 @@ async def main() -> None:
         print("  Password      : (existing — from console.cred)")
     if not args.no_tls:
         print(f"  TLS SHA-256   : {console.cert_fingerprint}")
+    if connector is not None:
+        print(f"  Data connector: 127.0.0.1:{connector.port}   token={connector.token}")
     if args.console_host not in ("127.0.0.1", "localhost", "::1"):
         print("  WARNING       : console is reachable off-host — protect the network path.")
     print("=" * 60, flush=True)
@@ -74,6 +84,8 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if connector is not None:
+            await connector.stop()
         console.stop()
         await node.stop()
 
