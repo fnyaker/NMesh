@@ -398,7 +398,8 @@ class MeshNode:
     def __init__(self,
                  transport_manager: TransportManager,
                  identity_path: str | None = None,
-                 cert_store_path: str | None = None) -> None:
+                 cert_store_path: str | None = None,
+                 session_store_path: str | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -425,6 +426,17 @@ class MeshNode:
         self._pending_finds: dict[bytes, asyncio.Future] = {}
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
+        # Opt-in E2E session persistence (encrypted at rest). Off by default:
+        # keys stay in RAM only. When enabled, resume prior sessions on start.
+        self._session_store = None
+        if session_store_path:
+            from .session_store import SessionStore
+            self._session_store = SessionStore(session_store_path, self._identity)
+            restored = self._session_store.load()
+            self._e2e_sessions.update(restored.e2e_sessions)
+            self._e2e_pending_kem.update(restored.pending_kem)
+            self._e2e_pending_nonce.update(restored.pending_nonce)
+            self._e2e_pending_data.update(restored.pending_data)
         transport_manager.on_new_connection = self._on_new_transport
 
     @property
@@ -459,6 +471,7 @@ class MeshNode:
 
     async def stop(self) -> None:
         self._running = False
+        self._persist_sessions()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -486,6 +499,7 @@ class MeshNode:
                 del queue[0]  # drop oldest — bounded backlog per target
             if target not in self._e2e_pending_kem:
                 await self._initiate_e2e_handshake(target)
+            self._persist_sessions()
             return
         session = self._e2e_sessions[target]
         packet = Packet.create_encrypted(DATA, self._id.raw, target.raw, payload, session)
@@ -733,6 +747,7 @@ class MeshNode:
         payload = _encode_e2e_handshake(nonce, kem_pub, dsa_pub, cert_chain, signature)
         self._e2e_pending_kem[target] = kem_secret
         self._e2e_pending_nonce[target] = nonce
+        self._persist_sessions()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
         await self._route_outbound(packet)
 
@@ -798,6 +813,19 @@ class MeshNode:
             pass
         try:
             await peer.transport.close()
+        except Exception:
+            pass
+
+    def _persist_sessions(self) -> None:
+        """Snapshot E2E state to the encrypted store, if persistence is on.
+        Never raises — a disk problem must not take the node down."""
+        if self._session_store is None:
+            return
+        try:
+            self._session_store.save(
+                self._e2e_sessions, self._e2e_pending_kem,
+                self._e2e_pending_nonce, self._e2e_pending_data,
+            )
         except Exception:
             pass
 
@@ -1097,6 +1125,7 @@ class MeshNode:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
             await self._route_outbound(pkt)
+        self._persist_sessions()
 
     async def _handle_e2e_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         try:
@@ -1124,6 +1153,7 @@ class MeshNode:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
             await self._route_outbound(pkt)
+        self._persist_sessions()
 
     async def _handle_handshake(self, peer: _Peer, packet: Packet) -> None:
         if peer.authenticated_id is not None:
