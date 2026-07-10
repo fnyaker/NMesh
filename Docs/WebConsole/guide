@@ -1,0 +1,70 @@
+# Console web NMesh
+
+Plan de gestion local d'une node : une page web pour visualiser l'état du
+réseau (graphe, pairs, débit, charge) et piloter la node (invitations, jointure
+d'un réseau, confiance à de nouveaux certificats).
+
+C'est **la surface la plus sensible du projet** — qui contrôle la console
+contrôle la node. Elle est donc conçue en parano maximale et **sans dépendance
+externe** (stdlib + `cryptography`, déjà présent).
+
+## Lancer
+
+```bash
+python scripts/console_demo.py --data ./mydata
+```
+
+Au premier lancement, le mot de passe est **généré et affiché une seule fois**
+— notez-le. L'empreinte SHA-256 du certificat TLS auto-signé est affichée pour
+vérification dans le navigateur.
+
+Options :
+- `--console-host 0.0.0.0` : rend la console accessible depuis une autre
+  machine. Par défaut elle écoute sur `127.0.0.1` uniquement.
+- `--console-port 8787`, `--no-tls`, `--data DIR` (persiste identité + creds).
+
+## Modèle de sécurité
+
+- **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.
+- **Mot de passe** généré au premier run, stocké uniquement en **hash scrypt
+  salé** (`console.cred`, permissions 0600). Jamais en clair sur disque.
+- **Jetons Bearer** (en-tête `Authorization`), jamais de cookie → aucune
+  surface CSRF. Expiration glissante (1 h d'inactivité).
+- **Lockout** anti-bruteforce après plusieurs échecs de login.
+- **Bind loopback par défaut** ; l'exposition réseau est un choix explicite.
+- **CSP stricte** (`default-src 'self'`), assets same-origin, aucune ressource
+  externe (pas de CDN), plafond de taille des requêtes.
+- Le serveur HTTP tourne dans un thread dédié et **marshalle** toute
+  interaction avec la node sur la boucle asyncio : l'état de la node n'est
+  jamais touché hors du thread de la boucle.
+
+## API (toutes en JSON, auth Bearer sauf login)
+
+| Méthode | Route            | Rôle                                           |
+|---------|------------------|------------------------------------------------|
+| POST    | `/api/login`     | `{password}` → `{token}`                       |
+| POST    | `/api/logout`    | révoque le jeton                               |
+| GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge)   |
+| POST    | `/api/invite`    | génère un code d'invitation                    |
+| POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
+| GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
+| POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
+
+## Rejoindre / relier deux réseaux
+
+1. Sur la node hôte : **Generate invite code**.
+2. Sur la node invitée : **Join network** avec `tcp://hôte:port` + le code.
+3. Pour une confiance mutuelle entre racines distinctes : chaque node expose
+   son certificat via **Show our root certificate** ; l'autre le colle dans
+   **Trust certificate**.
+
+## Intégrer dans votre propre runner
+
+```python
+from src.webconsole import WebConsole
+console = WebConsole(node, host="127.0.0.1", port=8787, state_dir="./data")
+console.start(loop=asyncio.get_running_loop())
+...
+console.stop()
+```
+</content>

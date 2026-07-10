@@ -78,10 +78,14 @@ class RoutingTable:
     def remove(self, node_id: NodeID) -> None:
         self._buckets[self._bucket_index(node_id)].remove(node_id)
 
-    def get_closest(self, target: NodeID, count: int = 20) -> list[NodeEntry]:
-        all_entries: list[NodeEntry] = []
+    def all_entries(self) -> list[NodeEntry]:
+        entries: list[NodeEntry] = []
         for bucket in self._buckets:
-            all_entries.extend(bucket.entries)
+            entries.extend(bucket.entries)
+        return entries
+
+    def get_closest(self, target: NodeID, count: int = 20) -> list[NodeEntry]:
+        all_entries = self.all_entries()
         all_entries.sort(key=lambda e: target.distance(e.node_id))
         return all_entries[:count]
 

@@ -29,6 +29,16 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - **Intégration réelle** : `tests/integration/test_local.py` remis à niveau —
   invite/handshake, data E2E, gros payloads, routage A→B→C, self-healing.
 
+### Console web de gestion (`src/webconsole.py`)
+- Plan de gestion local : graphe réseau, liste des pairs, débit temps réel,
+  charge de la node ; actions invite / join / trust cert.
+- Sécurité : HTTPS auto-signé (empreinte affichée), mot de passe généré +
+  haché scrypt, jetons Bearer (pas de cookie → pas de CSRF), lockout
+  anti-bruteforce, bind loopback par défaut, CSP stricte, assets same-origin,
+  **zéro dépendance externe** (stdlib + `cryptography`).
+- Métriques nœud (`src/metrics.py`) : compteurs débit + charge process.
+- Démo : `scripts/console_demo.py`. Doc : `Docs/WebConsole/guide`.
+
 ## En cours / à valider
 - Test Docker multi-nœuds (10) : rebuild `--build`, valider invitation →
   handshake → data sur les 9 guests.
@@ -42,10 +52,11 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   (scénario « clé USB portée à la main »). Correction d'erreur + retry.
 - File d'émission persistante par pair + reprise après coupure.
 
-### Intégration applicative (au moins deux voies)
+### Intégration applicative (voie données — distincte de la console de gestion)
 1. **Connecteur socket local** : le nœud écoute sur une socket (TCP loopback /
    Unix), authentifiée par certificat auto-généré en RAM, pour brancher des
-   apps locales ou des conteneurs Docker.
+   apps locales ou des conteneurs Docker sur le flux **de données** du mesh
+   (la console web, elle, est le plan de *gestion*).
 2. **Lanceur de sous-processus** : le nœud lance des programmes déclarés et les
    raccorde au réseau (le nœud devient le pont réseau de l'app).
 
