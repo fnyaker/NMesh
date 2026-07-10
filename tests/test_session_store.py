@@ -107,7 +107,7 @@ class TestNodeRestart:
 
             node1 = MeshNode(make_manager(), identity_path=idp, session_store_path=ssp)
             node1._e2e_sessions[peer] = SessionKey(shared)
-            node1._persist_sessions()
+            node1._persist_state()
             await node1.stop()
 
             # Restart with the same identity + store.
@@ -130,8 +130,29 @@ class TestNodeRestart:
         # No session_store_path → nothing persisted, no store object.
         node, _ = await make_node()
         assert node._session_store is None
-        node._persist_sessions()  # no-op, must not raise
+        node._persist_state()  # no-op, must not raise
         await node.stop()
+
+    async def test_routing_survives_restart(self):
+        # Known peers (direct-link recovery) are restored after a restart, so
+        # the node can rebuild links without re-invitation.
+        with tempfile.TemporaryDirectory() as d:
+            idp = os.path.join(d, "id.key")
+            ssp = os.path.join(d, "sessions")
+            peer = _peer_id()
+            dsa_pub = CryptoIdentity().dsa_public_key
+
+            node1 = MeshNode(make_manager(), identity_path=idp, session_store_path=ssp)
+            node1._routing.add(peer, ["tcp://198.51.100.7:9000"], dsa_pub)
+            node1._persist_state()
+            await node1.stop()
+
+            node2 = MeshNode(make_manager(), identity_path=idp, session_store_path=ssp)
+            entry = node2._routing.get(peer)
+            assert entry is not None
+            assert "tcp://198.51.100.7:9000" in entry.addresses
+            assert entry.dsa_pub == dsa_pub
+            await node2.stop()
 
 
 class _Dummy:
