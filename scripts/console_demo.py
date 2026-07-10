@@ -42,6 +42,7 @@ async def main() -> None:
         mgr,
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
         cert_store_path=os.path.join(args.data, "node.certs") if args.data else None,
+        session_store_path=os.path.join(args.data, "node.sessions") if args.data else None,
     )
     listen_uris = [f"tcp://{args.listen}"]
     if args.spool:

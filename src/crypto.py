@@ -46,6 +46,17 @@ class CryptoIdentity:
         with oqs.KeyEncapsulation(KEM_ALG, secret_key) as kem:
             return kem.decap_secret(ciphertext)
 
+    def derive_secret(self, info: bytes, length: int = 32) -> bytes:
+        """Derive an independent symmetric subkey from the long-term identity
+        secret (HKDF). Used to encrypt at-rest state under the same trust
+        boundary as the identity file. One-way: never exposes the signing key."""
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=length,
+            salt=None,
+            info=info,
+        ).derive(self._signer.export_secret_key())
+
     def save(self, path: str) -> None:
         """Persiste la paire de clés DSA sur disque (format binaire brut)."""
         import struct, os
@@ -115,6 +126,20 @@ class SessionKey:
             salt=None,
             info=_HKDF_INFO,
         ).derive(shared_secret)
+
+    @classmethod
+    def from_key(cls, key: bytes) -> "SessionKey":
+        """Rebuild a session from its already-derived 32-byte key (for
+        persistence). Bypasses HKDF — the key is stored, not the raw secret."""
+        if len(key) != 32:
+            raise ValueError("session key must be 32 bytes")
+        obj = cls.__new__(cls)
+        obj._key = key
+        return obj
+
+    @property
+    def key_bytes(self) -> bytes:
+        return self._key
 
     def encrypt(self, plaintext: bytes, nonce: bytes, aad: bytes) -> tuple[bytes, bytes]:
         raw = AESGCM(self._key).encrypt(nonce, plaintext, aad)
