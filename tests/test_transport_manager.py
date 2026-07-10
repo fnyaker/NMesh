@@ -105,7 +105,7 @@ class TestListen:
     async def test_listen_starts_server(self):
         m = make_manager()
         await m.listen("fake://anything")
-        assert "fake" in m._servers
+        assert "fake://anything" in m._servers
 
     async def test_listen_failure_no_server_stored(self):
         class FailingServer(FakeServer):
@@ -116,13 +116,21 @@ class TestListen:
         m.register("fail", FakeTransport, FailingServer)
         with pytest.raises(OSError):
             await m.listen("fail://anything")
-        assert "fail" not in m._servers
+        assert "fail://anything" not in m._servers
 
-    async def test_listen_duplicate_scheme_rejected(self):
+    async def test_listen_multiple_addresses_same_scheme(self):
+        # Several listeners of the same scheme on distinct addresses are allowed.
         m = make_manager()
         await m.listen("fake://first")
+        await m.listen("fake://second")
+        assert "fake://first" in m._servers
+        assert "fake://second" in m._servers
+
+    async def test_listen_duplicate_uri_rejected(self):
+        m = make_manager()
+        await m.listen("fake://same")
         with pytest.raises(TransportError):
-            await m.listen("fake://second")
+            await m.listen("fake://same")
 
     async def test_listen_unknown_scheme_raises(self):
         m = TransportManager()
