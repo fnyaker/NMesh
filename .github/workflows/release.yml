@@ -1,0 +1,55 @@
+name: Release
+
+# Builds distributable artifacts on a version tag (e.g. v0.1.0):
+#   - nmesh.pyz         attached to the GitHub release
+#   - Docker image      pushed to GHCR (ghcr.io/<owner>/nmesh)
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  pyz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build zipapp
+        run: python scripts/build_pyz.py -o nmesh.pyz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nmesh-pyz
+          path: nmesh.pyz
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nmesh.pyz
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase image name
+        id: img
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.ref_name }}
