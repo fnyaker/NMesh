@@ -117,3 +117,26 @@ class TestRoutingTable:
         self.rt.evict_and_add(new_id, ["new_addr"])
         closest = self.rt.get_closest(new_id)
         assert any(e.node_id == new_id for e in closest)
+
+
+class TestExportImport:
+    def test_roundtrip(self):
+        rt = RoutingTable(make_id(0))
+        rt.add(make_id(1), ["tcp://a:1"], b"\x11" * 32)
+        rt.add(make_id(2), ["tcp://b:2", "spool:///x"], b"\x22" * 32)
+        rt.add(make_id(3), ["tcp://c:3"])  # no dsa_pub → not exportable
+
+        exported = rt.export_entries()
+        assert len(exported) == 2  # entry 3 skipped (no key to re-auth with)
+
+        rt2 = RoutingTable(make_id(0))
+        rt2.import_entries(exported)
+        assert rt2.get(make_id(1)).addresses == ["tcp://a:1"]
+        assert rt2.get(make_id(2)).dsa_pub == b"\x22" * 32
+        assert rt2.get(make_id(3)) is None
+
+    def test_import_ignores_garbage(self):
+        rt = RoutingTable(make_id(0))
+        rt.import_entries("not a list")
+        rt.import_entries([{"id": "zz"}, {"bad": 1}, 42, {"id": "00", "dsa_pub": "gg"}])
+        assert rt.all_entries() == []

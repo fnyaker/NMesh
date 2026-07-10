@@ -95,3 +95,34 @@ class RoutingTable:
 
     def contains(self, node_id: NodeID) -> bool:
         return self.get(node_id) is not None
+
+    def export_entries(self) -> list[dict]:
+        """Reconnectable peers as JSON-safe dicts (node id, addresses, pubkey).
+        Only public information — no secrets."""
+        out: list[dict] = []
+        for e in self.all_entries():
+            if not e.dsa_pub:
+                continue  # can't re-authenticate without the peer's key
+            out.append({
+                "id": e.node_id.raw.hex(),
+                "addresses": list(e.addresses),
+                "dsa_pub": e.dsa_pub.hex(),
+            })
+        return out
+
+    def import_entries(self, entries: list) -> None:
+        """Restore peers exported by :meth:`export_entries`, defensively."""
+        if not isinstance(entries, list):
+            return
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            try:
+                raw = bytes.fromhex(e["id"])
+                dsa_pub = bytes.fromhex(e["dsa_pub"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(raw) != 20:
+                continue
+            addresses = [a for a in e.get("addresses", []) if isinstance(a, str)]
+            self.add(NodeID(raw), addresses, dsa_pub)
