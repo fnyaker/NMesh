@@ -12,7 +12,10 @@ from .invite import InviteManager, compute_response
 from .cert import Certificate
 from .cert_store import CertStore
 from .transport_manager import TransportManager
+from .metrics import NodeMetrics, Counters
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
+
+_HEADER_BYTES = 79  # fixed packet header size, for byte accounting
 
 DATA          = 0x00
 PING          = 0x01
@@ -318,6 +321,8 @@ class _Peer:
         self._invite_lockout_ts: float = 0.0
         self.dsa_pub: bytes = b""
         self._malformed: int = 0
+        self.counters = Counters()   # per-link throughput
+        self.total = None            # node-wide Counters, set by the node
         # Invoked when the receive loop exits on its own (dead link or abuse),
         # so the node can prune this peer. Cleared on intentional stop().
         self.on_dead = None
@@ -355,6 +360,10 @@ class _Peer:
                 if self._malformed > _MAX_MALFORMED:
                     return
                 continue
+            nbytes = _HEADER_BYTES + len(packet.payload)
+            self.counters.on_in(nbytes)
+            if self.total is not None:
+                self.total.on_in(nbytes)
             try:
                 await on_packet(self, packet)
             except asyncio.CancelledError:
@@ -364,6 +373,10 @@ class _Peer:
 
     async def send(self, packet: Packet) -> None:
         await self.transport.send(packet)
+        nbytes = _HEADER_BYTES + len(packet.payload)
+        self.counters.on_out(nbytes)
+        if self.total is not None:
+            self.total.on_out(nbytes)
 
     async def stop(self) -> None:
         self.on_dead = None  # intentional shutdown — do not trigger reaping
@@ -411,6 +424,7 @@ class MeshNode:
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
         self._transport_manager = transport_manager
+        self._metrics = NodeMetrics()
         transport_manager.on_new_connection = self._on_new_transport
 
     @property
@@ -437,6 +451,7 @@ class MeshNode:
         transport = await self._transport_manager.connect(address)
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
+        peer.total = self._metrics.total
         peer.join_code = code
         self._peers.append(peer)
         self._running = True
@@ -727,6 +742,7 @@ class MeshNode:
             return
         peer = _Peer(transport, is_client_side=False)
         peer.on_dead = self._reap_peer
+        peer.total = self._metrics.total
         self._peers.append(peer)
         await peer.start(self._handle_packet)
         challenge = self._invite.generate_challenge()
@@ -752,6 +768,7 @@ class MeshNode:
                 continue
             peer = _Peer(transport, is_client_side=True)
             peer.on_dead = self._reap_peer
+            peer.total = self._metrics.total
             self._peers.append(peer)
             await peer.start(self._handle_packet)
             return peer
@@ -761,6 +778,7 @@ class MeshNode:
         """For testing only — injects a fake transport as a client-side peer."""
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
+        peer.total = self._metrics.total
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
@@ -782,6 +800,60 @@ class MeshNode:
             await peer.transport.close()
         except Exception:
             pass
+
+    # -- console / management surface -------------------------------------
+    # These read or mutate node state and are meant to be driven from the web
+    # console. Async ones run on the event loop; the console marshals into it.
+
+    async def console_snapshot(self) -> dict:
+        """A JSON-serialisable view of the node. Built on the event loop, so it
+        reads live state atomically (no awaits mid-iteration)."""
+        peers = []
+        for p in self._peers:
+            peers.append({
+                "authenticated_id": p.authenticated_id.raw.hex() if p.authenticated_id else None,
+                "is_client_side": p.is_client_side,
+                "has_session": p.session is not None,
+                "malformed": p._malformed,
+                "counters": p.counters.as_dict(),
+            })
+        routing = [
+            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses)}
+            for e in self._routing.all_entries()
+        ]
+        return {
+            "id": self._id.raw.hex(),
+            "addresses": list(self._addresses),
+            "running": self._running,
+            "uptime": self._metrics.uptime(),
+            "peer_count": len(self._peers),
+            "authenticated_peers": sum(
+                1 for p in self._peers if p.authenticated_id and p.session
+            ),
+            "peers": peers,
+            "routing": routing,
+            "routing_size": len(routing),
+            "e2e_sessions": [nid.raw.hex() for nid in self._e2e_sessions],
+            "total": self._metrics.total.as_dict(),
+            "load": self._metrics.load(),
+        }
+
+    def console_root_cert_hex(self) -> str:
+        """Our self-signed root cert, hex-encoded — paste it into another node's
+        console to have that node trust ours."""
+        return self._identity.self_signed_cert().serialize().hex()
+
+    def console_add_root(self, cert_hex: str) -> bool:
+        """Trust another node's self-signed root cert (hex). Returns success."""
+        try:
+            cert = Certificate.deserialize(bytes.fromhex(cert_hex))
+        except Exception:
+            return False
+        if not cert.is_self_signed:
+            return False
+        self._cert_add(cert)
+        self._cert_store.add_root(cert.subject_id)
+        return True
 
     def _cert_add(self, cert: Certificate) -> bool:
         ok = self._cert_store.add(cert)
