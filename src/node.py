@@ -13,6 +13,12 @@ from .cert import Certificate
 from .cert_store import CertStore
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters
+from .dht import ContentStore
+from .app_package import (
+    build as _app_build, parse_manifest as _app_parse_manifest,
+    reassemble as _app_reassemble, chunk_keys as _app_chunk_keys,
+    content_key as _content_key, AppPackageError,
+)
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 _HEADER_BYTES = 79  # fixed packet header size, for byte accounting
@@ -22,6 +28,9 @@ PING          = 0x01
 PONG          = 0x02
 FIND_NODE     = 0x03
 FOUND_NODE    = 0x04
+FIND_VALUE    = 0x05
+FOUND_VALUE   = 0x06
+STORE         = 0x07
 HANDSHAKE     = 0x08
 HANDSHAKE_ACK = 0x09
 INVITE        = 0x0A
@@ -46,8 +55,10 @@ _ADDR_LEN    = struct.Struct('!H')
 # E2E handshake: nonce(32) || var1_len(H) || var2_len(H) || chain_bytes_len(H)
 _E2E_HEADER  = struct.Struct('!32sHHH')
 
-_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE}
+_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE}
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
+_DHT_K              = 6      # replication: store/fetch across this many closest nodes
+_DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
 _BROADCAST_ID    = b"\xff" * 20
 _MSG_DEDUP_MAX         = 10_000
@@ -425,6 +436,8 @@ class MeshNode:
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
+        self._dht_store = ContentStore()
+        self._pending_values: dict[bytes, asyncio.Future] = {}
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
@@ -967,6 +980,9 @@ class MeshNode:
             PONG:              self._handle_pong,
             FIND_NODE:         self._handle_find_node,
             FOUND_NODE:        self._handle_found_node,
+            FIND_VALUE:        self._handle_find_value,
+            FOUND_VALUE:       self._handle_found_value,
+            STORE:             self._handle_store,
             HANDSHAKE:         self._handle_handshake,
             HANDSHAKE_ACK:     self._handle_handshake_ack,
             CHALLENGE:         self._handle_challenge,
@@ -1051,6 +1067,118 @@ class MeshNode:
         future = self._pending_finds.pop(query_id, None)
         if future is not None and not future.done():
             future.set_result(valid_entries)
+
+    # -- DHT (content-addressed value store) ------------------------------
+
+    async def _handle_store(self, peer: _Peer, packet: Packet) -> None:
+        # payload: key(20) || value ; stored only if key == hash(value)
+        if len(packet.payload) < 20:
+            return
+        key = packet.payload[:20]
+        value = packet.payload[20:]
+        self._dht_store.put(key, value)  # put() rejects non-content-addressed data
+
+    async def _handle_find_value(self, peer: _Peer, packet: Packet) -> None:
+        # payload: key(20) || query_id(8) ; reply carries the value or empty
+        if len(packet.payload) != 20 + _QID_LEN:
+            return
+        key = packet.payload[:20]
+        query_id = packet.payload[20:]
+        value = self._dht_store.get(key) or b""
+        reply = Packet.create(FOUND_VALUE, self._id.raw, packet.src_id,
+                              query_id + value)
+        await peer.send(reply)
+
+    async def _handle_found_value(self, peer: _Peer, packet: Packet) -> None:
+        if len(packet.payload) < _QID_LEN:
+            return
+        query_id = packet.payload[:_QID_LEN]
+        value = packet.payload[_QID_LEN:]
+        future = self._pending_values.pop(query_id, None)
+        if future is not None and not future.done():
+            future.set_result(value if value else None)
+
+    async def _dht_store_at(self, node_id: NodeID, key: bytes, value: bytes) -> None:
+        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
+        if peer is None:
+            return
+        try:
+            await peer.send(Packet.create(STORE, self._id.raw,
+                                          NodeID(b"\xff" * 20).raw, key + value))
+        except Exception:
+            pass
+
+    async def _dht_find_value_at(self, node_id: NodeID, key: bytes) -> bytes | None:
+        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
+        if peer is None:
+            return None
+        query_id = os.urandom(_QID_LEN)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_values[query_id] = future
+        try:
+            await peer.send(Packet.create(FIND_VALUE, self._id.raw,
+                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
+        except Exception:
+            return None
+        finally:
+            self._pending_values.pop(query_id, None)
+            if not future.done():
+                future.cancel()
+
+    async def dht_put(self, value: bytes) -> bytes:
+        """Store a value in the DHT, addressed by its own hash. Returns the key."""
+        key = _content_key(value)
+        self._dht_store.put(key, value)  # keep a local copy (and re-share)
+        targets = await self.kad_lookup(NodeID(key))
+        await asyncio.gather(
+            *(self._dht_store_at(nid, key, value)
+              for nid in targets[:_DHT_K] if nid != self._id),
+            return_exceptions=True,
+        )
+        return key
+
+    async def dht_get(self, key: bytes) -> bytes | None:
+        """Fetch a value by key, verifying it hashes to the key. Caches locally."""
+        local = self._dht_store.get(key)
+        if local is not None:
+            return local
+        for nid in (await self.kad_lookup(NodeID(key)))[:_DHT_K]:
+            if nid == self._id:
+                continue
+            value = await self._dht_find_value_at(nid, key)
+            if value is not None and _content_key(value) == key:
+                self._dht_store.put(key, value)  # cache → this node now re-shares it
+                return value
+        return None
+
+    # -- application packages ---------------------------------------------
+
+    async def publish_app(self, name: str, version: str,
+                          files: dict[str, bytes]) -> bytes:
+        """Publish an app (its chunks + manifest) on the DHT. Returns the app id."""
+        app_id, manifest, chunks = _app_build(name, version, files)
+        from .dht import MAX_VALUE
+        if len(manifest) > MAX_VALUE:
+            raise AppPackageError("manifest too large for a single DHT value")
+        for value in chunks.values():
+            await self.dht_put(value)
+        await self.dht_put(manifest)
+        return app_id
+
+    async def fetch_app(self, app_id: bytes) -> tuple[dict, dict[str, bytes]] | None:
+        """Fetch and verify an app by id. Returns (manifest, files) or None."""
+        manifest_bytes = await self.dht_get(app_id)
+        if manifest_bytes is None:
+            return None
+        manifest = _app_parse_manifest(manifest_bytes)
+        fetched: dict[bytes, bytes] = {}
+        for ck in _app_chunk_keys(manifest):
+            value = await self.dht_get(ck)
+            if value is not None:
+                fetched[ck] = value
+        files = _app_reassemble(manifest, fetched.get)  # verifies every hash
+        return manifest, files
 
     async def _handle_challenge(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != 32:
