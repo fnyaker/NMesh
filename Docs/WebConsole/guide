@@ -49,6 +49,13 @@ Options :
 | POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
 | GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
+| POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
+| POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
+
+La section **Apps (DHT)** de l'interface permet de publier une application
+(sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une
+par son identifiant (fichiers vérifiés puis téléchargeables). Voir
+`Docs/AppSharing/guide`.
 
 ## Rejoindre / relier deux réseaux
 
