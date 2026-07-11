@@ -95,10 +95,17 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   terminés à l'arrêt. Démo : `console_demo.py --launch "..."`,
   `scripts/example_app.py`. Doc : `Docs/ProcessLauncher/guide`.
 
-### Écosystème d'applications
-- App de démonstration : chat texte + échange de fichiers.
-- Format de paquetage d'app déclaratif (manifeste + fichiers), partageable et
-  re-partageable sur le mesh via une table de hachage distribuée (DHT).
+### Partage d'apps via DHT (`src/dht.py`, `src/app_package.py`) — fait
+- Paquets d'app **adressés par contenu** (chunks + manifeste, clé = hash) :
+  publication, récupération vérifiée, re-partage automatique en cache.
+- DHT Kademlia : `STORE` / `FIND_VALUE` / `FOUND_VALUE`, magasin borné
+  anti-empoisonnement/anti-OOM. API `node.publish_app` / `node.fetch_app`.
+- Doc : `Docs/AppSharing/guide`.
+
+### Écosystème d'applications — suite
+- App de démonstration : chat texte + échange de fichiers (via le connecteur).
+- Chunking du manifeste pour des apps plus grosses que ~59 Ko de métadonnées.
+- Intégration console : publier/récupérer une app depuis la web UI.
 
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.
