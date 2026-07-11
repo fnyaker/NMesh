@@ -109,11 +109,18 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   latence médiane en local), client interactif `scripts/chat_app.py`.
   Doc : `Docs/Apps/chat`.
 
+### Partage d'apps depuis la console web — fait
+- Section « Apps (DHT) » de l'interface : publier une app (sélection de
+  fichiers → app_id partagé sur le mesh) et en récupérer une par identifiant
+  (fichiers vérifiés, téléchargeables). Endpoints `/api/app/publish` et
+  `/api/app/fetch`.
+
 ### Écosystème d'applications — suite
 - Capture audio/vidéo réelle côté app (dépendance hors charte + périphérique)
   au-dessus du flux temps réel existant.
 - Chunking du manifeste pour des apps plus grosses que ~59 Ko de métadonnées.
-- Intégration console : publier/récupérer une app, ouvrir un chat depuis la UI.
+- Chat depuis la console web (nécessite un fan-out des messages entrants du
+  nœud, aujourd'hui à consommateur unique).
 
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.
