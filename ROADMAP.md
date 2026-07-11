@@ -102,10 +102,18 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   anti-empoisonnement/anti-OOM. API `node.publish_app` / `node.fetch_app`.
 - Doc : `Docs/AppSharing/guide`.
 
+### App de démo chat (`src/apps/chat.py`) — fait
+- Texte, partage de fichiers (chunké, intégrité SHA-256) et flux temps réel
+  (primitive d'appel : trames horodatées, latence mesurée) sur le connecteur.
+- Démo auto-contenue `scripts/chat_demo.py` (~37 Mo/s fichier, ~0,5 ms de
+  latence médiane en local), client interactif `scripts/chat_app.py`.
+  Doc : `Docs/Apps/chat`.
+
 ### Écosystème d'applications — suite
-- App de démonstration : chat texte + échange de fichiers (via le connecteur).
+- Capture audio/vidéo réelle côté app (dépendance hors charte + périphérique)
+  au-dessus du flux temps réel existant.
 - Chunking du manifeste pour des apps plus grosses que ~59 Ko de métadonnées.
-- Intégration console : publier/récupérer une app depuis la web UI.
+- Intégration console : publier/récupérer une app, ouvrir un chat depuis la UI.
 
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.

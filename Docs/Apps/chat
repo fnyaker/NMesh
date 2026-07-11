@@ -1,0 +1,73 @@
+# Application de chat (démo)
+
+Application de référence de NMesh, construite sur le connecteur de données :
+**messages texte**, **partage de fichiers** (chunké + vérifié), et un **flux
+temps réel** de trames horodatées — la primitive qu'un appel voix/vidéo
+utiliserait. Elle montre le mesh faire du quasi temps réel de bout en bout.
+
+## Démo auto-contenue
+
+```bash
+python scripts/chat_demo.py
+```
+
+Monte deux nœuds sur localhost et exécute une conversation, un transfert de
+fichier (1 Mo) et un flux temps réel, avec un rapport latence/débit. Exemple :
+
+```
+[file]  Bob received : picture.bin (1000000 bytes) integrity=OK
+        transfer     : 25 ms  (37.6 MB/s)
+[real-time stream — a call]
+        frames       : 150/150 at ~50 fps (320 B each)
+        latency ms   : avg 0.5 | p50 0.5 | p95 0.8 | max 0.9
+```
+
+## Client interactif
+
+Contre un nœud exposant un connecteur (voir `Docs/DataConnector/guide` et le
+lanceur `Docs/ProcessLauncher/guide`) :
+
+```bash
+NMESH_CONNECTOR_HOST=127.0.0.1 NMESH_CONNECTOR_PORT=8790 \
+NMESH_CONNECTOR_TOKEN=<token> python scripts/chat_app.py --peer <node_id_hex>
+```
+
+Commandes : `<texte>` envoie un message ; `/peer <hex>` change de destinataire ;
+`/file <chemin>` envoie un fichier ; `/quit` quitte.
+
+## Bibliothèque
+
+```python
+from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
+
+app = ChatApp(connector_client)      # ConnectorClient déjà connecté
+await app.start()
+await app.send_text(peer, "hello")
+await app.send_file(peer, "photo.png", data)         # chunké, intégrité SHA-256
+await app.send_frame(peer, stream_id, seq, payload)  # temps réel
+ev = await app.next_event()          # TextMessage | FileReceived | Frame
+```
+
+## Format applicatif
+
+Chaque charge utile DATA E2E : `type(1) ‖ corps`.
+
+| Type         | Corps                                              |
+|--------------|----------------------------------------------------|
+| `TEXT`       | texte utf-8                                        |
+| `FILE_OFFER` | transfer_id, total_chunks, taille, sha256, nom     |
+| `FILE_CHUNK` | transfer_id, index, données                        |
+| `STREAM`     | stream_id, seq, ts_ns, charge utile                |
+
+Robustesse : tout message applicatif est validé et borné ; un message mal formé
+est ignoré, jamais fatal (la charte s'applique aussi au niveau app). L'intégrité
+des fichiers est vérifiée (SHA-256) avant livraison.
+
+## Sur les « appels »
+
+Le flux `STREAM` est la primitive temps réel d'un appel : trames horodatées,
+latence mesurée à la réception. La **capture audio réelle** nécessiterait une
+dépendance externe (hors charte) et un périphérique ; elle est donc laissée à
+une intégration côté application — le mesh, lui, fournit le transport temps réel
+(latence médiane ~0,5 ms en local dans la démo).
+</content>
