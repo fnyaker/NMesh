@@ -12,6 +12,7 @@ can verify it in your browser. The console binds to loopback by default; pass
 import argparse
 import asyncio
 import os
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -21,6 +22,7 @@ from src.tcp_transport import TCPTransport, TCPServer
 from src.spool_transport import SpoolTransport, SpoolServer
 from src.webconsole import WebConsole
 from src.data_connector import DataConnector
+from src.process_launcher import ProcessLauncher
 
 
 async def main() -> None:
@@ -31,6 +33,8 @@ async def main() -> None:
     ap.add_argument("--console-port", type=int, default=8787)
     ap.add_argument("--connector-port", type=int, default=None,
                     help="expose a data connector on this loopback port for apps")
+    ap.add_argument("--launch", action="append", default=[], metavar="CMD",
+                    help="launch an app wired to the mesh (repeatable); needs --connector-port")
     ap.add_argument("--no-tls", action="store_true")
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
     args = ap.parse_args()
@@ -57,9 +61,15 @@ async def main() -> None:
     console.start(loop=asyncio.get_running_loop())
 
     connector = None
+    launcher = None
     if args.connector_port is not None:
         connector = DataConnector(node, host="127.0.0.1", port=args.connector_port)
         await connector.start()
+        launcher = ProcessLauncher(connector, node_id=node.id)
+        for cmd in args.launch:
+            await launcher.launch(shlex.split(cmd))
+    elif args.launch:
+        print("  NOTE          : --launch ignored (requires --connector-port)")
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
@@ -74,6 +84,8 @@ async def main() -> None:
         print(f"  TLS SHA-256   : {console.cert_fingerprint}")
     if connector is not None:
         print(f"  Data connector: 127.0.0.1:{connector.port}   token={connector.token}")
+    if launcher is not None and launcher.processes:
+        print(f"  Launched apps : {', '.join(p.name for p in launcher.processes)}")
     if args.console_host not in ("127.0.0.1", "localhost", "::1"):
         print("  WARNING       : console is reachable off-host — protect the network path.")
     print("=" * 60, flush=True)
@@ -84,6 +96,8 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if launcher is not None:
+            await launcher.stop_all()
         if connector is not None:
             await connector.stop()
         console.stop()

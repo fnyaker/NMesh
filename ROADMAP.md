@@ -88,10 +88,12 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Testé app→mesh→app de bout en bout. Doc : `Docs/DataConnector/guide`.
   Démo : `console_demo.py --connector-port N`.
 
-### Intégration applicative — suite
-1. **Lanceur de sous-processus** : le nœud lance des programmes déclarés et les
-   raccorde au réseau via le connecteur (le nœud devient le pont réseau de
-   l'app), en injectant le jeton du connecteur.
+### Lanceur de sous-processus (`src/process_launcher.py`) — fait
+- Le nœud lance des apps déclarées et injecte les coordonnées du connecteur
+  (hôte/port/jeton) dans leur environnement ; l'app rejoint le mesh via
+  `ConnectorClient`. Exec sans shell (pas d'injection), enfants bornés et
+  terminés à l'arrêt. Démo : `console_demo.py --launch "..."`,
+  `scripts/example_app.py`. Doc : `Docs/ProcessLauncher/guide`.
 
 ### Écosystème d'applications
 - App de démonstration : chat texte + échange de fichiers.
