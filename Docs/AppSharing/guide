@@ -1,0 +1,54 @@
+# Partage d'applications via DHT
+
+Une application est un ensemble de fichiers empaquetés et publiés sur une table
+de hachage distribuée (DHT). N'importe quel nœud peut la récupérer par son
+identifiant, la vérifier, l'utiliser, et la **re-partager** automatiquement.
+
+## Adressage par contenu (le cœur de la sécurité)
+
+Tout est identifié par son hash :
+
+- un fichier est découpé en chunks ; la clé d'un chunk = `sha256(chunk)[:20]`.
+- le manifeste liste, par fichier : taille, SHA-256 complet, et les clés de
+  chunks ordonnées.
+- l'identifiant de l'app = `sha256(manifeste)[:20]`.
+
+Conséquence : on demande une clé et on **vérifie que ce qui revient hashe vers
+cette clé**. Un relais ou un pair malveillant ne peut ni substituer du contenu
+ni empoisonner le DHT (un nœud refuse de stocker une valeur dont la clé ne
+correspond pas à son hash). Aucune confiance dans l'émetteur n'est requise.
+
+## Publier / récupérer (API nœud)
+
+```python
+files = {"app.py": b"...", "README": b"..."}
+app_id = await node.publish_app("chat", "0.1.0", files)
+#   -> chunks + manifeste stockés sur les K nœuds les plus proches de chaque clé
+
+manifest, files = await node.fetch_app(app_id)
+#   -> récupère le manifeste puis les chunks, vérifie chaque hash, réassemble.
+#      Le nœud met en cache ce qu'il récupère → il re-partage ensuite.
+```
+
+`fetch_app` retourne `None` si l'app est introuvable, et lève `AppPackageError`
+si un chunk manque ou échoue sa vérification d'intégrité.
+
+## Protocole DHT
+
+Trois types de paquets, échangés sur un lien direct authentifié (établi à la
+demande, comme `FIND_NODE`) :
+
+- `STORE key(20)‖valeur` — le récepteur stocke si `key == sha256(valeur)[:20]`.
+- `FIND_VALUE key(20)‖query_id(8)` — demande une valeur.
+- `FOUND_VALUE query_id(8)‖valeur` — réponse (valeur vide = absente).
+
+Bornes : valeur ≤ ~59 Ko (une charge utile de paquet), magasin local plafonné
+en nombre d'entrées et en octets (éviction LRU) → pas d'épuisement mémoire sous
+un flot de `STORE`.
+
+## Limite connue
+
+Un manifeste doit tenir dans une seule valeur DHT (~59 Ko), ce qui borne le
+nombre de fichiers/chunks d'une app publiable d'un bloc. Le chunking du
+manifeste lui-même est une évolution possible (voir ROADMAP).
+</content>

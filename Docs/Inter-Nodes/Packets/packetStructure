@@ -61,12 +61,17 @@ Messages de routage et gestion réseau — priorité haute.
 | PONG            | 0x02   | Réponse au PING                                    |
 | FIND_NODE       | 0x03   | Chercher les nœuds proches d'un ID                 |
 | FOUND_NODE      | 0x04   | Réponse avec liste de nœuds proches                |
-| FIND_VALUE      | 0x05   | Chercher une valeur par clé (Kademlia DHT)         |
-| FOUND_VALUE     | 0x06   | Réponse avec la valeur trouvée                     |
-| STORE           | 0x07   | Stocker une valeur sur un nœud                     |
+| FIND_VALUE      | 0x05   | Chercher une valeur DHT par clé — `key(20)‖query_id(8)` |
+| FOUND_VALUE     | 0x06   | Réponse DHT — `query_id(8)‖valeur` (vide = absente)     |
+| STORE           | 0x07   | Stocker une valeur DHT — `key(20)‖valeur`              |
 | HANDSHAKE       | 0x08   | Initier une session (échange ML-KEM + ML-DSA)      |
 | HANDSHAKE_ACK   | 0x09   | Confirmation de handshake                          |
 | INVITE          | 0x0A   | Présenter un code d'invitation                     |
 | INVITE_ACK      | 0x0B   | Validation ou rejet d'une invitation               |
+| CHALLENGE       | 0x0C   | Challenge d'authentification                       |
+| E2E_HANDSHAKE     | 0x0D | Handshake E2E de bout en bout                      |
+| E2E_HANDSHAKE_ACK | 0x0E | Confirmation du handshake E2E                      |
 
-> FIND_VALUE, FOUND_VALUE, STORE : réservés pour l'implémentation Kademlia complète (étape 4).
+DHT : les valeurs sont **adressées par contenu** (`key = sha256(valeur)[:20]`).
+Un nœud ne stocke une valeur que si sa clé correspond à son hash → pas
+d'empoisonnement. Voir `Docs/AppSharing/guide`.
