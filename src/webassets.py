@@ -76,6 +76,27 @@ INDEX_HTML = """<!doctype html>
       <div id="manage-status" class="muted"></div>
     </div>
   </section>
+
+  <section class="card">
+    <h2>Apps (DHT)</h2>
+    <div class="manage">
+      <div class="mrow join">
+        <input id="app-name" placeholder="app name">
+        <input id="app-version" placeholder="version" value="1.0.0">
+      </div>
+      <div class="mrow">
+        <input id="app-files" type="file" multiple>
+        <button id="publish-btn">Publish to mesh</button>
+      </div>
+      <div class="mrow">Published id: <code id="app-id-out" class="mono"></code></div>
+      <div class="mrow join">
+        <input id="fetch-id" placeholder="app id (hex) to fetch">
+        <button id="fetch-btn">Fetch from mesh</button>
+      </div>
+      <div id="app-files-out"></div>
+      <div id="app-status" class="muted"></div>
+    </div>
+  </section>
 </div>
 
 <script src="/app.js"></script>
@@ -318,5 +339,51 @@ $("trust-btn").addEventListener("click", async () => {
     status(res.ok ? "certificate trusted" : "invalid certificate", res.ok);
     if (res.ok) $("trust-in").value = "";
   } catch (_) { status("trust failed", false); }
+});
+
+// apps (DHT)
+function appStatus(msg, ok = true) {
+  const el = $("app-status");
+  el.textContent = msg; el.style.color = ok ? "" : "var(--bad)";
+}
+function fileToB64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve((r.result + "").split(",")[1] || "");
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+$("publish-btn").addEventListener("click", async () => {
+  const name = $("app-name").value.trim();
+  const version = $("app-version").value.trim() || "1.0.0";
+  const input = $("app-files");
+  if (!name || !input.files.length) { appStatus("name and at least one file required", false); return; }
+  appStatus("reading files…");
+  const files = {};
+  for (const f of input.files) files[f.name] = await fileToB64(f);
+  try {
+    const res = await api("/api/app/publish", "POST", { name, version, files });
+    const j = await res.json();
+    if (res.ok) { $("app-id-out").textContent = j.app_id; appStatus("published ✓"); }
+    else appStatus("publish failed: " + (j.error || ""), false);
+  } catch (_) { appStatus("publish failed", false); }
+});
+$("fetch-btn").addEventListener("click", async () => {
+  const id = $("fetch-id").value.trim();
+  if (!id) { appStatus("enter an app id", false); return; }
+  appStatus("fetching…");
+  try {
+    const res = await api("/api/app/fetch", "POST", { app_id: id });
+    if (res.status === 404) { appStatus("not found on the mesh", false); return; }
+    const j = await res.json();
+    if (!res.ok) { appStatus("fetch failed: " + (j.error || ""), false); return; }
+    $("app-files-out").innerHTML =
+      `<div class="muted">${j.name} v${j.version}</div>` +
+      Object.entries(j.files).map(([p, b64]) =>
+        `<div class="mrow"><a download="${p}" href="data:application/octet-stream;base64,${b64}">${p}</a>`
+        + ` <span class="muted">(${atob(b64).length} B)</span></div>`).join("");
+    appStatus("fetched ✓");
+  } catch (_) { appStatus("fetch failed", false); }
 });
 """

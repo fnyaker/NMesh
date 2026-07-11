@@ -20,6 +20,7 @@ the asyncio event loop, so node state is only ever touched from the loop thread.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -33,6 +34,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .webassets import INDEX_HTML, APP_JS, STYLE_CSS
 
 _MAX_BODY = 64 * 1024
+_MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
+_APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
@@ -188,12 +191,12 @@ class WebConsole:
 
     # -- loop marshalling -------------------------------------------------
 
-    def _call(self, coro):
+    def _call(self, coro, timeout: float = _CALL_TIMEOUT):
         """Run a coroutine on the node's event loop from the server thread."""
         if self._loop is None:
             raise RuntimeError("console not started")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=_CALL_TIMEOUT)
+        return fut.result(timeout=timeout)
 
     # -- lifecycle --------------------------------------------------------
 
@@ -314,13 +317,13 @@ def _make_handler(console: WebConsole):
             self._send(code, "application/json; charset=utf-8",
                        json.dumps(obj).encode("utf-8"))
 
-        def _read_body(self) -> bytes | None:
+        def _read_body(self, max_len: int = _MAX_BODY) -> bytes | None:
             try:
                 length = int(self.headers.get("Content-Length", 0))
             except ValueError:
                 self.close_connection = True
                 return None
-            if length < 0 or length > _MAX_BODY:
+            if length < 0 or length > max_len:
                 # Don't drain a hostile oversized body — cut the connection.
                 self.close_connection = True
                 return None
@@ -368,7 +371,8 @@ def _make_handler(console: WebConsole):
 
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
-            body = self._read_body()
+            cap = _MAX_APP_BODY if path == "/api/app/publish" else _MAX_BODY
+            body = self._read_body(cap)
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
                 return
@@ -405,7 +409,65 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/app/publish":
+                self._handle_app_publish(body)
+                return
+            if path == "/api/app/fetch":
+                self._handle_app_fetch(body)
+                return
             self._json(404, {"error": "not found"})
+
+        def _handle_app_publish(self, body: bytes) -> None:
+            data = _parse_json(body)
+            if (not data or not isinstance(data.get("name"), str)
+                    or not isinstance(data.get("version"), str)
+                    or not isinstance(data.get("files"), dict)):
+                self._json(400, {"error": "name, version, files required"})
+                return
+            try:
+                files: dict[str, bytes] = {}
+                total = 0
+                for p, b64 in data["files"].items():
+                    if not isinstance(p, str) or not isinstance(b64, str):
+                        raise ValueError("bad file entry")
+                    raw = base64.b64decode(b64, validate=True)
+                    total += len(raw)
+                    if total > _MAX_APP_BODY:
+                        raise ValueError("app too large")
+                    files[p] = raw
+                app_id = console._call(
+                    console._node.publish_app(data["name"], data["version"], files),
+                    timeout=_APP_CALL_TIMEOUT)
+                self._json(200, {"app_id": app_id.hex()})
+            except Exception as exc:
+                self._json(400, {"error": str(exc)[:200]})
+
+        def _handle_app_fetch(self, body: bytes) -> None:
+            data = _parse_json(body)
+            try:
+                app_id = bytes.fromhex((data or {}).get("app_id", ""))
+            except (ValueError, TypeError):
+                app_id = b""
+            if len(app_id) != 20:
+                self._json(400, {"error": "bad app_id"})
+                return
+            try:
+                result = console._call(console._node.fetch_app(app_id),
+                                       timeout=_APP_CALL_TIMEOUT)
+            except Exception:
+                self._json(503, {"error": "fetch failed"})
+                return
+            if result is None:
+                self._json(404, {"found": False})
+                return
+            manifest, files = result
+            self._json(200, {
+                "found": True,
+                "name": manifest.get("name"),
+                "version": manifest.get("version"),
+                "files": {p: base64.b64encode(d).decode("ascii")
+                          for p, d in files.items()},
+            })
 
         def _handle_login(self, body: bytes) -> None:
             if console._locked_out():

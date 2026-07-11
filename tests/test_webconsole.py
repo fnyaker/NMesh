@@ -9,6 +9,7 @@ a worker thread so the event loop stays free to service the console's
 run_coroutine_threadsafe bridge.
 """
 import asyncio
+import base64
 import http.client
 import json
 import os
@@ -211,6 +212,60 @@ class TestHardening:
             assert b"NMesh" in body
             assert "content-security-policy" in hdrs
             assert "default-src 'self'" in hdrs["content-security-policy"]
+        finally:
+            console.stop(); await node.stop()
+
+
+class TestApps:
+    async def test_publish_then_fetch(self):
+        # On a lone node the DHT stores locally, so publish + fetch round-trips
+        # through the console without needing peers.
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            files = {"main.py": b"print('hi')\n" * 100, "README": b"demo"}
+            payload = {"name": "chat", "version": "0.1.0",
+                       "files": {p: base64.b64encode(d).decode() for p, d in files.items()}}
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/app/publish", token, payload)
+            assert status == 200 and len(j["app_id"]) == 40
+
+            status, _, _, j2 = await asyncio.to_thread(
+                _request, console, "POST", "/api/app/fetch", token, {"app_id": j["app_id"]})
+            assert status == 200 and j2["found"] is True
+            assert j2["name"] == "chat"
+            got = {p: base64.b64decode(b) for p, b in j2["files"].items()}
+            assert got == files
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_fetch_unknown(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/app/fetch", token, {"app_id": "00" * 20})
+            assert status == 404 and j["found"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_publish_requires_auth(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/app/publish", None,
+                {"name": "x", "version": "1", "files": {}})
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_publish_bad_request(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/app/publish", token, {"name": "x"})
+            assert status == 400
         finally:
             console.stop(); await node.stop()
 
