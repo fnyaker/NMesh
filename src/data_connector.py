@@ -76,6 +76,10 @@ class DataConnector:
         self._server: asyncio.AbstractServer | None = None
         self._pump_task: asyncio.Task | None = None
 
+    @property
+    def host(self) -> str:
+        return self._host
+
     async def start(self) -> None:
         if self._unix_path:
             self._server = await asyncio.start_unix_server(
@@ -164,3 +168,66 @@ class DataConnector:
                 writer.close()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Client library — what an application uses to talk to the connector.
+# ---------------------------------------------------------------------------
+
+class ConnectorClient:
+    """Async client for the data connector. An app connects, authenticates, and
+    then sends/receives end-to-end mesh messages.
+
+    Typically constructed with :meth:`from_env` when the node's process launcher
+    started the app and injected the connection coordinates.
+    """
+
+    def __init__(self, host: str, port: int, token: str) -> None:
+        self._host = host
+        self._port = port
+        self._token = token
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._inbox: list[tuple[NodeID, bytes]] = []
+
+    @classmethod
+    def from_env(cls, environ=None) -> "ConnectorClient":
+        e = environ if environ is not None else os.environ
+        return cls(e["NMESH_CONNECTOR_HOST"],
+                   int(e["NMESH_CONNECTOR_PORT"]),
+                   e["NMESH_CONNECTOR_TOKEN"])
+
+    async def connect(self) -> None:
+        self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
+        await _write_frame(self._writer, _AUTH, self._token.encode("utf-8"))
+        ftype, _ = await _read_frame(self._reader)
+        if ftype != _AUTH_OK:
+            raise ConnectionError("connector authentication failed")
+
+    async def whoami(self) -> NodeID:
+        await _write_frame(self._writer, _WHOAMI, b"")
+        while True:
+            ftype, body = await _read_frame(self._reader)
+            if ftype == _WHOAMI_RESP:
+                return NodeID(body)
+            if ftype == _RECV and len(body) >= 20:
+                self._inbox.append((NodeID(body[:20]), body[20:]))  # buffer data
+
+    async def send(self, target: NodeID, payload: bytes) -> None:
+        await _write_frame(self._writer, _SEND, target.raw + payload)
+
+    async def recv(self) -> tuple[NodeID, bytes]:
+        if self._inbox:
+            return self._inbox.pop(0)
+        while True:
+            ftype, body = await _read_frame(self._reader)
+            if ftype == _RECV and len(body) >= 20:
+                return NodeID(body[:20]), body[20:]
+
+    async def close(self) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+            self._writer = None

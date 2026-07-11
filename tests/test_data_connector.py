@@ -9,7 +9,7 @@ import asyncio
 import pytest
 
 from src.data_connector import (
-    DataConnector, _read_frame, _write_frame, _LEN,
+    DataConnector, ConnectorClient, _read_frame, _write_frame, _LEN,
     _AUTH, _SEND, _WHOAMI, _AUTH_OK, _AUTH_FAIL, _RECV, _WHOAMI_RESP,
 )
 from src.node_id import NodeID
@@ -133,3 +133,28 @@ class TestHardening:
         conn = DataConnector(node)
         assert conn.token and len(conn.token) >= 16
         await node.stop()
+
+
+class TestConnectorClient:
+    async def test_client_whoami_and_recv(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN)
+        try:
+            await client.connect()
+            assert (await client.whoami()) == node.id
+            # A message the node delivers is surfaced by recv().
+            src = NodeID(os.urandom(20))
+            node._data_queue.put_nowait((src, b"hello app"))
+            got_src, got = await asyncio.wait_for(client.recv(), timeout=2.0)
+            assert got_src == src and got == b"hello app"
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_from_env(self):
+        env = {"NMESH_CONNECTOR_HOST": "127.0.0.1",
+               "NMESH_CONNECTOR_PORT": "1234",
+               "NMESH_CONNECTOR_TOKEN": "tok"}
+        client = ConnectorClient.from_env(env)
+        assert client._host == "127.0.0.1" and client._port == 1234 and client._token == "tok"

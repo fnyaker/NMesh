@@ -1,0 +1,52 @@
+# Lanceur de sous-processus
+
+Le nœud peut lancer des applications déclarées et les **raccorder au mesh** : il
+injecte dans leur environnement les coordonnées du connecteur de données local
+(hôte, port, jeton). L'app rejoint alors le réseau via `ConnectorClient` — le
+nœud devient son pont réseau, l'app n'a rien à savoir du mesh.
+
+## Lancer une app avec le nœud
+
+```bash
+python scripts/console_demo.py --connector-port 8790 \
+    --launch "python scripts/example_app.py"
+# répétez --launch pour plusieurs apps
+```
+
+`--launch` nécessite `--connector-port` (l'app doit avoir un connecteur où se
+brancher). À l'arrêt du nœud, toutes les apps lancées sont terminées proprement.
+
+## Écrire une app
+
+```python
+from src.data_connector import ConnectorClient
+
+async def main():
+    client = ConnectorClient.from_env()      # lit NMESH_CONNECTOR_HOST/PORT/TOKEN
+    await client.connect()
+    me = await client.whoami()               # notre NodeID sur le mesh
+    while True:
+        src, payload = await client.recv()   # message entrant
+        await client.send(src, b"echo:" + payload)
+```
+
+Voir [`scripts/example_app.py`](../../scripts/example_app.py) (service d'écho
+complet).
+
+## Variables injectées
+
+| Variable                | Contenu                             |
+|-------------------------|-------------------------------------|
+| `NMESH_CONNECTOR_HOST`  | hôte du connecteur (loopback)       |
+| `NMESH_CONNECTOR_PORT`  | port du connecteur                  |
+| `NMESH_CONNECTOR_TOKEN` | jeton d'authentification            |
+| `NMESH_NODE_ID`         | NodeID du nœud (hex)                |
+
+## Sécurité
+
+- Les commandes sont de la **configuration déclarée par l'opérateur**, pas de
+  l'entrée réseau ; elles sont exécutées via `exec` (jamais un shell) → aucune
+  surface d'injection de commande.
+- Le jeton ne transite que par l'environnement de l'enfant.
+- Nombre d'enfants borné ; tous terminés à l'arrêt du nœud.
+</content>
