@@ -18,6 +18,8 @@ from .app_package import (
     build as _app_build, parse_manifest as _app_parse_manifest,
     reassemble as _app_reassemble, chunk_keys as _app_chunk_keys,
     content_key as _content_key, AppPackageError,
+    pack_root as _app_pack_root, parse_root as _app_parse_root,
+    reassemble_bytes as _app_reassemble_bytes,
 )
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
@@ -1156,21 +1158,35 @@ class MeshNode:
 
     async def publish_app(self, name: str, version: str,
                           files: dict[str, bytes]) -> bytes:
-        """Publish an app (its chunks + manifest) on the DHT. Returns the app id."""
-        app_id, manifest, chunks = _app_build(name, version, files)
+        """Publish an app on the DHT. Returns the app id (= hash of the root).
+
+        Content chunks, the manifest (itself chunked), and a small root that
+        lists the manifest chunks are all stored content-addressed — so an app
+        can have arbitrarily many files."""
+        _, manifest, chunks = _app_build(name, version, files)
         from .dht import MAX_VALUE
-        if len(manifest) > MAX_VALUE:
-            raise AppPackageError("manifest too large for a single DHT value")
         for value in chunks.values():
             await self.dht_put(value)
-        await self.dht_put(manifest)
-        return app_id
+        root_bytes, manifest_chunks = _app_pack_root(manifest)
+        if len(root_bytes) > MAX_VALUE:
+            raise AppPackageError("app has too many files even after chunking")
+        for value in manifest_chunks.values():
+            await self.dht_put(value)
+        return await self.dht_put(root_bytes)
 
     async def fetch_app(self, app_id: bytes) -> tuple[dict, dict[str, bytes]] | None:
         """Fetch and verify an app by id. Returns (manifest, files) or None."""
-        manifest_bytes = await self.dht_get(app_id)
-        if manifest_bytes is None:
+        root_bytes = await self.dht_get(app_id)
+        if root_bytes is None:
             return None
+        root = _app_parse_root(root_bytes)
+        mchunks: dict[bytes, bytes] = {}
+        for h in root["chunks"]:
+            value = await self.dht_get(bytes.fromhex(h))
+            if value is not None:
+                mchunks[bytes.fromhex(h)] = value
+        manifest_bytes = _app_reassemble_bytes(
+            root["size"], root["sha256"], root["chunks"], mchunks.get)
         manifest = _app_parse_manifest(manifest_bytes)
         fetched: dict[bytes, bytes] = {}
         for ck in _app_chunk_keys(manifest):

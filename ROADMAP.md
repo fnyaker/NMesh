@@ -121,12 +121,16 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `ChatApp.add_listener`). Le nœud et la console de gestion ne sont pas touchés.
   Loopback + jeton, CSP stricte. `chat_app.py --web PORT`.
 
+### Manifestes chunkés (grosses apps) — fait
+- Le manifeste est lui-même chunké et adressé par contenu ; l'app_id pointe
+  vers un petit root listant les chunks du manifeste. Plus de limite ~59 Ko
+  sur le nombre de fichiers d'une app.
+
 ### Écosystème d'applications — suite
 - Capture audio/vidéo réelle côté app (dépendance hors charte + périphérique)
   au-dessus du flux temps réel existant.
 - Envoi de fichiers depuis la web UI du chat (aujourd'hui : texte + affichage
   des fichiers reçus).
-- Chunking du manifeste pour des apps plus grosses que ~59 Ko de métadonnées.
 
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.

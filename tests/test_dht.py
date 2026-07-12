@@ -12,8 +12,10 @@ import pytest
 from src.app_package import (
     build, parse_manifest, reassemble, chunk_keys, content_key,
     AppPackageError, CHUNK_SIZE,
+    pack_root, parse_root, reassemble_bytes,
 )
 from src.dht import ContentStore, MAX_VALUE
+from tests.conftest import make_node
 
 
 # ---------------------------------------------------------------------------
@@ -116,3 +118,60 @@ class TestContentStore:
             ok = s.put(key, value)
             # Stored only when the key actually addresses the content.
             assert ok == (key == content_key(value) and len(value) <= MAX_VALUE)
+
+
+# ---------------------------------------------------------------------------
+# Manifest chunking (root indirection lifts the single-value manifest limit)
+# ---------------------------------------------------------------------------
+
+class TestManifestChunking:
+    def test_root_roundtrip(self):
+        manifest = os.urandom(CHUNK_SIZE * 2 + 500)   # larger than one chunk
+        root_bytes, mchunks = pack_root(manifest)
+        root = parse_root(root_bytes)
+        assert len(root["chunks"]) == 3
+        got = reassemble_bytes(root["size"], root["sha256"], root["chunks"], mchunks.get)
+        assert got == manifest
+
+    def test_reassemble_rejects_tamper(self):
+        manifest = os.urandom(CHUNK_SIZE + 10)
+        root_bytes, mchunks = pack_root(manifest)
+        root = parse_root(root_bytes)
+        key = next(iter(mchunks))
+        bad = dict(mchunks); bad[key] = b"x" + mchunks[key][1:]
+        with pytest.raises(AppPackageError):
+            reassemble_bytes(root["size"], root["sha256"], root["chunks"], bad.get)
+
+    def test_reassemble_rejects_missing(self):
+        root_bytes, _ = pack_root(os.urandom(CHUNK_SIZE + 1))
+        root = parse_root(root_bytes)
+        with pytest.raises(AppPackageError):
+            reassemble_bytes(root["size"], root["sha256"], root["chunks"], lambda k: None)
+
+    def test_parse_root_fuzz(self):
+        rng = random.Random(0x0007)
+        for _ in range(3000):
+            data = bytes(rng.getrandbits(8) for _ in range(rng.randint(0, 200)))
+            try:
+                parse_root(data)
+            except AppPackageError:
+                pass
+
+
+class TestLargeApp:
+    async def test_publish_fetch_many_files(self):
+        # Enough files that the manifest itself exceeds one DHT value, forcing
+        # the root/manifest-chunking path. On a lone node the DHT is local.
+        node, _ = await make_node()
+        files = {f"f{i:05d}": bytes([i % 256]) for i in range(1200)}
+        # sanity: the manifest really is over the single-value limit
+        _, manifest, _ = build("big", "1", files)
+        assert len(manifest) > MAX_VALUE
+        try:
+            app_id = await node.publish_app("big", "1", files)
+            result = await node.fetch_app(app_id)
+            assert result is not None
+            _, got = result
+            assert got == files
+        finally:
+            await node.stop()
