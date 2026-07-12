@@ -100,6 +100,76 @@ def chunk_keys(manifest: dict) -> list[bytes]:
     return list(seen.keys())
 
 
+def _chunk_blob(data: bytes) -> tuple[dict[bytes, bytes], list[str]]:
+    chunks: dict[bytes, bytes] = {}
+    keys: list[str] = []
+    for off in range(0, len(data), CHUNK_SIZE):
+        piece = data[off:off + CHUNK_SIZE]
+        k = content_key(piece)
+        chunks[k] = piece
+        keys.append(k.hex())
+    return chunks, keys
+
+
+def pack_root(manifest_bytes: bytes) -> tuple[bytes, dict[bytes, bytes]]:
+    """Chunk the manifest itself and return (root_bytes, manifest_chunks).
+
+    The root is a small descriptor listing the manifest's chunk keys, so the
+    manifest is no longer bounded by a single DHT value — a package can have
+    arbitrarily many files. The app id is ``content_key(root_bytes)``."""
+    chunks, keys = _chunk_blob(manifest_bytes)
+    root = {
+        "v": 1,
+        "size": len(manifest_bytes),
+        "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "chunks": keys,
+    }
+    return json.dumps(root, sort_keys=True).encode("utf-8"), chunks
+
+
+def parse_root(data: bytes) -> dict:
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except Exception as exc:
+        raise AppPackageError(f"root not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("v") != 1:
+        raise AppPackageError("bad root")
+    if not isinstance(doc.get("size"), int) or not 0 <= doc["size"] <= _MAX_TOTAL_BYTES:
+        raise AppPackageError("bad root size")
+    if not isinstance(doc.get("sha256"), str) or len(doc["sha256"]) != 64:
+        raise AppPackageError("bad root sha256")
+    ck = doc.get("chunks")
+    if not isinstance(ck, list) or len(ck) > _MAX_CHUNKS_PER_FILE:
+        raise AppPackageError("bad root chunks")
+    for h in ck:
+        if not isinstance(h, str) or len(h) != KEY_LEN * 2:
+            raise AppPackageError("bad root chunk key")
+    return doc
+
+
+def reassemble_bytes(size: int, sha256_hex: str, chunk_key_hexes: list[str],
+                     get_chunk) -> bytes:
+    """Rebuild a blob from content-addressed chunks, verifying each chunk and
+    the whole. Raises AppPackageError on any mismatch or missing piece."""
+    parts = []
+    total = 0
+    for h in chunk_key_hexes:
+        key = bytes.fromhex(h)
+        chunk = get_chunk(key)
+        if chunk is None:
+            raise AppPackageError(f"missing chunk {h}")
+        if content_key(chunk) != key:
+            raise AppPackageError(f"chunk {h} fails its hash")
+        total += len(chunk)
+        if total > _MAX_TOTAL_BYTES:
+            raise AppPackageError("blob exceeds size ceiling")
+        parts.append(chunk)
+    data = b"".join(parts)
+    if len(data) != size or hashlib.sha256(data).hexdigest() != sha256_hex:
+        raise AppPackageError("reassembled blob fails its hash")
+    return data
+
+
 def reassemble(manifest: dict, get_chunk) -> dict[str, bytes]:
     """Rebuild {path: content} from a manifest, fetching chunks via
     ``get_chunk(key) -> bytes | None``. Every chunk and every file is verified
