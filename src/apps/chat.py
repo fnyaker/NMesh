@@ -83,9 +83,37 @@ class ChatApp:
     def __init__(self, client) -> None:
         self._client = client
         self._events: asyncio.Queue = asyncio.Queue()
+        self._listeners: list = []
         self._transfers: dict[tuple[bytes, int], _Transfer] = {}
         self._next_tid = 1
         self._task: asyncio.Task | None = None
+
+    # -- event fan-out (everything the app receives flows through here) ----
+
+    def add_listener(self, fn) -> None:
+        """Register a callback invoked for every received event — used to
+        surface messages to a UI. Everything still goes through this app."""
+        self._listeners.append(fn)
+
+    def remove_listener(self, fn) -> None:
+        try:
+            self._listeners.remove(fn)
+        except ValueError:
+            pass
+
+    def _emit(self, event) -> None:
+        # Bounded queue so a caller that never drains next_event() can't leak.
+        if self._events.qsize() >= 1000:
+            try:
+                self._events.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._events.put_nowait(event)
+        for fn in list(self._listeners):
+            try:
+                fn(event)
+            except Exception:
+                pass  # a bad listener must not break the app
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -148,7 +176,7 @@ class ChatApp:
             return
         mtype, body = payload[0], payload[1:]
         if mtype == _TEXT:
-            self._events.put_nowait(TextMessage(src, body.decode("utf-8", "replace")))
+            self._emit(TextMessage(src, body.decode("utf-8", "replace")))
         elif mtype == _FILE_OFFER:
             self._on_offer(src, body)
         elif mtype == _FILE_CHUNK:
@@ -167,7 +195,7 @@ class ChatApp:
             return
         if total == 0:
             if size == 0 and digest == hashlib.sha256(b"").digest():
-                self._events.put_nowait(FileReceived(src, name, b""))
+                self._emit(FileReceived(src, name, b""))
             return
         self._transfers[(src.raw, tid)] = _Transfer(name, size, digest, total)
 
@@ -184,7 +212,7 @@ class ChatApp:
             self._transfers.pop((src.raw, tid), None)
             assembled = t.assemble()
             if len(assembled) == t.size and hashlib.sha256(assembled).digest() == t.digest:
-                self._events.put_nowait(FileReceived(src, t.name, assembled))
+                self._emit(FileReceived(src, t.name, assembled))
 
     def _on_frame(self, src: NodeID, body: bytes) -> None:
         if len(body) < _FRAME.size:
@@ -192,4 +220,4 @@ class ChatApp:
         stream_id, seq, ts_ns = _FRAME.unpack_from(body, 0)
         payload = body[_FRAME.size:]
         latency_ms = (time.time_ns() - ts_ns) / 1e6
-        self._events.put_nowait(Frame(src, stream_id, seq, latency_ms, payload))
+        self._emit(Frame(src, stream_id, seq, latency_ms, payload))

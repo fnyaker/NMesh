@@ -115,12 +115,18 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   (fichiers vérifiés, téléchargeables). Endpoints `/api/app/publish` et
   `/api/app/fetch`.
 
+### Web app du chat (`src/apps/chat_web.py`) — fait
+- Option de l'app de chat : quand activée, l'app fait remonter ses messages vers
+  une web UI et route les envois via elle (fan-out interne à l'app via
+  `ChatApp.add_listener`). Le nœud et la console de gestion ne sont pas touchés.
+  Loopback + jeton, CSP stricte. `chat_app.py --web PORT`.
+
 ### Écosystème d'applications — suite
 - Capture audio/vidéo réelle côté app (dépendance hors charte + périphérique)
   au-dessus du flux temps réel existant.
+- Envoi de fichiers depuis la web UI du chat (aujourd'hui : texte + affichage
+  des fichiers reçus).
 - Chunking du manifeste pour des apps plus grosses que ~59 Ko de métadonnées.
-- Chat depuis la console web (nécessite un fan-out des messages entrants du
-  nœud, aujourd'hui à consommateur unique).
 
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.
