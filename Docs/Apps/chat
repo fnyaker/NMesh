@@ -35,6 +35,19 @@ NMESH_CONNECTOR_TOKEN=<token> python scripts/chat_app.py --peer <node_id_hex>
 Commandes : `<texte>` envoie un message ; `/peer <hex>` change de destinataire ;
 `/file <chemin>` envoie un fichier ; `/quit` quitte.
 
+### Interface web (option de l'app de chat)
+
+```bash
+... python scripts/chat_app.py --peer <hex> --web 8791
+# web UI: http://127.0.0.1:8791/   token=<jeton>
+```
+
+Quand l'option `--web` est activée, **l'app de chat** (et non le nœud ni la
+console de gestion) fait remonter ses messages vers une petite page web et
+route les envois via l'app. Tout passe par l'app de chat : la web UI s'abonne à
+son flux d'événements (`ChatApp.add_listener`). Loopback + jeton Bearer, CSP
+stricte, assets same-origin.
+
 ## Bibliothèque
 
 ```python
