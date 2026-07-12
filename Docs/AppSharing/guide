@@ -46,9 +46,11 @@ Bornes : valeur ≤ ~59 Ko (une charge utile de paquet), magasin local plafonné
 en nombre d'entrées et en octets (éviction LRU) → pas d'épuisement mémoire sous
 un flot de `STORE`.
 
-## Limite connue
+## Manifestes chunkés (grosses apps)
 
-Un manifeste doit tenir dans une seule valeur DHT (~59 Ko), ce qui borne le
-nombre de fichiers/chunks d'une app publiable d'un bloc. Le chunking du
-manifeste lui-même est une évolution possible (voir ROADMAP).
+Le manifeste n'est plus borné par une seule valeur DHT : il est lui-même
+**chunké et adressé par contenu**. L'app_id pointe vers un petit **root** qui
+liste les chunks du manifeste (`app_id = sha256(root)[:20]`). À la récupération,
+le root est lu, le manifeste réassemblé et vérifié, puis les fichiers. Une app
+peut donc avoir un nombre arbitraire de fichiers/chunks.
 </content>
