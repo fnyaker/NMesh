@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.data_connector import ConnectorClient
 from src.node_id import NodeID
 from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
+from src.apps.chat_web import ChatWebServer
 
 
 async def _print_events(app: ChatApp) -> None:
@@ -45,6 +46,8 @@ async def _print_events(app: ChatApp) -> None:
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--peer", help="peer node id (hex)")
+    ap.add_argument("--web", type=int, default=None, metavar="PORT",
+                    help="also surface this chat to a local web UI on PORT")
     args = ap.parse_args()
 
     client = ConnectorClient.from_env()
@@ -54,6 +57,12 @@ async def main() -> None:
     me = await client.whoami()
     print(f"connected as {me.raw.hex()}")
     peer = NodeID(bytes.fromhex(args.peer)) if args.peer else None
+
+    web = None
+    if args.web is not None:
+        web = ChatWebServer(app, host="127.0.0.1", port=args.web, peer=peer)
+        web.start(loop=asyncio.get_running_loop())
+        print(f"web UI: {web.url}   token={web.token}")
 
     printer = asyncio.create_task(_print_events(app))
     try:
@@ -83,6 +92,8 @@ async def main() -> None:
                 print("set a peer first (/peer <hex>)")
             print("> ", end="", flush=True)
     finally:
+        if web is not None:
+            web.stop()
         printer.cancel()
         await app.stop()
 
