@@ -56,6 +56,7 @@ need_system_deps() {
     if [ -f /etc/debian_version ]; then
         dpkg -s python3-dev &>/dev/null || return 0
     fi
+    # ninja-build is optional but preferred — don't fail if missing
     return 1
 }
 
@@ -128,61 +129,58 @@ ok "Virtualenv active ($VENV)"
 # ── step 4: Python dependencies ──────────────────────────────────────────────
 info "Installing Python dependencies (first run compiles liboqs — may take a few minutes)…"
 
-# Install cryptography + pytest first (these never fail)
 pip install --quiet --upgrade pip
 pip install --quiet cryptography pytest pytest-asyncio
 
 # liboqs-python bundles liboqs source and tries to compile it on import.
-# The auto-build can fail silently on some systems (missing ninja, cmake
-# config errors). We force a clean build here with verbose output so the
-# user sees what's happening and we can catch errors early.
+# The auto-build can fail on some systems. We build liboqs explicitly here
+# with proper error handling and a clean build directory.
 if ! python -c "import oqs" 2>/dev/null; then
     info "Building liboqs from source (post-quantum crypto)…"
-    # OQS_LIBOQS_SRC_DIR forces liboqs-python to use a fresh clone+build
-    # instead of its bundled one, which sometimes has stale cmake cache.
     LIBOQS_BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
     rm -rf "$LIBOQS_BUILD_DIR"
     mkdir -p "$LIBOQS_BUILD_DIR"
 
-    # Clone liboqs and build it explicitly
-    if [ ! -d "$LIBOQS_BUILD_DIR/liboqs" ]; then
-        git clone --depth 1 --branch main \
-            https://github.com/open-quantum-safe/liboqs.git \
-            "$LIBOQS_BUILD_DIR/liboqs" 2>&1 | tail -3
-    fi
+    # Clone liboqs
+    git clone --depth 1 --branch main \
+        https://github.com/open-quantum-safe/liboqs.git \
+        "$LIBOQS_BUILD_DIR/liboqs" || fail "Failed to clone liboqs repository"
 
-    # Build liboqs with cmake + ninja (faster + more reliable than make)
-    BUILD_TOOL="make"
+    # Determine build generator: prefer Ninja, fallback to Unix Makefiles
+    CMAKE_GEN=""
     if command -v ninja &>/dev/null; then
-        BUILD_TOOL="ninja"
+        CMAKE_GEN="-GNinja"
     fi
 
+    # Clean build dir (no stale cache), configure, build, install
+    rm -rf "$LIBOQS_BUILD_DIR/build"
     cmake -S "$LIBOQS_BUILD_DIR/liboqs" -B "$LIBOQS_BUILD_DIR/build" \
-        -GNinja -DCMAKE_BUILD_TYPE=Release \
-        -DOQS_USE_OPENSSL=OFF 2>&1 | tail -5 \
-        || cmake -S "$LIBOQS_BUILD_DIR/liboqs" -B "$LIBOQS_BUILD_DIR/build" \
-        -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=OFF 2>&1 | tail -5
+        $CMAKE_GEN -DCMAKE_BUILD_TYPE=Release \
+        -DOQS_USE_OPENSSL=OFF \
+        || fail "liboqs cmake configure failed"
 
-    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel 2>&1 | tail -5
-    cmake --install "$LIBOQS_BUILD_DIR/build" 2>&1 | tail -3
+    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel \
+        || fail "liboqs build failed"
 
-    # Now install liboqs-python pointing to our built library
-    export OQS_LIBOQS_SRC_DIR="$LIBOQS_BUILD_DIR/liboqs"
-    pip install --quiet --force-reinstall liboqs-python 2>&1 | tail -5
+    cmake --install "$LIBOQS_BUILD_DIR/build" \
+        || fail "liboqs install failed"
+
+    # Reinstall liboqs-python so it picks up the pre-built library
+    pip install --quiet --force-reinstall liboqs-python \
+        || fail "liboqs-python pip install failed"
 
     # Verify the shared library is loadable
     if ! python -c "import oqs" 2>/dev/null; then
-        # Fallback: try to find the .so manually and set LD_LIBRARY_PATH
-        LIBOQS_SO=$(find "$LIBOQS_BUILD_DIR" -name "liboqs.so*" -o -name "liboqs.dylib" 2>/dev/null | head -1)
+        # Fallback: find the .so and set LD_LIBRARY_PATH
+        LIBOQS_SO=$(find "$LIBOQS_BUILD_DIR" /usr/local -name "liboqs.so*" 2>/dev/null | head -1)
         if [ -n "$LIBOQS_SO" ]; then
             LIBOQS_LIBDIR=$(dirname "$LIBOQS_SO")
             export LD_LIBRARY_PATH="$LIBOQS_LIBDIR:${LD_LIBRARY_PATH:-}"
             info "Set LD_LIBRARY_PATH=$LIBOQS_LIBDIR"
-            if ! python -c "import oqs" 2>/dev/null; then
-                fail "liboqs built but Python can't load it. Try: export LD_LIBRARY_PATH=$LIBOQS_LIBDIR"
-            fi
+            python -c "import oqs" 2>/dev/null \
+                || fail "liboqs built but Python can't load it. Try: export LD_LIBRARY_PATH=$LIBOQS_LIBDIR"
         else
-            fail "liboqs build failed. Check cmake output above. Ensure gcc, g++, cmake, ninja-build are installed."
+            fail "liboqs .so not found after build. Check $LIBOQS_BUILD_DIR/build"
         fi
     fi
 fi
