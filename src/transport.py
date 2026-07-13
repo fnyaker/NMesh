@@ -48,6 +48,14 @@ class BaseTransport(ABC):
         """Close this connection and release resources."""
         ...
 
+    def remote_ip(self) -> str | None:
+        """The peer's source IP as observed locally, if the medium exposes one.
+
+        Lets a node learn its own public address from a peer that accepted its
+        connection (mesh-native public-IP discovery). Media without a network
+        address (e.g. spool files) return None."""
+        return None
+
 
 class BaseServer(ABC):
     """
