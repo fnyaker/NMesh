@@ -58,6 +58,13 @@ INDEX_HTML = """<!doctype html>
   <section class="card">
     <h2>Transports</h2>
     <div id="net-status" class="netrow"></div>
+    <div class="mrow tctl">
+      <button id="punch-toggle" class="ghost"></button>
+      <button id="udp-toggle" class="ghost"></button>
+      <input id="udp-port" type="number" min="1" max="65535" value="9001" title="UDP port">
+      <button id="net-recheck" class="ghost">Re-check network</button>
+      <span id="tctl-status" class="muted"></span>
+    </div>
     <div id="transport-cards" class="tcards"></div>
     <div id="punch-block"></div>
   </section>
@@ -67,24 +74,41 @@ INDEX_HTML = """<!doctype html>
     <div class="xrow"><span class="xk">Advertised URIs</span><ul id="x-advertised" class="mono"></ul></div>
     <div class="xrow"><span class="xk">Listening</span><ul id="x-listening" class="mono"></ul></div>
     <div class="xrow"><span class="xk">Local IPs</span><ul id="x-localips" class="mono"></ul></div>
+    <div class="mrow join">
+      <input id="listen-uri" placeholder="tcp://0.0.0.0:9002 — add a listener">
+      <button id="listen-btn" class="ghost">Listen</button>
+    </div>
   </section>
 
   <section class="card">
     <h2>Manage</h2>
     <div class="manage">
       <div class="mrow">
-        <button id="gen-invite">Generate invite code</button>
-        <code id="invite-out" class="mono"></code>
+        <button id="gen-block">Generate invite block</button>
+        <span class="muted">share this block — it carries our addresses and a one-time code</span>
       </div>
+      <textarea id="block-out" class="mono" readonly placeholder="Invite block (base64)"></textarea>
+      <textarea id="join-block-in" class="mono" placeholder="Paste an invite block here to join a network"></textarea>
+      <div class="mrow">
+        <button id="join-block-btn">Join with block</button>
+        <span id="join-progress" class="muted"></span>
+      </div>
+      <details class="expert-join">
+        <summary class="muted">Expert — manual invite / join</summary>
+        <div class="mrow">
+          <button id="gen-invite" class="ghost">Generate invite code</button>
+          <code id="invite-out" class="mono"></code>
+        </div>
+        <div class="mrow join">
+          <input id="join-uri" placeholder="tcp://host:port">
+          <input id="join-code" placeholder="invite code">
+          <button id="join-btn" class="ghost">Join network</button>
+        </div>
+      </details>
       <div class="mrow">
         <button id="show-cert">Show our root certificate</button>
       </div>
       <textarea id="cert-out" class="mono" readonly placeholder="Our root cert (share it so another node trusts us)"></textarea>
-      <div class="mrow join">
-        <input id="join-uri" placeholder="tcp://host:port">
-        <input id="join-code" placeholder="invite code">
-        <button id="join-btn">Join network</button>
-      </div>
       <textarea id="trust-in" class="mono" placeholder="Paste another node's root cert (hex) to trust it"></textarea>
       <div class="mrow"><button id="trust-btn">Trust certificate</button></div>
       <div id="manage-status" class="muted"></div>
@@ -184,6 +208,13 @@ padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}
 .tcard .kv .k{color:var(--muted)}
 .tcard ul{margin:4px 0 0;padding:0;list-style:none;font-size:12px}
 .tcard ul li{word-break:break-all}
+.tctl{margin-bottom:12px}
+.tctl #udp-port{width:90px;margin:0}
+.unlisten{background:transparent;color:var(--muted);border:0;padding:0 4px;font-weight:400;cursor:pointer}
+.unlisten:hover{color:var(--bad)}
+details.expert-join{border-top:1px solid var(--line);padding-top:8px}
+details.expert-join summary{cursor:pointer}
+details.expert-join .mrow{margin-top:8px}
 #punch-block{margin-top:12px}
 #punch-block h3{margin:0 0 8px;font-size:13px;color:var(--muted);
 text-transform:uppercase;letter-spacing:.05em}
@@ -192,6 +223,7 @@ text-transform:uppercase;letter-spacing:.05em}
 APP_JS = r"""
 let TOKEN = null;
 let prev = null;      // previous {t, bytes_in, bytes_out}
+let last = null;      // last full state snapshot (drives the control buttons)
 const hist = [];      // [{in,out}] KB/s samples
 
 const $ = (id) => document.getElementById(id);
@@ -282,11 +314,13 @@ async function tick() {
     ["CPU", cpu],
     ["Memory", rss],
   ]);
+  last = s;
   drawChart();
   drawGraph(s);
   drawPeers(s.peers);
   drawTransports(s);
   drawExpert(s);
+  drawJoinProgress(s.join_status);
 }
 
 function drawExpert(s) {
@@ -296,8 +330,27 @@ function drawExpert(s) {
       : '<li class="muted">—</li>';
   };
   list("x-advertised", s.advertised);
-  list("x-listening", s.listening);
   list("x-localips", s.local_ips);
+  $("x-listening").innerHTML = (s.listening && s.listening.length)
+    ? s.listening.map((u) =>
+        `<li>${u} <button class="unlisten" data-uri="${u}" title="stop listening">✕</button></li>`
+      ).join("")
+    : '<li class="muted">—</li>';
+}
+
+function drawJoinProgress(js) {
+  const el = $("join-progress");
+  if (!js) { el.textContent = ""; return; }
+  if (js.connected) { el.textContent = "connected via " + js.connected; el.style.color = ""; return; }
+  if (js.running) {
+    el.textContent = "trying " + (js.current || "…")
+      + (js.tried.length ? ` (${js.tried.length} failed)` : "");
+    el.style.color = "";
+    return;
+  }
+  const lastTry = js.tried[js.tried.length - 1];
+  el.textContent = "join failed — " + (lastTry ? `${lastTry.uri}: ${lastTry.error}` : "no address reachable");
+  el.style.color = "var(--bad)";
 }
 
 function fmtAge(a) {
@@ -307,6 +360,13 @@ function fmtAge(a) {
 }
 
 function drawTransports(s) {
+  const udpOn = (s.transport_details || []).some((t) => t.hole_punch);
+  const pt = $("punch-toggle");
+  pt.textContent = "Hole punching: " + (s.punch_enabled ? "ON" : "OFF");
+  pt.className = s.punch_enabled ? "" : "ghost";
+  $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
+  $("udp-port").classList.toggle("hidden", udpOn);
+
   const net = s.network;
   if (net) {
     const inet = net.internet == null
@@ -423,6 +483,69 @@ function status(msg, ok = true) {
 $("gen-invite").addEventListener("click", async () => {
   try { const j = await (await api("/api/invite", "POST")).json(); $("invite-out").textContent = j.code; }
   catch (_) { status("failed to generate invite", false); }
+});
+$("gen-block").addEventListener("click", async () => {
+  try { const j = await (await api("/api/invite/block", "POST")).json(); $("block-out").value = j.block; }
+  catch (_) { status("failed to generate invite block", false); }
+});
+$("join-block-btn").addEventListener("click", async () => {
+  const block = $("join-block-in").value.trim();
+  if (!block) { status("paste an invite block first", false); return; }
+  try {
+    const res = await api("/api/join/block", "POST", { block });
+    const j = await res.json();
+    if (res.ok) { status(`joining — trying ${j.candidates} address(es)…`); $("join-block-in").value = ""; }
+    else status("join failed: " + (j.error || ""), false);
+  } catch (_) { status("join failed", false); }
+});
+
+// transport controls
+function tctl(msg, ok = true) {
+  const el = $("tctl-status");
+  el.textContent = msg; el.style.color = ok ? "" : "var(--bad)";
+  if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 4000);
+}
+$("punch-toggle").addEventListener("click", async () => {
+  if (!last) return;
+  try {
+    await api("/api/punch", "POST", { enabled: !last.punch_enabled });
+    tick();
+  } catch (_) { tctl("failed to toggle hole punching", false); }
+});
+$("udp-toggle").addEventListener("click", async () => {
+  if (!last) return;
+  const udpOn = (last.transport_details || []).some((t) => t.hole_punch);
+  try {
+    let res;
+    if (udpOn) res = await api("/api/udp", "POST", { action: "stop" });
+    else {
+      const port = parseInt($("udp-port").value, 10);
+      if (!(port > 0 && port < 65536)) { tctl("invalid UDP port", false); return; }
+      res = await api("/api/udp", "POST", { action: "start", port });
+    }
+    if (!res.ok) tctl("UDP: " + ((await res.json()).error || "failed"), false);
+    tick();
+  } catch (_) { tctl("UDP control failed", false); }
+});
+$("net-recheck").addEventListener("click", async () => {
+  try { await api("/api/net/recheck", "POST"); tctl("network re-check requested"); tick(); }
+  catch (_) { tctl("re-check failed", false); }
+});
+$("listen-btn").addEventListener("click", async () => {
+  const uri = $("listen-uri").value.trim();
+  if (!uri) { tctl("enter a listen URI", false); return; }
+  try {
+    const res = await api("/api/listen", "POST", { uri });
+    if (res.ok) { $("listen-uri").value = ""; tctl("listening on " + uri); }
+    else tctl("listen failed: " + ((await res.json()).error || ""), false);
+    tick();
+  } catch (_) { tctl("listen failed", false); }
+});
+$("x-listening").addEventListener("click", async (e) => {
+  const uri = e.target && e.target.dataset && e.target.dataset.uri;
+  if (!uri) return;
+  try { await api("/api/unlisten", "POST", { uri }); tick(); }
+  catch (_) { tctl("failed to stop listener", false); }
 });
 $("show-cert").addEventListener("click", async () => {
   try { const j = await (await api("/api/rootcert")).json(); $("cert-out").value = j.cert_hex; }
