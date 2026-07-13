@@ -2,9 +2,19 @@ import asyncio
 import struct
 from .transport import BaseTransport, BaseServer
 from .packet import Packet
+from .ip_utils import split_host_port
 
 _FRAME = struct.Struct('!H')
 _READ_TIMEOUT = 60.0
+
+
+def _host_port(address: str) -> tuple[str, int]:
+    """Parse host:port (IPv6-safe). Raises ValueError on malformed input."""
+    hp = split_host_port(address)
+    if hp is None:
+        raise ValueError(f"invalid address: {address!r}")
+    host, port = hp
+    return host, int(port)
 
 
 class TCPTransport(BaseTransport):
@@ -24,11 +34,11 @@ class TCPTransport(BaseTransport):
         return t
 
     async def connect(self, address: str) -> None:
-        host, port = address.rsplit(':', 1)
-        self._reader, self._writer = await asyncio.open_connection(host, int(port))
+        host, port = _host_port(address)
+        self._reader, self._writer = await asyncio.open_connection(host, port)
 
     async def listen(self, address: str) -> None:
-        host, port = address.rsplit(':', 1)
+        host, port = _host_port(address)
         connected = asyncio.Event()
 
         async def _accept(reader, writer):
@@ -38,7 +48,7 @@ class TCPTransport(BaseTransport):
             if self.on_connect is not None:
                 await self.on_connect()
 
-        self._server = await asyncio.start_server(_accept, host, int(port), reuse_address=True)
+        self._server = await asyncio.start_server(_accept, host, port, reuse_address=True)
         await connected.wait()
 
     async def send(self, packet: Packet) -> None:
@@ -61,6 +71,14 @@ class TCPTransport(BaseTransport):
             raise ConnectionError("read timeout")
         return Packet.unpack(data)
 
+    def remote_ip(self) -> str | None:
+        if self._writer is None:
+            return None
+        peer = self._writer.get_extra_info("peername")
+        if not peer:
+            return None
+        return str(peer[0]).split("%", 1)[0]   # drop IPv6 scope id
+
     async def close(self) -> None:
         if self._writer:
             self._writer.close()
@@ -78,14 +96,14 @@ class TCPServer(BaseServer):
         self._server: asyncio.Server | None = None
 
     async def listen(self, address: str) -> None:
-        host, port = address.rsplit(':', 1)
+        host, port = _host_port(address)
 
         async def _accept(reader, writer):
             transport = TCPTransport._from_accepted(reader, writer)
             if self.on_new_connection is not None:
                 await self.on_new_connection(transport)
 
-        self._server = await asyncio.start_server(_accept, host, int(port), reuse_address=True)
+        self._server = await asyncio.start_server(_accept, host, port, reuse_address=True)
 
     async def close(self) -> None:
         if self._server:

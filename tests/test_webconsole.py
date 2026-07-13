@@ -118,9 +118,11 @@ class TestAuth:
             status, hdrs, _, snap = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)
             assert status == 200
-            for key in ("id", "peers", "total", "load", "routing", "uptime"):
+            for key in ("id", "peers", "total", "load", "routing", "uptime",
+                        "advertised", "listen", "local_ips", "transports", "listening"):
                 assert key in snap
             assert snap["id"] == node.id.raw.hex()
+            assert "fake" in snap["transports"]
             assert "content-security-policy" in hdrs
         finally:
             console.stop(); await node.stop()
