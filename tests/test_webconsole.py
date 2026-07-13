@@ -120,7 +120,8 @@ class TestAuth:
             assert status == 200
             for key in ("id", "peers", "total", "load", "routing", "uptime",
                         "advertised", "listen", "local_ips", "transports",
-                        "listening", "network", "transport_details"):
+                        "listening", "network", "transport_details",
+                        "punch_enabled", "join_status"):
                 assert key in snap
             assert snap["id"] == node.id.raw.hex()
             assert "fake" in snap["transports"]
@@ -192,6 +193,119 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/trust", token, {"cert_hex": "deadbeef"})
             assert status == 400 and j["ok"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_invite_block_roundtrip(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/invite/block", token)
+            assert status == 200 and j["block"]
+            data = json.loads(base64.b64decode(j["block"]))
+            assert data["v"] == 1 and data["code"] in node._invite._codes
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_join_block_rejects_garbage(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for bad in ({"block": "not-base64!!!"}, {"block": ""}, {}):
+                status, _, _, j = await asyncio.to_thread(
+                    _request, console, "POST", "/api/join/block", token, bad)
+                assert status == 400 and j["ok"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_punch_toggle(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            assert node._punch_enabled is True  # on by default
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch", token, {"enabled": False})
+            assert status == 200 and j["enabled"] is False
+            assert node._punch_enabled is False
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch", token, {"enabled": True})
+            assert status == 200 and node._punch_enabled is True
+            # type-checked input
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch", token, {"enabled": "yes"})
+            assert status == 400
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_punch_requires_auth(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch", None, {"enabled": False})
+            assert status == 401 and node._punch_enabled is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_udp_start_stop(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/udp", token,
+                {"action": "start", "port": 0})
+            assert status == 400  # port 0 refused
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/udp", token, {"action": "bogus"})
+            assert status == 400
+            # pick an ephemeral free port by binding then releasing
+            import socket as _socket
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/udp", token,
+                {"action": "start", "port": port})
+            assert status == 200 and node._udp_server is not None
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/udp", token, {"action": "stop"})
+            assert status == 200 and node._udp_server is None
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_listen_unlisten(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/listen", token, {"uri": "garbage"})
+            assert status == 400
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/listen", token,
+                {"uri": "tcp://x:1"})
+            assert status == 400  # tcp not registered on this test manager
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/listen", token,
+                {"uri": "fake://addr:1"})
+            assert status == 200
+            assert "fake://addr:1" in node._transport_manager.listening_uris()
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/unlisten", token,
+                {"uri": "fake://addr:1"})
+            assert status == 200 and j["ok"] is True
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/unlisten", token,
+                {"uri": "fake://addr:1"})
+            assert status == 404  # already gone
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_net_recheck(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/net/recheck", token)
+            assert status == 200 and j["ok"] is False  # monitor not started
         finally:
             console.stop(); await node.stop()
 

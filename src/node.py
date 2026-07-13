@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import os
 import socket
 import ssl
@@ -104,6 +106,11 @@ _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 2
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
+
+# Invite blocks (base64 join bundles: advertised URIs + invite code)
+_JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
+_JOIN_BLOCK_MAX_URIS = 16     # candidate addresses tried per block
+_JOIN_TRY_TIMEOUT    = 6.0    # per-URI connect + session wait
 
 # Hole punching
 _PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
@@ -598,7 +605,12 @@ class MeshNode:
         self._udp_listen_uri: str | None = None
         self._punch_pending: dict[NodeID, _PunchState] = {}
         self._punch_stats = {"attempted": 0, "completed": 0, "failed": 0}
+        self._punch_enabled: bool = True   # hole punching on by default
         self._stun_enabled: bool = False
+        # Invite-block join state (driven from the console)
+        self._join_task: asyncio.Task | None = None
+        self._join_status: dict | None = None
+        self._join_try_timeout: float = _JOIN_TRY_TIMEOUT
         # Keeps local/public addressing fresh (created on start(), needs a loop)
         self._net_monitor: NetMonitor | None = None
 
@@ -768,6 +780,8 @@ class MeshNode:
         The relay will respond with PUNCH_RELAY to both us and the target,
         after which both sides send UDP probes simultaneously.
         """
+        if not self._punch_enabled:
+            return
         if relay_peer.authenticated_id is None or relay_peer.session is None:
             return
         if len(self._punch_pending) >= _PUNCH_MAX_PENDING:
@@ -793,7 +807,7 @@ class MeshNode:
                     out.append(u)
         return out
 
-    async def join(self, address: str, code: str) -> None:
+    async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._transport_manager.connect(address)
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
@@ -803,6 +817,7 @@ class MeshNode:
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
+        return peer
 
     async def stop(self) -> None:
         self._running = False
@@ -1220,6 +1235,8 @@ class MeshNode:
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
+            "punch_enabled": self._punch_enabled,
+            "join_status": self._join_status,
         }
 
     def _peer_scheme(self, peer: '_Peer') -> str | None:
@@ -1289,6 +1306,127 @@ class MeshNode:
                 }
             details.append(entry)
         return details
+
+    def console_set_punch_enabled(self, enabled: bool) -> bool:
+        """Enable/disable UDP hole punching at runtime (default: enabled).
+        Disabling also drops in-flight punch attempts."""
+        self._punch_enabled = bool(enabled)
+        if not self._punch_enabled:
+            self._punch_pending.clear()
+        return self._punch_enabled
+
+    async def console_start_udp(self, port: int) -> None:
+        if not isinstance(port, int) or not (0 < port < 65536):
+            raise ValueError("invalid port")
+        await self.start_udp(port)
+
+    async def console_stop_udp(self) -> None:
+        await self.stop_udp()
+
+    def console_recheck_net(self) -> bool:
+        """Force an immediate network re-check (rate-limited by the monitor)."""
+        if self._net_monitor is None:
+            return False
+        self._net_monitor.poke("manual")
+        return True
+
+    async def console_add_listen(self, uri: str) -> None:
+        if not isinstance(uri, str) or not (0 < len(uri) <= _MAX_URI_LEN):
+            raise ValueError("invalid URI")
+        parsed = _validate_uri(uri)
+        if parsed is None:
+            raise ValueError("invalid URI")
+        if not self._transport_manager.is_supported(parsed[0]):
+            raise ValueError(f"unsupported scheme: {parsed[0]}")
+        await self.add_listen(uri)
+
+    async def console_remove_listen(self, uri: str) -> bool:
+        return await self.remove_listen(uri)
+
+    def console_invite_block(self) -> str:
+        """A shareable join bundle: base64 JSON with a fresh invite code and
+        every URI we advertise. The receiving node tries them all."""
+        code = self._invite.generate_code()
+        payload = {"v": 1, "code": code,
+                   "uris": self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS]}
+        return base64.b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+    def console_join_block(self, block: str) -> dict:
+        """Validate an invite block and start joining in the background.
+
+        The block is attacker-supplied input (pasted by the operator, but
+        crafted by whoever produced it): every field is type- and
+        size-checked, addresses are capped and URI-validated, and only
+        schemes with a registered transport are kept.
+        """
+        if not isinstance(block, str) or not (0 < len(block) <= _JOIN_BLOCK_MAX_LEN):
+            raise ValueError("invalid block")
+        try:
+            data = json.loads(base64.b64decode("".join(block.split()), validate=True))
+        except Exception:
+            raise ValueError("invalid block") from None
+        if not isinstance(data, dict) or data.get("v") != 1:
+            raise ValueError("unsupported block version")
+        code = data.get("code")
+        uris = data.get("uris")
+        if not isinstance(code, str) or not (0 < len(code) <= 64):
+            raise ValueError("invalid code in block")
+        if not isinstance(uris, list) or not uris:
+            raise ValueError("no addresses in block")
+        candidates: list[str] = []
+        for uri in uris[:_JOIN_BLOCK_MAX_URIS]:
+            if not isinstance(uri, str) or len(uri) > _MAX_URI_LEN:
+                continue
+            parsed = _validate_uri(uri)
+            if parsed is None or not self._transport_manager.is_supported(parsed[0]):
+                continue
+            if uri not in candidates:
+                candidates.append(uri)
+        if not candidates:
+            raise ValueError("no address uses a transport this node supports")
+        if self._join_task is not None and not self._join_task.done():
+            raise ValueError("a join is already in progress")
+        self._join_status = {"running": True, "current": None,
+                             "tried": [], "connected": None}
+        self._join_task = asyncio.create_task(
+            self._join_block_task(candidates, code))
+        return {"candidates": len(candidates)}
+
+    async def _join_block_task(self, uris: list[str], code: str) -> None:
+        """Try each candidate URI until one yields an authenticated session."""
+        status = self._join_status
+        try:
+            for uri in uris:
+                status["current"] = uri
+                peer = None
+                try:
+                    peer = await asyncio.wait_for(
+                        self.join(uri, code), self._join_try_timeout)
+                    deadline = time.monotonic() + self._join_try_timeout
+                    while peer.session is None:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("no session established")
+                        if peer not in self._peers:
+                            raise ConnectionError("link died")
+                        await asyncio.sleep(0.05)
+                    status["connected"] = uri
+                    return
+                except Exception as exc:
+                    if peer is not None:
+                        try:
+                            await peer.stop()
+                        except Exception:
+                            pass
+                        if peer in self._peers:
+                            self._peers.remove(peer)
+                    status["tried"].append(
+                        {"uri": uri,
+                         "error": (str(exc) or type(exc).__name__)[:80]})
+        finally:
+            status["running"] = False
+            status["current"] = None
 
     def console_root_cert_hex(self) -> str:
         """Our self-signed root cert, hex-encoded — paste it into another node's
@@ -1844,6 +1982,8 @@ class MeshNode:
         PUNCH_RELAY to both sides, telling each the other's public UDP
         address (as we observed it) and the UDP port they're listening on.
         """
+        if not self._punch_enabled:
+            return
         decoded = _decode_punch_request(packet.payload)
         if decoded is None:
             return
@@ -1897,6 +2037,8 @@ class MeshNode:
         Start sending UDP probes to the peer's address. The peer will be
         doing the same simultaneously, creating NAT mappings on both sides.
         """
+        if not self._punch_enabled:
+            return
         decoded = _decode_punch_relay(packet.payload)
         if decoded is None:
             return
@@ -1996,6 +2138,8 @@ class MeshNode:
 
         This runs on the event loop via the datagram protocol callback.
         """
+        if not self._punch_enabled:
+            return  # punching disabled — ignore probes and acks entirely
         # Try to parse as a punch probe
         probe = _parse_punch_probe(data)
         if probe is not None:
