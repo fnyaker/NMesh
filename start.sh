@@ -135,7 +135,31 @@ pip install --quiet cryptography pytest pytest-asyncio
 # liboqs-python bundles liboqs source and tries to compile it on import.
 # The auto-build can fail on some systems. We build liboqs explicitly here
 # with proper error handling and a clean build directory.
-if ! python -c "import oqs" 2>/dev/null; then
+#
+# No Linux distro ships a trustworthy prebuilt liboqs: Ubuntu/Debian never
+# had one (removed from Debian unstable in April 2025) and Fedora's
+# liboqs-devel is stuck on 0.10.0, too old to guarantee the ML-KEM-768 /
+# ML-DSA-65 parameter sets this project requires. Source build stays the
+# only correct path there. Homebrew's formula is official and current
+# enough to trust, so macOS gets a fast path that skips the RAM-heavy
+# compile entirely — verified against the required algorithms before use.
+BUILT_VIA_PACKAGE=false
+if [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null && ! python -c "import oqs" 2>/dev/null; then
+    info "macOS detected — trying prebuilt liboqs via Homebrew (avoids RAM-heavy compile)…"
+    if brew list liboqs &>/dev/null || brew install liboqs; then
+        pip install --quiet --force-reinstall liboqs-python || true
+        if python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')" 2>/dev/null; then
+            ok "liboqs via Homebrew (ML-KEM-768, ML-DSA-65 present)"
+            BUILT_VIA_PACKAGE=true
+        else
+            warn "Homebrew liboqs missing required algorithms — falling back to source build"
+        fi
+    else
+        warn "brew install liboqs failed — falling back to source build"
+    fi
+fi
+
+if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; then
     info "Building liboqs from source (post-quantum crypto)…"
     LIBOQS_BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
     rm -rf "$LIBOQS_BUILD_DIR"
