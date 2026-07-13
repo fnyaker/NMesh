@@ -75,7 +75,28 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   rend le pair reconnectable après redémarrage.
 - Testé : redémarrage sur lien TCP réel, reprise sans ré-invitation.
 
+### Adressage IP complet + vue expert (`src/ip_utils.py`) — fait
+- Énumération des IP locales, parsing host:port IPv6-safe, expansion des URI
+  d'écoute wildcard (`0.0.0.0` → chaque IP concrète) → URIs annoncées
+  connectables (le ping annonce désormais des adresses joignables).
+- Écoute multi-ports + ajout/retrait d'écoute à chaud (`add_listen` /
+  `remove_listen`). Snapshot enrichi (advertised, listen, local_ips,
+  transports, listening).
+- Vue expert dans la console web (URIs diffusées, écoutes, IP locales,
+  transports actifs).
+
 ## Prochaines étapes (vision « Jarvis / Edith »)
+
+### Détection d'IP publique (mesh-native) — fait
+- Un pair qui accepte notre connexion nous renvoie l'IP source qu'il a vue
+  (message `OBSERVED_ADDR`) → on apprend notre adresse publique sans serveur
+  externe (activé par défaut, à chaque handshake). Validé, borné ; alimente
+  les URIs annoncées.
+
+### Transport IP — suite (à faire)
+- Client STUN optionnel (fallback quand aucun pair n'est disponible).
+- Transport UDP (couche de fiabilité) + hole punching NAT signalé sur le mesh.
+
 
 ### Store-and-forward — approfondissement delay-tolerant
 - Mode drop unidirectionnel (bundle déposé sans round-trip interactif).
@@ -126,9 +147,17 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   vers un petit root listant les chunks du manifeste. Plus de limite ~59 Ko
   sur le nombre de fichiers d'une app.
 
+### Appels audio (`src/apps/call.py`) — fait
+- Transport audio temps réel sur le flux de trames : PCM framé, latence mesurée.
+  Backend WAV en stdlib (`wave`) → appel testé de bout en bout avec de vrais
+  échantillons, sans matériel ni dépendance. Interface `AudioSource`/`AudioSink`
+  pour brancher un micro/HP live côté app sans polluer les deps de NMesh.
+  Démo `scripts/call_demo.py` (audio identique bit-à-bit, ~0,5 ms de latence).
+
 ### Écosystème d'applications — suite
-- Capture audio/vidéo réelle côté app (dépendance hors charte + périphérique)
-  au-dessus du flux temps réel existant.
+- Backend périphérique live (micro/HP, ex. sounddevice) implémentant
+  `AudioSource`/`AudioSink`, côté application.
+- Vidéo au-dessus du même flux temps réel.
 - Envoi de fichiers depuis la web UI du chat (aujourd'hui : texte + affichage
   des fichiers reçus).
 

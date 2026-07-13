@@ -248,3 +248,62 @@ class TestRestartRecovery:
 
             await guest2.stop()
             await host.stop()
+
+
+# ---------------------------------------------------------------------------
+# IP transport: multiple ports, runtime add/remove, advertised URIs.
+# ---------------------------------------------------------------------------
+
+class TestMultiPort:
+    async def test_listen_multiple_ports_and_runtime_change(self):
+        host = make_node()
+        await host.start(["tcp://127.0.0.1:19200"])
+        await host.add_listen("tcp://127.0.0.1:19201")
+
+        gA, gB = make_node(), make_node()
+        await gA.join("tcp://127.0.0.1:19200", host.generate_invite())
+        await gB.join("tcp://127.0.0.1:19201", host.generate_invite())
+        await gA.wait_for_session(timeout=15.0)
+        await gB.wait_for_session(timeout=15.0)
+
+        adv = host.advertised_uris()
+        assert "tcp://127.0.0.1:19200" in adv
+        assert "tcp://127.0.0.1:19201" in adv
+        assert "tcp://127.0.0.1:19201" in host._transport_manager.listening_uris()
+
+        # Drop the second port at runtime; new joins to it must fail.
+        assert await host.remove_listen("tcp://127.0.0.1:19201")
+        assert "tcp://127.0.0.1:19201" not in host.advertised_uris()
+        gC = make_node()
+        with pytest.raises(Exception):
+            await gC.join("tcp://127.0.0.1:19201", host.generate_invite())
+
+        await gA.stop(); await gB.stop(); await gC.stop(); await host.stop()
+
+
+# ---------------------------------------------------------------------------
+# Mesh-native public-IP discovery: a joining node learns the source IP a peer
+# observed for it, and advertises itself there.
+# ---------------------------------------------------------------------------
+
+class TestObservedAddress:
+    async def test_guest_learns_observed_ip(self):
+        host = make_node()
+        guest = make_node()
+        code = host.generate_invite()
+        await host.start(["tcp://127.0.0.1:19210"])
+        await guest.start(["tcp://0.0.0.0:19211"])   # guest also listens
+        await guest.join("tcp://127.0.0.1:19210", code)
+        await guest.wait_for_session(timeout=15.0)
+        await host.wait_for_session(timeout=15.0)
+
+        # The host saw the guest connect from loopback and told it so.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 5.0
+        while loop.time() < deadline and "127.0.0.1" not in guest._extra_addrs:
+            await asyncio.sleep(0.05)
+        assert "127.0.0.1" in guest._extra_addrs
+        assert "tcp://127.0.0.1:19211" in guest.advertised_uris()
+
+        await guest.stop()
+        await host.stop()
