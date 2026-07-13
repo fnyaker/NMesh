@@ -409,6 +409,70 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/invite/block":
+                try:
+                    block = console._call(_wrap(console._node.console_invite_block))
+                    self._json(200, {"block": block})
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/join/block":
+                data = _parse_json(body)
+                block = (data or {}).get("block", "")
+                try:
+                    result = console._call(
+                        _wrap(console._node.console_join_block, block))
+                    self._json(200, {"ok": True, **result})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/punch":
+                data = _parse_json(body)
+                if not data or not isinstance(data.get("enabled"), bool):
+                    self._json(400, {"error": "enabled (bool) required"})
+                    return
+                enabled = console._call(
+                    _wrap(console._node.console_set_punch_enabled, data["enabled"]))
+                self._json(200, {"ok": True, "enabled": enabled})
+                return
+            if path == "/api/udp":
+                data = _parse_json(body)
+                action = (data or {}).get("action")
+                try:
+                    if action == "start":
+                        console._call(
+                            console._node.console_start_udp((data or {}).get("port")))
+                    elif action == "stop":
+                        console._call(console._node.console_stop_udp())
+                    else:
+                        self._json(400, {"error": "action must be start or stop"})
+                        return
+                    self._json(200, {"ok": True})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/listen":
+                data = _parse_json(body)
+                try:
+                    console._call(
+                        console._node.console_add_listen((data or {}).get("uri", "")))
+                    self._json(200, {"ok": True})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/unlisten":
+                data = _parse_json(body)
+                try:
+                    ok = console._call(
+                        console._node.console_remove_listen((data or {}).get("uri", "")))
+                    self._json(200 if ok else 404, {"ok": bool(ok)})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/net/recheck":
+                ok = console._call(_wrap(console._node.console_recheck_net))
+                self._json(200, {"ok": bool(ok)})
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
