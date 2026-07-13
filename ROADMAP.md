@@ -75,7 +75,23 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   rend le pair reconnectable après redémarrage.
 - Testé : redémarrage sur lien TCP réel, reprise sans ré-invitation.
 
+### Adressage IP complet + vue expert (`src/ip_utils.py`) — fait
+- Énumération des IP locales, parsing host:port IPv6-safe, expansion des URI
+  d'écoute wildcard (`0.0.0.0` → chaque IP concrète) → URIs annoncées
+  connectables (le ping annonce désormais des adresses joignables).
+- Écoute multi-ports + ajout/retrait d'écoute à chaud (`add_listen` /
+  `remove_listen`). Snapshot enrichi (advertised, listen, local_ips,
+  transports, listening).
+- Vue expert dans la console web (URIs diffusées, écoutes, IP locales,
+  transports actifs).
+
 ## Prochaines étapes (vision « Jarvis / Edith »)
+
+### Transport IP — suite (à faire)
+- Détection d'IP publique : adresse observée par les pairs (mesh-natif, sans
+  serveur externe) + client STUN optionnel.
+- Transport UDP (couche de fiabilité) + hole punching NAT signalé sur le mesh.
+
 
 ### Store-and-forward — approfondissement delay-tolerant
 - Mode drop unidirectionnel (bundle déposé sans round-trip interactif).

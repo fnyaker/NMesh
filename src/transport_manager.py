@@ -72,6 +72,25 @@ class TransportManager:
             return
         await self.on_new_connection(transport)
 
+    def schemes(self) -> list[str]:
+        """URL schemes with a registered transport."""
+        return sorted(self._registry.keys())
+
+    def listening_uris(self) -> list[str]:
+        """URIs this manager is currently listening on."""
+        return sorted(self._servers.keys())
+
+    async def stop_listen(self, uri: str) -> bool:
+        """Stop one active listener. Returns True if it was listening."""
+        server = self._servers.pop(uri, None)
+        if server is None:
+            return False
+        try:
+            await server.close()
+        except Exception:
+            pass
+        return True
+
     async def close_all(self) -> None:
         for server in list(self._servers.values()):
             try:

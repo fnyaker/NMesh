@@ -44,13 +44,19 @@ Options :
 |---------|------------------|------------------------------------------------|
 | POST    | `/api/login`     | `{password}` → `{token}`                       |
 | POST    | `/api/logout`    | révoque le jeton                               |
-| GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge)   |
+| GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge, **adressage**) |
 | POST    | `/api/invite`    | génère un code d'invitation                    |
 | POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
 | GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
+
+La section **Expert — addressing & transports** montre toutes les URIs
+concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
+chaque IP locale), les URIs en écoute, les IP locales, et les transports
+enregistrés (● = actif). Le snapshot expose `advertised`, `listen`,
+`local_ips`, `transports`, `listening`.
 
 La section **Apps (DHT)** de l'interface permet de publier une application
 (sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une

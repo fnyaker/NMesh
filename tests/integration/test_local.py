@@ -248,3 +248,34 @@ class TestRestartRecovery:
 
             await guest2.stop()
             await host.stop()
+
+
+# ---------------------------------------------------------------------------
+# IP transport: multiple ports, runtime add/remove, advertised URIs.
+# ---------------------------------------------------------------------------
+
+class TestMultiPort:
+    async def test_listen_multiple_ports_and_runtime_change(self):
+        host = make_node()
+        await host.start(["tcp://127.0.0.1:19200"])
+        await host.add_listen("tcp://127.0.0.1:19201")
+
+        gA, gB = make_node(), make_node()
+        await gA.join("tcp://127.0.0.1:19200", host.generate_invite())
+        await gB.join("tcp://127.0.0.1:19201", host.generate_invite())
+        await gA.wait_for_session(timeout=15.0)
+        await gB.wait_for_session(timeout=15.0)
+
+        adv = host.advertised_uris()
+        assert "tcp://127.0.0.1:19200" in adv
+        assert "tcp://127.0.0.1:19201" in adv
+        assert "tcp://127.0.0.1:19201" in host._transport_manager.listening_uris()
+
+        # Drop the second port at runtime; new joins to it must fail.
+        assert await host.remove_listen("tcp://127.0.0.1:19201")
+        assert "tcp://127.0.0.1:19201" not in host.advertised_uris()
+        gC = make_node()
+        with pytest.raises(Exception):
+            await gC.join("tcp://127.0.0.1:19201", host.generate_invite())
+
+        await gA.stop(); await gB.stop(); await gC.stop(); await host.stop()
