@@ -76,11 +76,25 @@ Robustesse : tout message applicatif est validé et borné ; un message mal form
 est ignoré, jamais fatal (la charte s'applique aussi au niveau app). L'intégrité
 des fichiers est vérifiée (SHA-256) avant livraison.
 
-## Sur les « appels »
+## Appels audio (`src/apps/call.py`)
 
-Le flux `STREAM` est la primitive temps réel d'un appel : trames horodatées,
-latence mesurée à la réception. La **capture audio réelle** nécessiterait une
-dépendance externe (hors charte) et un périphérique ; elle est donc laissée à
-une intégration côté application — le mesh, lui, fournit le transport temps réel
-(latence médiane ~0,5 ms en local dans la démo).
+Le flux `STREAM` est la primitive d'un appel. `AudioCall` s'appuie dessus pour
+transporter de l'audio PCM en temps réel :
+
+```bash
+python scripts/call_demo.py      # 2 nœuds, un WAV streamé, audio vérifié bit-à-bit
+```
+
+```python
+from src.apps.call import AudioCall, WavSource, WavSink
+tx = AudioCall(chat_app)
+await tx.place(peer, WavSource("in.wav"), stream_id=1)   # émet
+rx = AudioCall(chat_app); rx.attach()                    # reçoit
+rx.render(src, 1, WavSink("out.wav"))
+```
+
+Le backend **WAV** (stdlib `wave`) donne un appel testable de bout en bout avec
+de vrais échantillons, sans matériel ni dépendance. Pour un **micro/HP live**,
+implémentez `AudioSource`/`AudioSink` avec un backend périphérique
+(ex. sounddevice) **dans votre app** — NMesh reste sans dépendance audio.
 </content>
