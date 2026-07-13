@@ -176,11 +176,16 @@ if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; the
         CMAKE_GEN="-GNinja"
     fi
 
-    # Clean build dir (no stale cache), configure, build, install
+    # Clean build dir (no stale cache), configure, build, install.
+    # Install prefix is a user-writable directory, not /usr/local: this
+    # script must never need sudo, and installing system-wide would fail
+    # outright (or silently touch shared system paths) on a locked-down box.
+    LIBOQS_INSTALL_DIR="${LIBOQS_INSTALL_DIR:-$LIBOQS_BUILD_DIR/install}"
     rm -rf "$LIBOQS_BUILD_DIR/build"
     cmake -S "$LIBOQS_BUILD_DIR/liboqs" -B "$LIBOQS_BUILD_DIR/build" \
         $CMAKE_GEN -DCMAKE_BUILD_TYPE=Release \
         -DOQS_USE_OPENSSL=OFF \
+        -DCMAKE_INSTALL_PREFIX="$LIBOQS_INSTALL_DIR" \
         || fail "liboqs cmake configure failed"
 
     # cmake --build --parallel with no argument defaults to one job per core,
@@ -220,7 +225,7 @@ if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; the
     # Verify the shared library is loadable
     if ! python -c "import oqs" 2>/dev/null; then
         # Fallback: find the .so and set LD_LIBRARY_PATH
-        LIBOQS_SO=$(find "$LIBOQS_BUILD_DIR" /usr/local -name "liboqs.so*" 2>/dev/null | head -1)
+        LIBOQS_SO=$(find "$LIBOQS_BUILD_DIR" "$LIBOQS_INSTALL_DIR" /usr/local -name "liboqs.so*" 2>/dev/null | head -1)
         if [ -n "$LIBOQS_SO" ]; then
             LIBOQS_LIBDIR=$(dirname "$LIBOQS_SO")
             export LD_LIBRARY_PATH="$LIBOQS_LIBDIR:${LD_LIBRARY_PATH:-}"
