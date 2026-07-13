@@ -84,7 +84,9 @@ _PUNCH_REQ = struct.Struct('!20sH')
 # PUNCH_PROBE (raw UDP datagram, not a mesh Packet): magic(4) | node_id(20) | nonce(16) | signature(64)
 _PUNCH_PROBE_MAGIC = b"NPPB"
 _PUNCH_PROBE = struct.Struct('!4s20s16s')
-_PUNCH_PROBE_SIG_LEN = 64  # ML-DSA-65 signature length
+# ML-DSA-65 signatures are 3309 bytes; keep a generous upper bound so a
+# malformed/oversized datagram is rejected before we hand it to verify().
+_PUNCH_SIG_MAX = 5000
 # PUNCH_ACK (raw UDP datagram): magic(4) | node_id(20) | nonce(16) | signature(64)
 _PUNCH_ACK_MAGIC = b"NPAK"
 
@@ -118,6 +120,9 @@ _PUNCH_PROBE_INTERVAL  = 0.1   # seconds between probes
 _PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
 _PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
 _PUNCH_MAX_RETRIES     = 3     # max retries per target
+_PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
+_UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
+_UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +349,20 @@ def _build_punch_probe(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
 
 def _parse_punch_probe(data: bytes) -> tuple[bytes, bytes, bytes] | None:
     """Parse a raw UDP probe datagram. Returns (node_id, nonce, signature) or None."""
-    if len(data) < _PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN:
+    return _parse_punch_frame(data, _PUNCH_PROBE_MAGIC)
+
+
+def _parse_punch_frame(data: bytes, expect_magic: bytes
+                       ) -> tuple[bytes, bytes, bytes] | None:
+    """Shared probe/ack parse. The signature is the variable-length tail after
+    the fixed header (ML-DSA-65 = 3309 bytes), bounded by _PUNCH_SIG_MAX."""
+    sig_len = len(data) - _PUNCH_PROBE.size
+    if sig_len <= 0 or sig_len > _PUNCH_SIG_MAX:
         return None
     magic, node_id, nonce = _PUNCH_PROBE.unpack_from(data, 0)
-    if magic != _PUNCH_PROBE_MAGIC:
+    if magic != expect_magic:
         return None
-    signature = data[_PUNCH_PROBE.size:_PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN]
+    signature = data[_PUNCH_PROBE.size:]
     return node_id, nonce, signature
 
 
@@ -360,13 +373,7 @@ def _build_punch_ack(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
 
 def _parse_punch_ack(data: bytes) -> tuple[bytes, bytes, bytes] | None:
     """Parse a raw UDP punch-ack datagram. Returns (node_id, nonce, signature) or None."""
-    if len(data) < _PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN:
-        return None
-    magic, node_id, nonce = _PUNCH_PROBE.unpack_from(data, 0)
-    if magic != _PUNCH_ACK_MAGIC:
-        return None
-    signature = data[_PUNCH_PROBE.size:_PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN]
-    return node_id, nonce, signature
+    return _parse_punch_frame(data, _PUNCH_ACK_MAGIC)
 # node_id(20) | addr_count(B) | chain_bytes_len(H)
 #   | [addr_len(H) | addr_bytes]*addr_count
 #   | chain_bytes
@@ -607,6 +614,8 @@ class MeshNode:
         self._punch_stats = {"attempted": 0, "completed": 0, "failed": 0}
         self._punch_enabled: bool = True   # hole punching on by default
         self._stun_enabled: bool = False
+        # Per-target cooldown for relayed→direct path upgrade attempts
+        self._upgrade_last: OrderedDict[NodeID, float] = OrderedDict()
         # Invite-block join state (driven from the console)
         self._join_task: asyncio.Task | None = None
         self._join_status: dict | None = None
@@ -980,7 +989,10 @@ class MeshNode:
                     return None
             peer = await self._connect_routing(target)
             if peer is None:
-                return None
+                # No advertised address is directly connectable (typically
+                # both sides behind NAT) — fall back to a UDP hole punch
+                # coordinated by a shared relay.
+                return await self._punch_route_to(target, timeout)
             ok = await self._wait_for_peer_authenticated(peer, target, timeout)
             if not ok:
                 try:
@@ -989,11 +1001,64 @@ class MeshNode:
                     pass
                 if peer in self._peers:
                     self._peers.remove(peer)
-                return None
+                return await self._punch_route_to(target, timeout)
             return peer
         finally:
             event.set()
             self._pending_connections.pop(target, None)
+
+    async def _punch_route_to(self, target: NodeID,
+                              timeout: float = _ON_DEMAND_TIMEOUT) -> _Peer | None:
+        """NAT traversal fallback: ask shared relays to coordinate a UDP hole
+        punch to *target*, then wait for the punched link to authenticate.
+
+        Requires an active UDP listener and punching enabled. Relays tried are
+        bounded; a hostile or ignorant relay just wastes one wait slot."""
+        if not self._punch_enabled or self._udp_server is None:
+            return None
+        if self.udp_port() is None:
+            return None
+        relays = [p for p in self._peers
+                  if p.session is not None and p.authenticated_id is not None
+                  and p.authenticated_id != target]
+        sent = 0
+        for relay in relays[:_PUNCH_MAX_RELAYS]:
+            try:
+                await self.request_hole_punch(relay, target)
+                sent += 1
+            except Exception:
+                pass
+        if sent == 0:
+            return None
+        # All requests are in flight; concurrent PUNCH_RELAY answers dedupe
+        # on _punch_pending. One bounded wait covers them all.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            peer = next(
+                (p for p in self._peers
+                 if p.authenticated_id == target and p.session is not None),
+                None,
+            )
+            if peer is not None:
+                return peer
+            await asyncio.sleep(_AUTH_POLL_INTERVAL)
+        return None
+
+    def _maybe_upgrade_path(self, target: NodeID) -> None:
+        """Fire-and-forget attempt to turn a relayed path into a direct link
+        (direct connect first, hole punch as fallback — both inside
+        _ensure_route_to). Rate-limited per target so a chatty flow doesn't
+        turn into a connect/punch storm."""
+        if target == self._id or target in self._pending_connections:
+            return
+        now = time.monotonic()
+        last = self._upgrade_last.get(target)
+        if last is not None and now - last < _UPGRADE_COOLDOWN:
+            return
+        if len(self._upgrade_last) >= _UPGRADE_MAX_TRACKED:
+            self._upgrade_last.popitem(last=False)
+        self._upgrade_last[target] = now
+        asyncio.create_task(self._ensure_route_to(target))
 
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
                                timeout: float = 5.0) -> list[NodeEntry]:
@@ -1088,6 +1153,9 @@ class MeshNode:
         if candidates:
             best = min(candidates, key=lambda p: target.distance(p.authenticated_id))
             await best.send(packet)
+            # Relayed path — try to upgrade to a direct link in the
+            # background (direct connect, then UDP hole punch).
+            self._maybe_upgrade_path(target)
             return
         peer = await self._ensure_route_to(target)
         if peer is not None:
@@ -2246,8 +2314,14 @@ class MeshNode:
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
 
-        # Register as a peer — the full mesh handshake will run over UDP
-        peer = _Peer(transport, is_client_side=True)
+        # Both sides complete the punch simultaneously, so the handshake role
+        # must be deterministic or both would challenge and neither respond.
+        # The node with the larger NodeID plays server (challenges); the other
+        # plays client (waits for the challenge, then presents its chain — no
+        # join code needed, both peers already hold each other's certs from
+        # the relayed path).
+        is_server = self._id.raw > state.target.raw
+        peer = _Peer(transport, is_client_side=not is_server)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
         host, port = addr
@@ -2256,20 +2330,20 @@ class MeshNode:
         asyncio.create_task(peer.start(self._handle_packet))
 
         # Record in routing table for reconnection
+        existing = self._routing.get(state.target)
         self._routing.add(state.target, [peer.remote_addr],
-                          self._routing.get(state.target).dsa_pub if self._routing.get(state.target) else b"")
+                          existing.dsa_pub if existing else b"")
 
         state.transport = transport
         self._punch_pending.pop(state.target, None)
         self._punch_stats["completed"] += 1
 
-        # Trigger the mesh handshake (challenge → handshake → session)
-        # The server-side will send a challenge when it gets the transport
-        # via on_new_connection. But since we created this transport
-        # ourselves (not via the server's accept loop), we need to send
-        # the challenge ourselves.
-        challenge = self._invite.generate_challenge()
-        peer.pending_challenge = challenge
-        challenge_pkt = Packet.create(CHALLENGE, self._id.raw,
-                                      NodeID(b"\xff" * 20).raw, challenge)
-        asyncio.create_task(peer.send(challenge_pkt))
+        # Server side kicks off the mesh handshake with a CHALLENGE. We create
+        # the transport ourselves (not via the server accept loop), so we send
+        # it here rather than relying on _on_new_transport.
+        if is_server:
+            challenge = self._invite.generate_challenge()
+            peer.pending_challenge = challenge
+            challenge_pkt = Packet.create(CHALLENGE, self._id.raw,
+                                          NodeID(b"\xff" * 20).raw, challenge)
+            asyncio.create_task(peer.send(challenge_pkt))
