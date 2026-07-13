@@ -135,7 +135,31 @@ pip install --quiet cryptography pytest pytest-asyncio
 # liboqs-python bundles liboqs source and tries to compile it on import.
 # The auto-build can fail on some systems. We build liboqs explicitly here
 # with proper error handling and a clean build directory.
-if ! python -c "import oqs" 2>/dev/null; then
+#
+# No Linux distro ships a trustworthy prebuilt liboqs: Ubuntu/Debian never
+# had one (removed from Debian unstable in April 2025) and Fedora's
+# liboqs-devel is stuck on 0.10.0, too old to guarantee the ML-KEM-768 /
+# ML-DSA-65 parameter sets this project requires. Source build stays the
+# only correct path there. Homebrew's formula is official and current
+# enough to trust, so macOS gets a fast path that skips the RAM-heavy
+# compile entirely — verified against the required algorithms before use.
+BUILT_VIA_PACKAGE=false
+if [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null && ! python -c "import oqs" 2>/dev/null; then
+    info "macOS detected — trying prebuilt liboqs via Homebrew (avoids RAM-heavy compile)…"
+    if brew list liboqs &>/dev/null || brew install liboqs; then
+        pip install --quiet --force-reinstall liboqs-python || true
+        if python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')" 2>/dev/null; then
+            ok "liboqs via Homebrew (ML-KEM-768, ML-DSA-65 present)"
+            BUILT_VIA_PACKAGE=true
+        else
+            warn "Homebrew liboqs missing required algorithms — falling back to source build"
+        fi
+    else
+        warn "brew install liboqs failed — falling back to source build"
+    fi
+fi
+
+if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; then
     info "Building liboqs from source (post-quantum crypto)…"
     LIBOQS_BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
     rm -rf "$LIBOQS_BUILD_DIR"
@@ -159,7 +183,31 @@ if ! python -c "import oqs" 2>/dev/null; then
         -DOQS_USE_OPENSSL=OFF \
         || fail "liboqs cmake configure failed"
 
-    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel \
+    # cmake --build --parallel with no argument defaults to one job per core,
+    # which OOM-kills the build on machines with many cores but little RAM
+    # (each liboqs compile unit can need ~1.5 GB). Cap jobs by available RAM.
+    cpu_count() {
+        nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1
+    }
+    available_mem_mb() {
+        if [ -r /proc/meminfo ]; then
+            awk '/MemAvailable:/{print int($2/1024); exit}' /proc/meminfo
+        elif command -v sysctl &>/dev/null; then
+            sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}'
+        fi
+    }
+    BUILD_JOBS="$(cpu_count)"
+    MEM_MB="$(available_mem_mb || true)"
+    if [ -n "${MEM_MB:-}" ] && [ "$MEM_MB" -gt 0 ]; then
+        MEM_JOBS=$(( MEM_MB / 1500 ))
+        [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+        if [ "$MEM_JOBS" -lt "$BUILD_JOBS" ]; then
+            BUILD_JOBS="$MEM_JOBS"
+        fi
+    fi
+    info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
+
+    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel "$BUILD_JOBS" \
         || fail "liboqs build failed"
 
     cmake --install "$LIBOQS_BUILD_DIR/build" \
