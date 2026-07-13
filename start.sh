@@ -127,128 +127,140 @@ fi
 ok "Virtualenv active ($VENV)"
 
 # ── step 4: Python dependencies ──────────────────────────────────────────────
-info "Installing Python dependencies (first run compiles liboqs — may take a few minutes)…"
-
-pip install --quiet --upgrade pip
-pip install --quiet cryptography pytest pytest-asyncio
-
-# liboqs-python bundles liboqs source and tries to compile it on import.
-# The auto-build can fail on some systems. We build liboqs explicitly here
-# with proper error handling and a clean build directory.
+# Post-quantum crypto = liboqs-python (the wrapper) + liboqs (the C library).
+#
+# liboqs-python only looks for the shared library in $OQS_INSTALL_PATH
+# (default ~/_oqs) and in the system linker paths. liboqs must therefore be
+# installed into that prefix: any other location "works" only in the current
+# shell via LD_LIBRARY_PATH and forces a full recompile on every run. And if
+# the wrapper can't find the library on import, it silently clones and builds
+# its own copy with unbounded parallelism (OOM on small machines) — so the
+# checks below never `import oqs` unless the library is already on disk.
 #
 # No Linux distro ships a trustworthy prebuilt liboqs: Ubuntu/Debian never
 # had one (removed from Debian unstable in April 2025) and Fedora's
 # liboqs-devel is stuck on 0.10.0, too old to guarantee the ML-KEM-768 /
 # ML-DSA-65 parameter sets this project requires. Source build stays the
-# only correct path there. Homebrew's formula is official and current
-# enough to trust, so macOS gets a fast path that skips the RAM-heavy
-# compile entirely — verified against the required algorithms before use.
-BUILT_VIA_PACKAGE=false
-if [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null && ! python -c "import oqs" 2>/dev/null; then
-    info "macOS detected — trying prebuilt liboqs via Homebrew (avoids RAM-heavy compile)…"
-    if brew list liboqs &>/dev/null || brew install liboqs; then
-        pip install --quiet --force-reinstall liboqs-python || true
-        if python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')" 2>/dev/null; then
-            ok "liboqs via Homebrew (ML-KEM-768, ML-DSA-65 present)"
-            BUILT_VIA_PACKAGE=true
-        else
-            warn "Homebrew liboqs missing required algorithms — falling back to source build"
-        fi
-    else
-        warn "brew install liboqs failed — falling back to source build"
+# only correct path there. Homebrew's formula is official and current enough
+# to trust, so macOS gets a fast path that skips the compile — verified
+# against the required algorithms before use.
+OQS_PREFIX="${OQS_INSTALL_PATH:-$HOME/_oqs}"
+
+# The shared library exists where the wrapper will look. No `import oqs`
+# here — checking must never trigger the wrapper's surprise auto-build.
+pq_lib_on_disk() {
+    python - >/dev/null 2>&1 <<'PYEOF'
+import ctypes.util, os, sys
+from pathlib import Path
+prefix = Path(os.environ.get("OQS_INSTALL_PATH", str(Path.home() / "_oqs")))
+hits = [p for d in ("lib", "lib64") for p in (prefix / d).glob("liboqs.*")]
+sys.exit(0 if (hits or ctypes.util.find_library("oqs")) else 1)
+PYEOF
+}
+
+# Full functional check: wrapper + library + the exact algorithms we need.
+pq_ready() {
+    pq_lib_on_disk || return 1
+    python - >/dev/null 2>&1 <<'PYEOF'
+import oqs
+oqs.KeyEncapsulation("ML-KEM-768")
+oqs.Signature("ML-DSA-65")
+PYEOF
+}
+
+if pq_ready && python -c "import cryptography, pytest, pytest_asyncio" >/dev/null 2>&1; then
+    ok "Dependencies already installed (fast start)"
+else
+    info "Installing Python dependencies…"
+    pip install --quiet --upgrade pip || fail "pip upgrade failed"
+    pip install --quiet -r requirements.txt || fail "pip install failed"
+
+    if ! pq_ready && [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null; then
+        info "macOS — trying prebuilt liboqs via Homebrew (skips the long compile)…"
+        brew list liboqs &>/dev/null || brew install liboqs || true
     fi
+
+    if ! pq_ready; then
+        # Build the liboqs release matching the installed wrapper so the two
+        # stay in lockstep — a mismatched wrapper/library pair around the
+        # crypto is not acceptable, even when it happens to load.
+        OQS_PY_VER=$(python -c "import importlib.metadata as m; print(m.version('liboqs-python'))") \
+            || fail "liboqs-python is not installed"
+        info "Building liboqs $OQS_PY_VER from source (one-time — a few minutes)…"
+
+        BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        SRC="$BUILD_DIR/liboqs"
+
+        # Tag matching the wrapper version, else its x.y.0, else main.
+        for ref in "$OQS_PY_VER" "${OQS_PY_VER%.*}.0" main; do
+            if git clone --quiet --depth 1 --branch "$ref" \
+                https://github.com/open-quantum-safe/liboqs.git "$SRC" 2>/dev/null; then
+                [ "$ref" = main ] && warn "No liboqs tag matches liboqs-python $OQS_PY_VER — building main"
+                break
+            fi
+            rm -rf "$SRC"
+        done
+        [ -d "$SRC" ] || fail "Failed to clone liboqs repository"
+
+        CMAKE_GEN=""
+        command -v ninja &>/dev/null && CMAKE_GEN="-GNinja"
+
+        # Same feature flags as the wrapper's own auto-build (the stateful
+        # signature symbols must exist or the wrapper fails to load), minus
+        # OpenSSL so no dev headers are needed. OQS_BUILD_ONLY_LIB skips
+        # tests and docs. The install prefix is the wrapper's search path —
+        # user-writable, never needs sudo.
+        cmake -S "$SRC" -B "$BUILD_DIR/build" $CMAKE_GEN \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DOQS_USE_OPENSSL=OFF \
+            -DOQS_ENABLE_SIG_STFL_LMS=ON \
+            -DOQS_ENABLE_SIG_STFL_XMSS=ON \
+            -DOQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN=ON \
+            -DCMAKE_INSTALL_PREFIX="$OQS_PREFIX" \
+            || fail "liboqs cmake configure failed (see output above)"
+
+        # One job per core OOM-kills the build on machines with many cores
+        # but little RAM (~1.5 GB per compile unit) — cap jobs by available RAM.
+        cpu_count() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1; }
+        available_mem_mb() {
+            if [ -r /proc/meminfo ]; then
+                awk '/MemAvailable:/{print int($2/1024); exit}' /proc/meminfo
+            elif command -v sysctl &>/dev/null; then
+                sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}'
+            fi
+        }
+        BUILD_JOBS="$(cpu_count)"
+        MEM_MB="$(available_mem_mb || true)"
+        if [ -n "${MEM_MB:-}" ] && [ "$MEM_MB" -gt 0 ]; then
+            MEM_JOBS=$(( MEM_MB / 1500 ))
+            [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+            if [ "$MEM_JOBS" -lt "$BUILD_JOBS" ]; then BUILD_JOBS="$MEM_JOBS"; fi
+        fi
+        info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
+
+        cmake --build "$BUILD_DIR/build" --parallel "$BUILD_JOBS" \
+            || fail "liboqs build failed"
+        cmake --install "$BUILD_DIR/build" \
+            || fail "liboqs install failed"
+        # The install lives in $OQS_PREFIX — the build tree is dead weight.
+        rm -rf "$BUILD_DIR"
+    fi
+
+    pq_ready || fail "post-quantum crypto still unusable after install — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"
+    ok "Python dependencies installed"
 fi
-
-if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; then
-    info "Building liboqs from source (post-quantum crypto)…"
-    LIBOQS_BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
-    rm -rf "$LIBOQS_BUILD_DIR"
-    mkdir -p "$LIBOQS_BUILD_DIR"
-
-    # Clone liboqs
-    git clone --depth 1 --branch main \
-        https://github.com/open-quantum-safe/liboqs.git \
-        "$LIBOQS_BUILD_DIR/liboqs" || fail "Failed to clone liboqs repository"
-
-    # Determine build generator: prefer Ninja, fallback to Unix Makefiles
-    CMAKE_GEN=""
-    if command -v ninja &>/dev/null; then
-        CMAKE_GEN="-GNinja"
-    fi
-
-    # Clean build dir (no stale cache), configure, build, install.
-    # Install prefix is a user-writable directory, not /usr/local: this
-    # script must never need sudo, and installing system-wide would fail
-    # outright (or silently touch shared system paths) on a locked-down box.
-    LIBOQS_INSTALL_DIR="${LIBOQS_INSTALL_DIR:-$LIBOQS_BUILD_DIR/install}"
-    rm -rf "$LIBOQS_BUILD_DIR/build"
-    # liboqs defaults to a static lib (liboqs.a); liboqs-python needs the
-    # shared object to dlopen at runtime, so BUILD_SHARED_LIBS is mandatory.
-    cmake -S "$LIBOQS_BUILD_DIR/liboqs" -B "$LIBOQS_BUILD_DIR/build" \
-        $CMAKE_GEN -DCMAKE_BUILD_TYPE=Release \
-        -DOQS_USE_OPENSSL=OFF \
-        -DBUILD_SHARED_LIBS=ON \
-        -DCMAKE_INSTALL_PREFIX="$LIBOQS_INSTALL_DIR" \
-        || fail "liboqs cmake configure failed"
-
-    # cmake --build --parallel with no argument defaults to one job per core,
-    # which OOM-kills the build on machines with many cores but little RAM
-    # (each liboqs compile unit can need ~1.5 GB). Cap jobs by available RAM.
-    cpu_count() {
-        nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1
-    }
-    available_mem_mb() {
-        if [ -r /proc/meminfo ]; then
-            awk '/MemAvailable:/{print int($2/1024); exit}' /proc/meminfo
-        elif command -v sysctl &>/dev/null; then
-            sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}'
-        fi
-    }
-    BUILD_JOBS="$(cpu_count)"
-    MEM_MB="$(available_mem_mb || true)"
-    if [ -n "${MEM_MB:-}" ] && [ "$MEM_MB" -gt 0 ]; then
-        MEM_JOBS=$(( MEM_MB / 1500 ))
-        [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
-        if [ "$MEM_JOBS" -lt "$BUILD_JOBS" ]; then
-            BUILD_JOBS="$MEM_JOBS"
-        fi
-    fi
-    info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
-
-    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel "$BUILD_JOBS" \
-        || fail "liboqs build failed"
-
-    cmake --install "$LIBOQS_BUILD_DIR/build" \
-        || fail "liboqs install failed"
-
-    # Reinstall liboqs-python so it picks up the pre-built library
-    pip install --quiet --force-reinstall liboqs-python \
-        || fail "liboqs-python pip install failed"
-
-    # Verify the shared library is loadable
-    if ! python -c "import oqs" 2>/dev/null; then
-        # Fallback: find the .so and set LD_LIBRARY_PATH
-        LIBOQS_SO=$(find "$LIBOQS_BUILD_DIR" "$LIBOQS_INSTALL_DIR" /usr/local -name "liboqs.so*" 2>/dev/null | head -1)
-        if [ -n "$LIBOQS_SO" ]; then
-            LIBOQS_LIBDIR=$(dirname "$LIBOQS_SO")
-            export LD_LIBRARY_PATH="$LIBOQS_LIBDIR:${LD_LIBRARY_PATH:-}"
-            info "Set LD_LIBRARY_PATH=$LIBOQS_LIBDIR"
-            python -c "import oqs" 2>/dev/null \
-                || fail "liboqs built but Python can't load it. Try: export LD_LIBRARY_PATH=$LIBOQS_LIBDIR"
-        else
-            fail "liboqs .so not found after build. Check $LIBOQS_BUILD_DIR/build"
-        fi
-    fi
-fi
-ok "Python dependencies installed"
 
 # ── step 5: verify imports ───────────────────────────────────────────────────
 info "Verifying imports…"
-python -c "import oqs; print('ok')" 2>/dev/null && ok "liboqs-python (post-quantum crypto)" \
-    || fail "liboqs-python import failed — try: rm -rf $HOME/_oqs_build .venv && ./start.sh"
-python -c "import cryptography" 2>/dev/null && ok "cryptography (AES-GCM/HKDF)" \
+pq_ready && ok "liboqs-python (ML-KEM-768, ML-DSA-65)" \
+    || fail "liboqs-python check failed — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"
+python -c "import cryptography" >/dev/null 2>&1 && ok "cryptography (AES-GCM/HKDF)" \
     || fail "cryptography import failed"
-python -c "import src" 2>/dev/null && ok "src (NMesh core)" \
+python -c "import src" >/dev/null 2>&1 && ok "src (NMesh core)" \
     || fail "src import failed — check project structure"
 
 # ── step 6: launch ───────────────────────────────────────────────────────────
