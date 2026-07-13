@@ -76,6 +76,7 @@ Un transport = tout ce qui déplace des octets. Fournis :
 | Schéma     | Medium                         | Usage                         |
 |------------|--------------------------------|-------------------------------|
 | `tcp://`   | TCP/IP                         | liens réseau classiques       |
+| `udp://`   | UDP/IP (fiabilité + hole punch NAT) | liens directs derrière NAT |
 | `spool://` | répertoire partagé / fichier   | store-and-forward, clé USB    |
 
 Écrire le vôtre : [`Docs/Transports/guide`](Docs/Transports/guide) +

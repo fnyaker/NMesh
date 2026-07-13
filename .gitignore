@@ -16,3 +16,4 @@ invite_*
 
 # Build artifacts
 *.pyz
+.blackboxcli/

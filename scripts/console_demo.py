@@ -20,6 +20,7 @@ from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.spool_transport import SpoolTransport, SpoolServer
+from src.udp_transport import UDPTransport, UDPServer
 from src.webconsole import WebConsole
 from src.data_connector import DataConnector
 from src.process_launcher import ProcessLauncher
@@ -28,6 +29,12 @@ from src.process_launcher import ProcessLauncher
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", default="0.0.0.0:9000", help="node TCP listen addr")
+    ap.add_argument("--udp", default=None, type=int,
+                    help="also listen on UDP for hole punching (port number)")
+    ap.add_argument("--no-udp", action="store_true",
+                    help="disable UDP hole punching (overrides start.sh default)")
+    ap.add_argument("--stun", action="store_true",
+                    help="use STUN to discover public UDP address (fallback)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
     ap.add_argument("--console-host", default="127.0.0.1")
     ap.add_argument("--console-port", type=int, default=8787)
@@ -45,6 +52,7 @@ async def main() -> None:
     mgr = TransportManager()
     mgr.register("tcp", TCPTransport, TCPServer)
     mgr.register("spool", SpoolTransport, SpoolServer)
+    mgr.register("udp", UDPTransport, UDPServer)
     node = MeshNode(
         mgr,
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
@@ -55,6 +63,14 @@ async def main() -> None:
     if args.spool:
         listen_uris.append(f"spool://{args.spool}")
     await node.start(listen_uris)
+    # Discover public IP before printing so advertised URIs include it
+    pub_ip = await node.discover_public_ip()
+    if args.udp is not None and not args.no_udp:
+        await node.start_udp(args.udp)
+        if args.stun:
+            pub = await node.discover_public_udp_addr()
+            if pub:
+                print(f"  STUN          : public UDP addr {pub[0]}:{pub[1]}")
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
                          state_dir=args.data, use_tls=not args.no_tls)
@@ -73,10 +89,14 @@ async def main() -> None:
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
+    if pub_ip:
+        print(f"  Public IP     : {pub_ip}   (self-discovered)")
     for uri in node.advertised_uris():
         print(f"  Advertised    : {uri}")
     if args.spool:
         print(f"  Spool link    : spool://{args.spool}   (store-and-forward)")
+    if args.udp is not None and not args.no_udp:
+        print(f"  UDP listener  : udp://0.0.0.0:{args.udp}   (NAT hole punching)")
     print(f"  Web console   : {console.url}")
     if console.generated_password:
         print(f"  Password      : {console.generated_password}   (shown once — save it)")
@@ -103,7 +123,7 @@ async def main() -> None:
         if connector is not None:
             await connector.stop()
         console.stop()
-        await node.stop()
+        await node.stop()  # also stops UDP listener + cleans up punch state
 
 
 if __name__ == "__main__":
