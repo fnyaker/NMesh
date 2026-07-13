@@ -159,7 +159,31 @@ if ! python -c "import oqs" 2>/dev/null; then
         -DOQS_USE_OPENSSL=OFF \
         || fail "liboqs cmake configure failed"
 
-    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel \
+    # cmake --build --parallel with no argument defaults to one job per core,
+    # which OOM-kills the build on machines with many cores but little RAM
+    # (each liboqs compile unit can need ~1.5 GB). Cap jobs by available RAM.
+    cpu_count() {
+        nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1
+    }
+    available_mem_mb() {
+        if [ -r /proc/meminfo ]; then
+            awk '/MemAvailable:/{print int($2/1024); exit}' /proc/meminfo
+        elif command -v sysctl &>/dev/null; then
+            sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}'
+        fi
+    }
+    BUILD_JOBS="$(cpu_count)"
+    MEM_MB="$(available_mem_mb || true)"
+    if [ -n "${MEM_MB:-}" ] && [ "$MEM_MB" -gt 0 ]; then
+        MEM_JOBS=$(( MEM_MB / 1500 ))
+        [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+        if [ "$MEM_JOBS" -lt "$BUILD_JOBS" ]; then
+            BUILD_JOBS="$MEM_JOBS"
+        fi
+    fi
+    info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
+
+    cmake --build "$LIBOQS_BUILD_DIR/build" --parallel "$BUILD_JOBS" \
         || fail "liboqs build failed"
 
     cmake --install "$LIBOQS_BUILD_DIR/build" \
