@@ -119,7 +119,8 @@ class TestAuth:
                 _request, console, "GET", "/api/state", token)
             assert status == 200
             for key in ("id", "peers", "total", "load", "routing", "uptime",
-                        "advertised", "listen", "local_ips", "transports", "listening"):
+                        "advertised", "listen", "local_ips", "transports",
+                        "listening", "network", "transport_details"):
                 assert key in snap
             assert snap["id"] == node.id.raw.hex()
             assert "fake" in snap["transports"]
