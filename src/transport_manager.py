@@ -76,6 +76,13 @@ class TransportManager:
         """URL schemes with a registered transport."""
         return sorted(self._registry.keys())
 
+    def scheme_of(self, transport: BaseTransport) -> str | None:
+        """Registered scheme a transport instance belongs to, if any."""
+        for scheme, (transport_cls, _) in self._registry.items():
+            if isinstance(transport, transport_cls):
+                return scheme
+        return None
+
     def listening_uris(self) -> list[str]:
         """URIs this manager is currently listening on."""
         return sorted(self._servers.keys())

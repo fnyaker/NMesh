@@ -16,7 +16,8 @@ from .cert_store import CertStore
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters
 from .dht import ContentStore
-from .ip_utils import local_ip_addresses, expand_listen_uri
+from .ip_utils import local_ip_addresses, expand_listen_uri, split_host_port
+from .net_monitor import NetMonitor
 from .app_package import (
     build as _app_build, parse_manifest as _app_parse_manifest,
     reassemble as _app_reassemble, chunk_keys as _app_chunk_keys,
@@ -596,7 +597,10 @@ class MeshNode:
         self._udp_server: 'UDPServer | None' = None
         self._udp_listen_uri: str | None = None
         self._punch_pending: dict[NodeID, _PunchState] = {}
+        self._punch_stats = {"attempted": 0, "completed": 0, "failed": 0}
         self._stun_enabled: bool = False
+        # Keeps local/public addressing fresh (created on start(), needs a loop)
+        self._net_monitor: NetMonitor | None = None
 
     @property
     def id(self) -> NodeID:
@@ -618,15 +622,41 @@ class MeshNode:
             except Exception:
                 pass
         self._local_ips = local_ip_addresses()
-        # Fire-and-forget public IP discovery so advertised URIs include it
-        asyncio.ensure_future(self._discover_public_ip_bg())
+        # Background monitor: re-verifies local/public IPs on triggers
+        # (interface change, suspend/resume, peer events) and periodically.
+        if self._net_monitor is None:
+            self._net_monitor = NetMonitor(
+                probe_local_ips=local_ip_addresses,
+                probe_public_ip=self.discover_public_ip,
+                probe_stun=self._probe_stun_if_udp,
+                on_change=self._on_network_change,
+            )
+            self._net_monitor.start()
 
-    async def _discover_public_ip_bg(self) -> None:
-        """Background task: discover public IP for advertised URIs."""
-        try:
-            await self.discover_public_ip()
-        except Exception:
-            pass
+    def _on_network_change(self, status: dict, changes: dict) -> None:
+        """Applied when the monitor sees our addressing move: refresh the
+        addresses we advertise and drop a stale public IP."""
+        if "local_ips" in changes:
+            self._local_ips = list(status["local_ips"])
+        if "public_ip" in changes:
+            old, new = changes["public_ip"]
+            if old in self._extra_addrs:
+                self._extra_addrs.remove(old)
+            if (new and new not in self._extra_addrs
+                    and new not in self._local_ips
+                    and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
+                self._extra_addrs.append(new)
+
+    def _poke_net(self, reason: str) -> None:
+        if self._net_monitor is not None:
+            self._net_monitor.poke(reason)
+
+    async def _probe_stun_if_udp(self) -> tuple[str, int] | None:
+        """STUN only makes sense (and is only worth the observable traffic)
+        when a UDP listener is up for hole punching."""
+        if self._udp_server is None:
+            return None
+        return await self.discover_public_udp_addr()
 
     async def add_listen(self, uri: str) -> None:
         """Start listening on another address at runtime (e.g. add a port)."""
@@ -635,6 +665,7 @@ class MeshNode:
             self._addresses.append(uri)
         self._running = True
         self._local_ips = local_ip_addresses()
+        self._poke_net("listener-added")
 
     async def remove_listen(self, uri: str) -> bool:
         """Stop listening on an address at runtime."""
@@ -656,6 +687,7 @@ class MeshNode:
         self._udp_listen_uri = uri
         if uri not in self._addresses:
             self._addresses.append(uri)
+        self._poke_net("udp-listener-added")
 
     async def stop_udp(self) -> None:
         """Stop the UDP listener."""
@@ -783,6 +815,9 @@ class MeshNode:
             await self._udp_server.close()
             self._udp_server = None
         self._punch_pending.clear()
+        if self._net_monitor is not None:
+            await self._net_monitor.stop()
+            self._net_monitor = None
 
     async def wait_for_session(self, timeout: float = 10.0) -> None:
         deadline = asyncio.get_event_loop().time() + timeout
@@ -1066,6 +1101,7 @@ class MeshNode:
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
         self._peers.append(peer)
+        self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
         challenge = self._invite.generate_challenge()
         peer.pending_challenge = challenge
@@ -1123,6 +1159,7 @@ class MeshNode:
             await peer.transport.close()
         except Exception:
             pass
+        self._poke_net("peer-lost")
 
     def _persist_state(self) -> None:
         """Snapshot E2E + routing state to the encrypted store, if persistence
@@ -1153,6 +1190,7 @@ class MeshNode:
                 "has_session": p.session is not None,
                 "malformed": p._malformed,
                 "counters": p.counters.as_dict(),
+                "transport": self._peer_scheme(p),
             })
         routing = [
             {"id": e.node_id.raw.hex(), "addresses": list(e.addresses)}
@@ -1179,7 +1217,78 @@ class MeshNode:
             "e2e_sessions": [nid.raw.hex() for nid in self._e2e_sessions],
             "total": self._metrics.total.as_dict(),
             "load": self._metrics.load(),
+            "network": (self._net_monitor.status()
+                        if self._net_monitor is not None else None),
+            "transport_details": self._transport_details(),
         }
+
+    def _peer_scheme(self, peer: '_Peer') -> str | None:
+        """Best-effort transport scheme of a peer's link, for the console."""
+        addr = peer.remote_addr
+        if addr and "://" in addr:
+            return addr.split("://", 1)[0]
+        scheme = self._transport_manager.scheme_of(peer.transport)
+        if scheme is not None:
+            return scheme
+        from .udp_transport import UDPTransport
+        if isinstance(peer.transport, UDPTransport):
+            return "udp"
+        return None
+
+    def _transport_details(self) -> list[dict]:
+        """Per-scheme view of the transport layer for the console: listeners,
+        ports, connected peers — plus hole-punching state for udp://."""
+        listening = (self._transport_manager.listening_uris()
+                     + ([self._udp_listen_uri] if self._udp_listen_uri else []))
+        by_scheme: dict[str, list[str]] = {}
+        for uri in listening:
+            parsed = _validate_uri(uri)
+            if parsed is not None:
+                by_scheme.setdefault(parsed[0], []).append(uri)
+
+        peer_schemes: dict[str, int] = {}
+        for p in self._peers:
+            scheme = self._peer_scheme(p)
+            if scheme is not None:
+                peer_schemes[scheme] = peer_schemes.get(scheme, 0) + 1
+
+        self._prune_punch_pending()
+        details: list[dict] = []
+        schemes = set(self._transport_manager.schemes()) | set(by_scheme)
+        if self._udp_server is not None:
+            schemes.add("udp")
+        for scheme in sorted(schemes):
+            uris = by_scheme.get(scheme, [])
+            ports: list[int] = []
+            for uri in uris:
+                hp = split_host_port(_validate_uri(uri)[1])
+                if hp is not None:
+                    try:
+                        ports.append(int(hp[1]))
+                    except ValueError:
+                        pass
+            entry: dict = {
+                "scheme": scheme,
+                "listening": uris,
+                "ports": sorted(set(ports)),
+                "peers": peer_schemes.get(scheme, 0),
+            }
+            if scheme == "udp":
+                now = time.monotonic()
+                entry["hole_punch"] = {
+                    "udp_port": self.udp_port(),
+                    "stats": dict(self._punch_stats),
+                    "pending": [{
+                        "target": s.target.raw.hex(),
+                        "remote_addr": s.remote_udp_addr,
+                        "probes_sent": s.probes_sent,
+                        "probes_received": s.probes_received,
+                        "ack_received": s.ack_received,
+                        "expires_in": max(0.0, s.deadline - now),
+                    } for s in self._punch_pending.values()],
+                }
+            details.append(entry)
+        return details
 
     def console_root_cert_hex(self) -> str:
         """Our self-signed root cert, hex-encoded — paste it into another node's
@@ -1389,6 +1498,9 @@ class MeshNode:
             return
         if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
             self._extra_addrs.append(ip)
+        # A peer sees us at an address we didn't know — our public IP may
+        # have just changed. Re-verify.
+        self._poke_net("observed-addr")
 
     async def _handle_find_value(self, peer: _Peer, packet: Packet) -> None:
         # payload: key(20) || query_id(8) ; reply carries the value or empty
@@ -1793,6 +1905,7 @@ class MeshNode:
 
         if peer_id == self._id:
             return
+        self._prune_punch_pending()
         if len(self._punch_pending) >= _PUNCH_MAX_PENDING:
             return
         if peer_id in self._punch_pending:
@@ -1824,9 +1937,18 @@ class MeshNode:
         state = _PunchState(peer_id, udp_addr, observed_ip)
         state.deadline = time.monotonic() + _PUNCH_TIMEOUT
         self._punch_pending[peer_id] = state
+        self._punch_stats["attempted"] += 1
 
         # Start sending probes
         asyncio.create_task(self._send_punch_probes(state))
+
+    def _prune_punch_pending(self) -> None:
+        """Drop hole-punch attempts past their deadline (counted as failed)."""
+        now = time.monotonic()
+        for target in [t for t, s in self._punch_pending.items()
+                       if s.transport is None and now > s.deadline]:
+            del self._punch_pending[target]
+            self._punch_stats["failed"] += 1
 
     async def _send_punch_probes(self, state: '_PunchState') -> None:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
@@ -1995,6 +2117,7 @@ class MeshNode:
 
         state.transport = transport
         self._punch_pending.pop(state.target, None)
+        self._punch_stats["completed"] += 1
 
         # Trigger the mesh handshake (challenge → handshake → session)
         # The server-side will send a challenge when it gets the transport
