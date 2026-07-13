@@ -73,6 +73,8 @@ async def main() -> None:
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
+    for uri in node.advertised_uris():
+        print(f"  Advertised    : {uri}")
     if args.spool:
         print(f"  Spool link    : spool://{args.spool}   (store-and-forward)")
     print(f"  Web console   : {console.url}")

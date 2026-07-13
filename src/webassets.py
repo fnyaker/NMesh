@@ -55,6 +55,14 @@ INDEX_HTML = """<!doctype html>
     </tr></thead><tbody></tbody></table>
   </section>
 
+  <section class="card expert">
+    <h2>Expert — addressing &amp; transports</h2>
+    <div class="xrow"><span class="xk">Advertised URIs</span><ul id="x-advertised" class="mono"></ul></div>
+    <div class="xrow"><span class="xk">Listening</span><ul id="x-listening" class="mono"></ul></div>
+    <div class="xrow"><span class="xk">Local IPs</span><ul id="x-localips" class="mono"></ul></div>
+    <div class="xrow"><span class="xk">Transports</span><div id="x-transports"></div></div>
+  </section>
+
   <section class="card">
     <h2>Manage</h2>
     <div class="manage">
@@ -153,6 +161,13 @@ th{color:var(--muted);font-weight:500}
 .mrow.join input{width:auto;flex:1;margin:0}
 #invite-out{color:var(--accent)}
 section{margin-bottom:16px}
+.expert .xrow{display:grid;grid-template-columns:150px 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
+.expert .xk{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+.expert ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px}
+.expert ul li{word-break:break-all}
+.pill{display:inline-block;background:#223;border:1px solid var(--line);border-radius:999px;
+padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}
+.pill.on{background:rgba(63,185,80,.15);color:var(--ok);border-color:transparent}
 """
 
 APP_JS = r"""
@@ -251,6 +266,23 @@ async function tick() {
   drawChart();
   drawGraph(s);
   drawPeers(s.peers);
+  drawExpert(s);
+}
+
+function drawExpert(s) {
+  const list = (id, arr) => {
+    $(id).innerHTML = (arr && arr.length)
+      ? arr.map((x) => `<li>${x}</li>`).join("")
+      : '<li class="muted">—</li>';
+  };
+  list("x-advertised", s.advertised);
+  list("x-listening", s.listening);
+  list("x-localips", s.local_ips);
+  const listening = new Set(s.listening || []);
+  const active = new Set((s.listening || []).map((u) => u.split("://")[0]));
+  $("x-transports").innerHTML = (s.transports || []).map((t) =>
+    `<span class="pill ${active.has(t) ? "on" : ""}">${t}${active.has(t) ? " ●" : ""}</span>`
+  ).join("");
 }
 
 function tiles(items) {

@@ -14,6 +14,7 @@ from .cert_store import CertStore
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters
 from .dht import ContentStore
+from .ip_utils import local_ip_addresses, expand_listen_uri
 from .app_package import (
     build as _app_build, parse_manifest as _app_parse_manifest,
     reassemble as _app_reassemble, chunk_keys as _app_chunk_keys,
@@ -421,7 +422,9 @@ class MeshNode:
             self._identity = CryptoIdentity()
         self._id = NodeID.from_public_key(self._identity.dsa_public_key)
         self._routing = RoutingTable(self._id)
-        self._addresses: list[str] = []
+        self._addresses: list[str] = []      # configured listen URIs (may be wildcard)
+        self._local_ips: list[str] = []      # cached host addresses (for expansion)
+        self._extra_addrs: list[str] = []    # externally-discovered (e.g. public IP)
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -478,6 +481,35 @@ class MeshNode:
                 self._addresses.append(uri)
             except Exception:
                 pass
+        self._local_ips = local_ip_addresses()
+
+    async def add_listen(self, uri: str) -> None:
+        """Start listening on another address at runtime (e.g. add a port)."""
+        await self._transport_manager.listen(uri)
+        if uri not in self._addresses:
+            self._addresses.append(uri)
+        self._running = True
+        self._local_ips = local_ip_addresses()
+
+    async def remove_listen(self, uri: str) -> bool:
+        """Stop listening on an address at runtime."""
+        ok = await self._transport_manager.stop_listen(uri)
+        if uri in self._addresses:
+            self._addresses.remove(uri)
+        return ok
+
+    def advertised_uris(self) -> list[str]:
+        """Concrete, connectable URIs a peer can reach us at — each configured
+        listen URI expanded over the host's addresses (and any discovered
+        external address). Wildcards like 0.0.0.0 become one URI per address."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for uri in self._addresses:
+            for u in expand_listen_uri(uri, self._local_ips, self._extra_addrs):
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+        return out
 
     async def join(self, address: str, code: str) -> None:
         transport = await self._transport_manager.connect(address)
@@ -530,7 +562,7 @@ class MeshNode:
         return await self._data_queue.get()
 
     async def ping(self, peer: _Peer) -> None:
-        payload = _encode_addresses(self._addresses)
+        payload = _encode_addresses(self.advertised_uris())
         packet = Packet.create(PING, self._id.raw, NodeID(b"\xff" * 20).raw, payload)
         await peer.send(packet)
 
@@ -875,6 +907,11 @@ class MeshNode:
         return {
             "id": self._id.raw.hex(),
             "addresses": list(self._addresses),
+            "listen": list(self._addresses),
+            "advertised": self.advertised_uris(),
+            "local_ips": list(self._local_ips),
+            "transports": self._transport_manager.schemes(),
+            "listening": self._transport_manager.listening_uris(),
             "running": self._running,
             "uptime": self._metrics.uptime(),
             "peer_count": len(self._peers),
