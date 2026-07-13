@@ -255,3 +255,55 @@ class TestHolePunching:
         await a.stop()
         await c.stop()
         await relay.stop()
+
+    async def test_auto_punch_on_relayed_traffic(self):
+        """Sending data to a peer reachable only via a relay automatically
+        upgrades to a direct UDP link through a hole punch.
+
+        A and C join relay B over TCP. A's routing entry for C carries a dead
+        address (simulated NAT: C's advertised address is not connectable).
+        A simply send_data()s to C — no manual punch call anywhere — and the
+        path-upgrade logic must fall back to a relay-coordinated punch.
+        """
+        relay = make_node()
+        a = make_node()
+        c = make_node()
+
+        code_a = relay.generate_invite()
+        code_c = relay.generate_invite()
+        await relay.start(["tcp://127.0.0.1:19350"])
+        await a.join("tcp://127.0.0.1:19350", code_a)
+        await c.join("tcp://127.0.0.1:19350", code_c)
+        await asyncio.wait_for(a.wait_for_session(timeout=15.0), timeout=20.0)
+        await asyncio.wait_for(c.wait_for_session(timeout=15.0), timeout=20.0)
+
+        await a.start_udp(19351, "127.0.0.1")
+        await c.start_udp(19352, "127.0.0.1")
+
+        # Simulated NAT: A knows C's identity but only a dead address
+        a._routing.add(c.id, ["tcp://127.0.0.1:1"],
+                       c._identity.dsa_public_key)
+        c._routing.add(a.id, [], a._identity.dsa_public_key)
+
+        # The trigger: plain application traffic, nothing punch-specific
+        await a.send_data(c.id, b"punch me a path")
+
+        async with asyncio.timeout(30.0):
+            while True:
+                src, data = await c.receive_data()
+                if data == b"punch me a path":
+                    break
+
+        # The punched direct UDP link exists on A's side
+        async with asyncio.timeout(15.0):
+            while not any(
+                p.authenticated_id == c.id and p.session is not None
+                and (p.remote_addr or "").startswith("udp://")
+                for p in a._peers
+            ):
+                await asyncio.sleep(0.1)
+        assert a._punch_stats["completed"] >= 1
+
+        await a.stop()
+        await c.stop()
+        await relay.stop()
