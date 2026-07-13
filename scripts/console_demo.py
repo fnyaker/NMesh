@@ -29,10 +29,10 @@ from src.process_launcher import ProcessLauncher
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", default="0.0.0.0:9000", help="node TCP listen addr")
-    ap.add_argument("--udp", default=None, type=int,
-                    help="also listen on UDP for hole punching (port number)")
+    ap.add_argument("--udp", default=9001, type=int,
+                    help="UDP listen port for hole punching (default 9001)")
     ap.add_argument("--no-udp", action="store_true",
-                    help="disable UDP hole punching (overrides start.sh default)")
+                    help="disable the UDP listener (punching stays controllable from the console)")
     ap.add_argument("--stun", action="store_true",
                     help="use STUN to discover public UDP address (fallback)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
