@@ -87,9 +87,14 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 
 ## Prochaines étapes (vision « Jarvis / Edith »)
 
+### Détection d'IP publique (mesh-native) — fait
+- Un pair qui accepte notre connexion nous renvoie l'IP source qu'il a vue
+  (message `OBSERVED_ADDR`) → on apprend notre adresse publique sans serveur
+  externe (activé par défaut, à chaque handshake). Validé, borné ; alimente
+  les URIs annoncées.
+
 ### Transport IP — suite (à faire)
-- Détection d'IP publique : adresse observée par les pairs (mesh-natif, sans
-  serveur externe) + client STUN optionnel.
+- Client STUN optionnel (fallback quand aucun pair n'est disponible).
 - Transport UDP (couche de fiabilité) + hole punching NAT signalé sur le mesh.
 
 

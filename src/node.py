@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import struct
 import time
 from collections import OrderedDict
@@ -26,6 +27,16 @@ from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 _HEADER_BYTES = 79  # fixed packet header size, for byte accounting
 
+
+def _is_ip_address(s: str) -> bool:
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(family, s)
+            return True
+        except OSError:
+            continue
+    return False
+
 DATA          = 0x00
 PING          = 0x01
 PONG          = 0x02
@@ -41,6 +52,7 @@ INVITE_ACK    = 0x0B
 CHALLENGE         = 0x0C
 E2E_HANDSHAKE     = 0x0D
 E2E_HANDSHAKE_ACK = 0x0E
+OBSERVED_ADDR     = 0x0F
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -58,7 +70,9 @@ _ADDR_LEN    = struct.Struct('!H')
 # E2E handshake: nonce(32) || var1_len(H) || var2_len(H) || chain_bytes_len(H)
 _E2E_HEADER  = struct.Struct('!32sHHH')
 
-_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE}
+_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
+                    STORE, OBSERVED_ADDR}
+_MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
@@ -1022,6 +1036,7 @@ class MeshNode:
             FIND_VALUE:        self._handle_find_value,
             FOUND_VALUE:       self._handle_found_value,
             STORE:             self._handle_store,
+            OBSERVED_ADDR:     self._handle_observed_addr,
             HANDSHAKE:         self._handle_handshake,
             HANDSHAKE_ACK:     self._handle_handshake_ack,
             CHALLENGE:         self._handle_challenge,
@@ -1116,6 +1131,21 @@ class MeshNode:
         key = packet.payload[:20]
         value = packet.payload[20:]
         self._dht_store.put(key, value)  # put() rejects non-content-addressed data
+
+    async def _handle_observed_addr(self, peer: _Peer, packet: Packet) -> None:
+        # A peer that accepted our connection tells us the source IP it saw —
+        # that's our public address as seen from there. Record it (validated,
+        # bounded) so we can advertise it alongside our local ones.
+        try:
+            ip = packet.payload.decode("ascii")
+        except UnicodeDecodeError:
+            return
+        if not _is_ip_address(ip):
+            return
+        if ip in self._local_ips or ip in self._extra_addrs:
+            return
+        if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
+            self._extra_addrs.append(ip)
 
     async def _handle_find_value(self, peer: _Peer, packet: Packet) -> None:
         # payload: key(20) || query_id(8) ; reply carries the value or empty
@@ -1387,6 +1417,14 @@ class MeshNode:
         ack = Packet.create(HANDSHAKE_ACK, self._id.raw, packet.src_id, payload)
         await peer.send(ack)
         self._persist_state()  # persist the newly-known peer for restart recovery
+        # Tell the peer the source IP we saw — that's their public address.
+        observed = peer.transport.remote_ip()
+        if observed and _is_ip_address(observed):
+            try:
+                await peer.send(Packet.create(OBSERVED_ADDR, self._id.raw,
+                                              packet.src_id, observed.encode("ascii")))
+            except Exception:
+                pass
 
     async def _handle_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         if peer.pending_kem_secret is None:

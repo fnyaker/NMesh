@@ -71,6 +71,14 @@ class TCPTransport(BaseTransport):
             raise ConnectionError("read timeout")
         return Packet.unpack(data)
 
+    def remote_ip(self) -> str | None:
+        if self._writer is None:
+            return None
+        peer = self._writer.get_extra_info("peername")
+        if not peer:
+            return None
+        return str(peer[0]).split("%", 1)[0]   # drop IPv6 scope id
+
     async def close(self) -> None:
         if self._writer:
             self._writer.close()
