@@ -55,12 +55,18 @@ INDEX_HTML = """<!doctype html>
     </tr></thead><tbody></tbody></table>
   </section>
 
+  <section class="card">
+    <h2>Transports</h2>
+    <div id="net-status" class="netrow"></div>
+    <div id="transport-cards" class="tcards"></div>
+    <div id="punch-block"></div>
+  </section>
+
   <section class="card expert">
-    <h2>Expert — addressing &amp; transports</h2>
+    <h2>Expert — addressing</h2>
     <div class="xrow"><span class="xk">Advertised URIs</span><ul id="x-advertised" class="mono"></ul></div>
     <div class="xrow"><span class="xk">Listening</span><ul id="x-listening" class="mono"></ul></div>
     <div class="xrow"><span class="xk">Local IPs</span><ul id="x-localips" class="mono"></ul></div>
-    <div class="xrow"><span class="xk">Transports</span><div id="x-transports"></div></div>
   </section>
 
   <section class="card">
@@ -168,6 +174,19 @@ section{margin-bottom:16px}
 .pill{display:inline-block;background:#223;border:1px solid var(--line);border-radius:999px;
 padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}
 .pill.on{background:rgba(63,185,80,.15);color:var(--ok);border-color:transparent}
+.netrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.netrow .badge.down{background:rgba(248,81,73,.15);color:var(--bad)}
+.netrow .nk{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-right:4px}
+.tcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.tcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;padding:12px}
+.tcard h3{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
+.tcard .kv{display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:2px 0}
+.tcard .kv .k{color:var(--muted)}
+.tcard ul{margin:4px 0 0;padding:0;list-style:none;font-size:12px}
+.tcard ul li{word-break:break-all}
+#punch-block{margin-top:12px}
+#punch-block h3{margin:0 0 8px;font-size:13px;color:var(--muted);
+text-transform:uppercase;letter-spacing:.05em}
 """
 
 APP_JS = r"""
@@ -266,6 +285,7 @@ async function tick() {
   drawChart();
   drawGraph(s);
   drawPeers(s.peers);
+  drawTransports(s);
   drawExpert(s);
 }
 
@@ -278,11 +298,65 @@ function drawExpert(s) {
   list("x-advertised", s.advertised);
   list("x-listening", s.listening);
   list("x-localips", s.local_ips);
-  const listening = new Set(s.listening || []);
-  const active = new Set((s.listening || []).map((u) => u.split("://")[0]));
-  $("x-transports").innerHTML = (s.transports || []).map((t) =>
-    `<span class="pill ${active.has(t) ? "on" : ""}">${t}${active.has(t) ? " ●" : ""}</span>`
-  ).join("");
+}
+
+function fmtAge(a) {
+  if (a == null) return "never";
+  if (a < 60) return Math.round(a) + "s ago";
+  return Math.round(a / 60) + "m ago";
+}
+
+function drawTransports(s) {
+  const net = s.network;
+  if (net) {
+    const inet = net.internet == null
+      ? '<span class="badge">checking…</span>'
+      : net.internet
+        ? '<span class="badge up">online</span>'
+        : '<span class="badge down">offline</span>';
+    $("net-status").innerHTML =
+      `<span><span class="nk">Internet</span>${inet}</span>` +
+      `<span><span class="nk">Public IP</span><span class="mono">${net.public_ip || "unknown"}</span></span>` +
+      `<span><span class="nk">Public UDP (STUN)</span><span class="mono">${net.stun_addr || "—"}</span></span>` +
+      `<span><span class="nk">Checked</span>${fmtAge(net.last_full_check_age)}</span>` +
+      (net.triggers && net.triggers.length
+        ? `<span><span class="nk">Last trigger</span>${net.triggers[0].reason}</span>` : "");
+  } else {
+    $("net-status").innerHTML = '<span class="muted">network monitor not running</span>';
+  }
+
+  const details = s.transport_details || [];
+  $("transport-cards").innerHTML = details.map((t) => {
+    const live = t.listening && t.listening.length;
+    return `<div class="tcard">
+      <h3><span class="pill ${live ? "on" : ""}">${t.scheme}${live ? " ●" : ""}</span></h3>
+      <div class="kv"><span class="k">Peers</span><span>${t.peers}</span></div>
+      <div class="kv"><span class="k">Ports</span><span class="mono">${(t.ports || []).join(", ") || "—"}</span></div>
+      <div class="kv"><span class="k">Listening</span><span>${live ? t.listening.length : "no"}</span></div>
+      <ul class="mono muted">${(t.listening || []).map((u) => `<li>${u}</li>`).join("")}</ul>
+    </div>`;
+  }).join("");
+
+  const udp = details.find((t) => t.hole_punch);
+  if (udp) {
+    const hp = udp.hole_punch;
+    const rows = (hp.pending || []).map((p) => `<tr>
+      <td class="mono">${short(p.target)}</td>
+      <td class="mono">${p.remote_addr}</td>
+      <td>${p.probes_sent} / ${p.probes_received}</td>
+      <td>${p.ack_received ? "✓" : "…"}</td>
+      <td>${p.expires_in.toFixed(0)}s</td>
+    </tr>`).join("");
+    $("punch-block").innerHTML =
+      `<h3>UDP hole punching — port ${hp.udp_port ?? "—"} · ` +
+      `${hp.stats.completed} ok / ${hp.stats.failed} failed / ${hp.stats.attempted} tried</h3>` +
+      (rows
+        ? `<table><thead><tr><th>Target</th><th>Remote</th><th>Probes s/r</th>
+           <th>Ack</th><th>Expires</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<div class="muted">no punch in progress</div>');
+  } else {
+    $("punch-block").innerHTML = "";
+  }
 }
 
 function tiles(items) {
