@@ -93,9 +93,26 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   externe (activé par défaut, à chaque handshake). Validé, borné ; alimente
   les URIs annoncées.
 
-### Transport IP — suite (à faire)
-- Client STUN optionnel (fallback quand aucun pair n'est disponible).
-- Transport UDP (couche de fiabilité) + hole punching NAT signalé sur le mesh.
+### Transport IP — suite — fait
+- **Client STUN** (`src/stun.py`) : Binding Request RFC 5389 sur UDP, parse
+  XOR-MAPPED-ADDRESS (IPv4/IPv6). Fallback quand aucun pair n'est disponible
+  pour observer notre adresse. stdlib only, opt-in (`--stun`).
+- **Transport UDP** (`src/udp_transport.py`) : `UDPTransport` / `UDPServer`
+  implémentant `BaseTransport` / `BaseServer` sur sockets datagramme asyncio.
+  Couche de fiabilité : numéros de séquence, ACK cumulatif + SACK,
+  retransmission avec backoff exponentiel, tampon de réordonnancement borné,
+  keepalive 25 s pour maintenir les mappings NAT. Framing avec magic `NUDP`.
+  Tout le mesh (invite/handshake/routage/E2E) tourne sur UDP inchangé.
+- **Hole punching NAT** signalé sur le mesh : messages `PUNCH_REQUEST` /
+  `PUNCH_RELAY` (coordination via relais TCP), `PUNCH_PROBE` / `PUNCH_ACK`
+  (datagrammes UDP bruts signés ML-DSA-65). Deux nœuds derrière NAT
+  s'envoient des sondes simultanées via un relais public ; le trou est
+  percé et un lien UDP direct remplace le relais. Fallback automatique :
+  si le punch échoue (NAT symétrique), le trafic continue via le relais.
+- Testé : transport UDP loopback (send/receive, ordre, bidirectionnel),
+  invite/handshake/E2E sur UDP, hole-punching coordination via relais,
+  résistance aux datagrammes hostiles (garbage → ignoré, pas de crash).
+  385 tests unitaires + 6 tests d'intégration, zéro régression.
 
 
 ### Store-and-forward — approfondissement delay-tolerant

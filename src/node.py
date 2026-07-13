@@ -1,6 +1,7 @@
 import asyncio
 import os
 import socket
+import ssl
 import struct
 import time
 from collections import OrderedDict
@@ -53,6 +54,10 @@ CHALLENGE         = 0x0C
 E2E_HANDSHAKE     = 0x0D
 E2E_HANDSHAKE_ACK = 0x0E
 OBSERVED_ADDR     = 0x0F
+PUNCH_REQUEST     = 0x10
+PUNCH_RELAY       = 0x11
+PUNCH_PROBE       = 0x12
+PUNCH_ACK         = 0x13
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -70,8 +75,18 @@ _ADDR_LEN    = struct.Struct('!H')
 # E2E handshake: nonce(32) || var1_len(H) || var2_len(H) || chain_bytes_len(H)
 _E2E_HEADER  = struct.Struct('!32sHHH')
 
+# PUNCH_REQUEST payload: target_id(20) | my_udp_port(H)
+_PUNCH_REQ = struct.Struct('!20sH')
+# PUNCH_RELAY payload: peer_id(20) | peer_addr_len(H) | peer_addr | my_observed_addr_len(H) | my_observed_addr
+# PUNCH_PROBE (raw UDP datagram, not a mesh Packet): magic(4) | node_id(20) | nonce(16) | signature(64)
+_PUNCH_PROBE_MAGIC = b"NPPB"
+_PUNCH_PROBE = struct.Struct('!4s20s16s')
+_PUNCH_PROBE_SIG_LEN = 64  # ML-DSA-65 signature length
+# PUNCH_ACK (raw UDP datagram): magic(4) | node_id(20) | nonce(16) | signature(64)
+_PUNCH_ACK_MAGIC = b"NPAK"
+
 _DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
-                    STORE, OBSERVED_ADDR}
+                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY}
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
@@ -88,6 +103,13 @@ _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 2
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
+
+# Hole punching
+_PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
+_PUNCH_PROBE_INTERVAL  = 0.1   # seconds between probes
+_PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
+_PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
+_PUNCH_MAX_RETRIES     = 3     # max retries per target
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +284,81 @@ def _decode_e2e_handshake_ack(data: bytes) -> tuple[bytes, bytes, bytes, list[Ce
 
 
 # ---------------------------------------------------------------------------
-# FOUND_NODE entry codec
+# Hole-punching codecs
+# ---------------------------------------------------------------------------
+
+def _encode_punch_request(target_id: bytes, my_udp_port: int) -> bytes:
+    return _PUNCH_REQ.pack(target_id, my_udp_port)
+
+
+def _decode_punch_request(data: bytes) -> tuple[bytes, int] | None:
+    if len(data) < _PUNCH_REQ.size:
+        return None
+    target_id, port = _PUNCH_REQ.unpack_from(data, 0)
+    return target_id, port
+
+
+def _encode_punch_relay(peer_id: bytes, peer_addr: str,
+                        observed_addr: str) -> bytes:
+    pa = peer_addr.encode('utf-8')
+    oa = observed_addr.encode('utf-8')
+    return (peer_id + _ADDR_LEN.pack(len(pa)) + pa
+            + _ADDR_LEN.pack(len(oa)) + oa)
+
+
+def _decode_punch_relay(data: bytes) -> tuple[bytes, str, str] | None:
+    if len(data) < 20 + 2:
+        return None
+    peer_id = data[:20]
+    offset = 20
+    if offset + 2 > len(data):
+        return None
+    pa_len = _ADDR_LEN.unpack_from(data, offset)[0]
+    offset += 2
+    if offset + pa_len > len(data):
+        return None
+    peer_addr = data[offset:offset + pa_len].decode('utf-8')
+    offset += pa_len
+    if offset + 2 > len(data):
+        return None
+    oa_len = _ADDR_LEN.unpack_from(data, offset)[0]
+    offset += 2
+    if offset + oa_len > len(data):
+        return None
+    observed_addr = data[offset:offset + oa_len].decode('utf-8')
+    return peer_id, peer_addr, observed_addr
+
+
+def _build_punch_probe(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
+    """Build a raw UDP probe datagram (not a mesh Packet)."""
+    return _PUNCH_PROBE.pack(_PUNCH_PROBE_MAGIC, node_id, nonce) + signature
+
+
+def _parse_punch_probe(data: bytes) -> tuple[bytes, bytes, bytes] | None:
+    """Parse a raw UDP probe datagram. Returns (node_id, nonce, signature) or None."""
+    if len(data) < _PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN:
+        return None
+    magic, node_id, nonce = _PUNCH_PROBE.unpack_from(data, 0)
+    if magic != _PUNCH_PROBE_MAGIC:
+        return None
+    signature = data[_PUNCH_PROBE.size:_PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN]
+    return node_id, nonce, signature
+
+
+def _build_punch_ack(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
+    """Build a raw UDP punch-ack datagram."""
+    return _PUNCH_PROBE.pack(_PUNCH_ACK_MAGIC, node_id, nonce) + signature
+
+
+def _parse_punch_ack(data: bytes) -> tuple[bytes, bytes, bytes] | None:
+    """Parse a raw UDP punch-ack datagram. Returns (node_id, nonce, signature) or None."""
+    if len(data) < _PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN:
+        return None
+    magic, node_id, nonce = _PUNCH_PROBE.unpack_from(data, 0)
+    if magic != _PUNCH_ACK_MAGIC:
+        return None
+    signature = data[_PUNCH_PROBE.size:_PUNCH_PROBE.size + _PUNCH_PROBE_SIG_LEN]
+    return node_id, nonce, signature
 # node_id(20) | addr_count(B) | chain_bytes_len(H)
 #   | [addr_len(H) | addr_bytes]*addr_count
 #   | chain_bytes
@@ -419,6 +515,27 @@ class _Peer:
 
 
 # ---------------------------------------------------------------------------
+# Hole-punching state
+# ---------------------------------------------------------------------------
+
+class _PunchState:
+    """Tracks an in-progress NAT hole-punch attempt."""
+
+    def __init__(self, target: NodeID, remote_udp_addr: str,
+                 my_udp_addr: str) -> None:
+        self.target = target
+        self.remote_udp_addr = remote_udp_addr   # peer's public UDP addr (from relay)
+        self.my_udp_addr = my_udp_addr           # our public UDP addr (observed by relay)
+        self.probes_sent: int = 0
+        self.probes_received: int = 0
+        self.ack_received: bool = False
+        self.deadline: float = 0.0
+        self.transport: 'UDPTransport | None' = None
+        self.nonce: bytes = os.urandom(16)
+        self.peer_nonce: bytes | None = None
+
+
+# ---------------------------------------------------------------------------
 # MeshNode
 # ---------------------------------------------------------------------------
 
@@ -475,6 +592,11 @@ class MeshNode:
             # re-invitation is needed.
             self._routing.import_entries(restored.routing)
         transport_manager.on_new_connection = self._on_new_transport
+        # UDP hole-punching state
+        self._udp_server: 'UDPServer | None' = None
+        self._udp_listen_uri: str | None = None
+        self._punch_pending: dict[NodeID, _PunchState] = {}
+        self._stun_enabled: bool = False
 
     @property
     def id(self) -> NodeID:
@@ -496,6 +618,15 @@ class MeshNode:
             except Exception:
                 pass
         self._local_ips = local_ip_addresses()
+        # Fire-and-forget public IP discovery so advertised URIs include it
+        asyncio.ensure_future(self._discover_public_ip_bg())
+
+    async def _discover_public_ip_bg(self) -> None:
+        """Background task: discover public IP for advertised URIs."""
+        try:
+            await self.discover_public_ip()
+        except Exception:
+            pass
 
     async def add_listen(self, uri: str) -> None:
         """Start listening on another address at runtime (e.g. add a port)."""
@@ -511,6 +642,111 @@ class MeshNode:
         if uri in self._addresses:
             self._addresses.remove(uri)
         return ok
+
+    async def start_udp(self, port: int, host: str = "0.0.0.0") -> None:
+        """Start a UDP listener for hole-punching and direct UDP links."""
+        from .udp_transport import UDPServer
+        uri = f"udp://{host}:{port}"
+        if self._udp_server is not None:
+            return  # already listening
+        self._udp_server = UDPServer()
+        self._udp_server.on_new_connection = self._on_new_transport
+        self._udp_server.on_raw_datagram = self.handle_udp_datagram
+        await self._udp_server.listen(f"{host}:{port}")
+        self._udp_listen_uri = uri
+        if uri not in self._addresses:
+            self._addresses.append(uri)
+
+    async def stop_udp(self) -> None:
+        """Stop the UDP listener."""
+        if self._udp_server is None:
+            return
+        await self._udp_server.close()
+        self._udp_server = None
+        if self._udp_listen_uri and self._udp_listen_uri in self._addresses:
+            self._addresses.remove(self._udp_listen_uri)
+        self._udp_listen_uri = None
+
+    def udp_port(self) -> int | None:
+        """The port our UDP server is listening on, if any."""
+        if self._udp_server is None or self._udp_server._sock is None:
+            return None
+        sock = self._udp_server._sock.get_extra_info("socket")
+        if sock is None:
+            return None
+        try:
+            return sock.getsockname()[1]
+        except (OSError, IndexError):
+            return None
+
+    async def discover_public_udp_addr(self) -> tuple[str, int] | None:
+        """Use STUN to discover our public UDP reflexive address (fallback)."""
+        from .stun import discover_public_addr
+        return await discover_public_addr()
+
+    async def discover_public_ip(self) -> str | None:
+        """Discover our public IP address via HTTP services (ip.me, etc.).
+
+        Uses stdlib only — no new dependency. Tries multiple services in
+        order with a short timeout. Forces IPv4 connectivity so we learn
+        our public IPv4 (behind NAT) rather than our already-known IPv6.
+        On success, the IP is added to ``_extra_addrs`` so it appears in
+        advertised URIs for all transports.
+        """
+        import http.client
+        services = [
+            ("ip.me", "/"),
+            ("ifconfig.me", "/"),
+            ("icanhazip.com", "/"),
+        ]
+        for host, path in services:
+            try:
+                # Force IPv4: resolve A record only, connect on AF_INET
+                infos = socket.getaddrinfo(
+                    host, 443, socket.AF_INET, socket.SOCK_STREAM)
+                if not infos:
+                    continue
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+                sock.connect(infos[0][4])
+                conn = http.client.HTTPSConnection(host, timeout=5)
+                conn.sock = sock
+                try:
+                    conn.request("GET", path, headers={"User-Agent": "curl/8"})
+                    resp = conn.getresponse()
+                    ip = resp.read().decode("ascii").strip()
+                finally:
+                    conn.close()
+                if _is_ip_address(ip):
+                    if ip not in self._local_ips and ip not in self._extra_addrs:
+                        if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
+                            self._extra_addrs.append(ip)
+                    return ip
+            except Exception:
+                continue
+        return None
+
+    async def request_hole_punch(self, relay_peer: '_Peer',
+                                  target: NodeID) -> None:
+        """Request a relay to coordinate a UDP hole punch to *target*.
+
+        Sends PUNCH_REQUEST to the relay peer (over the existing TCP link).
+        The relay will respond with PUNCH_RELAY to both us and the target,
+        after which both sides send UDP probes simultaneously.
+        """
+        if relay_peer.authenticated_id is None or relay_peer.session is None:
+            return
+        if len(self._punch_pending) >= _PUNCH_MAX_PENDING:
+            return
+        udp_port = self.udp_port()
+        if udp_port is None:
+            return  # no UDP listener — can't punch
+        payload = _encode_punch_request(target.raw, udp_port)
+        pkt = Packet.create(PUNCH_REQUEST, self._id.raw,
+                            relay_peer.authenticated_id.raw, payload)
+        await relay_peer.send(pkt)
 
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
@@ -543,6 +779,10 @@ class MeshNode:
             await peer.stop()
         self._peers.clear()
         await self._transport_manager.close_all()
+        if self._udp_server is not None:
+            await self._udp_server.close()
+            self._udp_server = None
+        self._punch_pending.clear()
 
     async def wait_for_session(self, timeout: float = 10.0) -> None:
         deadline = asyncio.get_event_loop().time() + timeout
@@ -925,7 +1165,8 @@ class MeshNode:
             "advertised": self.advertised_uris(),
             "local_ips": list(self._local_ips),
             "transports": self._transport_manager.schemes(),
-            "listening": self._transport_manager.listening_uris(),
+            "listening": self._transport_manager.listening_uris()
+                         + ([self._udp_listen_uri] if self._udp_listen_uri else []),
             "running": self._running,
             "uptime": self._metrics.uptime(),
             "peer_count": len(self._peers),
@@ -1044,6 +1285,8 @@ class MeshNode:
             INVITE_ACK:        self._handle_invite_ack,
             E2E_HANDSHAKE:     self._handle_e2e_handshake,
             E2E_HANDSHAKE_ACK: self._handle_e2e_handshake_ack,
+            PUNCH_REQUEST:     self._handle_punch_request,
+            PUNCH_RELAY:       self._handle_punch_relay,
         }
         handler = handlers.get(packet.type)
         if handler:
@@ -1477,3 +1720,289 @@ class MeshNode:
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
         self._persist_state()  # persist the newly-known peer for restart recovery
+
+    # -----------------------------------------------------------------------
+    # Hole-punching handlers
+    # -----------------------------------------------------------------------
+
+    async def _handle_punch_request(self, peer: '_Peer', packet: Packet) -> None:
+        """Relay role: a peer asks us to coordinate a hole punch to *target*.
+
+        We look up the target among our authenticated peers and send
+        PUNCH_RELAY to both sides, telling each the other's public UDP
+        address (as we observed it) and the UDP port they're listening on.
+        """
+        decoded = _decode_punch_request(packet.payload)
+        if decoded is None:
+            return
+        target_id_raw, requester_udp_port = decoded
+        target_id = NodeID(target_id_raw)
+
+        # Find the target among our authenticated peers
+        target_peer = next(
+            (p for p in self._peers
+             if p.authenticated_id == target_id and p.session is not None),
+            None,
+        )
+        if target_peer is None:
+            return  # can't relay if we don't have a link to the target
+
+        # Observe the requester's source IP
+        requester_ip = peer.transport.remote_ip()
+        if requester_ip is None or not _is_ip_address(requester_ip):
+            return
+        requester_udp_addr = f"{requester_ip}:{requester_udp_port}"
+
+        # Observe the target's source IP (from its TCP connection to us)
+        target_ip = target_peer.transport.remote_ip()
+        if target_ip is None or not _is_ip_address(target_ip):
+            return
+        # We don't know the target's UDP port yet — ask it by sending a
+        # PUNCH_RELAY with the requester's info. The target will respond
+        # with its own PUNCH_REQUEST if it wants to punch back.
+        # For now, send the target the requester's UDP address.
+        target_payload = _encode_punch_relay(
+            packet.src_id, requester_udp_addr, requester_ip,
+        )
+        target_pkt = Packet.create(PUNCH_RELAY, self._id.raw,
+                                   target_id.raw, target_payload)
+        await target_peer.send(target_pkt)
+
+        # Send the requester the target's known TCP address as a starting
+        # point. The target will send its own probes once it receives the
+        # relay. We include the target's observed IP.
+        target_tcp_addr = target_peer.remote_addr or ""
+        requester_payload = _encode_punch_relay(
+            target_id.raw, target_tcp_addr, target_ip,
+        )
+        requester_pkt = Packet.create(PUNCH_RELAY, self._id.raw,
+                                      packet.src_id, requester_payload)
+        await peer.send(requester_pkt)
+
+    async def _handle_punch_relay(self, peer: '_Peer', packet: Packet) -> None:
+        """We received relay info about a peer we want to punch to.
+
+        Start sending UDP probes to the peer's address. The peer will be
+        doing the same simultaneously, creating NAT mappings on both sides.
+        """
+        decoded = _decode_punch_relay(packet.payload)
+        if decoded is None:
+            return
+        peer_id_raw, peer_addr_str, observed_ip = decoded
+        peer_id = NodeID(peer_id_raw)
+
+        if peer_id == self._id:
+            return
+        if len(self._punch_pending) >= _PUNCH_MAX_PENDING:
+            return
+        if peer_id in self._punch_pending:
+            return  # already punching to this target
+
+        # We need a UDP listener to punch
+        if self._udp_server is None:
+            return
+
+        # The relay told us the peer's address. If it's a TCP address, we
+        # can't punch to it directly — we need the peer's UDP address.
+        # The peer will send us its UDP probes, and we'll learn its UDP
+        # address from the datagram source. For now, parse what we can.
+        # If the peer_addr is host:port format, use it as the UDP target.
+        udp_addr = peer_addr_str
+        if "://" in udp_addr:
+            # It's a URI like tcp://host:port — extract host:port
+            result = _validate_uri(udp_addr)
+            if result is None:
+                return
+            _, opaque = result
+            udp_addr = opaque
+
+        # Record our observed address from the relay
+        if _is_ip_address(observed_ip) and observed_ip not in self._extra_addrs:
+            if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
+                self._extra_addrs.append(observed_ip)
+
+        state = _PunchState(peer_id, udp_addr, observed_ip)
+        state.deadline = time.monotonic() + _PUNCH_TIMEOUT
+        self._punch_pending[peer_id] = state
+
+        # Start sending probes
+        asyncio.create_task(self._send_punch_probes(state))
+
+    async def _send_punch_probes(self, state: '_PunchState') -> None:
+        """Send a burst of UDP probe datagrams to punch the NAT hole."""
+        from .udp_transport import _host_port
+
+        try:
+            host, port = _host_port(state.remote_udp_addr)
+        except ValueError:
+            self._punch_pending.pop(state.target, None)
+            return
+
+        # Get the raw socket from our UDP server
+        if self._udp_server is None or self._udp_server._sock is None:
+            self._punch_pending.pop(state.target, None)
+            return
+
+        sock = self._udp_server._sock
+        target_addr = (host, port)
+
+        # Look up the peer's DSA public key for signing the probe
+        entry = self._routing.get(state.target)
+        if entry is None or not entry.dsa_pub:
+            self._punch_pending.pop(state.target, None)
+            return
+
+        for i in range(_PUNCH_PROBE_COUNT):
+            if time.monotonic() > state.deadline:
+                break
+            nonce = os.urandom(16)
+            signature = self._identity.sign(
+                _PUNCH_PROBE_MAGIC + self._id.raw + nonce
+            )
+            probe = _build_punch_probe(self._id.raw, nonce, signature)
+            try:
+                sock.sendto(probe, target_addr)
+            except (OSError, ConnectionError):
+                break
+            state.probes_sent += 1
+            if i < _PUNCH_PROBE_COUNT - 1:
+                await asyncio.sleep(_PUNCH_PROBE_INTERVAL)
+
+    def handle_udp_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
+        """Called by the UDP server when a raw datagram arrives that is not
+        a reliable transport frame (i.e. a punch probe or punch ack).
+
+        This runs on the event loop via the datagram protocol callback.
+        """
+        # Try to parse as a punch probe
+        probe = _parse_punch_probe(data)
+        if probe is not None:
+            node_id_raw, nonce, signature = probe
+            self._handle_punch_probe_datagram(node_id_raw, nonce, signature, addr)
+            return
+
+        # Try to parse as a punch ack
+        ack = _parse_punch_ack(data)
+        if ack is not None:
+            node_id_raw, nonce, signature = ack
+            self._handle_punch_ack_datagram(node_id_raw, nonce, signature, addr)
+            return
+
+        # Not a probe or ack — could be a reliable transport frame or garbage.
+        # The UDPTransport handles reliable frames via its own feed_datagram.
+        # This method is only called for datagrams that don't match any
+        # known transport in the server's dispatch table.
+
+    def _handle_punch_probe_datagram(self, node_id_raw: bytes, nonce: bytes,
+                                      signature: bytes,
+                                      addr: tuple[str, int]) -> None:
+        """Handle a raw UDP punch probe from a peer."""
+        src_id = NodeID(node_id_raw)
+        if src_id == self._id:
+            return
+
+        # Look up the peer's DSA key to verify the signature
+        entry = self._routing.get(src_id)
+        if entry is None or not entry.dsa_pub:
+            return
+
+        # Verify the probe signature
+        if not self._identity.verify(
+            _PUNCH_PROBE_MAGIC + node_id_raw + nonce, signature, entry.dsa_pub
+        ):
+            return  # invalid signature — hostile probe, ignore
+
+        # Send a punch ACK back via UDP to confirm the hole is punched
+        ack_nonce = os.urandom(16)
+        ack_sig = self._identity.sign(
+            _PUNCH_ACK_MAGIC + self._id.raw + ack_nonce
+        )
+        ack = _build_punch_ack(self._id.raw, ack_nonce, ack_sig)
+        if self._udp_server is not None and self._udp_server._sock is not None:
+            try:
+                self._udp_server._sock.sendto(ack, addr)
+            except (OSError, ConnectionError):
+                pass
+
+        # If we have a pending punch to this peer, complete it
+        state = self._punch_pending.get(src_id)
+        if state is not None:
+            state.probes_received += 1
+            state.peer_nonce = nonce
+            # The hole is punched — we can now create a UDP transport
+            # to this peer. We'll do this once we also receive a PUNCH_ACK
+            # (or after enough probes, optimistically).
+            if not state.ack_received:
+                # Optimistically create the transport after receiving a probe
+                self._complete_punch(state, addr)
+
+    def _handle_punch_ack_datagram(self, node_id_raw: bytes, nonce: bytes,
+                                    signature: bytes,
+                                    addr: tuple[str, int]) -> None:
+        """Handle a raw UDP punch ack from a peer."""
+        src_id = NodeID(node_id_raw)
+        if src_id == self._id:
+            return
+
+        entry = self._routing.get(src_id)
+        if entry is None or not entry.dsa_pub:
+            return
+
+        if not self._identity.verify(
+            _PUNCH_ACK_MAGIC + node_id_raw + nonce, signature, entry.dsa_pub
+        ):
+            return
+
+        state = self._punch_pending.get(src_id)
+        if state is not None:
+            state.ack_received = True
+            self._complete_punch(state, addr)
+
+    def _complete_punch(self, state: '_PunchState',
+                        addr: tuple[str, int]) -> None:
+        """Create a UDP transport for the punched peer and register it."""
+        from .udp_transport import UDPTransport
+
+        if state.transport is not None:
+            return  # already completed
+        if self._udp_server is None:
+            return
+        if len(self._peers) >= _MAX_PEERS:
+            self._punch_pending.pop(state.target, None)
+            return
+
+        # Create a transport bound to this peer's address, sharing the
+        # server's socket. Feed it into the server's dispatch table so
+        # future datagrams from this address go to it.
+        transport = UDPTransport._from_server(
+            self._udp_server._sock, addr,
+        )
+        self._udp_server._transports[addr] = transport
+        transport._start_tasks()
+
+        # Register as a peer — the full mesh handshake will run over UDP
+        peer = _Peer(transport, is_client_side=True)
+        peer.on_dead = self._reap_peer
+        peer.total = self._metrics.total
+        host, port = addr
+        peer.remote_addr = f"udp://{host}:{port}"
+        self._peers.append(peer)
+        asyncio.create_task(peer.start(self._handle_packet))
+
+        # Record in routing table for reconnection
+        self._routing.add(state.target, [peer.remote_addr],
+                          self._routing.get(state.target).dsa_pub if self._routing.get(state.target) else b"")
+
+        state.transport = transport
+        self._punch_pending.pop(state.target, None)
+
+        # Trigger the mesh handshake (challenge → handshake → session)
+        # The server-side will send a challenge when it gets the transport
+        # via on_new_connection. But since we created this transport
+        # ourselves (not via the server's accept loop), we need to send
+        # the challenge ourselves.
+        challenge = self._invite.generate_challenge()
+        peer.pending_challenge = challenge
+        challenge_pkt = Packet.create(CHALLENGE, self._id.raw,
+                                      NodeID(b"\xff" * 20).raw, challenge)
+        asyncio.create_task(peer.send(challenge_pkt))
