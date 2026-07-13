@@ -182,9 +182,12 @@ if [ "$BUILT_VIA_PACKAGE" = false ] && ! python -c "import oqs" 2>/dev/null; the
     # outright (or silently touch shared system paths) on a locked-down box.
     LIBOQS_INSTALL_DIR="${LIBOQS_INSTALL_DIR:-$LIBOQS_BUILD_DIR/install}"
     rm -rf "$LIBOQS_BUILD_DIR/build"
+    # liboqs defaults to a static lib (liboqs.a); liboqs-python needs the
+    # shared object to dlopen at runtime, so BUILD_SHARED_LIBS is mandatory.
     cmake -S "$LIBOQS_BUILD_DIR/liboqs" -B "$LIBOQS_BUILD_DIR/build" \
         $CMAKE_GEN -DCMAKE_BUILD_TYPE=Release \
         -DOQS_USE_OPENSSL=OFF \
+        -DBUILD_SHARED_LIBS=ON \
         -DCMAKE_INSTALL_PREFIX="$LIBOQS_INSTALL_DIR" \
         || fail "liboqs cmake configure failed"
 
