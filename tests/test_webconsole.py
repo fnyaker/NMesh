@@ -238,6 +238,24 @@ class TestManagement:
         finally:
             console.stop(); await node.stop()
 
+    async def test_punch_keepalive_toggle(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            assert node._punch_keepalive is False
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch/keepalive", token,
+                {"enabled": True})
+            assert status == 200 and j["keepalive"] is True
+            assert node._punch_keepalive is True
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch/keepalive", token,
+                {"enabled": "nope"})
+            assert status == 400
+        finally:
+            node.console_set_punch_keepalive(False)
+            console.stop(); await node.stop()
+
     async def test_punch_requires_auth(self):
         node, console = await _make_console()
         try:

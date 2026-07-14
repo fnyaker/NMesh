@@ -435,6 +435,15 @@ def _make_handler(console: WebConsole):
                     _wrap(console._node.console_set_punch_enabled, data["enabled"]))
                 self._json(200, {"ok": True, "enabled": enabled})
                 return
+            if path == "/api/punch/keepalive":
+                data = _parse_json(body)
+                if not data or not isinstance(data.get("enabled"), bool):
+                    self._json(400, {"error": "enabled (bool) required"})
+                    return
+                enabled = console._call(
+                    _wrap(console._node.console_set_punch_keepalive, data["enabled"]))
+                self._json(200, {"ok": True, "keepalive": enabled})
+                return
             if path == "/api/udp":
                 data = _parse_json(body)
                 action = (data or {}).get("action")

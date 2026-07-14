@@ -35,6 +35,9 @@ async def main() -> None:
                     help="disable the UDP listener (punching stays controllable from the console)")
     ap.add_argument("--stun", action="store_true",
                     help="use STUN to discover public UDP address (fallback)")
+    ap.add_argument("--punch-keepalive", action="store_true",
+                    help="keep the UDP NAT mapping open continuously (stay "
+                         "reachable / relay behind NAT)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
     ap.add_argument("--console-host", default="127.0.0.1")
     ap.add_argument("--console-port", type=int, default=8787)
@@ -67,6 +70,8 @@ async def main() -> None:
     pub_ip = await node.discover_public_ip()
     if args.udp is not None and not args.no_udp:
         await node.start_udp(args.udp)
+        if args.punch_keepalive:
+            node.console_set_punch_keepalive(True)
         if args.stun:
             pub = await node.discover_public_udp_addr()
             if pub:

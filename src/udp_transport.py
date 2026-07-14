@@ -548,8 +548,12 @@ class UDPServer(BaseServer):
         signals — forwarded to on_raw_datagram if set.
         Everything else is garbage — silently dropped.
         """
-        # Check for hole-punch probe/ack magic (not reliable transport frames)
-        if len(data) >= 4 and data[:4] in (b"NPPB", b"NPAK"):
+        # Hole-punch probe/ack magic, or a STUN binding response (magic cookie
+        # 0x2112A442 at bytes 4:8) that keepalive STUN sent from this very
+        # socket — both are handled by the node's raw-datagram callback, not
+        # by a reliable transport.
+        if (len(data) >= 4 and data[:4] in (b"NPPB", b"NPAK")) or (
+                len(data) >= 8 and data[4:8] == b"\x21\x12\xa4\x42"):
             if self.on_raw_datagram is not None:
                 try:
                     self.on_raw_datagram(data, addr)
