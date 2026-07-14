@@ -444,6 +444,27 @@ def _make_handler(console: WebConsole):
                     _wrap(console._node.console_set_punch_keepalive, data["enabled"]))
                 self._json(200, {"ok": True, "keepalive": enabled})
                 return
+            if path == "/api/punch/open":
+                data = _parse_json(body) or {}
+                host = data.get("host")
+                port = data.get("port")
+                # allow "ip:port" in a single field for convenience
+                if port is None and isinstance(data.get("endpoint"), str):
+                    from .ip_utils import split_host_port
+                    hp = split_host_port(data["endpoint"].strip())
+                    if hp is not None:
+                        host = hp[0]
+                        try:
+                            port = int(hp[1])
+                        except ValueError:
+                            port = None
+                try:
+                    result = console._call(
+                        _wrap(console._node.console_open_hole, host, port))
+                    self._json(200, {"ok": True, **result})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
             if path == "/api/udp":
                 data = _parse_json(body)
                 action = (data or {}).get("action")

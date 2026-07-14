@@ -256,6 +256,32 @@ class TestManagement:
             node.console_set_punch_keepalive(False)
             console.stop(); await node.stop()
 
+    async def test_open_hole_endpoint(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            # no UDP listener yet → rejected
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch/open", token,
+                {"endpoint": "90.54.169.91:9001"})
+            assert status == 400 and j["ok"] is False
+            await node.start_udp(0, "127.0.0.1")
+            node._udp_server._sock.sendto = lambda *a: None  # no real traffic
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch/open", token,
+                {"endpoint": "90.54.169.91:9001"})
+            assert status == 200 and j["ok"] is True
+            assert j["host"] == "90.54.169.91" and j["port"] == 9001
+            assert ("90.54.169.91", 9001) in node._manual_holes
+            # malformed endpoint
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/punch/open", token,
+                {"endpoint": "garbage"})
+            assert status == 400 and j["ok"] is False
+        finally:
+            node._cancel_manual_holes()
+            console.stop(); await node.stop()
+
     async def test_punch_requires_auth(self):
         node, console = await _make_console()
         try:
