@@ -60,6 +60,7 @@ INDEX_HTML = """<!doctype html>
     <div id="net-status" class="netrow"></div>
     <div class="mrow tctl">
       <button id="punch-toggle" class="ghost"></button>
+      <button id="keepalive-toggle" class="ghost" title="keep the NAT mapping open continuously so this node stays reachable / can relay behind NAT"></button>
       <button id="udp-toggle" class="ghost"></button>
       <input id="udp-port" type="number" min="1" max="65535" value="9001" title="UDP port">
       <button id="net-recheck" class="ghost">Re-check network</button>
@@ -364,6 +365,10 @@ function drawTransports(s) {
   const pt = $("punch-toggle");
   pt.textContent = "Hole punching: " + (s.punch_enabled ? "ON" : "OFF");
   pt.className = s.punch_enabled ? "" : "ghost";
+  const ka = $("keepalive-toggle");
+  ka.textContent = "Continuous: " + (s.punch_keepalive ? "ON" : "OFF");
+  ka.className = s.punch_keepalive ? "" : "ghost";
+  ka.classList.toggle("hidden", !udpOn);
   $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
   $("udp-port").classList.toggle("hidden", udpOn);
 
@@ -407,8 +412,12 @@ function drawTransports(s) {
       <td>${p.ack_received ? "✓" : "…"}</td>
       <td>${p.expires_in.toFixed(0)}s</td>
     </tr>`).join("");
+    const publicUdp = hp.public_udp
+      ? ` · public ${hp.public_udp}` : "";
+      const cont = hp.keepalive
+        ? ` · continuous (${hp.stats.keepalives || 0} keepalives)` : "";
     $("punch-block").innerHTML =
-      `<h3>UDP hole punching — port ${hp.udp_port ?? "—"} · ` +
+      `<h3>UDP hole punching — port ${hp.udp_port ?? "—"}${publicUdp}${cont} · ` +
       `${hp.stats.completed} ok / ${hp.stats.failed} failed / ${hp.stats.attempted} tried</h3>` +
       (rows
         ? `<table><thead><tr><th>Target</th><th>Remote</th><th>Probes s/r</th>
@@ -511,6 +520,14 @@ $("punch-toggle").addEventListener("click", async () => {
     await api("/api/punch", "POST", { enabled: !last.punch_enabled });
     tick();
   } catch (_) { tctl("failed to toggle hole punching", false); }
+});
+$("keepalive-toggle").addEventListener("click", async () => {
+  if (!last) return;
+  try {
+    await api("/api/punch/keepalive", "POST", { enabled: !last.punch_keepalive });
+    tctl(!last.punch_keepalive ? "continuous punching on" : "continuous punching off");
+    tick();
+  } catch (_) { tctl("failed to toggle continuous mode", false); }
 });
 $("udp-toggle").addEventListener("click", async () => {
   if (!last) return;
