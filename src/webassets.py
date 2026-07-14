@@ -66,6 +66,11 @@ INDEX_HTML = """<!doctype html>
       <button id="net-recheck" class="ghost">Re-check network</button>
       <span id="tctl-status" class="muted"></span>
     </div>
+    <div class="mrow tctl" id="manual-punch-row">
+      <input id="peer-udp" placeholder="peer public UDP  ip:port" title="the other node's public UDP endpoint, exchanged out of band">
+      <button id="open-hole-btn" class="ghost">Open hole</button>
+      <span class="muted">no relay needed — both sides open a hole, then join with the block</span>
+    </div>
     <div id="transport-cards" class="tcards"></div>
     <div id="punch-block"></div>
   </section>
@@ -371,6 +376,7 @@ function drawTransports(s) {
   ka.classList.toggle("hidden", !udpOn);
   $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
   $("udp-port").classList.toggle("hidden", udpOn);
+  $("manual-punch-row").classList.toggle("hidden", !udpOn);
 
   const net = s.network;
   if (net) {
@@ -416,13 +422,23 @@ function drawTransports(s) {
       ? ` · public ${hp.public_udp}` : "";
       const cont = hp.keepalive
         ? ` · continuous (${hp.stats.keepalives || 0} keepalives)` : "";
+    const readiness = hp.reason
+      ? `<div class="muted" style="margin-bottom:8px">${hp.ready ? "✓" : "⚠"} ${hp.reason}</div>`
+      : "";
+    const holes = (hp.manual_holes || []).length
+      ? `<div class="muted" style="margin:6px 0">Manual holes: ` +
+        hp.manual_holes.map((h) =>
+          `<span class="pill ${h.active ? "on" : ""}">${h.addr} (${h.sent} sent${h.active ? ", active" : ""})</span>`
+        ).join("") + `</div>`
+      : "";
     $("punch-block").innerHTML =
       `<h3>UDP hole punching — port ${hp.udp_port ?? "—"}${publicUdp}${cont} · ` +
       `${hp.stats.completed} ok / ${hp.stats.failed} failed / ${hp.stats.attempted} tried</h3>` +
+      readiness + holes +
       (rows
         ? `<table><thead><tr><th>Target</th><th>Remote</th><th>Probes s/r</th>
            <th>Ack</th><th>Expires</th></tr></thead><tbody>${rows}</tbody></table>`
-        : '<div class="muted">no punch in progress</div>');
+        : '<div class="muted">no relay-coordinated punch in progress</div>');
   } else {
     $("punch-block").innerHTML = "";
   }
@@ -547,6 +563,17 @@ $("udp-toggle").addEventListener("click", async () => {
 $("net-recheck").addEventListener("click", async () => {
   try { await api("/api/net/recheck", "POST"); tctl("network re-check requested"); tick(); }
   catch (_) { tctl("re-check failed", false); }
+});
+$("open-hole-btn").addEventListener("click", async () => {
+  const endpoint = $("peer-udp").value.trim();
+  if (!endpoint) { tctl("enter the peer's public UDP ip:port", false); return; }
+  try {
+    const res = await api("/api/punch/open", "POST", { endpoint });
+    const j = await res.json();
+    if (res.ok) { tctl("opening hole toward " + j.host + ":" + j.port); $("peer-udp").value = ""; }
+    else tctl("open hole failed: " + (j.error || ""), false);
+    tick();
+  } catch (_) { tctl("open hole failed", false); }
 });
 $("listen-btn").addEventListener("click", async () => {
   const uri = $("listen-uri").value.trim();
