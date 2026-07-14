@@ -294,15 +294,20 @@ class TestHolePunching:
                 if data == b"punch me a path":
                     break
 
-        # The punched direct UDP link exists on A's side
+        # An authenticated *direct UDP* link now exists on both sides — the
+        # accepted responder peer has remote_addr=None, so match by transport
+        # type rather than the address string.
+        def has_udp_link(node, other):
+            return any(
+                p.authenticated_id == other and p.session is not None
+                and isinstance(p.transport, UDPTransport)
+                for p in node._peers
+            )
         async with asyncio.timeout(15.0):
-            while not any(
-                p.authenticated_id == c.id and p.session is not None
-                and (p.remote_addr or "").startswith("udp://")
-                for p in a._peers
-            ):
+            while not (has_udp_link(a, c.id) and has_udp_link(c, a.id)):
                 await asyncio.sleep(0.1)
         assert a._punch_stats["completed"] >= 1
+        assert c._punch_stats["completed"] >= 1
 
         await a.stop()
         await c.stop()

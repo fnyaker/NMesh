@@ -121,6 +121,7 @@ _PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
 _PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
 _PUNCH_MAX_RETRIES     = 3     # max retries per target
 _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
+_PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
 _UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
 _UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
 
@@ -545,7 +546,7 @@ class _PunchState:
         self.probes_received: int = 0
         self.ack_received: bool = False
         self.deadline: float = 0.0
-        self.transport: 'UDPTransport | None' = None
+        self.completed: bool = False   # hole open, mesh handshake handed off
         self.nonce: bytes = os.urandom(16)
         self.peer_nonce: bytes | None = None
 
@@ -611,8 +612,14 @@ class MeshNode:
         self._udp_server: 'UDPServer | None' = None
         self._udp_listen_uri: str | None = None
         self._punch_pending: dict[NodeID, _PunchState] = {}
-        self._punch_stats = {"attempted": 0, "completed": 0, "failed": 0}
+        self._punch_stats = {"attempted": 0, "completed": 0,
+                             "failed": 0, "keepalives": 0}
         self._punch_enabled: bool = True   # hole punching on by default
+        # Continuous mode: keep the UDP listener's NAT mapping open so the node
+        # stays reachable (and can relay for others) even behind NAT. Opt-in.
+        self._punch_keepalive: bool = False
+        self._punch_keepalive_task: asyncio.Task | None = None
+        self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         self._stun_enabled: bool = False
         # Per-target cooldown for relayed→direct path upgrade attempts
         self._upgrade_last: OrderedDict[NodeID, float] = OrderedDict()
@@ -709,9 +716,14 @@ class MeshNode:
         if uri not in self._addresses:
             self._addresses.append(uri)
         self._poke_net("udp-listener-added")
+        # Resume continuous keepalive if it was requested while UDP was down.
+        if self._punch_keepalive:
+            self._start_punch_keepalive()
 
     async def stop_udp(self) -> None:
         """Stop the UDP listener."""
+        await self._stop_punch_keepalive()
+        self._observed_udp_addr = None
         if self._udp_server is None:
             return
         await self._udp_server.close()
@@ -719,6 +731,74 @@ class MeshNode:
         if self._udp_listen_uri and self._udp_listen_uri in self._addresses:
             self._addresses.remove(self._udp_listen_uri)
         self._udp_listen_uri = None
+
+    # -- continuous hole-punch keepalive ------------------------------------
+
+    def console_set_punch_keepalive(self, enabled: bool) -> bool:
+        """Continuous mode: keep the UDP NAT mapping open so this node stays
+        reachable behind NAT and can act as a relay. Requires a UDP listener
+        and hole punching enabled to actually emit traffic."""
+        self._punch_keepalive = bool(enabled)
+        if self._punch_keepalive:
+            self._start_punch_keepalive()
+        else:
+            asyncio.ensure_future(self._stop_punch_keepalive())
+        return self._punch_keepalive
+
+    def _start_punch_keepalive(self) -> None:
+        if (self._punch_keepalive_task is None
+                or self._punch_keepalive_task.done()):
+            self._punch_keepalive_task = asyncio.create_task(
+                self._punch_keepalive_loop())
+
+    async def _stop_punch_keepalive(self) -> None:
+        task = self._punch_keepalive_task
+        self._punch_keepalive_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _punch_keepalive_loop(self) -> None:
+        """Refresh the listener's NAT mapping on a timer while continuous mode
+        is on. Never raises out — a broken probe must not kill the loop."""
+        while self._punch_keepalive and self._running:
+            try:
+                await self._send_nat_keepalive()
+            except Exception:
+                pass
+            await asyncio.sleep(_PUNCH_KEEPALIVE_INTERVAL)
+
+    async def _send_nat_keepalive(self) -> None:
+        """Send a STUN Binding Request from the *listener* socket. The outbound
+        packet keeps the NAT mapping alive; the response (dispatched back to
+        handle_udp_datagram) tells us the listener's public reflexive address.
+
+        Uses the listener socket itself — not a fresh socket like the net
+        monitor — because only that socket's mapping is the one peers reach."""
+        if not self._punch_enabled or self._udp_server is None:
+            return
+        sock = self._udp_server._sock
+        if sock is None:
+            return
+        from .stun import _build_binding_request, DEFAULT_STUN_SERVERS
+        loop = asyncio.get_running_loop()
+        for host, port in DEFAULT_STUN_SERVERS:
+            try:
+                infos = await loop.getaddrinfo(
+                    host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
+            except (OSError, socket.gaierror):
+                continue
+            if not infos:
+                continue
+            try:
+                sock.sendto(_build_binding_request(), infos[0][4])
+                self._punch_stats["keepalives"] += 1
+            except (OSError, ConnectionError):
+                continue
+            return  # one server is enough per interval
 
     def udp_port(self) -> int | None:
         """The port our UDP server is listening on, if any."""
@@ -835,6 +915,7 @@ class MeshNode:
             await peer.stop()
         self._peers.clear()
         await self._transport_manager.close_all()
+        await self._stop_punch_keepalive()
         if self._udp_server is not None:
             await self._udp_server.close()
             self._udp_server = None
@@ -1304,6 +1385,7 @@ class MeshNode:
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
             "punch_enabled": self._punch_enabled,
+            "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
         }
 
@@ -1362,6 +1444,10 @@ class MeshNode:
                 now = time.monotonic()
                 entry["hole_punch"] = {
                     "udp_port": self.udp_port(),
+                    "keepalive": self._punch_keepalive,
+                    "public_udp": (f"{self._observed_udp_addr[0]}:"
+                                   f"{self._observed_udp_addr[1]}"
+                                   if self._observed_udp_addr else None),
                     "stats": dict(self._punch_stats),
                     "pending": [{
                         "target": s.target.raw.hex(),
@@ -2156,7 +2242,7 @@ class MeshNode:
         """Drop hole-punch attempts past their deadline (counted as failed)."""
         now = time.monotonic()
         for target in [t for t, s in self._punch_pending.items()
-                       if s.transport is None and now > s.deadline]:
+                       if not s.completed and now > s.deadline]:
             del self._punch_pending[target]
             self._punch_stats["failed"] += 1
 
@@ -2206,6 +2292,12 @@ class MeshNode:
 
         This runs on the event loop via the datagram protocol callback.
         """
+        # STUN binding response to our keepalive (magic cookie at bytes 4:8) —
+        # handled regardless of punch state so continuous mode keeps learning
+        # our public UDP mapping.
+        if len(data) >= 20 and data[4:8] == b"\x21\x12\xa4\x42":
+            self._handle_stun_keepalive_response(data)
+            return
         if not self._punch_enabled:
             return  # punching disabled — ignore probes and acks entirely
         # Try to parse as a punch probe
@@ -2226,6 +2318,23 @@ class MeshNode:
         # The UDPTransport handles reliable frames via its own feed_datagram.
         # This method is only called for datagrams that don't match any
         # known transport in the server's dispatch table.
+
+    def _handle_stun_keepalive_response(self, data: bytes) -> None:
+        """Parse a STUN Binding Response received on the listener socket and
+        record the public UDP address peers actually reach us at."""
+        from .stun import _parse_binding_response
+        # The response echoes our transaction id; use it directly so the
+        # XOR-MAPPED-ADDRESS de-XORs correctly without our tracking it.
+        result = _parse_binding_response(data, data[8:20])
+        if result is None:
+            return
+        ip, port = result
+        self._observed_udp_addr = (ip, port)
+        if (_is_ip_address(ip) and ip not in self._extra_addrs
+                and ip not in self._local_ips
+                and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
+            self._extra_addrs.append(ip)
+            self._poke_net("stun-keepalive")
 
     def _handle_punch_probe_datagram(self, node_id_raw: bytes, nonce: bytes,
                                       signature: bytes,
@@ -2294,56 +2403,49 @@ class MeshNode:
 
     def _complete_punch(self, state: '_PunchState',
                         addr: tuple[str, int]) -> None:
-        """Create a UDP transport for the punched peer and register it."""
+        """Finish a punched attempt once the hole is open.
+
+        Both sides reach here (each got the other's probe), so the roles must
+        be deterministic and only ONE side may drive the mesh handshake — else
+        each side's UDP server would also auto-accept the other's frames and a
+        duplicate peer would race the handshake to a dead link.
+
+        The node with the larger NodeID is the *initiator*: it opens the UDP
+        transport, registers it, and sends the first frame (acting like a
+        client connecting). The other side does nothing here — its UDP server
+        accept loop creates the peer and challenges when the initiator's frames
+        arrive, exactly as for any inbound UDP connection."""
         from .udp_transport import UDPTransport
 
-        if state.transport is not None:
-            return  # already completed
-        if self._udp_server is None:
+        if state.completed:
+            return  # already handled (probe and ack both landed)
+        if self._udp_server is None or self._udp_server._sock is None:
+            return
+
+        state.completed = True  # guards re-entry from probe+ack
+        self._punch_pending.pop(state.target, None)
+        self._punch_stats["completed"] += 1
+
+        if self._id.raw <= state.target.raw:
+            # Responder: let the standard UDP accept path handle it.
             return
         if len(self._peers) >= _MAX_PEERS:
-            self._punch_pending.pop(state.target, None)
             return
 
-        # Create a transport bound to this peer's address, sharing the
-        # server's socket. Feed it into the server's dispatch table so
-        # future datagrams from this address go to it.
-        transport = UDPTransport._from_server(
-            self._udp_server._sock, addr,
-        )
+        # Initiator: open the transport, register it in the server dispatch
+        # table so the peer's frames route to it, and send an initial keepalive
+        # to trigger the responder's accept + challenge.
+        transport = UDPTransport._from_server(self._udp_server._sock, addr)
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
-
-        # Both sides complete the punch simultaneously, so the handshake role
-        # must be deterministic or both would challenge and neither respond.
-        # The node with the larger NodeID plays server (challenges); the other
-        # plays client (waits for the challenge, then presents its chain — no
-        # join code needed, both peers already hold each other's certs from
-        # the relayed path).
-        is_server = self._id.raw > state.target.raw
-        peer = _Peer(transport, is_client_side=not is_server)
+        peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"
         self._peers.append(peer)
-        asyncio.create_task(peer.start(self._handle_packet))
-
-        # Record in routing table for reconnection
         existing = self._routing.get(state.target)
         self._routing.add(state.target, [peer.remote_addr],
                           existing.dsa_pub if existing else b"")
-
-        state.transport = transport
-        self._punch_pending.pop(state.target, None)
-        self._punch_stats["completed"] += 1
-
-        # Server side kicks off the mesh handshake with a CHALLENGE. We create
-        # the transport ourselves (not via the server accept loop), so we send
-        # it here rather than relying on _on_new_transport.
-        if is_server:
-            challenge = self._invite.generate_challenge()
-            peer.pending_challenge = challenge
-            challenge_pkt = Packet.create(CHALLENGE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, challenge)
-            asyncio.create_task(peer.send(challenge_pkt))
+        asyncio.create_task(peer.start(self._handle_packet))
+        transport._send_raw(transport._link.build_keepalive())
