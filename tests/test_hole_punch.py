@@ -172,7 +172,7 @@ class TestPunchState:
         assert state.probes_sent == 0
         assert state.probes_received == 0
         assert state.ack_received is False
-        assert state.transport is None
+        assert state.completed is False
         assert len(state.nonce) == 16
 
     def test_max_pending_constant(self):
