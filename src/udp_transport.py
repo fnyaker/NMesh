@@ -540,6 +540,12 @@ class UDPServer(BaseServer):
         )
         self._sock = transport
 
+    def reachability(self, uri: str, ctx: dict) -> list[dict]:
+        from .ip_utils import ip_reachability
+        return ip_reachability(
+            "udp", uri, ctx.get("local_ips", []), ctx.get("public_addrs", []),
+            "udp" in ctx.get("inbound_schemes", ()))
+
     def _dispatch_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
         """Dispatch an incoming datagram to the appropriate transport.
 

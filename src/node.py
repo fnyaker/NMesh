@@ -609,6 +609,9 @@ class MeshNode:
         self._addresses: list[str] = []      # configured listen URIs (may be wildcard)
         self._local_ips: list[str] = []      # cached host addresses (for expansion)
         self._extra_addrs: list[str] = []    # externally-discovered (e.g. public IP)
+        # Transports on which we have accepted an inbound authenticated
+        # connection — passive, zero-cost proof of reachability (relay-capable).
+        self._inbound_schemes: set[str] = set()
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -1524,17 +1527,48 @@ class MeshNode:
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
+            "reachability": self.reachability(),
+            "relay_capable": self.relay_capable(),
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
         }
+
+    def _reachability_ctx(self) -> dict:
+        """Node-level facts a transport needs to classify its reachability:
+        our host addresses, discovered public addresses, and the transports on
+        which someone has already reached us (passive confirmation)."""
+        return {
+            "local_ips": list(self._local_ips),
+            "public_addrs": list(self._extra_addrs),
+            "inbound_schemes": set(self._inbound_schemes),
+        }
+
+    def reachability(self) -> list[dict]:
+        """Aggregated reachability descriptors across every active transport.
+        Transport-agnostic: each transport classifies its own addresses."""
+        ctx = self._reachability_ctx()
+        out = list(self._transport_manager.reachability(ctx))
+        if self._udp_server is not None and self._udp_listen_uri is not None:
+            try:
+                out.extend(self._udp_server.reachability(self._udp_listen_uri, ctx))
+            except Exception:
+                pass
+        return out
+
+    def relay_capable(self) -> bool:
+        """True if we are confirmed reachable by a broad audience — i.e. we can
+        serve as a rendezvous/relay for others. Any transport may qualify."""
+        return any(d.get("scope") == "world" and d.get("confirmed")
+                   for d in self.reachability())
 
     def _peer_scheme(self, peer: '_Peer') -> str | None:
         """Best-effort transport scheme of a peer's link, for the console."""
         addr = peer.remote_addr
         if addr and "://" in addr:
             return addr.split("://", 1)[0]
-        scheme = self._transport_manager.scheme_of(peer.transport)
+        scheme_of = getattr(self._transport_manager, "scheme_of", None)
+        scheme = scheme_of(peer.transport) if scheme_of is not None else None
         if scheme is not None:
             return scheme
         from .udp_transport import UDPTransport
@@ -2290,6 +2324,16 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        # This peer connected to us (server side) and authenticated → positive,
+        # zero-cost evidence that we are reachable on this transport. Never let
+        # this observability bookkeeping break the handshake (zéro crash).
+        if not peer.is_client_side:
+            try:
+                scheme = self._peer_scheme(peer)
+                if scheme is not None:
+                    self._inbound_schemes.add(scheme)
+            except Exception:
+                pass
         dsa_pub      = self._identity.dsa_public_key
         server_chain = self._cert_store.get_chain_to_root(self._id) or []
         signature    = self._identity.sign(peer.pending_challenge + ciphertext + dsa_pub)
