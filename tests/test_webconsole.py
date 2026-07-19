@@ -219,6 +219,39 @@ class TestManagement:
         finally:
             console.stop(); await node.stop()
 
+    async def test_connect_request_and_accept(self):
+        # host node accepts a request block and returns an invite block
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/connect/request", token)
+            assert status == 200 and j["block"]
+            # a request block with a fake-supported address is accepted
+            from src.node import _encode_conn_block
+            req = _encode_conn_block("req", uris=["fake://peer:1"])
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/connect/accept", token,
+                {"block": req})
+            assert status == 200 and j["ok"] is True and j["block"]
+            from src.node import _decode_conn_block
+            inv = _decode_conn_block(j["block"], "inv")
+            assert inv["code"] in node._invite._codes
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_connect_endpoints_reject_garbage(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for path in ("/api/connect/accept", "/api/connect/complete"):
+                for bad in ({"block": "not-base64!!!"}, {"block": ""}, {}):
+                    status, _, _, j = await asyncio.to_thread(
+                        _request, console, "POST", path, token, bad)
+                    assert status == 400 and j["ok"] is False
+        finally:
+            console.stop(); await node.stop()
+
     async def test_punch_toggle(self):
         node, console = await _make_console()
         try:

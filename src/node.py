@@ -125,11 +125,42 @@ _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
 # Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
 # public UDP endpoint an operator supplies by hand — no relay needed.
 _HOLE_OPEN_MAGIC    = b"NHOL"  # ignored by the receiver; only opens our mapping
-_HOLE_OPEN_COUNT    = 40       # datagrams per manual-punch burst
-_HOLE_OPEN_INTERVAL = 0.5      # seconds between them (~20s window)
+_HOLE_OPEN_INTERVAL = 2.0      # cadence for keeping a hole fresh (< NAT timeout)
+_HOLE_OPEN_DEFAULT  = 30.0     # default sustain for a bare manual open
+# The two-step connect exchange has a human copy-paste round-trip between the
+# accept and the complete, so the host must hold its hole open long enough to
+# span it — kept under the 5-min invite-code TTL.
+_CONN_HOLE_SUSTAIN  = 180.0
 _MANUAL_HOLE_MAX    = 32       # bounded table of manual-punch targets
 _UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
 _UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
+
+# Two-step connect exchange blocks
+_CONN_BLOCK_VERSION = 2
+
+
+def _encode_conn_block(kind: str, **fields) -> str:
+    """base64(JSON) block for the two-step connect exchange."""
+    payload = {"v": _CONN_BLOCK_VERSION, "kind": kind, **fields}
+    return base64.b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_conn_block(block: str, expect_kind: str) -> dict:
+    """Decode + validate a connect block (hostile input). Raises ValueError."""
+    if not isinstance(block, str) or not (0 < len(block) <= _JOIN_BLOCK_MAX_LEN):
+        raise ValueError("invalid block")
+    try:
+        data = json.loads(base64.b64decode("".join(block.split()), validate=True))
+    except Exception:
+        raise ValueError("invalid or corrupt block") from None
+    if not isinstance(data, dict) or data.get("v") != _CONN_BLOCK_VERSION:
+        raise ValueError("unsupported block version")
+    if data.get("kind") != expect_kind:
+        what = {"req": "a connection request", "inv": "an invite"}.get(expect_kind, expect_kind)
+        raise ValueError(f"that block is not {what} block")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -960,13 +991,15 @@ class MeshNode:
                 return
             await asyncio.sleep(0.5)
 
-    def console_open_hole(self, host: str, port: int) -> dict:
+    def console_open_hole(self, host: str, port: int,
+                          duration: float = _HOLE_OPEN_DEFAULT) -> dict:
         """Manually punch a NAT hole toward a peer's public UDP endpoint.
 
         No relay: two operators exchange their public UDP addresses out of
-        band, each opens a hole toward the other, then one joins with the
-        other's invite block. This side just opens our mapping — the peer must
-        do the same for traffic to cross both NATs."""
+        band, each opens a hole toward the other, then one joins. This side
+        only opens *our* mapping — the peer must do the same. Datagrams keep
+        flowing at a low cadence for ``duration`` seconds (or until a link to
+        the endpoint appears) so the hole survives the copy-paste round-trip."""
         if self._udp_server is None:
             raise ValueError("start UDP first")
         if not isinstance(host, str) or not _is_ip_address(host):
@@ -981,19 +1014,24 @@ class MeshNode:
             _, old = self._manual_holes.popitem(last=False)
             if not old["task"].done():
                 old["task"].cancel()
-        task = asyncio.create_task(self._open_hole_task(host, port))
+        deadline = time.monotonic() + max(0.0, float(duration))
+        task = asyncio.create_task(self._open_hole_task(host, port, deadline))
         self._manual_holes[key] = {"sent": 0, "started": time.monotonic(),
                                    "task": task}
         return {"host": host, "port": port}
 
-    async def _open_hole_task(self, host: str, port: int) -> None:
-        """Fire a bounded burst of hole-open datagrams from the listener socket.
-        The receiver ignores them; they only open *our* NAT mapping."""
+    async def _open_hole_task(self, host: str, port: int, deadline: float) -> None:
+        """Keep a NAT hole open by sending hole-open datagrams from the listener
+        socket until the deadline — or until a transport to this endpoint
+        exists (the connection is happening). The receiver ignores them; they
+        only open *our* mapping."""
         key = (host, port)
-        for _ in range(_HOLE_OPEN_COUNT):
+        while time.monotonic() < deadline:
             server = self._udp_server
             if server is None or server._sock is None:
                 break
+            if key in server._transports:
+                break  # a link to this endpoint is forming — stop opening
             try:
                 server._sock.sendto(_HOLE_OPEN_MAGIC, (host, port))
             except (OSError, ConnectionError):
@@ -1632,6 +1670,87 @@ class MeshNode:
     async def console_remove_listen(self, uri: str) -> bool:
         return await self.remove_listen(uri)
 
+    # -- two-step connect exchange ----------------------------------------
+    # The simple way to link two nodes with no shared relay: B (joiner) makes
+    # a request block → paste into A (host) → A returns an invite block →
+    # paste into B → B connects. Each side opens a NAT hole toward the other's
+    # UDP endpoints during the exchange, so the join traverses both NATs.
+
+    def console_connect_request(self) -> str:
+        """Step 1 (joiner): a base64 block listing the endpoints we can be
+        reached at. Hand it to the node you want to join."""
+        return _encode_conn_block("req",
+                                  uris=self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS])
+
+    def console_connect_accept(self, block: str) -> str:
+        """Step 2 (host): ingest the joiner's request, open NAT holes toward
+        its UDP endpoints, mint a one-time code, and return an invite block to
+        send back. The block is hostile input — fully validated."""
+        data = _decode_conn_block(block, "req")
+        peer_uris = self._valid_candidate_uris(data.get("uris"))
+        self._open_holes_from_uris(peer_uris, _CONN_HOLE_SUSTAIN)
+        code = self._invite.generate_code()
+        return _encode_conn_block("inv", code=code,
+                                  uris=self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS])
+
+    def console_connect_complete(self, block: str) -> dict:
+        """Step 3 (joiner): ingest the host's invite, open NAT holes toward its
+        UDP endpoints, and join it over every advertised address."""
+        data = _decode_conn_block(block, "inv")
+        code = data.get("code")
+        if not isinstance(code, str) or not (0 < len(code) <= 64):
+            raise ValueError("invalid code in block")
+        candidates = self._valid_candidate_uris(data.get("uris"))
+        self._open_holes_from_uris(candidates, _CONN_HOLE_SUSTAIN)
+        return self._start_join(candidates, code)
+
+    def _valid_candidate_uris(self, uris) -> list[str]:
+        """Validate a pasted URI list (hostile input): bounded, well-formed,
+        and only schemes this node actually has a transport for."""
+        if not isinstance(uris, list) or not uris:
+            raise ValueError("no addresses in block")
+        out: list[str] = []
+        for uri in uris[:_JOIN_BLOCK_MAX_URIS]:
+            if not isinstance(uri, str) or len(uri) > _MAX_URI_LEN:
+                continue
+            parsed = _validate_uri(uri)
+            if parsed is None or not self._transport_manager.is_supported(parsed[0]):
+                continue
+            if uri not in out:
+                out.append(uri)
+        if not out:
+            raise ValueError("no address uses a transport this node supports")
+        return out
+
+    def _open_holes_from_uris(self, uris: list[str], duration: float) -> int:
+        """Open a NAT hole toward every udp:// endpoint in *uris*. No-op without
+        a UDP listener. Bounded by the manual-hole table."""
+        if self._udp_server is None:
+            return 0
+        opened = 0
+        for uri in uris:
+            parsed = _validate_uri(uri)
+            if parsed is None or parsed[0] != "udp":
+                continue
+            hp = split_host_port(parsed[1])
+            if hp is None:
+                continue
+            try:
+                self.console_open_hole(hp[0], int(hp[1]), duration)
+                opened += 1
+            except ValueError:
+                continue
+        return opened
+
+    def _start_join(self, candidates: list[str], code: str) -> dict:
+        if self._join_task is not None and not self._join_task.done():
+            raise ValueError("a join is already in progress")
+        self._join_status = {"running": True, "current": None,
+                             "tried": [], "connected": None}
+        self._join_task = asyncio.create_task(
+            self._join_block_task(candidates, code))
+        return {"candidates": len(candidates)}
+
     def console_invite_block(self) -> str:
         """A shareable join bundle: base64 JSON with a fresh invite code and
         every URI we advertise. The receiving node tries them all."""
@@ -1643,12 +1762,12 @@ class MeshNode:
         ).decode("ascii")
 
     def console_join_block(self, block: str) -> dict:
-        """Validate an invite block and start joining in the background.
+        """Validate a one-shot invite block and start joining in the background.
 
         The block is attacker-supplied input (pasted by the operator, but
-        crafted by whoever produced it): every field is type- and
-        size-checked, addresses are capped and URI-validated, and only
-        schemes with a registered transport are kept.
+        crafted by whoever produced it): every field is type- and size-checked,
+        addresses are capped and URI-validated, and only schemes with a
+        registered transport are kept.
         """
         if not isinstance(block, str) or not (0 < len(block) <= _JOIN_BLOCK_MAX_LEN):
             raise ValueError("invalid block")
@@ -1659,29 +1778,10 @@ class MeshNode:
         if not isinstance(data, dict) or data.get("v") != 1:
             raise ValueError("unsupported block version")
         code = data.get("code")
-        uris = data.get("uris")
         if not isinstance(code, str) or not (0 < len(code) <= 64):
             raise ValueError("invalid code in block")
-        if not isinstance(uris, list) or not uris:
-            raise ValueError("no addresses in block")
-        candidates: list[str] = []
-        for uri in uris[:_JOIN_BLOCK_MAX_URIS]:
-            if not isinstance(uri, str) or len(uri) > _MAX_URI_LEN:
-                continue
-            parsed = _validate_uri(uri)
-            if parsed is None or not self._transport_manager.is_supported(parsed[0]):
-                continue
-            if uri not in candidates:
-                candidates.append(uri)
-        if not candidates:
-            raise ValueError("no address uses a transport this node supports")
-        if self._join_task is not None and not self._join_task.done():
-            raise ValueError("a join is already in progress")
-        self._join_status = {"running": True, "current": None,
-                             "tried": [], "connected": None}
-        self._join_task = asyncio.create_task(
-            self._join_block_task(candidates, code))
-        return {"candidates": len(candidates)}
+        candidates = self._valid_candidate_uris(data.get("uris"))
+        return self._start_join(candidates, code)
 
     async def _join_block_task(self, uris: list[str], code: str) -> None:
         """Try each candidate URI until one yields an authenticated session."""
