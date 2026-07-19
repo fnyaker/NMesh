@@ -409,6 +409,33 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/connect/request":
+                try:
+                    block = console._call(_wrap(console._node.console_connect_request))
+                    self._json(200, {"block": block})
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/connect/accept":
+                data = _parse_json(body)
+                block = (data or {}).get("block", "")
+                try:
+                    reply = console._call(
+                        _wrap(console._node.console_connect_accept, block))
+                    self._json(200, {"ok": True, "block": reply})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/connect/complete":
+                data = _parse_json(body)
+                block = (data or {}).get("block", "")
+                try:
+                    result = console._call(
+                        _wrap(console._node.console_connect_complete, block))
+                    self._json(200, {"ok": True, **result})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
             if path == "/api/invite/block":
                 try:
                     block = console._call(_wrap(console._node.console_invite_block))

@@ -66,11 +66,6 @@ INDEX_HTML = """<!doctype html>
       <button id="net-recheck" class="ghost">Re-check network</button>
       <span id="tctl-status" class="muted"></span>
     </div>
-    <div class="mrow tctl" id="manual-punch-row">
-      <input id="peer-udp" placeholder="peer public UDP  ip:port" title="the other node's public UDP endpoint, exchanged out of band">
-      <button id="open-hole-btn" class="ghost">Open hole</button>
-      <span class="muted">no relay needed — both sides open a hole, then join with the block</span>
-    </div>
     <div id="transport-cards" class="tcards"></div>
     <div id="punch-block"></div>
   </section>
@@ -87,20 +82,46 @@ INDEX_HTML = """<!doctype html>
   </section>
 
   <section class="card">
+    <h2>Connect a node</h2>
+    <p class="muted">Two copy-pastes, no relay needed. NAT holes open automatically.</p>
+    <div class="connect">
+      <div class="cbox">
+        <div class="ctitle">Join someone <span class="muted">(you connect to them)</span></div>
+        <button id="cx-request">1 · Create request</button>
+        <textarea id="cx-request-out" class="mono" readonly placeholder="→ send this block to the node you want to join"></textarea>
+        <textarea id="cx-reply-in" class="mono" placeholder="3 · paste the block they send back"></textarea>
+        <div class="mrow">
+          <button id="cx-complete">Connect</button>
+          <span id="cx-join-progress" class="muted"></span>
+        </div>
+      </div>
+      <div class="cbox">
+        <div class="ctitle">Accept someone <span class="muted">(they connect to you)</span></div>
+        <textarea id="cx-accept-in" class="mono" placeholder="2 · paste their request block"></textarea>
+        <button id="cx-accept">Make invite</button>
+        <textarea id="cx-accept-out" class="mono" readonly placeholder="→ send this block back to them"></textarea>
+      </div>
+    </div>
+    <div id="connect-status" class="muted"></div>
+  </section>
+
+  <section class="card expert">
     <h2>Manage</h2>
     <div class="manage">
-      <div class="mrow">
-        <button id="gen-block">Generate invite block</button>
-        <span class="muted">share this block — it carries our addresses and a one-time code</span>
-      </div>
-      <textarea id="block-out" class="mono" readonly placeholder="Invite block (base64)"></textarea>
-      <textarea id="join-block-in" class="mono" placeholder="Paste an invite block here to join a network"></textarea>
-      <div class="mrow">
-        <button id="join-block-btn">Join with block</button>
-        <span id="join-progress" class="muted"></span>
-      </div>
       <details class="expert-join">
-        <summary class="muted">Expert — manual invite / join</summary>
+        <summary class="muted">One-shot invite block (host is publicly reachable)</summary>
+        <div class="mrow">
+          <button id="gen-block" class="ghost">Generate invite block</button>
+        </div>
+        <textarea id="block-out" class="mono" readonly placeholder="Invite block (base64)"></textarea>
+        <textarea id="join-block-in" class="mono" placeholder="Paste an invite block to join"></textarea>
+        <div class="mrow">
+          <button id="join-block-btn" class="ghost">Join with block</button>
+          <span id="join-progress" class="muted"></span>
+        </div>
+      </details>
+      <details class="expert-join">
+        <summary class="muted">Manual invite / join (uri + code)</summary>
         <div class="mrow">
           <button id="gen-invite" class="ghost">Generate invite code</button>
           <code id="invite-out" class="mono"></code>
@@ -221,6 +242,12 @@ padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}
 details.expert-join{border-top:1px solid var(--line);padding-top:8px}
 details.expert-join summary{cursor:pointer}
 details.expert-join .mrow{margin-top:8px}
+.connect{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:760px){.connect{grid-template-columns:1fr}}
+.cbox{background:#0e1116;border:1px solid var(--line);border-radius:10px;padding:12px;
+display:flex;flex-direction:column;gap:8px}
+.cbox .ctitle{font-size:13px;font-weight:600}
+.cbox textarea{min-height:56px;margin:0}
 #punch-block{margin-top:12px}
 #punch-block h3{margin:0 0 8px;font-size:13px;color:var(--muted);
 text-transform:uppercase;letter-spacing:.05em}
@@ -345,18 +372,21 @@ function drawExpert(s) {
 }
 
 function drawJoinProgress(js) {
-  const el = $("join-progress");
-  if (!js) { el.textContent = ""; return; }
-  if (js.connected) { el.textContent = "connected via " + js.connected; el.style.color = ""; return; }
-  if (js.running) {
-    el.textContent = "trying " + (js.current || "…")
-      + (js.tried.length ? ` (${js.tried.length} failed)` : "");
-    el.style.color = "";
-    return;
+  let text = "", color = "";
+  if (js) {
+    if (js.connected) { text = "connected ✓ via " + js.connected; }
+    else if (js.running) {
+      text = "trying " + (js.current || "…") + (js.tried.length ? ` (${js.tried.length} failed)` : "");
+    } else if (js.tried && js.tried.length) {
+      const lastTry = js.tried[js.tried.length - 1];
+      text = "join failed — " + `${lastTry.uri}: ${lastTry.error}`;
+      color = "var(--bad)";
+    }
   }
-  const lastTry = js.tried[js.tried.length - 1];
-  el.textContent = "join failed — " + (lastTry ? `${lastTry.uri}: ${lastTry.error}` : "no address reachable");
-  el.style.color = "var(--bad)";
+  for (const id of ["join-progress", "cx-join-progress"]) {
+    const el = $(id);
+    if (el) { el.textContent = text; el.style.color = color; }
+  }
 }
 
 function fmtAge(a) {
@@ -376,7 +406,6 @@ function drawTransports(s) {
   ka.classList.toggle("hidden", !udpOn);
   $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
   $("udp-port").classList.toggle("hidden", udpOn);
-  $("manual-punch-row").classList.toggle("hidden", !udpOn);
 
   const net = s.network;
   if (net) {
@@ -500,6 +529,44 @@ function drawPeers(peers) {
   }).join("");
 }
 
+// two-step connect exchange
+function cstatus(msg, ok = true) {
+  const el = $("connect-status");
+  el.textContent = msg; el.style.color = ok ? "" : "var(--bad)";
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (_) { return false; }
+}
+$("cx-request").addEventListener("click", async () => {
+  try {
+    const j = await (await api("/api/connect/request", "POST")).json();
+    $("cx-request-out").value = j.block;
+    cstatus((await copyText(j.block)) ? "request copied — send it to them" : "request ready — copy it to them");
+  } catch (_) { cstatus("failed to create request", false); }
+});
+$("cx-accept").addEventListener("click", async () => {
+  const block = $("cx-accept-in").value.trim();
+  if (!block) { cstatus("paste their request block first", false); return; }
+  try {
+    const res = await api("/api/connect/accept", "POST", { block });
+    const j = await res.json();
+    if (res.ok) {
+      $("cx-accept-out").value = j.block; $("cx-accept-in").value = "";
+      cstatus((await copyText(j.block)) ? "invite copied — send it back to them" : "invite ready — copy it back to them");
+    } else cstatus("accept failed: " + (j.error || ""), false);
+  } catch (_) { cstatus("accept failed", false); }
+});
+$("cx-complete").addEventListener("click", async () => {
+  const block = $("cx-reply-in").value.trim();
+  if (!block) { cstatus("paste the block they sent back first", false); return; }
+  try {
+    const res = await api("/api/connect/complete", "POST", { block });
+    const j = await res.json();
+    if (res.ok) { cstatus(`connecting — trying ${j.candidates} address(es)…`); $("cx-reply-in").value = ""; }
+    else cstatus("connect failed: " + (j.error || ""), false);
+  } catch (_) { cstatus("connect failed", false); }
+});
+
 // management
 function status(msg, ok = true) {
   const el = $("manage-status");
@@ -563,17 +630,6 @@ $("udp-toggle").addEventListener("click", async () => {
 $("net-recheck").addEventListener("click", async () => {
   try { await api("/api/net/recheck", "POST"); tctl("network re-check requested"); tick(); }
   catch (_) { tctl("re-check failed", false); }
-});
-$("open-hole-btn").addEventListener("click", async () => {
-  const endpoint = $("peer-udp").value.trim();
-  if (!endpoint) { tctl("enter the peer's public UDP ip:port", false); return; }
-  try {
-    const res = await api("/api/punch/open", "POST", { endpoint });
-    const j = await res.json();
-    if (res.ok) { tctl("opening hole toward " + j.host + ":" + j.port); $("peer-udp").value = ""; }
-    else tctl("open hole failed: " + (j.error || ""), false);
-    tick();
-  } catch (_) { tctl("open hole failed", false); }
 });
 $("listen-btn").addEventListener("click", async () => {
   const uri = $("listen-uri").value.trim();
