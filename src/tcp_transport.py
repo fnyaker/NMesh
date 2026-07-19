@@ -105,6 +105,12 @@ class TCPServer(BaseServer):
 
         self._server = await asyncio.start_server(_accept, host, port, reuse_address=True)
 
+    def reachability(self, uri: str, ctx: dict) -> list[dict]:
+        from .ip_utils import ip_reachability
+        return ip_reachability(
+            "tcp", uri, ctx.get("local_ips", []), ctx.get("public_addrs", []),
+            "tcp" in ctx.get("inbound_schemes", ()))
+
     async def close(self) -> None:
         if self._server:
             self._server.close()

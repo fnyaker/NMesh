@@ -84,3 +84,19 @@ class BaseServer(ABC):
     async def close(self) -> None:
         """Stop accepting connections and release resources."""
         ...
+
+    def reachability(self, uri: str, ctx: dict) -> list[dict]:
+        """Describe how this server can be reached, and by which audience.
+
+        Transport-agnostic: the core never classifies addresses itself — each
+        transport reports its own reachability descriptors. A descriptor is::
+
+            {"transport": scheme, "scope": "world"|"lan"|"broadcast"|"none",
+             "anchor": str, "address": uri|None, "confirmed": bool}
+
+        ``scope`` is the audience breadth; ``anchor`` distinguishes two audiences
+        of the same breadth (e.g. a LAN ``192.168.0.0/24`` is anchored by the
+        public IP it sits behind, so it is not the neighbour's identical range).
+        ``uri`` is this listener's URI; ``ctx`` carries node-level discovered
+        facts (see ``MeshNode._reachability_ctx``). Default: nothing known."""
+        return []

@@ -8,6 +8,7 @@ advertise (one per local address, plus any externally-discovered address).
 """
 from __future__ import annotations
 
+import ipaddress
 import socket
 
 from .uri import _validate_uri
@@ -87,4 +88,56 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
         if u not in seen:
             seen.add(u)
             out.append(u)
+    return out
+
+
+def _is_global_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
+
+
+def ip_reachability(scheme: str, uri: str, local_ips: list[str],
+                    public_addrs: list[str], confirmed: bool) -> list[dict]:
+    """Reachability descriptors for an IP-based listener (tcp/udp).
+
+    Globally-routable addresses (a real public IP, or a discovered reflexive
+    one) map to scope ``world``; RFC1918/link-local addresses map to scope
+    ``lan`` anchored by our public IP — so *our* ``192.168.0.0/24`` is a
+    different audience from the neighbour's identical range behind another
+    public IP. ``confirmed`` reflects positive evidence of reachability
+    (an accepted inbound authenticated connection on this transport)."""
+    parsed = _validate_uri(uri)
+    if parsed is None:
+        return []
+    hp = split_host_port(parsed[1])
+    if hp is None:
+        return []
+    port = hp[1]
+    anchor = next((a for a in public_addrs if _is_global_ip(a)), "")
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(ip: str, scope: str, anc: str) -> None:
+        key = (ip, scope)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({
+            "transport": scheme,
+            "scope": scope,
+            "anchor": anc,
+            "address": f"{scheme}://{_fmt_host(ip)}:{port}",
+            "confirmed": confirmed,
+        })
+
+    for ip in public_addrs:
+        if _is_global_ip(ip):
+            add(ip, "world", "")
+    for ip in local_ips:
+        if _is_global_ip(ip):
+            add(ip, "world", "")
+        else:
+            add(ip, "lan", anchor)
     return out

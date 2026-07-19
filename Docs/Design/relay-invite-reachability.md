@@ -147,35 +147,42 @@ preuve (`token`), il est TTL-borné, dédupliqué, rate-limité.
 
 ```
 INVITE_SEEK payload = {
-  inviter_id,           # NodeID(A) — vers qui router
+  inviter_id,           # NodeID(A) — vers qui router (en clair, assumé)
   cert_A, exp, token,   # recopiés du bloc (vérifiables par tout nœud)
-  rdv_id,               # ID de rendez-vous ÉPHÉMÈRE généré par B (pas son vrai ID)
-  rdv_pub               # clé pub éphémère de B pour ce join
+  seeker_id, cert_B,    # identité de B (son vrai NodeID) — pour le chemin retour
+  rdv_nonce             # corrélation d'un aller-retour, borne la table de rendez-vous
 }
 ```
 
-**Choix important : `rdv_id` éphémère.** B ne diffuse **pas** son vrai NodeID
-(anti-traçage). Il génère une identité jetable pour ce seul join ; son vrai
-certificat n'apparaît que **dans le handshake chiffré**, plus tard.
+**Décision (validée) : on transmet l'ID de A en clair.** Aucun risque
+cryptographique (`NodeID = hash(clé pub)`, pas d'usurpation possible sans la clé
+privée), et surtout ça garde le routage **dirigé** (Kademlia, ~log(n) hops) →
+ça passe à l'échelle de 4 à 4000 nœuds. On **écarte** explicitement toute
+diffusion/flood réseau (qui, elle, ne scalerait pas). Masquer l'ID de A
+(chiffrement de groupe, tag de reconnaissance, IDs éphémères) est **abandonné** :
+ça imposait soit une clé de réseau partagée (point de compromission unique,
+inefficace contre un membre hostile), soit du flooding. Amélioration éventuelle
+notée pour plus tard si un modèle de menace l'exige, mais hors v1.
 
 ### 2.4 Machine à états du join
 
 ```
-B (invité)                    R (relais / témoin)              A (inviteur)
+B (invité)                    R (relais, pair direct de A)      A (inviteur)
    │                             │                                │
-   │ 1. broadcast INVITE_SEEK ───┤ (sur transports broadcast-capables)
-   │ 1'. + envoi direct aux relays de la liste                    │
+   │ 1. ouvre un lien vers R (sortant → traverse tout NAT)        │
+   │    + envoie INVITE_SEEK ────┤                                │
+   │ 1'. (opportuniste) broadcast le SEEK sur transports capables │
    │                             │                                │
    │                             │ 2. vérifie token+cert+exp      │
    │                             │    (sinon drop + rate-limit)   │
-   │                             │ 3. note rdv_id → lien(B)       │
+   │                             │ 3. note rdv_nonce → lien(B)    │
    │                             │    (table rendez-vous, bornée) │
    │                             │ 4. route SEEK vers inviter_id ─┤
-   │                             │    (Kademlia/on-demand, TTL,   │
-   │                             │     dédup)                     │
-   │                             │                                │ 5. A reconnaît
-   │                             │                                │  H(code), token OK
-   │                             │ 6. CHALLENGE adressé à rdv_id ◄┤
+   │                             │    (dirigé : pair direct, sinon│
+   │                             │     Kademlia/on-demand, TTL)   │
+   │                             │                                │ 5. A voit
+   │                             │                                │  H(code)+token OK
+   │                             │ 6. CHALLENGE (dst = seeker_id) ◄┤
    │                             │ 7. route retour via table rdv  │
    │ 8. CHALLENGE reçu ◄─────────┤                                │
    │                             │                                │
@@ -187,16 +194,20 @@ B (invité)                    R (relais / témoin)              A (inviteur)
 ```
 
 Points clés :
+- **Routage dirigé, pas de flood.** R route le SEEK vers `inviter_id` : dans le
+  cas simple R est un **pair direct de A** (A l'a choisi parmi ses propres pairs
+  à joignabilité large) → 2 hops, chemin retour trivial. Cas général : Kademlia
+  vers `inviter_id`, borné TTL. Ça scale à des milliers de nœuds.
 - **R n'est qu'un tuyau** : il route des paquets signés qu'il ne peut pas forger
   (invariant NMesh : « un relais ne voit que des métadonnées de routage »).
-- **Le chemin retour** : R garde une **table de rendez-vous** `rdv_id → (lien, exp)`,
-  bornée et à courte durée de vie (anti-DoS). A adresse sa réponse à `rdv_id` ; R
-  la renvoie sur le lien d'où venait le SEEK.
+- **Chemin retour** : R garde une **table de rendez-vous** `rdv_nonce → (lien, exp)`,
+  bornée et courte. A répond en adressant `seeker_id` ; R renvoie sur le lien d'où
+  venait le SEEK.
 - **B est joint par le lien qu'il a lui-même ouvert vers R** (sortant → traverse
   tout NAT). Aucune joignabilité entrante requise côté B.
 - **Broadcast opportuniste** : si un nœud du réseau entend le SEEK sur le même
-  medium (BLE, LAN UDP), il devient R spontanément. Sinon, la liste `relays`
-  prend le relais (sans jeu de mots).
+  medium (BLE, LAN UDP), il joue R et route (toujours dirigé vers `inviter_id`,
+  jamais de flood). Sinon, la liste `relays` du bloc prend le relais.
 
 ### 2.5 Sélection des relais dans le bloc (réponse à « pas en aléatoire »)
 
@@ -224,7 +235,7 @@ Aucune base dédiée : c'est le routing table + presence déjà là.
 | Amplification (SEEK routé à l'infini) | TTL décrémenté par hop, dédup borné (déjà en place pour les paquets routés), table de rendez-vous bornée. |
 | Relais malveillant | Ne peut que **jeter/retarder** (jamais lire ni forger : handshake signé ML-DSA, E2E). C'est déjà dans le modèle de menace. |
 | Rejeu du bloc | `code` à usage unique + `exp`. A peut invalider (le code expire ; annulation = on laisse expirer / on régénère). |
-| Fuite de métadonnée (ID de A diffusé) | Accepté en v1 (ID = adresse, pas de compromission de clé). `rdv_id` **éphémère** protège déjà l'invité. ID éphémère pour A = amélioration future. |
+| Fuite de métadonnée (ID de A diffusé) | **Accepté (décidé).** ID = adresse, pas de compromission de clé. Le masquage (clé de groupe / tag / IDs éphémères) est écarté en v1 car il impose flood ou clé partagée qui ne scalent/protègent pas. Amélioration future si besoin. |
 | Pré-auth traversant le mesh | **Un seul** type (`INVITE_SEEK`) autorisé pré-auth, strictement token-gated, borné, rate-limité. Revue de sécurité dédiée à l'implémentation. |
 
 **Annulation d'invitation** (demande utilisateur) : pas de DB à purger — le
