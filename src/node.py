@@ -122,6 +122,12 @@ _PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
 _PUNCH_MAX_RETRIES     = 3     # max retries per target
 _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
 _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
+# Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
+# public UDP endpoint an operator supplies by hand — no relay needed.
+_HOLE_OPEN_MAGIC    = b"NHOL"  # ignored by the receiver; only opens our mapping
+_HOLE_OPEN_COUNT    = 40       # datagrams per manual-punch burst
+_HOLE_OPEN_INTERVAL = 0.5      # seconds between them (~20s window)
+_MANUAL_HOLE_MAX    = 32       # bounded table of manual-punch targets
 _UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
 _UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
 
@@ -620,6 +626,8 @@ class MeshNode:
         self._punch_keepalive: bool = False
         self._punch_keepalive_task: asyncio.Task | None = None
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
+        # Manual hole-punch targets → {"sent": int, "started": float, "task": Task}
+        self._manual_holes: OrderedDict[tuple[str, int], dict] = OrderedDict()
         self._stun_enabled: bool = False
         # Per-target cooldown for relayed→direct path upgrade attempts
         self._upgrade_last: OrderedDict[NodeID, float] = OrderedDict()
@@ -723,6 +731,7 @@ class MeshNode:
     async def stop_udp(self) -> None:
         """Stop the UDP listener."""
         await self._stop_punch_keepalive()
+        self._cancel_manual_holes()
         self._observed_udp_addr = None
         if self._udp_server is None:
             return
@@ -897,7 +906,7 @@ class MeshNode:
         return out
 
     async def join(self, address: str, code: str) -> '_Peer':
-        transport = await self._transport_manager.connect(address)
+        transport = await self._connect_for_join(address)
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
@@ -908,6 +917,98 @@ class MeshNode:
         await peer.start(self._handle_packet)
         return peer
 
+    async def _connect_for_join(self, address: str) -> BaseTransport:
+        """Open a transport for a join. A ``udp://`` target reuses the shared
+        listener socket (not a fresh one) so it traverses any NAT hole already
+        opened toward the peer — the whole point of manual hole punching. Other
+        schemes go through the normal transport manager."""
+        parsed = _validate_uri(address)
+        if (parsed is not None and parsed[0] == "udp"
+                and self._udp_server is not None
+                and self._udp_server._sock is not None):
+            hp = split_host_port(parsed[1])
+            if hp is not None:
+                try:
+                    host, port = hp[0], int(hp[1])
+                except ValueError:
+                    host = None
+                if host is not None and 0 < port < 65536:
+                    return self._udp_listener_transport(host, port)
+        return await self._transport_manager.connect(address)
+
+    def _udp_listener_transport(self, host: str, port: int) -> BaseTransport:
+        """Create a UDP transport bound to (host, port) on the *listener* socket
+        and register it so the peer's replies route to it. Sends an initial
+        keepalive burst to open our mapping and prod the peer to accept."""
+        from .udp_transport import UDPTransport
+        addr = (host, port)
+        transport = UDPTransport._from_server(self._udp_server._sock, addr)
+        self._udp_server._transports[addr] = transport
+        transport._start_tasks()
+        asyncio.create_task(self._udp_join_bridge(transport))
+        return transport
+
+    async def _udp_join_bridge(self, transport) -> None:
+        """Send a short burst of keepalives so the peer accepts even if the two
+        operators didn't open their holes at exactly the same instant."""
+        for _ in range(10):
+            if transport._closed:
+                return
+            try:
+                transport._send_raw(transport._link.build_keepalive())
+            except Exception:
+                return
+            await asyncio.sleep(0.5)
+
+    def console_open_hole(self, host: str, port: int) -> dict:
+        """Manually punch a NAT hole toward a peer's public UDP endpoint.
+
+        No relay: two operators exchange their public UDP addresses out of
+        band, each opens a hole toward the other, then one joins with the
+        other's invite block. This side just opens our mapping — the peer must
+        do the same for traffic to cross both NATs."""
+        if self._udp_server is None:
+            raise ValueError("start UDP first")
+        if not isinstance(host, str) or not _is_ip_address(host):
+            raise ValueError("invalid IP address — expected ip:port")
+        if not isinstance(port, int) or not (0 < port < 65536):
+            raise ValueError("invalid port")
+        key = (host, port)
+        existing = self._manual_holes.pop(key, None)
+        if existing is not None and not existing["task"].done():
+            existing["task"].cancel()
+        while len(self._manual_holes) >= _MANUAL_HOLE_MAX:
+            _, old = self._manual_holes.popitem(last=False)
+            if not old["task"].done():
+                old["task"].cancel()
+        task = asyncio.create_task(self._open_hole_task(host, port))
+        self._manual_holes[key] = {"sent": 0, "started": time.monotonic(),
+                                   "task": task}
+        return {"host": host, "port": port}
+
+    async def _open_hole_task(self, host: str, port: int) -> None:
+        """Fire a bounded burst of hole-open datagrams from the listener socket.
+        The receiver ignores them; they only open *our* NAT mapping."""
+        key = (host, port)
+        for _ in range(_HOLE_OPEN_COUNT):
+            server = self._udp_server
+            if server is None or server._sock is None:
+                break
+            try:
+                server._sock.sendto(_HOLE_OPEN_MAGIC, (host, port))
+            except (OSError, ConnectionError):
+                break
+            entry = self._manual_holes.get(key)
+            if entry is not None:
+                entry["sent"] += 1
+            await asyncio.sleep(_HOLE_OPEN_INTERVAL)
+
+    def _cancel_manual_holes(self) -> None:
+        for entry in self._manual_holes.values():
+            if not entry["task"].done():
+                entry["task"].cancel()
+        self._manual_holes.clear()
+
     async def stop(self) -> None:
         self._running = False
         self._persist_state()
@@ -916,6 +1017,7 @@ class MeshNode:
         self._peers.clear()
         await self._transport_manager.close_all()
         await self._stop_punch_keepalive()
+        self._cancel_manual_holes()
         if self._udp_server is not None:
             await self._udp_server.close()
             self._udp_server = None
@@ -1442,12 +1544,22 @@ class MeshNode:
             }
             if scheme == "udp":
                 now = time.monotonic()
+                ready, reason = self._punch_readiness()
                 entry["hole_punch"] = {
                     "udp_port": self.udp_port(),
                     "keepalive": self._punch_keepalive,
                     "public_udp": (f"{self._observed_udp_addr[0]}:"
                                    f"{self._observed_udp_addr[1]}"
                                    if self._observed_udp_addr else None),
+                    "ready": ready,
+                    "reason": reason,
+                    "relay_peers": self._relay_peer_count(),
+                    "manual_holes": [{
+                        "addr": f"{h}:{p}",
+                        "sent": e["sent"],
+                        "active": not e["task"].done(),
+                        "age": now - e["started"],
+                    } for (h, p), e in self._manual_holes.items()],
                     "stats": dict(self._punch_stats),
                     "pending": [{
                         "target": s.target.raw.hex(),
@@ -1460,6 +1572,29 @@ class MeshNode:
                 }
             details.append(entry)
         return details
+
+    def _relay_peer_count(self) -> int:
+        """Authenticated peers that could coordinate a punch (or that we could
+        relay between). Hole punching is impossible without at least one."""
+        return sum(1 for p in self._peers
+                   if p.authenticated_id is not None and p.session is not None)
+
+    def _punch_readiness(self) -> tuple[bool, str]:
+        """Explain, for the console, whether a punch can happen right now.
+
+        Punching is on-demand: it only fires when this node tries to reach a
+        peer it can't connect to directly AND shares a relay with. This tells
+        the operator why nothing is punching — the top question behind NAT."""
+        if not self._punch_enabled:
+            return False, "hole punching is off"
+        if self._udp_server is None:
+            return False, "no UDP listener — start UDP first"
+        relays = self._relay_peer_count()
+        if relays == 0:
+            return False, ("no connected peer to coordinate through — join a "
+                           "reachable node (a public rendezvous) first")
+        return True, (f"ready — {relays} peer(s) can coordinate a punch; it "
+                      "fires on demand when you reach an unreachable node")
 
     def console_set_punch_enabled(self, enabled: bool) -> bool:
         """Enable/disable UDP hole punching at runtime (default: enabled).
