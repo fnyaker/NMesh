@@ -100,3 +100,10 @@ class BaseServer(ABC):
         ``uri`` is this listener's URI; ``ctx`` carries node-level discovered
         facts (see ``MeshNode._reachability_ctx``). Default: nothing known."""
         return []
+
+    async def broadcast(self, data: bytes) -> bool:
+        """Send *data* to every reachable peer on this medium at once, if the
+        transport supports it (LAN UDP, BLE advertising, LoRa…). Used for
+        opportunistic discovery when no relay is configured. Returns True if
+        the transport actually broadcast. Default: not broadcast-capable."""
+        return False
