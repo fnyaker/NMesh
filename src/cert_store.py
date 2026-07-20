@@ -37,9 +37,12 @@ class CertStore:
         BFS dans le graphe d'émission pour trouver un chemin depuis target
         jusqu'à une racine connue.
 
-        Priorité aux certs avec émetteur externe (non self-signed) pour éviter
-        de retourner un chemin court ancré sur soi-même quand un chemin vers
-        le réseau exist.
+        On préfère une chaîne ancrée sur une racine **externe** (le réseau) :
+        un nœud qui a rejoint un réseau est aussi sa propre racine auto-signée,
+        mais présenter ``[cert_soi_self_signed]`` n'authentifie rien auprès des
+        pairs (personne ne fait confiance à cette racine). La chaîne réseau
+        (via l'émetteur qui nous a invité) est la seule vérifiable par autrui ;
+        la racine-soi n'est retenue qu'à défaut.
 
         Retourne [cert_target, ..., cert_root_self_signed] ou None.
         """
@@ -53,6 +56,7 @@ class CertStore:
         queue: deque[tuple[bytes, list[Certificate]]] = deque(
             (c.issuer_id.raw, [c]) for c in sorted_certs
         )
+        self_anchored: list[Certificate] | None = None  # fallback: our own root
 
         while queue:
             current_raw, path = queue.popleft()
@@ -60,13 +64,24 @@ class CertStore:
             if current_raw in self._roots:
                 last = path[-1]
                 if last.is_self_signed:
-                    return path
-                # Find the self-signed cert for this root
-                for rc in self._certs.get(current_raw, []):
-                    if rc.is_self_signed:
-                        return path + [rc]
-                # Root is known but we don't have its self-signed cert yet;
-                # can't satisfy verify_chain step 3 — keep BFS going
+                    chain = path
+                else:
+                    chain = None
+                    for rc in self._certs.get(current_raw, []):
+                        if rc.is_self_signed:
+                            chain = path + [rc]
+                            break
+                    if chain is None:
+                        # Root known but no self-signed cert yet — keep BFS going
+                        if current_raw not in visited:
+                            visited.add(current_raw)
+                            for cert in self._certs.get(current_raw, []):
+                                queue.append((cert.issuer_id.raw, path + [cert]))
+                        continue
+                if current_raw != self._own_id.raw:
+                    return chain            # anchored on the network root — best
+                if self_anchored is None:
+                    self_anchored = chain   # only good if nothing external exists
                 continue
 
             if current_raw in visited:
@@ -76,7 +91,7 @@ class CertStore:
             for cert in self._certs.get(current_raw, []):
                 queue.append((cert.issuer_id.raw, path + [cert]))
 
-        return None
+        return self_anchored
 
     def verify_chain(self, chain: list[Certificate]) -> NodeID | None:
         """

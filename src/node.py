@@ -64,6 +64,7 @@ PUNCH_RELAY       = 0x11
 PUNCH_PROBE       = 0x12
 PUNCH_ACK         = 0x13
 INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, token-gated
+RELAY_CARRY       = 0x15   # carries a handshake packet between two nodes via a relay
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -129,6 +130,11 @@ _RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
 _SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
 _SEEK_RATE_WINDOW  = 10.0      # rate-limit window, seconds
 _MAX_PENDING_SEEKS = 128       # bounded record of seeks addressed to us
+_CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per window
+_RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
+_RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
+_RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
+_MAX_RELAY_PEERS   = 64        # bounded virtual (relayed) peer table
 
 # Hole punching
 _PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
@@ -573,6 +579,9 @@ class _Peer:
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
         self.is_client_side: bool = is_client_side
+        # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
+        # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
+        self.relay_only: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
@@ -647,6 +656,60 @@ class _Peer:
 
 
 # ---------------------------------------------------------------------------
+# Relayed transport — a virtual link tunnelled through a relay
+# ---------------------------------------------------------------------------
+
+class RelayedTransport(BaseTransport):
+    """A BaseTransport that carries mesh packets to a *remote* node through a
+    *relay* link, by wrapping each outgoing packet in a RELAY_CARRY and letting
+    the relay route it. Incoming packets are fed by the node when a RELAY_CARRY
+    addressed to us and originating from ``remote`` is unwrapped.
+
+    This lets the entire existing invite/handshake run, unchanged, between two
+    nodes that share no direct link — the relay only sees signed ciphertext."""
+
+    def __init__(self, node: 'MeshNode', remote: NodeID, via: '_Peer') -> None:
+        super().__init__()
+        self._node = node
+        self._remote = remote
+        self._via = via
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._closed = False
+
+    async def connect(self, address: str) -> None:  # never dialled directly
+        ...
+
+    async def listen(self, address: str) -> None:
+        ...
+
+    async def send(self, packet: Packet) -> None:
+        if self._closed:
+            raise ConnectionError("relayed transport closed")
+        carrier = Packet.create(RELAY_CARRY, self._node.id.raw,
+                                self._remote.raw, packet.pack(), ttl=_SEEK_TTL)
+        await self._via.send(carrier)
+
+    def feed(self, inner: Packet) -> None:
+        if not self._closed:
+            self._queue.put_nowait(inner)
+
+    async def receive(self) -> Packet:
+        while True:
+            if self._closed:
+                raise ConnectionError("relayed transport closed")
+            try:
+                return await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+    def remote_ip(self) -> str | None:
+        return None
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+# ---------------------------------------------------------------------------
 # Hole-punching state
 # ---------------------------------------------------------------------------
 
@@ -695,6 +758,8 @@ class MeshNode:
         self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
         self._seek_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer) -> (count, window)
         self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
+        self._carry_rate: OrderedDict[int, tuple] = OrderedDict()     # id(peer) -> (count, window)
+        self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -752,6 +817,7 @@ class MeshNode:
         self._join_task: asyncio.Task | None = None
         self._join_status: dict | None = None
         self._join_try_timeout: float = _JOIN_TRY_TIMEOUT
+        self._relay_join_timeout: float = _RELAY_JOIN_TIMEOUT
         # Keeps local/public addressing fresh (created on start(), needs a loop)
         self._net_monitor: NetMonitor | None = None
 
@@ -1869,6 +1935,172 @@ class MeshNode:
             self._join_block_task(candidates, code))
         return {"candidates": len(candidates)}
 
+    # -- relayed invitation (single block, no direct link needed) -----------
+
+    def _select_relays(self, limit: int = 5) -> list[str]:
+        """Addresses of nodes that can bridge an invitation to us. We pick the
+        reachable peers we dialled (we reached them, so a joiner likely can
+        too), preferring the freshest. Bounded."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in self._peers:
+            if (p.authenticated_id is not None and p.session is not None
+                    and p.is_client_side and p.remote_addr
+                    and _validate_uri(p.remote_addr) is not None
+                    and p.remote_addr not in seen):
+                seen.add(p.remote_addr)
+                out.append(p.remote_addr)
+            if len(out) >= limit:
+                break
+        return out
+
+    def console_relay_invite(self) -> str:
+        """Generate a single invite block for a node we want to bring in, even
+        with no direct link: it carries a signed rendezvous token plus a list
+        of relays the joiner can reach us through."""
+        code = self._invite.generate_code()
+        exp = int(time.time()) + _RELAY_INVITE_TTL
+        token = self._identity.sign(_seek_signed_blob(_h_code(code), exp))
+        payload = {
+            "v": 3, "kind": "relay-inv", "code": code, "exp": exp,
+            "pub": self._identity.dsa_public_key.hex(),
+            "token": token.hex(), "relays": self._select_relays(),
+        }
+        return base64.b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+    def console_relay_join(self, block: str) -> dict:
+        """Ingest a relay-invite block and join in the background: route a
+        signed seek toward the inviter through each relay until the tunnelled
+        handshake yields a session. Hostile input — fully validated."""
+        # relay-inv is v3 (not the v2 connect exchange) — parse explicitly
+        if not isinstance(block, str) or not (0 < len(block) <= _RELAY_BLOCK_MAX_LEN):
+            raise ValueError("invalid block")
+        try:
+            data = json.loads(base64.b64decode("".join(block.split()), validate=True))
+        except Exception:
+            raise ValueError("invalid or corrupt block") from None
+        if not isinstance(data, dict) or data.get("v") != 3 or data.get("kind") != "relay-inv":
+            raise ValueError("not a relay-invite block")
+        code = data.get("code")
+        if not isinstance(code, str) or not (0 < len(code) <= 64):
+            raise ValueError("invalid code in block")
+        exp = data.get("exp")
+        if not isinstance(exp, int) or exp < time.time():
+            raise ValueError("invite block expired")
+        try:
+            inviter_pub = bytes.fromhex(data.get("pub", ""))
+            token = bytes.fromhex(data.get("token", ""))
+        except (ValueError, TypeError):
+            raise ValueError("malformed block fields") from None
+        if not inviter_pub or not token:
+            raise ValueError("malformed block fields")
+        try:
+            inviter_id = NodeID.from_public_key(inviter_pub)
+        except Exception:
+            raise ValueError("bad inviter key") from None
+        if inviter_id == self._id:
+            raise ValueError("that is our own invite")
+        relays = data.get("relays")
+        candidates: list[str] = []
+        if isinstance(relays, list):
+            for uri in relays[:_JOIN_BLOCK_MAX_URIS]:
+                if (isinstance(uri, str) and len(uri) <= _MAX_URI_LEN
+                        and _validate_uri(uri) is not None
+                        and uri not in candidates):
+                    parsed = _validate_uri(uri)
+                    if self._transport_manager.is_supported(parsed[0]):
+                        candidates.append(uri)
+        if not candidates:
+            raise ValueError("no reachable relay in block")
+        if self._join_task is not None and not self._join_task.done():
+            raise ValueError("a join is already in progress")
+        self._join_status = {"running": True, "current": None,
+                             "tried": [], "connected": None}
+        self._join_task = asyncio.create_task(
+            self._relay_join_task(inviter_id, inviter_pub, code, exp, token, candidates))
+        return {"relays": len(candidates)}
+
+    def _seek_from_block(self, inviter_id: NodeID, inviter_pub: bytes,
+                         code: str, exp: int, token: bytes) -> Packet:
+        payload = _encode_seek(exp, _h_code(code), inviter_pub, token)
+        return Packet.create(INVITE_SEEK, self._id.raw, inviter_id.raw,
+                             payload, ttl=_SEEK_TTL)
+
+    async def _relay_join_task(self, inviter_id, inviter_pub, code, exp, token,
+                               relays: list[str]) -> None:
+        status = self._join_status
+        try:
+            for uri in relays:
+                status["current"] = uri
+                try:
+                    if await self._relay_join_one(uri, inviter_id, inviter_pub,
+                                                  code, exp, token):
+                        status["connected"] = uri
+                        return
+                    status["tried"].append({"uri": uri, "error": "no session"})
+                except Exception as exc:
+                    status["tried"].append(
+                        {"uri": uri, "error": (str(exc) or type(exc).__name__)[:80]})
+        finally:
+            status["running"] = False
+            status["current"] = None
+
+    async def _relay_join_one(self, relay_uri: str, inviter_id: NodeID,
+                              inviter_pub: bytes, code: str, exp: int,
+                              token: bytes) -> bool:
+        """Open a relay link, launch a tunnelled invite handshake toward the
+        inviter, and wait for a session. Cleans up on failure."""
+        rlink = None
+        vpa = None
+        try:
+            transport = await self._transport_manager.connect(relay_uri)
+            rlink = _Peer(transport, is_client_side=True)
+            rlink.relay_only = True
+            rlink.on_dead = self._reap_peer
+            rlink.total = self._metrics.total
+            rlink.remote_addr = relay_uri
+            self._peers.append(rlink)
+            self._running = True
+            await rlink.start(self._handle_packet)
+
+            vpa = _Peer(RelayedTransport(self, inviter_id, rlink), is_client_side=True)
+            vpa.join_code = code
+            vpa.on_dead = self._relay_on_dead(inviter_id.raw)
+            vpa.total = self._metrics.total
+            self._relay_peers[inviter_id.raw] = vpa
+            self._peers.append(vpa)
+            await vpa.start(self._handle_packet)
+
+            await rlink.send(self._seek_from_block(inviter_id, inviter_pub,
+                                                   code, exp, token))
+
+            deadline = time.monotonic() + self._relay_join_timeout
+            while time.monotonic() < deadline:
+                if vpa.session is not None and vpa.authenticated_id == inviter_id:
+                    return True
+                if vpa not in self._peers or rlink not in self._peers:
+                    break
+                await asyncio.sleep(0.05)
+            return False
+        finally:
+            if (vpa is not None and
+                    (vpa.session is None or vpa.authenticated_id != inviter_id)):
+                self._relay_peers.pop(inviter_id.raw, None)
+                if vpa is not None:
+                    await self._safe_stop_peer(vpa)
+                if rlink is not None:
+                    await self._safe_stop_peer(rlink)
+
+    async def _safe_stop_peer(self, peer: '_Peer') -> None:
+        try:
+            await peer.stop()
+        except Exception:
+            pass
+        if peer in self._peers:
+            self._peers.remove(peer)
+
     def console_invite_block(self) -> str:
         """A shareable join bundle: base64 JSON with a fresh invite code and
         every URI we advertise. The receiving node tries them all."""
@@ -2008,6 +2240,9 @@ class MeshNode:
             # Pre-auth, token-gated, bounded — handled entirely on its own.
             await self._handle_invite_seek(peer, packet)
             return
+        if packet.type == RELAY_CARRY:
+            await self._handle_relay_carry(peer, packet)
+            return
         if packet.type in _DIRECT_TYPES:
             if peer.authenticated_id is None:
                 return
@@ -2140,16 +2375,94 @@ class MeshNode:
 
     def _on_seek_for_self(self, seeker: NodeID, h_code: bytes,
                           inviter_pub: bytes, peer: '_Peer') -> None:
-        """A valid seek addressed to us. Record it (bounded); the actual invite
-        handshake over the rendezvous is wired in a later step."""
+        """A valid seek addressed to us. If it names a live invite code we
+        answer it: open a relayed virtual peer for the seeker and drive the
+        invite handshake through the relay it arrived on."""
+        recognized = self._recognize_seek(h_code) is not None
         while len(self._pending_seeks) >= _MAX_PENDING_SEEKS:
             self._pending_seeks.popitem(last=False)
         self._pending_seeks[seeker.raw] = {
-            "h_code": h_code,
-            "recognized": self._recognize_seek(h_code) is not None,
-            "peer": peer,
-            "at": time.monotonic(),
+            "h_code": h_code, "recognized": recognized,
+            "peer": peer, "at": time.monotonic(),
         }
+        if recognized and seeker.raw not in self._relay_peers:
+            asyncio.ensure_future(self._start_relay_invite(seeker, peer))
+
+    async def _start_relay_invite(self, seeker: NodeID, via: '_Peer') -> None:
+        """Inviter side: challenge the seeker over a relayed virtual peer,
+        mirroring _on_new_transport but tunnelled through *via*."""
+        if seeker.raw in self._relay_peers or seeker == self._id:
+            return
+        if len(self._relay_peers) >= _MAX_RELAY_PEERS or len(self._peers) >= _MAX_PEERS:
+            return
+        vp = _Peer(RelayedTransport(self, seeker, via), is_client_side=False)
+        vp.on_dead = self._relay_on_dead(seeker.raw)
+        vp.total = self._metrics.total
+        self._relay_peers[seeker.raw] = vp
+        self._peers.append(vp)
+        await vp.start(self._handle_packet)
+        challenge = self._invite.generate_challenge()
+        vp.pending_challenge = challenge
+        pkt = Packet.create(CHALLENGE, self._id.raw, _BROADCAST_ID, challenge)
+        try:
+            await vp.send(pkt)
+        except Exception:
+            pass
+
+    def _relay_on_dead(self, remote_raw: bytes):
+        async def _cb(peer: '_Peer') -> None:
+            if self._relay_peers.get(remote_raw) is peer:
+                self._relay_peers.pop(remote_raw, None)
+            await self._reap_peer(peer)
+        return _cb
+
+    def _carry_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit for relay-carry packets (bounded table)."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._carry_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._carry_rate[k]
+        while len(self._carry_rate) > _RDV_MAX:
+            self._carry_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._carry_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _CARRY_RATE_MAX:
+            self._carry_rate[key] = (cnt, ws)
+            return False
+        self._carry_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_relay_carry(self, peer: '_Peer', packet: Packet) -> None:
+        """Route a RELAY_CARRY toward its destination, or — if it is for us —
+        unwrap the inner handshake packet and feed the matching virtual peer.
+        Bounded: TTL, dedup, per-link rate limit."""
+        if packet.ttl <= 0:
+            return
+        if packet.msg_id != packet.compute_msg_id():
+            return
+        if self._is_seen(packet.msg_id):
+            return
+        if not self._carry_allowed(peer):
+            return
+        if packet.dst_id == self._id.raw:
+            vp = self._relay_peers.get(packet.src_id)
+            if vp is None:
+                return  # no active rendezvous with this endpoint
+            try:
+                inner = Packet.unpack(packet.payload)
+            except Exception:
+                return
+            vp.transport.feed(inner)
+            return
+        # route onward: reverse path (a seeker we bridged) first, else forward
+        rp = self._rdv_lookup(packet.dst_id)
+        if rp is not None and rp is not peer:
+            if packet.ttl > 1:
+                await rp.send(packet.with_decremented_ttl())
+            return
+        await self._forward_seek(peer, packet)
 
     async def _forward_seek(self, from_peer: '_Peer', packet: Packet) -> None:
         """Greedy XOR routing of a seek toward its inviter id, over authenticated
@@ -2397,6 +2710,8 @@ class MeshNode:
         if len(packet.payload) != 32:
             return
         peer.received_challenge = packet.payload
+        if peer.relay_only:
+            return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
         if peer.join_code is None:
