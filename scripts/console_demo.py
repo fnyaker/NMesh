@@ -38,6 +38,9 @@ async def main() -> None:
     ap.add_argument("--punch-keepalive", action="store_true",
                     help="keep the UDP NAT mapping open continuously (stay "
                          "reachable / relay behind NAT)")
+    ap.add_argument("--lan-discovery", action="store_true",
+                    help="answer LAN relay-discovery beacons (be findable as a "
+                         "relay by joiners on the same network)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
     ap.add_argument("--console-host", default="127.0.0.1")
     ap.add_argument("--console-port", type=int, default=8787)
@@ -72,6 +75,8 @@ async def main() -> None:
         await node.start_udp(args.udp)
         if args.punch_keepalive:
             node.console_set_punch_keepalive(True)
+    if args.lan_discovery:
+        await node.start_lan_discovery()
         if args.stun:
             pub = await node.discover_public_udp_addr()
             if pub:
