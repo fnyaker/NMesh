@@ -65,6 +65,7 @@ INDEX_HTML = """<!doctype html>
       <button id="udp-toggle" class="ghost"></button>
       <input id="udp-port" type="number" min="1" max="65535" value="9001" title="UDP port">
       <button id="lan-toggle" class="ghost" title="answer LAN discovery beacons — be findable as a relay by joiners on your network"></button>
+      <button id="reach-probe" class="ghost" title="ask a peer to dial you back and confirm you're reachable (AutoNAT)">Confirm reachability</button>
       <button id="net-recheck" class="ghost">Re-check network</button>
       <span id="tctl-status" class="muted"></span>
     </div>
@@ -715,6 +716,13 @@ $("lan-toggle").addEventListener("click", async () => {
     tctl(!last.lan_discovery ? "LAN relay discovery on" : "LAN relay discovery off");
     tick();
   } catch (_) { tctl("failed to toggle LAN discovery", false); }
+});
+$("reach-probe").addEventListener("click", async () => {
+  try {
+    const j = await (await api("/api/reachability/probe", "POST")).json();
+    tctl(j.sent ? `reachability probe sent (${j.sent}) — check the badge` : "no peer to probe through");
+    setTimeout(tick, 3500);
+  } catch (_) { tctl("reachability probe failed", false); }
 });
 $("listen-btn").addEventListener("click", async () => {
   const uri = $("listen-uri").value.trim();
