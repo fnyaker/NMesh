@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -61,6 +63,7 @@ PUNCH_REQUEST     = 0x10
 PUNCH_RELAY       = 0x11
 PUNCH_PROBE       = 0x12
 PUNCH_ACK         = 0x13
+INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, token-gated
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -114,6 +117,19 @@ _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
 _JOIN_BLOCK_MAX_URIS = 16     # candidate addresses tried per block
 _JOIN_TRY_TIMEOUT    = 6.0    # per-URI connect + session wait
 
+# Relayed invitation (INVITE_SEEK): a joiner routes a signed seek toward the
+# inviter through the mesh. Everything here is bounded and rate-limited — a
+# pre-auth packet crossing the mesh is a sensitive surface.
+_SEEK_TAG          = b"NMESH-INVITE-SEEK-v1"  # domain separation for the token
+_SEEK_MAX_PAYLOAD  = 8192      # cert + token, bounded before any parse
+_SEEK_MAX_FUTURE   = 3600.0    # exp accepted at most this far ahead (replay window)
+_SEEK_TTL          = 16        # max hops a seek travels
+_RDV_MAX           = 512       # bounded reverse-path (rendezvous) table
+_RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
+_SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
+_SEEK_RATE_WINDOW  = 10.0      # rate-limit window, seconds
+_MAX_PENDING_SEEKS = 128       # bounded record of seeks addressed to us
+
 # Hole punching
 _PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
 _PUNCH_PROBE_INTERVAL  = 0.1   # seconds between probes
@@ -161,6 +177,69 @@ def _decode_conn_block(block: str, expect_kind: str) -> dict:
         what = {"req": "a connection request", "inv": "an invite"}.get(expect_kind, expect_kind)
         raise ValueError(f"that block is not {what} block")
     return data
+
+
+# ---------------------------------------------------------------------------
+# INVITE_SEEK codec (relayed invitation)
+# ---------------------------------------------------------------------------
+#
+# Payload: exp(uint64) | h_code(32) | pub_len(H) | inviter_pub | token_len(H) | token
+# Routing uses the packet header: src_id = seeker (B), dst_id = inviter (A). We
+# carry the inviter's raw ML-DSA public key (not a full cert — leaner): any node
+# checks NodeID(inviter_pub) == dst_id and that the token is the inviter's
+# signature over TAG||h_code||exp. So a seek is verifiably authorised by the key
+# whose hash is the inviter id — no shared secret, no impersonation.
+
+def _h_code(code: str) -> bytes:
+    """Recogniser tag for an invite code (only the inviter resolves it)."""
+    return hashlib.sha256(code.encode("utf-8")).digest()
+
+
+def _seek_signed_blob(h_code: bytes, exp: int) -> bytes:
+    return _SEEK_TAG + h_code + struct.pack("!Q", exp)
+
+
+def _encode_seek(exp: int, h_code: bytes, inviter_pub: bytes, token: bytes) -> bytes:
+    return (struct.pack("!Q", exp) + h_code
+            + struct.pack("!H", len(inviter_pub)) + inviter_pub
+            + struct.pack("!H", len(token)) + token)
+
+
+def _decode_seek(payload: bytes):
+    """Parse an INVITE_SEEK payload (hostile input). Returns
+    (exp, h_code, inviter_pub, token) or None. Fully bounds-checked."""
+    if not (40 < len(payload) <= _SEEK_MAX_PAYLOAD):
+        return None
+    try:
+        off = 0
+        exp = struct.unpack_from("!Q", payload, off)[0]; off += 8
+        h_code = payload[off:off + 32]; off += 32
+        if len(h_code) != 32:
+            return None
+        plen = struct.unpack_from("!H", payload, off)[0]; off += 2
+        inviter_pub = payload[off:off + plen]; off += plen
+        if len(inviter_pub) != plen or plen == 0:
+            return None
+        tlen = struct.unpack_from("!H", payload, off)[0]; off += 2
+        token = payload[off:off + tlen]; off += tlen
+        if len(token) != tlen or tlen == 0:
+            return None
+    except struct.error:
+        return None
+    return exp, h_code, inviter_pub, token
+
+
+def _make_invite_seek(inviter_identity, seeker_id, code: str, exp: int,
+                      ttl: int = _SEEK_TTL) -> 'Packet':
+    """Build a signed INVITE_SEEK from the inviter's own identity (used by the
+    inviter's block generator and by tests). Routed toward the inviter id."""
+    pub = inviter_identity.dsa_public_key
+    inviter_id = NodeID.from_public_key(pub)
+    h = _h_code(code)
+    token = inviter_identity.sign(_seek_signed_blob(h, exp))
+    payload = _encode_seek(exp, h, pub, token)
+    return Packet.create(INVITE_SEEK, seeker_id.raw, inviter_id.raw,
+                         payload, ttl=ttl)
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +691,10 @@ class MeshNode:
         # Transports on which we have accepted an inbound authenticated
         # connection — passive, zero-cost proof of reachability (relay-capable).
         self._inbound_schemes: set[str] = set()
+        # Relayed-invitation state (INVITE_SEEK). All bounded.
+        self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
+        self._seek_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer) -> (count, window)
+        self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -1529,6 +1612,7 @@ class MeshNode:
             "transport_details": self._transport_details(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
+            "pending_seeks": len(self._pending_seeks),
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
@@ -1920,6 +2004,10 @@ class MeshNode:
             await peer.send(packet.with_decremented_ttl())
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
+        if packet.type == INVITE_SEEK:
+            # Pre-auth, token-gated, bounded — handled entirely on its own.
+            await self._handle_invite_seek(peer, packet)
+            return
         if packet.type in _DIRECT_TYPES:
             if peer.authenticated_id is None:
                 return
@@ -1961,6 +2049,132 @@ class MeshNode:
         handler = handlers.get(packet.type)
         if handler:
             await handler(peer, packet)
+
+    # -----------------------------------------------------------------------
+    # Relayed invitation (INVITE_SEEK)
+    # -----------------------------------------------------------------------
+
+    def _seek_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit: bound how many seeks one link can make
+        us process (and verify) in a window. Table is bounded and pruned."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._seek_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._seek_rate[k]
+        while len(self._seek_rate) > _RDV_MAX:
+            self._seek_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._seek_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _SEEK_RATE_MAX:
+            self._seek_rate[key] = (cnt, ws)
+            return False
+        self._seek_rate[key] = (cnt + 1, ws)
+        return True
+
+    def _rdv_record(self, seeker_raw: bytes, peer: '_Peer') -> None:
+        """Remember the reverse path for a seeker (bounded, short-lived) so the
+        inviter's reply can be routed back on the link the seek arrived on."""
+        self._rdv.pop(seeker_raw, None)
+        while len(self._rdv) >= _RDV_MAX:
+            self._rdv.popitem(last=False)
+        self._rdv[seeker_raw] = (peer, time.monotonic() + _RDV_TTL)
+
+    def _rdv_lookup(self, seeker_raw: bytes) -> '_Peer | None':
+        entry = self._rdv.get(seeker_raw)
+        if entry is None:
+            return None
+        peer, exp = entry
+        if time.monotonic() > exp or peer not in self._peers:
+            self._rdv.pop(seeker_raw, None)
+            return None
+        return peer
+
+    def _recognize_seek(self, h_code: bytes) -> str | None:
+        """The live invite code whose hash matches, if any (constant-time)."""
+        for code in list(self._invite._codes.keys()):
+            if hmac.compare_digest(_h_code(code), h_code):
+                return code
+        return None
+
+    async def _handle_invite_seek(self, peer: '_Peer', packet: Packet) -> None:
+        """Process a relayed invitation seek. Cheap, bounded checks run before
+        the expensive signature verification; nothing here can crash the loop."""
+        # 1. cheap structural / bound checks first
+        if packet.ttl <= 0:
+            return
+        if packet.msg_id != packet.compute_msg_id():
+            return  # msg_id must commit to content (anti-amplification)
+        if self._is_seen(packet.msg_id):
+            return
+        if not self._seek_allowed(peer):
+            return
+        decoded = _decode_seek(packet.payload)
+        if decoded is None:
+            return
+        exp, h_code, inviter_pub, token = decoded
+        now = time.time()
+        if exp < now or exp > now + _SEEK_MAX_FUTURE:
+            return  # expired or absurdly far ahead
+        inviter = NodeID(packet.dst_id)
+        seeker = NodeID(packet.src_id)
+        if seeker == self._id:
+            return  # our own seek looped back
+        # 2. expensive verification last: key↔id binding + token signature
+        try:
+            if NodeID.from_public_key(inviter_pub) != inviter:
+                return  # a NodeID not derivable from the presented key is a lie
+            if not self._identity.verify(_seek_signed_blob(h_code, exp), token,
+                                         inviter_pub):
+                return  # not authorised by the inviter's key — drop
+        except Exception:
+            return
+        # 3. legit seek: remember the reverse path (bounded)
+        self._rdv_record(packet.src_id, peer)
+        if inviter == self._id:
+            self._on_seek_for_self(seeker, h_code, inviter_pub, peer)
+            return
+        # 4. relay toward the inviter over authenticated member links only
+        await self._forward_seek(peer, packet)
+
+    def _on_seek_for_self(self, seeker: NodeID, h_code: bytes,
+                          inviter_pub: bytes, peer: '_Peer') -> None:
+        """A valid seek addressed to us. Record it (bounded); the actual invite
+        handshake over the rendezvous is wired in a later step."""
+        while len(self._pending_seeks) >= _MAX_PENDING_SEEKS:
+            self._pending_seeks.popitem(last=False)
+        self._pending_seeks[seeker.raw] = {
+            "h_code": h_code,
+            "recognized": self._recognize_seek(h_code) is not None,
+            "peer": peer,
+            "at": time.monotonic(),
+        }
+
+    async def _forward_seek(self, from_peer: '_Peer', packet: Packet) -> None:
+        """Greedy XOR routing of a seek toward its inviter id, over authenticated
+        peers only. TTL-bounded; no on-demand connects (stays cheap pre-auth)."""
+        if packet.ttl <= 1:
+            return
+        target = NodeID(packet.dst_id)
+        direct = next(
+            (p for p in self._peers
+             if p is not from_peer and p.authenticated_id == target
+             and p.session is not None),
+            None,
+        )
+        if direct is not None:
+            await direct.send(packet.with_decremented_ttl())
+            return
+        candidates = [
+            p for p in self._peers
+            if p is not from_peer and p.authenticated_id is not None
+            and p.session is not None
+        ]
+        if candidates:
+            best = min(candidates,
+                       key=lambda p: target.distance(p.authenticated_id))
+            await best.send(packet.with_decremented_ttl())
 
     async def _handle_data(self, peer: _Peer, packet: Packet) -> None:
         src = NodeID(packet.src_id)
