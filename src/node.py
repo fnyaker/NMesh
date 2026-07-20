@@ -3074,6 +3074,7 @@ class MeshNode:
 
         peer.authenticated_id = claimed_id
         peer.dsa_pub = bob_dsa_pub
+        self._note_punch_link_up(peer)
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
@@ -3146,6 +3147,7 @@ class MeshNode:
 
         peer.authenticated_id = server_id
         peer.dsa_pub = alice_dsa_pub
+        self._note_punch_link_up(peer)
         # Record the address we dialled so this peer is reconnectable after a
         # restart (validated before advertising it to anyone else).
         addrs = ([peer.remote_addr]
@@ -3432,6 +3434,27 @@ class MeshNode:
         if state is not None:
             state.ack_received = True
             self._complete_punch(state, addr)
+
+    def _note_punch_link_up(self, peer: '_Peer') -> None:
+        """A newly authenticated peer just came up over UDP. If we had a
+        hole-punch attempt pending toward it, the authenticated link is proof
+        the hole is open — count the completion here.
+
+        The responder side (smaller NodeID) never drives _complete_punch: its
+        link is created by the UDP accept path when the initiator's frames
+        arrive. Its probe/ack exchange can also race ahead of the pending state
+        set up from PUNCH_RELAY. Anchoring the completion to the handshake makes
+        the counter reflect reality on both sides regardless of that race."""
+        from .udp_transport import UDPTransport
+        target = peer.authenticated_id
+        if target is None or not isinstance(peer.transport, UDPTransport):
+            return
+        state = self._punch_pending.get(target)
+        if state is None or state.completed:
+            return  # no attempt, or _complete_punch already counted it
+        state.completed = True
+        self._punch_pending.pop(target, None)
+        self._punch_stats["completed"] += 1
 
     def _complete_punch(self, state: '_PunchState',
                         addr: tuple[str, int]) -> None:
