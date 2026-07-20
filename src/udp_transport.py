@@ -546,6 +546,26 @@ class UDPServer(BaseServer):
             "udp", uri, ctx.get("local_ips", []), ctx.get("public_addrs", []),
             "udp" in ctx.get("inbound_schemes", ()))
 
+    async def broadcast(self, data: bytes) -> bool:
+        """Send a datagram to the LAN limited-broadcast address on our port."""
+        if self._sock is None:
+            return False
+        sock = self._sock.get_extra_info("socket")
+        port = None
+        try:
+            if sock is not None:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                port = sock.getsockname()[1]
+        except OSError:
+            return False
+        if port is None:
+            return False
+        try:
+            self._sock.sendto(data, ("255.255.255.255", port))
+            return True
+        except OSError:
+            return False
+
     def _dispatch_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
         """Dispatch an incoming datagram to the appropriate transport.
 

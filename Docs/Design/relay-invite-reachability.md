@@ -284,7 +284,15 @@ merger.
   du bloc, envoi aux relays + `broadcast()` sur transports capables, réponse de A,
   handshake tunnelé, session E2E via relais. Test e2e A↔B via un relais, **sans
   lien direct**.
-- **Étape 4 — `broadcast()` sur UDP (LAN)** + capacité générique. (BLE hors scope.)
+- **Étape 4 — `broadcast()` sur UDP (LAN) + découverte de relais.** ✅
+  Raffinement adopté vs « broadcaster le SEEK brut » : le chemin retour d'un
+  broadcast fire-and-forget est fragile (le témoin n'a pas de lien vers B).
+  À la place, **découverte LAN** (`src/lan_discovery.py`) : B diffuse un beacon
+  `NDSC`, tout membre du medium répond (`NDSA`) avec ses adresses joignables ;
+  B les ajoute à ses relais candidats et rejoint via le **chemin étape 3**
+  (lien réel, fiable). Même effet (« un membre du medium sert de relais »),
+  sans bridge datagramme. Borné + rate-limité. Port fixe 45888, capacité
+  `broadcast()` générique sur `BaseServer`/UDP.
 - **Étape 5 — Refactor web UI générique** (status/config par transport, UDP
   migré derrière l'interface, panneau invitation).
 - **Étape 6 — Bonus** : préférence IPv6 directe ; `REACH_PROBE` actif (AutoNAT) ;

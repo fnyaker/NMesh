@@ -409,6 +409,20 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/lan/discovery":
+                data = _parse_json(body)
+                if not data or not isinstance(data.get("enabled"), bool):
+                    self._json(400, {"error": "enabled (bool) required"})
+                    return
+                try:
+                    if data["enabled"]:
+                        console._call(console._node.start_lan_discovery())
+                    else:
+                        console._call(console._node.stop_lan_discovery())
+                    self._json(200, {"ok": True, "enabled": data["enabled"]})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
             if path == "/api/relay/invite":
                 try:
                     block = console._call(_wrap(console._node.console_relay_invite))

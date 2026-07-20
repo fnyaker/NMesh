@@ -760,6 +760,7 @@ class MeshNode:
         self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
         self._carry_rate: OrderedDict[int, tuple] = OrderedDict()     # id(peer) -> (count, window)
         self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
+        self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -1208,6 +1209,7 @@ class MeshNode:
         await self._transport_manager.close_all()
         await self._stop_punch_keepalive()
         self._cancel_manual_holes()
+        await self.stop_lan_discovery()
         if self._udp_server is not None:
             await self._udp_server.close()
             self._udp_server = None
@@ -1679,6 +1681,7 @@ class MeshNode:
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
+            "lan_discovery": self._lan_discovery is not None,
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
@@ -2012,15 +2015,70 @@ class MeshNode:
                     parsed = _validate_uri(uri)
                     if self._transport_manager.is_supported(parsed[0]):
                         candidates.append(uri)
-        if not candidates:
+        # No relay in the block is not fatal if we can look for one on the LAN
+        # (a broadcast-capable transport is up).
+        can_discover = self._udp_server is not None
+        if not candidates and not can_discover:
             raise ValueError("no reachable relay in block")
         if self._join_task is not None and not self._join_task.done():
             raise ValueError("a join is already in progress")
         self._join_status = {"running": True, "current": None,
                              "tried": [], "connected": None}
         self._join_task = asyncio.create_task(
-            self._relay_join_task(inviter_id, inviter_pub, code, exp, token, candidates))
+            self._relay_join_task(inviter_id, inviter_pub, code, exp, token,
+                                  candidates, discover=can_discover))
         return {"relays": len(candidates)}
+
+    # -- LAN relay discovery (broadcast) ------------------------------------
+
+    def _lan_relay_addrs(self) -> list[str]:
+        """Addresses a LAN peer can reach us at to relay through — our own
+        reachable addresses. Answered to discovery beacons."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for d in self.reachability():
+            a = d.get("address")
+            if a and a not in seen:
+                seen.add(a)
+                out.append(a)
+        return out[:8]
+
+    async def start_lan_discovery(self) -> None:
+        """Answer LAN discovery beacons so joiners on our medium can find us as
+        a relay. Opt-in — it exposes our addresses to the local broadcast domain."""
+        if self._lan_discovery is not None:
+            return
+        from .lan_discovery import LanDiscovery
+        disc = LanDiscovery(self._id.raw, self._lan_relay_addrs)
+        try:
+            await disc.start()
+        except Exception:
+            return
+        self._lan_discovery = disc
+
+    async def stop_lan_discovery(self) -> None:
+        if self._lan_discovery is not None:
+            await self._lan_discovery.stop()
+            self._lan_discovery = None
+
+    async def discover_lan_relays(self, timeout: float = 1.5,
+                                  targets: tuple = ("255.255.255.255",)) -> list[str]:
+        """Broadcast a beacon and collect relay addresses from LAN members.
+        Only URIs whose scheme we support are returned. Bounded."""
+        from .lan_discovery import LanDiscovery
+        try:
+            found = await LanDiscovery(self._id.raw, lambda: []).discover(
+                timeout=timeout, targets=targets)
+        except Exception:
+            return []
+        out: list[str] = []
+        for uri in found[:_JOIN_BLOCK_MAX_URIS]:
+            parsed = _validate_uri(uri)
+            if (parsed is not None and len(uri) <= _MAX_URI_LEN
+                    and self._transport_manager.is_supported(parsed[0])
+                    and uri not in out):
+                out.append(uri)
+        return out
 
     def _seek_from_block(self, inviter_id: NodeID, inviter_pub: bytes,
                          code: str, exp: int, token: bytes) -> Packet:
@@ -2029,10 +2087,21 @@ class MeshNode:
                              payload, ttl=_SEEK_TTL)
 
     async def _relay_join_task(self, inviter_id, inviter_pub, code, exp, token,
-                               relays: list[str]) -> None:
+                               relays: list[str], discover: bool = False) -> None:
         status = self._join_status
         try:
-            for uri in relays:
+            candidates = list(relays)
+            # Opportunistic: ask the LAN if a member can relay us, and append
+            # any answers we don't already have.
+            if discover:
+                status["current"] = "discovering relays on LAN…"
+                for uri in await self.discover_lan_relays():
+                    if uri not in candidates:
+                        candidates.append(uri)
+            if not candidates:
+                status["tried"].append({"uri": "-", "error": "no relay found"})
+                return
+            for uri in candidates:
                 status["current"] = uri
                 try:
                     if await self._relay_join_one(uri, inviter_id, inviter_pub,
