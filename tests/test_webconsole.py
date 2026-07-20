@@ -121,7 +121,8 @@ class TestAuth:
             for key in ("id", "peers", "total", "load", "routing", "uptime",
                         "advertised", "listen", "local_ips", "transports",
                         "listening", "network", "transport_details",
-                        "punch_enabled", "join_status"):
+                        "punch_enabled", "join_status", "reachability",
+                        "relay_capable", "pending_seeks", "lan_discovery"):
                 assert key in snap
             assert snap["id"] == node.id.raw.hex()
             assert "fake" in snap["transports"]
@@ -250,6 +251,46 @@ class TestManagement:
                         _request, console, "POST", path, token, bad)
                     assert status == 400 and j["ok"] is False
         finally:
+            console.stop(); await node.stop()
+
+    async def test_relay_invite_and_join_endpoints(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/relay/invite", token)
+            assert status == 200 and j["block"]
+            import base64 as _b64, json as _json
+            data = _json.loads(_b64.b64decode(j["block"]))
+            assert data["v"] == 3 and data["kind"] == "relay-inv"
+            # join with garbage → validation error surfaced
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/relay/join", token,
+                {"block": "not-base64!!!"})
+            assert status == 400 and j["ok"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_lan_discovery_toggle(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/lan/discovery", token,
+                {"enabled": True})
+            assert status == 200 and j["enabled"] is True
+            assert node._lan_discovery is not None
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/lan/discovery", token,
+                {"enabled": False})
+            assert status == 200 and node._lan_discovery is None
+            # type-checked
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/lan/discovery", token,
+                {"enabled": "yes"})
+            assert status == 400
+        finally:
+            await node.stop_lan_discovery()
             console.stop(); await node.stop()
 
     async def test_punch_toggle(self):
