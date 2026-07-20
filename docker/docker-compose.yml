@@ -1,11 +1,14 @@
 # A single relay node: mesh TCP open to the world, web console kept on the host
 # loopback by default. Bring it up with: docker compose -f docker/docker-compose.yml up -d
+#
+# By default this pulls the image published by CI (ghcr.io/fnyaker/nmesh:latest).
+# To build locally instead: docker compose -f docker/docker-compose.yml build
 services:
   nmesh:
+    image: ghcr.io/fnyaker/nmesh:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: nmesh:latest
     restart: unless-stopped
     environment:
       NMESH_LISTEN: "0.0.0.0:9000"

@@ -312,3 +312,49 @@ class TestHolePunching:
         await a.stop()
         await c.stop()
         await relay.stop()
+
+    async def test_punch_counted_when_link_authenticates(self):
+        """The completed-punch counter is anchored to the authenticated link,
+        not to the probe/ack exchange.
+
+        The responder side of a punch (smaller NodeID) never drives
+        _complete_punch — its link is created by the UDP accept path when the
+        initiator's frames arrive — and its probe/ack can race ahead of the
+        pending state set up from PUNCH_RELAY. Regression guard: a punch that
+        never completes via probe/ack must still be counted once its punched
+        UDP link authenticates, and must not be double-counted."""
+        from src.node import _PunchState, _Peer
+
+        node = make_node()
+        target = make_node().id  # some other node's identity
+
+        # A punch attempt is pending toward `target` but never completed via the
+        # probe/ack path (the exact race the CI failure exposed).
+        state = _PunchState(target, "127.0.0.1:1", "127.0.0.1")
+        node._punch_pending[target] = state
+        before = node._punch_stats["completed"]
+
+        # The punched UDP link authenticates (accept path on the responder).
+        peer = _Peer(UDPTransport(), is_client_side=False)
+        peer.authenticated_id = target
+        node._note_punch_link_up(peer)
+
+        assert node._punch_stats["completed"] == before + 1
+        assert target not in node._punch_pending  # cleared
+
+        # A second authenticated frame from the same peer must not re-count it.
+        node._note_punch_link_up(peer)
+        assert node._punch_stats["completed"] == before + 1
+
+        # A non-UDP link toward a punch target must not be miscounted as a punch.
+        other = make_node().id
+        node._punch_pending[other] = _PunchState(other, "127.0.0.1:1", "127.0.0.1")
+
+        class _NotUDP:
+            pass
+
+        tcp_peer = _Peer.__new__(_Peer)
+        tcp_peer.transport = _NotUDP()
+        tcp_peer.authenticated_id = other
+        node._note_punch_link_up(tcp_peer)
+        assert node._punch_stats["completed"] == before + 1
