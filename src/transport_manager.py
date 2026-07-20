@@ -87,6 +87,19 @@ class TransportManager:
         """URIs this manager is currently listening on."""
         return sorted(self._servers.keys())
 
+    def reachability(self, ctx: dict) -> list[dict]:
+        """Aggregate reachability descriptors from every active listener.
+
+        The core stays transport-agnostic: each server classifies its own
+        address(es); a server that doesn't implement it contributes nothing."""
+        out: list[dict] = []
+        for uri, server in self._servers.items():
+            try:
+                out.extend(server.reachability(uri, ctx))
+            except Exception:
+                pass
+        return out
+
     async def stop_listen(self, uri: str) -> bool:
         """Stop one active listener. Returns True if it was listening."""
         server = self._servers.pop(uri, None)

@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -61,6 +63,10 @@ PUNCH_REQUEST     = 0x10
 PUNCH_RELAY       = 0x11
 PUNCH_PROBE       = 0x12
 PUNCH_ACK         = 0x13
+INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, token-gated
+RELAY_CARRY       = 0x15   # carries a handshake packet between two nodes via a relay
+REACH_PROBE       = 0x16   # ask a peer to dial us back and confirm we're reachable
+REACH_PROBE_ACK   = 0x17   # reply: did the dial-back succeed?
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -91,7 +97,8 @@ _PUNCH_SIG_MAX = 5000
 _PUNCH_ACK_MAGIC = b"NPAK"
 
 _DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
-                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY}
+                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
+                    REACH_PROBE, REACH_PROBE_ACK}
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
@@ -113,6 +120,29 @@ _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix o
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
 _JOIN_BLOCK_MAX_URIS = 16     # candidate addresses tried per block
 _JOIN_TRY_TIMEOUT    = 6.0    # per-URI connect + session wait
+
+# Relayed invitation (INVITE_SEEK): a joiner routes a signed seek toward the
+# inviter through the mesh. Everything here is bounded and rate-limited — a
+# pre-auth packet crossing the mesh is a sensitive surface.
+_SEEK_TAG          = b"NMESH-INVITE-SEEK-v1"  # domain separation for the token
+_SEEK_MAX_PAYLOAD  = 8192      # cert + token, bounded before any parse
+_SEEK_MAX_FUTURE   = 3600.0    # exp accepted at most this far ahead (replay window)
+_SEEK_TTL          = 16        # max hops a seek travels
+_RDV_MAX           = 512       # bounded reverse-path (rendezvous) table
+_RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
+_SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
+_SEEK_RATE_WINDOW  = 10.0      # rate-limit window, seconds
+_MAX_PENDING_SEEKS = 128       # bounded record of seeks addressed to us
+_CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per window
+# AutoNAT: confirm reachability by having a peer dial us back at the address it
+# observed us come from (never an arbitrary address → no amplification).
+_REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
+_REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
+_REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
+_RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
+_RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
+_RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
+_MAX_RELAY_PEERS   = 64        # bounded virtual (relayed) peer table
 
 # Hole punching
 _PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
@@ -161,6 +191,92 @@ def _decode_conn_block(block: str, expect_kind: str) -> dict:
         what = {"req": "a connection request", "inv": "an invite"}.get(expect_kind, expect_kind)
         raise ValueError(f"that block is not {what} block")
     return data
+
+
+# ---------------------------------------------------------------------------
+# INVITE_SEEK codec (relayed invitation)
+# ---------------------------------------------------------------------------
+#
+# Payload: exp(uint64) | h_code(32) | pub_len(H) | inviter_pub | token_len(H) | token
+# Routing uses the packet header: src_id = seeker (B), dst_id = inviter (A). We
+# carry the inviter's raw ML-DSA public key (not a full cert — leaner): any node
+# checks NodeID(inviter_pub) == dst_id and that the token is the inviter's
+# signature over TAG||h_code||exp. So a seek is verifiably authorised by the key
+# whose hash is the inviter id — no shared secret, no impersonation.
+
+def _uri_preference(uri: str) -> int:
+    """Connect-order key: 0 = global IPv6 (no NAT, prefer), 1 = anything else.
+    A global IPv6 endpoint is directly reachable end-to-end, so trying it first
+    lets two IPv6-capable nodes skip NAT punching / relaying entirely."""
+    parsed = _validate_uri(uri)
+    if parsed is None:
+        return 1
+    hp = split_host_port(parsed[1])
+    if hp is None:
+        return 1
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(hp[0])
+    except ValueError:
+        return 1
+    return 0 if (ip.version == 6 and ip.is_global) else 1
+
+
+def _order_by_preference(uris: list[str]) -> list[str]:
+    """Stable sort putting global-IPv6 endpoints first."""
+    return sorted(uris, key=_uri_preference)
+
+
+def _h_code(code: str) -> bytes:
+    """Recogniser tag for an invite code (only the inviter resolves it)."""
+    return hashlib.sha256(code.encode("utf-8")).digest()
+
+
+def _seek_signed_blob(h_code: bytes, exp: int) -> bytes:
+    return _SEEK_TAG + h_code + struct.pack("!Q", exp)
+
+
+def _encode_seek(exp: int, h_code: bytes, inviter_pub: bytes, token: bytes) -> bytes:
+    return (struct.pack("!Q", exp) + h_code
+            + struct.pack("!H", len(inviter_pub)) + inviter_pub
+            + struct.pack("!H", len(token)) + token)
+
+
+def _decode_seek(payload: bytes):
+    """Parse an INVITE_SEEK payload (hostile input). Returns
+    (exp, h_code, inviter_pub, token) or None. Fully bounds-checked."""
+    if not (40 < len(payload) <= _SEEK_MAX_PAYLOAD):
+        return None
+    try:
+        off = 0
+        exp = struct.unpack_from("!Q", payload, off)[0]; off += 8
+        h_code = payload[off:off + 32]; off += 32
+        if len(h_code) != 32:
+            return None
+        plen = struct.unpack_from("!H", payload, off)[0]; off += 2
+        inviter_pub = payload[off:off + plen]; off += plen
+        if len(inviter_pub) != plen or plen == 0:
+            return None
+        tlen = struct.unpack_from("!H", payload, off)[0]; off += 2
+        token = payload[off:off + tlen]; off += tlen
+        if len(token) != tlen or tlen == 0:
+            return None
+    except struct.error:
+        return None
+    return exp, h_code, inviter_pub, token
+
+
+def _make_invite_seek(inviter_identity, seeker_id, code: str, exp: int,
+                      ttl: int = _SEEK_TTL) -> 'Packet':
+    """Build a signed INVITE_SEEK from the inviter's own identity (used by the
+    inviter's block generator and by tests). Routed toward the inviter id."""
+    pub = inviter_identity.dsa_public_key
+    inviter_id = NodeID.from_public_key(pub)
+    h = _h_code(code)
+    token = inviter_identity.sign(_seek_signed_blob(h, exp))
+    payload = _encode_seek(exp, h, pub, token)
+    return Packet.create(INVITE_SEEK, seeker_id.raw, inviter_id.raw,
+                         payload, ttl=ttl)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +610,9 @@ class _Peer:
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
         self.is_client_side: bool = is_client_side
+        # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
+        # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
+        self.relay_only: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
@@ -568,6 +687,60 @@ class _Peer:
 
 
 # ---------------------------------------------------------------------------
+# Relayed transport — a virtual link tunnelled through a relay
+# ---------------------------------------------------------------------------
+
+class RelayedTransport(BaseTransport):
+    """A BaseTransport that carries mesh packets to a *remote* node through a
+    *relay* link, by wrapping each outgoing packet in a RELAY_CARRY and letting
+    the relay route it. Incoming packets are fed by the node when a RELAY_CARRY
+    addressed to us and originating from ``remote`` is unwrapped.
+
+    This lets the entire existing invite/handshake run, unchanged, between two
+    nodes that share no direct link — the relay only sees signed ciphertext."""
+
+    def __init__(self, node: 'MeshNode', remote: NodeID, via: '_Peer') -> None:
+        super().__init__()
+        self._node = node
+        self._remote = remote
+        self._via = via
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._closed = False
+
+    async def connect(self, address: str) -> None:  # never dialled directly
+        ...
+
+    async def listen(self, address: str) -> None:
+        ...
+
+    async def send(self, packet: Packet) -> None:
+        if self._closed:
+            raise ConnectionError("relayed transport closed")
+        carrier = Packet.create(RELAY_CARRY, self._node.id.raw,
+                                self._remote.raw, packet.pack(), ttl=_SEEK_TTL)
+        await self._via.send(carrier)
+
+    def feed(self, inner: Packet) -> None:
+        if not self._closed:
+            self._queue.put_nowait(inner)
+
+    async def receive(self) -> Packet:
+        while True:
+            if self._closed:
+                raise ConnectionError("relayed transport closed")
+            try:
+                return await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+    def remote_ip(self) -> str | None:
+        return None
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+# ---------------------------------------------------------------------------
 # Hole-punching state
 # ---------------------------------------------------------------------------
 
@@ -609,6 +782,18 @@ class MeshNode:
         self._addresses: list[str] = []      # configured listen URIs (may be wildcard)
         self._local_ips: list[str] = []      # cached host addresses (for expansion)
         self._extra_addrs: list[str] = []    # externally-discovered (e.g. public IP)
+        # Transports on which we have accepted an inbound authenticated
+        # connection — passive, zero-cost proof of reachability (relay-capable).
+        self._inbound_schemes: set[str] = set()
+        # Relayed-invitation state (INVITE_SEEK). All bounded.
+        self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
+        self._seek_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer) -> (count, window)
+        self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
+        self._carry_rate: OrderedDict[int, tuple] = OrderedDict()     # id(peer) -> (count, window)
+        self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
+        self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
+        self._reach_probe_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._reach_dials_active = 0                   # concurrent dial-backs (bounded)
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -666,6 +851,7 @@ class MeshNode:
         self._join_task: asyncio.Task | None = None
         self._join_status: dict | None = None
         self._join_try_timeout: float = _JOIN_TRY_TIMEOUT
+        self._relay_join_timeout: float = _RELAY_JOIN_TIMEOUT
         # Keeps local/public addressing fresh (created on start(), needs a loop)
         self._net_monitor: NetMonitor | None = None
 
@@ -1056,6 +1242,7 @@ class MeshNode:
         await self._transport_manager.close_all()
         await self._stop_punch_keepalive()
         self._cancel_manual_holes()
+        await self.stop_lan_discovery()
         if self._udp_server is not None:
             await self._udp_server.close()
             self._udp_server = None
@@ -1417,7 +1604,7 @@ class MeshNode:
         entry = self._routing.get(node_id)
         if entry is None:
             return None
-        for uri in entry.addresses:
+        for uri in _order_by_preference(list(entry.addresses)):  # prefer global IPv6
             result = _validate_uri(uri)
             if result is None:
                 continue
@@ -1524,17 +1711,50 @@ class MeshNode:
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
+            "reachability": self.reachability(),
+            "relay_capable": self.relay_capable(),
+            "pending_seeks": len(self._pending_seeks),
+            "lan_discovery": self._lan_discovery is not None,
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
         }
+
+    def _reachability_ctx(self) -> dict:
+        """Node-level facts a transport needs to classify its reachability:
+        our host addresses, discovered public addresses, and the transports on
+        which someone has already reached us (passive confirmation)."""
+        return {
+            "local_ips": list(self._local_ips),
+            "public_addrs": list(self._extra_addrs),
+            "inbound_schemes": set(self._inbound_schemes),
+        }
+
+    def reachability(self) -> list[dict]:
+        """Aggregated reachability descriptors across every active transport.
+        Transport-agnostic: each transport classifies its own addresses."""
+        ctx = self._reachability_ctx()
+        out = list(self._transport_manager.reachability(ctx))
+        if self._udp_server is not None and self._udp_listen_uri is not None:
+            try:
+                out.extend(self._udp_server.reachability(self._udp_listen_uri, ctx))
+            except Exception:
+                pass
+        return out
+
+    def relay_capable(self) -> bool:
+        """True if we are confirmed reachable by a broad audience — i.e. we can
+        serve as a rendezvous/relay for others. Any transport may qualify."""
+        return any(d.get("scope") == "world" and d.get("confirmed")
+                   for d in self.reachability())
 
     def _peer_scheme(self, peer: '_Peer') -> str | None:
         """Best-effort transport scheme of a peer's link, for the console."""
         addr = peer.remote_addr
         if addr and "://" in addr:
             return addr.split("://", 1)[0]
-        scheme = self._transport_manager.scheme_of(peer.transport)
+        scheme_of = getattr(self._transport_manager, "scheme_of", None)
+        scheme = scheme_of(peer.transport) if scheme_of is not None else None
         if scheme is not None:
             return scheme
         from .udp_transport import UDPTransport
@@ -1706,7 +1926,9 @@ class MeshNode:
 
     def _valid_candidate_uris(self, uris) -> list[str]:
         """Validate a pasted URI list (hostile input): bounded, well-formed,
-        and only schemes this node actually has a transport for."""
+        and only schemes this node actually has a transport for. Ordered to try
+        a global IPv6 address first — no NAT there, so a direct link often
+        works where IPv4 would need punching or a relay."""
         if not isinstance(uris, list) or not uris:
             raise ValueError("no addresses in block")
         out: list[str] = []
@@ -1720,7 +1942,7 @@ class MeshNode:
                 out.append(uri)
         if not out:
             raise ValueError("no address uses a transport this node supports")
-        return out
+        return _order_by_preference(out)
 
     def _open_holes_from_uris(self, uris: list[str], duration: float) -> int:
         """Open a NAT hole toward every udp:// endpoint in *uris*. No-op without
@@ -1750,6 +1972,239 @@ class MeshNode:
         self._join_task = asyncio.create_task(
             self._join_block_task(candidates, code))
         return {"candidates": len(candidates)}
+
+    # -- relayed invitation (single block, no direct link needed) -----------
+
+    def _select_relays(self, limit: int = 5) -> list[str]:
+        """Addresses of nodes that can bridge an invitation to us. We pick the
+        reachable peers we dialled (we reached them, so a joiner likely can
+        too), preferring the freshest. Bounded."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in self._peers:
+            if (p.authenticated_id is not None and p.session is not None
+                    and p.is_client_side and p.remote_addr
+                    and _validate_uri(p.remote_addr) is not None
+                    and p.remote_addr not in seen):
+                seen.add(p.remote_addr)
+                out.append(p.remote_addr)
+            if len(out) >= limit:
+                break
+        return out
+
+    def console_relay_invite(self) -> str:
+        """Generate a single invite block for a node we want to bring in, even
+        with no direct link: it carries a signed rendezvous token plus a list
+        of relays the joiner can reach us through."""
+        code = self._invite.generate_code()
+        exp = int(time.time()) + _RELAY_INVITE_TTL
+        token = self._identity.sign(_seek_signed_blob(_h_code(code), exp))
+        payload = {
+            "v": 3, "kind": "relay-inv", "code": code, "exp": exp,
+            "pub": self._identity.dsa_public_key.hex(),
+            "token": token.hex(), "relays": self._select_relays(),
+        }
+        return base64.b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+    def console_relay_join(self, block: str) -> dict:
+        """Ingest a relay-invite block and join in the background: route a
+        signed seek toward the inviter through each relay until the tunnelled
+        handshake yields a session. Hostile input — fully validated."""
+        # relay-inv is v3 (not the v2 connect exchange) — parse explicitly
+        if not isinstance(block, str) or not (0 < len(block) <= _RELAY_BLOCK_MAX_LEN):
+            raise ValueError("invalid block")
+        try:
+            data = json.loads(base64.b64decode("".join(block.split()), validate=True))
+        except Exception:
+            raise ValueError("invalid or corrupt block") from None
+        if not isinstance(data, dict) or data.get("v") != 3 or data.get("kind") != "relay-inv":
+            raise ValueError("not a relay-invite block")
+        code = data.get("code")
+        if not isinstance(code, str) or not (0 < len(code) <= 64):
+            raise ValueError("invalid code in block")
+        exp = data.get("exp")
+        if not isinstance(exp, int) or exp < time.time():
+            raise ValueError("invite block expired")
+        try:
+            inviter_pub = bytes.fromhex(data.get("pub", ""))
+            token = bytes.fromhex(data.get("token", ""))
+        except (ValueError, TypeError):
+            raise ValueError("malformed block fields") from None
+        if not inviter_pub or not token:
+            raise ValueError("malformed block fields")
+        try:
+            inviter_id = NodeID.from_public_key(inviter_pub)
+        except Exception:
+            raise ValueError("bad inviter key") from None
+        if inviter_id == self._id:
+            raise ValueError("that is our own invite")
+        relays = data.get("relays")
+        candidates: list[str] = []
+        if isinstance(relays, list):
+            for uri in relays[:_JOIN_BLOCK_MAX_URIS]:
+                if (isinstance(uri, str) and len(uri) <= _MAX_URI_LEN
+                        and _validate_uri(uri) is not None
+                        and uri not in candidates):
+                    parsed = _validate_uri(uri)
+                    if self._transport_manager.is_supported(parsed[0]):
+                        candidates.append(uri)
+        candidates = _order_by_preference(candidates)   # prefer global IPv6
+        # No relay in the block is not fatal if we can look for one on the LAN
+        # (a broadcast-capable transport is up).
+        can_discover = self._udp_server is not None
+        if not candidates and not can_discover:
+            raise ValueError("no reachable relay in block")
+        if self._join_task is not None and not self._join_task.done():
+            raise ValueError("a join is already in progress")
+        self._join_status = {"running": True, "current": None,
+                             "tried": [], "connected": None}
+        self._join_task = asyncio.create_task(
+            self._relay_join_task(inviter_id, inviter_pub, code, exp, token,
+                                  candidates, discover=can_discover))
+        return {"relays": len(candidates)}
+
+    # -- LAN relay discovery (broadcast) ------------------------------------
+
+    def _lan_relay_addrs(self) -> list[str]:
+        """Addresses a LAN peer can reach us at to relay through — our own
+        reachable addresses. Answered to discovery beacons."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for d in self.reachability():
+            a = d.get("address")
+            if a and a not in seen:
+                seen.add(a)
+                out.append(a)
+        return out[:8]
+
+    async def start_lan_discovery(self) -> None:
+        """Answer LAN discovery beacons so joiners on our medium can find us as
+        a relay. Opt-in — it exposes our addresses to the local broadcast domain."""
+        if self._lan_discovery is not None:
+            return
+        from .lan_discovery import LanDiscovery
+        disc = LanDiscovery(self._id.raw, self._lan_relay_addrs)
+        try:
+            await disc.start()
+        except Exception:
+            return
+        self._lan_discovery = disc
+
+    async def stop_lan_discovery(self) -> None:
+        if self._lan_discovery is not None:
+            await self._lan_discovery.stop()
+            self._lan_discovery = None
+
+    async def discover_lan_relays(self, timeout: float = 1.5,
+                                  targets: tuple = ("255.255.255.255",)) -> list[str]:
+        """Broadcast a beacon and collect relay addresses from LAN members.
+        Only URIs whose scheme we support are returned. Bounded."""
+        from .lan_discovery import LanDiscovery
+        try:
+            found = await LanDiscovery(self._id.raw, lambda: []).discover(
+                timeout=timeout, targets=targets)
+        except Exception:
+            return []
+        out: list[str] = []
+        for uri in found[:_JOIN_BLOCK_MAX_URIS]:
+            parsed = _validate_uri(uri)
+            if (parsed is not None and len(uri) <= _MAX_URI_LEN
+                    and self._transport_manager.is_supported(parsed[0])
+                    and uri not in out):
+                out.append(uri)
+        return out
+
+    def _seek_from_block(self, inviter_id: NodeID, inviter_pub: bytes,
+                         code: str, exp: int, token: bytes) -> Packet:
+        payload = _encode_seek(exp, _h_code(code), inviter_pub, token)
+        return Packet.create(INVITE_SEEK, self._id.raw, inviter_id.raw,
+                             payload, ttl=_SEEK_TTL)
+
+    async def _relay_join_task(self, inviter_id, inviter_pub, code, exp, token,
+                               relays: list[str], discover: bool = False) -> None:
+        status = self._join_status
+        try:
+            candidates = list(relays)
+            # Opportunistic: ask the LAN if a member can relay us, and append
+            # any answers we don't already have.
+            if discover:
+                status["current"] = "discovering relays on LAN…"
+                for uri in await self.discover_lan_relays():
+                    if uri not in candidates:
+                        candidates.append(uri)
+            if not candidates:
+                status["tried"].append({"uri": "-", "error": "no relay found"})
+                return
+            for uri in candidates:
+                status["current"] = uri
+                try:
+                    if await self._relay_join_one(uri, inviter_id, inviter_pub,
+                                                  code, exp, token):
+                        status["connected"] = uri
+                        return
+                    status["tried"].append({"uri": uri, "error": "no session"})
+                except Exception as exc:
+                    status["tried"].append(
+                        {"uri": uri, "error": (str(exc) or type(exc).__name__)[:80]})
+        finally:
+            status["running"] = False
+            status["current"] = None
+
+    async def _relay_join_one(self, relay_uri: str, inviter_id: NodeID,
+                              inviter_pub: bytes, code: str, exp: int,
+                              token: bytes) -> bool:
+        """Open a relay link, launch a tunnelled invite handshake toward the
+        inviter, and wait for a session. Cleans up on failure."""
+        rlink = None
+        vpa = None
+        try:
+            transport = await self._transport_manager.connect(relay_uri)
+            rlink = _Peer(transport, is_client_side=True)
+            rlink.relay_only = True
+            rlink.on_dead = self._reap_peer
+            rlink.total = self._metrics.total
+            rlink.remote_addr = relay_uri
+            self._peers.append(rlink)
+            self._running = True
+            await rlink.start(self._handle_packet)
+
+            vpa = _Peer(RelayedTransport(self, inviter_id, rlink), is_client_side=True)
+            vpa.join_code = code
+            vpa.on_dead = self._relay_on_dead(inviter_id.raw)
+            vpa.total = self._metrics.total
+            self._relay_peers[inviter_id.raw] = vpa
+            self._peers.append(vpa)
+            await vpa.start(self._handle_packet)
+
+            await rlink.send(self._seek_from_block(inviter_id, inviter_pub,
+                                                   code, exp, token))
+
+            deadline = time.monotonic() + self._relay_join_timeout
+            while time.monotonic() < deadline:
+                if vpa.session is not None and vpa.authenticated_id == inviter_id:
+                    return True
+                if vpa not in self._peers or rlink not in self._peers:
+                    break
+                await asyncio.sleep(0.05)
+            return False
+        finally:
+            if (vpa is not None and
+                    (vpa.session is None or vpa.authenticated_id != inviter_id)):
+                self._relay_peers.pop(inviter_id.raw, None)
+                if vpa is not None:
+                    await self._safe_stop_peer(vpa)
+                if rlink is not None:
+                    await self._safe_stop_peer(rlink)
+
+    async def _safe_stop_peer(self, peer: '_Peer') -> None:
+        try:
+            await peer.stop()
+        except Exception:
+            pass
+        if peer in self._peers:
+            self._peers.remove(peer)
 
     def console_invite_block(self) -> str:
         """A shareable join bundle: base64 JSON with a fresh invite code and
@@ -1886,6 +2341,13 @@ class MeshNode:
             await peer.send(packet.with_decremented_ttl())
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
+        if packet.type == INVITE_SEEK:
+            # Pre-auth, token-gated, bounded — handled entirely on its own.
+            await self._handle_invite_seek(peer, packet)
+            return
+        if packet.type == RELAY_CARRY:
+            await self._handle_relay_carry(peer, packet)
+            return
         if packet.type in _DIRECT_TYPES:
             if peer.authenticated_id is None:
                 return
@@ -1923,10 +2385,333 @@ class MeshNode:
             E2E_HANDSHAKE_ACK: self._handle_e2e_handshake_ack,
             PUNCH_REQUEST:     self._handle_punch_request,
             PUNCH_RELAY:       self._handle_punch_relay,
+            REACH_PROBE:       self._handle_reach_probe,
+            REACH_PROBE_ACK:   self._handle_reach_probe_ack,
         }
         handler = handlers.get(packet.type)
         if handler:
             await handler(peer, packet)
+
+    # -----------------------------------------------------------------------
+    # Relayed invitation (INVITE_SEEK)
+    # -----------------------------------------------------------------------
+
+    def _seek_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit: bound how many seeks one link can make
+        us process (and verify) in a window. Table is bounded and pruned."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._seek_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._seek_rate[k]
+        while len(self._seek_rate) > _RDV_MAX:
+            self._seek_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._seek_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _SEEK_RATE_MAX:
+            self._seek_rate[key] = (cnt, ws)
+            return False
+        self._seek_rate[key] = (cnt + 1, ws)
+        return True
+
+    def _rdv_record(self, seeker_raw: bytes, peer: '_Peer') -> None:
+        """Remember the reverse path for a seeker (bounded, short-lived) so the
+        inviter's reply can be routed back on the link the seek arrived on."""
+        self._rdv.pop(seeker_raw, None)
+        while len(self._rdv) >= _RDV_MAX:
+            self._rdv.popitem(last=False)
+        self._rdv[seeker_raw] = (peer, time.monotonic() + _RDV_TTL)
+
+    def _rdv_lookup(self, seeker_raw: bytes) -> '_Peer | None':
+        entry = self._rdv.get(seeker_raw)
+        if entry is None:
+            return None
+        peer, exp = entry
+        if time.monotonic() > exp or peer not in self._peers:
+            self._rdv.pop(seeker_raw, None)
+            return None
+        return peer
+
+    def _recognize_seek(self, h_code: bytes) -> str | None:
+        """The live invite code whose hash matches, if any (constant-time)."""
+        for code in list(self._invite._codes.keys()):
+            if hmac.compare_digest(_h_code(code), h_code):
+                return code
+        return None
+
+    async def _handle_invite_seek(self, peer: '_Peer', packet: Packet) -> None:
+        """Process a relayed invitation seek. Cheap, bounded checks run before
+        the expensive signature verification; nothing here can crash the loop."""
+        # 1. cheap structural / bound checks first
+        if packet.ttl <= 0:
+            return
+        if packet.msg_id != packet.compute_msg_id():
+            return  # msg_id must commit to content (anti-amplification)
+        if self._is_seen(packet.msg_id):
+            return
+        if not self._seek_allowed(peer):
+            return
+        decoded = _decode_seek(packet.payload)
+        if decoded is None:
+            return
+        exp, h_code, inviter_pub, token = decoded
+        now = time.time()
+        if exp < now or exp > now + _SEEK_MAX_FUTURE:
+            return  # expired or absurdly far ahead
+        inviter = NodeID(packet.dst_id)
+        seeker = NodeID(packet.src_id)
+        if seeker == self._id:
+            return  # our own seek looped back
+        # 2. expensive verification last: key↔id binding + token signature
+        try:
+            if NodeID.from_public_key(inviter_pub) != inviter:
+                return  # a NodeID not derivable from the presented key is a lie
+            if not self._identity.verify(_seek_signed_blob(h_code, exp), token,
+                                         inviter_pub):
+                return  # not authorised by the inviter's key — drop
+        except Exception:
+            return
+        # 3. legit seek: remember the reverse path (bounded)
+        self._rdv_record(packet.src_id, peer)
+        if inviter == self._id:
+            self._on_seek_for_self(seeker, h_code, inviter_pub, peer)
+            return
+        # 4. relay toward the inviter over authenticated member links only
+        await self._forward_seek(peer, packet)
+
+    def _on_seek_for_self(self, seeker: NodeID, h_code: bytes,
+                          inviter_pub: bytes, peer: '_Peer') -> None:
+        """A valid seek addressed to us. If it names a live invite code we
+        answer it: open a relayed virtual peer for the seeker and drive the
+        invite handshake through the relay it arrived on."""
+        recognized = self._recognize_seek(h_code) is not None
+        while len(self._pending_seeks) >= _MAX_PENDING_SEEKS:
+            self._pending_seeks.popitem(last=False)
+        self._pending_seeks[seeker.raw] = {
+            "h_code": h_code, "recognized": recognized,
+            "peer": peer, "at": time.monotonic(),
+        }
+        if recognized and seeker.raw not in self._relay_peers:
+            asyncio.ensure_future(self._start_relay_invite(seeker, peer))
+
+    async def _start_relay_invite(self, seeker: NodeID, via: '_Peer') -> None:
+        """Inviter side: challenge the seeker over a relayed virtual peer,
+        mirroring _on_new_transport but tunnelled through *via*."""
+        if seeker.raw in self._relay_peers or seeker == self._id:
+            return
+        if len(self._relay_peers) >= _MAX_RELAY_PEERS or len(self._peers) >= _MAX_PEERS:
+            return
+        vp = _Peer(RelayedTransport(self, seeker, via), is_client_side=False)
+        vp.on_dead = self._relay_on_dead(seeker.raw)
+        vp.total = self._metrics.total
+        self._relay_peers[seeker.raw] = vp
+        self._peers.append(vp)
+        await vp.start(self._handle_packet)
+        challenge = self._invite.generate_challenge()
+        vp.pending_challenge = challenge
+        pkt = Packet.create(CHALLENGE, self._id.raw, _BROADCAST_ID, challenge)
+        try:
+            await vp.send(pkt)
+        except Exception:
+            pass
+
+    def _relay_on_dead(self, remote_raw: bytes):
+        async def _cb(peer: '_Peer') -> None:
+            if self._relay_peers.get(remote_raw) is peer:
+                self._relay_peers.pop(remote_raw, None)
+            await self._reap_peer(peer)
+        return _cb
+
+    def _carry_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit for relay-carry packets (bounded table)."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._carry_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._carry_rate[k]
+        while len(self._carry_rate) > _RDV_MAX:
+            self._carry_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._carry_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _CARRY_RATE_MAX:
+            self._carry_rate[key] = (cnt, ws)
+            return False
+        self._carry_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_relay_carry(self, peer: '_Peer', packet: Packet) -> None:
+        """Route a RELAY_CARRY toward its destination, or — if it is for us —
+        unwrap the inner handshake packet and feed the matching virtual peer.
+        Bounded: TTL, dedup, per-link rate limit."""
+        if packet.ttl <= 0:
+            return
+        if packet.msg_id != packet.compute_msg_id():
+            return
+        if self._is_seen(packet.msg_id):
+            return
+        if not self._carry_allowed(peer):
+            return
+        if packet.dst_id == self._id.raw:
+            vp = self._relay_peers.get(packet.src_id)
+            if vp is None:
+                return  # no active rendezvous with this endpoint
+            try:
+                inner = Packet.unpack(packet.payload)
+            except Exception:
+                return
+            vp.transport.feed(inner)
+            return
+        # route onward: reverse path (a seeker we bridged) first, else forward
+        rp = self._rdv_lookup(packet.dst_id)
+        if rp is not None and rp is not peer:
+            if packet.ttl > 1:
+                await rp.send(packet.with_decremented_ttl())
+            return
+        await self._forward_seek(peer, packet)
+
+    async def _forward_seek(self, from_peer: '_Peer', packet: Packet) -> None:
+        """Greedy XOR routing of a seek toward its inviter id, over authenticated
+        peers only. TTL-bounded; no on-demand connects (stays cheap pre-auth)."""
+        if packet.ttl <= 1:
+            return
+        target = NodeID(packet.dst_id)
+        direct = next(
+            (p for p in self._peers
+             if p is not from_peer and p.authenticated_id == target
+             and p.session is not None),
+            None,
+        )
+        if direct is not None:
+            await direct.send(packet.with_decremented_ttl())
+            return
+        candidates = [
+            p for p in self._peers
+            if p is not from_peer and p.authenticated_id is not None
+            and p.session is not None
+        ]
+        if candidates:
+            best = min(candidates,
+                       key=lambda p: target.distance(p.authenticated_id))
+            await best.send(packet.with_decremented_ttl())
+
+    # -----------------------------------------------------------------------
+    # AutoNAT — active reachability confirmation
+    # -----------------------------------------------------------------------
+
+    async def probe_reachability(self) -> int:
+        """Ask an authenticated peer to dial each scheme we listen on and tell
+        us whether it worked — proactive confirmation (beyond the passive
+        'someone reached us' signal). Returns how many probes were sent."""
+        peer = next((p for p in self._peers
+                     if p.authenticated_id is not None and p.session is not None
+                     and not isinstance(p.transport, RelayedTransport)), None)
+        if peer is None:
+            return 0
+        sent = 0
+        for uri in self._transport_manager.listening_uris():
+            parsed = _validate_uri(uri)
+            if parsed is None:
+                continue
+            hp = split_host_port(parsed[1])
+            if hp is None:
+                continue
+            try:
+                port = int(hp[1])
+            except ValueError:
+                continue
+            scheme = parsed[0].encode("utf-8")[:16]
+            payload = struct.pack("!BH", len(scheme), port) + scheme
+            try:
+                await peer.send(Packet.create(REACH_PROBE, self._id.raw,
+                                              peer.authenticated_id.raw, payload))
+                sent += 1
+            except Exception:
+                pass
+        return sent
+
+    def _reach_probe_allowed(self, peer: '_Peer') -> bool:
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._reach_probe_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._reach_probe_rate[k]
+        while len(self._reach_probe_rate) > _RDV_MAX:
+            self._reach_probe_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._reach_probe_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _REACH_PROBE_RATE_MAX:
+            self._reach_probe_rate[key] = (cnt, ws)
+            return False
+        self._reach_probe_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_reach_probe(self, peer: _Peer, packet: Packet) -> None:
+        """A peer asks us to confirm it is reachable. We dial back the address
+        we OBSERVED it come from (never an arbitrary one → no amplification)
+        and report whether an NMesh node answered."""
+        try:
+            slen, port = struct.unpack_from("!BH", packet.payload, 0)
+            scheme = packet.payload[3:3 + slen].decode("ascii")
+        except Exception:
+            return
+        if not scheme or port <= 0 or port >= 65536:
+            return
+        if not self._transport_manager.is_supported(scheme):
+            return
+        if not self._reach_probe_allowed(peer):
+            return
+        if self._reach_dials_active >= _REACH_DIALS_MAX:
+            return
+        # Dial ONLY the address we observed this peer at — never a value it
+        # supplied — so it can never make us dial an arbitrary victim.
+        observed = peer.transport.remote_ip()
+        ok = False
+        if observed is not None:
+            self._reach_dials_active += 1
+            try:
+                ok = await self._dial_back(scheme, observed, port)
+            finally:
+                self._reach_dials_active -= 1
+        reply = struct.pack("!BB", len(scheme.encode()), 1 if ok else 0) + scheme.encode()
+        try:
+            await peer.send(Packet.create(REACH_PROBE_ACK, self._id.raw,
+                                          packet.src_id, reply))
+        except Exception:
+            pass
+
+    async def _dial_back(self, scheme: str, ip: str, port: int) -> bool:
+        """Open a connection to ip:port and confirm an NMesh node answers (it
+        challenges on accept). Bounded by a timeout; always cleaned up."""
+        from .ip_utils import _fmt_host
+        addr = f"{scheme}://{_fmt_host(ip)}:{port}"
+        transport = None
+        try:
+            transport = await asyncio.wait_for(
+                self._transport_manager.connect(addr), _REACH_DIAL_TIMEOUT)
+            pkt = await asyncio.wait_for(transport.receive(), _REACH_DIAL_TIMEOUT)
+            return pkt.type == CHALLENGE
+        except Exception:
+            return False
+        finally:
+            if transport is not None:
+                try:
+                    await transport.close()
+                except Exception:
+                    pass
+
+    async def _handle_reach_probe_ack(self, peer: _Peer, packet: Packet) -> None:
+        try:
+            slen, ok = struct.unpack_from("!BB", packet.payload, 0)
+            scheme = packet.payload[2:2 + slen].decode("ascii")
+        except Exception:
+            return
+        if ok and scheme and self._transport_manager.is_supported(scheme):
+            if scheme not in self._inbound_schemes:
+                self._inbound_schemes.add(scheme)   # confirmed reachable → relay-capable
+                self._poke_net("autonat-confirmed")
 
     async def _handle_data(self, peer: _Peer, packet: Packet) -> None:
         src = NodeID(packet.src_id)
@@ -2149,6 +2934,8 @@ class MeshNode:
         if len(packet.payload) != 32:
             return
         peer.received_challenge = packet.payload
+        if peer.relay_only:
+            return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
         if peer.join_code is None:
@@ -2290,6 +3077,16 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        # This peer connected to us (server side) and authenticated → positive,
+        # zero-cost evidence that we are reachable on this transport. Never let
+        # this observability bookkeeping break the handshake (zéro crash).
+        if not peer.is_client_side:
+            try:
+                scheme = self._peer_scheme(peer)
+                if scheme is not None:
+                    self._inbound_schemes.add(scheme)
+            except Exception:
+                pass
         dsa_pub      = self._identity.dsa_public_key
         server_chain = self._cert_store.get_chain_to_root(self._id) or []
         signature    = self._identity.sign(peer.pending_challenge + ciphertext + dsa_pub)

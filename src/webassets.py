@@ -57,15 +57,19 @@ INDEX_HTML = """<!doctype html>
 
   <section class="card">
     <h2>Transports</h2>
+    <div id="reach-status" class="netrow"></div>
     <div id="net-status" class="netrow"></div>
     <div class="mrow tctl">
       <button id="punch-toggle" class="ghost"></button>
       <button id="keepalive-toggle" class="ghost" title="keep the NAT mapping open continuously so this node stays reachable / can relay behind NAT"></button>
       <button id="udp-toggle" class="ghost"></button>
       <input id="udp-port" type="number" min="1" max="65535" value="9001" title="UDP port">
+      <button id="lan-toggle" class="ghost" title="answer LAN discovery beacons — be findable as a relay by joiners on your network"></button>
+      <button id="reach-probe" class="ghost" title="ask a peer to dial you back and confirm you're reachable (AutoNAT)">Confirm reachability</button>
       <button id="net-recheck" class="ghost">Re-check network</button>
       <span id="tctl-status" class="muted"></span>
     </div>
+    <div id="reach-cards" class="tcards"></div>
     <div id="transport-cards" class="tcards"></div>
     <div id="punch-block"></div>
   </section>
@@ -103,6 +107,27 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div>
     <div id="connect-status" class="muted"></div>
+  </section>
+
+  <section class="card">
+    <h2>Invite across NAT (relay)</h2>
+    <p class="muted">When a direct link is impossible (4G/CGNAT, double NAT): the invitation is routed through a relay — a public node, or any member found on your LAN. No direct link needed.</p>
+    <div class="connect">
+      <div class="cbox">
+        <div class="ctitle">Invite a node <span class="muted">(bring someone in)</span></div>
+        <button id="rly-invite">Generate relay invite</button>
+        <textarea id="rly-invite-out" class="mono" readonly placeholder="→ send this block to the node you want to bring in"></textarea>
+      </div>
+      <div class="cbox">
+        <div class="ctitle">Join a network <span class="muted">(you connect in)</span></div>
+        <textarea id="rly-join-in" class="mono" placeholder="paste a relay invite block"></textarea>
+        <div class="mrow">
+          <button id="rly-join">Join via relay</button>
+          <span id="rly-join-progress" class="muted"></span>
+        </div>
+      </div>
+    </div>
+    <div id="rly-status" class="muted"></div>
   </section>
 
   <section class="card expert">
@@ -383,7 +408,7 @@ function drawJoinProgress(js) {
       color = "var(--bad)";
     }
   }
-  for (const id of ["join-progress", "cx-join-progress"]) {
+  for (const id of ["join-progress", "cx-join-progress", "rly-join-progress"]) {
     const el = $(id);
     if (el) { el.textContent = text; el.style.color = color; }
   }
@@ -395,7 +420,34 @@ function fmtAge(a) {
   return Math.round(a / 60) + "m ago";
 }
 
+function drawReachability(s) {
+  // "How am I reachable, and by whom" — transport-agnostic, from descriptors.
+  const relay = s.relay_capable
+    ? '<span class="badge up">relay-capable</span>'
+    : '<span class="badge">not a relay</span>';
+  const seeks = s.pending_seeks ? ` <span class="muted">· ${s.pending_seeks} invite seek(s)</span>` : "";
+  $("reach-status").innerHTML =
+    `<span><span class="nk">Reachability</span>${relay}${seeks}</span>`;
+  const byT = {};
+  (s.reachability || []).forEach((d) => {
+    (byT[d.transport] = byT[d.transport] || []).push(d);
+  });
+  const scopeBadge = (d) => {
+    const cls = d.scope === "world" ? "on" : "";
+    const mark = d.confirmed ? " ✓" : "";
+    const anc = d.anchor ? `@${d.anchor}` : "";
+    return `<span class="pill ${cls}">${d.scope}${anc}${mark}</span>`;
+  };
+  $("reach-cards").innerHTML = Object.keys(byT).map((t) =>
+    `<div class="tcard"><h3><span class="pill on">${t}</span> reachable as</h3>` +
+    byT[t].map((d) =>
+      `<div class="kv"><span>${scopeBadge(d)}</span><span class="mono muted">${d.address || "—"}</span></div>`
+    ).join("") + `</div>`
+  ).join("");
+}
+
 function drawTransports(s) {
+  drawReachability(s);
   const udpOn = (s.transport_details || []).some((t) => t.hole_punch);
   const pt = $("punch-toggle");
   pt.textContent = "Hole punching: " + (s.punch_enabled ? "ON" : "OFF");
@@ -404,6 +456,9 @@ function drawTransports(s) {
   ka.textContent = "Continuous: " + (s.punch_keepalive ? "ON" : "OFF");
   ka.className = s.punch_keepalive ? "" : "ghost";
   ka.classList.toggle("hidden", !udpOn);
+  const lt = $("lan-toggle");
+  lt.textContent = "LAN relay discovery: " + (s.lan_discovery ? "ON" : "OFF");
+  lt.className = s.lan_discovery ? "" : "ghost";
   $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
   $("udp-port").classList.toggle("hidden", udpOn);
 
@@ -567,6 +622,29 @@ $("cx-complete").addEventListener("click", async () => {
   } catch (_) { cstatus("connect failed", false); }
 });
 
+// relay invitation (across NAT)
+function rstatus(msg, ok = true) {
+  const el = $("rly-status");
+  el.textContent = msg; el.style.color = ok ? "" : "var(--bad)";
+}
+$("rly-invite").addEventListener("click", async () => {
+  try {
+    const j = await (await api("/api/relay/invite", "POST")).json();
+    $("rly-invite-out").value = j.block;
+    rstatus((await copyText(j.block)) ? "invite copied — send it to the node you're inviting" : "invite ready — copy it");
+  } catch (_) { rstatus("failed to generate relay invite", false); }
+});
+$("rly-join").addEventListener("click", async () => {
+  const block = $("rly-join-in").value.trim();
+  if (!block) { rstatus("paste a relay invite block first", false); return; }
+  try {
+    const res = await api("/api/relay/join", "POST", { block });
+    const j = await res.json();
+    if (res.ok) { rstatus(`joining via relay — ${j.relays} relay(s) + LAN discovery…`); $("rly-join-in").value = ""; }
+    else rstatus("join failed: " + (j.error || ""), false);
+  } catch (_) { rstatus("join failed", false); }
+});
+
 // management
 function status(msg, ok = true) {
   const el = $("manage-status");
@@ -630,6 +708,21 @@ $("udp-toggle").addEventListener("click", async () => {
 $("net-recheck").addEventListener("click", async () => {
   try { await api("/api/net/recheck", "POST"); tctl("network re-check requested"); tick(); }
   catch (_) { tctl("re-check failed", false); }
+});
+$("lan-toggle").addEventListener("click", async () => {
+  if (!last) return;
+  try {
+    await api("/api/lan/discovery", "POST", { enabled: !last.lan_discovery });
+    tctl(!last.lan_discovery ? "LAN relay discovery on" : "LAN relay discovery off");
+    tick();
+  } catch (_) { tctl("failed to toggle LAN discovery", false); }
+});
+$("reach-probe").addEventListener("click", async () => {
+  try {
+    const j = await (await api("/api/reachability/probe", "POST")).json();
+    tctl(j.sent ? `reachability probe sent (${j.sent}) — check the badge` : "no peer to probe through");
+    setTimeout(tick, 3500);
+  } catch (_) { tctl("reachability probe failed", false); }
 });
 $("listen-btn").addEventListener("click", async () => {
   const uri = $("listen-uri").value.trim();
