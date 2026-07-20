@@ -65,6 +65,8 @@ PUNCH_PROBE       = 0x12
 PUNCH_ACK         = 0x13
 INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, token-gated
 RELAY_CARRY       = 0x15   # carries a handshake packet between two nodes via a relay
+REACH_PROBE       = 0x16   # ask a peer to dial us back and confirm we're reachable
+REACH_PROBE_ACK   = 0x17   # reply: did the dial-back succeed?
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -95,7 +97,8 @@ _PUNCH_SIG_MAX = 5000
 _PUNCH_ACK_MAGIC = b"NPAK"
 
 _DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
-                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY}
+                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
+                    REACH_PROBE, REACH_PROBE_ACK}
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
@@ -131,6 +134,11 @@ _SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
 _SEEK_RATE_WINDOW  = 10.0      # rate-limit window, seconds
 _MAX_PENDING_SEEKS = 128       # bounded record of seeks addressed to us
 _CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per window
+# AutoNAT: confirm reachability by having a peer dial us back at the address it
+# observed us come from (never an arbitrary address → no amplification).
+_REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
+_REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
+_REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
 _RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
 _RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
 _RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
@@ -195,6 +203,29 @@ def _decode_conn_block(block: str, expect_kind: str) -> dict:
 # checks NodeID(inviter_pub) == dst_id and that the token is the inviter's
 # signature over TAG||h_code||exp. So a seek is verifiably authorised by the key
 # whose hash is the inviter id — no shared secret, no impersonation.
+
+def _uri_preference(uri: str) -> int:
+    """Connect-order key: 0 = global IPv6 (no NAT, prefer), 1 = anything else.
+    A global IPv6 endpoint is directly reachable end-to-end, so trying it first
+    lets two IPv6-capable nodes skip NAT punching / relaying entirely."""
+    parsed = _validate_uri(uri)
+    if parsed is None:
+        return 1
+    hp = split_host_port(parsed[1])
+    if hp is None:
+        return 1
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(hp[0])
+    except ValueError:
+        return 1
+    return 0 if (ip.version == 6 and ip.is_global) else 1
+
+
+def _order_by_preference(uris: list[str]) -> list[str]:
+    """Stable sort putting global-IPv6 endpoints first."""
+    return sorted(uris, key=_uri_preference)
+
 
 def _h_code(code: str) -> bytes:
     """Recogniser tag for an invite code (only the inviter resolves it)."""
@@ -761,6 +792,8 @@ class MeshNode:
         self._carry_rate: OrderedDict[int, tuple] = OrderedDict()     # id(peer) -> (count, window)
         self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
         self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
+        self._reach_probe_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._reach_dials_active = 0                   # concurrent dial-backs (bounded)
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -1571,7 +1604,7 @@ class MeshNode:
         entry = self._routing.get(node_id)
         if entry is None:
             return None
-        for uri in entry.addresses:
+        for uri in _order_by_preference(list(entry.addresses)):  # prefer global IPv6
             result = _validate_uri(uri)
             if result is None:
                 continue
@@ -1893,7 +1926,9 @@ class MeshNode:
 
     def _valid_candidate_uris(self, uris) -> list[str]:
         """Validate a pasted URI list (hostile input): bounded, well-formed,
-        and only schemes this node actually has a transport for."""
+        and only schemes this node actually has a transport for. Ordered to try
+        a global IPv6 address first — no NAT there, so a direct link often
+        works where IPv4 would need punching or a relay."""
         if not isinstance(uris, list) or not uris:
             raise ValueError("no addresses in block")
         out: list[str] = []
@@ -1907,7 +1942,7 @@ class MeshNode:
                 out.append(uri)
         if not out:
             raise ValueError("no address uses a transport this node supports")
-        return out
+        return _order_by_preference(out)
 
     def _open_holes_from_uris(self, uris: list[str], duration: float) -> int:
         """Open a NAT hole toward every udp:// endpoint in *uris*. No-op without
@@ -2015,6 +2050,7 @@ class MeshNode:
                     parsed = _validate_uri(uri)
                     if self._transport_manager.is_supported(parsed[0]):
                         candidates.append(uri)
+        candidates = _order_by_preference(candidates)   # prefer global IPv6
         # No relay in the block is not fatal if we can look for one on the LAN
         # (a broadcast-capable transport is up).
         can_discover = self._udp_server is not None
@@ -2349,6 +2385,8 @@ class MeshNode:
             E2E_HANDSHAKE_ACK: self._handle_e2e_handshake_ack,
             PUNCH_REQUEST:     self._handle_punch_request,
             PUNCH_RELAY:       self._handle_punch_relay,
+            REACH_PROBE:       self._handle_reach_probe,
+            REACH_PROBE_ACK:   self._handle_reach_probe_ack,
         }
         handler = handlers.get(packet.type)
         if handler:
@@ -2557,6 +2595,123 @@ class MeshNode:
             best = min(candidates,
                        key=lambda p: target.distance(p.authenticated_id))
             await best.send(packet.with_decremented_ttl())
+
+    # -----------------------------------------------------------------------
+    # AutoNAT — active reachability confirmation
+    # -----------------------------------------------------------------------
+
+    async def probe_reachability(self) -> int:
+        """Ask an authenticated peer to dial each scheme we listen on and tell
+        us whether it worked — proactive confirmation (beyond the passive
+        'someone reached us' signal). Returns how many probes were sent."""
+        peer = next((p for p in self._peers
+                     if p.authenticated_id is not None and p.session is not None
+                     and not isinstance(p.transport, RelayedTransport)), None)
+        if peer is None:
+            return 0
+        sent = 0
+        for uri in self._transport_manager.listening_uris():
+            parsed = _validate_uri(uri)
+            if parsed is None:
+                continue
+            hp = split_host_port(parsed[1])
+            if hp is None:
+                continue
+            try:
+                port = int(hp[1])
+            except ValueError:
+                continue
+            scheme = parsed[0].encode("utf-8")[:16]
+            payload = struct.pack("!BH", len(scheme), port) + scheme
+            try:
+                await peer.send(Packet.create(REACH_PROBE, self._id.raw,
+                                              peer.authenticated_id.raw, payload))
+                sent += 1
+            except Exception:
+                pass
+        return sent
+
+    def _reach_probe_allowed(self, peer: '_Peer') -> bool:
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._reach_probe_rate.items()
+                  if now - ws > _SEEK_RATE_WINDOW]:
+            del self._reach_probe_rate[k]
+        while len(self._reach_probe_rate) > _RDV_MAX:
+            self._reach_probe_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._reach_probe_rate.get(key, (0, now))
+        if now - ws > _SEEK_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _REACH_PROBE_RATE_MAX:
+            self._reach_probe_rate[key] = (cnt, ws)
+            return False
+        self._reach_probe_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_reach_probe(self, peer: _Peer, packet: Packet) -> None:
+        """A peer asks us to confirm it is reachable. We dial back the address
+        we OBSERVED it come from (never an arbitrary one → no amplification)
+        and report whether an NMesh node answered."""
+        try:
+            slen, port = struct.unpack_from("!BH", packet.payload, 0)
+            scheme = packet.payload[3:3 + slen].decode("ascii")
+        except Exception:
+            return
+        if not scheme or port <= 0 or port >= 65536:
+            return
+        if not self._transport_manager.is_supported(scheme):
+            return
+        if not self._reach_probe_allowed(peer):
+            return
+        if self._reach_dials_active >= _REACH_DIALS_MAX:
+            return
+        # Dial ONLY the address we observed this peer at — never a value it
+        # supplied — so it can never make us dial an arbitrary victim.
+        observed = peer.transport.remote_ip()
+        ok = False
+        if observed is not None:
+            self._reach_dials_active += 1
+            try:
+                ok = await self._dial_back(scheme, observed, port)
+            finally:
+                self._reach_dials_active -= 1
+        reply = struct.pack("!BB", len(scheme.encode()), 1 if ok else 0) + scheme.encode()
+        try:
+            await peer.send(Packet.create(REACH_PROBE_ACK, self._id.raw,
+                                          packet.src_id, reply))
+        except Exception:
+            pass
+
+    async def _dial_back(self, scheme: str, ip: str, port: int) -> bool:
+        """Open a connection to ip:port and confirm an NMesh node answers (it
+        challenges on accept). Bounded by a timeout; always cleaned up."""
+        from .ip_utils import _fmt_host
+        addr = f"{scheme}://{_fmt_host(ip)}:{port}"
+        transport = None
+        try:
+            transport = await asyncio.wait_for(
+                self._transport_manager.connect(addr), _REACH_DIAL_TIMEOUT)
+            pkt = await asyncio.wait_for(transport.receive(), _REACH_DIAL_TIMEOUT)
+            return pkt.type == CHALLENGE
+        except Exception:
+            return False
+        finally:
+            if transport is not None:
+                try:
+                    await transport.close()
+                except Exception:
+                    pass
+
+    async def _handle_reach_probe_ack(self, peer: _Peer, packet: Packet) -> None:
+        try:
+            slen, ok = struct.unpack_from("!BB", packet.payload, 0)
+            scheme = packet.payload[2:2 + slen].decode("ascii")
+        except Exception:
+            return
+        if ok and scheme and self._transport_manager.is_supported(scheme):
+            if scheme not in self._inbound_schemes:
+                self._inbound_schemes.add(scheme)   # confirmed reachable → relay-capable
+                self._poke_net("autonat-confirmed")
 
     async def _handle_data(self, peer: _Peer, packet: Packet) -> None:
         src = NodeID(packet.src_id)

@@ -409,6 +409,13 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/reachability/probe":
+                try:
+                    sent = console._call(console._node.probe_reachability())
+                    self._json(200, {"ok": True, "sent": sent})
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
             if path == "/api/lan/discovery":
                 data = _parse_json(body)
                 if not data or not isinstance(data.get("enabled"), bool):
