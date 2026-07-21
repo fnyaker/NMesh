@@ -151,6 +151,14 @@ _PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
 _PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
 _PUNCH_MAX_RETRIES     = 3     # max retries per target
 _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
+# The initiator opens the punched link by sending a keepalive frame the
+# responder's accept path turns into a challenge. UDP can drop that datagram
+# (a loaded receiver's buffer overflows), and a single loss strands the whole
+# punch — the responder never challenges and the initiator's link self-closes
+# on its keepalive timeout. Kick in a bounded, spaced burst instead so a few
+# consecutive drops can't sink the handshake (CLAUDE.md: retry, self-repair).
+_PUNCH_KICK_COUNT      = 8     # keepalive kicks to open the punched link
+_PUNCH_KICK_INTERVAL   = 0.3   # seconds between kicks (burst spans ~2.4s)
 _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
 # Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
 # public UDP endpoint an operator supplies by hand — no relay needed.
@@ -3503,4 +3511,19 @@ class MeshNode:
         self._routing.add(state.target, [peer.remote_addr],
                           existing.dsa_pub if existing else b"")
         asyncio.create_task(peer.start(self._handle_packet))
-        transport._send_raw(transport._link.build_keepalive())
+        asyncio.create_task(self._kick_punched_link(peer, transport))
+
+    async def _kick_punched_link(self, peer: '_Peer',
+                                 transport: 'UDPTransport') -> None:
+        """Open the punched link with a bounded burst of keepalive kicks.
+
+        The responder challenges only once it sees a frame from us; a single
+        lost datagram would otherwise strand the punch. Stop as soon as the
+        link authenticates (further kicks are harmless dedup'd keepalives) or
+        the transport dies — bounded so a dead peer can't loop us forever."""
+        for i in range(_PUNCH_KICK_COUNT):
+            if peer.authenticated_id is not None or transport._closed:
+                return
+            transport._send_raw(transport._link.build_keepalive())
+            if i < _PUNCH_KICK_COUNT - 1:
+                await asyncio.sleep(_PUNCH_KICK_INTERVAL)
