@@ -234,22 +234,15 @@ class TestHolePunching:
         await a.start_udp(19341, "127.0.0.1")
         await c.start_udp(19342, "127.0.0.1")
 
-        # A sends PUNCH_REQUEST to relay for target C
+        # A sends PUNCH_REQUEST to relay for target C. The relay must forward a
+        # PUNCH_RELAY to BOTH sides — A (the requester) and C (the target) —
+        # each of which then starts a punch attempt. Poll for that outcome
+        # instead of sleeping a fixed few seconds; on loopback it lands fast.
         await a.request_hole_punch(relay_peer, c.id)
-
-        # Wait for the relay to process and forward
-        await asyncio.sleep(1.0)
-
-        # The relay should have sent PUNCH_RELAY to both A and C
-        # Check that A received a PUNCH_RELAY (it would be in the sent packets
-        # of the relay's peer for A)
-        # We can't easily inspect the relay's sent packets, but we can check
-        # that A has a pending punch state
-        # Note: in a real scenario, A would learn C's UDP address from the relay
-        # and start probing. On loopback, the punch should succeed quickly.
-
-        # Give time for the punch to complete
-        await asyncio.sleep(2.0)
+        async with asyncio.timeout(10.0):
+            while not (a._punch_stats["attempted"] >= 1
+                       and c._punch_stats["attempted"] >= 1):
+                await asyncio.sleep(0.05)
 
         # Clean up
         await a.stop()
