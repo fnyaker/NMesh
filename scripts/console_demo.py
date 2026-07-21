@@ -50,6 +50,12 @@ async def main() -> None:
                     help="launch an app wired to the mesh (repeatable); needs --connector-port")
     ap.add_argument("--no-tls", action="store_true")
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
+    # Read from the environment so a password never lands in the process args
+    # (visible in `ps`); a CLI flag still overrides it when given explicitly.
+    ap.add_argument("--console-password",
+                    default=os.environ.get("NMESH_CONSOLE_PASSWORD") or None,
+                    help="console password (default: $NMESH_CONSOLE_PASSWORD, "
+                         "else a strong one is generated and printed once)")
     args = ap.parse_args()
 
     if args.data:
@@ -83,7 +89,8 @@ async def main() -> None:
                 print(f"  STUN          : public UDP addr {pub[0]}:{pub[1]}")
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
-                         state_dir=args.data, use_tls=not args.no_tls)
+                         state_dir=args.data, use_tls=not args.no_tls,
+                         password=args.console_password)
     console.start(loop=asyncio.get_running_loop())
 
     connector = None
@@ -110,6 +117,8 @@ async def main() -> None:
     print(f"  Web console   : {console.url}")
     if console.generated_password:
         print(f"  Password      : {console.generated_password}   (shown once — save it)")
+    elif args.console_password:
+        print("  Password      : (the one you set via NMESH_CONSOLE_PASSWORD)")
     else:
         print("  Password      : (existing — from console.cred)")
     if not args.no_tls:
