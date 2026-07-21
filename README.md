@@ -52,7 +52,7 @@ Sans le script, à la main :
 
 ```bash
 pip install -r requirements.txt
-python scripts/console_demo.py --data ./data
+python scripts/nmesh_node.py --data ./data
 ```
 
 ## Console web
@@ -127,7 +127,7 @@ hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
 
 ```
 src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
-scripts/          console_demo.py (lanceur), build_pyz.py
+scripts/          nmesh_node.py (lanceur), build_pyz.py
 docker/           image et compose du nœud-relais
 Docs/             guides (transports, console, connecteur, format des paquets)
 tests/            unitaires + tests/integration (nœuds réels)

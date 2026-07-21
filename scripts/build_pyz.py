@@ -22,8 +22,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def build(output: str) -> None:
     with tempfile.TemporaryDirectory() as work:
         shutil.copytree(os.path.join(ROOT, "src"), os.path.join(work, "src"))
-        # console_demo becomes the archive's entry point.
-        shutil.copy(os.path.join(ROOT, "scripts", "console_demo.py"),
+        # nmesh_node becomes the archive's entry point.
+        shutil.copy(os.path.join(ROOT, "scripts", "nmesh_node.py"),
                     os.path.join(work, "__main__.py"))
         zipapp.create_archive(
             work, target=output, interpreter="/usr/bin/env python3",
