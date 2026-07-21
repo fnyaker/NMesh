@@ -32,9 +32,15 @@ jobs:
       - name: Integration tests
         run: pytest tests/integration -q
 
-  # Build the node image on every run so a broken Dockerfile fails CI, and
-  # publish it to GHCR (ghcr.io/<owner>/nmesh) only on pushes to main — PRs
+  # Build the application image on every run so a broken Dockerfile fails CI,
+  # and publish it to GHCR (ghcr.io/<owner>/nmesh) only on pushes to main — PRs
   # (including from forks) build but never push, since they lack write creds.
+  #
+  # The heavy liboqs layer lives in a separate base image built by
+  # base-image.yml. Here we reuse the published base (pulling it) and only when
+  # it isn't reachable — first bootstrap, or a fork PR without package access —
+  # build it locally so CI still goes green. The app image then layers only the
+  # NMesh code on top, so this job is fast whenever the base is available.
   docker:
     needs: test
     runs-on: ubuntu-latest
@@ -44,11 +50,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lowercase image name
+      - name: Image names (lowercased)
         id: img
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
+        run: |
+          repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "app=ghcr.io/$repo" >> "$GITHUB_OUTPUT"
+          echo "base=ghcr.io/$repo-base" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -58,12 +65,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and (on main) push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ steps.img.outputs.name }}:latest
-            ${{ steps.img.outputs.name }}:${{ github.sha }}
+      - name: Provide the base image (pull if published, else build locally)
+        run: |
+          BASE='${{ steps.img.outputs.base }}:latest'
+          if docker pull "$BASE" 2>/dev/null; then
+            echo "using published base image $BASE"
+          else
+            echo "base image not reachable — building it locally"
+            docker build -f docker/Dockerfile.base -t "$BASE" .
+          fi
+
+      - name: Build the application image
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg BASE_IMAGE='${{ steps.img.outputs.base }}:latest' \
+            -t '${{ steps.img.outputs.app }}:latest' \
+            -t '${{ steps.img.outputs.app }}:${{ github.sha }}' .
+
+      - name: Push the application image (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push '${{ steps.img.outputs.app }}:latest'
+          docker push '${{ steps.img.outputs.app }}:${{ github.sha }}'

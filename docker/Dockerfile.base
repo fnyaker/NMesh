@@ -1,0 +1,22 @@
+# NMesh base image — Python + liboqs (post-quantum crypto) compiled from source.
+#
+# This layer is heavy (it builds the liboqs C library) and changes rarely, so it
+# is built and published on its own — only when requirements.txt or this file
+# changes (see .github/workflows/base-image.yml). The application image
+# (docker/Dockerfile) builds FROM this one, so ordinary NMesh code changes never
+# recompile liboqs.
+FROM python:3.13-slim
+
+# liboqs-python builds liboqs from source with CMake's default generator
+# ("Unix Makefiles"), which needs `make` — so build-essential (gcc + g++ +
+# make), not a bare gcc, or CMake aborts with "CMAKE_MAKE_PROGRAM is not set".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake build-essential python3-dev git libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+# Install deps and pre-build liboqs (the C library is compiled on first import
+# and cached in the image) so neither the app build nor the first run is slow.
+RUN pip install --no-cache-dir -r requirements.txt && python -c "import oqs"
