@@ -81,8 +81,10 @@ class TestInviteAndHandshake:
         await host.start(["tcp://127.0.0.1:19104"])
         await guest.join("tcp://127.0.0.1:19104", "wrongcode1")
 
+        # A valid session forms in well under a second; 1.5s is ample to be
+        # sure a rejected code never produces one, without padding the suite.
         with pytest.raises(TimeoutError):
-            await guest.wait_for_session(timeout=3.0)
+            await guest.wait_for_session(timeout=1.5)
         await guest.stop()
         await host.stop()
 
@@ -97,8 +99,10 @@ class TestInviteAndHandshake:
         await guest1.wait_for_session(timeout=15.0)
 
         await guest2.join("tcp://127.0.0.1:19105", code)
+        # guest1 already got a session in well under a second, so 1.5s is ample
+        # to be sure the reused code never grants guest2 one.
         with pytest.raises(TimeoutError):
-            await guest2.wait_for_session(timeout=3.0)
+            await guest2.wait_for_session(timeout=1.5)
 
         await guest1.stop()
         await guest2.stop()
@@ -317,17 +321,17 @@ class TestLinkKeepalive:
         guard for links that used to drop on their own after ~60s of silence.
 
         We shrink both timers so the test is quick and deterministic: without
-        the keepalive the link would die at the 1.2s read timeout; the 0.3s
-        keepalive keeps it alive across a 3s idle period."""
+        the keepalive the link would die at the 0.6s read timeout; the 0.15s
+        keepalive keeps it alive across a 1.5s idle period (>2 read windows)."""
         import src.tcp_transport as tcpmod
         import src.node as nodemod
-        monkeypatch.setattr(tcpmod, "_READ_TIMEOUT", 1.2)
-        monkeypatch.setattr(nodemod, "_LINK_KEEPALIVE_INTERVAL", 0.3)
+        monkeypatch.setattr(tcpmod, "_READ_TIMEOUT", 0.6)
+        monkeypatch.setattr(nodemod, "_LINK_KEEPALIVE_INTERVAL", 0.15)
 
         host, guest = await establish_session("127.0.0.1:19212", "")
         try:
-            # Idle far longer than the read timeout — no application traffic.
-            await asyncio.sleep(3.0)
+            # Idle over twice the read timeout — no application traffic.
+            await asyncio.sleep(1.5)
             assert any(p.authenticated_id == host.id and p.session is not None
                        for p in guest._peers), "guest lost its link while idle"
             assert any(p.authenticated_id == guest.id and p.session is not None
