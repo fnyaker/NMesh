@@ -538,6 +538,26 @@ class TestTLS:
             assert c2._check_password(pw)
         await node.stop()
 
+    async def test_explicit_password_used_and_overrides_stored(self):
+        """A caller-supplied password (the NMESH_CONSOLE_PASSWORD path) is the
+        one that authenticates, is never echoed as 'generated', and takes over
+        an existing credential file so a restart with a new value applies it."""
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            c1 = WebConsole(node, host="127.0.0.1", port=0, use_tls=False,
+                            state_dir=d, password="first-pass")
+            assert c1.generated_password is None      # not auto-generated
+            assert c1._check_password("first-pass")
+            assert os.path.exists(os.path.join(d, "console.cred"))
+
+            # Restart with a different explicit password → the new one wins,
+            # the old one no longer authenticates.
+            c2 = WebConsole(node, host="127.0.0.1", port=0, use_tls=False,
+                            state_dir=d, password="second-pass")
+            assert c2._check_password("second-pass")
+            assert not c2._check_password("first-pass")
+        await node.stop()
+
 
 async def _tls_login(console, password=PW):
     status, _, _, j = await asyncio.to_thread(

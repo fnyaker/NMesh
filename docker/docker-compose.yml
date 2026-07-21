@@ -1,8 +1,12 @@
-# A single relay node: mesh TCP open to the world, web console kept on the host
-# loopback by default. Bring it up with: docker compose -f docker/docker-compose.yml up -d
+# A single relay node: mesh TCP open to the world, and the web console exposed
+# on all interfaces so you can reach the dashboard from another machine.
+# Bring it up with: docker compose -f docker/docker-compose.yml up -d
 #
 # By default this pulls the image published by CI (ghcr.io/fnyaker/nmesh:latest).
 # To build locally instead: docker compose -f docker/docker-compose.yml build
+#
+# Open the dashboard at  https://<server-ip>:8787/  (self-signed TLS → your
+# browser will warn once; that's expected, click through to proceed).
 services:
   nmesh:
     image: ghcr.io/fnyaker/nmesh:latest
@@ -14,10 +18,17 @@ services:
       NMESH_LISTEN: "0.0.0.0:9000"
       NMESH_CONSOLE_HOST: "0.0.0.0"
       NMESH_CONSOLE_PORT: "8787"
+      # Dashboard password. Easiest: uncomment the next line and set your own —
+      # then you log in with exactly that. If you leave it commented out, a
+      # strong random password is generated on first start and printed in the
+      # logs; read it with:
+      #     docker compose -f docker/docker-compose.yml logs nmesh | grep Password
+      # NMESH_CONSOLE_PASSWORD: "choose-your-own-password"
     ports:
       - "9000:9000"                 # mesh TCP — reachable so this node can relay
-      - "127.0.0.1:8787:8787"       # web console — host loopback only by default;
-                                    # change to "8787:8787" to expose it (TLS + password).
+      - "8787:8787"                 # web console — exposed on all interfaces
+                                    # (HTTPS + password + login lockout). To keep
+                                    # it host-only instead: "127.0.0.1:8787:8787".
     volumes:
       - nmesh_data:/data            # identity, certs, sessions, console password persist here
 
