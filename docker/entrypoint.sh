@@ -4,6 +4,9 @@
 #   NMESH_LISTEN          mesh TCP listen addr     (default 0.0.0.0:9000)
 #   NMESH_CONSOLE_HOST    web console bind host    (default 0.0.0.0)
 #   NMESH_CONSOLE_PORT    web console port         (default 8787)
+#   NMESH_CONSOLE_PASSWORD  console login password (optional; read straight from
+#                           the env by console_demo.py — if unset, a strong one
+#                           is generated and printed once in the logs)
 #   NMESH_CONNECTOR_PORT  data connector port      (optional)
 #   NMESH_SPOOL           spool directory          (optional, store-and-forward)
 #   NMESH_DATA            state directory          (default /data)
