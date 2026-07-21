@@ -1731,9 +1731,15 @@ class MeshNode:
                 "counters": p.counters.as_dict(),
                 "transport": self._peer_scheme(p),
             })
+        # Known nodes, most recently seen first, so the console can show the
+        # latest N. seen_ago is seconds since we last added/refreshed the entry.
+        now = time.monotonic()
+        entries = sorted(self._routing.all_entries(),
+                         key=lambda e: e.last_seen, reverse=True)
         routing = [
-            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses)}
-            for e in self._routing.all_entries()
+            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses),
+             "seen_ago": max(0.0, now - e.last_seen)}
+            for e in entries
         ]
         return {
             "id": self._id.raw.hex(),

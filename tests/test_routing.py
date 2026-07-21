@@ -118,6 +118,22 @@ class TestRoutingTable:
         closest = self.rt.get_closest(new_id)
         assert any(e.node_id == new_id for e in closest)
 
+    def test_last_seen_tracks_recency(self):
+        # Entries carry a last_seen timestamp; sorting by it gives the most
+        # recently added/refreshed nodes first (drives the console's list).
+        a, b, c = make_id(1), make_id(2), make_id(3)
+        self.rt.add(a, [])
+        self.rt.add(b, [])
+        self.rt.add(c, [])
+        newest_first = sorted(self.rt.all_entries(),
+                              key=lambda e: e.last_seen, reverse=True)
+        assert [e.node_id for e in newest_first] == [c, b, a]
+        # Refreshing an existing node bumps it to the front.
+        self.rt.add(a, ["addr"])
+        newest_first = sorted(self.rt.all_entries(),
+                              key=lambda e: e.last_seen, reverse=True)
+        assert newest_first[0].node_id == a
+
 
 class TestExportImport:
     def test_roundtrip(self):
