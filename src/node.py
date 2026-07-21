@@ -115,6 +115,11 @@ _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 2
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
+# A transport reaps an idle link once no data arrives for its read timeout
+# (TCP: 60s). A healthy but quiet link would die on its own, so ping every
+# established peer well inside that window — both sides do it, so each link
+# carries a packet each way and a few misses still leave margin.
+_LINK_KEEPALIVE_INTERVAL = 20.0
 
 # Invite blocks (base64 join bundles: advertised URIs + invite code)
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
@@ -849,6 +854,8 @@ class MeshNode:
         # stays reachable (and can relay for others) even behind NAT. Opt-in.
         self._punch_keepalive: bool = False
         self._punch_keepalive_task: asyncio.Task | None = None
+        # Periodic PING that keeps idle authenticated links from timing out.
+        self._keepalive_task: asyncio.Task | None = None
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         # Manual hole-punch targets → {"sent": int, "started": float, "task": Task}
         self._manual_holes: OrderedDict[tuple[str, int], dict] = OrderedDict()
@@ -893,6 +900,7 @@ class MeshNode:
                 on_change=self._on_network_change,
             )
             self._net_monitor.start()
+        self._ensure_link_keepalive()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1139,6 +1147,7 @@ class MeshNode:
         peer.join_code = code
         self._peers.append(peer)
         self._running = True
+        self._ensure_link_keepalive()
         await peer.start(self._handle_packet)
         return peer
 
@@ -1244,6 +1253,7 @@ class MeshNode:
     async def stop(self) -> None:
         self._running = False
         self._persist_state()
+        await self._stop_link_keepalive()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -1294,6 +1304,36 @@ class MeshNode:
         payload = _encode_addresses(self.advertised_uris())
         packet = Packet.create(PING, self._id.raw, NodeID(b"\xff" * 20).raw, payload)
         await peer.send(packet)
+
+    def _ensure_link_keepalive(self) -> None:
+        """Start the link-keepalive loop if it isn't already running."""
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._link_keepalive_loop())
+
+    async def _link_keepalive_loop(self) -> None:
+        """Ping every established peer on an interval so a healthy but idle link
+        isn't torn down by the transport's read timeout. Both sides run this, so
+        each link sees inbound traffic in both directions. Never raises: a link
+        that is genuinely dead is reaped by its own receive loop."""
+        while self._running:
+            await asyncio.sleep(_LINK_KEEPALIVE_INTERVAL)
+            for peer in list(self._peers):
+                if peer.authenticated_id is None or peer.session is None:
+                    continue
+                try:
+                    await self.ping(peer)
+                except Exception:
+                    pass
+
+    async def _stop_link_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def find_node(self, target: NodeID) -> None:
         qid = os.urandom(_QID_LEN)
@@ -1691,9 +1731,15 @@ class MeshNode:
                 "counters": p.counters.as_dict(),
                 "transport": self._peer_scheme(p),
             })
+        # Known nodes, most recently seen first, so the console can show the
+        # latest N. seen_ago is seconds since we last added/refreshed the entry.
+        now = time.monotonic()
+        entries = sorted(self._routing.all_entries(),
+                         key=lambda e: e.last_seen, reverse=True)
         routing = [
-            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses)}
-            for e in self._routing.all_entries()
+            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses),
+             "seen_ago": max(0.0, now - e.last_seen)}
+            for e in entries
         ]
         return {
             "id": self._id.raw.hex(),

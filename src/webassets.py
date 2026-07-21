@@ -56,6 +56,18 @@ INDEX_HTML = """<!doctype html>
   </section>
 
   <section class="card">
+    <h2>Known nodes <span id="known-count" class="muted"></span></h2>
+    <div class="mrow">
+      <label class="muted" for="known-limit">Show latest</label>
+      <input id="known-limit" type="number" min="1" max="1000" value="20"
+             title="how many of the most recently seen nodes from the routing table to show">
+    </div>
+    <table id="known"><thead><tr>
+      <th>Node</th><th>Addresses</th><th>Last seen</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section class="card">
     <h2>Transports</h2>
     <div id="reach-status" class="netrow"></div>
     <div id="net-status" class="netrow"></div>
@@ -337,6 +349,13 @@ function fmtDur(s) {
   return (d ? d + "d " : "") + (h ? h + "h " : "") + m + "m";
 }
 const short = (hex) => hex ? hex.slice(0, 10) + "…" : "—";
+function fmtAgo(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h";
+  return Math.floor(sec / 86400) + "d";
+}
 
 async function tick() {
   let s;
@@ -376,6 +395,7 @@ async function tick() {
   drawChart();
   drawGraph(s);
   drawPeers(s.peers);
+  drawKnownNodes(s);
   drawTransports(s);
   drawExpert(s);
   drawJoinProgress(s.join_status);
@@ -583,6 +603,29 @@ function drawPeers(peers) {
     </tr>`;
   }).join("");
 }
+
+function knownLimit() {
+  const v = parseInt($("known-limit").value, 10);
+  return (Number.isFinite(v) && v > 0) ? v : 20;
+}
+
+function drawKnownNodes(s) {
+  const all = s.routing || [];           // already sorted most-recent-first
+  const rows = all.slice(0, knownLimit());
+  $("known-count").textContent = rows.length + " of " + (s.routing_size || 0);
+  const tb = $("known").querySelector("tbody");
+  tb.innerHTML = rows.length ? rows.map((n) => {
+    const addrs = (n.addresses && n.addresses.length) ? n.addresses.join(", ") : "—";
+    return `<tr>
+      <td class="mono">${short(n.id)}</td>
+      <td class="mono">${addrs}</td>
+      <td>${fmtAgo(n.seen_ago)} ago</td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="3" class="muted">no known nodes yet</td></tr>';
+}
+
+// Re-render immediately when the operator changes how many to show.
+$("known-limit").addEventListener("input", () => { if (last) drawKnownNodes(last); });
 
 // two-step connect exchange
 function cstatus(msg, ok = true) {

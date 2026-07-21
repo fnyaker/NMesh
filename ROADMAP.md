@@ -37,7 +37,7 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   anti-bruteforce, bind loopback par défaut, CSP stricte, assets same-origin,
   **zéro dépendance externe** (stdlib + `cryptography`).
 - Métriques nœud (`src/metrics.py`) : compteurs débit + charge process.
-- Démo : `scripts/console_demo.py`. Doc : `Docs/WebConsole/guide`.
+- Exemple : `scripts/nmesh_node.py`. Doc : `Docs/WebConsole/guide`.
 
 ## En cours / à valider
 - Test Docker multi-nœuds (10) : rebuild `--build`, valider invitation →
@@ -52,7 +52,7 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   (le « fichier de la clé USB »), troncature/altération rejetées.
 - Testé : session + data E2E via fichiers, routage multi-hop en étoile,
   sneakernet (livraison offline via Bundle), fuzzing du conteneur et du framing.
-- Doc : `Docs/Transports/spool`. Démo : `console_demo.py --spool DIR`.
+- Doc : `Docs/Transports/spool`. Exemple : `nmesh_node.py --spool DIR`.
 
 ### Persistance de session (`src/session_store.py`) — opt-in
 - Survit au redémarrage et à l'aller-retour offline : sessions E2E, handshakes
@@ -124,13 +124,13 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   envoie/reçoit des messages E2E du mesh. Auth par jeton (compare_digest),
   trames bornées, clients plafonnés. Plan de *données* (distinct de la console).
 - Testé app→mesh→app de bout en bout. Doc : `Docs/DataConnector/guide`.
-  Démo : `console_demo.py --connector-port N`.
+  Exemple : `nmesh_node.py --connector-port N`.
 
 ### Lanceur de sous-processus (`src/process_launcher.py`) — fait
 - Le nœud lance des apps déclarées et injecte les coordonnées du connecteur
   (hôte/port/jeton) dans leur environnement ; l'app rejoint le mesh via
   `ConnectorClient`. Exec sans shell (pas d'injection), enfants bornés et
-  terminés à l'arrêt. Démo : `console_demo.py --launch "..."`,
+  terminés à l'arrêt. Exemple : `nmesh_node.py --launch "..."`,
   `scripts/example_app.py`. Doc : `Docs/ProcessLauncher/guide`.
 
 ### Partage d'apps via DHT (`src/dht.py`, `src/app_package.py`) — fait

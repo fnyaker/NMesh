@@ -1,7 +1,7 @@
 """
 Run a MeshNode with the web console attached.
 
-    python scripts/console_demo.py [--listen 0.0.0.0:9000] [--console-host 127.0.0.1]
+    python scripts/nmesh_node.py [--listen 0.0.0.0:9000] [--console-host 127.0.0.1]
                                    [--console-port 8787] [--no-tls] [--data DIR]
 
 On first run the console password is generated and printed once — save it.
