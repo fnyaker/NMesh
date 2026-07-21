@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 from .node_id import NodeID
 
@@ -8,6 +9,10 @@ class NodeEntry:
     addresses: list[str] = field(default_factory=list)
     dsa_pub: bytes = b""
     cert_chain: list = field(default_factory=list)
+    # Monotonic timestamp of when this entry was last added/refreshed — used to
+    # surface the most recently seen nodes. A fresh entry is created on every
+    # add(), so this tracks recency of contact without a separate update path.
+    last_seen: float = field(default_factory=time.monotonic)
 
 
 class KBucket:

@@ -1,21 +1,19 @@
-# NMesh node image — runs a relay node with the web console (and optional data
-# connector). Suitable for hosting a node on a server that opens TCP ports and
-# acts as a mesh relay / rendezvous point.
-FROM python:3.13-slim
-
-# liboqs-python builds liboqs from source with CMake's default generator
-# ("Unix Makefiles"), which needs `make` — so build-essential (gcc + g++ +
-# make), not a bare gcc, or CMake aborts with "CMAKE_MAKE_PROGRAM is not set".
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake build-essential python3-dev git libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# NMesh application image — runs a relay node with the web console (and optional
+# data connector). Suitable for hosting a node on a server that opens TCP ports
+# and acts as a mesh relay / rendezvous point.
+#
+# Builds FROM the prebuilt base image (docker/Dockerfile.base), which already
+# carries Python + a compiled liboqs. This image only layers the NMesh code on
+# top, so it builds in seconds and never recompiles the crypto library. Override
+# the base with --build-arg BASE_IMAGE=... (CI builds it locally when the
+# published one isn't reachable).
+ARG BASE_IMAGE=ghcr.io/fnyaker/nmesh-base:latest
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-COPY requirements.txt .
-# Install deps and pre-build liboqs so the first run isn't slow.
-RUN pip install --no-cache-dir -r requirements.txt && python -c "import oqs"
-
+# Dependencies already live in the base image (installed from the same
+# requirements.txt). Only the application code is added here.
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY docker/entrypoint.sh /entrypoint.sh

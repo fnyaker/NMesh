@@ -307,3 +307,35 @@ class TestObservedAddress:
 
         await guest.stop()
         await host.stop()
+
+
+class TestLinkKeepalive:
+    async def test_idle_link_survives_read_timeout(self, monkeypatch):
+        """A healthy but idle link must not be torn down by the transport's
+        read timeout. The node keepalive pings established peers well inside
+        that window, so an idle link stays up in both directions. Regression
+        guard for links that used to drop on their own after ~60s of silence.
+
+        We shrink both timers so the test is quick and deterministic: without
+        the keepalive the link would die at the 1.2s read timeout; the 0.3s
+        keepalive keeps it alive across a 3s idle period."""
+        import src.tcp_transport as tcpmod
+        import src.node as nodemod
+        monkeypatch.setattr(tcpmod, "_READ_TIMEOUT", 1.2)
+        monkeypatch.setattr(nodemod, "_LINK_KEEPALIVE_INTERVAL", 0.3)
+
+        host, guest = await establish_session("127.0.0.1:19212", "")
+        try:
+            # Idle far longer than the read timeout — no application traffic.
+            await asyncio.sleep(3.0)
+            assert any(p.authenticated_id == host.id and p.session is not None
+                       for p in guest._peers), "guest lost its link while idle"
+            assert any(p.authenticated_id == guest.id and p.session is not None
+                       for p in host._peers), "host lost its link while idle"
+            # And data still flows after the idle period.
+            await guest.send_data(host.id, b"still alive")
+            _, data = await _recv(host, timeout=10.0)
+            assert data == b"still alive"
+        finally:
+            await guest.stop()
+            await host.stop()

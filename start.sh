@@ -11,7 +11,7 @@
 #   ./start.sh --spool /mnt/usb/mesh            # add a store-and-forward link
 #   ./start.sh --console-host 0.0.0.0           # reach the console from the LAN
 #
-# Any extra arguments are passed straight to scripts/console_demo.py.
+# Any extra arguments are passed straight to scripts/nmesh_node.py.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -286,4 +286,4 @@ echo "  NMesh starting — state in $DATA"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
-exec python -u scripts/console_demo.py --data "$DATA" "${EXTRA_ARGS[@]}"
+exec python -u scripts/nmesh_node.py --data "$DATA" "${EXTRA_ARGS[@]}"

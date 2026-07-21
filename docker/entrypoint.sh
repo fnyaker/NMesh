@@ -1,11 +1,11 @@
 #!/bin/sh
-# Translate NMESH_* environment variables into console_demo.py arguments.
+# Translate NMESH_* environment variables into nmesh_node.py arguments.
 #
 #   NMESH_LISTEN          mesh TCP listen addr     (default 0.0.0.0:9000)
 #   NMESH_CONSOLE_HOST    web console bind host    (default 0.0.0.0)
 #   NMESH_CONSOLE_PORT    web console port         (default 8787)
 #   NMESH_CONSOLE_PASSWORD  console login password (optional; read straight from
-#                           the env by console_demo.py — if unset, a strong one
+#                           the env by nmesh_node.py — if unset, a strong one
 #                           is generated and printed once in the logs)
 #   NMESH_CONNECTOR_PORT  data connector port      (optional)
 #   NMESH_SPOOL           spool directory          (optional, store-and-forward)
@@ -25,4 +25,4 @@ set -- --listen "$LISTEN" --console-host "$CONSOLE_HOST" \
 [ -n "$NMESH_SPOOL" ] && set -- "$@" --spool "$NMESH_SPOOL"
 [ -n "$NMESH_NO_TLS" ] && set -- "$@" --no-tls
 
-exec python -u scripts/console_demo.py "$@"
+exec python -u scripts/nmesh_node.py "$@"
