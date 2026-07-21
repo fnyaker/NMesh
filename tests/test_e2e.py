@@ -22,6 +22,19 @@ from tests.conftest import FakeTransport, make_node, make_manager
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _until(pred, timeout: float = 2.0) -> bool:
+    """Wait until pred() is true, polling the event loop. Replaces fixed
+    ``sleep(0.1)`` propagation waits: on in-memory transports a step completes
+    in a few event-loop hops (~ms), so this returns almost immediately instead
+    of always paying the full delay, while still tolerating slow PQ crypto."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not pred():
+        if asyncio.get_event_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.001)
+    return True
+
+
 async def _make_authed_pair(
     node_a: MeshNode,
     fake_a: FakeTransport,
@@ -39,10 +52,10 @@ async def _make_authed_pair(
     node_a._peers[0].received_challenge = challenge
     await node_a.initiate_handshake(node_a._peers[0])
     fake_b.inject(fake_a.sent[-1])
-    await asyncio.sleep(0.1)
+    await _until(lambda: any(p.type == 0x09 for p in fake_b.sent))
     ack = next(p for p in fake_b.sent if p.type == 0x09)
     fake_a.inject(ack)
-    await asyncio.sleep(0.1)
+    await _until(lambda: node_a._peers[0].authenticated_id is not None)
 
 
 async def _make_chain() -> tuple[
@@ -84,10 +97,10 @@ async def _make_chain() -> tuple[
     node_a._peers[0].received_challenge = challenge_ab
     await node_a.initiate_handshake(node_a._peers[0])
     t_ba.inject(t_ab.sent[-1])       # HANDSHAKE: A→B
-    await asyncio.sleep(0.1)
+    await _until(lambda: any(p.type == 0x09 for p in t_ba.sent))
     ack_ab = next(p for p in t_ba.sent if p.type == 0x09)
     t_ab.inject(ack_ab)              # HANDSHAKE_ACK: B→A
-    await asyncio.sleep(0.1)
+    await _until(lambda: node_a._peers[0].authenticated_id is not None)
 
     # ── Authenticate B↔C ──────────────────────────────────────────────────
     challenge_bc = os.urandom(32)
@@ -97,10 +110,10 @@ async def _make_chain() -> tuple[
     node_b._peers[1].received_challenge = challenge_bc
     await node_b.initiate_handshake(node_b._peers[1])
     t_cb.inject(t_bc.sent[-1])       # HANDSHAKE: B→C
-    await asyncio.sleep(0.1)
+    await _until(lambda: any(p.type == 0x09 for p in t_cb.sent))
     ack_bc = next(p for p in t_cb.sent if p.type == 0x09)
     t_bc.inject(ack_bc)              # HANDSHAKE_ACK: C→B
-    await asyncio.sleep(0.1)
+    await _until(lambda: node_b._peers[1].authenticated_id is not None)
 
     # Make B's cert trusted by A and C (and vice-versa), so E2E chains verify.
     _cross_trust(node_a, node_b)

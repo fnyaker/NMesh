@@ -40,6 +40,10 @@ _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
+# serve_forever() only notices a shutdown() between polls; the stdlib default is
+# 0.5s, which makes every stop() block that long. Poll tighter so teardown is
+# near-instant (idle cost is one cheap select wakeup per interval).
+_SHUTDOWN_POLL = 0.02
 _SCRYPT = dict(n=16384, r=8, p=1, dklen=32)
 
 
@@ -210,8 +214,9 @@ class WebConsole:
             )
         # If port was 0, capture the OS-assigned one.
         self.port = self._server.server_address[1]
-        self._thread = threading.Thread(target=self._server.serve_forever,
-                                        name="nmesh-console", daemon=True)
+        self._thread = threading.Thread(
+            target=lambda: self._server.serve_forever(poll_interval=_SHUTDOWN_POLL),
+            name="nmesh-console", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
