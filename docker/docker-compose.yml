@@ -4,6 +4,9 @@
 #
 # By default this pulls the image published by CI (ghcr.io/fnyaker/nmesh:latest).
 # To build locally instead: docker compose -f docker/docker-compose.yml build
+# (the app image builds FROM the published base ghcr.io/fnyaker/nmesh-base; to
+#  build that base yourself: docker build -f docker/Dockerfile.base -t \
+#  ghcr.io/fnyaker/nmesh-base:latest .)
 #
 # Open the dashboard at  https://<server-ip>:8787/  (self-signed TLS → your
 # browser will warn once; that's expected, click through to proceed).
