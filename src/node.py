@@ -3292,25 +3292,32 @@ class MeshNode:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
         from .udp_transport import _host_port
 
-        try:
-            host, port = _host_port(state.remote_udp_addr)
-        except ValueError:
-            self._punch_pending.pop(state.target, None)
-            return
-
-        # Get the raw socket from our UDP server
+        # No UDP listener → we can't punch at all.
         if self._udp_server is None or self._udp_server._sock is None:
             self._punch_pending.pop(state.target, None)
             return
 
-        sock = self._udp_server._sock
-        target_addr = (host, port)
-
-        # Look up the peer's DSA public key for signing the probe
+        # Without the peer's DSA key we can neither sign our probes nor verify
+        # theirs — the punch can never complete, so drop it now.
         entry = self._routing.get(state.target)
         if entry is None or not entry.dsa_pub:
             self._punch_pending.pop(state.target, None)
             return
+
+        # The relay often can't tell us the peer's UDP address: it only sees the
+        # peer's TCP link, whose server-side remote_addr is None, so the address
+        # relayed to us is empty. We then can't probe proactively — but the peer
+        # DID get our address (the relay knows our UDP port from the request) and
+        # is probing us. Keep the pending state so an incoming probe completes
+        # the punch from its source address; dropping it here strands the punch
+        # exactly on the side (larger NodeID) that must drive the handshake.
+        try:
+            host, port = _host_port(state.remote_udp_addr)
+        except ValueError:
+            return
+
+        sock = self._udp_server._sock
+        target_addr = (host, port)
 
         for i in range(_PUNCH_PROBE_COUNT):
             if time.monotonic() > state.deadline:
@@ -3493,6 +3500,16 @@ class MeshNode:
             # Responder: let the standard UDP accept path handle it.
             return
         if len(self._peers) >= _MAX_PEERS:
+            return
+
+        # Both peers may punch at once (each upgrades its own relayed traffic),
+        # so several attempts can complete toward the same endpoint. The server
+        # dispatch table is the one link per source address: if it already holds
+        # a live transport for this addr — a prior attempt, or the accept path —
+        # a second one here would race the first to a dead, never-authenticated
+        # link. Reuse the existing one instead of duplicating it.
+        existing_t = self._udp_server._transports.get(addr)
+        if existing_t is not None and not existing_t._closed:
             return
 
         # Initiator: open the transport, register it in the server dispatch
