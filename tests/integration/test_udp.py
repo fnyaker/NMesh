@@ -313,6 +313,73 @@ class TestHolePunching:
         await c.stop()
         await relay.stop()
 
+    async def test_punch_survives_dropped_opening_kick(self, monkeypatch):
+        """A lost opening-kick datagram must not strand the punch.
+
+        The initiator opens the punched link by kicking the responder with a
+        keepalive frame; the responder challenges only once it sees one. UDP
+        can drop that datagram under load, and a single lost kick used to
+        strand the whole punch (no challenge, and the initiator's link then
+        self-closed on its keepalive timeout) — the exact intermittent CI
+        failure. Here we deliberately drop each transport's first keepalive
+        (which is precisely the initiator's opening kick) and assert the
+        bounded kick burst still brings the direct UDP link up on both sides.
+        """
+        from src.udp_transport import _MAGIC, FLAG_KEEPALIVE
+
+        _orig_send_raw = UDPTransport._send_raw
+
+        def dropping_send_raw(self, frame):
+            is_keepalive = (len(frame) == len(_MAGIC) + 15
+                            and frame[len(_MAGIC) + 12] == FLAG_KEEPALIVE)
+            if is_keepalive and not getattr(self, "_dropped_first_ka", False):
+                self._dropped_first_ka = True
+                return  # simulate the opening kick lost to buffer overflow
+            return _orig_send_raw(self, frame)
+
+        monkeypatch.setattr(UDPTransport, "_send_raw", dropping_send_raw)
+
+        relay = make_node()
+        a = make_node()
+        c = make_node()
+
+        code_a = relay.generate_invite()
+        code_c = relay.generate_invite()
+        await relay.start(["tcp://127.0.0.1:19353"])
+        await a.join("tcp://127.0.0.1:19353", code_a)
+        await c.join("tcp://127.0.0.1:19353", code_c)
+        await asyncio.wait_for(a.wait_for_session(timeout=15.0), timeout=20.0)
+        await asyncio.wait_for(c.wait_for_session(timeout=15.0), timeout=20.0)
+
+        await a.start_udp(19354, "127.0.0.1")
+        await c.start_udp(19355, "127.0.0.1")
+
+        a._routing.add(c.id, ["tcp://127.0.0.1:1"],
+                       c._identity.dsa_public_key)
+        c._routing.add(a.id, [], a._identity.dsa_public_key)
+
+        await a.send_data(c.id, b"kick may drop")
+
+        async with asyncio.timeout(30.0):
+            while True:
+                src, data = await c.receive_data()
+                if data == b"kick may drop":
+                    break
+
+        def has_udp_link(node, other):
+            return any(
+                p.authenticated_id == other and p.session is not None
+                and isinstance(p.transport, UDPTransport)
+                for p in node._peers
+            )
+        async with asyncio.timeout(15.0):
+            while not (has_udp_link(a, c.id) and has_udp_link(c, a.id)):
+                await asyncio.sleep(0.1)
+
+        await a.stop()
+        await c.stop()
+        await relay.stop()
+
     async def test_punch_counted_when_link_authenticates(self):
         """The completed-punch counter is anchored to the authenticated link,
         not to the probe/ack exchange.

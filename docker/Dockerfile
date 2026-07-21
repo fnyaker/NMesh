@@ -3,8 +3,11 @@
 # acts as a mesh relay / rendezvous point.
 FROM python:3.13-slim
 
+# liboqs-python builds liboqs from source with CMake's default generator
+# ("Unix Makefiles"), which needs `make` — so build-essential (gcc + g++ +
+# make), not a bare gcc, or CMake aborts with "CMAKE_MAKE_PROGRAM is not set".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake ninja-build gcc python3-dev git libssl-dev \
+        cmake build-essential python3-dev git libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
