@@ -85,8 +85,11 @@ class ChatWebServer:
         self._chat.add_listener(self._on_event)
         self._server = ThreadingHTTPServer((self.host, self.port), _make_handler(self))
         self.port = self._server.server_address[1]
-        self._thread = threading.Thread(target=self._server.serve_forever,
-                                        name="nmesh-chat-web", daemon=True)
+        # Poll the shutdown flag tightly (stdlib default is 0.5s) so stop()
+        # returns near-instantly instead of blocking up to half a second.
+        self._thread = threading.Thread(
+            target=lambda: self._server.serve_forever(poll_interval=0.02),
+            name="nmesh-chat-web", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
