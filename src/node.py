@@ -151,6 +151,14 @@ _PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
 _PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
 _PUNCH_MAX_RETRIES     = 3     # max retries per target
 _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
+# The initiator opens the punched link by sending a keepalive frame the
+# responder's accept path turns into a challenge. UDP can drop that datagram
+# (a loaded receiver's buffer overflows), and a single loss strands the whole
+# punch — the responder never challenges and the initiator's link self-closes
+# on its keepalive timeout. Kick in a bounded, spaced burst instead so a few
+# consecutive drops can't sink the handshake (CLAUDE.md: retry, self-repair).
+_PUNCH_KICK_COUNT      = 8     # keepalive kicks to open the punched link
+_PUNCH_KICK_INTERVAL   = 0.3   # seconds between kicks (burst spans ~2.4s)
 _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
 # Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
 # public UDP endpoint an operator supplies by hand — no relay needed.
@@ -3284,25 +3292,32 @@ class MeshNode:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
         from .udp_transport import _host_port
 
-        try:
-            host, port = _host_port(state.remote_udp_addr)
-        except ValueError:
-            self._punch_pending.pop(state.target, None)
-            return
-
-        # Get the raw socket from our UDP server
+        # No UDP listener → we can't punch at all.
         if self._udp_server is None or self._udp_server._sock is None:
             self._punch_pending.pop(state.target, None)
             return
 
-        sock = self._udp_server._sock
-        target_addr = (host, port)
-
-        # Look up the peer's DSA public key for signing the probe
+        # Without the peer's DSA key we can neither sign our probes nor verify
+        # theirs — the punch can never complete, so drop it now.
         entry = self._routing.get(state.target)
         if entry is None or not entry.dsa_pub:
             self._punch_pending.pop(state.target, None)
             return
+
+        # The relay often can't tell us the peer's UDP address: it only sees the
+        # peer's TCP link, whose server-side remote_addr is None, so the address
+        # relayed to us is empty. We then can't probe proactively — but the peer
+        # DID get our address (the relay knows our UDP port from the request) and
+        # is probing us. Keep the pending state so an incoming probe completes
+        # the punch from its source address; dropping it here strands the punch
+        # exactly on the side (larger NodeID) that must drive the handshake.
+        try:
+            host, port = _host_port(state.remote_udp_addr)
+        except ValueError:
+            return
+
+        sock = self._udp_server._sock
+        target_addr = (host, port)
 
         for i in range(_PUNCH_PROBE_COUNT):
             if time.monotonic() > state.deadline:
@@ -3487,6 +3502,16 @@ class MeshNode:
         if len(self._peers) >= _MAX_PEERS:
             return
 
+        # Both peers may punch at once (each upgrades its own relayed traffic),
+        # so several attempts can complete toward the same endpoint. The server
+        # dispatch table is the one link per source address: if it already holds
+        # a live transport for this addr — a prior attempt, or the accept path —
+        # a second one here would race the first to a dead, never-authenticated
+        # link. Reuse the existing one instead of duplicating it.
+        existing_t = self._udp_server._transports.get(addr)
+        if existing_t is not None and not existing_t._closed:
+            return
+
         # Initiator: open the transport, register it in the server dispatch
         # table so the peer's frames route to it, and send an initial keepalive
         # to trigger the responder's accept + challenge.
@@ -3503,4 +3528,19 @@ class MeshNode:
         self._routing.add(state.target, [peer.remote_addr],
                           existing.dsa_pub if existing else b"")
         asyncio.create_task(peer.start(self._handle_packet))
-        transport._send_raw(transport._link.build_keepalive())
+        asyncio.create_task(self._kick_punched_link(peer, transport))
+
+    async def _kick_punched_link(self, peer: '_Peer',
+                                 transport: 'UDPTransport') -> None:
+        """Open the punched link with a bounded burst of keepalive kicks.
+
+        The responder challenges only once it sees a frame from us; a single
+        lost datagram would otherwise strand the punch. Stop as soon as the
+        link authenticates (further kicks are harmless dedup'd keepalives) or
+        the transport dies — bounded so a dead peer can't loop us forever."""
+        for i in range(_PUNCH_KICK_COUNT):
+            if peer.authenticated_id is not None or transport._closed:
+                return
+            transport._send_raw(transport._link.build_keepalive())
+            if i < _PUNCH_KICK_COUNT - 1:
+                await asyncio.sleep(_PUNCH_KICK_INTERVAL)
