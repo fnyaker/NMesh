@@ -369,6 +369,33 @@ class TestPingAndAddressGossip:
             await guest.stop()
             await host.stop()
 
+    async def test_console_ping_node_by_id(self):
+        """Pinging a known node by id returns reachability + RTT, and the
+        snapshot marks the routing entry connected with its RTT."""
+        host, guest = await establish_session("127.0.0.1:19223", "")
+        try:
+            res = await host.console_ping_node(guest.id.raw.hex())
+            assert res["ok"] and res["reachable"] is True
+            assert res["rtt_ms"] is not None and res["rtt_ms"] >= 0
+
+            snap = await host.console_snapshot()
+            entry = next(e for e in snap["routing"]
+                         if e["id"] == guest.id.raw.hex())
+            assert entry["connected"] is True
+            assert entry["rtt_ms"] is not None
+            assert entry["has_key"] is True
+
+            # An unknown, unreachable id reports not-reachable (no crash).
+            from src.node_id import NodeID
+            unknown = NodeID(bytes([9]) + b"\x00" * 19)
+            r2 = await host.console_ping_node(unknown.raw.hex())
+            assert r2["ok"] and r2["reachable"] is False
+            # A malformed id is rejected.
+            assert (await host.console_ping_node("zz"))["ok"] is False
+        finally:
+            await guest.stop()
+            await host.stop()
+
     async def test_address_change_gossiped_to_recent_peer(self):
         """When a node's advertised address set changes (here: a new listener),
         it must gossip the new set to its recent peers immediately — the peer

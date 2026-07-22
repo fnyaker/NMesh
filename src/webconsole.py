@@ -428,6 +428,19 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/ping/node":
+                data = _parse_json(body)
+                node_id = (data or {}).get("id", "")
+                if not isinstance(node_id, str) or not node_id:
+                    self._json(400, {"error": "id required"})
+                    return
+                try:
+                    result = console._call(
+                        console._node.console_ping_node(node_id), timeout=15.0)
+                    self._json(200, result)
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
             if path == "/api/lan/discovery":
                 data = _parse_json(body)
                 if not data or not isinstance(data.get("enabled"), bool):

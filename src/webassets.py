@@ -62,13 +62,16 @@ INDEX_HTML = """<!doctype html>
   <section class="card">
     <h2>Known nodes <span id="known-count" class="muted"></span></h2>
     <div class="mrow">
+      <input id="known-search" type="search" placeholder="search id or address…"
+             title="filter known nodes by id or address">
       <label class="muted" for="known-limit">Show latest</label>
       <input id="known-limit" type="number" min="1" max="1000" value="20"
              title="how many of the most recently seen nodes from the routing table to show">
     </div>
     <table id="known"><thead><tr>
-      <th>Node</th><th>Addresses</th><th>Last seen</th>
+      <th>Node</th><th>Addresses</th><th>Last seen</th><th>Link</th><th></th>
     </tr></thead><tbody></tbody></table>
+    <div id="known-status" class="muted"></div>
   </section>
 
   <section class="card">
@@ -269,6 +272,13 @@ padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}
 .netrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .netrow .badge.down{background:rgba(248,81,73,.15);color:var(--bad)}
 .netrow .nk{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-right:4px}
+.krow{white-space:nowrap}
+.krow button{margin-left:6px}
+tr.kdetails td{background:rgba(127,127,127,.06)}
+.kd{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;padding:8px 4px}
+.kd .nk{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+.kd ul{margin:0;padding-left:16px}
+#known-search{min-width:200px}
 .tcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 .tcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;padding:12px}
 .tcard h3{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
@@ -626,23 +636,94 @@ function knownLimit() {
   return (Number.isFinite(v) && v > 0) ? v : 20;
 }
 
-function drawKnownNodes(s) {
-  const all = s.routing || [];           // already sorted most-recent-first
-  const rows = all.slice(0, knownLimit());
-  $("known-count").textContent = rows.length + " of " + (s.routing_size || 0);
-  const tb = $("known").querySelector("tbody");
-  tb.innerHTML = rows.length ? rows.map((n) => {
-    const addrs = (n.addresses && n.addresses.length) ? n.addresses.join(", ") : "—";
-    return `<tr>
-      <td class="mono">${short(n.id)}</td>
-      <td class="mono">${addrs}</td>
-      <td>${fmtAgo(n.seen_ago)} ago</td>
-    </tr>`;
-  }).join("") : '<tr><td colspan="3" class="muted">no known nodes yet</td></tr>';
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const knownExpanded = new Set();   // node ids whose details are open
+
+function knownMatch(n, q) {
+  if (!q) return true;
+  q = q.toLowerCase();
+  if (n.id.toLowerCase().includes(q)) return true;
+  return (n.addresses || []).some((a) => a.toLowerCase().includes(q));
 }
 
-// Re-render immediately when the operator changes how many to show.
+function drawKnownNodes(s) {
+  const all = s.routing || [];           // already sorted most-recent-first
+  const q = ($("known-search").value || "").trim();
+  const matched = all.filter((n) => knownMatch(n, q));
+  const rows = matched.slice(0, knownLimit());
+  $("known-count").textContent =
+    rows.length + " of " + (q ? matched.length + " matched" : (s.routing_size || 0));
+  const tb = $("known").querySelector("tbody");
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="muted">${q ? "no match" : "no known nodes yet"}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map((n) => {
+    const addrs = (n.addresses && n.addresses.length)
+      ? esc(n.addresses.join(", ")) : "—";
+    const link = n.connected
+      ? `<span class="badge up">direct${n.rtt_ms != null ? " " + n.rtt_ms + " ms" : ""}</span>`
+      : "—";
+    const open = knownExpanded.has(n.id);
+    let html = `<tr>
+      <td class="mono" title="${esc(n.id)}">${short(n.id)}</td>
+      <td class="mono">${addrs}</td>
+      <td>${fmtAgo(n.seen_ago)} ago</td>
+      <td>${link}</td>
+      <td class="krow">
+        <button class="ghost" data-ping="${esc(n.id)}">Ping</button>
+        <button class="ghost" data-details="${esc(n.id)}">${open ? "Hide" : "Details"}</button>
+      </td>
+    </tr>`;
+    if (open) {
+      const addrList = (n.addresses && n.addresses.length)
+        ? n.addresses.map((a) => `<li>${esc(a)}</li>`).join("") : '<li class="muted">none</li>';
+      html += `<tr class="kdetails"><td colspan="5"><div class="kd">
+        <div><span class="nk">Full id</span><span class="mono">${esc(n.id)}</span></div>
+        <div><span class="nk">Addresses</span><ul class="mono">${addrList}</ul></div>
+        <div><span class="nk">Last seen</span><span>${fmtAgo(n.seen_ago)} ago</span></div>
+        <div><span class="nk">Link</span><span>${n.connected ? "direct peer" + (n.rtt_ms != null ? " · " + n.rtt_ms + " ms RTT" : "") : "not connected"}</span></div>
+        <div><span class="nk">Auth key</span><span>${n.has_key ? "known" : "missing"}</span></div>
+      </div></td></tr>`;
+    }
+    return html;
+  }).join("");
+}
+
+function kstatus(msg, bad = false) {
+  const el = $("known-status");
+  el.textContent = msg; el.style.color = bad ? "var(--bad)" : "";
+}
+
+// Re-render when the operator changes the count or the search.
 $("known-limit").addEventListener("input", () => { if (last) drawKnownNodes(last); });
+$("known-search").addEventListener("input", () => { if (last) drawKnownNodes(last); });
+
+// Per-row Ping / Details via event delegation.
+$("known").addEventListener("click", async (ev) => {
+  const pingId = ev.target.getAttribute && ev.target.getAttribute("data-ping");
+  const detId = ev.target.getAttribute && ev.target.getAttribute("data-details");
+  if (detId) {
+    if (knownExpanded.has(detId)) knownExpanded.delete(detId);
+    else knownExpanded.add(detId);
+    if (last) drawKnownNodes(last);
+    return;
+  }
+  if (pingId) {
+    ev.target.disabled = true;
+    kstatus("pinging " + short(pingId) + " …");
+    try {
+      const j = await (await api("/api/ping/node", "POST", { id: pingId })).json();
+      if (!j.reachable) kstatus(short(pingId) + " : unreachable", true);
+      else kstatus(short(pingId) + " : " + (j.rtt_ms != null ? j.rtt_ms + " ms" : "reachable"));
+    } catch (_) {
+      kstatus("ping failed", true);
+    } finally {
+      ev.target.disabled = false;
+    }
+  }
+});
 
 // two-step connect exchange
 function cstatus(msg, ok = true) {
