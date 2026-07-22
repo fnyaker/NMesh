@@ -28,8 +28,16 @@ Options :
 - **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.
 - **Mot de passe** généré au premier run, stocké uniquement en **hash scrypt
   salé** (`console.cred`, permissions 0600). Jamais en clair sur disque.
-- **Jetons Bearer** (en-tête `Authorization`), jamais de cookie → aucune
-  surface CSRF. Expiration glissante (1 h d'inactivité).
+- **Session** authentifiée par **jeton Bearer** (en-tête `Authorization`) **ou
+  cookie de session**. Le login pose un cookie `nmesh_session` :
+  `HttpOnly` (illisible par le JS de la page → une XSS ne l'exfiltre pas),
+  `SameSite=Strict` (jamais envoyé sur une requête cross-site → **aucune surface
+  CSRF**, la propriété qui justifiait autrefois l'absence totale de cookie), et
+  `Secure` sous TLS. Les deux chemins valident le **même** jeton (expiration
+  glissante, 1 h d'inactivité) ; le cookie existe pour qu'un **rafraîchissement
+  de page ne force plus un re-login**. C'est un cookie de session (sans
+  `Max-Age`) : il survit au refresh, disparaît à la fermeture du navigateur, et
+  le serveur borne de toute façon la durée de vie du jeton.
 - **Lockout** anti-bruteforce après plusieurs échecs de login.
 - **Bind loopback par défaut** ; l'exposition réseau est un choix explicite.
 - **CSP stricte** (`default-src 'self'`), assets same-origin, aucune ressource
@@ -38,12 +46,12 @@ Options :
   interaction avec la node sur la boucle asyncio : l'état de la node n'est
   jamais touché hors du thread de la boucle.
 
-## API (toutes en JSON, auth Bearer sauf login)
+## API (toutes en JSON, auth Bearer ou cookie sauf login)
 
 | Méthode | Route            | Rôle                                           |
 |---------|------------------|------------------------------------------------|
-| POST    | `/api/login`     | `{password}` → `{token}`                       |
-| POST    | `/api/logout`    | révoque le jeton                               |
+| POST    | `/api/login`     | `{password}` → `{token}` + pose le cookie `nmesh_session` |
+| POST    | `/api/logout`    | révoque le jeton (Bearer ou cookie) et efface le cookie |
 | GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge, **adressage**) |
 | POST    | `/api/invite`    | génère un code d'invitation                    |
 | POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
@@ -78,9 +86,11 @@ la surface :
 - la section **Apps** liste les apps intégrées avec un lien **Open**.
 - la sous-page **`/chat`** sert l'interface de chat, hébergée par **le même
   serveur console** (pas de port ni de jeton séparés). Elle **réutilise la
-  session** : le jeton Bearer de la console est passé à la sous-page via
-  `sessionStorage` (par onglet, jamais sur disque) ; ouverte à froid, la page
-  redemande le mot de passe console et se connecte elle-même.
+  session** : le cookie `nmesh_session` (même origine, `Path=/`) authentifie la
+  sous-page automatiquement, et le jeton Bearer reste passé via `sessionStorage`
+  (par onglet, jamais sur disque) pour l'usage explicite ; ouverte à froid sans
+  session valide, la page redemande le mot de passe console et se connecte
+  elle-même. Un simple **rafraîchissement** ne redemande plus rien.
 - les endpoints `/api/chat/*` exigent le **même jeton** que le reste de la
   console. Sans app de chat attachée, ni `/chat` ni `/api/chat/*` n'existent
   (404) et la liste d'apps est vide.

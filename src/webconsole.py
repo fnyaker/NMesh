@@ -9,7 +9,12 @@ already a dependency, for the TLS cert):
   - HTTPS with a self-signed cert whose fingerprint is printed at startup.
   - Password auth; the password is generated on first run and only ever stored
     as a salted scrypt hash.
-  - Bearer tokens (Authorization header), never cookies → no CSRF surface.
+  - Session auth by bearer token (Authorization header) *or* a session cookie.
+    The cookie is ``HttpOnly`` (unreadable from JS, so XSS can't exfiltrate it),
+    ``SameSite=Strict`` (never sent on a cross-site request, so it carries no
+    CSRF surface — the property that once justified having no cookie at all),
+    and ``Secure`` under TLS. Both auth paths validate the same session token;
+    the cookie exists so a page refresh no longer forces a re-login.
   - Login lockout after repeated failures.
   - Binds to loopback by default; exposing it on the LAN is an explicit choice.
   - Strict CSP, same-origin assets only, no external resources, request-size cap.
@@ -29,6 +34,7 @@ import secrets
 import ssl
 import threading
 import time
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .webassets import INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS, CHAT_CSS
@@ -45,6 +51,25 @@ _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
 # near-instant (idle cost is one cheap select wakeup per interval).
 _SHUTDOWN_POLL = 0.02
 _SCRYPT = dict(n=16384, r=8, p=1, dklen=32)
+_COOKIE_NAME = "nmesh_session"
+
+
+def _set_cookie_header(token: str, secure: bool) -> tuple[str, str]:
+    """A session cookie (no Max-Age → dropped when the browser closes). It
+    survives a page refresh, which is the whole point; the server still enforces
+    the sliding idle TTL on the token itself. SameSite=Strict is what keeps this
+    free of CSRF surface; HttpOnly keeps it out of reach of page scripts."""
+    parts = [f"{_COOKIE_NAME}={token}", "Path=/", "HttpOnly", "SameSite=Strict"]
+    if secure:
+        parts.append("Secure")
+    return ("Set-Cookie", "; ".join(parts))
+
+
+def _clear_cookie_header(secure: bool) -> tuple[str, str]:
+    parts = [f"{_COOKIE_NAME}=", "Path=/", "Max-Age=0", "HttpOnly", "SameSite=Strict"]
+    if secure:
+        parts.append("Secure")
+    return ("Set-Cookie", "; ".join(parts))
 
 
 def _scrypt(password: str, salt: bytes) -> bytes:
@@ -330,19 +355,22 @@ def _make_handler(console: WebConsole):
 
         # -- helpers --
 
-        def _send(self, code: int, ctype: str, body: bytes) -> None:
+        def _send(self, code: int, ctype: str, body: bytes,
+                  extra_headers: list | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             for k, v in _SECURITY_HEADERS.items():
                 self.send_header(k, v)
+            for k, v in (extra_headers or []):
+                self.send_header(k, v)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _json(self, code: int, obj) -> None:
+        def _json(self, code: int, obj, extra_headers: list | None = None) -> None:
             self._send(code, "application/json; charset=utf-8",
-                       json.dumps(obj).encode("utf-8"))
+                       json.dumps(obj).encode("utf-8"), extra_headers)
 
         def _read_body(self, max_len: int = _MAX_BODY) -> bytes | None:
             try:
@@ -356,11 +384,27 @@ def _make_handler(console: WebConsole):
                 return None
             return self.rfile.read(length) if length else b""
 
-        def _authed(self) -> bool:
+        def _cookie_token(self) -> str | None:
+            raw = self.headers.get("Cookie")
+            if not raw:
+                return None
+            try:
+                jar = SimpleCookie(raw)
+            except Exception:
+                return None  # malformed Cookie header — treat as absent
+            morsel = jar.get(_COOKIE_NAME)
+            return morsel.value if morsel is not None else None
+
+        def _session_token(self) -> str | None:
+            # A bearer header wins (programmatic clients set it explicitly);
+            # otherwise fall back to the session cookie the browser sends itself.
             auth = self.headers.get("Authorization", "")
-            if not auth.startswith("Bearer "):
-                return False
-            return console._valid_token(auth[7:])
+            if auth.startswith("Bearer "):
+                return auth[7:]
+            return self._cookie_token()
+
+        def _authed(self) -> bool:
+            return console._valid_token(self._session_token())
 
         # -- routing --
 
@@ -433,9 +477,11 @@ def _make_handler(console: WebConsole):
                 self._json(401, {"error": "unauthorized"})
                 return
             if path == "/api/logout":
-                auth = self.headers.get("Authorization", "")
-                console._revoke_token(auth[7:])
-                self._json(200, {"ok": True})
+                tok = self._session_token()
+                if tok:
+                    console._revoke_token(tok)
+                self._json(200, {"ok": True},
+                           extra_headers=[_clear_cookie_header(console._use_tls)])
                 return
             if path == "/api/invite":
                 code = console._call(_wrap(console._node.generate_invite))
@@ -765,7 +811,9 @@ def _make_handler(console: WebConsole):
             if not ok:
                 self._json(401, {"error": "invalid password"})
                 return
-            self._json(200, {"token": console._issue_token()})
+            token = console._issue_token()
+            self._json(200, {"token": token},
+                       extra_headers=[_set_cookie_header(token, console._use_tls)])
 
     return Handler
 
