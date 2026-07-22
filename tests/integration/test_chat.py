@@ -14,6 +14,7 @@ from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.data_connector import DataConnector, ConnectorClient
+from src.app_channel import CHAT_APP_ID
 from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
 
 
@@ -26,7 +27,7 @@ def make_node() -> MeshNode:
 async def _chat_for(node) -> tuple[DataConnector, ChatApp]:
     conn = DataConnector(node, host="127.0.0.1", port=0, token="tok")
     await conn.start()
-    client = ConnectorClient(conn.host, conn.port, "tok")
+    client = ConnectorClient(conn.host, conn.port, "tok", CHAT_APP_ID)
     await client.connect()
     app = ChatApp(client)
     await app.start()

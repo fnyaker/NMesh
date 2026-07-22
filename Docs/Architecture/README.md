@@ -25,7 +25,9 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales. |
 | `webconsole.py` / `webassets.py` | Console web de gestion (HTTPS, stdlib). |
-| `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh. |
+| `app_channel.py` | Sections d'app : cadrage `app_id ‖ payload` dans la payload DATA, ids intégrés/déployés (démux du connecteur). |
+| `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
+| `app_package.py` | Packages adressés par contenu + **release signée** (déploiement : app_id lié à l'auteur ML-DSA). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
 
 ## Les documents

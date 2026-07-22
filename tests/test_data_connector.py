@@ -12,11 +12,13 @@ from src.data_connector import (
     DataConnector, ConnectorClient, _read_frame, _write_frame, _LEN,
     _AUTH, _SEND, _WHOAMI, _AUTH_OK, _AUTH_FAIL, _RECV, _WHOAMI_RESP,
 )
+from src.app_channel import APP_ID_LEN, GENERIC_APP_ID, builtin_id, frame
 from src.node_id import NodeID
 from tests.conftest import make_node
 import os
 
 TOKEN = "test-token-abc"
+APP = GENERIC_APP_ID   # the section the test client speaks on
 
 
 async def _make():
@@ -30,8 +32,9 @@ async def _open(conn):
     return await asyncio.open_connection(conn._host, conn.port)
 
 
-async def _auth(reader, writer, token=TOKEN):
-    await _write_frame(writer, _AUTH, token.encode())
+async def _auth(reader, writer, token=TOKEN, app_id=APP):
+    # AUTH declares the client's app section, then the token.
+    await _write_frame(writer, _AUTH, app_id + token.encode())
     ftype, _ = await _read_frame(reader)
     return ftype
 
@@ -77,12 +80,13 @@ class TestSendReceive:
             assert await _auth(reader, writer) == _AUTH_OK
             target = NodeID(os.urandom(20))
             await _write_frame(writer, _SEND, target.raw + b"payload-out")
-            # No route → node buffers it as pending E2E data.
+            # No route → node buffers it as pending E2E data, framed with the
+            # client's app id so the far end can demultiplex it.
             for _ in range(50):
                 if target in node._e2e_pending_data:
                     break
                 await asyncio.sleep(0.02)
-            assert node._e2e_pending_data.get(target) == [b"payload-out"]
+            assert node._e2e_pending_data.get(target) == [frame(APP, b"payload-out")]
             writer.close()
         finally:
             await conn.stop(); await node.stop()
@@ -106,7 +110,9 @@ class TestSendReceive:
             reader, writer = await _open(conn)
             await _auth(reader, writer)
             src = NodeID(os.urandom(20))
-            node._data_queue.put_nowait((src, b"incoming"))
+            # Inbound DATA is framed with the app id; the connector demultiplexes
+            # it and delivers only the payload (section header stripped).
+            node._data_queue.put_nowait((src, frame(APP, b"incoming")))
             ftype, body = await asyncio.wait_for(_read_frame(reader), timeout=2.0)
             assert ftype == _RECV
             assert body[:20] == src.raw
@@ -142,9 +148,9 @@ class TestConnectorClient:
         try:
             await client.connect()
             assert (await client.whoami()) == node.id
-            # A message the node delivers is surfaced by recv().
+            # A message the node delivers on this client's section is surfaced.
             src = NodeID(os.urandom(20))
-            node._data_queue.put_nowait((src, b"hello app"))
+            node._data_queue.put_nowait((src, frame(GENERIC_APP_ID, b"hello app")))
             got_src, got = await asyncio.wait_for(client.recv(), timeout=2.0)
             assert got_src == src and got == b"hello app"
         finally:
@@ -158,3 +164,61 @@ class TestConnectorClient:
                "NMESH_CONNECTOR_TOKEN": "tok"}
         client = ConnectorClient.from_env(env)
         assert client._host == "127.0.0.1" and client._port == 1234 and client._token == "tok"
+        assert client._app_id == GENERIC_APP_ID   # no NMESH_APP_ID → generic section
+
+    async def test_from_env_reads_app_id(self):
+        app = builtin_id("widget")
+        env = {"NMESH_CONNECTOR_HOST": "127.0.0.1", "NMESH_CONNECTOR_PORT": "1",
+               "NMESH_CONNECTOR_TOKEN": "t", "NMESH_APP_ID": app.hex()}
+        assert ConnectorClient.from_env(env)._app_id == app
+
+
+class TestSections:
+    """App-id demultiplexing: a client only receives its own section, and
+    unsectioned traffic is dropped (reject by default)."""
+
+    async def test_sections_are_isolated(self):
+        node, _, conn = await _make()
+        a_app = builtin_id("alpha")
+        b_app = builtin_id("beta")
+        r1, w1 = await _open(conn)
+        r2, w2 = await _open(conn)
+        try:
+            assert await _auth(r1, w1, app_id=a_app) == _AUTH_OK
+            assert await _auth(r2, w2, app_id=b_app) == _AUTH_OK
+            src = NodeID(os.urandom(20))
+            node._data_queue.put_nowait((src, frame(a_app, b"for-alpha")))
+            # The alpha client gets it…
+            ftype, body = await asyncio.wait_for(_read_frame(r1), timeout=2.0)
+            assert ftype == _RECV and body[20:] == b"for-alpha"
+            # …and the beta client does not (nothing queued for its section).
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(_read_frame(r2), timeout=0.4)
+            w1.close(); w2.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_unsectioned_message_dropped(self):
+        node, _, conn = await _make()
+        reader, writer = await _open(conn)
+        try:
+            await _auth(reader, writer)
+            src = NodeID(os.urandom(20))
+            node._data_queue.put_nowait((src, b"x"))  # shorter than a section header
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(_read_frame(reader), timeout=0.5)
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_auth_without_app_id_rejected(self):
+        node, _, conn = await _make()
+        reader, writer = await _open(conn)
+        try:
+            # Token alone, no room for a section header → rejected.
+            await _write_frame(writer, _AUTH, TOKEN.encode()[:APP_ID_LEN - 1])
+            ftype, _ = await _read_frame(reader)
+            assert ftype == _AUTH_FAIL
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()

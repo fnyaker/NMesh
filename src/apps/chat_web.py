@@ -40,21 +40,32 @@ _HEADERS = {
 }
 
 
-class ChatWebServer:
-    def __init__(self, chat_app, *, host: str = "127.0.0.1", port: int = 0,
-                 token: str | None = None, peer: NodeID | None = None) -> None:
+class ChatBridge:
+    """Loop-thread-safe message store + send actions bridging a ChatApp to an
+    HTTP front-end. It runs no server of its own: it subscribes to the app's
+    event stream, buffers a bounded feed, and marshals outgoing sends onto the
+    event loop. Any front-end (the standalone :class:`ChatWebServer`, or the
+    node's web console) drives it via :meth:`snapshot` / :meth:`send_text`.
+
+    Everything still flows through the chat app — the node and the management
+    console core are untouched."""
+
+    def __init__(self, chat_app, *, peer: NodeID | None = None) -> None:
         self._chat = chat_app
-        self.host = host
-        self.port = port
-        self.token = token or secrets.token_urlsafe(18)
-        self._token_bytes = self.token.encode("utf-8")
         self._peer = peer
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server: ThreadingHTTPServer | None = None
-        self._thread: threading.Thread | None = None
         self._messages: deque = deque(maxlen=_MESSAGES_MAX)
         self._cursor = 0
         self._lock = threading.Lock()
+
+    # -- lifecycle (start binds the loop that sends are marshalled onto) ---
+
+    def start(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._chat.add_listener(self._on_event)
+
+    def stop(self) -> None:
+        self._chat.remove_listener(self._on_event)
 
     # -- ChatApp listener (runs on the event loop thread) -----------------
 
@@ -78,34 +89,6 @@ class ChatWebServer:
             self._messages.append({"id": self._cursor, "type": "text",
                                    "src": "me", "text": text, "t": time.time()})
 
-    # -- lifecycle --------------------------------------------------------
-
-    def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        self._loop = loop or asyncio.get_event_loop()
-        self._chat.add_listener(self._on_event)
-        self._server = ThreadingHTTPServer((self.host, self.port), _make_handler(self))
-        self.port = self._server.server_address[1]
-        # Poll the shutdown flag tightly (stdlib default is 0.5s) so stop()
-        # returns near-instantly instead of blocking up to half a second.
-        self._thread = threading.Thread(
-            target=lambda: self._server.serve_forever(poll_interval=0.02),
-            name="nmesh-chat-web", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._chat.remove_listener(self._on_event)
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
-
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self.port}/"
-
     # -- actions ----------------------------------------------------------
 
     def _resolve_peer(self, peer_hex: str | None) -> NodeID:
@@ -116,6 +99,8 @@ class ChatWebServer:
         return self._peer
 
     def send_text(self, peer_hex: str | None, text: str) -> None:
+        if self._loop is None:
+            raise RuntimeError("bridge not started")
         peer = self._resolve_peer(peer_hex)
         fut = asyncio.run_coroutine_threadsafe(
             self._chat.send_text(peer, text), self._loop)
@@ -130,6 +115,57 @@ class ChatWebServer:
                 "messages": msgs,
                 "peer": self._peer.raw.hex() if self._peer else None,
             }
+
+
+class ChatWebServer:
+    """Standalone chat web UI: its own threaded HTTP server on its own port and
+    bearer token, wrapping a :class:`ChatBridge`. The node console hosts the same
+    bridge in-process instead (see :mod:`src.webconsole`)."""
+
+    def __init__(self, chat_app, *, host: str = "127.0.0.1", port: int = 0,
+                 token: str | None = None, peer: NodeID | None = None) -> None:
+        self.host = host
+        self.port = port
+        self.token = token or secrets.token_urlsafe(18)
+        self._token_bytes = self.token.encode("utf-8")
+        self.bridge = ChatBridge(chat_app, peer=peer)
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    # -- lifecycle --------------------------------------------------------
+
+    def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        self.bridge.start(loop or asyncio.get_event_loop())
+        self._server = ThreadingHTTPServer((self.host, self.port), _make_handler(self))
+        self.port = self._server.server_address[1]
+        # Poll the shutdown flag tightly (stdlib default is 0.5s) so stop()
+        # returns near-instantly instead of blocking up to half a second.
+        self._thread = threading.Thread(
+            target=lambda: self._server.serve_forever(poll_interval=0.02),
+            name="nmesh-chat-web", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self.bridge.stop()
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/"
+
+    # -- thin delegates the request handler drives ------------------------
+
+    def send_text(self, peer_hex: str | None, text: str) -> None:
+        self.bridge.send_text(peer_hex, text)
+
+    def snapshot(self, since: int) -> dict:
+        return self.bridge.snapshot(since)
 
 
 def _make_handler(server: "ChatWebServer"):
