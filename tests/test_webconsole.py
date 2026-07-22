@@ -427,6 +427,30 @@ class TestManagement:
         finally:
             console.stop(); await node.stop()
 
+    async def test_ping_endpoints_require_auth_and_respond(self):
+        node, console = await _make_console()
+        try:
+            # No token → unauthorized.
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/ping")
+            assert status == 401
+            _, token = await _login(console)
+            # Ping all peers: fake peer isn't authenticated → nothing sent.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/ping", token)
+            assert status == 200 and j["ok"] is True and j["sent"] == 0
+            # Ping a node by id: missing id → 400.
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/ping/node", token, {})
+            assert status == 400
+            # Unknown id → reachable False (no crash).
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/ping/node", token,
+                {"id": "aa" * 20})
+            assert status == 200 and j["reachable"] is False
+        finally:
+            console.stop(); await node.stop()
+
 
 class TestHardening:
     async def test_oversized_body_rejected(self):
