@@ -12,9 +12,15 @@ import pytest
 
 from src.apps.chat import (
     ChatApp, ProfileReceived, GroupMessage, GroupInvited, DirResult,
-    _PROFILE, _GROUP_INVITE, _GROUP_TEXT, _DIR_QUERY, _DIR_REPLY, GROUP_ID_LEN,
+    _PROFILE, _GROUP_INVITE, _GROUP_TEXT, _DIR_QUERY, _DIR_REPLY,
+    GROUP_ID_LEN, MSG_ID_LEN,
 )
 from src.node_id import NodeID
+
+
+def _profile_body(pseudo=b"", bio=b"", avatar=b""):
+    return (bytes([_PROFILE]) + struct.pack("!H", len(pseudo)) + pseudo
+            + struct.pack("!H", len(bio)) + bio + avatar)
 
 ME = NodeID(bytes([0x01]) * 20)
 B = NodeID(bytes([0x02]) * 20)
@@ -45,9 +51,9 @@ async def _next(app, kind, timeout=2.0):
 class TestSend:
     async def test_send_profile(self):
         app = _app()
-        app.state.set_pseudo("alice")
+        app.state.set_profile(pseudo="alice", bio="hi", avatar=b"AV")
         await app.send_profile(B)
-        assert app._client.sent[-1] == (B, bytes([_PROFILE]) + b"alice")
+        assert app._client.sent[-1] == (B, _profile_body(b"alice", b"hi", b"AV"))
 
     async def test_create_group_invites_members(self):
         app = _app()
@@ -71,7 +77,8 @@ class TestSend:
         _, payload = app._client.sent[0]
         assert payload[0] == _GROUP_TEXT
         assert payload[1:1 + GROUP_ID_LEN] == gid
-        assert payload[1 + GROUP_ID_LEN:] == b"hi all"
+        # gid | mid(16) | reply_to(16) | text
+        assert payload[1 + GROUP_ID_LEN + MSG_ID_LEN + GROUP_ID_LEN:] == b"hi all"
 
     async def test_dir_query_hits_contacts(self):
         app = _app()
@@ -85,10 +92,11 @@ class TestSend:
 class TestReceive:
     async def test_profile_learned(self):
         app = _app()
-        app._dispatch(B, bytes([_PROFILE]) + b"bob")
+        app._dispatch(B, _profile_body(b"bob", b"bob's bio", b"BOBAV"))
         ev = await _next(app, ProfileReceived)
-        assert ev.pseudo == "bob"
+        assert ev.pseudo == "bob" and ev.bio == "bob's bio" and ev.avatar == b"BOBAV"
         assert app.state.known[B.raw.hex()]["pseudo"] == "bob"
+        assert app.state.get_avatar(B.raw.hex()) == b"BOBAV"
 
     async def test_group_invite_adds_group(self):
         app = _app()
@@ -105,9 +113,11 @@ class TestReceive:
     async def test_group_text_emitted(self):
         app = _app()
         gid = bytes([0x07]) * GROUP_ID_LEN
-        app._dispatch(B, bytes([_GROUP_TEXT]) + gid + b"yo group")
+        mid = b"\x05" * MSG_ID_LEN
+        body = bytes([_GROUP_TEXT]) + gid + mid + bytes(GROUP_ID_LEN) + b"yo group"
+        app._dispatch(B, body)
         ev = await _next(app, GroupMessage)
-        assert ev.group_id == gid and ev.src == B and ev.text == "yo group"
+        assert ev.group_id == gid and ev.src == B and ev.text == "yo group" and ev.mid == mid
 
     async def test_dir_query_replies_only_for_own_pseudo(self):
         app = _app()

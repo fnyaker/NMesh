@@ -25,6 +25,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 
 _STATE_KEY = "state"    # drawer key holding the serialised state doc
 
@@ -46,12 +47,19 @@ class DrawerStore:
     def put(self, key: str, value: bytes) -> bool:
         return self._s.put(self._app, key, value)
 
+    def delete(self, key: str) -> bool:
+        return self._s.delete(self._app, key)
+
 _MAX_PSEUDO = 32
+_MAX_BIO = 1024
+_MAX_AVATAR = 48 * 1024    # avatar thumbnail bytes (per profile)
+_MAX_AVATARS = 128         # peers whose avatar we cache (LRU bounded)
 _MAX_CONTACTS = 1000
 _MAX_KNOWN = 5000          # learned pseudos (not confirmed contacts) — LRU bounded
 _MAX_GROUPS = 256
 _MAX_GROUP_MEMBERS = 256
 _MAX_GROUP_NAME = 64
+_AVATAR_PREFIX = "avatar:"   # drawer key prefix; avatars live outside the state blob
 
 
 def normalize_pseudo(pseudo: str) -> str:
@@ -70,9 +78,14 @@ class ChatState:
         self._store = store
         self._lock = threading.Lock()
         self.pseudo = ""
-        self.contacts: dict[str, dict] = {}   # id_hex -> {pseudo, added}
-        self.known: dict[str, dict] = {}      # id_hex -> {pseudo, seen}
+        self.bio = ""
+        self.avatar = b""                     # my own avatar thumbnail bytes
+        self.contacts: dict[str, dict] = {}   # id_hex -> {pseudo, added, bio}
+        self.known: dict[str, dict] = {}      # id_hex -> {pseudo, seen, bio}
         self.groups: dict[str, dict] = {}     # gid_hex -> {name, members:[id_hex]}
+        # Avatars live in their own drawer keys (they'd bloat the state blob).
+        # In-memory LRU cache; ids present here also have a store key.
+        self._avatars: "OrderedDict[str, bytes]" = OrderedDict()  # id_hex|'self' -> bytes
         self._load()
 
     # -- persistence ------------------------------------------------------
@@ -95,16 +108,19 @@ class ChatState:
         if not isinstance(doc, dict):
             return
         self.pseudo = normalize_pseudo(str(doc.get("pseudo", "")))
+        self.bio = str(doc.get("bio", ""))[:_MAX_BIO]
         if isinstance(doc.get("contacts"), dict):
             for k, v in list(doc["contacts"].items())[:_MAX_CONTACTS]:
                 if _is_id(k) and isinstance(v, dict):
                     self.contacts[k] = {"pseudo": normalize_pseudo(str(v.get("pseudo", ""))),
-                                        "added": float(v.get("added", 0) or 0)}
+                                        "added": float(v.get("added", 0) or 0),
+                                        "bio": str(v.get("bio", ""))[:_MAX_BIO]}
         if isinstance(doc.get("known"), dict):
             for k, v in list(doc["known"].items())[:_MAX_KNOWN]:
                 if _is_id(k) and isinstance(v, dict):
                     self.known[k] = {"pseudo": normalize_pseudo(str(v.get("pseudo", ""))),
-                                     "seen": float(v.get("seen", 0) or 0)}
+                                     "seen": float(v.get("seen", 0) or 0),
+                                     "bio": str(v.get("bio", ""))[:_MAX_BIO]}
         if isinstance(doc.get("groups"), dict):
             for k, v in list(doc["groups"].items())[:_MAX_GROUPS]:
                 if _is_gid(k) and isinstance(v, dict):
@@ -112,10 +128,21 @@ class ChatState:
                                if _is_id(m)][:_MAX_GROUP_MEMBERS]
                     self.groups[k] = {"name": str(v.get("name", ""))[:_MAX_GROUP_NAME],
                                       "members": members}
+        # Track which peers have a cached avatar (ids only; bytes loaded lazily).
+        if isinstance(doc.get("avatar_ids"), list):
+            for aid in doc["avatar_ids"][:_MAX_AVATARS]:
+                if isinstance(aid, str):
+                    self._avatars[aid] = b""     # placeholder → lazy-loaded on get
+        # Load my own avatar eagerly (send_profile needs the bytes).
+        if self._store is not None:
+            mine = self._store.get(_AVATAR_PREFIX + "self")
+            if mine:
+                self.avatar = mine[:_MAX_AVATAR]
 
     def _save_locked(self) -> None:
-        doc = {"pseudo": self.pseudo, "contacts": self.contacts,
-               "known": self.known, "groups": self.groups}
+        doc = {"pseudo": self.pseudo, "bio": self.bio,
+               "contacts": self.contacts, "known": self.known,
+               "groups": self.groups, "avatar_ids": list(self._avatars.keys())}
         if self._store is not None:
             try:
                 self._store.put(_STATE_KEY, json.dumps(doc).encode("utf-8"))
@@ -143,6 +170,20 @@ class ChatState:
             self.pseudo = normalize_pseudo(pseudo)
             self._save_locked()
 
+    def set_profile(self, *, pseudo: str | None = None, bio: str | None = None,
+                    avatar: bytes | None = None) -> None:
+        """Update my own profile. Only provided fields change; ``avatar=b''``
+        clears the picture."""
+        with self._lock:
+            if pseudo is not None:
+                self.pseudo = normalize_pseudo(pseudo)
+            if bio is not None:
+                self.bio = str(bio)[:_MAX_BIO]
+            if avatar is not None:
+                self.avatar = bytes(avatar)[:_MAX_AVATAR]
+                self._store_avatar_locked("self", self.avatar)
+            self._save_locked()
+
     def add_contact(self, id_hex: str, pseudo: str = "") -> bool:
         if not _is_id(id_hex):
             return False
@@ -153,6 +194,7 @@ class ChatState:
             self.contacts[id_hex] = {
                 "pseudo": normalize_pseudo(pseudo) or existing.get("pseudo", ""),
                 "added": existing.get("added") or time.time(),
+                "bio": existing.get("bio", "") or self.known.get(id_hex, {}).get("bio", ""),
             }
             self.known.pop(id_hex, None)  # promoted from learned → confirmed
             self._save_locked()
@@ -178,8 +220,57 @@ class ChatState:
                 if id_hex not in self.known and len(self.known) >= _MAX_KNOWN:
                     oldest = min(self.known, key=lambda k: self.known[k]["seen"])
                     self.known.pop(oldest, None)
-                self.known[id_hex] = {"pseudo": pseudo, "seen": time.time()}
+                prev = self.known.get(id_hex, {})
+                self.known[id_hex] = {"pseudo": pseudo, "seen": time.time(),
+                                      "bio": prev.get("bio", "")}
             self._save_locked()
+
+    def learn_profile(self, id_hex: str, *, bio: str = "", avatar: bytes = b"") -> None:
+        """Record a peer's bio/avatar from their PROFILE announce. Bounded: the
+        avatar goes to an LRU cache (own drawer key), bio next to their pseudo."""
+        if not _is_id(id_hex):
+            return
+        with self._lock:
+            rec = self.contacts.get(id_hex) or self.known.get(id_hex)
+            if rec is not None and bio:
+                rec["bio"] = str(bio)[:_MAX_BIO]
+            if avatar:
+                self._store_avatar_locked(id_hex, bytes(avatar)[:_MAX_AVATAR])
+            self._save_locked()
+
+    # -- avatars (LRU cache; each in its own drawer key) ------------------
+
+    def _store_avatar_locked(self, key_id: str, data: bytes) -> None:
+        if key_id in self._avatars:
+            self._avatars.move_to_end(key_id)
+        elif len(self._avatars) >= _MAX_AVATARS:
+            old, _ = self._avatars.popitem(last=False)   # evict least-recent
+            if old != "self" and self._store is not None:
+                try:
+                    self._store.delete(_AVATAR_PREFIX + old)
+                except Exception:
+                    pass
+        self._avatars[key_id] = data
+        if self._store is not None:
+            try:
+                self._store.put(_AVATAR_PREFIX + key_id, data)
+            except Exception:
+                pass
+
+    def get_avatar(self, id_hex: str) -> bytes | None:
+        """Avatar bytes for a peer (or 'self'), or None. Lazy-loaded from the
+        drawer on first access after a restart."""
+        with self._lock:
+            data = self._avatars.get(id_hex)
+            if data:
+                self._avatars.move_to_end(id_hex)
+                return data
+            if id_hex in self._avatars and self._store is not None:
+                loaded = self._store.get(_AVATAR_PREFIX + id_hex)
+                if loaded:
+                    self._avatars[id_hex] = loaded
+                    return loaded
+            return None
 
     def add_group(self, gid_hex: str, name: str, members: list[str]) -> bool:
         if not _is_gid(gid_hex):
@@ -226,10 +317,14 @@ class ChatState:
 
     def snapshot(self) -> dict:
         with self._lock:
+            def entry(k, v):
+                return {"id": k, **v, "has_avatar": k in self._avatars}
             return {
                 "pseudo": self.pseudo,
-                "contacts": [{"id": k, **v} for k, v in self.contacts.items()],
-                "known": [{"id": k, **v} for k, v in self.known.items()],
+                "bio": self.bio,
+                "has_avatar": "self" in self._avatars,
+                "contacts": [entry(k, v) for k, v in self.contacts.items()],
+                "known": [entry(k, v) for k, v in self.known.items()],
                 "groups": [{"id": k, **v} for k, v in self.groups.items()],
             }
 
