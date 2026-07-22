@@ -46,6 +46,30 @@ Le concept de base est Kademlia, mais le routage est **agnostique du medium** et
 - Réplication : `_DHT_K = 6` nœuds les plus proches (STORE/FIND_VALUE).
 - Usage : partage d'applications (`app_package.py`, cf. `Docs/AppSharing/guide`).
 
+## DHT par-app publique/privée (`app_dht.py`)
+
+Overlay applicatif au-dessus du store adressé par contenu, sans en affaiblir
+l'anti-empoisonnement (c'est toujours la valeur *cadrée* qui est hashée et
+stockée). Chaque valeur est `app_id(8) ‖ flag(1) ‖ body` :
+
+- **Namespace par app.** L'`app_id` est celui que le nœud tient pour la session
+  authentifiée — **l'app ne le déclare pas**. Un lecteur n'accepte qu'une valeur
+  dont l'`app_id` cadré correspond au sien : deux apps ne se lisent jamais, même
+  en connaissant la clé de contenu de l'autre.
+- **Publique** (`flag=0`) : `body = contenu` en clair → toute instance de la
+  *même* app, sur n'importe quel nœud, la lit (« toutes les nodes »).
+- **Privée** (`flag=1`) : `body = nonce(12) ‖ AES-256-GCM(contenu)` chiffré par
+  le **nœud** sous une clé fournie par **l'app** (16/24/32 octets ; AAD =
+  `app_id ‖ flag`). Seules les instances qui détiennent aussi la clé lisent.
+  Le nœud fait la crypto DHT ; l'app possède le contenu, la clé, et sa
+  distribution entre nœuds. AES-GCM symétrique = post-quantique.
+
+API nœud : `app_dht_put(app_id, contenu, enc_key?) -> clé` /
+`app_dht_get(app_id, clé, dec_key?) -> contenu | None`. Côté app externe, mêmes
+opérations via le connecteur (`ConnectorClient.dht_put/dht_get`, l'`app_id` venant
+de la session — cf. `Docs/DataConnector/guide`). Contenu borné à `MAX_CONTENT`
+(≈ une valeur DHT). L'app gère son propre index de clés de contenu.
+
 ## Propagation des adresses  ⚑ invariant central
 
 **But visé** : *connaître une node ⟹ connaître l'ensemble de ses adresses

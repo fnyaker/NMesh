@@ -288,3 +288,59 @@ class TestLocalStore:
             assert await client.store_get("blob") == big
         finally:
             await client.close(); await conn.stop(); await node.stop()
+
+
+class TestAppDHT:
+    """The per-app DHT, driven over the connector. The app supplies content and
+    (for private) a key; the node namespaces by the session's app id."""
+
+    async def test_public_put_get(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            key = await client.dht_put(b"public-entry")
+            assert key is not None and len(key) == 20
+            assert await client.dht_get(key) == b"public-entry"
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_private_put_get(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            enc = b"k" * 32
+            key = await client.dht_put(b"private-entry", enc)
+            assert key is not None
+            assert await client.dht_get(key, enc) == b"private-entry"
+            assert await client.dht_get(key) is None            # no key
+            assert await client.dht_get(key, b"z" * 32) is None  # wrong key
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_namespace_isolation_across_sections(self):
+        node, _, conn = await _make()
+        alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
+        beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
+        try:
+            await alpha.connect(); await beta.connect()
+            key = await alpha.dht_put(b"alpha-only")
+            # Beta holds the exact content key but reads nothing (other namespace).
+            assert await beta.dht_get(key) is None
+            assert await alpha.dht_get(key) == b"alpha-only"
+        finally:
+            await alpha.close(); await beta.close()
+            await conn.stop(); await node.stop()
+
+    async def test_oversized_content_signals_failure(self):
+        from src.app_dht import MAX_CONTENT
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            # Within the connector frame budget but past the DHT value ceiling:
+            # the node refuses it and the client sees None (empty key reply).
+            assert await client.dht_put(b"x" * (MAX_CONTENT + 1)) is None
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
