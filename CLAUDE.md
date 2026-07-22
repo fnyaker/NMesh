@@ -4,6 +4,21 @@ Réseau mesh décentralisé, agnostique du transport, conçu pour faire transite
 des données sensibles dans un environnement **hostile**. Ce fichier fixe les
 principes non-négociables. Toute contribution doit les respecter.
 
+## ⚑ Documentation d'architecture — OBLIGATOIRE
+
+`Docs/Architecture/` décrit **comment le code fonctionne réellement** (protocole,
+sécurité, routage, transports, et surtout `gotchas.md` : les pièges de blocage /
+flakiness durement appris).
+
+- **AVANT toute modification ou débogage**, lis les documents pertinents. Pour un
+  blocage ou une flakiness, **commence par `Docs/Architecture/gotchas.md`**.
+- **APRÈS tout changement de comportement décrit là**, mets le document à jour
+  **dans le même commit**. Une doc fausse est pire qu'absente.
+- Un nouveau mécanisme non trivial → une entrée dans le bon document (ou un
+  nouveau fichier + lien dans `Docs/Architecture/README.md`).
+
+Index : [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
+
 ## Modèle de menace (l'hypothèse de base)
 
 > Dès qu'une donnée quitte le nœud, elle entre en **territoire hostile**.
