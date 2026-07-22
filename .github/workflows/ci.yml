@@ -6,31 +6,50 @@ on:
   pull_request:
 
 jobs:
+  # Run the suite inside the published base image, which already carries a
+  # compiled liboqs + all deps (see docker/Dockerfile.base, base-image.yml). That
+  # avoids recompiling the heavy C library on every run and tests on the exact
+  # runtime the app ships with. If the base isn't reachable (first bootstrap, or
+  # a fork PR without package read) we build it once locally so CI still goes
+  # green — same pull-or-build fallback as the docker job below.
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Base image name (lowercased)
+        id: img
+        run: echo "base=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-base" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
         with:
-          python-version: "3.12"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install system deps for liboqs
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc libssl-dev
-
-      - name: Install Python dependencies
+      - name: Provide the base image (prebuilt liboqs; build once if unreachable)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          BASE='${{ steps.img.outputs.base }}:latest'
+          if docker pull "$BASE" 2>/dev/null; then
+            echo "using published base image with prebuilt liboqs: $BASE"
+          else
+            echo "base image not reachable — building it locally"
+            docker build -f docker/Dockerfile.base -t "$BASE" .
+          fi
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
 
-      - name: Build liboqs (first import compiles the C library)
-        run: python -c "import oqs; print('liboqs ready')"
-
-      - name: Unit tests
-        run: pytest -q
+      - name: Unit tests (in the base image — liboqs already compiled)
+        run: |
+          docker run --rm -v "$PWD:/app" -w /app "$BASE" \
+            sh -c "python -c 'import oqs; print(\"liboqs ready (prebuilt)\")' && pytest -q"
 
       - name: Integration tests
-        run: pytest tests/integration -q
+        run: docker run --rm -v "$PWD:/app" -w /app "$BASE" pytest tests/integration -q
 
   # Build the application image on every run so a broken Dockerfile fails CI,
   # and publish it to GHCR (ghcr.io/<owner>/nmesh) only on pushes to main — PRs
