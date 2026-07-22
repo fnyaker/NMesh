@@ -22,8 +22,11 @@ from src.tcp_transport import TCPTransport, TCPServer
 from src.spool_transport import SpoolTransport, SpoolServer
 from src.udp_transport import UDPTransport, UDPServer
 from src.webconsole import WebConsole
-from src.data_connector import DataConnector
+from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
+from src.app_channel import CHAT_APP_ID
+from src.apps.chat import ChatApp
+from src.apps.chat_web import ChatBridge
 
 
 async def main() -> None:
@@ -48,6 +51,8 @@ async def main() -> None:
                     help="expose a data connector on this loopback port for apps")
     ap.add_argument("--launch", action="append", default=[], metavar="CMD",
                     help="launch an app wired to the mesh (repeatable); needs --connector-port")
+    ap.add_argument("--no-chat", action="store_true",
+                    help="disable the built-in chat app (served at /chat on the console)")
     ap.add_argument("--no-tls", action="store_true")
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
     # Read from the environment so a password never lands in the process args
@@ -88,21 +93,34 @@ async def main() -> None:
             if pub:
                 print(f"  STUN          : public UDP addr {pub[0]}:{pub[1]}")
 
-    console = WebConsole(node, host=args.console_host, port=args.console_port,
-                         state_dir=args.data, use_tls=not args.no_tls,
-                         password=args.console_password)
-    console.start(loop=asyncio.get_running_loop())
-
+    # A data connector backs both the built-in chat app and any --launch'd apps.
+    # When only chat needs it, bind an ephemeral loopback port; --connector-port
+    # exposes a fixed one for external apps.
     connector = None
     launcher = None
-    if args.connector_port is not None:
-        connector = DataConnector(node, host="127.0.0.1", port=args.connector_port)
+    chat_app = None
+    chat_bridge = None
+    if not args.no_chat or args.connector_port is not None:
+        connector = DataConnector(node, host="127.0.0.1", port=args.connector_port or 0)
         await connector.start()
         launcher = ProcessLauncher(connector, node_id=node.id)
         for cmd in args.launch:
             await launcher.launch(shlex.split(cmd))
     elif args.launch:
-        print("  NOTE          : --launch ignored (requires --connector-port)")
+        print("  NOTE          : --launch ignored (requires --connector-port or chat)")
+
+    if not args.no_chat and connector is not None:
+        chat_client = ConnectorClient(connector.host, connector.port,
+                                      connector.token, CHAT_APP_ID)
+        await chat_client.connect()
+        chat_app = ChatApp(chat_client)
+        await chat_app.start()
+        chat_bridge = ChatBridge(chat_app)
+
+    console = WebConsole(node, host=args.console_host, port=args.console_port,
+                         state_dir=args.data, use_tls=not args.no_tls,
+                         password=args.console_password, chat_bridge=chat_bridge)
+    console.start(loop=asyncio.get_running_loop())
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
@@ -115,6 +133,8 @@ async def main() -> None:
     if args.udp is not None and not args.no_udp:
         print(f"  UDP listener  : udp://0.0.0.0:{args.udp}   (NAT hole punching)")
     print(f"  Web console   : {console.url}")
+    if chat_bridge is not None:
+        print(f"  Chat app      : {console.url}chat   (built-in, in-app)")
     if console.generated_password:
         print(f"  Password      : {console.generated_password}   (shown once — save it)")
     elif args.console_password:
@@ -137,11 +157,13 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        console.stop()          # also detaches the chat bridge listener
+        if chat_app is not None:
+            await chat_app.stop()   # closes the in-process connector client
         if launcher is not None:
             await launcher.stop_all()
         if connector is not None:
             await connector.stop()
-        console.stop()
         await node.stop()  # also stops UDP listener + cleans up punch state
 
 

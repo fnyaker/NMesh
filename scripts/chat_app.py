@@ -21,6 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.data_connector import ConnectorClient
+from src.app_channel import CHAT_APP_ID
 from src.node_id import NodeID
 from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
 from src.apps.chat_web import ChatWebServer
@@ -50,7 +51,7 @@ async def main() -> None:
                     help="also surface this chat to a local web UI on PORT")
     args = ap.parse_args()
 
-    client = ConnectorClient.from_env()
+    client = ConnectorClient.from_env(app_id=CHAT_APP_ID)
     await client.connect()
     app = ChatApp(client)
     await app.start()

@@ -22,6 +22,7 @@ from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.data_connector import DataConnector, ConnectorClient
+from src.app_channel import CHAT_APP_ID
 from src.apps.chat import ChatApp
 from src.apps.call import AudioCall, AudioFormat, WavSource, WavSink, read_wav, write_wav
 
@@ -35,7 +36,7 @@ def _node():
 async def _chat(node):
     conn = DataConnector(node, host="127.0.0.1", port=0, token="call")
     await conn.start()
-    client = ConnectorClient(conn.host, conn.port, "call")
+    client = ConnectorClient(conn.host, conn.port, "call", CHAT_APP_ID)
     await client.connect()
     app = ChatApp(client)
     await app.start()

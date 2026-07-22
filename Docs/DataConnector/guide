@@ -24,22 +24,47 @@ await conn.start()
 print(conn.token)
 ```
 
+## Sections d'application (app_id)
+
+Plusieurs apps peuvent partager un même nœud sans lire le trafic les unes des
+autres. Chaque message applicatif circule dans une **section** nommée par un
+**app_id** (`APP_ID_LEN` = 8 octets, voir `src/app_channel.py`). À l'intérieur
+de la charge utile DATA chiffrée E2E :
+
+```
+payload DATA E2E  =  app_id(8)  ‖  payload_app
+```
+
+Le connecteur est le **seul** endroit qui pose et retire ce cadre : à la
+connexion, une app **déclare son app_id** ; le connecteur préfixe ses envois et
+ne lui livre **que** les messages de sa section (démultiplexage). Un message
+sans en-tête de section (trop court) est **jeté**. Le trafic de gestion
+(PING/PONG, routage, DHT, handshakes) n'emprunte jamais le plan DATA : il est
+donc structurellement hors de toute section.
+
+Deux familles d'app_id : les apps **intégrées** (livrées avec le nœud) utilisent
+un id réservé dérivé du nom (`builtin_id`, ex. `CHAT_APP_ID`) et ne sont pas
+signées ; les apps **déployées** sont liées à la clé ML-DSA de leur auteur
+(`deployed_id`) et leur package est signé (voir `Docs/AppSharing/guide`).
+
 ## Protocole
 
 Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | corps`.
 
 | Sens | Type | Corps | Effet |
 |------|------|-------|-------|
-| →    | `AUTH` (0x01)       | jeton (utf-8)               | authentifie la connexion |
+| →    | `AUTH` (0x01)       | `app_id(8) + jeton (utf-8)` | authentifie + déclare la section |
 | ←    | `AUTH_OK` (0x81)    | —                           | authentifié |
-| ←    | `AUTH_FAIL` (0x82)  | —                           | jeton invalide, fermeture |
-| →    | `SEND` (0x02)       | `id_cible(20) + payload`    | `node.send_data(cible, payload)` |
+| ←    | `AUTH_FAIL` (0x82)  | —                           | jeton/section invalide, fermeture |
+| →    | `SEND` (0x02)       | `id_cible(20) + payload`    | `send_data(cible, app_id ‖ payload)` |
 | →    | `WHOAMI` (0x03)     | —                           | demande notre id de nœud |
 | ←    | `WHOAMI` (0x84)     | `id_noeud(20)`              | réponse |
-| ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant, poussé |
+| ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant **de cette section** |
 
-La première trame **doit** être `AUTH`. Ensuite l'app envoie des `SEND` et reçoit
-des `RECV` au fil de l'eau.
+La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
+`SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
+`ConnectorClient(host, port, token, app_id)` fixe la section ; `from_env` lit
+`NMESH_APP_ID` (hex) ou retombe sur la section générique.
 
 ## Sécurité
 
@@ -48,12 +73,14 @@ des `RECV` au fil de l'eau.
 - Trames **bornées** en taille, nombre de clients **plafonné**.
 - **Loopback par défaut** ; ou **socket Unix** (chmod 0600) pour l'IPC de
   conteneurs ; un `ssl_context` peut envelopper l'écoute TCP.
-- Le connecteur possède la boucle `node.receive_data()` et **diffuse** chaque
-  message entrant à tous les clients authentifiés (un client = cas usuel).
+- Le connecteur possède la boucle `node.receive_data()` et **démultiplexe**
+  chaque message entrant vers les clients de la section concernée (isolation
+  entre apps ; un message sans section est jeté — rejet par défaut).
 
-## Vers le partage d'applications
+## Partage et déploiement d'applications
 
 Ce connecteur est la brique de base : une app déclarée (manifeste + fichiers)
-lancée par le nœud s'y branche pour parler au réseau. Le partage d'apps via DHT
-reste à venir (voir ROADMAP).
+lancée par le nœud s'y branche pour parler au réseau, sur sa propre section.
+Le partage d'apps par DHT et leur **déploiement signé** (app_id + signature de
+l'auteur) sont décrits dans `Docs/AppSharing/guide`.
 </content>

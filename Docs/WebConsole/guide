@@ -51,6 +51,8 @@ Options :
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
+| GET     | `/api/chat/messages` | `?since=N` → feed du chat intégré (si activé) |
+| POST    | `/api/chat/send`   | `{text, peer?}` — envoie via l'app de chat        |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -62,6 +64,26 @@ La section **Apps (DHT)** de l'interface permet de publier une application
 (sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une
 par son identifiant (fichiers vérifiés puis téléchargeables). Voir
 `Docs/AppSharing/guide`.
+
+## App de chat intégrée (`/chat`)
+
+Le nœud embarque une **app de chat par défaut**, branchée sur le mesh comme
+n'importe quelle app (connecteur de données, section `CHAT_APP_ID`). La console
+la surface :
+
+- la section **Apps** liste les apps intégrées avec un lien **Open**.
+- la sous-page **`/chat`** sert l'interface de chat, hébergée par **le même
+  serveur console** (pas de port ni de jeton séparés). Elle **réutilise la
+  session** : le jeton Bearer de la console est passé à la sous-page via
+  `sessionStorage` (par onglet, jamais sur disque) ; ouverte à froid, la page
+  redemande le mot de passe console et se connecte elle-même.
+- les endpoints `/api/chat/*` exigent le **même jeton** que le reste de la
+  console. Sans app de chat attachée, ni `/chat` ni `/api/chat/*` n'existent
+  (404) et la liste d'apps est vide.
+
+Câblage : passer un `chat_bridge` (un `src.apps.chat_web.ChatBridge` enveloppant
+une `ChatApp`) à `WebConsole(...)`. Le lanceur `scripts/nmesh_node.py` le fait
+par défaut ; `--no-chat` le désactive. Voir `Docs/Apps/chat`.
 
 ## Rejoindre / relier deux réseaux
 

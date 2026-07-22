@@ -1,9 +1,20 @@
-# Application de chat (démo)
+# Application de chat
 
 Application de référence de NMesh, construite sur le connecteur de données :
 **messages texte**, **partage de fichiers** (chunké + vérifié), et un **flux
 temps réel** de trames horodatées — la primitive qu'un appel voix/vidéo
 utiliserait. Elle montre le mesh faire du quasi temps réel de bout en bout.
+
+## App intégrée par défaut (console `/chat`)
+
+Le chat est l'**app par défaut** livrée avec le nœud. `scripts/nmesh_node.py`
+la démarre automatiquement : il ouvre un connecteur de données en loopback,
+branche une `ChatApp` en interne (section `CHAT_APP_ID`), et la surface sur la
+console web à **`/chat`** (liste **Apps** → **Open**). Rien à lancer : l'app est
+intégrée, accessible depuis l'UI, et réutilise la session console. `--no-chat`
+la désactive. Étant livrée avec le nœud (code en dépôt), elle utilise un app_id
+réservé et **n'est pas signée** — contrairement à une app déployée sur le mesh
+(voir `Docs/AppSharing/guide`). Détails console : `Docs/WebConsole/guide`.
 
 ## Démo auto-contenue
 
