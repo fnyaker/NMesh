@@ -46,7 +46,8 @@ class _FakeAuthPeerTransport:
         await asyncio.Event().wait()  # block forever
 
 
-def _request(console, method, path, token=None, body=None, raw=None, tls=False):
+def _request(console, method, path, token=None, body=None, raw=None, tls=False,
+             cookie=None):
     """Blocking HTTP request — call via asyncio.to_thread."""
     if tls:
         ctx = ssl._create_unverified_context()
@@ -57,6 +58,8 @@ def _request(console, method, path, token=None, body=None, raw=None, tls=False):
     headers = {}
     if token:
         headers["Authorization"] = "Bearer " + token
+    if cookie:
+        headers["Cookie"] = cookie
     data = raw
     if body is not None:
         data = json.dumps(body).encode()
@@ -147,6 +150,61 @@ class TestAuth:
             status, _, _, _ = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)
             assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_login_sets_session_cookie(self):
+        node, console = await _make_console()
+        try:
+            status, hdrs, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/login", None, {"password": PW})
+            assert status == 200
+            sc = hdrs.get("set-cookie", "")
+            assert sc.startswith("nmesh_session=")
+            assert "HttpOnly" in sc and "SameSite=Strict" in sc
+            # No TLS here, so the Secure attribute must be absent (else the
+            # browser would drop the cookie on the plain-HTTP console).
+            assert "Secure" not in sc
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_cookie_authenticates_without_bearer(self):
+        # A refresh sends only the cookie (no Authorization header). It must be
+        # accepted on its own — that is the whole point of the session cookie.
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            cookie = "nmesh_session=" + token
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", None, None, None, False, cookie)
+            assert status == 200
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_logout_clears_cookie_and_revokes(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            cookie = "nmesh_session=" + token
+            _, hdrs, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/logout", None, None, None, False, cookie)
+            assert "max-age=0" in hdrs.get("set-cookie", "").lower()
+            # The token behind the cookie is revoked, not just the cookie dropped.
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", None, None, None, False, cookie)
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_secure_cookie_under_tls(self):
+        node = MeshNode(transport_manager=make_manager())
+        console = WebConsole(node, host="127.0.0.1", port=0, use_tls=True, password=PW)
+        console.start(loop=asyncio.get_running_loop())
+        try:
+            _, hdrs, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/login", None, {"password": PW},
+                None, True)
+            assert "Secure" in hdrs.get("set-cookie", "")
         finally:
             console.stop(); await node.stop()
 

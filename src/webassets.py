@@ -319,6 +319,7 @@ font-weight:600;text-decoration:none}
 
 APP_JS = r"""
 let TOKEN = null;
+let timer = null;     // status polling interval (guarded so re-entry never stacks)
 let prev = null;      // previous {t, bytes_in, bytes_out}
 let last = null;      // last full state snapshot (drives the control buttons)
 const hist = [];      // [{in,out}] KB/s samples
@@ -352,21 +353,36 @@ $("login-form").addEventListener("submit", async (e) => {
     // sessionStorage is per-tab and never written to disk.
     try { sessionStorage.setItem("nmesh_token", TOKEN); } catch (_) {}
     $("password").value = "";
-    $("login").classList.add("hidden");
-    $("app").classList.remove("hidden");
-    tick();
-    setInterval(tick, 1500);
+    startApp();
   } catch (_) { $("login-error").textContent = "network error"; }
 });
+
+function startApp() {
+  $("login").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  tick();
+  if (!timer) timer = setInterval(tick, 1500);
+}
 
 function logout() {
   if (TOKEN) api("/api/logout", "POST").catch(() => {});
   TOKEN = null;
   try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
+  if (timer) { clearInterval(timer); timer = null; }
   $("app").classList.add("hidden");
   $("login").classList.remove("hidden");
 }
 $("logout").addEventListener("click", logout);
+
+// On load, the session cookie set at login is sent automatically, so a refresh
+// resumes the session without a second password prompt. Probe one authed
+// endpoint: 200 → straight into the app, otherwise show the login form.
+(async function bootstrap() {
+  try {
+    const r = await fetch("/api/state");
+    if (r.ok) startApp();
+  } catch (_) { /* stay on the login screen */ }
+})();
 
 function fmtBytes(n) {
   if (n == null) return "n/a";
@@ -1138,17 +1154,20 @@ const short=(h)=>h?h.slice(0,10)+"…":"";
 const esc=(s)=>{const d=document.createElement("div");d.textContent=s==null?"":s;return d.innerHTML;};
 
 async function api(path, method="GET", body){
-  const h={Authorization:"Bearer "+TOKEN}; if(body)h["Content-Type"]="application/json";
+  const h={}; if(TOKEN)h["Authorization"]="Bearer "+TOKEN; if(body)h["Content-Type"]="application/json";
   const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});
   if(r.status===401){logout();throw new Error("unauth");} return r;
 }
 function logout(){TOKEN=null;try{sessionStorage.removeItem("nmesh_token");}catch(_){}
   if(timer){clearInterval(timer);timer=null;}$("app").classList.add("hidden");$("login").classList.remove("hidden");}
 
+// token may be null: the session cookie set by the console login is sent
+// automatically and carries auth on its own, so /chat resumes across refreshes.
 async function enter(token){
-  const r=await fetch("/api/chat/messages?since=0",{headers:{Authorization:"Bearer "+token}});
+  const h={}; if(token)h["Authorization"]="Bearer "+token;
+  const r=await fetch("/api/chat/messages?since=0",{headers:h});
   if(!r.ok)return false;
-  TOKEN=token; try{sessionStorage.setItem("nmesh_token",TOKEN);}catch(_){}
+  TOKEN=token||null; if(TOKEN){try{sessionStorage.setItem("nmesh_token",TOKEN);}catch(_){}}
   $("login").classList.add("hidden");$("app").classList.remove("hidden");
   apply(await r.json());
   if(timer)clearInterval(timer); timer=setInterval(poll,1000);
@@ -1308,5 +1327,5 @@ $("send-form").addEventListener("submit",async(e)=>{
 });
 
 (function(){ let tok=null; try{tok=sessionStorage.getItem("nmesh_token");}catch(_){}
-  if(tok) enter(tok).then((ok)=>{ if(!ok)$("login").classList.remove("hidden"); }); })();
+  enter(tok).then((ok)=>{ if(!ok)$("login").classList.remove("hidden"); }); })();
 """
