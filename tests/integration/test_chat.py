@@ -18,6 +18,7 @@ from src.app_channel import CHAT_APP_ID
 from src.apps.chat import (
     ChatApp, TextMessage, FileReceived, Frame,
     ProfileReceived, GroupInvited, GroupMessage, DirResult,
+    Edited, Deleted, Reaction, Receipt, _READ,
 )
 
 
@@ -92,6 +93,56 @@ class TestChatOverMesh:
             assert sorted(seqs) == list(range(N))     # every frame arrived
             assert min(latencies) >= 0
             assert statistics.median(latencies) < 500  # near-real-time locally
+        finally:
+            await host_app.stop()
+            await guest_app.stop()
+            await host_conn.stop()
+            await guest_conn.stop()
+            await guest.stop()
+            await host.stop()
+
+
+class TestRichChatOverMesh:
+    async def test_reaction_edit_receipt_and_profile(self):
+        host = make_node()
+        guest = make_node()
+        code = host.generate_invite()
+        await host.start(["tcp://127.0.0.1:19172"])
+        await guest.join("tcp://127.0.0.1:19172", code)
+        await guest.wait_for_session(timeout=15.0)
+        await host.wait_for_session(timeout=15.0)
+
+        host_conn, host_app = await _chat_for(host)
+        guest_conn, guest_app = await _chat_for(guest)
+        try:
+            # Guest sends a message; host gets it with the sender-minted msg id.
+            mid = await guest_app.send_text(host.id, "first")
+            m = await _wait_for(host_app, TextMessage)
+            assert m.mid == mid and m.text == "first"
+
+            # Guest reacts to it → host sees the reaction on that mid.
+            await guest_app.send_reaction(host.id, mid, "👍")
+            r = await _wait_for(host_app, Reaction)
+            assert r.mid == mid and r.emoji == "👍"
+
+            # Guest edits it → host sees the new text for the same mid.
+            await guest_app.send_edit(host.id, mid, "first (edited)")
+            e = await _wait_for(host_app, Edited)
+            assert e.mid == mid and e.text == "first (edited)"
+
+            # Host marks it read → guest receives a READ receipt for that mid.
+            await host_app.send_receipt(guest.id, _READ, [mid])
+            rc = await _wait_for(guest_app, Receipt)
+            assert rc.kind == _READ and mid in rc.mids
+
+            # Guest publishes a rich profile (bio + avatar) → host learns it.
+            await guest_app.add_contact(host.id, announce=False)
+            await guest_app.set_profile(pseudo="guesty", bio="on the mesh",
+                                        avatar=b"AVATARBYTES", announce=True)
+            prof = await _wait_for(host_app, ProfileReceived)
+            assert prof.pseudo == "guesty" and prof.bio == "on the mesh"
+            assert prof.avatar == b"AVATARBYTES"
+            assert host_app.state.get_avatar(guest.id.raw.hex()) == b"AVATARBYTES"
         finally:
             await host_app.stop()
             await guest_app.stop()
