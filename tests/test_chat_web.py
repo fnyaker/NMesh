@@ -85,7 +85,7 @@ class TestChatWeb:
             status, _, j = await asyncio.to_thread(
                 _request, server, "GET", "/api/messages?since=0", TOKEN)
             assert status == 200
-            texts = [m["text"] for m in j["messages"] if m["type"] == "text"]
+            texts = [m["text"] for m in j["messages"] if m["kind"] == "text"]
             assert "hello from the mesh" in texts
             assert j["peer"] == PEER.raw.hex()
         finally:
@@ -99,7 +99,8 @@ class TestChatWeb:
             assert status == 200 and j["ok"] is True
             # The message went out through the chat app → its client.
             assert app._client.sent[-1][0] == PEER
-            assert app._client.sent[-1][1] == bytes([0x01]) + b"yo"
+            payload = app._client.sent[-1][1]
+            assert payload[0] == 0x01 and payload.endswith(b"yo")  # _TEXT | mid | reply | text
             # And it's echoed in the feed as an outgoing message.
             _, _, feed = await asyncio.to_thread(
                 _request, server, "GET", "/api/messages?since=0", TOKEN)

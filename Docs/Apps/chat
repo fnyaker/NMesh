@@ -1,9 +1,13 @@
 # Application de chat
 
-Application de référence de NMesh, construite sur le connecteur de données :
-**messages texte**, **partage de fichiers** (chunké + vérifié), et un **flux
-temps réel** de trames horodatées — la primitive qu'un appel voix/vidéo
-utiliserait. Elle montre le mesh faire du quasi temps réel de bout en bout.
+Messagerie de référence de NMesh, construite sur le connecteur de données. Une
+vraie app de messagerie de bout en bout : **profils** (nom, bio, avatar),
+**conversations** 1:1 et **groupes**, **réponses**, **édition**, **suppression**,
+**réactions emoji**, **accusés livré/lu**, **indicateur de frappe**, **partage
+de fichiers et médias** (chunké + vérifié, images en aperçu), **recherche de
+personnes par pseudo** (local + annuaire DHT réseau), plus le **flux temps réel**
+de trames horodatées — la primitive qu'un appel voix/vidéo utiliserait. Tout
+reste **E2E chiffré** ; le nœud ne voit que des métadonnées de routage.
 
 ## App intégrée par défaut (console `/chat`)
 
@@ -76,21 +80,35 @@ ev = await app.next_event()          # TextMessage | FileReceived | Frame
 
 Chaque charge utile DATA E2E : `type(1) ‖ corps`.
 
-| Type           | Corps                                              |
-|----------------|----------------------------------------------------|
-| `TEXT`         | texte utf-8                                        |
-| `FILE_OFFER`   | transfer_id, total_chunks, taille, sha256, nom     |
-| `FILE_CHUNK`   | transfer_id, index, données                        |
-| `STREAM`       | stream_id, seq, ts_ns, charge utile                |
-| `PROFILE`      | pseudo utf-8 (annonce mon pseudo)                  |
-| `GROUP_INVITE` | group_id(16), nom, roster (liste de node ids)      |
-| `GROUP_TEXT`   | group_id(16), texte                                |
-| `DIR_QUERY`    | query_id(4), pseudo (« qui est ce pseudo ? »)      |
-| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (réponse sur soi) |
+Chaque message visible porte un **`msg_id`** de 16 octets (frappé par
+l'émetteur) pour que réponses, éditions, suppressions, réactions et accusés
+puissent le référencer. Une **portée de conversation** est un `group_id` de 16
+octets, ou tout-à-zéro pour un échange direct (1:1) avec l'émetteur.
+
+| Type           | Corps                                                        |
+|----------------|--------------------------------------------------------------|
+| `TEXT`         | msg_id(16), reply_to(16), texte utf-8                        |
+| `FILE_OFFER`   | msg_id(16), reply_to(16), transfer_id, total, taille, sha256, nom |
+| `FILE_CHUNK`   | transfer_id, index, données                                  |
+| `STREAM`       | stream_id, seq, ts_ns, charge utile                          |
+| `PROFILE`      | pseudo, bio, avatar (annonce mon profil)                     |
+| `GROUP_INVITE` | group_id(16), nom, roster (liste de node ids)                |
+| `GROUP_TEXT`   | group_id(16), msg_id(16), reply_to(16), texte                |
+| `RECEIPT`      | kind(livré/lu), scope(16), liste de msg_id (accusés)         |
+| `TYPING`       | scope(16), état (frappe / arrêt)                             |
+| `EDIT`         | scope(16), msg_id(16), nouveau texte                         |
+| `DELETE`       | scope(16), msg_id(16)                                        |
+| `REACTION`     | scope(16), msg_id(16), emoji (vide = retire)                 |
+| `DIR_QUERY`    | query_id(4), pseudo (« qui est ce pseudo ? »)                |
+| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (réponse sur soi)           |
 
 Robustesse : tout message applicatif est validé et borné ; un message mal formé
 est ignoré, jamais fatal (la charte s'applique aussi au niveau app). L'intégrité
-des fichiers est vérifiée (SHA-256) avant livraison.
+des fichiers est vérifiée (SHA-256) avant livraison. Sécurité des primitives
+sensibles : une **réaction/édition/suppression** n'agit que si elle vient de
+l'émetteur d'origine du message ; un `EDIT`/`DELETE` d'un pair n'altère que ses
+propres messages. Le profil (nom/bio/avatar) est **appris** du pair mais le
+node_id reste l'identité réelle.
 
 ## Couche sociale (contacts, pseudo, groupes, recherche)
 
