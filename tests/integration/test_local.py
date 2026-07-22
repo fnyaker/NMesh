@@ -343,3 +343,45 @@ class TestLinkKeepalive:
         finally:
             await guest.stop()
             await host.stop()
+
+
+class TestPingAndAddressGossip:
+    async def test_console_ping_measures_rtt(self):
+        """The console 'Ping peers' action PINGs every peer; the PONG is timed
+        and the round-trip surfaces per peer in the snapshot."""
+        host, guest = await establish_session("127.0.0.1:19220", "")
+        try:
+            res = await host.console_ping_peers()
+            assert res["sent"] >= 1
+            # Wait for the PONG to land and RTT to be recorded.
+            async with asyncio.timeout(5.0):
+                while True:
+                    p = next((p for p in host._peers
+                              if p.authenticated_id == guest.id), None)
+                    if p is not None and p.last_rtt is not None:
+                        break
+                    await asyncio.sleep(0.02)
+            snap = await host.console_snapshot()
+            rtt = next(pp["rtt_ms"] for pp in snap["peers"]
+                       if pp["authenticated_id"] == guest.id.raw.hex())
+            assert rtt is not None and rtt >= 0
+        finally:
+            await guest.stop()
+            await host.stop()
+
+    async def test_address_change_gossiped_to_recent_peer(self):
+        """When a node's advertised address set changes (here: a new listener),
+        it must gossip the new set to its recent peers immediately — the peer
+        learns the new address without waiting for the periodic keepalive."""
+        host, guest = await establish_session("127.0.0.1:19221", "")
+        try:
+            await host.add_listen("tcp://127.0.0.1:19222")
+            async with asyncio.timeout(5.0):
+                while True:
+                    entry = guest._routing.get(host.id)
+                    if entry and any("19222" in a for a in entry.addresses):
+                        break
+                    await asyncio.sleep(0.02)
+        finally:
+            await guest.stop()
+            await host.stop()

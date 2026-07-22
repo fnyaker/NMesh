@@ -421,6 +421,13 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/ping":
+                try:
+                    result = console._call(console._node.console_ping_peers())
+                    self._json(200, {"ok": True, **result})
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
             if path == "/api/lan/discovery":
                 data = _parse_json(body)
                 if not data or not isinstance(data.get("enabled"), bool):
