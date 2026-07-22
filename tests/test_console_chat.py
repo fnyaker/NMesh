@@ -114,6 +114,98 @@ class TestConsoleChat:
             console.stop(); await node.stop()
 
 
+ME = NodeID(bytes([0x01]) * 20)
+CONTACT = NodeID(bytes([0x02]) * 20)
+
+
+async def _make_console_social():
+    node = MeshNode(transport_manager=make_manager())
+    app = ChatApp(_StubClient(), node_id=ME)
+    bridge = ChatBridge(app)
+    console = WebConsole(node, host="127.0.0.1", port=0, use_tls=False,
+                         password=PW, chat_bridge=bridge)
+    console.start(loop=asyncio.get_running_loop())
+    return node, console, app
+
+
+def _post(console, token, path, body):
+    return _request(console, "POST", path, token, body)
+
+
+class TestConsoleSocial:
+    async def test_set_pseudo(self):
+        node, console, app = await _make_console_social()
+        try:
+            _, token = await _login(console)
+            st, _, _, j = await asyncio.to_thread(
+                _post, console, token, "/api/chat/pseudo", {"pseudo": "alice"})
+            assert st == 200 and j["ok"] is True
+            assert app.state.pseudo == "alice"
+            _, _, _, snap = await asyncio.to_thread(
+                _request, console, "GET", "/api/chat/messages?since=0", token)
+            assert snap["pseudo"] == "alice" and snap["me"] == ME.raw.hex()
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_add_and_remove_contact(self):
+        node, console, app = await _make_console_social()
+        try:
+            _, token = await _login(console)
+            st, _, _, j = await asyncio.to_thread(
+                _post, console, token, "/api/chat/contact",
+                {"op": "add", "id": CONTACT.raw.hex(), "pseudo": "bob"})
+            assert st == 200 and j["ok"] is True
+            assert CONTACT.raw.hex() in app.state.contacts
+            st2, _, _, j2 = await asyncio.to_thread(
+                _post, console, token, "/api/chat/contact",
+                {"op": "remove", "id": CONTACT.raw.hex()})
+            assert st2 == 200 and j2["ok"] is True
+            assert CONTACT.raw.hex() not in app.state.contacts
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_create_group_and_send(self):
+        node, console, app = await _make_console_social()
+        try:
+            _, token = await _login(console)
+            app.state.add_contact(CONTACT.raw.hex(), "bob")
+            st, _, _, j = await asyncio.to_thread(
+                _post, console, token, "/api/chat/group",
+                {"op": "create", "name": "team", "members": [CONTACT.raw.hex()]})
+            assert st == 200 and j["ok"] is True
+            gid = j["id"]
+            assert gid in app.state.groups
+            assert ME.raw.hex() in app.state.group_members(gid)
+            # Sending to the group fans out to the member (not us).
+            st2, _, _, j2 = await asyncio.to_thread(
+                _post, console, token, "/api/chat/send", {"group": gid, "text": "hello team"})
+            assert st2 == 200 and j2["ok"] is True
+            assert any(t == CONTACT for t, _ in app._client.sent)
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_search_returns_local_hits(self):
+        node, console, app = await _make_console_social()
+        try:
+            _, token = await _login(console)
+            app.state.add_contact(CONTACT.raw.hex(), "Alice")
+            st, _, _, j = await asyncio.to_thread(
+                _post, console, token, "/api/chat/search", {"pseudo": "ali"})
+            assert st == 200
+            assert any(r["id"] == CONTACT.raw.hex() for r in j["results"])
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_social_requires_auth(self):
+        node, console, _ = await _make_console_social()
+        try:
+            st, _, _, _ = await asyncio.to_thread(
+                _post, console, None, "/api/chat/pseudo", {"pseudo": "x"})
+            assert st == 401
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestNoChatBridge:
     """With no bridge attached, the chat surface must not exist at all."""
 
