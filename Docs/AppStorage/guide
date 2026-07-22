@@ -1,0 +1,89 @@
+# Store local sécurisé par app (« tiroir »)
+
+Chaque application branchée sur le nœud dispose d'un **tiroir** : un magasin
+clé→valeur local, **chiffré au repos**, **isolé** des autres apps, et **borné**.
+Le chat intégré peut s'en servir, comme n'importe quelle app externe branchée
+via le connecteur de données.
+
+Implémentation : [`src/app_storage.py`](../../src/app_storage.py).
+
+## Modèle
+
+- Un tiroir est nommé par l'**`app_id`** — les mêmes 8 octets de section que le
+  connecteur lie déjà à chaque client à l'`AUTH`. **L'app ne nomme jamais son
+  tiroir** : c'est le nœud qui fournit l'id depuis la session authentifiée. Une
+  app ne peut donc pas atteindre le tiroir d'une autre.
+- Un **fichier par tiroir** (`<app_id_hex>.drawer`), donc le rayon de casse
+  d'une corruption est une seule app.
+- Chaque tiroir est chiffré sous **sa propre clé**, dérivée de l'identité
+  long-terme du nœud (HKDF, `app_id` mélangé dans l'`info`). Même avec le
+  fichier en main, la clé d'une app ne dérive jamais celle d'une autre ; et
+  l'`app_id` sert d'**AAD** GCM → un fichier renommé vers un autre tiroir échoue
+  à se déchiffrer (substitution inter-tiroirs détectée).
+- **AES-256-GCM** (post-quantique en tant que primitive symétrique). Même
+  frontière de confiance que le fichier d'identité déjà sur disque : aucune
+  nouvelle information secrète n'est exposée au medium.
+- **Persistance opt-in** : sans chemin (`app_storage_path`), les tiroirs vivent
+  en RAM uniquement — exactement comme la persistance de session E2E.
+
+## Bornes (anti-épuisement, anti-amplification)
+
+Toutes dures (voir `src/app_storage.py`) : longueur de clé (`MAX_KEY_LEN`),
+taille de valeur (`MAX_VALUE`), nombre de clés par tiroir (`MAX_KEYS`), octets
+par tiroir (`MAX_DRAWER_BYTES`), et nombre de tiroirs (`MAX_DRAWERS`). Un `put`
+qui violerait une borne renvoie `False` sans effet de bord. Une app locale
+hostile ne peut ni saturer la mémoire ni remplir le disque à travers nous.
+
+## Robustesse (jamais de crash)
+
+Le chemin de chargement traite **tout fichier comme hostile** : corruption,
+troncature, falsification (échec d'authentification GCM), mauvaise clé, ou champ
+mal formé donnent un **tiroir vide** et un redémarrage propre — jamais un crash,
+jamais les données d'une autre app.
+
+## API nœud (apps intégrées)
+
+```python
+node.app_store_put(app_id, "clef", b"valeur")   # -> bool (False si borne dépassée)
+node.app_store_get(app_id, "clef")               # -> bytes | None
+node.app_store_delete(app_id, "clef")            # -> bool
+node.app_store_list(app_id)                       # -> [clefs...] triées
+```
+
+L'appelant passe **l'`app_id` lié à la session**, jamais un id choisi par l'app.
+
+## API connecteur (apps externes)
+
+Le client `ConnectorClient` expose le tiroir de **sa propre** section (l'`app_id`
+donné à l'`AUTH`) :
+
+```python
+await client.store_put("clef", b"valeur")   # -> bool
+await client.store_get("clef")               # -> bytes | None
+await client.store_delete("clef")            # -> bool
+await client.store_list()                     # -> [clefs...]
+```
+
+Frames (voir `src/data_connector.py`) — l'app_id n'apparaît **pas** dans la
+frame, il est déduit de la session :
+
+| Type | Sens | Corps |
+|---|---|---|
+| `STORE_GET`   | client→nœud | `clef(utf-8)` |
+| `STORE_PUT`   | client→nœud | `keylen(2) ‖ clef ‖ valeur` |
+| `STORE_DEL`   | client→nœud | `clef(utf-8)` |
+| `STORE_LIST`  | client→nœud | vide |
+| `STORE_VALUE` | nœud→client | `present(1) ‖ valeur` (réponse GET) |
+| `STORE_OK`    | nœud→client | `ok(1)` (réponse PUT/DEL) |
+| `STORE_KEYS`  | nœud→client | tableau JSON de clés (réponse LIST) |
+
+Note : une valeur transmise **via le connecteur** est bornée par le plafond de
+frame du connecteur (~70 Ko), atteint avant `MAX_VALUE`. Les apps intégrées, qui
+appellent `node.app_store_*` directement, ne sont bornées que par `MAX_VALUE`.
+La réponse `STORE_LIST` est plafonnée à une frame : un tiroir à très grand nombre
+de clés doit tenir son propre index dans une valeur.
+
+## Câblage
+
+`scripts/nmesh_node.py` passe `app_storage_path=<data>/app_store` quand `--data`
+est fourni ; sans `--data`, les tiroirs restent en RAM.
