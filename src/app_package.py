@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .app_channel import APP_ID_LEN, deployed_id
+
 CHUNK_SIZE = 49_152            # 48 KiB — comfortably under the 60 KB payload cap
 KEY_LEN = 20
 _MAX_FILES = 4096
@@ -168,6 +170,83 @@ def reassemble_bytes(size: int, sha256_hex: str, chunk_key_hexes: list[str],
     if len(data) != size or hashlib.sha256(data).hexdigest() != sha256_hex:
         raise AppPackageError("reassembled blob fails its hash")
     return data
+
+
+# ---------------------------------------------------------------------------
+# Signed release descriptor — the defined way to deploy an app.
+#
+# Content addressing (above) makes the *bytes* verifiable: ask for a key, check
+# the hash. It says nothing about *who* published them. A release descriptor
+# binds a content root to an author's ML-DSA identity: the author signs it, and
+# the runtime app id is derived from the author key + name so it cannot be
+# claimed by anyone else. Built-in apps skip this entirely (in-tree, reserved id).
+# ---------------------------------------------------------------------------
+
+_RELEASE_DOMAIN = b"nmesh-app-release-v1"
+_RELEASE_KEYS = ("v", "name", "version", "root_key", "root_sha256", "author", "app_id")
+
+
+def _release_signing_input(body: dict) -> bytes:
+    return _RELEASE_DOMAIN + json.dumps(
+        {k: body[k] for k in _RELEASE_KEYS}, sort_keys=True).encode("utf-8")
+
+
+def build_release(root_key: bytes, root_sha256: str, name: str, version: str,
+                  author_pub: bytes, sign) -> tuple[bytes, bytes]:
+    """Build a signed release descriptor binding a content root to its author.
+
+    ``sign(message) -> signature`` signs with the author's ML-DSA identity.
+    Returns ``(release_bytes, app_id)``. The descriptor is a small JSON blob,
+    itself content-addressable (publish it on the DHT like any other value)."""
+    app_id = deployed_id(author_pub, name)
+    body = {
+        "v": 1,
+        "name": name,
+        "version": version,
+        "root_key": root_key.hex(),
+        "root_sha256": root_sha256,
+        "author": author_pub.hex(),
+        "app_id": app_id.hex(),
+    }
+    body["sig"] = sign(_release_signing_input(body)).hex()
+    return json.dumps(body, sort_keys=True).encode("utf-8"), app_id
+
+
+def parse_release(data: bytes, verify) -> dict:
+    """Parse and cryptographically verify a release descriptor.
+
+    ``verify(message, signature, public_key) -> bool``. Every gate rejects by
+    default: bad JSON, missing/oversized fields, an app id not bound to the
+    author key, or a failed signature all raise ``AppPackageError``. Returns the
+    validated descriptor with ``root_key`` / ``app_id`` / ``author`` as bytes."""
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except Exception as exc:
+        raise AppPackageError(f"release not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("v") != 1:
+        raise AppPackageError("bad release")
+    for k in ("name", "version", "root_key", "root_sha256", "author", "app_id", "sig"):
+        if not isinstance(doc.get(k), str):
+            raise AppPackageError(f"release field {k} invalid")
+    if len(doc["name"]) > 512 or len(doc["version"]) > 64:
+        raise AppPackageError("release name/version too long")
+    try:
+        root_key = bytes.fromhex(doc["root_key"])
+        author = bytes.fromhex(doc["author"])
+        app_id = bytes.fromhex(doc["app_id"])
+        sig = bytes.fromhex(doc["sig"])
+    except ValueError as exc:
+        raise AppPackageError("release hex field invalid") from exc
+    if len(root_key) != KEY_LEN or len(doc["root_sha256"]) != 64:
+        raise AppPackageError("release root reference invalid")
+    if len(app_id) != APP_ID_LEN or app_id != deployed_id(author, doc["name"]):
+        raise AppPackageError("app id not bound to author")
+    if not verify(_release_signing_input(doc), sig, author):
+        raise AppPackageError("release signature invalid")
+    doc["root_key"] = root_key
+    doc["author"] = author
+    doc["app_id"] = app_id
+    return doc
 
 
 def reassemble(manifest: dict, get_chunk) -> dict[str, bytes]:

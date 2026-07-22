@@ -11,7 +11,9 @@ Tout est identifié par son hash :
 - un fichier est découpé en chunks ; la clé d'un chunk = `sha256(chunk)[:20]`.
 - le manifeste liste, par fichier : taille, SHA-256 complet, et les clés de
   chunks ordonnées.
-- l'identifiant de l'app = `sha256(manifeste)[:20]`.
+- la **clé de contenu** de l'app (sa clé DHT) = `sha256(root)[:20]` (voir plus
+  bas). À ne pas confondre avec l'**app_id runtime** (8 octets, la section du
+  connecteur) : voir « Déploiement signé ».
 
 Conséquence : on demande une clé et on **vérifie que ce qui revient hashe vers
 cette clé**. Un relais ou un pair malveillant ne peut ni substituer du contenu
@@ -49,8 +51,38 @@ un flot de `STORE`.
 ## Manifestes chunkés (grosses apps)
 
 Le manifeste n'est plus borné par une seule valeur DHT : il est lui-même
-**chunké et adressé par contenu**. L'app_id pointe vers un petit **root** qui
-liste les chunks du manifeste (`app_id = sha256(root)[:20]`). À la récupération,
-le root est lu, le manifeste réassemblé et vérifié, puis les fichiers. Une app
-peut donc avoir un nombre arbitraire de fichiers/chunks.
+**chunké et adressé par contenu**. La clé de contenu pointe vers un petit
+**root** qui liste les chunks du manifeste (`clé = sha256(root)[:20]`). À la
+récupération, le root est lu, le manifeste réassemblé et vérifié, puis les
+fichiers. Une app peut donc avoir un nombre arbitraire de fichiers/chunks.
+
+## Déploiement signé (app_id + signature)
+
+L'adressage par contenu prouve **ce que sont** les octets ; il ne dit rien de
+**qui** les publie. Pour déployer une app de façon authentifiée, on ajoute un
+**descripteur de release signé** qui lie un root de contenu à l'identité ML-DSA
+de son auteur.
+
+- l'**app_id runtime** (8 octets, la section du connecteur) d'une app déployée
+  est `deployed_id(clé_pub_auteur, nom)` — stable entre versions, **infalsifiable
+  sans la clé de l'auteur**.
+- le descripteur `{v, nom, version, root_key, root_sha256, author, app_id, sig}`
+  est signé (ML-DSA-65) sur son domaine séparé. Il est publié sur la DHT comme
+  toute valeur : son identifiant, la **`release_id`**, est `sha256(desc)[:20]`.
+
+```python
+info = await node.publish_signed_app("widget", "2.1.0", files)
+#   -> publie chunks + manifeste + root + descripteur signé
+#      info == {"release_id": "…", "app_id": "…"}
+
+meta, files = await node.fetch_signed_app(bytes.fromhex(info["release_id"]))
+#   -> vérifie la signature AVANT tout contenu, puis réassemble + vérifie les
+#      fichiers. meta == {app_id, name, version, author}
+```
+
+**Rejet par défaut** (`app_package.parse_release`) : JSON invalide, champ
+manquant/trop long, `app_id` non lié à la clé auteur, ou signature invalide →
+`AppPackageError`, rien n'est installé. Les apps **intégrées** (le chat livré
+avec le nœud) n'empruntent pas ce chemin : code en dépôt, app_id réservé
+(`builtin_id`), aucune signature.
 </content>

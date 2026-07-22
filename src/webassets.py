@@ -186,6 +186,12 @@ INDEX_HTML = """<!doctype html>
     </div>
   </section>
 
+  <section class="card" id="apps-card">
+    <h2>Apps</h2>
+    <p class="muted">Applications running on this node, wired to the mesh.</p>
+    <div id="apps-list" class="apps"></div>
+  </section>
+
   <section class="card">
     <h2>Apps (DHT)</h2>
     <div class="manage">
@@ -302,6 +308,13 @@ display:flex;flex-direction:column;gap:8px}
 #punch-block{margin-top:12px}
 #punch-block h3{margin:0 0 8px;font-size:13px;color:var(--muted);
 text-transform:uppercase;letter-spacing:.05em}
+.apps{display:flex;flex-wrap:wrap;gap:10px}
+.appitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);
+border-radius:10px;background:var(--bg)}
+.appitem .aname{font-weight:600}
+.appitem a.open{background:var(--accent);color:#04122a;border-radius:8px;padding:6px 12px;
+font-weight:600;text-decoration:none}
+.apps .muted{align-self:center}
 """
 
 APP_JS = r"""
@@ -335,6 +348,9 @@ $("login-form").addEventListener("submit", async (e) => {
       return;
     }
     TOKEN = (await res.json()).token;
+    // Hand the token to same-tab sub-pages (e.g. /chat) without a second login.
+    // sessionStorage is per-tab and never written to disk.
+    try { sessionStorage.setItem("nmesh_token", TOKEN); } catch (_) {}
     $("password").value = "";
     $("login").classList.add("hidden");
     $("app").classList.remove("hidden");
@@ -346,6 +362,7 @@ $("login-form").addEventListener("submit", async (e) => {
 function logout() {
   if (TOKEN) api("/api/logout", "POST").catch(() => {});
   TOKEN = null;
+  try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
   $("app").classList.add("hidden");
   $("login").classList.remove("hidden");
 }
@@ -412,7 +429,30 @@ async function tick() {
   drawKnownNodes(s);
   drawTransports(s);
   drawExpert(s);
+  drawApps(s.apps);
   drawJoinProgress(s.join_status);
+}
+
+function drawApps(apps) {
+  const el = $("apps-list");
+  if (!el) return;
+  apps = apps || [];
+  if (!apps.length) { el.innerHTML = '<span class="muted">No built-in apps.</span>'; return; }
+  el.innerHTML = "";
+  for (const a of apps) {
+    const row = document.createElement("div");
+    row.className = "appitem";
+    const name = document.createElement("span");
+    name.className = "aname";
+    name.textContent = a.name;
+    const open = document.createElement("a");
+    open.className = "open";
+    open.href = a.path;           // same-tab: carries the sessionStorage token
+    open.textContent = "Open";
+    row.appendChild(name);
+    row.appendChild(open);
+    el.appendChild(row);
+  }
 }
 
 function drawExpert(s) {
@@ -949,4 +989,161 @@ $("fetch-btn").addEventListener("click", async () => {
     appStatus("fetched ✓");
   } catch (_) { appStatus("fetch failed", false); }
 });
+"""
+
+
+# ---------------------------------------------------------------------------
+# Chat sub-page (/chat) — hosted by the console, reuses the console session.
+#
+# Same strict CSP as the console (default-src 'self', no inline). The page picks
+# up the bearer token the console stored in sessionStorage; opened cold it asks
+# for the console password and logs in itself. Sends/receives go through the
+# in-process chat app via /api/chat/*.
+# ---------------------------------------------------------------------------
+
+CHAT_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMesh Chat</title>
+<link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+<div id="login" class="center">
+  <form id="login-form" class="card">
+    <h1>NMesh<span>chat</span></h1>
+    <p class="muted">Sign in with the console password</p>
+    <input id="password" type="password" placeholder="Console password" autocomplete="current-password" autofocus>
+    <button type="submit">Enter</button>
+    <div id="err" class="err"></div>
+  </form>
+</div>
+<div id="app" class="hidden">
+  <header>
+    <b>NMesh<span>chat</span></b>
+    <span id="peer" class="muted mono"></span>
+    <a href="/" class="back">← console</a>
+  </header>
+  <div id="log"></div>
+  <form id="send-form">
+    <input id="peer-in" class="mono" placeholder="peer id (hex)">
+    <input id="msg" placeholder="type a message…" autocomplete="off">
+    <button>Send</button>
+  </form>
+</div>
+<script src="/chat.js"></script>
+</body>
+</html>
+"""
+
+CHAT_CSS = """
+:root{--bg:#0e1116;--card:#171b22;--line:#242a33;--fg:#e6e9ef;--muted:#8b93a1;--accent:#4da3ff;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.hidden{display:none!important}.mono{font-family:ui-monospace,Menlo,monospace}.muted{color:var(--muted)}
+.err{color:var(--bad);min-height:1.2em;margin-top:8px}
+.center{display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;width:320px;text-align:center}
+h1{margin:0 0 12px}h1 span,header span{color:var(--accent);margin-left:5px}
+input,button{font:inherit}input{width:100%;background:#0e1116;border:1px solid var(--line);
+color:var(--fg);border-radius:8px;padding:9px 11px;margin-top:8px}
+button{background:var(--accent);color:#04122a;border:0;border-radius:8px;padding:9px 14px;font-weight:600;cursor:pointer}
+#app{max-width:760px;margin:0 auto;height:100vh;display:flex;flex-direction:column;padding:12px}
+header{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line)}
+header .back{margin-left:auto;color:var(--accent);text-decoration:none;font-size:13px}
+#log{flex:1;overflow-y:auto;padding:12px 4px;display:flex;flex-direction:column;gap:8px}
+.bubble{max-width:75%;padding:8px 12px;border-radius:12px;background:var(--card);border:1px solid var(--line)}
+.me{align-self:flex-end;background:#123;border-color:#245}
+.who{font-size:11px;color:var(--muted);margin-bottom:2px}
+#send-form{display:flex;gap:8px;padding-top:8px}#send-form #msg{flex:1;margin:0}
+#peer-in{width:auto;flex:0 0 200px;margin:0}
+"""
+
+CHAT_JS = r"""
+let TOKEN = null, cursor = 0, timer = null;
+const $ = (id) => document.getElementById(id);
+
+async function api(path, method = "GET", body) {
+  const h = { Authorization: "Bearer " + TOKEN };
+  if (body) h["Content-Type"] = "application/json";
+  const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 401) { logout(); throw new Error("unauth"); }
+  return r;
+}
+
+function logout() {
+  TOKEN = null;
+  try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
+  if (timer) { clearInterval(timer); timer = null; }
+  $("app").classList.add("hidden");
+  $("login").classList.remove("hidden");
+}
+
+async function enter(token) {
+  const r = await fetch("/api/chat/messages?since=0", { headers: { Authorization: "Bearer " + token } });
+  if (!r.ok) return false;
+  TOKEN = token;
+  try { sessionStorage.setItem("nmesh_token", TOKEN); } catch (_) {}
+  $("login").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  const s = await r.json();
+  if (s.peer) { $("peer").textContent = "peer " + s.peer.slice(0, 12) + "…"; $("peer-in").value = s.peer; }
+  render(s.messages); cursor = s.cursor || 0;
+  if (timer) clearInterval(timer);
+  timer = setInterval(poll, 1000);
+  return true;
+}
+
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("err").textContent = "";
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: $("password").value }),
+    });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); $("err").textContent = j.error || "login failed"; return; }
+    $("password").value = "";
+    await enter((await res.json()).token);
+  } catch (_) { $("err").textContent = "network error"; }
+});
+
+async function poll() {
+  try {
+    const s = await (await api("/api/chat/messages?since=" + cursor)).json();
+    render(s.messages); if (s.cursor) cursor = s.cursor;
+  } catch (_) {}
+}
+
+function render(msgs) {
+  const log = $("log");
+  for (const m of msgs || []) {
+    const d = document.createElement("div");
+    d.className = "bubble" + (m.src === "me" ? " me" : "");
+    const who = m.src === "me" ? "you" : (m.src || "").slice(0, 12) + "…";
+    const txt = m.type === "file" ? ("📎 " + m.name + " (" + m.size + " B)") : m.text;
+    d.innerHTML = '<div class="who"></div><div class="body"></div>';
+    d.querySelector(".who").textContent = who;
+    d.querySelector(".body").textContent = txt;
+    log.appendChild(d);
+  }
+  if (msgs && msgs.length) log.scrollTop = log.scrollHeight;
+}
+
+$("send-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("msg").value; if (!text) return;
+  const peer = $("peer-in").value.trim() || undefined;
+  try {
+    const r = await api("/api/chat/send", "POST", { text, peer });
+    if (r.ok) { $("msg").value = ""; } else { const j = await r.json().catch(() => ({})); alert("send failed: " + (j.error || "")); }
+  } catch (_) {}
+});
+
+// Reuse the console session if we arrived from it in the same tab.
+(function () {
+  let tok = null;
+  try { tok = sessionStorage.getItem("nmesh_token"); } catch (_) {}
+  if (tok) enter(tok).then((ok) => { if (!ok) $("login").classList.remove("hidden"); });
+})();
 """

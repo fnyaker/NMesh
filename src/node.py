@@ -29,6 +29,7 @@ from .app_package import (
     content_key as _content_key, AppPackageError,
     pack_root as _app_pack_root, parse_root as _app_parse_root,
     reassemble_bytes as _app_reassemble_bytes,
+    build_release as _app_build_release, parse_release as _app_parse_release,
 )
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
@@ -3101,6 +3102,50 @@ class MeshNode:
         for value in manifest_chunks.values():
             await self.dht_put(value)
         return await self.dht_put(root_bytes)
+
+    async def publish_signed_app(self, name: str, version: str,
+                                 files: dict[str, bytes]) -> dict:
+        """Publish a signed, deployable app. Returns ``{"release_id", "app_id"}``.
+
+        The content (chunks + manifest + root) is published as with
+        :meth:`publish_app`; on top, a release descriptor signed by this node's
+        identity binds the content root to us as author, and is published too.
+        Installers fetch it by ``release_id`` and verify the signature."""
+        _, manifest, chunks = _app_build(name, version, files)
+        from .dht import MAX_VALUE
+        for value in chunks.values():
+            await self.dht_put(value)
+        root_bytes, manifest_chunks = _app_pack_root(manifest)
+        if len(root_bytes) > MAX_VALUE:
+            raise AppPackageError("app has too many files even after chunking")
+        for value in manifest_chunks.values():
+            await self.dht_put(value)
+        root_key = await self.dht_put(root_bytes)
+        release_bytes, app_id = _app_build_release(
+            root_key, hashlib.sha256(root_bytes).hexdigest(), name, version,
+            self._identity.dsa_public_key, self._identity.sign)
+        if len(release_bytes) > MAX_VALUE:
+            raise AppPackageError("release descriptor too large")
+        release_id = await self.dht_put(release_bytes)
+        return {"release_id": release_id.hex(), "app_id": app_id.hex()}
+
+    async def fetch_signed_app(self, release_id: bytes):
+        """Fetch a signed app by its release id, verifying the author signature
+        before any content. Returns ``(meta, files)`` where ``meta`` has
+        ``app_id`` / ``name`` / ``version`` / ``author`` (hex), or None if the
+        release is absent. Raises ``AppPackageError`` on any verification
+        failure — a bad signature yields nothing (reject by default)."""
+        release_bytes = await self.dht_get(release_id)
+        if release_bytes is None:
+            return None
+        doc = _app_parse_release(release_bytes, self._identity.verify)
+        result = await self.fetch_app(doc["root_key"])  # content-verified
+        if result is None:
+            return None
+        manifest, files = result
+        meta = {"app_id": doc["app_id"].hex(), "name": doc["name"],
+                "version": doc["version"], "author": doc["author"].hex()}
+        return meta, files
 
     async def fetch_app(self, app_id: bytes) -> tuple[dict, dict[str, bytes]] | None:
         """Fetch and verify an app by id. Returns (manifest, files) or None."""

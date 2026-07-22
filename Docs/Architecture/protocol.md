@@ -66,6 +66,18 @@ Regroupements (constantes) :
 - `INVITE_SEEK` et `RELAY_CARRY` sont traités **avant** les portes (pré-auth,
   strictement bornés/token-gated).
 
+### Sections d'application (dans la payload DATA)
+
+Le **management** (tout le reste du tableau : PING, routage, DHT, handshakes…)
+vit dans des **types de paquets distincts** — jamais dans DATA. Les **données
+applicatives** vivent, elles, uniquement dans `DATA`, et sont sous-divisées en
+**sections par app** : la payload DATA déchiffrée E2E est `app_id(8) ‖ payload`
+(voir `src/app_channel.py`). Le nœud traite la payload comme opaque ; c'est le
+**connecteur** qui pose/retire le cadre et démultiplexe par `app_id`, de sorte
+qu'une app ne voit que sa section. Une payload trop courte pour porter un
+`app_id` est jetée. `app_id` réservé pour les apps intégrées (`builtin_id`),
+lié à la clé auteur pour les apps déployées (`deployed_id`, package signé).
+
 ## Portes de validation (`_handle_packet`) — le cœur sécurité
 
 Ordre exact appliqué à chaque paquet reçu :
