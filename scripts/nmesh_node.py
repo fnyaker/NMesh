@@ -26,6 +26,7 @@ from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
 from src.apps.chat import ChatApp
+from src.apps.chat_state import ChatState
 from src.apps.chat_web import ChatBridge
 
 
@@ -113,7 +114,9 @@ async def main() -> None:
         chat_client = ConnectorClient(connector.host, connector.port,
                                       connector.token, CHAT_APP_ID)
         await chat_client.connect()
-        chat_app = ChatApp(chat_client)
+        chat_state = ChatState(
+            os.path.join(args.data, "chat_state.json") if args.data else None)
+        chat_app = ChatApp(chat_client, node_id=node.id, state=chat_state)
         await chat_app.start()
         chat_bridge = ChatBridge(chat_app)
 

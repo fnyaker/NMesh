@@ -51,8 +51,12 @@ Options :
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
-| GET     | `/api/chat/messages` | `?since=N` → feed du chat intégré (si activé) |
-| POST    | `/api/chat/send`   | `{text, peer?}` — envoie via l'app de chat        |
+| GET     | `/api/chat/messages` | `?since=N` → feed + état social (me, pseudo, contacts, groups) |
+| POST    | `/api/chat/send`   | `{text, peer}` ou `{text, group}` — 1:1 ou groupe |
+| POST    | `/api/chat/pseudo` | `{pseudo}` — définit + annonce mon pseudo          |
+| POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                    |
+| POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
+| POST    | `/api/chat/search` | `{pseudo}` → hits locaux (+ requête 1-saut aux contacts) |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
