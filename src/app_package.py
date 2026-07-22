@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 from .app_channel import APP_ID_LEN, deployed_id
 
@@ -183,7 +184,11 @@ def reassemble_bytes(size: int, sha256_hex: str, chunk_key_hexes: list[str],
 # ---------------------------------------------------------------------------
 
 _RELEASE_DOMAIN = b"nmesh-app-release-v1"
-_RELEASE_KEYS = ("v", "name", "version", "root_key", "root_sha256", "author", "app_id")
+# ``ts`` (author-signed publish time) gives a total order per app: a catalog
+# keeps the highest ts seen for an app id and ignores anything older, so a relay
+# cannot roll a node back to a stale signed release by replaying it.
+_RELEASE_KEYS = ("v", "name", "version", "root_key", "root_sha256", "author",
+                 "app_id", "ts")
 
 
 def _release_signing_input(body: dict) -> bytes:
@@ -192,12 +197,13 @@ def _release_signing_input(body: dict) -> bytes:
 
 
 def build_release(root_key: bytes, root_sha256: str, name: str, version: str,
-                  author_pub: bytes, sign) -> tuple[bytes, bytes]:
+                  author_pub: bytes, sign, ts: int | None = None) -> tuple[bytes, bytes]:
     """Build a signed release descriptor binding a content root to its author.
 
     ``sign(message) -> signature`` signs with the author's ML-DSA identity.
-    Returns ``(release_bytes, app_id)``. The descriptor is a small JSON blob,
-    itself content-addressable (publish it on the DHT like any other value)."""
+    ``ts`` (defaults to now) is the signed publish time that orders versions of
+    the same app. Returns ``(release_bytes, app_id)``. The descriptor is a small
+    JSON blob, itself content-addressable (publish it on the DHT like any value)."""
     app_id = deployed_id(author_pub, name)
     body = {
         "v": 1,
@@ -207,6 +213,7 @@ def build_release(root_key: bytes, root_sha256: str, name: str, version: str,
         "root_sha256": root_sha256,
         "author": author_pub.hex(),
         "app_id": app_id.hex(),
+        "ts": int(ts if ts is not None else time.time()),
     }
     body["sig"] = sign(_release_signing_input(body)).hex()
     return json.dumps(body, sort_keys=True).encode("utf-8"), app_id
@@ -230,6 +237,8 @@ def parse_release(data: bytes, verify) -> dict:
             raise AppPackageError(f"release field {k} invalid")
     if len(doc["name"]) > 512 or len(doc["version"]) > 64:
         raise AppPackageError("release name/version too long")
+    if not isinstance(doc.get("ts"), int) or isinstance(doc["ts"], bool) or not 0 <= doc["ts"] <= 1 << 62:
+        raise AppPackageError("release ts invalid")
     try:
         root_key = bytes.fromhex(doc["root_key"])
         author = bytes.fromhex(doc["author"])

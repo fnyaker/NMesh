@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import secrets
 import struct
@@ -43,15 +44,33 @@ _LEN = struct.Struct("!I")
 _MAX_FRAME = 70_000        # 1 type byte + 20-byte id + up to ~60 KiB payload
 _MAX_CLIENTS = 64
 
+_KLEN = struct.Struct("!H")   # key-length prefix for STORE_PUT
+_MAX_LIST = 60_000            # cap on a serialised key list reply
+
 # client → server
 _AUTH = 0x01
 _SEND = 0x02
 _WHOAMI = 0x03
+_STORE_GET = 0x04     # body = key(utf-8)
+_STORE_PUT = 0x05     # body = keylen(2) ‖ key(utf-8) ‖ value
+_STORE_DEL = 0x06     # body = key(utf-8)
+_STORE_LIST = 0x07    # body = empty
+_APP_DHT_PUT = 0x08   # body = flag(1) ‖ keylen(2) ‖ enc_key ‖ content
+_APP_DHT_GET = 0x09   # body = keylen(2) ‖ dec_key ‖ content_key(20)
+_PSEUDO_PUB = 0x0A    # body = pseudo(utf-8)    — publish my pseudo→node id
+_PSEUDO_LOOKUP = 0x0B # body = pseudo(utf-8)    — find node ids by pseudo
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
 _RECV = 0x83
 _WHOAMI_RESP = 0x84
+_STORE_VALUE = 0x85   # body = present(1) ‖ value   (GET reply)
+_STORE_OK = 0x86      # body = ok(1)                (PUT / DEL reply)
+_STORE_KEYS = 0x87    # body = JSON array of keys   (LIST reply)
+_APP_DHT_KEY = 0x88   # body = content_key(20) or empty on error  (PUT reply)
+_APP_DHT_VALUE = 0x89 # body = present(1) ‖ content                (GET reply)
+_PSEUDO_KEY = 0x8A    # body = dir_key(20) or empty                (PUB reply)
+_PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo}]                (LOOKUP reply)
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -176,6 +195,16 @@ class DataConnector:
                         pass  # bad target / self-send — ignore, keep serving
                 elif ftype == _WHOAMI:
                     await _write_frame(writer, _WHOAMI_RESP, self._node.id.raw)
+                elif ftype in (_STORE_GET, _STORE_PUT, _STORE_DEL, _STORE_LIST):
+                    # Local secure store. The drawer is this client's app section
+                    # (app_id bound at AUTH): an app can never touch another's.
+                    await self._handle_store(writer, app_id, ftype, body)
+                elif ftype in (_APP_DHT_PUT, _APP_DHT_GET):
+                    # Per-app DHT: same session-bound app_id names the namespace.
+                    await self._handle_app_dht(writer, app_id, ftype, body)
+                elif ftype in (_PSEUDO_PUB, _PSEUDO_LOOKUP):
+                    # Pseudo directory, namespaced by this client's app_id.
+                    await self._handle_pseudo(writer, app_id, ftype, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError, OSError):
             pass
@@ -187,6 +216,108 @@ class DataConnector:
                 writer.close()
             except Exception:
                 pass
+
+    async def _handle_store(self, writer: asyncio.StreamWriter, app_id: bytes,
+                            ftype: int, body: bytes) -> None:
+        """Serve one local-store request against this client's drawer. Every
+        malformed frame is dropped silently (reject by default); the node's
+        AppStorage enforces all bounds and returns False on any breach."""
+        if ftype == _STORE_GET:
+            try:
+                key = body.decode("utf-8")
+            except UnicodeDecodeError:
+                return
+            value = self._node.app_store_get(app_id, key)
+            present = b"\x01" if value is not None else b"\x00"
+            await _write_frame(writer, _STORE_VALUE, present + (value or b""))
+        elif ftype == _STORE_PUT:
+            if len(body) < _KLEN.size:
+                return
+            (klen,) = _KLEN.unpack(body[:_KLEN.size])
+            off = _KLEN.size
+            if len(body) < off + klen:
+                return
+            try:
+                key = body[off:off + klen].decode("utf-8")
+            except UnicodeDecodeError:
+                return
+            ok = self._node.app_store_put(app_id, key, body[off + klen:])
+            await _write_frame(writer, _STORE_OK, b"\x01" if ok else b"\x00")
+        elif ftype == _STORE_DEL:
+            try:
+                key = body.decode("utf-8")
+            except UnicodeDecodeError:
+                return
+            ok = self._node.app_store_delete(app_id, key)
+            await _write_frame(writer, _STORE_OK, b"\x01" if ok else b"\x00")
+        elif ftype == _STORE_LIST:
+            keys = self._node.app_store_list(app_id)
+            blob = json.dumps(keys).encode("utf-8")
+            # The reply must fit one frame; hand back as many keys as fit. Apps
+            # with huge key spaces should keep their own index in a value.
+            while len(blob) > _MAX_LIST and keys:
+                keys = keys[:len(keys) // 2]
+                blob = json.dumps(keys).encode("utf-8")
+            await _write_frame(writer, _STORE_KEYS, blob)
+
+    async def _handle_app_dht(self, writer: asyncio.StreamWriter, app_id: bytes,
+                              ftype: int, body: bytes) -> None:
+        """Serve one per-app DHT request in this client's namespace. The app id
+        comes from the session, never the frame. Any malformed frame or DHT
+        error yields an empty/absent reply (reject by default), never a crash."""
+        if ftype == _APP_DHT_PUT:
+            if len(body) < 1 + _KLEN.size:
+                return
+            flag = body[0]
+            (klen,) = _KLEN.unpack(body[1:1 + _KLEN.size])
+            off = 1 + _KLEN.size
+            if len(body) < off + klen:
+                return
+            enc_key = body[off:off + klen] if flag else None
+            content = body[off + klen:]
+            try:
+                key = await self._node.app_dht_put(app_id, content, enc_key)
+            except Exception:
+                key = b""   # oversized / bad key — signal failure with empty key
+            await _write_frame(writer, _APP_DHT_KEY, key)
+        elif ftype == _APP_DHT_GET:
+            if len(body) < _KLEN.size:
+                return
+            (klen,) = _KLEN.unpack(body[:_KLEN.size])
+            off = _KLEN.size
+            if len(body) < off + klen + 20:
+                return
+            dec_key = body[off:off + klen] if klen else None
+            content_key = body[off + klen:off + klen + 20]
+            try:
+                content = await self._node.app_dht_get(app_id, content_key, dec_key)
+            except Exception:
+                content = None
+            present = b"\x01" if content is not None else b"\x00"
+            await _write_frame(writer, _APP_DHT_VALUE, present + (content or b""))
+
+    async def _handle_pseudo(self, writer: asyncio.StreamWriter, app_id: bytes,
+                             ftype: int, body: bytes) -> None:
+        """Publish/lookup a pseudo in this app's directory namespace. Both are
+        network round-trips; any error yields an empty reply (reject by default)."""
+        try:
+            pseudo = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        if ftype == _PSEUDO_PUB:
+            try:
+                key_hex = await self._node.publish_pseudo(app_id, pseudo)
+                key = bytes.fromhex(key_hex)
+            except Exception:
+                key = b""
+            await _write_frame(writer, _PSEUDO_KEY, key)
+        elif ftype == _PSEUDO_LOOKUP:
+            try:
+                results = await self._node.lookup_pseudo(app_id, pseudo)
+            except Exception:
+                results = []
+            await _write_frame(writer, _PSEUDO_RESULTS,
+                               json.dumps(results).encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +374,87 @@ class ConnectorClient:
 
     async def send(self, target: NodeID, payload: bytes) -> None:
         await _write_frame(self._writer, _SEND, target.raw + payload)
+
+    # -- local secure store (this app's drawer) ---------------------------
+    #
+    # The drawer is keyed by the app id this client authenticated with; the node
+    # supplies it, so these calls never name another app's section.
+
+    async def _roundtrip(self, req_type: int, req_body: bytes,
+                         resp_type: int) -> bytes:
+        await _write_frame(self._writer, req_type, req_body)
+        while True:
+            ftype, body = await _read_frame(self._reader)
+            if ftype == resp_type:
+                return body
+            if ftype == _RECV and len(body) >= 20:
+                self._inbox.append((NodeID(body[:20]), body[20:]))  # buffer data
+
+    async def store_put(self, key: str, value: bytes) -> bool:
+        kb = key.encode("utf-8")
+        body = _KLEN.pack(len(kb)) + kb + value
+        resp = await self._roundtrip(_STORE_PUT, body, _STORE_OK)
+        return bool(resp) and resp[0] == 1
+
+    async def store_get(self, key: str) -> bytes | None:
+        resp = await self._roundtrip(_STORE_GET, key.encode("utf-8"), _STORE_VALUE)
+        if not resp or resp[0] != 1:
+            return None
+        return resp[1:]
+
+    async def store_delete(self, key: str) -> bool:
+        resp = await self._roundtrip(_STORE_DEL, key.encode("utf-8"), _STORE_OK)
+        return bool(resp) and resp[0] == 1
+
+    async def store_list(self) -> list[str]:
+        resp = await self._roundtrip(_STORE_LIST, b"", _STORE_KEYS)
+        try:
+            keys = json.loads(resp.decode("utf-8"))
+        except Exception:
+            return []
+        return [k for k in keys if isinstance(k, str)] if isinstance(keys, list) else []
+
+    # -- per-app DHT (this app's shared namespace) ------------------------
+    #
+    # The app supplies content and, for private entries, the encryption key; the
+    # node namespaces by this client's app id and does the DHT-level crypto.
+
+    async def dht_put(self, content: bytes, enc_key: bytes | None = None) -> bytes | None:
+        """Publish an entry on the app's DHT. ``enc_key`` present → private.
+        Returns the 20-byte content key, or None if the node refused it."""
+        flag = 1 if enc_key is not None else 0
+        key = enc_key or b""
+        body = bytes([flag]) + _KLEN.pack(len(key)) + key + content
+        resp = await self._roundtrip(_APP_DHT_PUT, body, _APP_DHT_KEY)
+        return resp if len(resp) == 20 else None
+
+    async def dht_get(self, content_key: bytes, dec_key: bytes | None = None) -> bytes | None:
+        """Fetch an app DHT entry by its content key. ``dec_key`` is required for
+        private entries. Returns the content, or None if absent/undecryptable."""
+        key = dec_key or b""
+        body = _KLEN.pack(len(key)) + key + content_key
+        resp = await self._roundtrip(_APP_DHT_GET, body, _APP_DHT_VALUE)
+        if not resp or resp[0] != 1:
+            return None
+        return resp[1:]
+
+    # -- pseudo directory (this app's namespace) --------------------------
+
+    async def publish_pseudo(self, pseudo: str) -> bytes | None:
+        """Publish a signed claim that ``pseudo`` maps to our node. Returns the
+        directory key, or None if the node refused it."""
+        resp = await self._roundtrip(_PSEUDO_PUB, pseudo.encode("utf-8"), _PSEUDO_KEY)
+        return resp if resp else None
+
+    async def lookup_pseudo(self, pseudo: str) -> list[dict]:
+        """Find every node claiming ``pseudo`` network-wide. Returns
+        ``[{"id": hex, "pseudo": str}, …]`` (possibly several)."""
+        resp = await self._roundtrip(_PSEUDO_LOOKUP, pseudo.encode("utf-8"), _PSEUDO_RESULTS)
+        try:
+            out = json.loads(resp.decode("utf-8"))
+        except Exception:
+            return []
+        return [x for x in out if isinstance(x, dict)] if isinstance(out, list) else []
 
     async def recv(self) -> tuple[NodeID, bytes]:
         if self._inbox:

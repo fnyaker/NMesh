@@ -214,6 +214,35 @@ class ChatApp:
         self.state.set_pseudo(pseudo)
         if announce:
             await self.announce_profile()
+            await self._publish_pseudo_dir()
+
+    async def _publish_pseudo_dir(self) -> None:
+        """Publish our pseudo→node-id claim to the network directory, so people
+        can find us by pseudo without being a contact first. Best-effort: a
+        client without the capability (or a transient failure) is ignored."""
+        fn = getattr(self._client, "publish_pseudo", None)
+        if fn is None or not self.state.pseudo:
+            return
+        try:
+            await fn(self.state.pseudo)
+        except Exception:
+            pass
+
+    async def lookup_pseudo_network(self, pseudo: str) -> list[dict]:
+        """Find people by pseudo across the whole network via the DHT directory.
+        Learns the results into our directory and returns ``[{id, pseudo}]``."""
+        fn = getattr(self._client, "lookup_pseudo", None)
+        if fn is None:
+            return []
+        try:
+            results = await fn(pseudo)
+        except Exception:
+            return []
+        for r in results:
+            nid, ps = r.get("id"), r.get("pseudo")
+            if isinstance(nid, str) and isinstance(ps, str):
+                self.state.learn_pseudo(nid, ps)
+        return results
 
     async def announce_profile(self) -> None:
         """Push our pseudo to every contact (skips ourselves)."""

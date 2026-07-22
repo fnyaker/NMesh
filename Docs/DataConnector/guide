@@ -60,11 +60,43 @@ Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | co
 | →    | `WHOAMI` (0x03)     | —                           | demande notre id de nœud |
 | ←    | `WHOAMI` (0x84)     | `id_noeud(20)`              | réponse |
 | ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant **de cette section** |
+| →    | `STORE_GET` (0x04)  | `clef(utf-8)`               | lit le tiroir local de cette section |
+| →    | `STORE_PUT` (0x05)  | `keylen(2) + clef + valeur` | écrit dans le tiroir |
+| →    | `STORE_DEL` (0x06)  | `clef(utf-8)`               | supprime une clé |
+| →    | `STORE_LIST` (0x07) | —                           | liste les clés du tiroir |
+| ←    | `STORE_VALUE` (0x85)| `present(1) + valeur`       | réponse `STORE_GET` |
+| ←    | `STORE_OK` (0x86)   | `ok(1)`                     | réponse `STORE_PUT` / `STORE_DEL` |
+| ←    | `STORE_KEYS` (0x87) | tableau JSON de clés        | réponse `STORE_LIST` |
+| →    | `APP_DHT_PUT` (0x08)| `flag(1) + keylen(2) + enc_key + contenu` | publie sur la DHT de l'app |
+| →    | `APP_DHT_GET` (0x09)| `keylen(2) + dec_key + clef_contenu(20)`  | récupère une entrée |
+| ←    | `APP_DHT_KEY` (0x88)| `clef_contenu(20)` ou vide  | réponse `APP_DHT_PUT` (vide = refus) |
+| ←    | `APP_DHT_VALUE`(0x89)| `present(1) + contenu`     | réponse `APP_DHT_GET` |
+| →    | `PSEUDO_PUB` (0x0A)  | `pseudo(utf-8)`             | publie mon pseudo→node id (annuaire) |
+| →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | cherche des node ids par pseudo |
+| ←    | `PSEUDO_KEY` (0x8A)  | `clé_annuaire(20)` ou vide  | réponse `PSEUDO_PUB` |
+| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | réponse `PSEUDO_LOOKUP` |
 
 La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
 `SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
 `ConnectorClient(host, port, token, app_id)` fixe la section ; `from_env` lit
 `NMESH_APP_ID` (hex) ou retombe sur la section générique.
+
+Les trames `STORE_*` pilotent le **store local par app** (« tiroir ») : un
+magasin clé→valeur chiffré, isolé par section. L'`app_id` **n'apparaît pas** dans
+la trame — le nœud le déduit de la session `AUTH`, donc une app ne touche jamais
+le tiroir d'une autre. Détails, bornes et robustesse : `Docs/AppStorage/guide`.
+Côté client : `store_put` / `store_get` / `store_delete` / `store_list`.
+
+Les trames `APP_DHT_*` pilotent la **DHT par-app** (publique ou privée) : l'app
+donne le contenu et, pour le privé, la clé de chiffrement ; le nœud namespace par
+l'`app_id` de la session et fait la crypto DHT. Là encore l'`app_id` ne figure
+pas dans la trame. Côté client : `dht_put(contenu, enc_key?)` /
+`dht_get(clef_contenu, dec_key?)`. Détails : `Docs/Architecture/routing.md`.
+
+Les trames `PSEUDO_*` pilotent l'**annuaire de pseudos** (find-by-pseudo réseau) :
+`publish_pseudo(pseudo)` publie une réclamation signée pseudo→node_id (liée à la
+clé de la session), `lookup_pseudo(pseudo)` renvoie tous les node ids réclamant ce
+pseudo. Namespacé par l'`app_id` de la session. Détails : `Docs/Architecture/routing.md`.
 
 ## Sécurité
 

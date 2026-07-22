@@ -222,3 +222,156 @@ class TestSections:
             writer.close()
         finally:
             await conn.stop(); await node.stop()
+
+
+class TestLocalStore:
+    """The per-app drawer, driven over the connector. The app never names its
+    drawer — the node uses the app id bound at AUTH."""
+
+    async def test_put_get_delete_list(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            assert await client.store_get("k") is None
+            assert await client.store_put("k", b"value") is True
+            assert await client.store_get("k") == b"value"
+            assert await client.store_put("k2", b"v2") is True
+            assert await client.store_list() == ["k", "k2"]
+            assert await client.store_delete("k") is True
+            assert await client.store_get("k") is None
+            assert await client.store_list() == ["k2"]
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_drawers_isolated_by_app_section(self):
+        node, _, conn = await _make()
+        alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
+        beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
+        try:
+            await alpha.connect(); await beta.connect()
+            await alpha.store_put("shared-key", b"alpha-data")
+            await beta.store_put("shared-key", b"beta-data")
+            # Same key string, different sections → different values, no bleed.
+            assert await alpha.store_get("shared-key") == b"alpha-data"
+            assert await beta.store_get("shared-key") == b"beta-data"
+        finally:
+            await alpha.close(); await beta.close()
+            await conn.stop(); await node.stop()
+
+    async def test_store_survives_interleaved_recv(self):
+        # A store round-trip must tolerate inbound DATA arriving mid-request: the
+        # client buffers RECV frames and still returns the store reply.
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            src = NodeID(os.urandom(20))
+            node._data_queue.put_nowait((src, frame(GENERIC_APP_ID, b"inbound")))
+            assert await client.store_put("k", b"v") is True
+            # The buffered inbound message is still delivered afterwards.
+            got_src, got = await asyncio.wait_for(client.recv(), timeout=2.0)
+            assert got_src == src and got == b"inbound"
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_large_value_within_frame_roundtrips(self):
+        # Values up to the connector's frame budget round-trip intact. (Values
+        # beyond one frame are refused at the transport layer — see
+        # test_oversized_frame_closes — never reaching the store.)
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            big = os.urandom(48 * 1024)
+            assert await client.store_put("blob", big) is True
+            assert await client.store_get("blob") == big
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+
+class TestAppDHT:
+    """The per-app DHT, driven over the connector. The app supplies content and
+    (for private) a key; the node namespaces by the session's app id."""
+
+    async def test_public_put_get(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            key = await client.dht_put(b"public-entry")
+            assert key is not None and len(key) == 20
+            assert await client.dht_get(key) == b"public-entry"
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_private_put_get(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            enc = b"k" * 32
+            key = await client.dht_put(b"private-entry", enc)
+            assert key is not None
+            assert await client.dht_get(key, enc) == b"private-entry"
+            assert await client.dht_get(key) is None            # no key
+            assert await client.dht_get(key, b"z" * 32) is None  # wrong key
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_namespace_isolation_across_sections(self):
+        node, _, conn = await _make()
+        alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
+        beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
+        try:
+            await alpha.connect(); await beta.connect()
+            key = await alpha.dht_put(b"alpha-only")
+            # Beta holds the exact content key but reads nothing (other namespace).
+            assert await beta.dht_get(key) is None
+            assert await alpha.dht_get(key) == b"alpha-only"
+        finally:
+            await alpha.close(); await beta.close()
+            await conn.stop(); await node.stop()
+
+    async def test_oversized_content_signals_failure(self):
+        from src.app_dht import MAX_CONTENT
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            # Within the connector frame budget but past the DHT value ceiling:
+            # the node refuses it and the client sees None (empty key reply).
+            assert await client.dht_put(b"x" * (MAX_CONTENT + 1)) is None
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+
+class TestPseudoDir:
+    """Publish/lookup a pseudo over the connector; namespaced by the session app."""
+
+    async def test_publish_and_lookup(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            key = await client.publish_pseudo("Alice")
+            assert key is not None and len(key) == 20
+            res = await client.lookup_pseudo("alice")   # case-insensitive
+            assert res == [{"id": node.id.raw.hex(), "pseudo": "Alice"}]
+            assert await client.lookup_pseudo("nobody") == []
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_namespaced_by_section(self):
+        node, _, conn = await _make()
+        alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
+        beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
+        try:
+            await alpha.connect(); await beta.connect()
+            await alpha.publish_pseudo("alice")
+            # beta's app has its own pseudo namespace → no hit.
+            assert await beta.lookup_pseudo("alice") == []
+            assert await alpha.lookup_pseudo("alice") != []
+        finally:
+            await alpha.close(); await beta.close()
+            await conn.stop(); await node.stop()

@@ -31,6 +31,13 @@ from .app_package import (
     reassemble_bytes as _app_reassemble_bytes,
     build_release as _app_build_release, parse_release as _app_parse_release,
 )
+from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
+from .app_catalog import AppCatalog, InstalledApps
+from .pseudo_dir import (PseudoStore, dir_key as _dir_key,
+                         build_claim as _dir_build_claim,
+                         parse_claim as _dir_parse_claim,
+                         encode_claims as _dir_encode, decode_claims as _dir_decode,
+                         PseudoDirError)
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 _HEADER_BYTES = 79  # fixed packet header size, for byte accounting
@@ -69,6 +76,10 @@ INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, toke
 RELAY_CARRY       = 0x15   # carries a handshake packet between two nodes via a relay
 REACH_PROBE       = 0x16   # ask a peer to dial us back and confirm we're reachable
 REACH_PROBE_ACK   = 0x17   # reply: did the dial-back succeed?
+CATALOG_ANNOUNCE  = 0x18   # gossip a signed app-store release descriptor
+DIR_STORE         = 0x19   # store a signed pseudo-directory claim
+DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
+DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -100,7 +111,13 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 
 _DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
                     STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
-                    REACH_PROBE, REACH_PROBE_ACK}
+                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
+                    DIR_STORE, DIR_FIND, DIR_FOUND}
+_CATALOG_RATE_WINDOW = 10.0     # seconds
+_CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
+_DIR_RATE_WINDOW     = 10.0     # seconds
+_DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
+_DIR_K               = 6        # replicate/query the pseudo directory across K
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
@@ -793,7 +810,9 @@ class MeshNode:
                  transport_manager: TransportManager,
                  identity_path: str | None = None,
                  cert_store_path: str | None = None,
-                 session_store_path: str | None = None) -> None:
+                 session_store_path: str | None = None,
+                 app_storage_path: str | None = None,
+                 app_store_dir: str | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -834,6 +853,22 @@ class MeshNode:
         self._pending_finds: dict[bytes, asyncio.Future] = {}
         self._dht_store = ContentStore()
         self._pending_values: dict[bytes, asyncio.Future] = {}
+        # Per-app local secure store ("drawers"). Encryption keys derive from the
+        # identity; persistence is opt-in (RAM-only without a path).
+        from .app_storage import AppStorage
+        self._app_storage = AppStorage(app_storage_path, self._identity)
+        # App store: the network catalog (gossiped, in-memory) and the local
+        # installed set (persisted). Rate-limit catalog gossip per ingress link.
+        self._catalog = AppCatalog()
+        installed_path = (os.path.join(app_store_dir, "installed.json")
+                          if app_store_dir else None)
+        apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
+        self._installed = InstalledApps(installed_path, apps_dir)
+        self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        # Pseudo directory: find node ids by pseudo, network-wide.
+        self._pseudo_store = PseudoStore()
+        self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
+        self._dir_rate: OrderedDict[int, tuple] = OrderedDict()      # id(peer)->(n,win)
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
@@ -2579,6 +2614,10 @@ class MeshNode:
             PUNCH_RELAY:       self._handle_punch_relay,
             REACH_PROBE:       self._handle_reach_probe,
             REACH_PROBE_ACK:   self._handle_reach_probe_ack,
+            CATALOG_ANNOUNCE:  self._handle_catalog_announce,
+            DIR_STORE:         self._handle_dir_store,
+            DIR_FIND:          self._handle_dir_find,
+            DIR_FOUND:         self._handle_dir_found,
         }
         handler = handlers.get(packet.type)
         if handler:
@@ -3083,6 +3122,300 @@ class MeshNode:
                 return value
         return None
 
+    # -- per-app DHT (namespaced overlay on the content-addressed store) ---
+    #
+    # The caller passes the app_id bound to the authenticated session; the app
+    # never declares it. Public entries are stored in the clear, private ones
+    # encrypted by the node under an app-supplied key. See :mod:`src.app_dht`.
+
+    async def app_dht_put(self, app_id: bytes, content: bytes,
+                          enc_key: bytes | None = None) -> bytes:
+        """Publish an app entry on the DHT; returns its content key. ``enc_key``
+        present → private (node-encrypted). Raises ``AppDHTError`` on bad input."""
+        value = _app_dht_frame(app_id, content, enc_key)
+        return await self.dht_put(value)
+
+    async def app_dht_get(self, app_id: bytes, key: bytes,
+                          dec_key: bytes | None = None) -> bytes | None:
+        """Fetch an app entry by content key. Returns its content, or None if
+        absent, from another app's namespace, or private without the right key."""
+        value = await self.dht_get(key)
+        if value is None:
+            return None
+        return _app_dht_read(value, app_id, dec_key)
+
+    # -- app store: shared catalog (gossiped) + installed set -------------
+
+    def _catalog_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit on catalog announces (bounded, pruned) —
+        a peer cannot make us verify signatures without end."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._catalog_rate.items()
+                  if now - ws > _CATALOG_RATE_WINDOW]:
+            del self._catalog_rate[k]
+        while len(self._catalog_rate) > _MAX_PEERS:
+            self._catalog_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._catalog_rate.get(key, (0, now))
+        if now - ws > _CATALOG_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _CATALOG_RATE_MAX:
+            self._catalog_rate[key] = (cnt, ws)
+            return False
+        self._catalog_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_catalog_announce(self, peer: '_Peer', packet: Packet) -> None:
+        from .dht import MAX_VALUE
+        if not self._catalog_allowed(peer):
+            return
+        release_bytes = packet.payload
+        if not release_bytes or len(release_bytes) > MAX_VALUE:
+            return
+        # offer() verifies the signature and rejects stale/duplicate entries;
+        # it returns a truthy outcome only when our view actually changed, which
+        # is exactly when we re-gossip — so the epidemic terminates on its own.
+        outcome = self._catalog.offer(release_bytes, self._identity.verify)
+        if outcome:
+            await self._gossip_catalog(release_bytes, exclude=peer)
+
+    async def _gossip_catalog(self, release_bytes: bytes,
+                              exclude: '_Peer | None' = None) -> None:
+        # Re-stamp src_id to us at each hop so the next node's direct-type gate
+        # (src_id must equal the immediate sender) accepts it.
+        pkt = Packet.create(CATALOG_ANNOUNCE, self._id.raw, _BROADCAST_ID, release_bytes)
+        for p in list(self._peers):
+            if p is exclude or p.authenticated_id is None or p.session is None:
+                continue
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    async def _sync_catalog_to(self, peer: '_Peer') -> None:
+        """Push our whole catalog view to a freshly authenticated peer so a
+        joining node catches up on apps published before it arrived."""
+        for release_bytes in self._catalog.releases():
+            if peer.authenticated_id is None or peer.session is None:
+                return
+            try:
+                await peer.send(Packet.create(CATALOG_ANNOUNCE, self._id.raw,
+                                              _BROADCAST_ID, release_bytes))
+            except Exception:
+                return
+
+    def _schedule_catalog_sync(self, peer: '_Peer') -> None:
+        if not self._catalog.releases():
+            return
+        try:
+            asyncio.create_task(self._sync_catalog_to(peer))
+        except RuntimeError:
+            pass  # no running loop (e.g. teardown) — nothing to sync
+
+    async def publish_store_app(self, name: str, version: str,
+                                files: dict[str, bytes],
+                                ts: int | None = None) -> dict:
+        """Publish a signed app and announce it to the network catalog. Returns
+        ``{"release_id", "app_id"}``. Every node that hears the announce (and
+        re-gossips it) can then discover and install the app. A later ``ts`` (or
+        just publishing again later) supersedes the previous version network-wide."""
+        info = await self.publish_signed_app(name, version, files, ts)
+        release_bytes = await self.dht_get(bytes.fromhex(info["release_id"]))
+        if release_bytes is not None:
+            if self._catalog.offer(release_bytes, self._identity.verify):
+                await self._gossip_catalog(release_bytes)
+        return info
+
+    def catalog_list(self) -> list[dict]:
+        return self._catalog.list()
+
+    def installed_list(self) -> list[dict]:
+        return self._installed.list()
+
+    def store_overview(self) -> dict:
+        """The full store view for a UI, with all decisions made here (Python):
+        each catalog app is annotated with its ``state`` (``install`` /
+        ``update`` / ``installed``) and the ``action`` verb to POST (or None when
+        it is already up to date). The front-end only renders this."""
+        installed = {m["app_id"]: m for m in self._installed.list()}
+        catalog = []
+        for e in self._catalog.list():
+            cur = installed.get(e["app_id"])
+            if cur is None:
+                state, action = "install", "install"
+            elif e["ts"] > cur.get("ts", 0):
+                state, action = "update", "update"
+            else:
+                state, action = "installed", None
+            catalog.append({**e, "state": state, "action": action})
+        return {"catalog": catalog, "installed": self._installed.list()}
+
+    async def install_app(self, app_id_hex: str) -> dict | None:
+        """Fetch and install an app known in the catalog. Content is verified
+        against the signed release's root before anything touches disk. Returns
+        the installed record, or None if unknown/unfetchable/at the cap."""
+        try:
+            app_id = bytes.fromhex(app_id_hex)
+        except (ValueError, TypeError):
+            return None
+        entry = self._catalog.get(app_id)
+        if entry is None:
+            return None
+        result = await self.fetch_app(entry["root_key"])  # content-verified
+        if result is None:
+            return None
+        _, files = result
+        self._installed.write_files(app_id_hex, files)
+        meta = {
+            "app_id": app_id_hex,
+            "name": entry["name"],
+            "version": entry["version"],
+            "author": entry["author"].hex(),
+            "release_id": entry["release_id"].hex(),
+            "ts": entry["ts"],
+            "installed_ts": int(time.time()),
+        }
+        if not self._installed.record(meta):
+            return None
+        return meta
+
+    def uninstall_app(self, app_id_hex: str) -> bool:
+        return self._installed.remove(app_id_hex)
+
+    async def update_app(self, app_id_hex: str) -> dict | None:
+        """Re-install an app if the catalog holds a newer signed release
+        (strictly higher ``ts``). Returns the new record, or None if nothing
+        newer / not installed."""
+        inst = self._installed.get(app_id_hex)
+        if inst is None:
+            return None
+        try:
+            entry = self._catalog.get(bytes.fromhex(app_id_hex))
+        except (ValueError, TypeError):
+            return None
+        if entry is None or entry["ts"] <= inst.get("ts", 0):
+            return None
+        return await self.install_app(app_id_hex)
+
+    # -- pseudo directory (find node ids by pseudo, network-wide) ---------
+    #
+    # A keyed directory over Kademlia. Records are self-authenticating (a claim
+    # can only bind a pseudo to the claimant's own node id), so an attacker-
+    # chosen key buys nothing. See :mod:`src.pseudo_dir`. The app_id (from the
+    # session) namespaces pseudos per app.
+
+    def _dir_allowed(self, peer: '_Peer') -> bool:
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._dir_rate.items()
+                  if now - ws > _DIR_RATE_WINDOW]:
+            del self._dir_rate[k]
+        while len(self._dir_rate) > _MAX_PEERS:
+            self._dir_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._dir_rate.get(key, (0, now))
+        if now - ws > _DIR_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _DIR_RATE_MAX:
+            self._dir_rate[key] = (cnt, ws)
+            return False
+        self._dir_rate[key] = (cnt + 1, ws)
+        return True
+
+    async def _handle_dir_store(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._dir_allowed(peer):
+            return
+        # parse_claim verifies the signature and the node-id binding; only a
+        # self-consistent claim is ever stored (reject by default).
+        claim = _dir_parse_claim(packet.payload, self._identity.verify)
+        if claim is not None:
+            self._pseudo_store.put(claim, packet.payload)
+
+    async def _handle_dir_find(self, peer: '_Peer', packet: Packet) -> None:
+        if len(packet.payload) != 20 + _QID_LEN:
+            return
+        key = packet.payload[:20]
+        query_id = packet.payload[20:]
+        body = query_id + _dir_encode(self._pseudo_store.get(key))
+        await peer.send(Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
+
+    async def _handle_dir_found(self, peer: '_Peer', packet: Packet) -> None:
+        if len(packet.payload) < _QID_LEN:
+            return
+        query_id = packet.payload[:_QID_LEN]
+        future = self._pending_dir.pop(query_id, None)
+        if future is not None and not future.done():
+            future.set_result(packet.payload[_QID_LEN:])
+
+    async def _dir_store_at(self, node_id: NodeID, claim: bytes) -> None:
+        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
+        if peer is None:
+            return
+        try:
+            await peer.send(Packet.create(DIR_STORE, self._id.raw,
+                                          NodeID(b"\xff" * 20).raw, claim))
+        except Exception:
+            pass
+
+    async def _dir_find_at(self, node_id: NodeID, key: bytes) -> bytes | None:
+        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
+        if peer is None:
+            return None
+        query_id = os.urandom(_QID_LEN)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_dir[query_id] = future
+        try:
+            await peer.send(Packet.create(DIR_FIND, self._id.raw,
+                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
+        except Exception:
+            return None
+        finally:
+            self._pending_dir.pop(query_id, None)
+            if not future.done():
+                future.cancel()
+
+    async def publish_pseudo(self, app_id: bytes, pseudo: str) -> str:
+        """Publish a signed claim that ``pseudo`` maps to this node, replicated to
+        the nodes closest to its key. Returns the directory key (hex)."""
+        claim = _dir_build_claim(app_id, pseudo, self._identity.dsa_public_key,
+                                 self._identity.sign)
+        parsed = _dir_parse_claim(claim, self._identity.verify)
+        if parsed is not None:
+            self._pseudo_store.put(parsed, claim)   # keep + re-serve locally
+        key = _dir_key(app_id, pseudo)
+        targets = await self.kad_lookup(NodeID(key))
+        await asyncio.gather(
+            *(self._dir_store_at(nid, claim)
+              for nid in targets[:_DIR_K] if nid != self._id),
+            return_exceptions=True,
+        )
+        return key.hex()
+
+    async def lookup_pseudo(self, app_id: bytes, pseudo: str) -> list[dict]:
+        """Find every node claiming ``pseudo`` in this app's namespace. Returns
+        ``[{"id": node_id_hex, "pseudo": pseudo}]`` — possibly several (pseudos
+        aren't unique); the node id is the real identity."""
+        key = _dir_key(app_id, pseudo)
+        found: dict[str, str] = {}
+
+        def absorb(raw: bytes) -> None:
+            claim = _dir_parse_claim(raw, self._identity.verify)
+            if claim is None or claim["app_id"] != app_id or claim["key"] != key:
+                return
+            self._pseudo_store.put(claim, raw)      # cache → this node re-serves it
+            found[claim["node_id"].hex()] = claim["pseudo"]
+
+        for raw in self._pseudo_store.get(key):
+            absorb(raw)
+        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K]:
+            if nid == self._id:
+                continue
+            blob = await self._dir_find_at(nid, key)
+            if blob:
+                for raw in _dir_decode(blob):
+                    absorb(raw)
+        return [{"id": h, "pseudo": p} for h, p in found.items()]
+
     # -- application packages ---------------------------------------------
 
     async def publish_app(self, name: str, version: str,
@@ -3104,12 +3437,14 @@ class MeshNode:
         return await self.dht_put(root_bytes)
 
     async def publish_signed_app(self, name: str, version: str,
-                                 files: dict[str, bytes]) -> dict:
+                                 files: dict[str, bytes],
+                                 ts: int | None = None) -> dict:
         """Publish a signed, deployable app. Returns ``{"release_id", "app_id"}``.
 
         The content (chunks + manifest + root) is published as with
         :meth:`publish_app`; on top, a release descriptor signed by this node's
         identity binds the content root to us as author, and is published too.
+        ``ts`` (defaults to now) is the signed publish time that orders versions.
         Installers fetch it by ``release_id`` and verify the signature."""
         _, manifest, chunks = _app_build(name, version, files)
         from .dht import MAX_VALUE
@@ -3123,7 +3458,7 @@ class MeshNode:
         root_key = await self.dht_put(root_bytes)
         release_bytes, app_id = _app_build_release(
             root_key, hashlib.sha256(root_bytes).hexdigest(), name, version,
-            self._identity.dsa_public_key, self._identity.sign)
+            self._identity.dsa_public_key, self._identity.sign, ts)
         if len(release_bytes) > MAX_VALUE:
             raise AppPackageError("release descriptor too large")
         release_id = await self.dht_put(release_bytes)
@@ -3168,6 +3503,27 @@ class MeshNode:
                 fetched[ck] = value
         files = _app_reassemble(manifest, fetched.get)  # verifies every hash
         return manifest, files
+
+    # -- per-app local secure store ("drawers") ---------------------------
+    #
+    # The node holds the app id; callers pass the id bound to the authenticated
+    # session, never one an app chose for itself. See :mod:`src.app_storage`.
+
+    @property
+    def app_storage(self):
+        return self._app_storage
+
+    def app_store_put(self, app_id: bytes, key: str, value: bytes) -> bool:
+        return self._app_storage.put(app_id, key, value)
+
+    def app_store_get(self, app_id: bytes, key: str) -> bytes | None:
+        return self._app_storage.get(app_id, key)
+
+    def app_store_delete(self, app_id: bytes, key: str) -> bool:
+        return self._app_storage.delete(app_id, key)
+
+    def app_store_list(self, app_id: bytes) -> list[str]:
+        return self._app_storage.list_keys(app_id)
 
     async def _handle_challenge(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != 32:
@@ -3317,6 +3673,7 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zéro crash).
@@ -3396,6 +3753,7 @@ class MeshNode:
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
+        self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------
