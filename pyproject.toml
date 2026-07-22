@@ -9,4 +9,11 @@ version = "0.1.0"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--ignore=tests/integration"
+# -n auto runs the suite across all CPU cores (pytest-xdist). Most tests bind
+# their own port or use in-memory/ephemeral sockets, so workers don't collide.
+# --dist loadgroup honours @pytest.mark.xdist_group: LAN-broadcast tests share a
+# group so they land on one worker and never hear each other's beacons.
+# Integration is excluded by default; run it explicitly with `pytest tests/integration`.
+# A per-test timeout (thread method: dumps a traceback even if the event loop is
+# blocked) turns any hang into a fast failure instead of a job that runs for hours.
+addopts = "-n auto --dist loadgroup --timeout=120 --timeout-method=thread --ignore=tests/integration"
