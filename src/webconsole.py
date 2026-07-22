@@ -457,6 +457,16 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/store":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                try:
+                    self._json(200, console._call(
+                        _wrap(console._node.store_overview)))
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
             self._json(404, {"error": "not found"})
 
         def do_HEAD(self) -> None:
@@ -464,7 +474,8 @@ def _make_handler(console: WebConsole):
 
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
-            cap = _MAX_APP_BODY if path == "/api/app/publish" else _MAX_BODY
+            cap = (_MAX_APP_BODY if path in ("/api/app/publish", "/api/store/publish")
+                   else _MAX_BODY)
             body = self._read_body(cap)
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
@@ -695,6 +706,13 @@ def _make_handler(console: WebConsole):
             if path == "/api/app/fetch":
                 self._handle_app_fetch(body)
                 return
+            if path == "/api/store/publish":
+                self._handle_store_publish(body)
+                return
+            if path in ("/api/store/install", "/api/store/uninstall",
+                        "/api/store/update"):
+                self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
+                return
             self._json(404, {"error": "not found"})
 
         def _handle_chat_post(self, path: str, data) -> None:
@@ -799,6 +817,51 @@ def _make_handler(console: WebConsole):
                 "files": {p: base64.b64encode(d).decode("ascii")
                           for p, d in files.items()},
             })
+
+        def _handle_store_publish(self, body: bytes) -> None:
+            data = _parse_json(body)
+            if (not data or not isinstance(data.get("name"), str)
+                    or not isinstance(data.get("version"), str)
+                    or not isinstance(data.get("files"), dict)):
+                self._json(400, {"error": "name, version, files required"})
+                return
+            try:
+                files: dict[str, bytes] = {}
+                total = 0
+                for p, b64 in data["files"].items():
+                    if not isinstance(p, str) or not isinstance(b64, str):
+                        raise ValueError("bad file entry")
+                    raw = base64.b64decode(b64, validate=True)
+                    total += len(raw)
+                    if total > _MAX_APP_BODY:
+                        raise ValueError("app too large")
+                    files[p] = raw
+                info = console._call(
+                    console._node.publish_store_app(data["name"], data["version"], files),
+                    timeout=_APP_CALL_TIMEOUT)
+                self._json(200, {"ok": True, **info})
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
+
+        def _handle_store_action(self, action: str, data) -> None:
+            app_id = (data or {}).get("app_id")
+            if not isinstance(app_id, str) or not app_id:
+                self._json(400, {"error": "app_id required"})
+                return
+            try:
+                if action == "install":
+                    result = console._call(console._node.install_app(app_id),
+                                           timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": result is not None, "app": result})
+                elif action == "update":
+                    result = console._call(console._node.update_app(app_id),
+                                           timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": result is not None, "app": result})
+                else:  # uninstall
+                    ok = console._call(_wrap(console._node.uninstall_app, app_id))
+                    self._json(200, {"ok": bool(ok)})
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
 
         def _handle_login(self, body: bytes) -> None:
             if console._locked_out():

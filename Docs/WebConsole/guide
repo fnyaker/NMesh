@@ -59,6 +59,9 @@ Options :
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
+| GET     | `/api/store`       | vue app store : `{catalog:[…state,action], installed:[…]}` |
+| POST    | `/api/store/publish` | `{name, version, files:{path:b64}}` — publie + annonce au réseau |
+| POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
 | GET     | `/api/chat/messages` | `?since=N` → feed + état social (me, pseudo, contacts, groups) |
 | POST    | `/api/chat/send`   | `{text, peer}` ou `{text, group}` — 1:1 ou groupe |
 | POST    | `/api/chat/pseudo` | `{pseudo}` — définit + annonce mon pseudo          |
@@ -76,6 +79,12 @@ La section **Apps (DHT)** de l'interface permet de publier une application
 (sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une
 par son identifiant (fichiers vérifiés puis téléchargeables). Voir
 `Docs/AppSharing/guide`.
+
+La section **App Store** liste les apps **publiées sur le réseau** (catalogue
+partagé, re-diffusé automatiquement) avec un bouton Install/Update selon l'état,
+les apps installées localement (Uninstall), et un formulaire de publication. La
+décision d'état est calculée **côté nœud** (`store_overview`) ; le front ne fait
+que l'afficher. Voir `Docs/AppStore/guide`.
 
 ## App de chat intégrée (`/chat`)
 

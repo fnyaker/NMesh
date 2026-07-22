@@ -212,6 +212,27 @@ INDEX_HTML = """<!doctype html>
       <div id="app-status" class="muted"></div>
     </div>
   </section>
+
+  <section class="card" id="store-card">
+    <h2>App Store</h2>
+    <p class="muted">Apps published on the network. Publishing announces to every
+      node; the catalog is shared and re-gossiped automatically.</p>
+    <div class="manage">
+      <div class="mrow join">
+        <input id="store-name" placeholder="app name">
+        <input id="store-version" placeholder="version" value="1.0.0">
+      </div>
+      <div class="mrow">
+        <input id="store-files" type="file" multiple>
+        <button id="store-publish-btn">Publish to store</button>
+      </div>
+      <div id="store-status" class="muted"></div>
+    </div>
+    <h3>Available</h3>
+    <table class="store-table"><tbody id="store-catalog"></tbody></table>
+    <h3>Installed</h3>
+    <table class="store-table"><tbody id="store-installed"></tbody></table>
+  </section>
 </div>
 
 <script src="/app.js"></script>
@@ -297,6 +318,11 @@ tr.kdetails td{background:rgba(127,127,127,.06)}
 .unlisten{background:transparent;color:var(--muted);border:0;padding:0 4px;font-weight:400;cursor:pointer}
 .unlisten:hover{color:var(--bad)}
 details.expert-join{border-top:1px solid var(--line);padding-top:8px}
+.store-table{width:100%;border-collapse:collapse;font-size:13px;margin:4px 0 8px}
+.store-table td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+.store-table td:last-child{text-align:right}
+.store-table button{padding:3px 10px;font-size:12px;margin:0}
+#store-card h3{margin:12px 0 2px;font-size:13px}
 details.expert-join summary{cursor:pointer}
 details.expert-join .mrow{margin-top:8px}
 .connect{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -320,6 +346,7 @@ font-weight:600;text-decoration:none}
 APP_JS = r"""
 let TOKEN = null;
 let timer = null;     // status polling interval (guarded so re-entry never stacks)
+let storeTimer = null; // app-store catalog polling interval
 let prev = null;      // previous {t, bytes_in, bytes_out}
 let last = null;      // last full state snapshot (drives the control buttons)
 const hist = [];      // [{in,out}] KB/s samples
@@ -361,7 +388,10 @@ function startApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   tick();
+  refreshStore();
   if (!timer) timer = setInterval(tick, 1500);
+  // The catalog changes rarely and arrives via gossip; poll it slowly.
+  if (!storeTimer) storeTimer = setInterval(refreshStore, 5000);
 }
 
 function logout() {
@@ -369,6 +399,7 @@ function logout() {
   TOKEN = null;
   try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
   if (timer) { clearInterval(timer); timer = null; }
+  if (storeTimer) { clearInterval(storeTimer); storeTimer = null; }
   $("app").classList.add("hidden");
   $("login").classList.remove("hidden");
 }
@@ -1004,6 +1035,63 @@ $("fetch-btn").addEventListener("click", async () => {
         + ` <span class="muted">(${atob(b64).length} B)</span></div>`).join("");
     appStatus("fetched ✓");
   } catch (_) { appStatus("fetch failed", false); }
+});
+
+// app store (shared catalog + installed set)
+function storeStatus(msg, ok = true) {
+  const el = $("store-status");
+  el.textContent = msg; el.style.color = ok ? "" : "var(--bad)";
+}
+// The backend (Python) computes every app's state/action; this only renders it.
+const CAP = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+async function refreshStore() {
+  try {
+    const view = await (await api("/api/store")).json();
+    const catalog = view.catalog || [], installed = view.installed || [];
+    $("store-catalog").innerHTML = catalog.length ? catalog.map((a) => {
+      const cell = a.action
+        ? `<button data-app="${a.app_id}" data-act="${a.action}">${CAP(a.action)}</button>`
+        : `<span class="muted">${esc(a.state)}</span>`;
+      return `<tr><td>${esc(a.name)}</td><td class="muted">v${esc(a.version)}</td>`
+           + `<td class="mono">${short(a.app_id)}</td><td>${cell}</td></tr>`;
+    }).join("") : '<tr><td class="muted" colspan="4">No apps published yet.</td></tr>';
+    $("store-installed").innerHTML = installed.length ? installed.map((m) =>
+      `<tr><td>${esc(m.name)}</td><td class="muted">v${esc(m.version)}</td>`
+      + `<td class="mono">${short(m.app_id)}</td>`
+      + `<td><button data-app="${m.app_id}" data-act="uninstall">Uninstall</button></td></tr>`
+    ).join("") : '<tr><td class="muted" colspan="4">Nothing installed.</td></tr>';
+  } catch (_) { /* transient — next refresh retries */ }
+}
+async function storeAction(app_id, act) {
+  const path = "/api/store/" + act;
+  storeStatus(act + "…");
+  try {
+    const res = await api(path, "POST", { app_id });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok && j.ok !== false) storeStatus(act + " ✓");
+    else storeStatus(act + " failed: " + (j.error || "no change"), false);
+  } catch (_) { storeStatus(act + " failed", false); }
+  refreshStore();
+}
+$("store-card").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (b) storeAction(b.getAttribute("data-app"), b.getAttribute("data-act"));
+});
+$("store-publish-btn").addEventListener("click", async () => {
+  const name = $("store-name").value.trim();
+  const version = $("store-version").value.trim() || "1.0.0";
+  const input = $("store-files");
+  if (!name || !input.files.length) { storeStatus("name and at least one file required", false); return; }
+  storeStatus("reading files…");
+  const files = {};
+  for (const f of input.files) files[f.name] = await fileToB64(f);
+  try {
+    const res = await api("/api/store/publish", "POST", { name, version, files });
+    const j = await res.json();
+    if (res.ok) { storeStatus("published to store ✓"); input.value = ""; }
+    else storeStatus("publish failed: " + (j.error || ""), false);
+  } catch (_) { storeStatus("publish failed", false); }
+  refreshStore();
 });
 """
 
