@@ -99,6 +99,19 @@ Index : [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
 
 ## Discipline de contribution
 
+- **La doc suit le code, dans le même commit — toujours, sans exception.**
+  Cette règle généralise la section ⚑ ci-dessus à **toute** la documentation, pas
+  seulement `Docs/Architecture/`.
+  - **AVANT de coder : lis les docs concernées.** `Docs/Architecture/` en premier
+    (mécanique interne), puis les guides d'usage touchés (`Docs/DataConnector/`,
+    `Docs/Apps/`, `Docs/WebConsole/`, `Docs/AppSharing/`…), et `TEST.md` /
+    `README.md` si le changement les concerne. Ne code jamais « à l'aveugle » un
+    mécanisme déjà documenté.
+  - **APRÈS avoir codé : mets à jour TOUS les documents que le changement touche,
+    dans le même commit** — protocole, guide d'app, table d'API de la console, CI,
+    carte du code, table des messages… Une feature livrée sans sa doc est
+    **incomplète**, jamais « à documenter plus tard ». Une doc fausse ou absente
+    est un bug au même titre qu'un test rouge.
 - **Tout changement est prouvé par des tests**, y compris des tests d'entrée
   hostile (fuzzing, paquets aléatoires/mal formés). « Ça marche » ne suffit
   pas : il faut « ça résiste ».
