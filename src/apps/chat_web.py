@@ -18,19 +18,31 @@ import json
 import secrets
 import threading
 import time
-from collections import deque
+from collections import deque, OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from ..node_id import NodeID
-from .chat import TextMessage, FileReceived, GroupMessage, DirResult
+from .chat import (
+    TextMessage, FileReceived, GroupMessage, DirResult, ProfileReceived,
+    Receipt, Typing, Edited, Deleted, Reaction, GroupInvited,
+    MSG_ID_LEN, _DELIVERED, _READ,
+)
 
 _MAX_BODY = 64 * 1024
-_MESSAGES_MAX = 500
+_MESSAGES_MAX = 2000
 _DIR_RESULTS_MAX = 200
 _CALL_TIMEOUT = 10.0
 _MESSAGES_KEY = "messages"        # drawer key holding the persisted feed
-_MESSAGES_BUDGET = 200 * 1024     # serialised feed ceiling (under the drawer cap)
+_MESSAGES_BUDGET = 220 * 1024     # serialised feed ceiling (under the drawer cap)
+_TYPING_TTL = 6.0                 # seconds a typing indicator stays live
+_FILES_MAX = 64                   # received/sent blobs cached for serving
+_FILES_BYTES = 96 * 1024 * 1024   # total bytes of cached file blobs
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def _is_image(name: str) -> bool:
+    return name.lower().endswith(_IMAGE_EXTS)
 
 _HEADERS = {
     "Content-Security-Policy": (
@@ -44,11 +56,16 @@ _HEADERS = {
 
 
 class ChatBridge:
-    """Loop-thread-safe message store + send actions bridging a ChatApp to an
-    HTTP front-end. It runs no server of its own: it subscribes to the app's
-    event stream, buffers a bounded feed, and marshals outgoing sends onto the
-    event loop. Any front-end (the standalone :class:`ChatWebServer`, or the
-    node's web console) drives it via :meth:`snapshot` / :meth:`send_text`.
+    """Loop-thread-safe messaging state + actions bridging a ChatApp to an HTTP
+    front-end. It subscribes to the app's event stream and keeps a rich, bounded
+    message model — replies, edits, deletes, reactions, delivered/read receipts,
+    typing, and file/media blobs — persisted (text metadata) in the encrypted
+    drawer. File/media bytes stay in a bounded in-memory cache served on demand.
+
+    A conversation is keyed by ``conv``: a peer id (hex) for 1:1, or
+    ``"g:"+group_id`` for a group. Change tracking uses a monotonic ``version``:
+    every new message OR mutation bumps it and stamps the record's ``seq``, so a
+    front-end polling ``snapshot(since)`` sees edits/reactions/status too.
 
     Everything still flows through the chat app — the node and the management
     console core are untouched."""
@@ -58,9 +75,15 @@ class ChatBridge:
         self._peer = peer
         self._store = store        # DrawerStore | None — persists the feed if set
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._messages: deque = deque(maxlen=_MESSAGES_MAX)
+        self._messages: list = []               # ordered records (trimmed manually)
+        self._by_mid: dict[str, dict] = {}       # wire msg id (hex) -> record
+        self._files: "OrderedDict[str, tuple]" = OrderedDict()  # mid -> (name, bytes)
+        self._files_bytes = 0
+        self._unread: dict[str, int] = {}        # conv -> unread count
+        self._typing: dict[str, tuple] = {}      # conv -> (sender_hex, expiry)
         self._dir_results: deque = deque(maxlen=_DIR_RESULTS_MAX)
-        self._cursor = 0
+        self._msg_id = 0                          # stable per-message local id
+        self._version = 0                         # change counter (drives polling)
         self._lock = threading.Lock()
         self._load_messages()
 
@@ -70,7 +93,14 @@ class ChatBridge:
         self._loop = loop
         self._chat.add_listener(self._on_event)
 
-    # -- feed persistence (encrypted drawer, so history survives a restart) --
+    def stop(self) -> None:
+        self._chat.remove_listener(self._on_event)
+
+    @property
+    def me(self) -> str | None:
+        return self._chat.node_id.raw.hex() if self._chat.node_id else None
+
+    # -- persistence (encrypted drawer; history survives a restart) --------
 
     def _load_messages(self) -> None:
         if self._store is None:
@@ -79,74 +109,170 @@ class ChatBridge:
             blob = self._store.get(_MESSAGES_KEY)
             doc = json.loads(blob.decode("utf-8")) if blob else None
         except Exception:
-            return  # corrupt/unreadable → start with an empty feed, never crash
+            return  # corrupt/unreadable → empty feed, never crash
         if not isinstance(doc, dict):
             return
-        msgs = doc.get("messages")
-        if isinstance(msgs, list):
-            for m in msgs[-_MESSAGES_MAX:]:
-                if isinstance(m, dict) and isinstance(m.get("id"), int):
-                    self._messages.append(m)
-        if isinstance(doc.get("cursor"), int):
-            self._cursor = doc["cursor"]
-        if self._messages:
-            self._cursor = max(self._cursor, self._messages[-1]["id"])
+        for m in doc.get("messages", []) if isinstance(doc.get("messages"), list) else []:
+            if isinstance(m, dict) and isinstance(m.get("id"), int):
+                self._messages.append(m)
+                if m.get("mid"):
+                    self._by_mid[m["mid"]] = m
+        if isinstance(doc.get("unread"), dict):
+            self._unread = {k: int(v) for k, v in doc["unread"].items()
+                            if isinstance(v, int)}
+        self._msg_id = max([m["id"] for m in self._messages], default=0)
+        self._version = max([m.get("seq", 0) for m in self._messages], default=0)
 
-    def _persist_messages_locked(self) -> None:
-        """Write the feed to the drawer, trimming oldest entries until the
-        serialised blob fits (a value ceiling well under the drawer cap)."""
+    def _persist_locked(self) -> None:
         if self._store is None:
             return
-        msgs = list(self._messages)
+        msgs = self._messages
         while True:
-            blob = json.dumps({"cursor": self._cursor, "messages": msgs}).encode("utf-8")
+            blob = json.dumps({"messages": msgs, "unread": self._unread}).encode("utf-8")
             if len(blob) <= _MESSAGES_BUDGET or len(msgs) <= 1:
                 break
-            msgs = msgs[len(msgs) // 2:]     # drop the oldest half and retry
+            drop = msgs[:len(msgs) // 2]                 # shed the oldest half
+            for m in drop:
+                self._by_mid.pop(m.get("mid"), None)
+            msgs = self._messages = msgs[len(msgs) // 2:]
         try:
             self._store.put(_MESSAGES_KEY, blob)
         except Exception:
-            pass  # best-effort; a store hiccup must not break messaging
+            pass
 
-    def stop(self) -> None:
-        self._chat.remove_listener(self._on_event)
+    # -- record model -----------------------------------------------------
 
-    @property
-    def me(self) -> str | None:
-        return self._chat.node_id.raw.hex() if self._chat.node_id else None
+    def _add(self, conv: str, src: str, rec: dict) -> dict:
+        """Append a new message record (caller holds the lock)."""
+        self._msg_id += 1
+        self._version += 1
+        record = {**rec, "id": self._msg_id, "seq": self._version,
+                  "conv": conv, "src": src, "t": time.time()}
+        self._messages.append(record)
+        if record.get("mid"):
+            self._by_mid[record["mid"]] = record
+        while len(self._messages) > _MESSAGES_MAX:
+            old = self._messages.pop(0)
+            self._by_mid.pop(old.get("mid"), None)
+        if src != "me":
+            self._unread[conv] = self._unread.get(conv, 0) + 1
+        self._persist_locked()
+        return record
+
+    def _touch(self, record: dict) -> None:
+        self._version += 1
+        record["seq"] = self._version
+
+    def _cache_file(self, mid_hex: str, name: str, data: bytes) -> None:
+        if mid_hex in self._files:
+            self._files_bytes -= len(self._files[mid_hex][1])
+            self._files.pop(mid_hex)
+        self._files[mid_hex] = (name, data)
+        self._files_bytes += len(data)
+        while self._files and (len(self._files) > _FILES_MAX
+                               or self._files_bytes > _FILES_BYTES):
+            _, (_, old) = self._files.popitem(last=False)
+            self._files_bytes -= len(old)
 
     # -- ChatApp listener (runs on the event loop thread) -----------------
-    #
-    # A conversation is keyed by ``conv``: a peer id (hex) for 1:1, or
-    # ``"g:"+group_id`` for a group. ``src`` is the sender ("me" for our own
-    # outgoing). Profile/group-invite events mutate ChatState directly, so the
-    # UI reads them from the state block of the snapshot, not the message feed.
 
     def _on_event(self, ev) -> None:
+        with self._lock:
+            self._dispatch_event(ev)
+
+    def _dispatch_event(self, ev) -> None:
         if isinstance(ev, TextMessage):
-            self._record(ev.src.raw.hex(), ev.src.raw.hex(), {"type": "text", "text": ev.text})
-        elif isinstance(ev, FileReceived):
-            self._record(ev.src.raw.hex(), ev.src.raw.hex(),
-                         {"type": "file", "name": ev.name, "size": len(ev.data)})
+            conv = ("g:" + ev.group_id.hex()) if ev.group_id else ev.src.raw.hex()
+            self._add(conv, ev.src.raw.hex(), self._text_rec(ev.mid, ev.text, ev.reply_to))
+            self._auto_deliver(ev.src, ev.mid, ev.group_id)
         elif isinstance(ev, GroupMessage):
             gid = ev.group_id.hex()
-            known = any(g["id"] == gid for g in self._chat.state.snapshot()["groups"])
-            if known:  # drop chatter for groups we're not a member of
-                self._record("g:" + gid, ev.src.raw.hex(), {"type": "text", "text": ev.text})
+            if any(g["id"] == gid for g in self._chat.state.snapshot()["groups"]):
+                self._add("g:" + gid, ev.src.raw.hex(),
+                          self._text_rec(ev.mid, ev.text, ev.reply_to))
+        elif isinstance(ev, FileReceived):
+            conv = ("g:" + ev.group_id.hex()) if ev.group_id else ev.src.raw.hex()
+            self._cache_file(ev.mid.hex(), ev.name, ev.data)
+            self._add(conv, ev.src.raw.hex(), self._file_rec(ev.mid, ev.name, len(ev.data), ev.reply_to))
+            self._auto_deliver(ev.src, ev.mid, ev.group_id)
+        elif isinstance(ev, Edited):
+            self._apply_edit(ev.src.raw.hex(), ev.mid.hex(), ev.text)
+        elif isinstance(ev, Deleted):
+            self._apply_delete(ev.src.raw.hex(), ev.mid.hex())
+        elif isinstance(ev, Reaction):
+            self._apply_reaction(ev.src.raw.hex(), ev.mid.hex(), ev.emoji)
+        elif isinstance(ev, Receipt):
+            self._apply_receipt(ev.kind, ev.mids)
+        elif isinstance(ev, Typing):
+            conv = ("g:" + ev.group_id.hex()) if ev.group_id else ev.src.raw.hex()
+            if ev.active:
+                self._typing[conv] = (ev.src.raw.hex(), time.time() + _TYPING_TTL)
+            else:
+                self._typing.pop(conv, None)
         elif isinstance(ev, DirResult):
-            with self._lock:
-                self._dir_results.append(
-                    {"id": ev.node_id.raw.hex(), "pseudo": ev.pseudo, "t": time.time()})
+            self._dir_results.append(
+                {"id": ev.node_id.raw.hex(), "pseudo": ev.pseudo, "t": time.time()})
 
-    def _record(self, conv: str, src: str, rec: dict) -> None:
-        with self._lock:
-            self._cursor += 1
-            rec = {**rec, "id": self._cursor, "conv": conv, "src": src, "t": time.time()}
-            self._messages.append(rec)
-            self._persist_messages_locked()
+    def _text_rec(self, mid: bytes, text: str, reply: bytes | None) -> dict:
+        return {"mid": mid.hex(), "kind": "text", "text": text,
+                "reply": reply.hex() if reply else None, "reactions": {}}
 
-    def record_outgoing(self, conv: str, text: str) -> None:
-        self._record(conv, "me", {"type": "text", "text": text})
+    def _file_rec(self, mid: bytes, name: str, size: int, reply: bytes | None) -> dict:
+        return {"mid": mid.hex(), "kind": "image" if _is_image(name) else "file",
+                "name": name, "size": size, "available": True,
+                "reply": reply.hex() if reply else None, "reactions": {}}
+
+    def _auto_deliver(self, src: NodeID, mid: bytes, group_id) -> None:
+        # Acknowledge receipt of a 1:1 message so the sender sees a delivered tick.
+        if group_id is not None or self._loop is None:
+            return
+        asyncio.ensure_future(self._safe(self._chat.send_receipt(src, _DELIVERED, [mid])),
+                              loop=self._loop)
+
+    def _apply_edit(self, src_hex: str, mid_hex: str, text: str) -> None:
+        rec = self._by_mid.get(mid_hex)
+        if rec is not None and rec["src"] == src_hex and rec.get("kind") == "text":
+            rec["text"] = text
+            rec["edited"] = True
+            self._touch(rec)
+            self._persist_locked()
+
+    def _apply_delete(self, src_hex: str, mid_hex: str) -> None:
+        rec = self._by_mid.get(mid_hex)
+        if rec is not None and rec["src"] == src_hex:
+            rec["deleted"] = True
+            rec["text"] = ""
+            rec["reactions"] = {}
+            self._touch(rec)
+            self._persist_locked()
+
+    def _apply_reaction(self, reactor_hex: str, mid_hex: str, emoji: str) -> None:
+        rec = self._by_mid.get(mid_hex)
+        if rec is None:
+            return
+        reactions = rec.setdefault("reactions", {})
+        for e in list(reactions):                        # one reaction per person
+            reactions[e] = [r for r in reactions[e] if r != reactor_hex]
+            if not reactions[e]:
+                del reactions[e]
+        if emoji:
+            reactions.setdefault(emoji, []).append(reactor_hex)
+        self._touch(rec)
+        self._persist_locked()
+
+    def _apply_receipt(self, kind: int, mids: list) -> None:
+        rank = {"sent": 0, "delivered": 1, "read": 2}
+        new = "read" if kind == _READ else "delivered"
+        changed = False
+        for m in mids:
+            rec = self._by_mid.get(m.hex())
+            if rec is not None and rec["src"] == "me":
+                if rank.get(rec.get("status", "sent"), 0) < rank[new]:
+                    rec["status"] = new
+                    self._touch(rec)
+                    changed = True
+        if changed:
+            self._persist_locked()
 
     # -- actions (called from the web thread; sends marshalled onto loop) --
 
@@ -155,6 +281,12 @@ class ChatBridge:
             raise RuntimeError("bridge not started")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=_CALL_TIMEOUT)
 
+    async def _safe(self, coro):
+        try:
+            await coro
+        except Exception:
+            pass
+
     def _resolve_peer(self, peer_hex: str | None) -> NodeID:
         if peer_hex:
             return NodeID(bytes.fromhex(peer_hex))
@@ -162,24 +294,147 @@ class ChatBridge:
             raise ValueError("no peer set")
         return self._peer
 
-    def send_text(self, peer_hex: str | None, text: str) -> None:
-        peer = self._resolve_peer(peer_hex)
-        self._run(self._chat.send_text(peer, text))
-        self.record_outgoing(peer.raw.hex(), text)
+    def _group_id(self, conv: str) -> bytes | None:
+        return bytes.fromhex(conv[2:]) if conv.startswith("g:") else None
 
+    def _targets(self, conv: str) -> list:
+        if conv.startswith("g:"):
+            gid = bytes.fromhex(conv[2:])
+            me = self._chat.node_id
+            return [n for n in self._chat._roster_ids(gid) if me is None or n != me]
+        return [NodeID(bytes.fromhex(conv))]
+
+    def send_text(self, peer_hex: str | None, text: str, reply: str | None = None) -> None:
+        conv = ("g:" + peer_hex[2:]) if (peer_hex or "").startswith("g:") else \
+               (peer_hex or (self._peer.raw.hex() if self._peer else ""))
+        reply_b = bytes.fromhex(reply) if reply else None
+        gid = self._group_id(conv)
+        if gid is not None:
+            mid = self._run(self._chat.send_group_text(gid, text, reply_to=reply_b))
+        else:
+            peer = self._resolve_peer(peer_hex)
+            conv = peer.raw.hex()
+            mid = self._run(self._chat.send_text(peer, text, reply_to=reply_b))
+        with self._lock:
+            rec = self._text_rec(mid, text, reply_b)
+            rec["status"] = "sent"
+            self._add(conv, "me", rec)
+
+    # kept for API compatibility; groups now go through send_text with "g:" conv
     def send_group(self, group_id_hex: str, text: str) -> None:
-        gid = bytes.fromhex(group_id_hex)
-        self._run(self._chat.send_group_text(gid, text))
-        self.record_outgoing("g:" + gid.hex(), text)
+        self.send_text("g:" + group_id_hex, text)
+
+    def send_file(self, peer_hex: str | None, name: str, data: bytes,
+                  reply: str | None = None) -> None:
+        conv = ("g:" + peer_hex[2:]) if (peer_hex or "").startswith("g:") else None
+        reply_b = bytes.fromhex(reply) if reply else None
+        if conv is not None:
+            gid = bytes.fromhex(conv[2:])
+            mid = None
+            for t in self._targets(conv):
+                mid = self._run(self._chat.send_file(t, name, data, reply_to=reply_b))
+            mid = mid or b"\x00" * MSG_ID_LEN
+        else:
+            peer = self._resolve_peer(peer_hex)
+            conv = peer.raw.hex()
+            mid = self._run(self._chat.send_file(peer, name, data, reply_to=reply_b))
+        with self._lock:
+            self._cache_file(mid.hex(), name, data)
+            rec = self._file_rec(mid, name, len(data), reply_b)
+            rec["status"] = "sent"
+            self._add(conv, "me", rec)
+
+    def edit_message(self, conv: str, mid: str, text: str) -> bool:
+        with self._lock:
+            rec = self._by_mid.get(mid)
+            if rec is None or rec["src"] != "me" or rec.get("kind") != "text":
+                return False
+        mid_b = bytes.fromhex(mid)
+        gid = self._group_id(conv)
+        for t in self._targets(conv):
+            self._run(self._chat.send_edit(t, mid_b, text, group_id=gid))
+        with self._lock:
+            rec = self._by_mid.get(mid)
+            if rec is not None:
+                rec["text"] = text
+                rec["edited"] = True
+                self._touch(rec)
+                self._persist_locked()
+        return True
+
+    def delete_message(self, conv: str, mid: str) -> bool:
+        with self._lock:
+            rec = self._by_mid.get(mid)
+            if rec is None or rec["src"] != "me":
+                return False
+        mid_b = bytes.fromhex(mid)
+        gid = self._group_id(conv)
+        for t in self._targets(conv):
+            self._run(self._chat.send_delete(t, mid_b, group_id=gid))
+        with self._lock:
+            self._apply_delete("me", mid)
+        return True
+
+    def react(self, conv: str, mid: str, emoji: str) -> bool:
+        me = self.me or "me"
+        with self._lock:
+            rec = self._by_mid.get(mid)
+            if rec is None:
+                return False
+            # Toggle: clicking my current reaction clears it.
+            mine = next((e for e, rs in rec.get("reactions", {}).items() if me in rs), None)
+            send_emoji = "" if mine == emoji else emoji
+        mid_b = bytes.fromhex(mid)
+        gid = self._group_id(conv)
+        for t in self._targets(conv):
+            self._run(self._chat.send_reaction(t, mid_b, send_emoji, group_id=gid))
+        with self._lock:
+            self._apply_reaction(me, mid, send_emoji)
+        return True
+
+    def mark_read(self, conv: str) -> None:
+        with self._lock:
+            self._unread[conv] = 0
+            mids = [bytes.fromhex(m["mid"]) for m in self._messages
+                    if m["conv"] == conv and m["src"] != "me" and m.get("mid")]
+            self._persist_locked()
+        if not mids:
+            return
+        gid = self._group_id(conv)
+        for t in self._targets(conv):
+            try:
+                self._run(self._chat.send_receipt(t, _READ, mids, group_id=gid))
+            except Exception:
+                pass
+
+    def set_typing(self, conv: str, active: bool) -> None:
+        gid = self._group_id(conv)
+        for t in self._targets(conv):
+            try:
+                self._run(self._chat.send_typing(t, active, group_id=gid))
+            except Exception:
+                pass
+
+    def get_file(self, mid: str) -> tuple | None:
+        with self._lock:
+            return self._files.get(mid)
+
+    def get_avatar(self, id_hex: str) -> bytes | None:
+        return self._chat.state.get_avatar(id_hex)
+
+    # -- profile / contacts / groups --------------------------------------
 
     def set_pseudo(self, pseudo: str) -> None:
         self._run(self._chat.set_pseudo(pseudo))
+
+    def set_profile(self, *, pseudo=None, bio=None, avatar=None) -> None:
+        self._run(self._chat.set_profile(pseudo=pseudo, bio=bio, avatar=avatar))
 
     def add_contact(self, id_hex: str, pseudo: str = "") -> bool:
         return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex)), pseudo))
 
     def remove_contact(self, id_hex: str) -> bool:
-        return self._chat.state.remove_contact(id_hex)  # pure state, thread-safe
+        return self._chat.state.remove_contact(id_hex)
 
     def remove_group(self, gid_hex: str) -> bool:
         return self._chat.state.remove_group(gid_hex)
@@ -190,17 +445,13 @@ class ChatBridge:
         return gid.hex()
 
     def search_pseudo(self, pseudo: str) -> list:
-        """Find people by pseudo three ways: the local directory (contacts +
-        learned), the **network DHT directory** (anyone who published their
-        pseudo, no prior contact needed), and a 1-hop query to contacts whose
-        replies land in ``dir_results`` (polled by the UI)."""
+        """Local directory + the network DHT directory (anyone who published
+        their pseudo, no prior contact needed) + a 1-hop query to contacts."""
         hits = {h["id"]: h for h in self._chat.state.find_by_pseudo(pseudo)}
         try:
             for r in self._run(self._chat.lookup_pseudo_network(pseudo)):
                 nid = r.get("id")
                 if isinstance(nid, str):
-                    # A network hit is authoritative (self-signed claim); don't
-                    # let it downgrade a richer local record already present.
                     hits.setdefault(nid, {"id": nid, "pseudo": r.get("pseudo", ""),
                                           "kind": "network"})
         except Exception:
@@ -213,19 +464,24 @@ class ChatBridge:
 
     def snapshot(self, since: int) -> dict:
         state = self._chat.state.snapshot()
+        now = time.time()
         with self._lock:
-            msgs = [m for m in self._messages if m["id"] > since]
-            dir_results = list(self._dir_results)
+            msgs = [m for m in self._messages if m.get("seq", 0) > since]
+            typing = {c: s for c, (s, exp) in self._typing.items() if exp > now}
             return {
-                "cursor": self._cursor,
+                "version": self._version,
                 "messages": msgs,
+                "unread": dict(self._unread),
+                "typing": typing,
                 "peer": self._peer.raw.hex() if self._peer else None,
                 "me": self.me,
                 "pseudo": state["pseudo"],
+                "bio": state.get("bio", ""),
+                "has_avatar": state.get("has_avatar", False),
                 "contacts": state["contacts"],
                 "known": state["known"],
                 "groups": state["groups"],
-                "dir_results": dir_results,
+                "dir_results": list(self._dir_results),
             }
 
 

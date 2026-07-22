@@ -10,6 +10,8 @@ import pytest
 
 from src.apps.chat import (
     ChatApp, TextMessage, FileReceived, Frame, FILE_CHUNK_SIZE,
+    Edited, Deleted, Reaction, Receipt, Typing, ProfileReceived, new_mid,
+    _DELIVERED, _READ,
 )
 from src.node_id import NodeID
 
@@ -47,10 +49,21 @@ class TestText:
     async def test_text_roundtrip(self):
         a = ChatApp(StubClient())
         b = ChatApp(StubClient())
-        await a.send_text(DST, "héllo mesh 🌐")
+        mid = await a.send_text(DST, "héllo mesh 🌐")
         _feed(b, a._client, SRC)
         events = _drain(b)
-        assert events == [TextMessage(SRC, "héllo mesh 🌐")]
+        assert len(events) == 1 and isinstance(events[0], TextMessage)
+        assert events[0].src == SRC and events[0].text == "héllo mesh 🌐"
+        assert events[0].mid == mid and events[0].reply_to is None
+
+    async def test_text_reply_carries_target(self):
+        a = ChatApp(StubClient())
+        b = ChatApp(StubClient())
+        target = os.urandom(16)
+        await a.send_text(DST, "re", reply_to=target)
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert ev.reply_to == target
 
 
 class TestFile:
@@ -72,7 +85,8 @@ class TestFile:
         await a.send_file(DST, "empty", b"")
         _feed(b, a._client, SRC)
         events = _drain(b)
-        assert events == [FileReceived(SRC, "empty", b"")]
+        assert len(events) == 1 and isinstance(events[0], FileReceived)
+        assert events[0].src == SRC and events[0].name == "empty" and events[0].data == b""
 
     async def test_corrupt_chunk_no_delivery(self):
         a = ChatApp(StubClient())
@@ -102,6 +116,59 @@ class TestStream:
         assert isinstance(fr, Frame)
         assert fr.stream_id == 7 and fr.seq == 42 and fr.payload == b"audioframe"
         assert fr.latency_ms >= 0
+
+
+class TestRichProtocol:
+    async def _pair(self):
+        return ChatApp(StubClient()), ChatApp(StubClient())
+
+    async def test_edit(self):
+        a, b = await self._pair()
+        mid = new_mid()
+        await a.send_edit(DST, mid, "new text")
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, Edited) and ev.mid == mid and ev.text == "new text"
+
+    async def test_delete(self):
+        a, b = await self._pair()
+        mid = new_mid()
+        await a.send_delete(DST, mid)
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, Deleted) and ev.mid == mid
+
+    async def test_reaction(self):
+        a, b = await self._pair()
+        mid = new_mid()
+        await a.send_reaction(DST, mid, "👍")
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, Reaction) and ev.mid == mid and ev.emoji == "👍"
+
+    async def test_receipt(self):
+        a, b = await self._pair()
+        m1, m2 = new_mid(), new_mid()
+        await a.send_receipt(DST, _READ, [m1, m2])
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, Receipt) and ev.kind == _READ and ev.mids == [m1, m2]
+
+    async def test_typing(self):
+        a, b = await self._pair()
+        await a.send_typing(DST, True)
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, Typing) and ev.active is True
+
+    async def test_profile_bio_and_avatar(self):
+        a, b = await self._pair()
+        a.state.set_profile(pseudo="Alice", bio="hi bio", avatar=b"AVATARBYTES")
+        await a.send_profile(DST)
+        _feed(b, a._client, SRC)
+        ev = _drain(b)[0]
+        assert isinstance(ev, ProfileReceived)
+        assert ev.pseudo == "Alice" and ev.bio == "hi bio" and ev.avatar == b"AVATARBYTES"
 
 
 class TestHardening:

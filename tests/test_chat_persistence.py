@@ -16,7 +16,7 @@ import pytest
 from src.crypto import CryptoIdentity
 from src.app_storage import AppStorage
 from src.app_channel import CHAT_APP_ID
-from src.apps.chat import ChatApp, TextMessage
+from src.apps.chat import ChatApp, TextMessage, new_mid
 from src.apps.chat_state import ChatState, DrawerStore
 from src.apps.chat_web import ChatBridge
 from src.node_id import NodeID
@@ -67,43 +67,47 @@ class TestChatStatePersistence:
             assert ChatState(store=_store(d, ident)).pseudo == ""
 
 
+def _incoming(bridge, src_hex, text):
+    """Simulate an inbound text message into the bridge's feed (no loop needed)."""
+    bridge._on_event(TextMessage(NodeID(bytes.fromhex(src_hex)), text, new_mid()))
+
+
 class TestMessageFeedPersistence:
     def test_feed_survives_reopen(self):
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
-            app = ChatApp(StubClient())
-            b1 = ChatBridge(app, store=_store(d, ident))
-            b1._on_event(TextMessage(NodeID(bytes.fromhex(ID_A)), "hello world"))
-            b1.record_outgoing(ID_A, "my reply")
+            b1 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
+            _incoming(b1, ID_A, "hello world")
+            _incoming(b1, ID_A, "second one")
             # A new bridge on the same drawer reloads the history.
             b2 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
             texts = [m["text"] for m in b2.snapshot(0)["messages"]]
-            assert "hello world" in texts and "my reply" in texts
+            assert "hello world" in texts and "second one" in texts
 
-    def test_cursor_preserved_so_since_still_works(self):
+    def test_version_preserved_so_since_still_works(self):
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
             b1 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
-            b1.record_outgoing(ID_A, "one")
-            b1.record_outgoing(ID_A, "two")
-            last = b1.snapshot(0)["cursor"]
+            _incoming(b1, ID_A, "one")
+            _incoming(b1, ID_A, "two")
+            last = b1.snapshot(0)["version"]
             b2 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
-            # New messages get ids strictly after the restored cursor.
-            b2.record_outgoing(ID_A, "three")
-            assert b2.snapshot(last)["messages"][-1]["text"] == "three"
-            assert b2.snapshot(last)["messages"][-1]["id"] > last
+            # New messages get seq strictly after the restored version.
+            _incoming(b2, ID_A, "three")
+            newer = b2.snapshot(last)["messages"]
+            assert newer[-1]["text"] == "three" and newer[-1]["seq"] > last
 
     def test_no_store_is_ram_only(self):
         with tempfile.TemporaryDirectory() as d:
             b = ChatBridge(ChatApp(StubClient()))   # no store
-            b.record_outgoing(ID_A, "ephemeral")
+            _incoming(b, ID_A, "ephemeral")
             assert os.listdir(d) == []
 
     def test_corrupt_feed_starts_empty(self):
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
             b1 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
-            b1.record_outgoing(ID_A, "hi")
+            _incoming(b1, ID_A, "hi")
             open(os.path.join(d, CHAT_APP_ID.hex() + ".drawer"), "wb").write(os.urandom(150))
             b2 = ChatBridge(ChatApp(StubClient()), store=_store(d, ident))
             assert b2.snapshot(0)["messages"] == []

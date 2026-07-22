@@ -72,7 +72,7 @@ class TestConsoleChat:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "GET", "/api/chat/messages?since=0", token)
             assert status == 200
-            texts = [m["text"] for m in j["messages"] if m["type"] == "text"]
+            texts = [m["text"] for m in j["messages"] if m["kind"] == "text"]
             assert "hello via console" in texts
             assert j["peer"] == PEER.raw.hex()
         finally:
@@ -86,7 +86,8 @@ class TestConsoleChat:
                 _request, console, "POST", "/api/chat/send", token, {"text": "yo"})
             assert status == 200 and j["ok"] is True
             assert app._client.sent[-1][0] == PEER
-            assert app._client.sent[-1][1] == bytes([0x01]) + b"yo"
+            payload = app._client.sent[-1][1]
+            assert payload[0] == 0x01 and payload.endswith(b"yo")
         finally:
             console.stop(); await node.stop()
 

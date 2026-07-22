@@ -41,6 +41,7 @@ from .webassets import INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS, CHAT_C
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
+_MAX_CHAT_UPLOAD = 64 * 1024 * 1024   # chat file/avatar uploads (base64)
 _APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
@@ -372,6 +373,17 @@ def _make_handler(console: WebConsole):
             self._send(code, "application/json; charset=utf-8",
                        json.dumps(obj).encode("utf-8"), extra_headers)
 
+        def _send_binary(self, data: bytes, name: str) -> None:
+            # Images are served with their type so the UI can render them inline;
+            # everything else is an opaque download. nosniff (in _SECURITY_HEADERS)
+            # stops the browser from reinterpreting the bytes.
+            ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+            ctype = {
+                "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+            }.get(ext, "application/octet-stream")
+            self._send(200, ctype, data)
+
         def _read_body(self, max_len: int = _MAX_BODY) -> bytes | None:
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -447,6 +459,31 @@ def _make_handler(console: WebConsole):
                         since = 0
                 self._json(200, console._chat.snapshot(since))
                 return
+            if path == "/api/chat/file":
+                if console._chat is None or not self._authed():
+                    self._json(404 if console._chat is None else 401, {"error": "no"})
+                    return
+                from urllib.parse import parse_qs
+                mid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("mid", [""])[0]
+                got = console._chat.get_file(mid)
+                if got is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                name, data = got
+                self._send_binary(data, name)
+                return
+            if path == "/api/chat/avatar":
+                if console._chat is None or not self._authed():
+                    self._json(404 if console._chat is None else 401, {"error": "no"})
+                    return
+                from urllib.parse import parse_qs
+                aid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("id", ["self"])[0]
+                data = console._chat.get_avatar(aid)
+                if not data:
+                    self._json(404, {"error": "not found"})
+                    return
+                self._send_binary(data, "avatar")
+                return
             if path == "/api/rootcert":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -474,8 +511,12 @@ def _make_handler(console: WebConsole):
 
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
-            cap = (_MAX_APP_BODY if path in ("/api/app/publish", "/api/store/publish")
-                   else _MAX_BODY)
+            if path in ("/api/app/publish", "/api/store/publish"):
+                cap = _MAX_APP_BODY
+            elif path in ("/api/chat/file", "/api/chat/profile"):
+                cap = _MAX_CHAT_UPLOAD
+            else:
+                cap = _MAX_BODY
             body = self._read_body(cap)
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
@@ -721,13 +762,40 @@ def _make_handler(console: WebConsole):
             try:
                 if path == "/api/chat/send":
                     text = data.get("text", "")
+                    conv = _chat_conv(data)
                     if not isinstance(text, str) or not text:
                         self._json(400, {"error": "text required"})
                         return
-                    if isinstance(data.get("group"), str) and data["group"]:
-                        chat.send_group(data["group"], text)
-                    else:
-                        chat.send_text(data.get("peer"), text)
+                    reply = data.get("reply") if isinstance(data.get("reply"), str) else None
+                    chat.send_text(conv, text, reply)
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/file":
+                    conv = _chat_conv(data)
+                    name = data.get("name", "")
+                    b64 = data.get("data", "")
+                    if not isinstance(name, str) or not name or not isinstance(b64, str):
+                        self._json(400, {"error": "name and data required"})
+                        return
+                    raw = base64.b64decode(b64, validate=True)
+                    reply = data.get("reply") if isinstance(data.get("reply"), str) else None
+                    chat.send_file(conv, name, raw, reply)
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/edit":
+                    ok = chat.edit_message(data.get("conv", ""), data.get("mid", ""),
+                                           data.get("text", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif path == "/api/chat/delete":
+                    ok = chat.delete_message(data.get("conv", ""), data.get("mid", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif path == "/api/chat/react":
+                    ok = chat.react(data.get("conv", ""), data.get("mid", ""),
+                                    str(data.get("emoji", "")))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif path == "/api/chat/read":
+                    chat.mark_read(data.get("conv", ""))
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/typing":
+                    chat.set_typing(data.get("conv", ""), bool(data.get("active")))
                     self._json(200, {"ok": True})
                 elif path == "/api/chat/pseudo":
                     pseudo = data.get("pseudo", "")
@@ -735,6 +803,14 @@ def _make_handler(console: WebConsole):
                         self._json(400, {"error": "pseudo required"})
                         return
                     chat.set_pseudo(pseudo)
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/profile":
+                    pseudo = data["pseudo"] if isinstance(data.get("pseudo"), str) else None
+                    bio = data["bio"] if isinstance(data.get("bio"), str) else None
+                    avatar = None
+                    if isinstance(data.get("avatar"), str):
+                        avatar = base64.b64decode(data["avatar"], validate=True)
+                    chat.set_profile(pseudo=pseudo, bio=bio, avatar=avatar)
                     self._json(200, {"ok": True})
                 elif path == "/api/chat/contact":
                     op = data.get("op", "add")
@@ -879,6 +955,17 @@ def _make_handler(console: WebConsole):
                        extra_headers=[_set_cookie_header(token, console._use_tls)])
 
     return Handler
+
+
+def _chat_conv(data) -> str | None:
+    """Resolve a conversation key from a chat request: an explicit ``conv``, a
+    ``group`` id (prefixed ``g:``), or a direct ``peer`` id."""
+    d = data or {}
+    if isinstance(d.get("conv"), str) and d["conv"]:
+        return d["conv"]
+    if isinstance(d.get("group"), str) and d["group"]:
+        return "g:" + d["group"]
+    return d.get("peer")
 
 
 def _parse_json(body: bytes):
