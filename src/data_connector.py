@@ -2,23 +2,30 @@
 Data connector — plug local applications into the mesh's DATA flow.
 
 An external program (on the same host, or a Docker container sharing the socket)
-connects, authenticates with a token, and then speaks a tiny length-prefixed
-protocol to send and receive end-to-end mesh messages:
+connects, authenticates with a token, declares the **app id** of the section it
+speaks on, and then exchanges end-to-end mesh messages:
 
-    → AUTH   token
+    → AUTH   <app_id:APP_ID_LEN><token>
     ← AUTH_OK
-    → SEND   <target_id:20><payload>      (node.send_data)
+    → SEND   <target_id:20><payload>      (node.send_data, framed with app_id)
     → WHOAMI
     ← WHOAMI <our_node_id:20>
-    ← RECV   <src_id:20><payload>          (node.receive_data, pushed)
+    ← RECV   <src_id:20><payload>          (only for this client's app section)
 
 This is the *data* plane (distinct from the web console, which is the management
 plane). It is fully asyncio and lives on the node's event loop, so it talks to
 the node directly — no threads.
 
+Application multiplexing (see :mod:`src.app_channel`): a client's app id names a
+section of the E2E DATA plane. Outgoing payloads are framed ``app_id ‖ payload``
+before ``node.send_data``; inbound DATA is demultiplexed by that prefix so a
+client only ever sees its own section's traffic. Management traffic never rides
+the DATA plane, so it is structurally outside every app section.
+
 Security (see CLAUDE.md): a token (constant-time compare) gates every action;
 nothing is accepted before AUTH. Frames are size-capped and the client count is
-bounded. Bind to loopback by default, or to a Unix socket (chmod 0600) for
+bounded. A message whose section header is missing/short is dropped, never
+delivered. Bind to loopback by default, or to a Unix socket (chmod 0600) for
 container IPC; an ``ssl_context`` may be supplied to wrap the TCP listener.
 """
 from __future__ import annotations
@@ -29,6 +36,7 @@ import os
 import secrets
 import struct
 
+from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
 from .node_id import NodeID
 
 _LEN = struct.Struct("!I")
@@ -72,7 +80,8 @@ class DataConnector:
         self._ssl = ssl_context
         self.token = token or secrets.token_urlsafe(24)
         self._token_bytes = self.token.encode("utf-8")
-        self._clients: set[asyncio.StreamWriter] = set()
+        # writer -> app_id: each client is bound to one app section.
+        self._clients: dict[asyncio.StreamWriter, bytes] = {}
         self._server: asyncio.AbstractServer | None = None
         self._pump_task: asyncio.Task | None = None
 
@@ -122,15 +131,21 @@ class DataConnector:
                 pass
 
     async def _pump(self) -> None:
-        """Deliver inbound mesh messages to every authenticated client."""
+        """Demultiplex inbound mesh messages by app section to matching clients."""
         while True:
-            src, payload = await self._node.receive_data()
+            src, framed = await self._node.receive_data()
+            parsed = _unframe(framed)
+            if parsed is None:
+                continue  # no section header — drop (reject by default)
+            app_id, payload = parsed
             body = src.raw + payload
-            for w in list(self._clients):
+            for w, w_app in list(self._clients.items()):
+                if w_app != app_id:
+                    continue  # not this client's section
                 try:
                     await _write_frame(w, _RECV, body)
                 except Exception:
-                    self._clients.discard(w)
+                    self._clients.pop(w, None)
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
@@ -139,12 +154,16 @@ class DataConnector:
             return
         try:
             ftype, body = await _read_frame(reader)
-            if ftype != _AUTH or not hmac.compare_digest(body, self._token_bytes):
+            # AUTH body = app_id(APP_ID_LEN) ‖ token. The token is compared in
+            # constant time; the app id names this client's section.
+            if ftype != _AUTH or len(body) < APP_ID_LEN or not hmac.compare_digest(
+                    body[APP_ID_LEN:], self._token_bytes):
                 await _write_frame(writer, _AUTH_FAIL, b"")
                 writer.close()
                 return
+            app_id = body[:APP_ID_LEN]
             await _write_frame(writer, _AUTH_OK, b"")
-            self._clients.add(writer)
+            self._clients[writer] = app_id
             while True:
                 ftype, body = await _read_frame(reader)
                 if ftype == _SEND:
@@ -152,7 +171,7 @@ class DataConnector:
                         continue
                     target = NodeID(body[:20])
                     try:
-                        await self._node.send_data(target, body[20:])
+                        await self._node.send_data(target, _frame(app_id, body[20:]))
                     except Exception:
                         pass  # bad target / self-send — ignore, keep serving
                 elif ftype == _WHOAMI:
@@ -163,7 +182,7 @@ class DataConnector:
         except asyncio.CancelledError:
             raise
         finally:
-            self._clients.discard(writer)
+            self._clients.pop(writer, None)
             try:
                 writer.close()
             except Exception:
@@ -182,24 +201,33 @@ class ConnectorClient:
     started the app and injected the connection coordinates.
     """
 
-    def __init__(self, host: str, port: int, token: str) -> None:
+    def __init__(self, host: str, port: int, token: str,
+                 app_id: bytes = GENERIC_APP_ID) -> None:
+        if len(app_id) != APP_ID_LEN:
+            raise ValueError("app_id must be APP_ID_LEN bytes")
         self._host = host
         self._port = port
         self._token = token
+        self._app_id = app_id
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._inbox: list[tuple[NodeID, bytes]] = []
 
     @classmethod
-    def from_env(cls, environ=None) -> "ConnectorClient":
+    def from_env(cls, environ=None, app_id: bytes | None = None) -> "ConnectorClient":
         e = environ if environ is not None else os.environ
+        # Explicit app_id wins; else NMESH_APP_ID (hex); else the generic section.
+        if app_id is None:
+            app_hex = e.get("NMESH_APP_ID") if hasattr(e, "get") else None
+            app_id = bytes.fromhex(app_hex) if app_hex else GENERIC_APP_ID
         return cls(e["NMESH_CONNECTOR_HOST"],
                    int(e["NMESH_CONNECTOR_PORT"]),
-                   e["NMESH_CONNECTOR_TOKEN"])
+                   e["NMESH_CONNECTOR_TOKEN"],
+                   app_id)
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
-        await _write_frame(self._writer, _AUTH, self._token.encode("utf-8"))
+        await _write_frame(self._writer, _AUTH, self._app_id + self._token.encode("utf-8"))
         ftype, _ = await _read_frame(self._reader)
         if ftype != _AUTH_OK:
             raise ConnectionError("connector authentication failed")

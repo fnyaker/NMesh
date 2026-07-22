@@ -31,7 +31,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .webassets import INDEX_HTML, APP_JS, STYLE_CSS
+from .webassets import INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS, CHAT_CSS
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
@@ -54,12 +54,14 @@ def _scrypt(password: str, salt: bytes) -> bytes:
 class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
-                 password: str | None = None) -> None:
+                 password: str | None = None, chat_bridge=None) -> None:
         self._node = node
         self.host = host
         self.port = port
         self._state_dir = state_dir
         self._use_tls = use_tls
+        # Optional in-process chat app surfaced at /chat (see src.apps.chat_web).
+        self._chat = chat_bridge
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -204,8 +206,17 @@ class WebConsole:
 
     # -- lifecycle --------------------------------------------------------
 
+    def _apps(self) -> list:
+        """Built-in apps hosted in-process by this console (for the Apps list)."""
+        apps = []
+        if self._chat is not None:
+            apps.append({"id": "chat", "name": "Chat", "path": "/chat"})
+        return apps
+
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
+        if self._chat is not None:
+            self._chat.start(self._loop)
         handler = _make_handler(self)
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         if self._ssl_ctx is not None:
@@ -227,6 +238,8 @@ class WebConsole:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if self._chat is not None:
+            self._chat.stop()
 
     @property
     def url(self) -> str:
@@ -297,6 +310,15 @@ _STATIC = {
     "/style.css": ("text/css; charset=utf-8", STYLE_CSS),
 }
 
+# Chat sub-page assets, served only when a chat bridge is attached. Like the
+# console shell, the page HTML/JS/CSS are public; the /api/chat/* endpoints
+# below require the same bearer token as the rest of the console.
+_CHAT_STATIC = {
+    "/chat": ("text/html; charset=utf-8", CHAT_HTML),
+    "/chat.js": ("application/javascript; charset=utf-8", CHAT_JS),
+    "/chat.css": ("text/css; charset=utf-8", CHAT_CSS),
+}
+
 
 def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
@@ -348,6 +370,10 @@ def _make_handler(console: WebConsole):
                 ctype, text = _STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
                 return
+            if console._chat is not None and path in _CHAT_STATIC:
+                ctype, text = _CHAT_STATIC[path]
+                self._send(200, ctype, text.encode("utf-8"))
+                return
             if path == "/api/state":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -355,9 +381,27 @@ def _make_handler(console: WebConsole):
                 try:
                     snap = console._call(console._node.console_snapshot())
                     snap["server_time"] = time.time()
+                    snap["apps"] = console._apps()
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/chat/messages":
+                if console._chat is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                qs = self.path.split("?", 1)
+                since = 0
+                if len(qs) == 2:
+                    from urllib.parse import parse_qs
+                    try:
+                        since = int(parse_qs(qs[1]).get("since", ["0"])[0])
+                    except ValueError:
+                        since = 0
+                self._json(200, console._chat.snapshot(since))
                 return
             if path == "/api/rootcert":
                 if not self._authed():
@@ -592,6 +636,21 @@ def _make_handler(console: WebConsole):
             if path == "/api/net/recheck":
                 ok = console._call(_wrap(console._node.console_recheck_net))
                 self._json(200, {"ok": bool(ok)})
+                return
+            if path == "/api/chat/send":
+                if console._chat is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                data = _parse_json(body)
+                text = (data or {}).get("text", "")
+                if not isinstance(text, str) or not text:
+                    self._json(400, {"error": "text required"})
+                    return
+                try:
+                    console._chat.send_text((data or {}).get("peer"), text)
+                    self._json(200, {"ok": True})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
