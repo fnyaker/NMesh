@@ -209,6 +209,62 @@ class TestAuth:
             console.stop(); await node.stop()
 
 
+class TestAppStore:
+    async def test_publish_install_uninstall_via_api(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            files = {"main.py": base64.b64encode(b"print('hi')\n").decode()}
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/store/publish", token,
+                {"name": "widget", "version": "1.0.0", "files": files})
+            assert status == 200 and j["ok"]
+            app_id = j["app_id"]
+
+            # The catalog view (computed in Python) shows it as installable.
+            status, _, _, view = await asyncio.to_thread(
+                _request, console, "GET", "/api/store", token)
+            assert status == 200
+            entry = next(a for a in view["catalog"] if a["app_id"] == app_id)
+            assert entry["state"] == "install" and entry["action"] == "install"
+
+            # Install, then the view flips to installed with no action.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/store/install", token, {"app_id": app_id})
+            assert status == 200 and j["ok"]
+            _, _, _, view = await asyncio.to_thread(_request, console, "GET", "/api/store", token)
+            entry = next(a for a in view["catalog"] if a["app_id"] == app_id)
+            assert entry["state"] == "installed" and entry["action"] is None
+            assert any(m["app_id"] == app_id for m in view["installed"])
+
+            # Uninstall.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/store/uninstall", token, {"app_id": app_id})
+            assert status == 200 and j["ok"]
+            _, _, _, view = await asyncio.to_thread(_request, console, "GET", "/api/store", token)
+            assert not view["installed"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_store_requires_auth(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(_request, console, "GET", "/api/store")
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_store_action_needs_app_id(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/store/install", token, {})
+            assert status == 400
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestManagement:
     async def test_generate_invite(self):
         node, console = await _make_console()
