@@ -793,7 +793,8 @@ class MeshNode:
                  transport_manager: TransportManager,
                  identity_path: str | None = None,
                  cert_store_path: str | None = None,
-                 session_store_path: str | None = None) -> None:
+                 session_store_path: str | None = None,
+                 app_storage_path: str | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -834,6 +835,10 @@ class MeshNode:
         self._pending_finds: dict[bytes, asyncio.Future] = {}
         self._dht_store = ContentStore()
         self._pending_values: dict[bytes, asyncio.Future] = {}
+        # Per-app local secure store ("drawers"). Encryption keys derive from the
+        # identity; persistence is opt-in (RAM-only without a path).
+        from .app_storage import AppStorage
+        self._app_storage = AppStorage(app_storage_path, self._identity)
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
@@ -3168,6 +3173,27 @@ class MeshNode:
                 fetched[ck] = value
         files = _app_reassemble(manifest, fetched.get)  # verifies every hash
         return manifest, files
+
+    # -- per-app local secure store ("drawers") ---------------------------
+    #
+    # The node holds the app id; callers pass the id bound to the authenticated
+    # session, never one an app chose for itself. See :mod:`src.app_storage`.
+
+    @property
+    def app_storage(self):
+        return self._app_storage
+
+    def app_store_put(self, app_id: bytes, key: str, value: bytes) -> bool:
+        return self._app_storage.put(app_id, key, value)
+
+    def app_store_get(self, app_id: bytes, key: str) -> bytes | None:
+        return self._app_storage.get(app_id, key)
+
+    def app_store_delete(self, app_id: bytes, key: str) -> bool:
+        return self._app_storage.delete(app_id, key)
+
+    def app_store_list(self, app_id: bytes) -> list[str]:
+        return self._app_storage.list_keys(app_id)
 
     async def _handle_challenge(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != 32:

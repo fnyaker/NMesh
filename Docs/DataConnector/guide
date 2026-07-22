@@ -60,11 +60,24 @@ Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | co
 | →    | `WHOAMI` (0x03)     | —                           | demande notre id de nœud |
 | ←    | `WHOAMI` (0x84)     | `id_noeud(20)`              | réponse |
 | ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant **de cette section** |
+| →    | `STORE_GET` (0x04)  | `clef(utf-8)`               | lit le tiroir local de cette section |
+| →    | `STORE_PUT` (0x05)  | `keylen(2) + clef + valeur` | écrit dans le tiroir |
+| →    | `STORE_DEL` (0x06)  | `clef(utf-8)`               | supprime une clé |
+| →    | `STORE_LIST` (0x07) | —                           | liste les clés du tiroir |
+| ←    | `STORE_VALUE` (0x85)| `present(1) + valeur`       | réponse `STORE_GET` |
+| ←    | `STORE_OK` (0x86)   | `ok(1)`                     | réponse `STORE_PUT` / `STORE_DEL` |
+| ←    | `STORE_KEYS` (0x87) | tableau JSON de clés        | réponse `STORE_LIST` |
 
 La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
 `SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
 `ConnectorClient(host, port, token, app_id)` fixe la section ; `from_env` lit
 `NMESH_APP_ID` (hex) ou retombe sur la section générique.
+
+Les trames `STORE_*` pilotent le **store local par app** (« tiroir ») : un
+magasin clé→valeur chiffré, isolé par section. L'`app_id` **n'apparaît pas** dans
+la trame — le nœud le déduit de la session `AUTH`, donc une app ne touche jamais
+le tiroir d'une autre. Détails, bornes et robustesse : `Docs/AppStorage/guide`.
+Côté client : `store_put` / `store_get` / `store_delete` / `store_list`.
 
 ## Sécurité
 

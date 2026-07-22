@@ -29,6 +29,7 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 | `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
 | `apps/chat*.py` | App de chat intégrée : messages/fichiers/flux (`chat.py`), couche sociale contacts/pseudo/groupes (`chat_state.py`), UI console (`chat_web.py`). |
 | `app_package.py` | Packages adressés par contenu + **release signée** (déploiement : app_id lié à l'auteur ML-DSA). |
+| `app_storage.py` | Store local par app (« tiroir ») : clé→valeur chiffré au repos (AES-256-GCM, clé par app dérivée de l'identité), isolé par `app_id`, borné. |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
 
 ## Les documents
