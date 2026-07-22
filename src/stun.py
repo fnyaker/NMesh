@@ -15,6 +15,32 @@ import asyncio
 import os
 import socket
 import struct
+import threading
+
+
+async def _bounded_getaddrinfo(host: str, port: int, *, family, type,
+                               timeout: float = 5.0):
+    """DNS resolution that can never wedge interpreter shutdown.
+
+    ``loop.getaddrinfo`` runs on asyncio's default executor, which is *joined*
+    at shutdown — a lookup that hangs on a restricted network would block it
+    forever. Resolve in a daemon thread we abandon on timeout instead."""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+
+    def _worker() -> None:
+        try:
+            result = socket.getaddrinfo(host, port, family=family, type=type)
+        except Exception as exc:
+            result = exc
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(result))
+
+    threading.Thread(target=_worker, name="nmesh-stun-dns", daemon=True).start()
+    res = await asyncio.wait_for(fut, timeout)
+    if isinstance(res, BaseException):
+        raise res
+    return res
 
 # RFC 5389 constants
 _STUN_MAGIC_COOKIE = 0x2112A442
@@ -130,9 +156,9 @@ async def query_stun_server(host: str, port: int = 19302,
     """
     loop = asyncio.get_running_loop()
     try:
-        addrinfo = await loop.getaddrinfo(host, port, family=socket.AF_INET,
-                                          type=socket.SOCK_DGRAM)
-    except (socket.gaierror, OSError):
+        addrinfo = await _bounded_getaddrinfo(host, port, family=socket.AF_INET,
+                                              type=socket.SOCK_DGRAM)
+    except (socket.gaierror, OSError, asyncio.TimeoutError):
         return None
     if not addrinfo:
         return None

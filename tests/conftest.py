@@ -115,3 +115,22 @@ class ConnectableFakeTransportManager:
 
     async def listen(self, uri: str) -> None: ...
     async def close_all(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Keep tests off the public internet
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_public_network_probes(monkeypatch):
+    """Stub the node's outward network discovery for every test.
+
+    ``discover_public_ip`` (HTTP to ip.me/…) and the STUN probe reach the public
+    internet. On a restricted network (CI, air-gapped) a DNS or connect that
+    hangs would wedge the whole run — the cause of a job that never finishes.
+    Real discovery is network-dependent and not asserted anywhere here, so make
+    both fast no-ops. Tests that exercise discovery inject their own probes."""
+    async def _none(self, *args, **kwargs):
+        return None
+    monkeypatch.setattr(MeshNode, "discover_public_ip", _none, raising=False)
+    monkeypatch.setattr(MeshNode, "_probe_stun_if_udp", _none, raising=False)
