@@ -50,8 +50,12 @@ INDEX_HTML = """<!doctype html>
 
   <section class="card">
     <h2>Peers</h2>
+    <div class="mrow">
+      <button id="ping-btn" class="ghost" title="PING every connected peer now — refreshes round-trip time and liveness">Ping peers</button>
+      <span id="ping-status" class="muted"></span>
+    </div>
     <table id="peers"><thead><tr>
-      <th>Node</th><th>Dir</th><th>Session</th><th>Bad</th><th>In</th><th>Out</th>
+      <th>Node</th><th>Dir</th><th>Session</th><th>RTT</th><th>Bad</th><th>In</th><th>Out</th>
     </tr></thead><tbody></tbody></table>
   </section>
 
@@ -593,16 +597,29 @@ function drawPeers(peers) {
   const tb = $("peers").querySelector("tbody");
   tb.innerHTML = peers.map((p) => {
     const c = p.counters;
+    const rtt = p.rtt_ms != null ? p.rtt_ms + " ms" : "—";
     return `<tr>
       <td class="mono">${short(p.authenticated_id)}</td>
       <td>${p.is_client_side ? "out" : "in"}</td>
       <td>${p.has_session ? "✓" : "—"}</td>
+      <td>${rtt}</td>
       <td>${p.malformed}</td>
       <td>${fmtBytes(c.bytes_in)}</td>
       <td>${fmtBytes(c.bytes_out)}</td>
     </tr>`;
   }).join("");
 }
+
+$("ping-btn").addEventListener("click", async () => {
+  const st = $("ping-status");
+  st.textContent = "pinging…"; st.style.color = "";
+  try {
+    const j = await (await api("/api/ping", "POST")).json();
+    st.textContent = `pinged ${j.sent} peer(s) — RTT updates below`;
+  } catch (_) {
+    st.textContent = "ping failed"; st.style.color = "var(--bad)";
+  }
+});
 
 function knownLimit() {
   const v = parseInt($("known-limit").value, 10);
