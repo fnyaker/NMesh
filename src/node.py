@@ -1391,6 +1391,9 @@ class MeshNode:
         task.add_done_callback(self._announce_tasks.discard)
 
     async def console_ping_peers(self) -> dict:
+        """Console action: PING every authenticated peer now (refreshes RTT and
+        liveness). Returns how many pings were sent; per-peer RTT surfaces in the
+        next snapshot."""
         sent = 0
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
@@ -1401,6 +1404,31 @@ class MeshNode:
             except Exception:
                 pass
         return {"sent": sent}
+
+    async def console_ping_node(self, node_id_hex: str) -> dict:
+        """Console action: ping one known node by id and measure the round-trip.
+
+        If it isn't a direct peer, establish a link on demand first (bounded).
+        Returns reachability + RTT so the console can show liveness per node."""
+        try:
+            nid = NodeID(bytes.fromhex(node_id_hex))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "bad id"}
+        if nid == self._id:
+            return {"ok": False, "error": "self"}
+        peer = next((p for p in self._peers
+                     if p.authenticated_id == nid and p.session is not None), None)
+        if peer is None:
+            peer = await self._ensure_route_to(nid)
+        if peer is None or peer.authenticated_id != nid or peer.session is None:
+            return {"ok": True, "reachable": False}
+        await self.ping(peer)
+        deadline = time.monotonic() + 3.0
+        while peer.ping_sent_at is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        rtt = (round(peer.last_rtt * 1000, 1)
+               if peer.ping_sent_at is None and peer.last_rtt is not None else None)
+        return {"ok": True, "reachable": True, "rtt_ms": rtt}
 
     def _ensure_link_keepalive(self) -> None:
         """Start the link-keepalive loop if it isn't already running."""
@@ -1835,11 +1863,21 @@ class MeshNode:
         now = time.monotonic()
         entries = sorted(self._routing.all_entries(),
                          key=lambda e: e.last_seen, reverse=True)
-        routing = [
-            {"id": e.node_id.raw.hex(), "addresses": list(e.addresses),
-             "seen_ago": max(0.0, now - e.last_seen)}
-            for e in entries
-        ]
+        authed = {p.authenticated_id.raw.hex(): p for p in self._peers
+                  if p.authenticated_id is not None and p.session is not None}
+        routing = []
+        for e in entries:
+            hexid = e.node_id.raw.hex()
+            p = authed.get(hexid)
+            routing.append({
+                "id": hexid,
+                "addresses": list(e.addresses),
+                "seen_ago": max(0.0, now - e.last_seen),
+                "connected": p is not None,
+                "rtt_ms": (round(p.last_rtt * 1000, 1)
+                           if p is not None and p.last_rtt is not None else None),
+                "has_key": bool(e.dsa_pub),
+            })
         return {
             "id": self._id.raw.hex(),
             "addresses": list(self._addresses),
