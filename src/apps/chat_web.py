@@ -190,14 +190,26 @@ class ChatBridge:
         return gid.hex()
 
     def search_pseudo(self, pseudo: str) -> list:
-        """Immediate local-directory hits; also fire a 1-hop query to contacts
-        whose replies land in ``dir_results`` (polled by the UI)."""
-        local = self._chat.state.find_by_pseudo(pseudo)
+        """Find people by pseudo three ways: the local directory (contacts +
+        learned), the **network DHT directory** (anyone who published their
+        pseudo, no prior contact needed), and a 1-hop query to contacts whose
+        replies land in ``dir_results`` (polled by the UI)."""
+        hits = {h["id"]: h for h in self._chat.state.find_by_pseudo(pseudo)}
+        try:
+            for r in self._run(self._chat.lookup_pseudo_network(pseudo)):
+                nid = r.get("id")
+                if isinstance(nid, str):
+                    # A network hit is authoritative (self-signed claim); don't
+                    # let it downgrade a richer local record already present.
+                    hits.setdefault(nid, {"id": nid, "pseudo": r.get("pseudo", ""),
+                                          "kind": "network"})
+        except Exception:
+            pass
         try:
             self._run(self._chat.dir_query(pseudo))
         except Exception:
             pass
-        return local
+        return list(hits.values())
 
     def snapshot(self, since: int) -> dict:
         state = self._chat.state.snapshot()

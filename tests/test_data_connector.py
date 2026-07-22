@@ -344,3 +344,34 @@ class TestAppDHT:
             assert await client.dht_put(b"x" * (MAX_CONTENT + 1)) is None
         finally:
             await client.close(); await conn.stop(); await node.stop()
+
+
+class TestPseudoDir:
+    """Publish/lookup a pseudo over the connector; namespaced by the session app."""
+
+    async def test_publish_and_lookup(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            key = await client.publish_pseudo("Alice")
+            assert key is not None and len(key) == 20
+            res = await client.lookup_pseudo("alice")   # case-insensitive
+            assert res == [{"id": node.id.raw.hex(), "pseudo": "Alice"}]
+            assert await client.lookup_pseudo("nobody") == []
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_namespaced_by_section(self):
+        node, _, conn = await _make()
+        alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
+        beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
+        try:
+            await alpha.connect(); await beta.connect()
+            await alpha.publish_pseudo("alice")
+            # beta's app has its own pseudo namespace → no hit.
+            assert await beta.lookup_pseudo("alice") == []
+            assert await alpha.lookup_pseudo("alice") != []
+        finally:
+            await alpha.close(); await beta.close()
+            await conn.stop(); await node.stop()

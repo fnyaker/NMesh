@@ -71,6 +71,10 @@ Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | co
 | →    | `APP_DHT_GET` (0x09)| `keylen(2) + dec_key + clef_contenu(20)`  | récupère une entrée |
 | ←    | `APP_DHT_KEY` (0x88)| `clef_contenu(20)` ou vide  | réponse `APP_DHT_PUT` (vide = refus) |
 | ←    | `APP_DHT_VALUE`(0x89)| `present(1) + contenu`     | réponse `APP_DHT_GET` |
+| →    | `PSEUDO_PUB` (0x0A)  | `pseudo(utf-8)`             | publie mon pseudo→node id (annuaire) |
+| →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | cherche des node ids par pseudo |
+| ←    | `PSEUDO_KEY` (0x8A)  | `clé_annuaire(20)` ou vide  | réponse `PSEUDO_PUB` |
+| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | réponse `PSEUDO_LOOKUP` |
 
 La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
 `SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
@@ -88,6 +92,11 @@ donne le contenu et, pour le privé, la clé de chiffrement ; le nœud namespace
 l'`app_id` de la session et fait la crypto DHT. Là encore l'`app_id` ne figure
 pas dans la trame. Côté client : `dht_put(contenu, enc_key?)` /
 `dht_get(clef_contenu, dec_key?)`. Détails : `Docs/Architecture/routing.md`.
+
+Les trames `PSEUDO_*` pilotent l'**annuaire de pseudos** (find-by-pseudo réseau) :
+`publish_pseudo(pseudo)` publie une réclamation signée pseudo→node_id (liée à la
+clé de la session), `lookup_pseudo(pseudo)` renvoie tous les node ids réclamant ce
+pseudo. Namespacé par l'`app_id` de la session. Détails : `Docs/Architecture/routing.md`.
 
 ## Sécurité
 
