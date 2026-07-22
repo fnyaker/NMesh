@@ -26,7 +26,7 @@ from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
 from src.apps.chat import ChatApp
-from src.apps.chat_state import ChatState
+from src.apps.chat_state import ChatState, DrawerStore
 from src.apps.chat_web import ChatBridge
 
 
@@ -116,11 +116,14 @@ async def main() -> None:
         chat_client = ConnectorClient(connector.host, connector.port,
                                       connector.token, CHAT_APP_ID)
         await chat_client.connect()
-        chat_state = ChatState(
-            os.path.join(args.data, "chat_state.json") if args.data else None)
+        # Persist chat state + message history in the node's encrypted per-app
+        # drawer (CHAT_APP_ID) — contacts/pseudos never sit in the clear, and the
+        # feed survives restarts. With no --data the drawer is RAM-only.
+        chat_store = DrawerStore(node.app_storage, CHAT_APP_ID)
+        chat_state = ChatState(store=chat_store)
         chat_app = ChatApp(chat_client, node_id=node.id, state=chat_state)
         await chat_app.start()
-        chat_bridge = ChatBridge(chat_app)
+        chat_bridge = ChatBridge(chat_app, store=chat_store)
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
                          state_dir=args.data, use_tls=not args.no_tls,

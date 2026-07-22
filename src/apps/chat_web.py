@@ -29,6 +29,8 @@ _MAX_BODY = 64 * 1024
 _MESSAGES_MAX = 500
 _DIR_RESULTS_MAX = 200
 _CALL_TIMEOUT = 10.0
+_MESSAGES_KEY = "messages"        # drawer key holding the persisted feed
+_MESSAGES_BUDGET = 200 * 1024     # serialised feed ceiling (under the drawer cap)
 
 _HEADERS = {
     "Content-Security-Policy": (
@@ -51,20 +53,60 @@ class ChatBridge:
     Everything still flows through the chat app — the node and the management
     console core are untouched."""
 
-    def __init__(self, chat_app, *, peer: NodeID | None = None) -> None:
+    def __init__(self, chat_app, *, peer: NodeID | None = None, store=None) -> None:
         self._chat = chat_app
         self._peer = peer
+        self._store = store        # DrawerStore | None — persists the feed if set
         self._loop: asyncio.AbstractEventLoop | None = None
         self._messages: deque = deque(maxlen=_MESSAGES_MAX)
         self._dir_results: deque = deque(maxlen=_DIR_RESULTS_MAX)
         self._cursor = 0
         self._lock = threading.Lock()
+        self._load_messages()
 
     # -- lifecycle (start binds the loop that sends are marshalled onto) ---
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
         self._chat.add_listener(self._on_event)
+
+    # -- feed persistence (encrypted drawer, so history survives a restart) --
+
+    def _load_messages(self) -> None:
+        if self._store is None:
+            return
+        try:
+            blob = self._store.get(_MESSAGES_KEY)
+            doc = json.loads(blob.decode("utf-8")) if blob else None
+        except Exception:
+            return  # corrupt/unreadable → start with an empty feed, never crash
+        if not isinstance(doc, dict):
+            return
+        msgs = doc.get("messages")
+        if isinstance(msgs, list):
+            for m in msgs[-_MESSAGES_MAX:]:
+                if isinstance(m, dict) and isinstance(m.get("id"), int):
+                    self._messages.append(m)
+        if isinstance(doc.get("cursor"), int):
+            self._cursor = doc["cursor"]
+        if self._messages:
+            self._cursor = max(self._cursor, self._messages[-1]["id"])
+
+    def _persist_messages_locked(self) -> None:
+        """Write the feed to the drawer, trimming oldest entries until the
+        serialised blob fits (a value ceiling well under the drawer cap)."""
+        if self._store is None:
+            return
+        msgs = list(self._messages)
+        while True:
+            blob = json.dumps({"cursor": self._cursor, "messages": msgs}).encode("utf-8")
+            if len(blob) <= _MESSAGES_BUDGET or len(msgs) <= 1:
+                break
+            msgs = msgs[len(msgs) // 2:]     # drop the oldest half and retry
+        try:
+            self._store.put(_MESSAGES_KEY, blob)
+        except Exception:
+            pass  # best-effort; a store hiccup must not break messaging
 
     def stop(self) -> None:
         self._chat.remove_listener(self._on_event)
@@ -101,6 +143,7 @@ class ChatBridge:
             self._cursor += 1
             rec = {**rec, "id": self._cursor, "conv": conv, "src": src, "t": time.time()}
             self._messages.append(rec)
+            self._persist_messages_locked()
 
     def record_outgoing(self, conv: str, text: str) -> None:
         self._record(conv, "me", {"type": "text", "text": text})
