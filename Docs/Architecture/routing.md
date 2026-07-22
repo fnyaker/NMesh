@@ -59,30 +59,33 @@ en Bluetooth et B↔C en Wi-Fi… »).
 - Le **PING transporte `advertised_uris`** ; `_handle_ping` fait
   `_routing.add(src, uris_valides, dsa_pub)` (fusion) et répond PONG.
   `_validate_uri` filtre avant ajout (« rejeter par défaut »).
-- PING émis : au `bootstrap()`, et par la **boucle de keepalive** (~20 s,
-  `_link_keepalive_loop`). `FOUND_NODE` propage aussi les adresses connues.
+- PING émis : au `bootstrap()`, par la **boucle de keepalive** (~20 s,
+  `_link_keepalive_loop`), **et sur changement d'adresse** (gossip ciblé, voir
+  ci-dessous). `FOUND_NODE` propage aussi les adresses connues. Le PING sert
+  aussi de mesure **RTT** (voir `_handle_pong`, exposé dans la console).
 - Découverte d'adresse : `OBSERVED_ADDR` (un pair nous dit l'IP d'où il nous
   voit), STUN, IP publique HTTP → alimentent `_extra_addrs`, puis `_poke_net`.
 
-### Le trou (⚠ à implémenter — comportement voulu, pas encore codé)
+### Gossip d'adresses sur changement (implémenté)
 
-Aujourd'hui, **un changement d'adresse ne pousse rien immédiatement** :
-`_on_network_change` et `_handle_observed_addr` mettent à jour `_extra_addrs`
-localement mais **n'annoncent pas** aux pairs. Les autres nœuds n'apprennent la
-nouvelle adresse qu'au prochain keepalive (jusqu'à ~20 s) ou par gossip indirect.
+Quand l'ensemble annoncé change, on l'annonce **immédiatement** aux pairs
+récents, sans attendre le keepalive périodique :
 
-**Invariant voulu** : quand une node change d'adresse, elle **annonce** son
-nouvel ensemble d'adresses à **si possible 5 nodes — les plus récemment vues**
-(`last_seen` de la table de routage), en plus du keepalive périodique. C'est du
-gossip Kademlia ciblé : peu de trafic, convergence rapide.
+- `_announce_addresses(reason)` : recalcule `advertised_uris()`, **saute si
+  inchangé** (`_last_announced` → pas de tempête), sinon envoie un PING (qui
+  porte déjà `advertised_uris`) aux **≤ `_ANNOUNCE_FANOUT` = 5** pairs
+  authentifiés triés par `last_seen` décroissant (`_recent_authed_peers`). Gossip
+  Kademlia ciblé : peu de trafic, convergence rapide. Ne lève jamais.
+- Déclencheurs (`_announce_addresses_soon`, fire-and-forget depuis un contexte
+  sync) : `_on_network_change` (IP publique/locale), `_handle_observed_addr`
+  (nouvelle adresse observée), `add_listen` / `remove_listen`.
+- Le pair receveur, via `_handle_ping`, fait `_routing.add(src, advertised_uris)`
+  → il connaît la nouvelle adresse. Les nœuds plus lointains l'apprennent
+  paresseusement par lookup Kademlia (`FIND_NODE`) — modèle Kademlia normal.
 
-Piste d'implémentation (à valider) : sur `_on_network_change` /
-`_handle_observed_addr`, si l'ensemble annoncé a réellement changé, envoyer un
-PING (qui porte déjà `advertised_uris`) aux ≤ 5 pairs authentifiés triés par
-`last_seen` décroissant ; router vers ceux qui ne sont pas des pairs directs.
-Borné (≤ 5), idempotent, sans tempête (dé-dupliquer sur « ensemble inchangé »).
-
-> Tant que ce trou existe, ne pas *supposer* dans le code qu'un pair fraîchement
-> authentifié connaît toutes nos adresses. Si tu combles le trou, **mets ce
-> document à jour** (retire la section « à implémenter »).
+Limite assumée : on pousse à ses **pairs directs** les plus récents (un PING est
+un message direct). La diffusion large reste lazy via Kademlia. Un pair
+fraîchement authentifié n'a donc pas *instantanément* toutes nos adresses ;
+elles arrivent au premier gossip/keepalive. Ne pas coder de dépendance dure sur
+« pair authentifié ⟹ toutes ses adresses connues à l'instant T ».
 </content>

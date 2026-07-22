@@ -75,12 +75,15 @@ class TCPTransport(BaseTransport):
     async def receive(self) -> Packet:
         if self._reader is None:
             raise ConnectionError("not connected")
+        # asyncio.timeout (not wait_for): wait_for can *lose* an outer
+        # cancellation when its inner read completes in the same loop step, so a
+        # cancelled receive loop would silently re-block instead of exiting —
+        # wedging peer shutdown. asyncio.timeout propagates cancellation cleanly.
         try:
-            raw_len = await asyncio.wait_for(
-                self._reader.readexactly(_FRAME.size), _READ_TIMEOUT)
-            length = _FRAME.unpack(raw_len)[0]
-            data = await asyncio.wait_for(
-                self._reader.readexactly(length), _READ_TIMEOUT)
+            async with asyncio.timeout(_READ_TIMEOUT):
+                raw_len = await self._reader.readexactly(_FRAME.size)
+                length = _FRAME.unpack(raw_len)[0]
+                data = await self._reader.readexactly(length)
         except asyncio.TimeoutError:
             raise ConnectionError("read timeout")
         return Packet.unpack(data)

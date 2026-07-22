@@ -122,6 +122,9 @@ _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 # established peer well inside that window — both sides do it, so each link
 # carries a packet each way and a few misses still leave margin.
 _LINK_KEEPALIVE_INTERVAL = 20.0
+# When our advertised address set changes, push it to this many most-recently
+# seen peers (targeted Kademlia-style gossip). Bounded → no storm.
+_ANNOUNCE_FANOUT       = 5
 
 # Invite blocks (base64 join bundles: advertised URIs + invite code)
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
@@ -633,6 +636,9 @@ class _Peer:
         self._invite_lockout_ts: float = 0.0
         self.dsa_pub: bytes = b""
         self._malformed: int = 0
+        # Liveness / round-trip: set when we PING, cleared+measured on the PONG.
+        self.ping_sent_at: float | None = None
+        self.last_rtt: float | None = None
         self.counters = Counters()   # per-link throughput
         self.total = None            # node-wide Counters, set by the node
         # Invoked when the receive loop exits on its own (dead link or abuse),
@@ -858,6 +864,8 @@ class MeshNode:
         self._punch_keepalive_task: asyncio.Task | None = None
         # Periodic PING that keeps idle authenticated links from timing out.
         self._keepalive_task: asyncio.Task | None = None
+        self._last_announced: tuple[str, ...] | None = None
+        self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         # Manual hole-punch targets → {"sent": int, "started": float, "task": Task}
         self._manual_holes: OrderedDict[tuple[str, int], dict] = OrderedDict()
@@ -917,6 +925,7 @@ class MeshNode:
                     and new not in self._local_ips
                     and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
                 self._extra_addrs.append(new)
+        self._announce_addresses_soon("network-change")
 
     def _poke_net(self, reason: str) -> None:
         if self._net_monitor is not None:
@@ -937,12 +946,15 @@ class MeshNode:
         self._running = True
         self._local_ips = local_ip_addresses()
         self._poke_net("listener-added")
+        await self._announce_addresses("listener-added")
 
     async def remove_listen(self, uri: str) -> bool:
         """Stop listening on an address at runtime."""
         ok = await self._transport_manager.stop_listen(uri)
         if uri in self._addresses:
             self._addresses.remove(uri)
+        if ok:
+            await self._announce_addresses("listener-removed")
         return ok
 
     async def start_udp(self, port: int, host: str = "0.0.0.0") -> None:
@@ -1285,6 +1297,13 @@ class MeshNode:
     async def stop(self) -> None:
         self._running = False
         self._persist_state()
+        # Cancel any in-flight address-gossip tasks before tearing down links.
+        tasks = list(self._announce_tasks)
+        self._announce_tasks.clear()
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._stop_link_keepalive()
         for peer in list(self._peers):
             await peer.stop()
@@ -1335,7 +1354,53 @@ class MeshNode:
     async def ping(self, peer: _Peer) -> None:
         payload = _encode_addresses(self.advertised_uris())
         packet = Packet.create(PING, self._id.raw, NodeID(b"\xff" * 20).raw, payload)
+        peer.ping_sent_at = time.monotonic()   # for RTT measurement on the PONG
         await peer.send(packet)
+
+    def _recent_authed_peers(self, limit: int) -> list['_Peer']:
+        peers = [p for p in self._peers
+                 if p.authenticated_id is not None and p.session is not None]
+        def seen(p):
+            e = self._routing.get(p.authenticated_id)
+            return e.last_seen if e is not None else 0.0
+        peers.sort(key=seen, reverse=True)
+        return peers[:limit]
+
+    async def _announce_addresses(self, reason: str) -> None:
+        """Push our advertised address set to the most-recently-seen peers when
+        it changes (targeted Kademlia-style gossip). A PING already carries
+        advertised_uris. Skips an unchanged set (no storm); never raises."""
+        current = tuple(self.advertised_uris())
+        if current == self._last_announced:
+            return
+        self._last_announced = current
+        for peer in self._recent_authed_peers(_ANNOUNCE_FANOUT):
+            try:
+                await self.ping(peer)
+            except Exception:
+                pass
+
+    def _announce_addresses_soon(self, reason: str) -> None:
+        """Fire-and-forget address announce for sync contexts (the network-change
+        callback). The task is tracked so stop() can cancel it — an untracked
+        announce awaiting a PING write would otherwise wedge teardown."""
+        if not self._running:
+            return
+        task = asyncio.ensure_future(self._announce_addresses(reason))
+        self._announce_tasks.add(task)
+        task.add_done_callback(self._announce_tasks.discard)
+
+    async def console_ping_peers(self) -> dict:
+        sent = 0
+        for peer in list(self._peers):
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            try:
+                await self.ping(peer)
+                sent += 1
+            except Exception:
+                pass
+        return {"sent": sent}
 
     def _ensure_link_keepalive(self) -> None:
         """Start the link-keepalive loop if it isn't already running."""
@@ -1760,6 +1825,8 @@ class MeshNode:
                 "is_client_side": p.is_client_side,
                 "has_session": p.session is not None,
                 "malformed": p._malformed,
+                "rtt_ms": (round(p.last_rtt * 1000, 1)
+                           if p.last_rtt is not None else None),
                 "counters": p.counters.as_dict(),
                 "transport": self._peer_scheme(p),
             })
@@ -2828,7 +2895,9 @@ class MeshNode:
         await peer.send(pong)
 
     async def _handle_pong(self, peer: _Peer, packet: Packet) -> None:
-        pass
+        if peer.ping_sent_at is not None:
+            peer.last_rtt = max(0.0, time.monotonic() - peer.ping_sent_at)
+            peer.ping_sent_at = None
 
     async def _handle_find_node(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != 20 + _QID_LEN:
@@ -2899,6 +2968,7 @@ class MeshNode:
         # A peer sees us at an address we didn't know — our public IP may
         # have just changed. Re-verify.
         self._poke_net("observed-addr")
+        self._announce_addresses_soon("observed-addr")
 
     async def _handle_find_value(self, peer: _Peer, packet: Packet) -> None:
         # payload: key(20) || query_id(8) ; reply carries the value or empty
