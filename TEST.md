@@ -40,6 +40,14 @@ Ils vérifient notamment :
 La CI GitHub (`.github/workflows/ci.yml`) exécute les tests unitaires puis
 d'intégration à chaque push sur `main` et à chaque pull request.
 
+Les tests tournent **dans l'image de base** (`docker/Dockerfile.base`, publiée
+par `base-image.yml`), qui embarque déjà un **liboqs compilé** et toutes les
+dépendances. On ne recompile donc plus la lourde bibliothèque C à chaque run, et
+on teste sur le runtime exact que l'app embarque (Python 3.13). Si l'image de
+base n'est pas joignable (premier bootstrap, ou PR de fork sans accès aux
+paquets), la CI la construit une fois localement pour rester verte — même repli
+que le job `docker`.
+
 ---
 
 ## Où sont les tests
