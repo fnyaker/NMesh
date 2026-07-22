@@ -995,10 +995,10 @@ $("fetch-btn").addEventListener("click", async () => {
 # ---------------------------------------------------------------------------
 # Chat sub-page (/chat) — hosted by the console, reuses the console session.
 #
-# Same strict CSP as the console (default-src 'self', no inline). The page picks
-# up the bearer token the console stored in sessionStorage; opened cold it asks
-# for the console password and logs in itself. Sends/receives go through the
-# in-process chat app via /api/chat/*.
+# A full chat client: identity (your id + pseudo), a contact directory, pseudo
+# search, and both 1:1 and group conversations. All of it is app state served
+# by the ChatBridge; the node is untouched. Same strict CSP as the console
+# (default-src 'self', no inline), same bearer token via sessionStorage.
 # ---------------------------------------------------------------------------
 
 CHAT_HTML = """<!doctype html>
@@ -1020,17 +1020,59 @@ CHAT_HTML = """<!doctype html>
   </form>
 </div>
 <div id="app" class="hidden">
-  <header>
-    <b>NMesh<span>chat</span></b>
-    <span id="peer" class="muted mono"></span>
-    <a href="/" class="back">← console</a>
-  </header>
-  <div id="log"></div>
-  <form id="send-form">
-    <input id="peer-in" class="mono" placeholder="peer id (hex)">
-    <input id="msg" placeholder="type a message…" autocomplete="off">
-    <button>Send</button>
-  </form>
+  <aside id="side">
+    <div class="brand">NMesh<span>chat</span> <a href="/" class="back">console</a></div>
+
+    <div class="block">
+      <div class="mrow">
+        <input id="pseudo" placeholder="your pseudo" maxlength="32">
+        <button id="save-pseudo" title="save and announce your pseudo to contacts">Save</button>
+      </div>
+      <div class="myid">
+        <span class="lbl">my id</span>
+        <code id="myid" class="mono" title="share this so others can add you"></code>
+        <button id="copy-id" class="mini" title="copy my id">copy</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="mrow">
+        <input id="search-in" placeholder="find someone by pseudo…">
+        <button id="search-btn">Find</button>
+      </div>
+      <div id="search-results" class="results"></div>
+    </div>
+
+    <div class="listhdr">Contacts <button id="add-contact" class="mini">+ by id</button></div>
+    <div id="add-contact-form" class="addform hidden">
+      <input id="ac-id" class="mono" placeholder="node id (hex)">
+      <input id="ac-pseudo" placeholder="pseudo (optional)">
+      <div class="mrow"><button id="ac-save">Add</button><button id="ac-cancel" class="ghost">Cancel</button></div>
+    </div>
+    <div id="contacts" class="list"></div>
+
+    <div class="listhdr">Groups <button id="new-group" class="mini">+ new</button></div>
+    <div id="new-group-form" class="addform hidden">
+      <input id="ng-name" placeholder="group name">
+      <div class="muted small">pick members</div>
+      <div id="ng-members" class="memberpick"></div>
+      <div class="mrow"><button id="ng-create">Create</button><button id="ng-cancel" class="ghost">Cancel</button></div>
+    </div>
+    <div id="groups" class="list"></div>
+  </aside>
+
+  <main id="main">
+    <header>
+      <b id="conv-title">Select a conversation</b>
+      <span id="conv-sub" class="muted mono"></span>
+      <button id="conv-del" class="mini hidden">remove</button>
+    </header>
+    <div id="log"></div>
+    <form id="send-form">
+      <input id="msg" placeholder="type a message…" autocomplete="off" disabled>
+      <button id="send-btn" disabled>Send</button>
+    </form>
+  </main>
 </div>
 <script src="/chat.js"></script>
 </body>
@@ -1042,108 +1084,229 @@ CHAT_CSS = """
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
 font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 .hidden{display:none!important}.mono{font-family:ui-monospace,Menlo,monospace}.muted{color:var(--muted)}
-.err{color:var(--bad);min-height:1.2em;margin-top:8px}
+.small{font-size:12px}.err{color:var(--bad);min-height:1.2em;margin-top:8px}
 .center{display:flex;min-height:100vh;align-items:center;justify-content:center}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;width:320px;text-align:center}
-h1{margin:0 0 12px}h1 span,header span{color:var(--accent);margin-left:5px}
-input,button{font:inherit}input{width:100%;background:#0e1116;border:1px solid var(--line);
-color:var(--fg);border-radius:8px;padding:9px 11px;margin-top:8px}
-button{background:var(--accent);color:#04122a;border:0;border-radius:8px;padding:9px 14px;font-weight:600;cursor:pointer}
-#app{max-width:760px;margin:0 auto;height:100vh;display:flex;flex-direction:column;padding:12px}
-header{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line)}
-header .back{margin-left:auto;color:var(--accent);text-decoration:none;font-size:13px}
-#log{flex:1;overflow-y:auto;padding:12px 4px;display:flex;flex-direction:column;gap:8px}
-.bubble{max-width:75%;padding:8px 12px;border-radius:12px;background:var(--card);border:1px solid var(--line)}
-.me{align-self:flex-end;background:#123;border-color:#245}
-.who{font-size:11px;color:var(--muted);margin-bottom:2px}
-#send-form{display:flex;gap:8px;padding-top:8px}#send-form #msg{flex:1;margin:0}
-#peer-in{width:auto;flex:0 0 200px;margin:0}
+h1{margin:0 0 12px}h1 span{color:var(--accent);margin-left:5px}
+input,button{font:inherit}
+input{background:#0e1116;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;width:100%}
+button{background:var(--accent);color:#04122a;border:0;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.mini{padding:2px 8px;font-size:12px;font-weight:600}
+.card input{margin-top:8px}.card button{margin-top:8px;width:100%}
+#app{display:flex;height:100vh}
+#side{width:300px;flex:0 0 300px;border-right:1px solid var(--line);padding:12px;overflow-y:auto;display:flex;flex-direction:column;gap:12px}
+.brand{font-weight:700}.brand span{color:var(--accent);margin-left:4px}
+.brand .back{float:right;color:var(--accent);text-decoration:none;font-weight:400;font-size:12px}
+.mrow{display:flex;gap:6px;align-items:center}
+.block{border-bottom:1px solid var(--line);padding-bottom:12px}
+.myid{display:flex;align-items:center;gap:6px;margin-top:8px}
+.myid .lbl{color:var(--muted);font-size:11px}#myid{flex:1;overflow:hidden;text-overflow:ellipsis;font-size:12px}
+.results{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.results .r{display:flex;align-items:center;gap:6px;font-size:12px}
+.results .r .p{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.listhdr{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
+.addform{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
+.memberpick{max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+.memberpick label{display:flex;gap:6px;align-items:center;font-size:12px}
+.memberpick input{width:auto}
+.list{display:flex;flex-direction:column;gap:3px}
+.item{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent}
+.item:hover{background:var(--card)}.item.sel{background:var(--card);border-color:var(--line)}
+.item .av{width:26px;height:26px;border-radius:50%;background:#245;color:#cfe;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:0 0 26px}
+.item .av.g{background:#423}
+.item .nm{flex:1;overflow:hidden}.item .nm .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .nm .s{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#main header{display:flex;gap:10px;align-items:center;padding:12px;border-bottom:1px solid var(--line)}
+#conv-sub{margin-left:auto}
+#log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.bubble{max-width:70%;padding:8px 12px;border-radius:12px;background:var(--card);border:1px solid var(--line)}
+.bubble.me{align-self:flex-end;background:#123;border-color:#245}
+.bubble .who{font-size:11px;color:var(--muted);margin-bottom:2px}
+#send-form{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
+#send-form #msg{flex:1}
 """
 
 CHAT_JS = r"""
-let TOKEN = null, cursor = 0, timer = null;
-const $ = (id) => document.getElementById(id);
+let TOKEN=null, cursor=0, sel=null, timer=null;
+let ST={me:null,pseudo:"",contacts:[],known:[],groups:[]};
+const MSGS={};            // conv -> [records]
+let SEARCH=[];            // latest search hits (local + dir replies)
+const $=(id)=>document.getElementById(id);
+const short=(h)=>h?h.slice(0,10)+"…":"";
+const esc=(s)=>{const d=document.createElement("div");d.textContent=s==null?"":s;return d.innerHTML;};
 
-async function api(path, method = "GET", body) {
-  const h = { Authorization: "Bearer " + TOKEN };
-  if (body) h["Content-Type"] = "application/json";
-  const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
-  if (r.status === 401) { logout(); throw new Error("unauth"); }
-  return r;
+async function api(path, method="GET", body){
+  const h={Authorization:"Bearer "+TOKEN}; if(body)h["Content-Type"]="application/json";
+  const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});
+  if(r.status===401){logout();throw new Error("unauth");} return r;
 }
+function logout(){TOKEN=null;try{sessionStorage.removeItem("nmesh_token");}catch(_){}
+  if(timer){clearInterval(timer);timer=null;}$("app").classList.add("hidden");$("login").classList.remove("hidden");}
 
-function logout() {
-  TOKEN = null;
-  try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
-  if (timer) { clearInterval(timer); timer = null; }
-  $("app").classList.add("hidden");
-  $("login").classList.remove("hidden");
-}
-
-async function enter(token) {
-  const r = await fetch("/api/chat/messages?since=0", { headers: { Authorization: "Bearer " + token } });
-  if (!r.ok) return false;
-  TOKEN = token;
-  try { sessionStorage.setItem("nmesh_token", TOKEN); } catch (_) {}
-  $("login").classList.add("hidden");
-  $("app").classList.remove("hidden");
-  const s = await r.json();
-  if (s.peer) { $("peer").textContent = "peer " + s.peer.slice(0, 12) + "…"; $("peer-in").value = s.peer; }
-  render(s.messages); cursor = s.cursor || 0;
-  if (timer) clearInterval(timer);
-  timer = setInterval(poll, 1000);
+async function enter(token){
+  const r=await fetch("/api/chat/messages?since=0",{headers:{Authorization:"Bearer "+token}});
+  if(!r.ok)return false;
+  TOKEN=token; try{sessionStorage.setItem("nmesh_token",TOKEN);}catch(_){}
+  $("login").classList.add("hidden");$("app").classList.remove("hidden");
+  apply(await r.json());
+  if(timer)clearInterval(timer); timer=setInterval(poll,1000);
   return true;
 }
-
-$("login-form").addEventListener("submit", async (e) => {
-  e.preventDefault(); $("err").textContent = "";
-  try {
-    const res = await fetch("/api/login", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: $("password").value }),
-    });
-    if (!res.ok) { const j = await res.json().catch(() => ({})); $("err").textContent = j.error || "login failed"; return; }
-    $("password").value = "";
-    await enter((await res.json()).token);
-  } catch (_) { $("err").textContent = "network error"; }
+$("login-form").addEventListener("submit",async(e)=>{
+  e.preventDefault();$("err").textContent="";
+  try{const res=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:$("password").value})});
+    if(!res.ok){const j=await res.json().catch(()=>({}));$("err").textContent=j.error||"login failed";return;}
+    $("password").value=""; await enter((await res.json()).token);
+  }catch(_){$("err").textContent="network error";}
 });
 
-async function poll() {
-  try {
-    const s = await (await api("/api/chat/messages?since=" + cursor)).json();
-    render(s.messages); if (s.cursor) cursor = s.cursor;
-  } catch (_) {}
+async function poll(){ try{ apply(await(await api("/api/chat/messages?since="+cursor)).json()); }catch(_){}}
+
+function apply(s){
+  ST={me:s.me,pseudo:s.pseudo||"",contacts:s.contacts||[],known:s.known||[],groups:s.groups||[]};
+  for(const m of s.messages||[]){ (MSGS[m.conv]=MSGS[m.conv]||[]).push(m); }
+  if(s.cursor)cursor=s.cursor;
+  if(s.dir_results&&s.dir_results.length){ mergeDir(s.dir_results); }
+  renderSide(); if(sel)renderLog();
+}
+function mergeDir(rows){
+  for(const r of rows){ if(!SEARCH.some(x=>x.id===r.id)) SEARCH.push({id:r.id,pseudo:r.pseudo,kind:"found"}); }
+  renderSearch();
 }
 
-function render(msgs) {
-  const log = $("log");
-  for (const m of msgs || []) {
-    const d = document.createElement("div");
-    d.className = "bubble" + (m.src === "me" ? " me" : "");
-    const who = m.src === "me" ? "you" : (m.src || "").slice(0, 12) + "…";
-    const txt = m.type === "file" ? ("📎 " + m.name + " (" + m.size + " B)") : m.text;
-    d.innerHTML = '<div class="who"></div><div class="body"></div>';
-    d.querySelector(".who").textContent = who;
-    d.querySelector(".body").textContent = txt;
+// ---- identity ----
+$("save-pseudo").addEventListener("click",async()=>{
+  try{ await api("/api/chat/pseudo","POST",{pseudo:$("pseudo").value}); }catch(_){}
+});
+$("copy-id").addEventListener("click",async()=>{
+  if(!ST.me)return; try{await navigator.clipboard.writeText(ST.me);$("copy-id").textContent="copied";
+    setTimeout(()=>$("copy-id").textContent="copy",1200);}catch(_){}
+});
+
+// ---- contacts ----
+$("add-contact").addEventListener("click",()=>$("add-contact-form").classList.toggle("hidden"));
+$("ac-cancel").addEventListener("click",()=>$("add-contact-form").classList.add("hidden"));
+$("ac-save").addEventListener("click",async()=>{
+  const id=$("ac-id").value.trim(), pseudo=$("ac-pseudo").value.trim();
+  try{ const r=await api("/api/chat/contact","POST",{op:"add",id,pseudo});
+    if(r.ok){$("ac-id").value="";$("ac-pseudo").value="";$("add-contact-form").classList.add("hidden");}
+    else alert("could not add (check the id)");
+  }catch(_){}
+});
+async function addContact(id,pseudo){ try{await api("/api/chat/contact","POST",{op:"add",id,pseudo:pseudo||""});}catch(_){}}
+async function removeContact(id){ try{await api("/api/chat/contact","POST",{op:"remove",id});}catch(_){}
+  if(sel===id){sel=null;renderMain();} }
+
+// ---- groups ----
+$("new-group").addEventListener("click",()=>{ renderMemberPick(); $("new-group-form").classList.toggle("hidden"); });
+$("ng-cancel").addEventListener("click",()=>$("new-group-form").classList.add("hidden"));
+$("ng-create").addEventListener("click",async()=>{
+  const name=$("ng-name").value.trim()||"group";
+  const members=[...document.querySelectorAll("#ng-members input:checked")].map(x=>x.value);
+  try{ await api("/api/chat/group","POST",{op:"create",name,members});
+    $("ng-name").value="";$("new-group-form").classList.add("hidden");
+  }catch(_){}
+});
+async function removeGroup(gid){ try{await api("/api/chat/group","POST",{op:"remove",id:gid});}catch(_){}
+  if(sel==="g:"+gid){sel=null;renderMain();} }
+
+function renderMemberPick(){
+  const box=$("ng-members"); box.innerHTML="";
+  for(const c of ST.contacts){
+    const l=document.createElement("label");
+    l.innerHTML='<input type="checkbox" value="'+esc(c.id)+'"><span>'+esc(c.pseudo||short(c.id))+'</span>';
+    box.appendChild(l);
+  }
+  if(!ST.contacts.length) box.innerHTML='<span class="muted small">add contacts first</span>';
+}
+
+// ---- search ----
+$("search-btn").addEventListener("click",doSearch);
+$("search-in").addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();doSearch();}});
+async function doSearch(){
+  const q=$("search-in").value.trim(); if(!q){SEARCH=[];renderSearch();return;}
+  try{ const j=await(await api("/api/chat/search","POST",{pseudo:q})).json(); SEARCH=j.results||[]; renderSearch(); }
+  catch(_){}
+}
+function renderSearch(){
+  const el=$("search-results"); el.innerHTML="";
+  for(const r of SEARCH){
+    const row=document.createElement("div"); row.className="r";
+    row.innerHTML='<span class="p">'+esc(r.pseudo||short(r.id))+' <span class="muted mono">'+short(r.id)+'</span></span>';
+    const open=document.createElement("button"); open.className="mini"; open.textContent="open";
+    open.onclick=()=>{ selectConv(r.id); };
+    const add=document.createElement("button"); add.className="mini ghost"; add.textContent="add";
+    add.onclick=()=>addContact(r.id,r.pseudo);
+    row.appendChild(open); row.appendChild(add); el.appendChild(row);
+  }
+}
+
+// ---- conversation selection + rendering ----
+function convName(conv){
+  if(conv.startsWith("g:")){ const g=ST.groups.find(x=>"g:"+x.id===conv); return g?g.name:"group"; }
+  const c=ST.contacts.find(x=>x.id===conv); if(c&&c.pseudo)return c.pseudo;
+  const k=ST.known.find(x=>x.id===conv); if(k&&k.pseudo)return k.pseudo;
+  return short(conv);
+}
+function selectConv(conv){ sel=conv; renderMain(); renderSide(); }
+function renderMain(){
+  const isGroup=sel&&sel.startsWith("g:");
+  $("conv-title").textContent= sel?convName(sel):"Select a conversation";
+  $("conv-sub").textContent= sel? (isGroup? "":(sel)) : "";
+  $("msg").disabled=!sel; $("send-btn").disabled=!sel;
+  $("conv-del").classList.toggle("hidden",!sel);
+  renderLog();
+}
+$("conv-del").addEventListener("click",()=>{ if(!sel)return;
+  if(sel.startsWith("g:")) removeGroup(sel.slice(2)); else removeContact(sel); });
+
+function renderLog(){
+  const log=$("log"); log.innerHTML="";
+  for(const m of (MSGS[sel]||[])){
+    const d=document.createElement("div"); d.className="bubble"+(m.src==="me"?" me":"");
+    const who=m.src==="me"?"you":convName(m.src)||short(m.src);
+    const body=m.type==="file"?("📎 "+esc(m.name)+" ("+m.size+" B)"):esc(m.text);
+    d.innerHTML='<div class="who">'+esc(who)+'</div><div class="body">'+body+'</div>';
     log.appendChild(d);
   }
-  if (msgs && msgs.length) log.scrollTop = log.scrollHeight;
+  log.scrollTop=log.scrollHeight;
 }
 
-$("send-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const text = $("msg").value; if (!text) return;
-  const peer = $("peer-in").value.trim() || undefined;
-  try {
-    const r = await api("/api/chat/send", "POST", { text, peer });
-    if (r.ok) { $("msg").value = ""; } else { const j = await r.json().catch(() => ({})); alert("send failed: " + (j.error || "")); }
-  } catch (_) {}
+function renderSide(){
+  $("myid").textContent= ST.me||"—";
+  const pin=$("pseudo"); if(document.activeElement!==pin) pin.value=ST.pseudo;
+  // contacts + recent 1:1 conversations from strangers
+  const cEl=$("contacts"); cEl.innerHTML="";
+  const seen=new Set();
+  for(const c of ST.contacts){ seen.add(c.id); cEl.appendChild(item(c.id,c.pseudo||short(c.id),short(c.id),false)); }
+  for(const conv of Object.keys(MSGS)){
+    if(conv.startsWith("g:")||seen.has(conv))continue; seen.add(conv);
+    cEl.appendChild(item(conv,convName(conv),short(conv)+" · not a contact",false));
+  }
+  const gEl=$("groups"); gEl.innerHTML="";
+  for(const g of ST.groups){ gEl.appendChild(item("g:"+g.id,g.name,(g.members||[]).length+" members",true)); }
+}
+function item(conv,title,sub,isGroup){
+  const d=document.createElement("div"); d.className="item"+(sel===conv?" sel":"");
+  const initial=(title||"?").trim().charAt(0).toUpperCase()||"?";
+  d.innerHTML='<div class="av'+(isGroup?" g":"")+'">'+esc(initial)+'</div>'+
+    '<div class="nm"><div class="t">'+esc(title)+'</div><div class="s">'+esc(sub)+'</div></div>';
+  d.onclick=()=>selectConv(conv);
+  return d;
+}
+
+// ---- send ----
+$("send-form").addEventListener("submit",async(e)=>{
+  e.preventDefault(); const text=$("msg").value; if(!text||!sel)return;
+  const body= sel.startsWith("g:")? {text,group:sel.slice(2)} : {text,peer:sel};
+  try{ const r=await api("/api/chat/send","POST",body);
+    if(r.ok){$("msg").value="";} else {const j=await r.json().catch(()=>({}));alert("send failed: "+(j.error||""));}
+  }catch(_){}
 });
 
-// Reuse the console session if we arrived from it in the same tab.
-(function () {
-  let tok = null;
-  try { tok = sessionStorage.getItem("nmesh_token"); } catch (_) {}
-  if (tok) enter(tok).then((ok) => { if (!ok) $("login").classList.remove("hidden"); });
-})();
+(function(){ let tok=null; try{tok=sessionStorage.getItem("nmesh_token");}catch(_){}
+  if(tok) enter(tok).then((ok)=>{ if(!ok)$("login").classList.remove("hidden"); }); })();
 """

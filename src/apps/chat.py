@@ -13,16 +13,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import secrets
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..node_id import NodeID
+from .chat_state import ChatState
 
 _TEXT = 0x01
 _FILE_OFFER = 0x02
 _FILE_CHUNK = 0x03
 _STREAM = 0x04
+_PROFILE = 0x05        # announce my pseudo
+_GROUP_INVITE = 0x06   # define/join a group (roster)
+_GROUP_TEXT = 0x07     # a message addressed to a group
+_DIR_QUERY = 0x08      # "who is <pseudo>?" (answered only about oneself)
+_DIR_REPLY = 0x09      # "<pseudo> is <node_id>"
 
 # FILE_OFFER body: transfer_id(4) | total_chunks(4) | size(8) | sha256(32) | name_len(2) | name
 _OFFER = struct.Struct("!IIQ32sH")
@@ -36,6 +43,12 @@ _MAX_FILE = 256 * 1024 * 1024
 _MAX_CHUNKS = _MAX_FILE // 1024
 _MAX_TRANSFERS = 64
 _MAX_NAME = 512
+
+GROUP_ID_LEN = 16
+_MAX_PSEUDO_BYTES = 256
+_MAX_GROUP_NAME_BYTES = 256
+_MAX_GROUP_MEMBERS = 256
+_MAX_GROUP_TEXT = 16_000
 
 
 @dataclass
@@ -60,6 +73,33 @@ class Frame:
     payload: bytes
 
 
+@dataclass
+class ProfileReceived:
+    src: NodeID
+    pseudo: str
+
+
+@dataclass
+class GroupMessage:
+    group_id: bytes
+    src: NodeID
+    text: str
+
+
+@dataclass
+class GroupInvited:
+    group_id: bytes
+    name: str
+    members: list = field(default_factory=list)   # list[NodeID]
+
+
+@dataclass
+class DirResult:
+    query_id: int
+    node_id: NodeID
+    pseudo: str
+
+
 class _Transfer:
     __slots__ = ("name", "size", "digest", "total", "chunks")
 
@@ -78,10 +118,15 @@ class _Transfer:
 
 
 class ChatApp:
-    """Text + file + real-time chat over a :class:`ConnectorClient`."""
+    """Text + file + real-time chat over a :class:`ConnectorClient`, plus the
+    app-level social layer: contacts, pseudos, groups and pseudo lookup — all
+    kept in :class:`ChatState` (the node knows nothing of it)."""
 
-    def __init__(self, client) -> None:
+    def __init__(self, client, *, node_id: NodeID | None = None,
+                 state: ChatState | None = None) -> None:
         self._client = client
+        self.node_id = node_id
+        self.state = state or ChatState()
         self._events: asyncio.Queue = asyncio.Queue()
         self._listeners: list = []
         self._transfers: dict[tuple[bytes, int], _Transfer] = {}
@@ -158,6 +203,93 @@ class ChatApp:
         await self._client.send(
             target, bytes([_STREAM]) + _FRAME.pack(stream_id, seq, time.time_ns()) + payload)
 
+    # -- social layer: pseudo, contacts, groups, lookup -------------------
+
+    async def send_profile(self, target: NodeID) -> None:
+        """Announce our pseudo to a peer (they record it in their directory)."""
+        await self._client.send(
+            target, bytes([_PROFILE]) + self.state.pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES])
+
+    async def set_pseudo(self, pseudo: str, *, announce: bool = True) -> None:
+        self.state.set_pseudo(pseudo)
+        if announce:
+            await self.announce_profile()
+
+    async def announce_profile(self) -> None:
+        """Push our pseudo to every contact (skips ourselves)."""
+        for id_hex in [c["id"] for c in self.state.snapshot()["contacts"]]:
+            target = NodeID(bytes.fromhex(id_hex))
+            if self.node_id is None or target != self.node_id:
+                try:
+                    await self.send_profile(target)
+                except Exception:
+                    pass  # a dead contact must not stop the announce loop
+
+    async def add_contact(self, target: NodeID, pseudo: str = "",
+                          *, announce: bool = True) -> bool:
+        ok = self.state.add_contact(target.raw.hex(), pseudo)
+        if ok and announce and (self.node_id is None or target != self.node_id):
+            try:
+                await self.send_profile(target)
+            except Exception:
+                pass
+        return ok
+
+    def _roster_ids(self, group_id: bytes) -> list[NodeID]:
+        return [NodeID(bytes.fromhex(h))
+                for h in self.state.group_members(group_id.hex())]
+
+    async def create_group(self, name: str, members: list[NodeID]) -> bytes:
+        """Create a group with us + ``members`` and invite everyone else."""
+        gid = secrets.token_bytes(GROUP_ID_LEN)
+        roster = list(members)
+        if self.node_id is not None and self.node_id not in roster:
+            roster.insert(0, self.node_id)
+        roster = roster[:_MAX_GROUP_MEMBERS]
+        self.state.add_group(gid.hex(), name, [n.raw.hex() for n in roster])
+        for m in roster:
+            if self.node_id is None or m != self.node_id:
+                try:
+                    await self._send_group_invite(m, gid, name, roster)
+                except Exception:
+                    pass
+        return gid
+
+    async def _send_group_invite(self, target: NodeID, gid: bytes, name: str,
+                                 roster: list[NodeID]) -> None:
+        name_b = name.encode("utf-8")[:_MAX_GROUP_NAME_BYTES]
+        body = (bytes([_GROUP_INVITE]) + gid
+                + struct.pack("!H", len(name_b)) + name_b
+                + struct.pack("!H", len(roster))
+                + b"".join(n.raw for n in roster))
+        await self._client.send(target, body)
+
+    async def send_group_text(self, group_id: bytes, text: str) -> None:
+        """Fan a group message out to every member (no relay by members, so it
+        cannot loop or amplify)."""
+        payload = (bytes([_GROUP_TEXT]) + group_id
+                   + text.encode("utf-8")[:_MAX_GROUP_TEXT])
+        for m in self._roster_ids(group_id):
+            if self.node_id is None or m != self.node_id:
+                try:
+                    await self._client.send(m, payload)
+                except Exception:
+                    pass
+
+    async def dir_query(self, pseudo: str) -> int:
+        """Ask every contact 'who is <pseudo>?'. Each answers only about itself;
+        replies arrive as :class:`DirResult`. Returns the query id."""
+        qid = secrets.randbits(32)
+        body = bytes([_DIR_QUERY]) + struct.pack("!I", qid) + pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES]
+        for c in self.state.snapshot()["contacts"]:
+            target = NodeID(bytes.fromhex(c["id"]))
+            if self.node_id is None or target != self.node_id:
+                try:
+                    await self._client.send(target, body)
+                except Exception:
+                    pass
+        return qid
+
     # -- receiving --------------------------------------------------------
 
     async def _loop(self) -> None:
@@ -183,6 +315,16 @@ class ChatApp:
             self._on_chunk(src, body)
         elif mtype == _STREAM:
             self._on_frame(src, body)
+        elif mtype == _PROFILE:
+            self._on_profile(src, body)
+        elif mtype == _GROUP_INVITE:
+            self._on_group_invite(src, body)
+        elif mtype == _GROUP_TEXT:
+            self._on_group_text(src, body)
+        elif mtype == _DIR_QUERY:
+            self._on_dir_query(src, body)
+        elif mtype == _DIR_REPLY:
+            self._on_dir_reply(src, body)
 
     def _on_offer(self, src: NodeID, body: bytes) -> None:
         if len(body) < _OFFER.size:
@@ -221,3 +363,68 @@ class ChatApp:
         payload = body[_FRAME.size:]
         latency_ms = (time.time_ns() - ts_ns) / 1e6
         self._emit(Frame(src, stream_id, seq, latency_ms, payload))
+
+    # -- social-layer handlers (all validated & bounded; drop on malformed) --
+
+    def _on_profile(self, src: NodeID, body: bytes) -> None:
+        pseudo = body[:_MAX_PSEUDO_BYTES].decode("utf-8", "replace").strip()
+        if pseudo:
+            self.state.learn_pseudo(src.raw.hex(), pseudo)
+            self._emit(ProfileReceived(src, pseudo))
+
+    def _on_group_invite(self, src: NodeID, body: bytes) -> None:
+        if len(body) < GROUP_ID_LEN + 2:
+            return
+        gid = body[:GROUP_ID_LEN]
+        off = GROUP_ID_LEN
+        (name_len,) = struct.unpack_from("!H", body, off)
+        off += 2
+        if name_len > _MAX_GROUP_NAME_BYTES or off + name_len + 2 > len(body):
+            return
+        name = body[off:off + name_len].decode("utf-8", "replace")
+        off += name_len
+        (count,) = struct.unpack_from("!H", body, off)
+        off += 2
+        if count > _MAX_GROUP_MEMBERS or off + count * 20 > len(body):
+            return
+        members = [NodeID(body[off + i * 20:off + i * 20 + 20]) for i in range(count)]
+        self.state.add_group(gid.hex(), name, [m.raw.hex() for m in members])
+        self._emit(GroupInvited(gid, name, members))
+
+    def _on_group_text(self, src: NodeID, body: bytes) -> None:
+        if len(body) < GROUP_ID_LEN:
+            return
+        gid = body[:GROUP_ID_LEN]
+        text = body[GROUP_ID_LEN:GROUP_ID_LEN + _MAX_GROUP_TEXT].decode("utf-8", "replace")
+        self._emit(GroupMessage(gid, src, text))
+
+    def _on_dir_query(self, src: NodeID, body: bytes) -> None:
+        if len(body) < 4 or self.node_id is None:
+            return
+        (qid,) = struct.unpack_from("!I", body, 0)
+        pseudo = body[4:4 + _MAX_PSEUDO_BYTES].decode("utf-8", "replace")
+        # Answer only about ourselves — never disclose contacts (privacy).
+        if self.state.matches_my_pseudo(pseudo):
+            reply = (bytes([_DIR_REPLY]) + struct.pack("!I", qid) + self.node_id.raw
+                     + self.state.pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES])
+            asyncio.create_task(self._safe_send(src, reply))
+
+    def _on_dir_reply(self, src: NodeID, body: bytes) -> None:
+        if len(body) < 4 + 20:
+            return
+        (qid,) = struct.unpack_from("!I", body, 0)
+        node_id = NodeID(body[4:24])
+        pseudo = body[24:24 + _MAX_PSEUDO_BYTES].decode("utf-8", "replace").strip()
+        # A peer may only assert its own id → the reply's id must be the sender.
+        # This blocks a malicious contact from mapping a pseudo onto a victim id.
+        if node_id != src:
+            return
+        if pseudo:
+            self.state.learn_pseudo(node_id.raw.hex(), pseudo)
+        self._emit(DirResult(qid, node_id, pseudo))
+
+    async def _safe_send(self, target: NodeID, payload: bytes) -> None:
+        try:
+            await self._client.send(target, payload)
+        except Exception:
+            pass

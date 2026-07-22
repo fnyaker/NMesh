@@ -23,10 +23,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from ..node_id import NodeID
-from .chat import TextMessage, FileReceived
+from .chat import TextMessage, FileReceived, GroupMessage, DirResult
 
 _MAX_BODY = 64 * 1024
 _MESSAGES_MAX = 500
+_DIR_RESULTS_MAX = 200
 _CALL_TIMEOUT = 10.0
 
 _HEADERS = {
@@ -55,6 +56,7 @@ class ChatBridge:
         self._peer = peer
         self._loop: asyncio.AbstractEventLoop | None = None
         self._messages: deque = deque(maxlen=_MESSAGES_MAX)
+        self._dir_results: deque = deque(maxlen=_DIR_RESULTS_MAX)
         self._cursor = 0
         self._lock = threading.Lock()
 
@@ -67,29 +69,48 @@ class ChatBridge:
     def stop(self) -> None:
         self._chat.remove_listener(self._on_event)
 
+    @property
+    def me(self) -> str | None:
+        return self._chat.node_id.raw.hex() if self._chat.node_id else None
+
     # -- ChatApp listener (runs on the event loop thread) -----------------
+    #
+    # A conversation is keyed by ``conv``: a peer id (hex) for 1:1, or
+    # ``"g:"+group_id`` for a group. ``src`` is the sender ("me" for our own
+    # outgoing). Profile/group-invite events mutate ChatState directly, so the
+    # UI reads them from the state block of the snapshot, not the message feed.
 
     def _on_event(self, ev) -> None:
         if isinstance(ev, TextMessage):
-            rec = {"type": "text", "src": ev.src.raw.hex(), "text": ev.text}
+            self._record(ev.src.raw.hex(), ev.src.raw.hex(), {"type": "text", "text": ev.text})
         elif isinstance(ev, FileReceived):
-            rec = {"type": "file", "src": ev.src.raw.hex(),
-                   "name": ev.name, "size": len(ev.data)}
-        else:
-            return  # real-time frames aren't shown in the chat log
+            self._record(ev.src.raw.hex(), ev.src.raw.hex(),
+                         {"type": "file", "name": ev.name, "size": len(ev.data)})
+        elif isinstance(ev, GroupMessage):
+            gid = ev.group_id.hex()
+            known = any(g["id"] == gid for g in self._chat.state.snapshot()["groups"])
+            if known:  # drop chatter for groups we're not a member of
+                self._record("g:" + gid, ev.src.raw.hex(), {"type": "text", "text": ev.text})
+        elif isinstance(ev, DirResult):
+            with self._lock:
+                self._dir_results.append(
+                    {"id": ev.node_id.raw.hex(), "pseudo": ev.pseudo, "t": time.time()})
+
+    def _record(self, conv: str, src: str, rec: dict) -> None:
         with self._lock:
             self._cursor += 1
-            rec["id"] = self._cursor
-            rec["t"] = time.time()
+            rec = {**rec, "id": self._cursor, "conv": conv, "src": src, "t": time.time()}
             self._messages.append(rec)
 
-    def record_outgoing(self, text: str) -> None:
-        with self._lock:
-            self._cursor += 1
-            self._messages.append({"id": self._cursor, "type": "text",
-                                   "src": "me", "text": text, "t": time.time()})
+    def record_outgoing(self, conv: str, text: str) -> None:
+        self._record(conv, "me", {"type": "text", "text": text})
 
-    # -- actions ----------------------------------------------------------
+    # -- actions (called from the web thread; sends marshalled onto loop) --
+
+    def _run(self, coro):
+        if self._loop is None:
+            raise RuntimeError("bridge not started")
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=_CALL_TIMEOUT)
 
     def _resolve_peer(self, peer_hex: str | None) -> NodeID:
         if peer_hex:
@@ -99,21 +120,57 @@ class ChatBridge:
         return self._peer
 
     def send_text(self, peer_hex: str | None, text: str) -> None:
-        if self._loop is None:
-            raise RuntimeError("bridge not started")
         peer = self._resolve_peer(peer_hex)
-        fut = asyncio.run_coroutine_threadsafe(
-            self._chat.send_text(peer, text), self._loop)
-        fut.result(timeout=_CALL_TIMEOUT)
-        self.record_outgoing(text)
+        self._run(self._chat.send_text(peer, text))
+        self.record_outgoing(peer.raw.hex(), text)
+
+    def send_group(self, group_id_hex: str, text: str) -> None:
+        gid = bytes.fromhex(group_id_hex)
+        self._run(self._chat.send_group_text(gid, text))
+        self.record_outgoing("g:" + gid.hex(), text)
+
+    def set_pseudo(self, pseudo: str) -> None:
+        self._run(self._chat.set_pseudo(pseudo))
+
+    def add_contact(self, id_hex: str, pseudo: str = "") -> bool:
+        return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex)), pseudo))
+
+    def remove_contact(self, id_hex: str) -> bool:
+        return self._chat.state.remove_contact(id_hex)  # pure state, thread-safe
+
+    def remove_group(self, gid_hex: str) -> bool:
+        return self._chat.state.remove_group(gid_hex)
+
+    def create_group(self, name: str, member_hexes: list) -> str:
+        members = [NodeID(bytes.fromhex(h)) for h in member_hexes]
+        gid = self._run(self._chat.create_group(name, members))
+        return gid.hex()
+
+    def search_pseudo(self, pseudo: str) -> list:
+        """Immediate local-directory hits; also fire a 1-hop query to contacts
+        whose replies land in ``dir_results`` (polled by the UI)."""
+        local = self._chat.state.find_by_pseudo(pseudo)
+        try:
+            self._run(self._chat.dir_query(pseudo))
+        except Exception:
+            pass
+        return local
 
     def snapshot(self, since: int) -> dict:
+        state = self._chat.state.snapshot()
         with self._lock:
             msgs = [m for m in self._messages if m["id"] > since]
+            dir_results = list(self._dir_results)
             return {
                 "cursor": self._cursor,
                 "messages": msgs,
                 "peer": self._peer.raw.hex() if self._peer else None,
+                "me": self.me,
+                "pseudo": state["pseudo"],
+                "contacts": state["contacts"],
+                "known": state["known"],
+                "groups": state["groups"],
+                "dir_results": dir_results,
             }
 
 

@@ -15,7 +15,10 @@ from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.data_connector import DataConnector, ConnectorClient
 from src.app_channel import CHAT_APP_ID
-from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
+from src.apps.chat import (
+    ChatApp, TextMessage, FileReceived, Frame,
+    ProfileReceived, GroupInvited, GroupMessage, DirResult,
+)
 
 
 def make_node() -> MeshNode:
@@ -29,7 +32,7 @@ async def _chat_for(node) -> tuple[DataConnector, ChatApp]:
     await conn.start()
     client = ConnectorClient(conn.host, conn.port, "tok", CHAT_APP_ID)
     await client.connect()
-    app = ChatApp(client)
+    app = ChatApp(client, node_id=node.id)
     await app.start()
     return conn, app
 
@@ -38,6 +41,16 @@ async def _next(app, kind, timeout=20.0):
     ev = await asyncio.wait_for(app.next_event(), timeout=timeout)
     assert isinstance(ev, kind), f"expected {kind.__name__}, got {ev}"
     return ev
+
+
+async def _wait_for(app, kind, timeout=20.0):
+    """Drain events until one of ``kind`` arrives (others are skipped)."""
+    async def _pump():
+        while True:
+            ev = await app.next_event()
+            if isinstance(ev, kind):
+                return ev
+    return await asyncio.wait_for(_pump(), timeout=timeout)
 
 
 class TestChatOverMesh:
@@ -79,6 +92,50 @@ class TestChatOverMesh:
             assert sorted(seqs) == list(range(N))     # every frame arrived
             assert min(latencies) >= 0
             assert statistics.median(latencies) < 500  # near-real-time locally
+        finally:
+            await host_app.stop()
+            await guest_app.stop()
+            await host_conn.stop()
+            await guest_conn.stop()
+            await guest.stop()
+            await host.stop()
+
+
+class TestSocialOverMesh:
+    async def test_profile_group_and_pseudo_lookup(self):
+        host = make_node()
+        guest = make_node()
+        code = host.generate_invite()
+        await host.start(["tcp://127.0.0.1:19171"])
+        await guest.join("tcp://127.0.0.1:19171", code)
+        await guest.wait_for_session(timeout=15.0)
+        await host.wait_for_session(timeout=15.0)
+
+        host_conn, host_app = await _chat_for(host)
+        guest_conn, guest_app = await _chat_for(guest)
+        try:
+            # Guest adds host as a contact and announces its pseudo → host learns it.
+            await guest_app.set_pseudo("guesty", announce=False)
+            await guest_app.add_contact(host.id, announce=True)
+            prof = await _wait_for(host_app, ProfileReceived)
+            assert prof.src == guest.id and prof.pseudo == "guesty"
+            assert host_app.state.known[guest.id.raw.hex()]["pseudo"] == "guesty"
+
+            # Guest creates a group with host and messages it.
+            gid = await guest_app.create_group("team", [host.id])
+            inv = await _wait_for(host_app, GroupInvited)
+            assert inv.group_id == gid and host.id in inv.members
+            await guest_app.send_group_text(gid, "hey team")
+            gm = await _wait_for(host_app, GroupMessage)
+            assert gm.group_id == gid and gm.src == guest.id and gm.text == "hey team"
+
+            # Host sets a pseudo; guest (host is its contact) resolves it by pseudo.
+            await host_app.set_pseudo("hosty", announce=False)
+            await guest_app.dir_query("hosty")
+            res = await _wait_for(guest_app, DirResult)
+            assert res.node_id == host.id and res.pseudo == "hosty"
+            # host is already a contact of guest, so the learned pseudo lands there.
+            assert guest_app.state.contacts[host.id.raw.hex()]["pseudo"] == "hosty"
         finally:
             await host_app.stop()
             await guest_app.stop()
