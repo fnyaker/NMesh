@@ -95,7 +95,14 @@ des fichiers est vérifiée (SHA-256) avant livraison.
 ## Couche sociale (contacts, pseudo, groupes, recherche)
 
 Tout est **côté app** (la node ne connaît rien de ces notions) et persisté par
-`src/apps/chat_state.py` (`ChatState`, JSON borné, 0600, dans le dossier `--data`) :
+`src/apps/chat_state.py` (`ChatState`, borné). Le chat intégré le range dans le
+**tiroir chiffré** du nœud (`node.app_storage`, section `CHAT_APP_ID`, via
+`DrawerStore`) : contacts/pseudos ne sont **jamais en clair sur disque**, et
+survivent au redémarrage. **L'historique des messages** (le fil de la web UI,
+`ChatBridge`) est persisté au même endroit → il ne disparaît plus au refresh ni
+au redémarrage. Sans `--data`, le tiroir reste en RAM (démos/tests). Un
+`ChatState(path=…)` en JSON clair reste disponible pour les tests/démos sans
+données réelles.
 
 - **Mon identité** : `whoami` donne mon node id (à copier/partager) ; je peux
   fixer un **pseudo** (`set_pseudo`) qui est annoncé à mes contacts (`PROFILE`).

@@ -2,14 +2,19 @@
 Chat application state — contacts, your own pseudo, and groups.
 
 This is **app-level** state (the node knows nothing about it): a small,
-bounded, JSON-persisted directory the chat app keeps for the user. It is owned
-by the chat app and read by its web front-end, so every access is guarded by a
-lock (the app mutates it on the event loop, the web thread reads snapshots).
+bounded directory the chat app keeps for the user. It is owned by the chat app
+and read by its web front-end, so every access is guarded by a lock (the app
+mutates it on the event loop, the web thread reads snapshots).
 
-Persistence is opt-in: with a path, the store is written atomically (0600) on
-every change so contacts/groups survive a restart; without one it stays purely
-in memory (demos/tests). It holds routing metadata (node ids, pseudos, group
-membership), never keys or secrets.
+Persistence is opt-in and can go two ways:
+  - a **``store`` backend** (:class:`DrawerStore`) — the node's per-app encrypted
+    drawer (:mod:`src.app_storage`). This is what the built-in chat uses so that
+    contacts/pseudos never sit in the clear on disk (charter: aucun secret en
+    clair sur disque sans raison).
+  - a plain **``path``** — an atomic 0600 JSON file, kept for demos/tests that
+    hold no real data.
+With neither, the state stays purely in memory. It holds routing metadata (node
+ids, pseudos, group membership), never keys.
 
 Every collection is hard-bounded (charter: bornes partout) so a hostile peer
 spraying profiles or group invites cannot grow it without limit.
@@ -20,6 +25,26 @@ import json
 import os
 import threading
 import time
+
+_STATE_KEY = "state"    # drawer key holding the serialised state doc
+
+
+class DrawerStore:
+    """Tiny key→bytes persistence backed by the node's encrypted per-app drawer.
+
+    Thread-safe: :class:`src.app_storage.AppStorage` guards itself, so the chat
+    app (event loop) and its web front-end (server thread) can both drive it.
+    """
+
+    def __init__(self, app_storage, app_id: bytes) -> None:
+        self._s = app_storage
+        self._app = app_id
+
+    def get(self, key: str) -> bytes | None:
+        return self._s.get(self._app, key)
+
+    def put(self, key: str, value: bytes) -> bool:
+        return self._s.put(self._app, key, value)
 
 _MAX_PSEUDO = 32
 _MAX_CONTACTS = 1000
@@ -40,8 +65,9 @@ def _match_key(pseudo: str) -> str:
 
 
 class ChatState:
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, store: DrawerStore | None = None) -> None:
         self._path = path
+        self._store = store
         self._lock = threading.Lock()
         self.pseudo = ""
         self.contacts: dict[str, dict] = {}   # id_hex -> {pseudo, added}
@@ -51,14 +77,21 @@ class ChatState:
 
     # -- persistence ------------------------------------------------------
 
-    def _load(self) -> None:
-        if not self._path or not os.path.exists(self._path):
-            return
+    def _read_doc(self) -> dict | None:
+        """Read the raw persisted doc from whichever backend is configured."""
         try:
-            with open(self._path) as f:
-                doc = json.load(f)
+            if self._store is not None:
+                blob = self._store.get(_STATE_KEY)
+                return json.loads(blob.decode("utf-8")) if blob else None
+            if self._path and os.path.exists(self._path):
+                with open(self._path) as f:
+                    return json.load(f)
         except Exception:
-            return  # unreadable/corrupt → start empty, never crash
+            return None  # unreadable/corrupt → start empty, never crash
+        return None
+
+    def _load(self) -> None:
+        doc = self._read_doc()
         if not isinstance(doc, dict):
             return
         self.pseudo = normalize_pseudo(str(doc.get("pseudo", "")))
@@ -81,10 +114,16 @@ class ChatState:
                                       "members": members}
 
     def _save_locked(self) -> None:
-        if not self._path:
-            return
         doc = {"pseudo": self.pseudo, "contacts": self.contacts,
                "known": self.known, "groups": self.groups}
+        if self._store is not None:
+            try:
+                self._store.put(_STATE_KEY, json.dumps(doc).encode("utf-8"))
+            except Exception:
+                pass  # best-effort; a store hiccup must not crash the app
+            return
+        if not self._path:
+            return
         tmp = self._path + ".tmp"
         try:
             with open(tmp, "w") as f:
