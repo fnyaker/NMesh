@@ -75,7 +75,10 @@ principes non-négociables. Toute contribution doit les respecter.
   répandue et auditée. Aujourd'hui, strictement :
   - `liboqs-python` — crypto post-quantique (pas d'équivalent stdlib).
   - `cryptography` — AES-GCM/HKDF (référence de l'écosystème Python).
-  - `pytest` / `pytest-asyncio` — tests uniquement, hors runtime.
+  - `pytest` / `pytest-asyncio` / `pytest-xdist` / `pytest-timeout` — tests
+    uniquement, hors runtime (`pytest-xdist` parallélise la suite sur tous les
+    cœurs ; `pytest-timeout` borne chaque test pour qu'un blocage échoue vite
+    au lieu de faire tourner le job des heures).
 - Ajouter une dépendance runtime = justification explicite dans la PR + mise à
   jour de cette liste. Dans le doute : réimplémenter sur stdlib.
 

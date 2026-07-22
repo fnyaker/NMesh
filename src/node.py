@@ -7,6 +7,7 @@ import os
 import socket
 import ssl
 import struct
+import threading
 import time
 from collections import OrderedDict
 from .node_id import NodeID
@@ -115,6 +116,7 @@ _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 2
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
+_PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -1062,12 +1064,45 @@ class MeshNode:
     async def discover_public_ip(self) -> str | None:
         """Discover our public IP address via HTTP services (ip.me, etc.).
 
-        Uses stdlib only — no new dependency. Tries multiple services in
-        order with a short timeout. Forces IPv4 connectivity so we learn
-        our public IPv4 (behind NAT) rather than our already-known IPv6.
-        On success, the IP is added to ``_extra_addrs`` so it appears in
+        The probe is blocking stdlib socket I/O (DNS + TLS connect), so it runs
+        in a *daemon* thread we abandon on timeout — never blocking the event
+        loop, and never joined at shutdown. A restricted network (CI, air-gapped)
+        where DNS or egress hangs would otherwise either freeze the loop or wedge
+        interpreter shutdown on the executor join — the real cause of a node
+        (or test run) that appears to hang forever. run_in_executor is unsafe
+        here precisely because asyncio joins the default executor on shutdown.
+        On success the IP is added to ``_extra_addrs`` so it appears in the
         advertised URIs for all transports.
         """
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+
+        def _worker() -> None:
+            try:
+                result = self._blocking_public_ip_probe()
+            except Exception:
+                result = None
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(
+                    lambda: fut.done() or fut.set_result(result))
+
+        threading.Thread(target=_worker, name="nmesh-pubip", daemon=True).start()
+        try:
+            ip = await asyncio.wait_for(fut, timeout=_PUBLIC_IP_TIMEOUT)
+        except (asyncio.TimeoutError, Exception):
+            return None
+        if ip and _is_ip_address(ip):
+            if ip not in self._local_ips and ip not in self._extra_addrs:
+                if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
+                    self._extra_addrs.append(ip)
+            return ip
+        return None
+
+    def _blocking_public_ip_probe(self) -> str | None:
+        """Synchronous public-IP probe — always called inside an executor.
+
+        Each service gets a per-socket timeout AND we cap the DNS lookup, so a
+        single stuck host can't consume the whole overall budget."""
         import http.client
         services = [
             ("ip.me", "/"),
@@ -1082,11 +1117,11 @@ class MeshNode:
                 if not infos:
                     continue
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
+                sock.settimeout(3)
                 ctx = ssl.create_default_context()
                 sock = ctx.wrap_socket(sock, server_hostname=host)
                 sock.connect(infos[0][4])
-                conn = http.client.HTTPSConnection(host, timeout=5)
+                conn = http.client.HTTPSConnection(host, timeout=3)
                 conn.sock = sock
                 try:
                     conn.request("GET", path, headers={"User-Agent": "curl/8"})
@@ -1095,9 +1130,6 @@ class MeshNode:
                 finally:
                     conn.close()
                 if _is_ip_address(ip):
-                    if ip not in self._local_ips and ip not in self._extra_addrs:
-                        if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
-                            self._extra_addrs.append(ip)
                     return ip
             except Exception:
                 continue
