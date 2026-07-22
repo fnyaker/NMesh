@@ -62,12 +62,18 @@ Options :
 | GET     | `/api/store`       | vue app store : `{catalog:[…state,action], installed:[…]}` |
 | POST    | `/api/store/publish` | `{name, version, files:{path:b64}}` — publie + annonce au réseau |
 | POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
-| GET     | `/api/chat/messages` | `?since=N` → feed + état social (me, pseudo, contacts, groups) |
-| POST    | `/api/chat/send`   | `{text, peer}` ou `{text, group}` — 1:1 ou groupe |
-| POST    | `/api/chat/pseudo` | `{pseudo}` — définit + annonce mon pseudo          |
+| GET     | `/api/chat/messages` | `?since=V` → feed (versionné) + profil + contacts/groups + unread + typing |
+| GET     | `/api/chat/file`   | `?mid=…` → octets d'un fichier/média (rendu inline des images) |
+| GET     | `/api/chat/avatar` | `?id=…` → octets d'un avatar (`self` ou node id)   |
+| POST    | `/api/chat/send`   | `{conv, text, reply?}` (`conv` = node id ou `g:`+group_id) |
+| POST    | `/api/chat/file`   | `{conv, name, data:b64, reply?}` — envoi de fichier/média |
+| POST    | `/api/chat/edit` / `delete` / `react` | `{conv, mid, …}` — édite / supprime / réagit |
+| POST    | `/api/chat/read`   | `{conv}` — marque lu (envoie l'accusé de lecture)  |
+| POST    | `/api/chat/typing` | `{conv, active}` — indicateur de frappe            |
+| POST    | `/api/chat/profile`| `{pseudo?, bio?, avatar?:b64}` — met à jour mon profil |
 | POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                    |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
-| POST    | `/api/chat/search` | `{pseudo}` → hits locaux (+ requête 1-saut aux contacts) |
+| POST    | `/api/chat/search` | `{pseudo}` → local + annuaire DHT réseau + requête 1-saut |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
