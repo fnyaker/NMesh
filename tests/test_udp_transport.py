@@ -114,12 +114,15 @@ async def udp_pair():
         accepted.set()
 
     server.on_new_connection = on_new_conn
-    await server.listen("127.0.0.1:19890")
+    # Ephemeral port (":0"): the OS assigns a free one, so parallel test workers
+    # never collide on a fixed number. Read it back to point the client at it.
+    await server.listen("127.0.0.1:0")
+    port = server._sock.get_extra_info("socket").getsockname()[1]
 
     client = UDPTransport()
-    await client.connect("127.0.0.1:19890")
+    await client.connect(f"127.0.0.1:{port}")
 
-    # Wait for the server to accept the client
+    # The connect() keepalive makes the server accept and create the transport.
     try:
         await asyncio.wait_for(accepted.wait(), timeout=2.0)
     except asyncio.TimeoutError:
@@ -129,10 +132,8 @@ async def udp_pair():
     pkt = make_packet(b"init")
     await client.send(pkt)
 
-    # Wait a bit for the server to receive and create the transport
-    await asyncio.sleep(0.3)
-
     # Drain the init packet from the server transport so tests start clean
+    # (receive() blocks until it lands — no fixed sleep needed).
     if server_transport:
         try:
             await asyncio.wait_for(server_transport[0].receive(), timeout=1.0)

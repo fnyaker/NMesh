@@ -22,6 +22,12 @@ from src.udp_transport import UDPTransport, UDPServer
 from src.tcp_transport import TCPTransport, TCPServer
 from tests.conftest import make_manager
 
+# These tests broadcast/answer on the fixed DISCOVERY_PORT, so two running at
+# once (on different xdist workers) would hear each other's beacons. Pin them
+# all to a single worker — they run in parallel with the rest of the suite, just
+# not with each other. Requires `--dist loadgroup` (set in pyproject addopts).
+pytestmark = pytest.mark.xdist_group("lan_discovery")
+
 
 def _ip_mgr() -> TransportManager:
     m = TransportManager()

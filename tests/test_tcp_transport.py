@@ -3,8 +3,6 @@ import pytest
 from src.tcp_transport import TCPTransport
 from src.packet import Packet, PacketError
 
-ADDRESS = "127.0.0.1:19877"
-
 SRC     = bytes(range(20))
 DST     = bytes(range(20, 40))
 NONCE   = bytes(range(12))
@@ -24,9 +22,13 @@ async def transport_pair():
     server = TCPTransport()
     client = TCPTransport()
 
-    server_task = asyncio.create_task(server.listen(ADDRESS))
-    await asyncio.sleep(0.05)
-    await client.connect(ADDRESS)
+    # Ephemeral port (":0") so parallel workers never collide on a fixed number;
+    # read it back once the server socket is bound (set before listen() blocks).
+    server_task = asyncio.create_task(server.listen("127.0.0.1:0"))
+    while server._server is None:
+        await asyncio.sleep(0.001)
+    port = server._server.sockets[0].getsockname()[1]
+    await client.connect(f"127.0.0.1:{port}")
     await server_task
 
     yield server, client

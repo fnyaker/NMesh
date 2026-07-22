@@ -2,3 +2,5 @@ liboqs-python
 cryptography
 pytest
 pytest-asyncio
+pytest-xdist
+pytest-timeout
