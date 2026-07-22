@@ -31,6 +31,7 @@ from .app_package import (
     reassemble_bytes as _app_reassemble_bytes,
     build_release as _app_build_release, parse_release as _app_parse_release,
 )
+from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 _HEADER_BYTES = 79  # fixed packet header size, for byte accounting
@@ -3087,6 +3088,28 @@ class MeshNode:
                 self._dht_store.put(key, value)  # cache → this node now re-shares it
                 return value
         return None
+
+    # -- per-app DHT (namespaced overlay on the content-addressed store) ---
+    #
+    # The caller passes the app_id bound to the authenticated session; the app
+    # never declares it. Public entries are stored in the clear, private ones
+    # encrypted by the node under an app-supplied key. See :mod:`src.app_dht`.
+
+    async def app_dht_put(self, app_id: bytes, content: bytes,
+                          enc_key: bytes | None = None) -> bytes:
+        """Publish an app entry on the DHT; returns its content key. ``enc_key``
+        present → private (node-encrypted). Raises ``AppDHTError`` on bad input."""
+        value = _app_dht_frame(app_id, content, enc_key)
+        return await self.dht_put(value)
+
+    async def app_dht_get(self, app_id: bytes, key: bytes,
+                          dec_key: bytes | None = None) -> bytes | None:
+        """Fetch an app entry by content key. Returns its content, or None if
+        absent, from another app's namespace, or private without the right key."""
+        value = await self.dht_get(key)
+        if value is None:
+            return None
+        return _app_dht_read(value, app_id, dec_key)
 
     # -- application packages ---------------------------------------------
 

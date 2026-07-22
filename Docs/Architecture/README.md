@@ -21,6 +21,7 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 | `invite.py` | Codes d'invitation (HMAC challenge/réponse, usage unique, lockout). |
 | `routing.py` | Table de routage Kademlia (k-buckets, `last_seen`). |
 | `dht.py` | Store DHT adressé par contenu (`key = sha256(valeur)[:20]`). |
+| `app_dht.py` | DHT par-app (overlay) : namespace par `app_id`, entrées publiques (clair) ou privées (AES-256-GCM sous clé fournie par l'app). |
 | `transport.py` / `transport_manager.py` | Interfaces `BaseTransport`/`BaseServer` + registre par schéma d'URL. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales. |
