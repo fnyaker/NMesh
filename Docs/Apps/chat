@@ -76,16 +76,45 @@ ev = await app.next_event()          # TextMessage | FileReceived | Frame
 
 Chaque charge utile DATA E2E : `type(1) ‖ corps`.
 
-| Type         | Corps                                              |
-|--------------|----------------------------------------------------|
-| `TEXT`       | texte utf-8                                        |
-| `FILE_OFFER` | transfer_id, total_chunks, taille, sha256, nom     |
-| `FILE_CHUNK` | transfer_id, index, données                        |
-| `STREAM`     | stream_id, seq, ts_ns, charge utile                |
+| Type           | Corps                                              |
+|----------------|----------------------------------------------------|
+| `TEXT`         | texte utf-8                                        |
+| `FILE_OFFER`   | transfer_id, total_chunks, taille, sha256, nom     |
+| `FILE_CHUNK`   | transfer_id, index, données                        |
+| `STREAM`       | stream_id, seq, ts_ns, charge utile                |
+| `PROFILE`      | pseudo utf-8 (annonce mon pseudo)                  |
+| `GROUP_INVITE` | group_id(16), nom, roster (liste de node ids)      |
+| `GROUP_TEXT`   | group_id(16), texte                                |
+| `DIR_QUERY`    | query_id(4), pseudo (« qui est ce pseudo ? »)      |
+| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (réponse sur soi) |
 
 Robustesse : tout message applicatif est validé et borné ; un message mal formé
 est ignoré, jamais fatal (la charte s'applique aussi au niveau app). L'intégrité
 des fichiers est vérifiée (SHA-256) avant livraison.
+
+## Couche sociale (contacts, pseudo, groupes, recherche)
+
+Tout est **côté app** (la node ne connaît rien de ces notions) et persisté par
+`src/apps/chat_state.py` (`ChatState`, JSON borné, 0600, dans le dossier `--data`) :
+
+- **Mon identité** : `whoami` donne mon node id (à copier/partager) ; je peux
+  fixer un **pseudo** (`set_pseudo`) qui est annoncé à mes contacts (`PROFILE`).
+- **Contacts** : `add_contact` / `remove_contact` (node id + pseudo). Ajouter un
+  contact lui annonce mon profil.
+- **Groupes** : `create_group(nom, membres)` génère un `group_id`, m'ajoute au
+  roster et envoie un `GROUP_INVITE` à chaque membre. `send_group_text` **fanne**
+  le message vers chaque membre (aucun relais par les membres → ni boucle ni
+  amplification). Le mesh n'a pas de multicast : le groupe est purement applicatif.
+- **Recherche par pseudo** : `find_by_pseudo` cherche dans l'annuaire local
+  (contacts + pseudos appris via `PROFILE`). `dir_query` interroge en plus mes
+  contacts à **1 saut** ; chacun ne répond que **sur lui-même** (`DIR_REPLY`),
+  jamais sur ses propres contacts (vie privée). Un `DIR_REPLY` dont l'id ≠
+  l'émetteur est rejeté (anti-usurpation). Ceci **ne** résout **pas** un inconnu
+  au niveau global : un annuaire nommé global demanderait un support DHT côté
+  node (non implémenté ici).
+
+Toutes ces actions sont pilotables depuis la sous-page `/chat` de la console
+(identité + copie d'id, contacts, groupes, recherche). Voir `Docs/WebConsole/guide`.
 
 ## Appels audio (`src/apps/call.py`)
 

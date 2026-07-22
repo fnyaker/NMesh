@@ -637,20 +637,11 @@ def _make_handler(console: WebConsole):
                 ok = console._call(_wrap(console._node.console_recheck_net))
                 self._json(200, {"ok": bool(ok)})
                 return
-            if path == "/api/chat/send":
+            if path.startswith("/api/chat/"):
                 if console._chat is None:
                     self._json(404, {"error": "not found"})
                     return
-                data = _parse_json(body)
-                text = (data or {}).get("text", "")
-                if not isinstance(text, str) or not text:
-                    self._json(400, {"error": "text required"})
-                    return
-                try:
-                    console._chat.send_text((data or {}).get("peer"), text)
-                    self._json(200, {"ok": True})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                self._handle_chat_post(path, _parse_json(body))
                 return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
@@ -659,6 +650,57 @@ def _make_handler(console: WebConsole):
                 self._handle_app_fetch(body)
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_chat_post(self, path: str, data) -> None:
+            chat = console._chat
+            data = data or {}
+            try:
+                if path == "/api/chat/send":
+                    text = data.get("text", "")
+                    if not isinstance(text, str) or not text:
+                        self._json(400, {"error": "text required"})
+                        return
+                    if isinstance(data.get("group"), str) and data["group"]:
+                        chat.send_group(data["group"], text)
+                    else:
+                        chat.send_text(data.get("peer"), text)
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/pseudo":
+                    pseudo = data.get("pseudo", "")
+                    if not isinstance(pseudo, str):
+                        self._json(400, {"error": "pseudo required"})
+                        return
+                    chat.set_pseudo(pseudo)
+                    self._json(200, {"ok": True})
+                elif path == "/api/chat/contact":
+                    op = data.get("op", "add")
+                    if op == "remove":
+                        ok = chat.remove_contact(data.get("id", ""))
+                    else:
+                        ok = chat.add_contact(data.get("id", ""), data.get("pseudo", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif path == "/api/chat/group":
+                    op = data.get("op", "create")
+                    if op == "remove":
+                        ok = chat.remove_group(data.get("id", ""))
+                        self._json(200 if ok else 400, {"ok": bool(ok)})
+                    else:
+                        members = data.get("members", [])
+                        if not isinstance(members, list):
+                            self._json(400, {"error": "members must be a list"})
+                            return
+                        gid = chat.create_group(str(data.get("name", "")), members)
+                        self._json(200, {"ok": True, "id": gid})
+                elif path == "/api/chat/search":
+                    pseudo = data.get("pseudo", "")
+                    if not isinstance(pseudo, str) or not pseudo:
+                        self._json(400, {"error": "pseudo required"})
+                        return
+                    self._json(200, {"results": chat.search_pseudo(pseudo)})
+                else:
+                    self._json(404, {"error": "not found"})
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
 
         def _handle_app_publish(self, body: bytes) -> None:
             data = _parse_json(body)
