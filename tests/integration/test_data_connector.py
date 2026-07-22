@@ -17,8 +17,10 @@ from src.data_connector import (
     DataConnector, _read_frame, _write_frame,
     _AUTH, _SEND, _WHOAMI, _AUTH_OK, _RECV, _WHOAMI_RESP,
 )
+from src.app_channel import GENERIC_APP_ID
 
 TOKEN = "integration-token"
+APP = GENERIC_APP_ID   # both apps speak on the same section, so messages flow
 
 
 def make_node() -> MeshNode:
@@ -27,9 +29,10 @@ def make_node() -> MeshNode:
     return MeshNode(mgr)
 
 
-async def _app(conn):
+async def _app(conn, app_id=APP):
     reader, writer = await asyncio.open_connection(conn._host, conn.port)
-    await _write_frame(writer, _AUTH, TOKEN.encode())
+    # AUTH declares the client's app section, then the token.
+    await _write_frame(writer, _AUTH, app_id + TOKEN.encode())
     ftype, _ = await _read_frame(reader)
     assert ftype == _AUTH_OK
     return reader, writer
