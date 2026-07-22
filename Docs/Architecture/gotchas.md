@@ -25,6 +25,18 @@ joint), bornée (`_PUBLIC_IP_TIMEOUT`). Idem DNS STUN (`_bounded_getaddrinfo`).
 **Toute I/O réseau bloquante potentiellement lente doit être bornée ET hors de
 la boucle ET non-jointe au shutdown.**
 
+### 3b. `asyncio.wait_for` peut *perdre* une annulation (Python 3.11)
+`TCPTransport.receive` utilisait `asyncio.wait_for(readexactly, timeout)`. Si la
+lecture interne se termine dans le même pas de boucle que l'annulation de la
+tâche englobante, `wait_for` peut **avaler** le `CancelledError` : la boucle de
+réception ne sort pas et se **re-bloque** sur le `receive()` suivant → `peer.stop()`
+(qui fait `await self._task`) attend une tâche qui ne meurt jamais. Symptôme :
+un `stop()` qui fige, révélé par du trafic concurrent (le gossip d'adresses
+générant un PING/PONG juste avant l'arrêt).
+→ Correctif : `async with asyncio.timeout(...)` au lieu de `wait_for` — il
+propage l'annulation proprement. **Ne pas réintroduire `wait_for` sur un chemin
+qui doit rester annulable.**
+
 ### 3. Un lien TCP inactif meurt tout seul
 `receive()` TCP lève au `_READ_TIMEOUT` (60 s) sans données → lien reapé. Sans
 keepalive, un lien sain mais silencieux tombe. → `_link_keepalive_loop` (PING
