@@ -57,6 +57,8 @@ _STORE_DEL = 0x06     # body = key(utf-8)
 _STORE_LIST = 0x07    # body = empty
 _APP_DHT_PUT = 0x08   # body = flag(1) ‖ keylen(2) ‖ enc_key ‖ content
 _APP_DHT_GET = 0x09   # body = keylen(2) ‖ dec_key ‖ content_key(20)
+_PSEUDO_PUB = 0x0A    # body = pseudo(utf-8)    — publish my pseudo→node id
+_PSEUDO_LOOKUP = 0x0B # body = pseudo(utf-8)    — find node ids by pseudo
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
@@ -67,6 +69,8 @@ _STORE_OK = 0x86      # body = ok(1)                (PUT / DEL reply)
 _STORE_KEYS = 0x87    # body = JSON array of keys   (LIST reply)
 _APP_DHT_KEY = 0x88   # body = content_key(20) or empty on error  (PUT reply)
 _APP_DHT_VALUE = 0x89 # body = present(1) ‖ content                (GET reply)
+_PSEUDO_KEY = 0x8A    # body = dir_key(20) or empty                (PUB reply)
+_PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo}]                (LOOKUP reply)
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -198,6 +202,9 @@ class DataConnector:
                 elif ftype in (_APP_DHT_PUT, _APP_DHT_GET):
                     # Per-app DHT: same session-bound app_id names the namespace.
                     await self._handle_app_dht(writer, app_id, ftype, body)
+                elif ftype in (_PSEUDO_PUB, _PSEUDO_LOOKUP):
+                    # Pseudo directory, namespaced by this client's app_id.
+                    await self._handle_pseudo(writer, app_id, ftype, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError, OSError):
             pass
@@ -288,6 +295,29 @@ class DataConnector:
                 content = None
             present = b"\x01" if content is not None else b"\x00"
             await _write_frame(writer, _APP_DHT_VALUE, present + (content or b""))
+
+    async def _handle_pseudo(self, writer: asyncio.StreamWriter, app_id: bytes,
+                             ftype: int, body: bytes) -> None:
+        """Publish/lookup a pseudo in this app's directory namespace. Both are
+        network round-trips; any error yields an empty reply (reject by default)."""
+        try:
+            pseudo = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        if ftype == _PSEUDO_PUB:
+            try:
+                key_hex = await self._node.publish_pseudo(app_id, pseudo)
+                key = bytes.fromhex(key_hex)
+            except Exception:
+                key = b""
+            await _write_frame(writer, _PSEUDO_KEY, key)
+        elif ftype == _PSEUDO_LOOKUP:
+            try:
+                results = await self._node.lookup_pseudo(app_id, pseudo)
+            except Exception:
+                results = []
+            await _write_frame(writer, _PSEUDO_RESULTS,
+                               json.dumps(results).encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +437,24 @@ class ConnectorClient:
         if not resp or resp[0] != 1:
             return None
         return resp[1:]
+
+    # -- pseudo directory (this app's namespace) --------------------------
+
+    async def publish_pseudo(self, pseudo: str) -> bytes | None:
+        """Publish a signed claim that ``pseudo`` maps to our node. Returns the
+        directory key, or None if the node refused it."""
+        resp = await self._roundtrip(_PSEUDO_PUB, pseudo.encode("utf-8"), _PSEUDO_KEY)
+        return resp if resp else None
+
+    async def lookup_pseudo(self, pseudo: str) -> list[dict]:
+        """Find every node claiming ``pseudo`` network-wide. Returns
+        ``[{"id": hex, "pseudo": str}, …]`` (possibly several)."""
+        resp = await self._roundtrip(_PSEUDO_LOOKUP, pseudo.encode("utf-8"), _PSEUDO_RESULTS)
+        try:
+            out = json.loads(resp.decode("utf-8"))
+        except Exception:
+            return []
+        return [x for x in out if isinstance(x, dict)] if isinstance(out, list) else []
 
     async def recv(self) -> tuple[NodeID, bytes]:
         if self._inbox:

@@ -58,11 +58,13 @@ un flood. Vérifié à la réception pour les types routables (voir portes).
 | RELAY_CARRY | 0x15 | transporte un paquet de handshake entre 2 nœuds via un relais |
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT : « rappelle-moi pour confirmer que je suis joignable » |
 | CATALOG_ANNOUNCE | 0x18 | gossip d'une **release signée** pour le catalogue de l'app store |
+| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | annuaire de pseudos : stocke/cherche/répond une **réclamation signée** pseudo→node_id |
 
 Regroupements (constantes) :
 - `_DIRECT_TYPES` : messages de contrôle entre pairs directs → **exigent un pair
   authentifié et `src_id == pair authentifié`** (inclut `CATALOG_ANNOUNCE`, re-
-  stampé à chaque saut lors du gossip épidémique).
+  stampé à chaque saut lors du gossip épidémique, et `DIR_STORE`/`DIR_FIND`/
+  `DIR_FOUND`).
 - `_ROUTABLE_TYPES` = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK} : peuvent traverser
   le mesh.
 - `INVITE_SEEK` et `RELAY_CARRY` sont traités **avant** les portes (pré-auth,

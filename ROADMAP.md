@@ -150,6 +150,13 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   node-side sous clé fournie par l'app pour le privé. `node.app_dht_*` et frames
   connecteur `APP_DHT_*`. Doc : `Docs/Architecture/routing.md`.
 
+### Annuaire de pseudos DHT (`src/pseudo_dir.py`) — fait
+- Find-by-pseudo **réseau** : annuaire à clé sur Kademlia (`DIR_STORE`/`FIND`/
+  `FOUND`), réclamations **signées auto-authentifiées** (pseudo→node_id lié à la
+  clé pub → pas d'usurpation), bornées/rate-limitées, réclamations multiples par
+  pseudo. `node.publish_pseudo`/`lookup_pseudo`, frames connecteur `PSEUDO_*`. Le
+  chat publie au `set_pseudo` et cherche le réseau au `search`.
+
 ### App store : catalogue partagé (`src/app_catalog.py`) — fait
 - Catalogue réseau de **releases signées** (auteur ML-DSA + `ts` signé), gossipé
   (`CATALOG_ANNOUNCE`), anti-forge / anti-rollback / borné, rattrapage au

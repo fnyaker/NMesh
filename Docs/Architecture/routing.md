@@ -70,6 +70,36 @@ opérations via le connecteur (`ConnectorClient.dht_put/dht_get`, l'`app_id` ven
 de la session — cf. `Docs/DataConnector/guide`). Contenu borné à `MAX_CONTENT`
 (≈ une valeur DHT). L'app gère son propre index de clés de contenu.
 
+## Annuaire de pseudos (`pseudo_dir.py`)
+
+Trouver un node_id **par pseudo**, à l'échelle du réseau — ce que l'adressage
+par contenu ne permet pas (la clé y est le hash de la valeur, pas du pseudo).
+C'est un **annuaire à clé** au-dessus de Kademlia, sans rien affaiblir grâce à
+des enregistrements **auto-authentifiés** :
+
+```
+clé         = sha256(DOMAIN : app_id : normalise(pseudo))[:20]
+réclamation = app_id ‖ ts ‖ pubkey ‖ pseudo ‖ signature ML-DSA
+```
+
+- Le **node_id réclamé est dérivé de la `pubkey`** de la réclamation
+  (`NodeID.from_public_key`), et la signature est vérifiée sous cette pubkey.
+  Une réclamation ne peut donc lier un pseudo qu'au node_id **de son propre
+  auteur** — impossible de mapper « alice » sur le node_id d'une victime (même
+  fermeture de l'empoisonnement/usurpation que le store adressé-contenu).
+- Le récepteur **recalcule la clé** depuis l'`app_id` + pseudo de la réclamation
+  → impossible de la déposer sous une clé sans rapport.
+- Les pseudos ne sont **pas uniques** : plusieurs peuvent réclamer « alice ».
+  L'annuaire garde un **ensemble borné de réclamations par clé** (la plus récente
+  par node_id l'emporte) ; un lookup les renvoie toutes — le node_id reste
+  l'identité réelle.
+
+Paquets `DIR_STORE` / `DIR_FIND` / `DIR_FOUND`, répliqués/interrogés sur les
+`_DIR_K` nœuds les plus proches de la clé, bornés et rate-limités par lien. API
+nœud : `publish_pseudo(app_id, pseudo)` / `lookup_pseudo(app_id, pseudo)`. Côté
+app : `ConnectorClient.publish_pseudo/lookup_pseudo` (app_id de la session). Le
+chat publie automatiquement au `set_pseudo` et cherche le réseau au `search`.
+
 ## Propagation des adresses  ⚑ invariant central
 
 **But visé** : *connaître une node ⟹ connaître l'ensemble de ses adresses
