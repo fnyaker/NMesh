@@ -33,7 +33,8 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Plan de gestion local : graphe réseau, liste des pairs, débit temps réel,
   charge de la node ; actions invite / join / trust cert.
 - Sécurité : HTTPS auto-signé (empreinte affichée), mot de passe généré +
-  haché scrypt, jetons Bearer (pas de cookie → pas de CSRF), lockout
+  haché scrypt, session par jeton Bearer **ou cookie** (`HttpOnly` +
+  `SameSite=Strict` → pas de surface CSRF ; survit au refresh), lockout
   anti-bruteforce, bind loopback par défaut, CSP stricte, assets same-origin,
   **zéro dépendance externe** (stdlib + `cryptography`).
 - Métriques nœud (`src/metrics.py`) : compteurs débit + charge process.
@@ -139,6 +140,29 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - DHT Kademlia : `STORE` / `FIND_VALUE` / `FOUND_VALUE`, magasin borné
   anti-empoisonnement/anti-OOM. API `node.publish_app` / `node.fetch_app`.
 - Doc : `Docs/AppSharing/guide`.
+
+### Store local par app + DHT par-app (`src/app_storage.py`, `src/app_dht.py`) — fait
+- **Tiroir** chiffré par app : clé→valeur AES-256-GCM (clé par app dérivée de
+  l'identité), isolé par `app_id`, borné, robuste aux fichiers hostiles.
+  `node.app_store_*` et frames connecteur `STORE_*`. Doc : `Docs/AppStorage/guide`.
+- **DHT par-app** publique/privée au-dessus du store adressé-contenu : namespace
+  par `app_id` (que le nœud connaît, l'app ne le déclare pas), chiffrement
+  node-side sous clé fournie par l'app pour le privé. `node.app_dht_*` et frames
+  connecteur `APP_DHT_*`. Doc : `Docs/Architecture/routing.md`.
+
+### Annuaire de pseudos DHT (`src/pseudo_dir.py`) — fait
+- Find-by-pseudo **réseau** : annuaire à clé sur Kademlia (`DIR_STORE`/`FIND`/
+  `FOUND`), réclamations **signées auto-authentifiées** (pseudo→node_id lié à la
+  clé pub → pas d'usurpation), bornées/rate-limitées, réclamations multiples par
+  pseudo. `node.publish_pseudo`/`lookup_pseudo`, frames connecteur `PSEUDO_*`. Le
+  chat publie au `set_pseudo` et cherche le réseau au `search`.
+
+### App store : catalogue partagé (`src/app_catalog.py`) — fait
+- Catalogue réseau de **releases signées** (auteur ML-DSA + `ts` signé), gossipé
+  (`CATALOG_ANNOUNCE`), anti-forge / anti-rollback / borné, rattrapage au
+  handshake. Registre local d'apps installées (install vérifie le contenu avant
+  d'écrire, chemins assainis). Page **App Store** de la console (logique de
+  décision en Python via `store_overview`). Doc : `Docs/AppStore/guide`.
 
 ### App de démo chat (`src/apps/chat.py`) — fait
 - Texte, partage de fichiers (chunké, intégrité SHA-256) et flux temps réel

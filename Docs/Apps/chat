@@ -95,7 +95,14 @@ des fichiers est vérifiée (SHA-256) avant livraison.
 ## Couche sociale (contacts, pseudo, groupes, recherche)
 
 Tout est **côté app** (la node ne connaît rien de ces notions) et persisté par
-`src/apps/chat_state.py` (`ChatState`, JSON borné, 0600, dans le dossier `--data`) :
+`src/apps/chat_state.py` (`ChatState`, borné). Le chat intégré le range dans le
+**tiroir chiffré** du nœud (`node.app_storage`, section `CHAT_APP_ID`, via
+`DrawerStore`) : contacts/pseudos ne sont **jamais en clair sur disque**, et
+survivent au redémarrage. **L'historique des messages** (le fil de la web UI,
+`ChatBridge`) est persisté au même endroit → il ne disparaît plus au refresh ni
+au redémarrage. Sans `--data`, le tiroir reste en RAM (démos/tests). Un
+`ChatState(path=…)` en JSON clair reste disponible pour les tests/démos sans
+données réelles.
 
 - **Mon identité** : `whoami` donne mon node id (à copier/partager) ; je peux
   fixer un **pseudo** (`set_pseudo`) qui est annoncé à mes contacts (`PROFILE`).
@@ -105,13 +112,16 @@ Tout est **côté app** (la node ne connaît rien de ces notions) et persisté p
   roster et envoie un `GROUP_INVITE` à chaque membre. `send_group_text` **fanne**
   le message vers chaque membre (aucun relais par les membres → ni boucle ni
   amplification). Le mesh n'a pas de multicast : le groupe est purement applicatif.
-- **Recherche par pseudo** : `find_by_pseudo` cherche dans l'annuaire local
-  (contacts + pseudos appris via `PROFILE`). `dir_query` interroge en plus mes
-  contacts à **1 saut** ; chacun ne répond que **sur lui-même** (`DIR_REPLY`),
-  jamais sur ses propres contacts (vie privée). Un `DIR_REPLY` dont l'id ≠
-  l'émetteur est rejeté (anti-usurpation). Ceci **ne** résout **pas** un inconnu
-  au niveau global : un annuaire nommé global demanderait un support DHT côté
-  node (non implémenté ici).
+- **Recherche par pseudo** — trois sources combinées :
+  1. `find_by_pseudo` : annuaire **local** (contacts + pseudos appris via `PROFILE`).
+  2. **Annuaire DHT réseau** (`lookup_pseudo_network`) : trouve **n'importe qui**
+     ayant publié son pseudo, **sans être déjà contact**. `set_pseudo` publie
+     automatiquement une réclamation signée `pseudo→node_id` dans l'annuaire
+     (`node.publish_pseudo`, cf. `Docs/Architecture/routing.md`) ; une réclamation
+     ne peut lier un pseudo qu'au node_id de son propre auteur (anti-usurpation).
+  3. `dir_query` : requête **1 saut** aux contacts ; chacun ne répond que **sur
+     lui-même** (`DIR_REPLY`, id ≠ émetteur rejeté), jamais sur ses contacts (vie
+     privée). Les réponses asynchrones arrivent dans `dir_results` (polling UI).
 
 Toutes ces actions sont pilotables depuis la sous-page `/chat` de la console
 (identité + copie d'id, contacts, groupes, recherche). Voir `Docs/WebConsole/guide`.
