@@ -197,6 +197,7 @@ class TestNodeDirectory:
             raw = _claim(author, pseudo="dave")
             node._pseudo_store.put(parse_claim(raw, node._identity.verify), raw)
             peer = _FakePeer()
+            node._peers.append(peer)   # DIR_FOUND routes back via _route_outbound
             qid = os.urandom(_QID_LEN)
             await node._handle_dir_find(peer, Packet.create(DIR_FIND,
                 peer.authenticated_id.raw, node.id.raw, dir_key(APP, "dave") + qid))

@@ -39,15 +39,26 @@ Le concept de base est Kademlia, mais le routage est **agnostique du medium** et
 
 ### Joindre un id **à distance** (multi-hop) — pas seulement un pair direct
 
-Le plan de données (`DATA`, `E2E_HANDSHAKE`/`_ACK`) est **routable** : adressé à
-un `dst_id`, il est **relayé de saut en saut** (`_forward_packet`, glouton vers
-la cible) jusqu'au nœud destinataire — à travers n'importe quel medium. Pour
-**sonder la vivacité** d'un id qui n'est pas un pair direct, `console_ping_node`
-n'essaie plus seulement d'ouvrir un lien direct : il envoie un `ECHO_REQUEST`
-**routable** vers l'id (relayé via B), le destinataire répond par `ECHO_REPLY`
-routé en retour, et le RTT est mesuré (`_routed_ping`). Résultat : pinger `A→C`
-en passant par `B` fonctionne même si A et C ne peuvent pas se connecter en
-direct (distant / NAT). Le champ `via` de la réponse indique `direct` ou `route`.
+**Tout ce qui adresse un `node id` est routable** et relayé de saut en saut
+(`_forward_packet`, glouton vers la cible en excluant le pair d'où vient le
+paquet — sur une chaîne cela dégénère en « passe à l'autre voisin ») jusqu'au
+destinataire, à travers **n'importe quel medium**. Sont routables : `DATA`,
+`E2E_HANDSHAKE`/`_ACK`, `ECHO_REQUEST`/`_REPLY`, **et tout le plan de contrôle
+Kademlia/DHT** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`,
+`DIR_STORE`/`DIR_FIND`/`DIR_FOUND`. Restent **directs** (un saut authentifié) :
+`PING`/`PONG` (keepalive par lien), la signalisation de punch, et le gossip du
+catalogue (re-stampé à chaque saut).
+
+Conséquence : `A → X en passant par tout l'alphabet` fonctionne pour **tout** —
+messages, ping, DHT adressé-contenu, annuaire de pseudos — même si A et X ne
+peuvent pas se connecter en direct (distant / NAT). Les requêtes (`_kad_query_node`,
+`_dht_store_at`/`_dht_find_value_at`, `_dir_store_at`/`_dir_find_at`) adressent le
+paquet au `node id` cible et passent par `_route_outbound` (direct si adjacent,
+multi-hop sinon) ; les réponses (`FOUND_*`) sont routées en retour vers le
+demandeur. Pour la **vivacité**, `console_ping_node` envoie un `ECHO_REQUEST`
+routé et mesure le RTT (`_routed_ping`) ; le champ `via` vaut `direct` ou `route`.
+E2E exige en plus une **racine de confiance commune** entre les extrémités (le
+routage atteint la cible, l'authentification demande une ancre partagée).
 
 ## DHT adressé par contenu (`dht.py`)
 
