@@ -3428,19 +3428,41 @@ class MeshNode:
             if not future.done():
                 future.cancel()
 
+    def _direct_peer_ids(self) -> list[NodeID]:
+        """Node ids of our directly-connected authenticated peers. The directory
+        (like the DHT) can only exchange FIND/STORE with peers we have a live link
+        to, so in a hub/NAT topology these — not the abstract K-closest — are who
+        actually holds and answers. Including them makes lookup work when the
+        closest-to-key nodes aren't directly reachable."""
+        out, seen = [], set()
+        for p in self._peers:
+            nid = p.authenticated_id
+            if nid is not None and p.session is not None and nid.raw not in seen:
+                seen.add(nid.raw)
+                out.append(nid)
+        return out
+
+    async def _dir_targets(self, key: bytes) -> list[NodeID]:
+        """Union of the K nodes closest to ``key`` and our direct peers — bounded,
+        deduplicated, self excluded."""
+        targets, seen = [], set()
+        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K] + self._direct_peer_ids():
+            if nid != self._id and nid.raw not in seen:
+                seen.add(nid.raw)
+                targets.append(nid)
+        return targets
+
     async def publish_pseudo(self, app_id: bytes, pseudo: str) -> str:
         """Publish a signed claim that ``pseudo`` maps to this node, replicated to
-        the nodes closest to its key. Returns the directory key (hex)."""
+        the nodes closest to its key and to our direct peers. Returns the key."""
         claim = _dir_build_claim(app_id, pseudo, self._identity.dsa_public_key,
                                  self._identity.sign)
         parsed = _dir_parse_claim(claim, self._identity.verify)
         if parsed is not None:
             self._pseudo_store.put(parsed, claim)   # keep + re-serve locally
         key = _dir_key(app_id, pseudo)
-        targets = await self.kad_lookup(NodeID(key))
         await asyncio.gather(
-            *(self._dir_store_at(nid, claim)
-              for nid in targets[:_DIR_K] if nid != self._id),
+            *(self._dir_store_at(nid, claim) for nid in await self._dir_targets(key)),
             return_exceptions=True,
         )
         return key.hex()
@@ -3448,7 +3470,9 @@ class MeshNode:
     async def lookup_pseudo(self, app_id: bytes, pseudo: str) -> list[dict]:
         """Find every node claiming ``pseudo`` in this app's namespace. Returns
         ``[{"id": node_id_hex, "pseudo": pseudo}]`` — possibly several (pseudos
-        aren't unique); the node id is the real identity."""
+        aren't unique); the node id is the real identity. Queries the closest
+        nodes and our direct peers **in parallel** so one slow/unreachable peer
+        can't stall the whole lookup."""
         key = _dir_key(app_id, pseudo)
         found: dict[str, str] = {}
 
@@ -3461,11 +3485,12 @@ class MeshNode:
 
         for raw in self._pseudo_store.get(key):
             absorb(raw)
-        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K]:
-            if nid == self._id:
-                continue
-            blob = await self._dir_find_at(nid, key)
-            if blob:
+        blobs = await asyncio.gather(
+            *(self._dir_find_at(nid, key) for nid in await self._dir_targets(key)),
+            return_exceptions=True,
+        )
+        for blob in blobs:
+            if isinstance(blob, (bytes, bytearray)):
                 for raw in _dir_decode(blob):
                     absorb(raw)
         return [{"id": h, "pseudo": p} for h, p in found.items()]

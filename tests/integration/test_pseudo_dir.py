@@ -58,3 +58,28 @@ class TestPseudoDirectory:
         finally:
             await guest.stop()
             await host.stop()
+
+    async def test_hub_topology_lookup_via_relay(self):
+        # A and B are NOT directly connected — both only reach a shared relay R
+        # (a common real deployment). The directory must still resolve, because
+        # publish/lookup also fan out to direct peers (the relay), not only the
+        # abstract closest-to-key nodes.
+        relay = make_node()
+        a = make_node()
+        b = make_node()
+        await relay.start(["tcp://127.0.0.1:19173"])
+        await a.join("tcp://127.0.0.1:19173", relay.generate_invite())
+        await a.wait_for_session(timeout=15.0)
+        await b.join("tcp://127.0.0.1:19173", relay.generate_invite())
+        await b.wait_for_session(timeout=15.0)
+        a._punch_enabled = False
+        b._punch_enabled = False
+        try:
+            await a.publish_pseudo(CHAT_APP_ID, "alice")
+            res = await asyncio.wait_for(
+                b.lookup_pseudo(CHAT_APP_ID, "alice"), timeout=20.0)
+            assert any(r["id"] == a.id.raw.hex() for r in res)
+        finally:
+            await a.stop()
+            await b.stop()
+            await relay.stop()
