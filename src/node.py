@@ -140,6 +140,12 @@ _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 # established peer well inside that window — both sides do it, so each link
 # carries a packet each way and a few misses still leave margin.
 _LINK_KEEPALIVE_INTERVAL = 20.0
+# Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
+# session with, re-initiate on this cadence. Without it, a single lost handshake
+# (peer offline at send time, an ACK dropped in transit) stranded the queued data
+# until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
+# self-repair / delay tolerance).
+_E2E_RETRY_INTERVAL = 5.0
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
@@ -848,6 +854,8 @@ class MeshNode:
         self._e2e_pending_kem: dict[NodeID, bytes] = {}
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
         self._e2e_pending_data: dict[NodeID, list[bytes]] = {}
+        self._e2e_attempt: dict[NodeID, float] = {}   # target -> last handshake attempt (monotonic)
+        self._e2e_retry_task: asyncio.Task | None = None
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
@@ -947,6 +955,7 @@ class MeshNode:
             )
             self._net_monitor.start()
         self._ensure_link_keepalive()
+        self._ensure_e2e_retry()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1228,6 +1237,7 @@ class MeshNode:
         self._peers.append(peer)
         self._running = True
         self._ensure_link_keepalive()
+        self._ensure_e2e_retry()
         await peer.start(self._handle_packet)
         return peer
 
@@ -1341,6 +1351,7 @@ class MeshNode:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._stop_link_keepalive()
+        await self._stop_e2e_retry()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -1376,7 +1387,7 @@ class MeshNode:
             queue.append(payload)
             if len(queue) > _MAX_PENDING_PER_TARGET:
                 del queue[0]  # drop oldest — bounded backlog per target
-            if target not in self._e2e_pending_kem:
+            if self._should_initiate_e2e(target):
                 await self._initiate_e2e_handshake(target)
             self._persist_state()
             return
@@ -1778,6 +1789,16 @@ class MeshNode:
         if peer is not None:
             await peer.send(packet)
 
+    def _should_initiate_e2e(self, target: NodeID) -> bool:
+        """True if we should (re)send an E2E handshake to ``target``: no session
+        yet, and either none in flight or the last attempt is stale enough to
+        retry. This is what makes a lost handshake self-heal instead of stranding
+        queued data forever."""
+        if target in self._e2e_sessions:
+            return False
+        last = self._e2e_attempt.get(target)
+        return last is None or (time.monotonic() - last) >= _E2E_RETRY_INTERVAL
+
     async def _initiate_e2e_handshake(self, target: NodeID) -> None:
         nonce = os.urandom(32)
         kem_pub, kem_secret = self._identity.generate_kem_keypair()
@@ -1789,9 +1810,42 @@ class MeshNode:
         payload = _encode_e2e_handshake(nonce, kem_pub, dsa_pub, cert_chain, signature)
         self._e2e_pending_kem[target] = kem_secret
         self._e2e_pending_nonce[target] = nonce
+        self._e2e_attempt[target] = time.monotonic()
         self._persist_state()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
         await self._route_outbound(packet)
+
+    def _ensure_e2e_retry(self) -> None:
+        if self._e2e_retry_task is None or self._e2e_retry_task.done():
+            self._e2e_retry_task = asyncio.create_task(self._e2e_retry_loop())
+
+    async def _e2e_retry_loop(self) -> None:
+        """Re-drive stalled E2E handshakes: any target with data still queued but
+        no session gets its handshake re-sent on a bounded cadence. Re-initiating
+        also nudges ``_route_outbound`` to look for a (possibly newly-available)
+        path to the peer. Never raises."""
+        while self._running:
+            await asyncio.sleep(_E2E_RETRY_INTERVAL)
+            # Prune bookkeeping for targets that are done (session up / no backlog).
+            for t in [t for t in self._e2e_attempt
+                      if t in self._e2e_sessions or t not in self._e2e_pending_data]:
+                self._e2e_attempt.pop(t, None)
+            for target in list(self._e2e_pending_data.keys()):
+                if self._should_initiate_e2e(target):
+                    try:
+                        await self._initiate_e2e_handshake(target)
+                    except Exception:
+                        pass
+
+    async def _stop_e2e_retry(self) -> None:
+        task = self._e2e_retry_task
+        self._e2e_retry_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _on_new_transport(self, transport: BaseTransport) -> None:
         if len(self._peers) >= _MAX_PEERS:
