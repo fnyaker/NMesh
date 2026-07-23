@@ -1537,6 +1537,39 @@ class MeshNode:
             return {"ok": True, "reachable": False}
         return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "route"}
 
+    async def console_forget_node(self, node_id_hex: str) -> bool:
+        """Console action: forget a known node — drop its routing-table (address
+        book) entry and any E2E/session state, and close a live link to it if one
+        exists. Persists so the deletion survives restart.
+
+        Not a permanent ban: gossip/PONG merge (any authenticated contact) and
+        neighbour maintenance can re-learn the node later if it's still
+        reachable — see gotchas.md."""
+        try:
+            nid = NodeID(bytes.fromhex(node_id_hex))
+        except (ValueError, TypeError):
+            return False
+        if nid == self._id:
+            return False
+        existed = self._routing.contains(nid)
+        self._routing.remove(nid)
+        self._e2e_sessions.pop(nid, None)
+        self._e2e_pending_kem.pop(nid, None)
+        self._e2e_pending_nonce.pop(nid, None)
+        self._e2e_pending_data.pop(nid, None)
+        self._route_hints.pop(nid, None)
+        for peer in list(self._peers):
+            if peer.authenticated_id == nid:
+                existed = True
+                try:
+                    await peer.stop()
+                except Exception:
+                    pass
+                if peer in self._peers:
+                    self._peers.remove(peer)
+        self._persist_state()
+        return existed
+
     async def _routed_ping(self, target: NodeID, timeout: float = 5.0) -> float | None:
         """Liveness probe that travels the mesh multi-hop: an ECHO_REQUEST routed
         to ``target`` (forwarded hop by hop, across any transport), which replies
