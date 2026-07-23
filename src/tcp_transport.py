@@ -6,6 +6,10 @@ from .ip_utils import split_host_port
 
 _FRAME = struct.Struct('!H')
 _READ_TIMEOUT = 60.0
+# A dial to an unreachable address (a NATted peer's private IP learned via
+# gossip, a dead host) must fail fast: with no cap, the OS SYN timeout holds
+# the caller — _ensure_route_to / join-block tries — for minutes.
+_CONNECT_TIMEOUT = 4.0
 
 
 def _host_port(address: str) -> tuple[str, int]:
@@ -49,7 +53,10 @@ class TCPTransport(BaseTransport):
 
     async def connect(self, address: str) -> None:
         host, port = _host_port(address)
-        self._reader, self._writer = await asyncio.open_connection(host, port)
+        # asyncio.timeout (not wait_for): cancellation must propagate, and a
+        # hanging dial must raise TimeoutError, not linger (see gotchas 3b).
+        async with asyncio.timeout(_CONNECT_TIMEOUT):
+            self._reader, self._writer = await asyncio.open_connection(host, port)
 
     async def listen(self, address: str) -> None:
         host, port = _host_port(address)

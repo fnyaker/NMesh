@@ -65,7 +65,10 @@ _RTO_MIN = 0.050            # initial retransmit timeout, seconds
 _RTO_MAX = 2.0              # max retransmit timeout after backoff
 _RTX_CHECK = 0.020          # retransmit check interval
 _KEEPALIVE_INTERVAL = 25.0  # NAT mapping refresh, seconds
-_KEEPALIVE_TIMEOUT = 15.0   # 3 missed keepalives → dead link
+# Dead-link horizon: 3 missed keepalives, so it MUST exceed both this interval
+# and the mesh-level PING cadence (20s) — a shorter value condemns healthy,
+# merely-quiet links whenever the two timers' phases align (route flapping).
+_KEEPALIVE_TIMEOUT = 75.0   # 3 missed keepalives → dead link
 _ACK_DELAY = 0.010          # max delay before sending a standalone ACK
 _RECV_TIMEOUT = 120.0       # overall receive inactivity timeout
 
@@ -104,8 +107,6 @@ class _ReliableLink:
         # Receive side
         self._recv_next: int = 0          # next expected seq to deliver in-order
         self._reorder: dict[int, bytes] = {}  # seq → payload (out-of-order buffer)
-        self._recv_seen: set[int] = set()  # all seqs received (for SACK bitmap)
-        self._max_recv_seen: int = -1     # highest seq ever received
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -211,6 +212,14 @@ class _ReliableLink:
         (in-order, possibly multiple if reordering gap was filled).
         Empty list if the frame is a duplicate, ACK-only, or out-of-order
         pending.
+
+        Sequence comparison is modular (RFC 1982): a frame is "ahead" of the
+        delivery cursor within half the 2^32 space, "behind" (a retransmit or
+        a stale hostile replay) otherwise. Duplicate detection needs no seen
+        set: ahead-and-buffered is already covered by ``_reorder``, and
+        anything behind the cursor was delivered before. State stays bounded
+        by ``_MAX_REORDER`` no matter how a peer sprays sequence numbers —
+        and the seq wrap at 2^32 no longer wedges the link.
         """
         self._last_recv_time = time.monotonic()
         self._keepalive_misses = 0
@@ -218,16 +227,10 @@ class _ReliableLink:
         if flags & (FLAG_ACK_ONLY | FLAG_KEEPALIVE | FLAG_FIN):
             return []  # no data payload to deliver
 
-        # Duplicate check
-        if seq in self._recv_seen:
-            return []
-
-        self._recv_seen.add(seq)
-        if seq > self._max_recv_seen or self._max_recv_seen < 0:
-            self._max_recv_seen = seq
+        dist = (seq - self._recv_next) & 0xFFFFFFFF
 
         # In-order: deliver immediately and flush any buffered successors
-        if seq == self._recv_next:
+        if dist == 0:
             self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
             delivered: list[bytes] = [payload]
             # Flush consecutive buffered frames
@@ -237,9 +240,16 @@ class _ReliableLink:
             self._schedule_ack()
             return delivered
 
-        # Out-of-order: buffer if space available
-        if len(self._reorder) < _MAX_REORDER:
-            self._reorder[seq] = payload
+        if dist < 0x80000000:
+            # Ahead of the cursor: out-of-order. A seq already buffered is a
+            # retransmit — drop it but re-ACK so the sender stops resending.
+            if seq not in self._reorder and len(self._reorder) < _MAX_REORDER:
+                self._reorder[seq] = payload
+            self._schedule_ack()
+            return []
+
+        # Behind the cursor: delivered long ago (retransmit) or stale garbage —
+        # drop, and re-ACK the current window so a lossy sender can move on.
         self._schedule_ack()
         return []
 
