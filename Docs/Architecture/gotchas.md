@@ -169,4 +169,11 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   après le join. Les topologies relais (pairs NATtés sans listener, ex.
   `test_routed_ping.py`, `test_nat_relay_e2e.py`) n'ont pas ce problème : sans
   adresse dialable, la maintenance ne peut pas créer de raccourci.
+- **« Forget node » (console web, `console_forget_node`) n'est pas un
+  bannissement.** Il retire l'entrée de `RoutingTable` et coupe la session live
+  éventuelle, mais la fusion PONG (tout émetteur authentifié est réinséré dans
+  la table — voir plus haut) et le scan de maintenance de voisinage ci-dessus
+  peuvent réapprendre le même nœud dès qu'il recontacte la node. Un vrai
+  bannissement demanderait une liste d'exclusion persistante consultée par
+  `RoutingTable.add`/PONG, qui n'existe pas aujourd'hui.
 </content>

@@ -711,6 +711,72 @@ class TestManagement:
         finally:
             console.stop(); await node.stop()
 
+    async def test_forget_node_removes_routing_entry_and_requires_auth(self):
+        node, console = await _make_console()
+        try:
+            known_id = NodeID(b"\x03" * 20)
+            node._routing.add(known_id, ["tcp://forget.example:9000"], b"known-key")
+            assert node._routing.contains(known_id)
+
+            # No token → unauthorized, and the entry survives.
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", None,
+                {"id": known_id.raw.hex()})
+            assert status == 401
+            assert node._routing.contains(known_id)
+
+            _, token = await _login(console)
+            # Missing id → 400.
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token, {})
+            assert status == 400
+
+            # Unknown id → 404, no crash.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token,
+                {"id": "aa" * 20})
+            assert status == 404 and j["ok"] is False
+
+            # Malformed hex → 404, no crash.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token,
+                {"id": "not-hex"})
+            assert status == 404 and j["ok"] is False
+
+            # Own id → refused, no crash.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token,
+                {"id": node._id.raw.hex()})
+            assert status == 404 and j["ok"] is False
+
+            # Known id → removed from the routing table.
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token,
+                {"id": known_id.raw.hex()})
+            assert status == 200 and j["ok"] is True
+            assert not node._routing.contains(known_id)
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_forget_node_disconnects_live_peer(self):
+        node, console = await _make_console()
+        try:
+            direct_id = NodeID(b"\x04" * 20)
+            peer = node._peers[0]
+            peer.authenticated_id = direct_id
+            peer.session = object()
+            node._routing.add(direct_id, ["fake://direct.example:7"], b"direct-key")
+
+            _, token = await _login(console)
+            status, _, _, j = await asyncio.to_thread(
+                _request, console, "POST", "/api/nodes/forget", token,
+                {"id": direct_id.raw.hex()})
+            assert status == 200 and j["ok"] is True
+            assert not node._routing.contains(direct_id)
+            assert peer not in node._peers
+        finally:
+            console.stop(); await node.stop()
+
 
 class TestHardening:
     async def test_oversized_body_rejected(self):
