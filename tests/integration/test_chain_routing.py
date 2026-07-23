@@ -33,6 +33,7 @@ async def _line(n: int, base: int):
         await nodes[i].wait_for_session(timeout=15.0)
     for nd in nodes:
         nd._punch_enabled = False
+        await nd._stop_neighbor_maintenance()  # no XOR-nearest shortcuts: force the chain
     # One trust anchor for the whole line so E2E can authenticate end to end
     # (routing reaches the far end regardless; E2E additionally needs trust).
     for x in nodes:

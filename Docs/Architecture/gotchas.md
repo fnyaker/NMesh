@@ -160,4 +160,13 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   lent » quand la cible est simplement injoignable. Un échec collectif est
   distingué d'un échec partiel (certains pairs répondent, d'autres non) pour
   que le fallback Kademlia ne « double-dial » pas des candidats déjà valides.
+- **Un test de topologie en chaîne (A-B-C-D-E, sans raccourci) doit désactiver
+  la maintenance de voisinage**, pas seulement `_punch_enabled`. Dès que les
+  nœuds ont chacun une adresse TCP écoutable, `_maintain_neighbors` les
+  connecte directement dès qu'ils s'apprennent via le routage (c'est le but :
+  résilience par liens XOR-proches). Ça casse l'hypothèse « pas de raccourci »
+  d'un test qui vérifie le multi-hop pur. `await nd._stop_neighbor_maintenance()`
+  après le join. Les topologies relais (pairs NATtés sans listener, ex.
+  `test_routed_ping.py`, `test_nat_relay_e2e.py`) n'ont pas ce problème : sans
+  adresse dialable, la maintenance ne peut pas créer de raccourci.
 </content>
