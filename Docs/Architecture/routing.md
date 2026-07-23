@@ -123,6 +123,34 @@ nœud : `publish_pseudo(app_id, pseudo)` / `lookup_pseudo(app_id, pseudo)`. Côt
 app : `ConnectorClient.publish_pseudo/lookup_pseudo` (app_id de la session). Le
 chat publie automatiquement au `set_pseudo` et cherche le réseau au `search`.
 
+## Maintenance de voisinage cible et recovery au démarrage
+
+Un nœud ne survit pas à un voisinage éparse : il entretient activement un
+**groupe cible de 5 voisins** choisis par distance XOR, et peut atteindre n'importe quel
+node-id en relayant à travers ses voisins et la DHT même sans pair direct
+commun.
+
+- Cible `_NEIGHBOR_TARGET = 5` : au démarrage (`start()`) et à chaud toutes les
+  `_NEIGHBOR_REFRESH = 30 s`, le nœud cherche les entrées XOR-les-plus-proches
+  dont il n'a pas encore de session authentifiée, privilégie les buckets
+  éloignés, puis tente `_connect_routing` sur les adresses connues (IPv6 puis
+  IPv4). C'est un dial dirigé, pas un broadcast.
+- Back-off par identité : chaque identité en échec retarde ses prochaines
+  tentatives (`_neighbor_retry_until`, minimum `2 s`, plafond `60 s`) ; le
+  nombre d'identités suivies est borné (`_NEIGHBOR_RETRY_TRACKED = 128`) pour
+  qu'un scan large ne crée pas d'état sans fin. Une fois la session établie,
+  `_add_authed_peer` efface la pénalité.
+- Réseaux sans pairs directs : si nous n'avons aucune entrée voisine joignable,
+  on retombe sur `_kademlia_lookup` puis un envoi multi-peer ordonné vers
+  jusqu'à `_ROUTE_SEND_FANOUT = 5` candidats choisis par distance XOR, avec un
+  deadline commun. Un pair qui échoue n'entraîne pas la chute du message : on
+  essaie le suivant. L'échec total est géré par `_forward_packet` (retry
+  Kademlia). Quand une route directe ou un premier saut est connu, on le met en
+  cache (`_route_hints`) pour accélérer les prochains envois vers la même cible.
+- Dernier recours : `_kademlia_lookup(target)` itératif borné (`_KAD_LOOKUP_MAX_ROUNDS = 4`,
+  `_KAD_LOOKUP_TIMEOUT = 3.0 s`) agrège `FOUND_NODE` jusqu'à stabilisation ;
+  les résultats alimentent `_connect_routing` et la table de routage.
+
 ## Propagation des adresses  ⚑ invariant central
 
 **But visé** : *connaître une node ⟹ connaître l'ensemble de ses adresses

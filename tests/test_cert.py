@@ -195,6 +195,7 @@ class TestFoundNodeChainValidation:
 
         entry = NodeEntry(victim_id, ["tcp://127.0.0.1:9099"], victim.dsa_public_key, chain)
 
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         pkt = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                             b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(pkt)
@@ -216,6 +217,7 @@ class TestFoundNodeChainValidation:
 
         entry = NodeEntry(victim_id, ["tcp://127.0.0.1:9100"], victim.dsa_public_key, chain)
 
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         pkt = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                             b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(pkt)

@@ -19,6 +19,7 @@ import tempfile
 import pytest
 
 from src.node import MeshNode
+from src.node_id import NodeID
 from src.webconsole import WebConsole, _LOGIN_MAX_FAILURES
 from tests.conftest import make_manager
 
@@ -261,6 +262,151 @@ class TestAppStore:
             status, _, _, _ = await asyncio.to_thread(
                 _request, console, "POST", "/api/store/install", token, {})
             assert status == 400
+        finally:
+            console.stop(); await node.stop()
+
+
+class TestListEndpoints:
+    @pytest.mark.parametrize("path", [
+        "/api/nodes?scope=active",
+        "/api/nodes?scope=known",
+        "/api/store/catalog",
+        "/api/store/installed",
+    ])
+    async def test_lists_require_auth(self, path):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", path)
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_node_scopes_search_ids_and_routing_addresses(self):
+        node, console = await _make_console()
+        try:
+            direct_id = NodeID(b"\x01" * 20)
+            known_id = NodeID(b"\x02" * 20)
+            peer = node._peers[0]
+            peer.authenticated_id = direct_id
+            peer.session = object()
+            peer.remote_addr = "fake://direct.example:7"
+            peer.dsa_pub = b"direct-key"
+            peer.last_rtt = 0.01234
+            node._routing.add(
+                direct_id, ["tcp://Route-Needle.example:9000"], b"route-key")
+            node._routing.add(
+                known_id, ["spool:///var/drop/address-match"], b"known-key")
+
+            _, token = await _login(console)
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/nodes?scope=active&q=route-needle", token)
+            assert status == 200
+            assert {"items", "total", "limit", "offset"} == set(page)
+            assert page["total"] == 1 and page["limit"] == 20 and page["offset"] == 0
+            active = page["items"][0]
+            assert active["id"] == direct_id.raw.hex()
+            assert active["authenticated_id"] == direct_id.raw.hex()
+            assert active["connected"] is True and active["has_session"] is True
+            assert active["rtt_ms"] == 12.3 and active["has_key"] is True
+            assert active["addresses"] == [
+                "fake://direct.example:7", "tcp://Route-Needle.example:9000"]
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/nodes?scope=known&q=ADDRESS-MATCH", token)
+            assert status == 200 and page["total"] == 1
+            assert page["items"][0]["id"] == known_id.raw.hex()
+            assert page["items"][0]["addresses"] == [
+                "spool:///var/drop/address-match"]
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                f"/api/nodes?scope=known&q={direct_id.raw.hex()[4:20]}", token)
+            assert status == 200 and page["total"] == 1
+            assert page["items"][0]["connected"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_store_lists_search_paginate_and_keep_fields(self):
+        node, console = await _make_console()
+        try:
+            for i in range(205):
+                app_id = i.to_bytes(20, "big")
+                node._catalog._apps[app_id] = {
+                    "app_id": app_id,
+                    "release": b"release",
+                    "release_id": (i + 1000).to_bytes(20, "big"),
+                    "name": "Needle Suite" if i == 17 else f"App {i:03d}",
+                    "version": f"1.0.{i}",
+                    "author": (i + 500).to_bytes(20, "big"),
+                    "root_key": (i + 2000).to_bytes(20, "big"),
+                    "ts": i,
+                }
+            installed_id = (17).to_bytes(20, "big").hex()
+            installed = {
+                "app_id": installed_id,
+                "name": "Needle Suite",
+                "version": "1.0.17",
+                "author": (517).to_bytes(20, "big").hex(),
+                "release_id": (1017).to_bytes(20, "big").hex(),
+                "ts": 17,
+                "installed_ts": 123456,
+            }
+            node._installed._apps[installed_id] = installed
+            _, token = await _login(console)
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/store/catalog?q=needle", token)
+            assert status == 200 and page["total"] == 1
+            assert page["items"][0]["state"] == "installed"
+            assert page["items"][0]["action"] is None
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/store/installed?q=1.0.17", token)
+            assert status == 200 and page["items"] == [installed]
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/store/catalog?limit=100&offset=100", token)
+            assert status == 200
+            assert page["total"] == 205 and len(page["items"]) == 100
+            assert page["limit"] == 100 and page["offset"] == 100
+            assert page["items"][0]["app_id"] == (104).to_bytes(20, "big").hex()
+
+            status, _, _, page = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/store/catalog?limit=100&offset=200", token)
+            assert status == 200 and len(page["items"]) == 5
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_malformed_list_queries_are_rejected(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            bad_paths = [
+                "/api/nodes",
+                "/api/nodes?scope=all",
+                "/api/nodes?scope=active&scope=known",
+                "/api/nodes?scope=known&q=" + "x" * 129,
+                "/api/nodes?scope=known&limit=0",
+                "/api/nodes?scope=known&limit=101",
+                "/api/nodes?scope=known&limit=-1",
+                "/api/nodes?scope=known&limit=1.5",
+                "/api/nodes?scope=known&offset=-1",
+                "/api/nodes?scope=known&offset=nope",
+                "/api/store/catalog?scope=known",
+                "/api/store/installed?q=a&q=b",
+                "/api/store/installed?q=%ZZ",
+            ]
+            for path in bad_paths:
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "GET", path, token)
+                assert status == 400, path
         finally:
             console.stop(); await node.stop()
 

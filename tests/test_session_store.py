@@ -139,8 +139,9 @@ class TestNodeRestart:
         with tempfile.TemporaryDirectory() as d:
             idp = os.path.join(d, "id.key")
             ssp = os.path.join(d, "sessions")
-            peer = _peer_id()
-            dsa_pub = CryptoIdentity().dsa_public_key
+            peer_identity = CryptoIdentity()
+            dsa_pub = peer_identity.dsa_public_key
+            peer = NodeID.from_public_key(dsa_pub)
 
             node1 = MeshNode(make_manager(), identity_path=idp, session_store_path=ssp)
             node1._routing.add(peer, ["tcp://198.51.100.7:9000"], dsa_pub)

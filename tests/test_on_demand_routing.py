@@ -176,6 +176,28 @@ class TestRouteOutboundOnDemand:
         await node_a.stop()
         await node_b.stop()
 
+    async def test_failed_closest_neighbor_falls_back_to_next(self):
+        class BrokenSend(FakeTransport):
+            async def send(self, packet):
+                raise ConnectionError("dead link")
+
+        node = MeshNode(transport_manager=make_manager())
+        broken = await node._inject_peer(BrokenSend())
+        working_transport = FakeTransport()
+        working = await node._inject_peer(working_transport)
+        target = NodeID(b"\x00" * 20)
+        broken.authenticated_id = NodeID(b"\x00" * 19 + b"\x01")
+        working.authenticated_id = NodeID(b"\x00" * 19 + b"\x02")
+        broken.session = working.session = SessionKey(os.urandom(32))
+
+        packet = Packet.create(DATA, node.id.raw, target.raw, b"fallback")
+        used = await node._route_outbound(packet)
+
+        assert used is working
+        assert working_transport.sent == [packet]
+        assert broken not in node._peers
+        await node.stop()
+
 
 # ---------------------------------------------------------------------------
 # 9.3 — _forward_packet integration

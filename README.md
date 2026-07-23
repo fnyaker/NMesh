@@ -57,10 +57,18 @@ python scripts/nmesh_node.py --data ./data
 
 ## Console web
 
-Plan de **gestion** : graphe réseau, liste des pairs, débit temps réel, charge
-du nœud, et actions (générer une invitation, rejoindre un réseau, faire
-confiance à un certificat). HTTPS auto-signé, mot de passe haché (scrypt),
-jetons Bearer, lockout anti-bruteforce, bind loopback par défaut.
+Interface de gestion **responsive** (4 onglets : Vue d'ensemble, Apps, Connectivité,
+Paramètres) :
+
+- Vue d'ensemble : statut local, débit temps réel (graphique), **carte réseau
+  cliquable** (cliquer sur un nœud ouvre une pop-up avec son ID complète),
+  tableau des pairs actifs (direction, session, RTT, octets), topologie.
+- Apps : apps installées + **store scalable** (catalogue paginé côté serveur,
+  recherche, actions d'installation/désinstallation).
+- Connectivité : nœuds actifs + connus/recherchables, affichage par défaut des
+  20 plus récents (jusqu'à 100), clic pour détails.
+- Paramètres : écouteurs, punch NAT, keepalive, AutoNAT, vérification réseau.
+
 → [`Docs/WebConsole/guide`](Docs/WebConsole/guide)
 
 ## Brancher une application

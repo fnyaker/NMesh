@@ -123,6 +123,7 @@ class TestHandleFoundNode:
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
         entry = _make_entry("tcp://127.0.0.1:9002", issuer_node=node)
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         found = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                               b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(found)
@@ -139,9 +140,22 @@ class TestHandleFoundNode:
         # Create entry with invalid URI — _encode_entries will include it raw;
         # _decode_entries must then drop the entire entry.
         entry = _make_entry("not-a-uri", issuer_node=node)
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         found = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                               b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(found)
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert node._routing.get(entry.node_id) is None
+
+    async def test_unsolicited_found_node_does_not_mutate_routing(self):
+        node, fake = await make_node()
+        sender_id = NodeID.generate()
+        node._peers[0].authenticated_id = sender_id
+        entry = _make_entry("tcp://127.0.0.1:9002", issuer_node=node)
+        fake.inject(Packet.create(
+            FOUND_NODE, sender_id.raw, node.id.raw,
+            b"unsolict" + _encode_entries([entry])))
         await asyncio.sleep(0.05)
         await node.stop()
         assert node._routing.get(entry.node_id) is None

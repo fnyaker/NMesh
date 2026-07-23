@@ -12,7 +12,7 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 
 | Fichier | Rôle |
 |---|---|
-| `node.py` | Le cœur (~3600 lignes) : boucle de réception, dispatch, handshake, routage, DHT, E2E, hole punching, keepalive, reachability. |
+| `node.py` | Le cœur (~3600 lignes) : boucle de réception, dispatch, handshake, routage, DHT, E2E, hole punching, keepalive, reachability, **maintenance d'un voisinage cible et recovery multi-hop**. |
 | `packet.py` | Format de paquet, `msg_id`, AAD GCM, (dé)chiffrement d'un paquet. |
 | `node_id.py` | `NodeID` = sha256(clé pub DSA)[:20] ; distance XOR Kademlia. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |
