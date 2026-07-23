@@ -139,7 +139,7 @@ _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per
 _MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
 _ON_DEMAND_TIMEOUT     = 5.0    # transport open + handshake
 _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
-_KAD_LOOKUP_MAX_ROUNDS = 2
+_KAD_LOOKUP_MAX_ROUNDS = 4
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
 _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
@@ -169,6 +169,17 @@ _E2E_REKEY_MAX = 64          # distinct peers with a pending re-key candidate
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
+# A bounded XOR-nearest link set is recovered at startup and refreshed while
+# the node runs. Failed identities back off independently so dead addresses do
+# not turn maintenance into a dial storm.
+_NEIGHBOR_TARGET          = 5
+_NEIGHBOR_REFRESH         = 30.0
+_NEIGHBOR_RETRY_MIN       = 2.0
+_NEIGHBOR_RETRY_MAX       = 60.0
+_NEIGHBOR_RETRY_TRACKED   = 128
+_ROUTE_SEND_FANOUT        = 5
+_ROUTE_HINT_MAX           = 256
+_ROUTE_HINT_TTL           = 120.0
 
 # Invite blocks (base64 join bundles: advertised URIs + invite code)
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
@@ -898,7 +909,7 @@ class MeshNode:
         apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
         self._installed = InstalledApps(installed_path, apps_dir)
         self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
-        self._pending_echo: dict[bytes, asyncio.Future] = {}   # routed-ping query_id -> future
+        self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
         # Pseudo directory: find node ids by pseudo, network-wide.
         self._pseudo_store = PseudoStore()
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
@@ -934,6 +945,12 @@ class MeshNode:
         self._punch_keepalive_task: asyncio.Task | None = None
         # Periodic PING that keeps idle authenticated links from timing out.
         self._keepalive_task: asyncio.Task | None = None
+        self._neighbor_task: asyncio.Task | None = None
+        self._neighbor_wakeup = asyncio.Event()
+        self._neighbor_retry: OrderedDict[NodeID, tuple[int, float]] = OrderedDict()
+        # Destination -> (authenticated local first hop, successful send time).
+        # No remote relay identities are inferred from this local observation.
+        self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
         self._last_announced: tuple[str, ...] | None = None
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
@@ -982,6 +999,7 @@ class MeshNode:
             self._net_monitor.start()
         self._ensure_link_keepalive()
         self._ensure_e2e_retry()
+        self._ensure_neighbor_maintenance()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1378,6 +1396,7 @@ class MeshNode:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._stop_link_keepalive()
         await self._stop_e2e_retry()
+        await self._stop_neighbor_maintenance()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -1524,7 +1543,11 @@ class MeshNode:
         with an ECHO_REPLY routed back. Returns the round-trip in ms, or None."""
         qid = os.urandom(_QID_LEN)
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending_echo[qid] = fut
+        while len(self._pending_echo) >= 128:
+            _, (_, old) = self._pending_echo.popitem(last=False)
+            if not old.done():
+                old.cancel()
+        self._pending_echo[qid] = (target, fut)
         t0 = time.monotonic()
         try:
             await self._route_outbound(
@@ -1549,8 +1572,14 @@ class MeshNode:
     async def _handle_echo_reply(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != _QID_LEN:
             return
-        fut = self._pending_echo.pop(packet.payload, None)
-        if fut is not None and not fut.done():
+        pending = self._pending_echo.get(packet.payload)
+        if pending is None:
+            return
+        target, fut = pending
+        if packet.src_id != target.raw or packet.dst_id != self._id.raw:
+            return
+        self._pending_echo.pop(packet.payload, None)
+        if not fut.done():
             fut.set_result(True)
 
     def _ensure_link_keepalive(self) -> None:
@@ -1582,6 +1611,101 @@ class MeshNode:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    def _authenticated_peers(self, *, exclude: _Peer | None = None) -> list[_Peer]:
+        """Return one live authenticated link per identity."""
+        seen: set[NodeID] = set()
+        out: list[_Peer] = []
+        for peer in self._peers:
+            if (peer is exclude or peer.authenticated_id is None
+                    or peer.session is None or peer.authenticated_id in seen):
+                continue
+            seen.add(peer.authenticated_id)
+            out.append(peer)
+        return out
+
+    def _wake_neighbor_maintenance(self) -> None:
+        if self._running:
+            self._neighbor_wakeup.set()
+
+    def _ensure_neighbor_maintenance(self) -> None:
+        if self._neighbor_task is None or self._neighbor_task.done():
+            self._neighbor_task = asyncio.create_task(
+                self._neighbor_maintenance_loop())
+
+    async def _stop_neighbor_maintenance(self) -> None:
+        task = self._neighbor_task
+        self._neighbor_task = None
+        self._neighbor_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _neighbor_maintenance_loop(self) -> None:
+        """Recover an empty node and maintain its five XOR-nearest known links."""
+        while self._running:
+            self._neighbor_wakeup.clear()
+            try:
+                await self._maintain_neighbors()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                async with asyncio.timeout(_NEIGHBOR_REFRESH):
+                    await self._neighbor_wakeup.wait()
+            except TimeoutError:
+                pass
+
+    async def _maintain_neighbors(self) -> None:
+        """Run one bounded discovery/reconnect cycle.
+
+        With no known or discoverable identity there is intentionally nothing
+        to dial. Once one live seed exists, iterative lookup refreshes the local
+        neighborhood before selecting the nearest five identities.
+        """
+        if self._authenticated_peers():
+            try:
+                async with asyncio.timeout(_KAD_LOOKUP_TIMEOUT * 2):
+                    await self.kad_lookup(self._id, k=20, alpha=3,
+                                          max_rounds=_KAD_LOOKUP_MAX_ROUNDS)
+            except (TimeoutError, Exception):
+                pass
+
+        now = time.monotonic()
+        live_ids = {p.authenticated_id for p in self._authenticated_peers()}
+        desired = [entry.node_id for entry in
+                   self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
+        attempts = []
+        for node_id in desired:
+            if node_id in live_ids:
+                self._neighbor_retry.pop(node_id, None)
+                continue
+            _, next_try = self._neighbor_retry.get(node_id, (0, 0.0))
+            if now >= next_try:
+                attempts.append(node_id)
+        if not attempts:
+            return
+
+        results = await asyncio.gather(
+            *(self._ensure_route_to(node_id) for node_id in attempts),
+            return_exceptions=True,
+        )
+        now = time.monotonic()
+        for node_id, result in zip(attempts, results):
+            if isinstance(result, _Peer) and result.session is not None:
+                self._neighbor_retry.pop(node_id, None)
+                continue
+            failures = self._neighbor_retry.get(node_id, (0, 0.0))[0] + 1
+            delay = min(_NEIGHBOR_RETRY_MAX,
+                        _NEIGHBOR_RETRY_MIN * (2 ** min(failures - 1, 5)))
+            self._neighbor_retry[node_id] = (failures, now + delay)
+            self._neighbor_retry.move_to_end(node_id)
+            while len(self._neighbor_retry) > _NEIGHBOR_RETRY_TRACKED:
+                self._neighbor_retry.popitem(last=False)
 
     async def find_node(self, target: NodeID) -> None:
         qid = os.urandom(_QID_LEN)
@@ -1627,34 +1751,12 @@ class MeshNode:
         event = asyncio.Event()
         self._pending_lookups[target] = event
         try:
-            seen_peers: set[bytes] = set()
-            deadline = asyncio.get_event_loop().time() + timeout
-            for _ in range(_KAD_LOOKUP_MAX_ROUNDS):
-                if self._routing.contains(target):
-                    return True
-                queried = 0
-                for p in list(self._peers):
-                    if p.authenticated_id is None or p.session is None:
-                        continue
-                    if p.authenticated_id.raw in seen_peers:
-                        continue
-                    seen_peers.add(p.authenticated_id.raw)
-                    pkt = Packet.create(FIND_NODE, self._id.raw,
-                                        NodeID(b"\xff" * 20).raw,
-                                        target.raw + os.urandom(_QID_LEN))
-                    try:
-                        await p.send(pkt)
-                        queried += 1
-                    except Exception:
-                        pass
-                if queried == 0:
-                    break
-                sub_deadline = min(deadline,
-                                   asyncio.get_event_loop().time() + _KAD_LOOKUP_TIMEOUT)
-                while asyncio.get_event_loop().time() < sub_deadline:
-                    if self._routing.contains(target):
-                        return True
-                    await asyncio.sleep(_AUTH_POLL_INTERVAL)
+            try:
+                async with asyncio.timeout(timeout):
+                    await self.kad_lookup(target, k=20, alpha=3,
+                                          max_rounds=_KAD_LOOKUP_MAX_ROUNDS)
+            except TimeoutError:
+                pass
             return self._routing.contains(target)
         finally:
             event.set()
@@ -1684,29 +1786,23 @@ class MeshNode:
             )
         event = asyncio.Event()
         self._pending_connections[target] = event
+        deadline = asyncio.get_event_loop().time() + timeout
         try:
             if not self._routing.contains(target):
-                await self._kademlia_lookup(
-                    target, _KAD_LOOKUP_TIMEOUT * _KAD_LOOKUP_MAX_ROUNDS
-                )
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    return None
+                await self._kademlia_lookup(target, remaining)
                 if not self._routing.contains(target):
                     return None
-            peer = await self._connect_routing(target)
-            if peer is None:
-                # No advertised address is directly connectable (typically
-                # both sides behind NAT) — fall back to a UDP hole punch
-                # coordinated by a shared relay.
-                return await self._punch_route_to(target, timeout)
-            ok = await self._wait_for_peer_authenticated(peer, target, timeout)
-            if not ok:
-                try:
-                    await peer.stop()
-                except Exception:
-                    pass
-                if peer in self._peers:
-                    self._peers.remove(peer)
-                return await self._punch_route_to(target, timeout)
-            return peer
+            peer = await self._connect_routing(target, deadline)
+            if peer is not None:
+                return peer
+            # Use only the remaining whole-operation budget for NAT traversal.
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return None
+            return await self._punch_route_to(target, remaining)
         finally:
             event.set()
             self._pending_connections.pop(target, None)
@@ -1819,44 +1915,75 @@ class MeshNode:
 
     async def bootstrap(self) -> None:
         """Kademlia join: advertise own addresses then iteratively populate routing table."""
-        if not self._peers:
+        if not self._authenticated_peers():
+            await self._maintain_neighbors()
+        if not self._authenticated_peers():
             return
         for peer in list(self._peers):
             if peer.session is not None and self._addresses:
                 await self.ping(peer)
-        discovered = await self.kad_lookup(self._id)
-        tasks = []
-        for nid in discovered:
-            if nid == self._id:
-                continue
-            if any(p.authenticated_id == nid for p in self._peers):
-                continue
-            tasks.append(asyncio.create_task(self._ensure_route_to(nid)))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._maintain_neighbors()
 
-    async def _route_outbound(self, packet: Packet) -> None:
-        target = NodeID(packet.dst_id)
-        direct = next(
-            (p for p in self._peers
-             if p.authenticated_id == target and p.session is not None),
-            None,
-        )
-        if direct is not None:
-            await direct.send(packet)
+    def _route_candidates(self, target: NodeID,
+                          exclude: _Peer | None = None) -> list[_Peer]:
+        peers = self._authenticated_peers(exclude=exclude)
+        peers.sort(key=lambda peer: (
+            0 if peer.authenticated_id == target else 1,
+            target.distance(peer.authenticated_id),
+        ))
+        return peers[:_ROUTE_SEND_FANOUT]
+
+    async def _drop_failed_peer(self, peer: _Peer) -> None:
+        try:
+            await peer.stop()
+        except Exception:
+            pass
+        if peer in self._peers:
+            self._peers.remove(peer)
+        self._wake_neighbor_maintenance()
+
+    def _remember_route_hint(self, packet: Packet, peer: _Peer) -> None:
+        if (packet.src_id != self._id.raw or packet.dst_id == _BROADCAST_ID
+                or peer.authenticated_id is None):
             return
-        candidates = [p for p in self._peers
-                      if p.authenticated_id is not None and p.session is not None]
-        if candidates:
-            best = min(candidates, key=lambda p: target.distance(p.authenticated_id))
-            await best.send(packet)
+        target = NodeID(packet.dst_id)
+        if peer.authenticated_id == target:
+            self._route_hints.pop(target, None)
+            return
+        self._route_hints[target] = (peer.authenticated_id, time.monotonic())
+        self._route_hints.move_to_end(target)
+        while len(self._route_hints) > _ROUTE_HINT_MAX:
+            self._route_hints.popitem(last=False)
+
+    async def _send_to_candidates(self, packet: Packet, candidates: list[_Peer],
+                                  *, decrement: bool = False) -> _Peer | None:
+        outgoing = packet.with_decremented_ttl() if decrement else packet
+        for peer in candidates:
+            try:
+                await peer.send(outgoing)
+                self._remember_route_hint(packet, peer)
+                return peer
+            except Exception:
+                await self._drop_failed_peer(peer)
+        return None
+
+    async def _route_outbound(self, packet: Packet) -> _Peer | None:
+        target = NodeID(packet.dst_id)
+        peer = await self._send_to_candidates(
+            packet, self._route_candidates(target))
+        if peer is not None:
             # Relayed path — try to upgrade to a direct link in the
             # background (direct connect, then UDP hole punch).
-            self._maybe_upgrade_path(target)
-            return
+            if peer.authenticated_id != target:
+                self._maybe_upgrade_path(target)
+            return peer
         peer = await self._ensure_route_to(target)
         if peer is not None:
-            await peer.send(packet)
+            return await self._send_to_candidates(packet, [peer])
+        # Lookup/direct acquisition may expose a new relay even if the target
+        # itself remains undiallable. Try the refreshed neighbor set once.
+        return await self._send_to_candidates(
+            packet, self._route_candidates(target))
 
     def _should_initiate_e2e(self, target: NodeID) -> bool:
         """True if we should (re)send an E2E handshake to ``target``: no session
@@ -1932,28 +2059,52 @@ class MeshNode:
                                NodeID(b"\xff" * 20).raw, challenge)
         await peer.send(packet)
 
-    async def _connect_routing(self, node_id: NodeID) -> _Peer | None:
+    async def _connect_routing(self, node_id: NodeID,
+                               deadline: float) -> _Peer | None:
         entry = self._routing.get(node_id)
         if entry is None:
             return None
-        for uri in _order_by_preference(list(entry.addresses)):  # prefer global IPv6
+        uris = _order_by_preference(list(entry.addresses))
+        for index, uri in enumerate(uris):  # prefer global IPv6
             result = _validate_uri(uri)
             if result is None:
                 continue
             scheme, _ = result
             if not self._transport_manager.is_supported(scheme):
                 continue
+            if len(self._peers) >= _MAX_PEERS:
+                return None
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return None
+            # Reserve a fair share for every remaining endpoint. A transport
+            # that accepts but never authenticates cannot hide fresher URIs.
+            attempt_timeout = remaining / max(1, len(uris) - index)
+            peer = None
+            authenticated = False
             try:
-                transport = await self._transport_manager.connect(uri)
+                async with asyncio.timeout(attempt_timeout):
+                    transport = await self._transport_manager.connect(uri)
+                    peer = _Peer(transport, is_client_side=True)
+                    peer.on_dead = self._reap_peer
+                    peer.total = self._metrics.total
+                    peer.remote_addr = uri
+                    self._peers.append(peer)
+                    await peer.start(self._handle_packet)
+                    if await self._wait_for_peer_authenticated(
+                            peer, node_id, attempt_timeout):
+                        authenticated = True
+                        return peer
             except Exception:
-                continue
-            peer = _Peer(transport, is_client_side=True)
-            peer.on_dead = self._reap_peer
-            peer.total = self._metrics.total
-            peer.remote_addr = uri
-            self._peers.append(peer)
-            await peer.start(self._handle_packet)
-            return peer
+                pass
+            finally:
+                if peer is not None and not authenticated:
+                    try:
+                        await peer.stop()
+                    except Exception:
+                        pass
+                    if peer in self._peers:
+                        self._peers.remove(peer)
         return None
 
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
@@ -1983,6 +2134,7 @@ class MeshNode:
         except Exception:
             pass
         self._poke_net("peer-lost")
+        self._wake_neighbor_maintenance()
 
     def _persist_state(self) -> None:
         """Snapshot E2E + routing state to the encrypted store, if persistence
@@ -2056,6 +2208,7 @@ class MeshNode:
             "routing": routing,
             "routing_size": len(routing),
             "e2e_sessions": [nid.raw.hex() for nid in self._e2e_sessions],
+            "topology": self._console_topology(now),
             "total": self._metrics.total.as_dict(),
             "load": self._metrics.load(),
             "network": (self._net_monitor.status()
@@ -2069,6 +2222,89 @@ class MeshNode:
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
         }
+
+    def _console_topology(self, now: float) -> dict:
+        direct = []
+        direct_ids: set[NodeID] = set()
+        for peer in self._authenticated_peers():
+            direct_ids.add(peer.authenticated_id)
+            direct.append({
+                "id": peer.authenticated_id.raw.hex(),
+                "transport": self._peer_scheme(peer),
+                "rtt_ms": (round(peer.last_rtt * 1000, 1)
+                           if peer.last_rtt is not None else None),
+                "evidence": "authenticated-direct-link",
+            })
+        routed = []
+        for target in self._e2e_sessions:
+            if target in direct_ids:
+                continue
+            hint = self._route_hints.get(target)
+            if hint is None:
+                continue
+            via, seen_at = hint
+            if now - seen_at > _ROUTE_HINT_TTL or via not in direct_ids:
+                continue
+            routed.append({
+                "id": target.raw.hex(),
+                "via": via.raw.hex(),
+                "seen_ago": max(0.0, now - seen_at),
+                "evidence": "locally-observed-first-hop",
+                "path_visibility": "first-hop-only",
+            })
+        return {"direct": direct, "routed": routed}
+
+    def console_nodes(self, scope: str) -> list[dict]:
+        """A focused console view of direct or routing-table nodes."""
+        now = time.monotonic()
+        authed = {p.authenticated_id.raw.hex(): p for p in self._peers
+                  if p.authenticated_id is not None and p.session is not None}
+        if scope == "known":
+            known = []
+            for e in self._routing.all_entries():
+                node_id = e.node_id.raw.hex()
+                peer = authed.get(node_id)
+                known.append({
+                    "id": node_id,
+                    "addresses": sorted(e.addresses),
+                    "seen_ago": max(0.0, now - e.last_seen),
+                    "connected": peer is not None,
+                    "rtt_ms": (round(peer.last_rtt * 1000, 1)
+                               if peer is not None and peer.last_rtt is not None
+                               else None),
+                    "has_key": bool(e.dsa_pub),
+                })
+            return known
+        if scope != "active":
+            raise ValueError("invalid node scope")
+
+        out = []
+        for p in self._peers:
+            if p.authenticated_id is None or p.session is None:
+                continue
+            node_id = p.authenticated_id.raw.hex()
+            route = self._routing.get(p.authenticated_id)
+            addresses = list(route.addresses) if route is not None else []
+            if p.remote_addr and p.remote_addr not in addresses:
+                addresses.append(p.remote_addr)
+            out.append({
+                "id": node_id,
+                "authenticated_id": node_id,
+                "addresses": sorted(addresses),
+                "seen_ago": (max(0.0, now - route.last_seen)
+                             if route is not None else None),
+                "connected": True,
+                "has_key": bool((route.dsa_pub if route is not None else b"")
+                                or p.dsa_pub),
+                "is_client_side": p.is_client_side,
+                "has_session": True,
+                "malformed": p._malformed,
+                "rtt_ms": (round(p.last_rtt * 1000, 1)
+                           if p.last_rtt is not None else None),
+                "counters": p.counters.as_dict(),
+                "transport": self._peer_scheme(p),
+            })
+        return out
 
     def _reachability_ctx(self) -> dict:
         """Node-level facts a transport needs to classify its reachability:
@@ -2657,38 +2893,18 @@ class MeshNode:
         if packet.ttl <= 1:
             return
         target = NodeID(packet.dst_id)
-        # Direct peer is always preferred
-        direct = next(
-            (p for p in self._peers
-             if p is not from_peer
-             and p.authenticated_id == target
-             and p.session is not None),
-            None,
-        )
-        if direct is not None:
-            await direct.send(packet.with_decremented_ttl())
+        # Each hop repeats the ordered neighbor fallback. If the closest link
+        # fails during send, the packet still gets every other bounded candidate
+        # before it is dropped; TTL and msg_id dedup stop loops and flooding.
+        peer = await self._send_to_candidates(
+            packet, self._route_candidates(target, exclude=from_peer),
+            decrement=True)
+        if peer is not None:
             return
-        # Routing table entry → on-demand is more reliable than random XOR hop,
-        # especially across network boundaries where only certain nodes have reachability.
-        if self._routing.contains(target):
-            peer = await self._ensure_route_to(target)
-            if peer is not None and peer is not from_peer:
-                await peer.send(packet.with_decremented_ttl())
-                return
-        candidates = [
-            p for p in self._peers
-            if p is not from_peer
-            and p.authenticated_id is not None
-            and p.session is not None
-        ]
-        if candidates:
-            best = min(candidates, key=lambda p: target.distance(p.authenticated_id))
-            await best.send(packet.with_decremented_ttl())
-            return
-        # Last resort: Kademlia lookup + on-demand
+        # Only block an ingress loop on lookup/dial when no live relay exists.
         peer = await self._ensure_route_to(target)
         if peer is not None and peer is not from_peer:
-            await peer.send(packet.with_decremented_ttl())
+            await self._send_to_candidates(packet, [peer], decrement=True)
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
         if packet.type == INVITE_SEEK:
@@ -3105,8 +3321,9 @@ class MeshNode:
         except (ValueError, UnicodeDecodeError):
             return
         valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
-        if valid_uris:
-            self._routing.add(src, valid_uris, peer.dsa_pub)
+        # An authenticated PING proves recency even when the peer currently has
+        # no announceable address. Existing addresses remain as reconnect hints.
+        self._routing.add(src, valid_uris, peer.dsa_pub)
         # The PONG is unconditional: a node with nothing to advertise (a pure
         # client, or a NATted node whose addresses are all unreachable) still
         # deserves its liveness reply — withholding it leaves the sender's RTT
@@ -3138,10 +3355,15 @@ class MeshNode:
         if len(packet.payload) < _QID_LEN:
             return
         query_id = packet.payload[:_QID_LEN]
+        future = self._pending_finds.get(query_id)
+        if future is None:
+            return  # unsolicited routing data never mutates local state
         try:
             entries = _decode_entries(packet.payload[_QID_LEN:])
         except Exception:
             entries = []
+        if len(entries) > 20:
+            return
         valid_entries: list[NodeEntry] = []
         for entry in entries:
             if not entry.cert_chain:
@@ -3157,9 +3379,11 @@ class MeshNode:
                 self._cert_add(cert)
             self._routing.add(entry.node_id, entry.addresses, dsa_pub)
             valid_entries.append(entry)
-        future = self._pending_finds.pop(query_id, None)
-        if future is not None and not future.done():
+        self._pending_finds.pop(query_id, None)
+        if not future.done():
             future.set_result(valid_entries)
+        if valid_entries:
+            self._wake_neighbor_maintenance()
 
     # -- DHT (content-addressed value store) ------------------------------
 
@@ -3872,6 +4096,7 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
@@ -3952,6 +4177,7 @@ class MeshNode:
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
+        self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._persist_state()  # persist the newly-known peer for restart recovery
 

@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass, field
 from .node_id import NodeID
+from .uri import _MAX_ADDRESSES, _validate_uri
 
 
 @dataclass
@@ -70,7 +71,10 @@ class RoutingTable:
         if node_id == self._own_id:
             return None
         existing = self.get(node_id)
-        merged_addrs = list(dict.fromkeys((existing.addresses if existing else []) + addresses))
+        # Prefer fresh observations and cap address churn from authenticated
+        # peers so a single route can never grow without bound.
+        merged_addrs = list(dict.fromkeys(
+            addresses + (existing.addresses if existing else [])))[:_MAX_ADDRESSES]
         merged_pub = dsa_pub if dsa_pub else (existing.dsa_pub if existing else b"")
         return self._buckets[self._bucket_index(node_id)].add(
             NodeEntry(node_id, merged_addrs, merged_pub)
@@ -127,7 +131,14 @@ class RoutingTable:
                 dsa_pub = bytes.fromhex(e["dsa_pub"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if len(raw) != 20:
+            if len(raw) != 20 or not dsa_pub:
                 continue
-            addresses = [a for a in e.get("addresses", []) if isinstance(a, str)]
-            self.add(NodeID(raw), addresses, dsa_pub)
+            node_id = NodeID(raw)
+            if NodeID.from_public_key(dsa_pub) != node_id:
+                continue
+            raw_addresses = e.get("addresses", [])
+            if not isinstance(raw_addresses, list):
+                continue
+            addresses = [a for a in raw_addresses[:_MAX_ADDRESSES]
+                         if isinstance(a, str) and _validate_uri(a) is not None]
+            self.add(node_id, addresses, dsa_pub)

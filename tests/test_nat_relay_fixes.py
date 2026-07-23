@@ -54,7 +54,7 @@ class TestPingEmptyAdvertised:
         assert any(p.type == PONG for p in fake.sent)
 
     async def test_all_invalid_addresses_still_pongs(self):
-        """Every advertised URI invalid → no routing merge, but still a PONG."""
+        """Every advertised URI invalid → recency merge with no address, but still a PONG."""
         node, fake = await make_node()
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
@@ -64,7 +64,9 @@ class TestPingEmptyAdvertised:
         await _until(lambda: any(p.type == PONG for p in fake.sent))
         await node.stop()
         assert any(p.type == PONG for p in fake.sent)
-        assert node._routing.get(sender_id) is None   # nothing junky merged
+        entry = node._routing.get(sender_id)
+        assert entry is not None                 # authenticated PING proves recency
+        assert entry.addresses == []              # but no junk address merged
 
 
 # ---------------------------------------------------------------------------

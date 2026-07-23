@@ -1105,6 +1105,373 @@ $("store-publish-btn").addEventListener("click", async () => {
 # (default-src 'self', no inline), same bearer token via sessionStorage.
 # ---------------------------------------------------------------------------
 
+# Console v2 replaces the original long-form shell above. Chat remains an
+# independent sub-page and keeps the assets below.
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>NMesh Console</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="login-screen">
+  <form id="login-form" class="login-card">
+    <div class="mark" aria-hidden="true">NM</div>
+    <p class="eyebrow">Local management plane</p>
+    <h1>Unlock this node</h1>
+    <p class="subtle">Credentials stay on this device and protect every management action.</p>
+    <label class="field"><span>Password</span><input id="password" type="password" autocomplete="current-password" autofocus></label>
+    <button type="submit" class="primary wide">Open console</button>
+    <p id="login-error" class="message error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" class="shell hidden">
+  <aside class="rail">
+    <div class="identity"><div class="mark">NM</div><div><strong>NMesh</strong><span>Console</span></div></div>
+    <nav id="tabs" class="tabs" role="tablist" aria-label="Console sections">
+      <button role="tab" data-tab="overview" aria-controls="panel-overview" aria-selected="true"><span class="tab-index">01</span><span>Overview</span></button>
+      <button role="tab" data-tab="apps" aria-controls="panel-apps" aria-selected="false"><span class="tab-index">02</span><span>Apps</span></button>
+      <button role="tab" data-tab="connectivity" aria-controls="panel-connectivity" aria-selected="false"><span class="tab-index">03</span><span>Connectivity</span></button>
+      <button role="tab" data-tab="settings" aria-controls="panel-settings" aria-selected="false"><span class="tab-index">04</span><span>Settings</span></button>
+    </nav>
+    <div class="rail-foot"><span id="rail-dot" class="status-dot"></span><span id="rail-state">Connecting</span><button id="logout" class="text-button">Log out</button></div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div><p class="eyebrow">Current node</p><button id="self-node" class="node-id mono" title="Show local node details"></button></div>
+      <div class="top-meta"><span id="node-state" class="state-pill"></span><span id="node-uptime"></span></div>
+    </header>
+
+    <section id="panel-overview" class="panel active" role="tabpanel" data-panel="overview">
+      <div class="page-head"><div><p class="eyebrow">Live mesh</p><h1 id="overview-status">Reading node status</h1></div><p class="lede">A concise view of this node's health, traffic, and authenticated mesh links.</p></div>
+      <div id="metrics" class="metrics"></div>
+      <div class="dashboard-grid">
+        <article class="surface traffic-card">
+          <div class="surface-head"><div><p class="eyebrow">Traffic</p><h2>Mesh bandwidth</h2></div><span id="rate-now" class="mono subtle"></span></div>
+          <canvas id="chart" width="900" height="300" aria-label="Inbound and outbound NMesh bytes per second"></canvas>
+          <div class="legend"><span><i class="swatch inbound"></i>Inbound</span><span><i class="swatch outbound"></i>Outbound</span><small>NMesh packet bytes, excluding physical transport overhead</small></div>
+        </article>
+        <article class="surface topology-card">
+          <div class="surface-head"><div><p class="eyebrow">Topology</p><h2>Current connections</h2></div><span id="map-count" class="count-pill"></span></div>
+          <svg id="graph" viewBox="0 0 620 390" role="img" aria-label="Clickable connected-node map"></svg>
+          <p class="map-note"><span class="line-key solid"></span> authenticated direct link <span class="line-key dashed"></span> locally observed first hop; deeper relays are opaque</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="panel-apps" class="panel" role="tabpanel" data-panel="apps" hidden>
+      <div class="page-head"><div><p class="eyebrow">Applications</p><h1>Installed software and network catalog</h1></div><p class="lede">Browse a signed catalog without loading the full store into the browser.</p></div>
+      <div class="segmented" role="tablist" aria-label="Application views"><button data-app-view="installed" class="active">Installed</button><button data-app-view="store">App store</button></div>
+      <div id="apps-installed-view" class="app-view">
+        <article class="surface"><div class="surface-head"><div><p class="eyebrow">Running now</p><h2>Built-in apps</h2></div></div><div id="builtin-apps" class="app-grid"></div></article>
+        <article class="surface list-surface">
+          <div class="list-head"><div><p class="eyebrow">Local packages</p><h2>Installed apps <span id="installed-count" class="soft-count"></span></h2></div><label class="search"><span class="sr-only">Search installed apps</span><input id="installed-search" type="search" placeholder="Search installed apps"></label></div>
+          <div id="installed-list" class="record-list"></div><div id="installed-pager" class="pager"></div>
+        </article>
+      </div>
+      <div id="apps-store-view" class="app-view hidden">
+        <article class="surface list-surface">
+          <div class="list-head"><div><p class="eyebrow">Signed releases</p><h2>App store <span id="catalog-count" class="soft-count"></span></h2></div><label class="search"><span class="sr-only">Search catalog</span><input id="catalog-search" type="search" placeholder="Search name, version, id, or author"></label></div>
+          <div id="catalog-list" class="record-list"></div><div id="catalog-pager" class="pager"></div>
+        </article>
+        <details class="surface disclosure"><summary>Publish a signed app release</summary>
+          <div class="form-grid two"><label class="field"><span>Name</span><input id="store-name"></label><label class="field"><span>Version</span><input id="store-version" value="1.0.0"></label></div>
+          <label class="field"><span>Files</span><input id="store-files" type="file" multiple></label><div class="action-row"><button id="store-publish-btn" class="primary">Publish to store</button><span id="store-status" class="message"></span></div>
+        </details>
+      </div>
+    </section>
+
+    <section id="panel-connectivity" class="panel" role="tabpanel" data-panel="connectivity" hidden>
+      <div class="page-head"><div><p class="eyebrow">Mesh membership</p><h1>Active and known nodes</h1></div><div class="head-actions"><button id="ping-btn" class="secondary">Ping active nodes</button><span id="ping-status" class="message"></span></div></div>
+      <article class="surface list-surface">
+        <div class="list-head"><div><p class="eyebrow">Authenticated links</p><h2>Active with us <span id="active-count" class="soft-count"></span></h2></div><label class="search"><span class="sr-only">Search active nodes</span><input id="active-search" type="search" placeholder="Search id, address, or transport"></label></div>
+        <div id="active-list" class="record-list node-list"></div><div id="active-pager" class="pager"></div>
+      </article>
+      <article class="surface list-surface">
+        <div class="list-head"><div><p class="eyebrow">Routing table</p><h2>Known nodes <span id="known-count" class="soft-count"></span></h2></div><div class="list-tools"><label class="search"><span class="sr-only">Search known nodes</span><input id="known-search" type="search" placeholder="Search id or address"></label><label class="limit">Show <input id="known-limit" type="number" min="1" max="100" value="20"></label></div></div>
+        <div id="known-list" class="record-list node-list"></div><div id="known-pager" class="pager"></div>
+      </article>
+    </section>
+
+    <section id="panel-settings" class="panel" role="tabpanel" data-panel="settings" hidden>
+      <div class="page-head"><div><p class="eyebrow">Node controls</p><h1>Connectivity and management</h1></div><p class="lede">Operational controls are separated from live status to reduce accidental changes.</p></div>
+      <article class="surface">
+        <div class="surface-head"><div><p class="eyebrow">Transport health</p><h2>Reachability</h2></div><span id="relay-state" class="state-pill"></span></div>
+        <div id="network-summary" class="info-strip"></div><div id="transport-list" class="transport-grid"></div>
+        <div class="action-row wrap"><button id="punch-toggle" class="secondary"></button><button id="keepalive-toggle" class="secondary"></button><button id="udp-toggle" class="secondary"></button><input id="udp-port" class="compact" type="number" min="1" max="65535" value="9001"><button id="lan-toggle" class="secondary"></button><button id="reach-probe" class="secondary">Confirm reachability</button><button id="net-recheck" class="secondary">Re-check network</button></div><p id="transport-status" class="message"></p>
+      </article>
+      <div class="settings-grid">
+        <details class="surface disclosure" open><summary>Connect two nodes</summary><div class="form-grid two">
+          <div class="form-block"><h3>Join someone</h3><button id="cx-request" class="secondary">Create request</button><textarea id="cx-request-out" class="mono" readonly placeholder="Send this request block"></textarea><textarea id="cx-reply-in" class="mono" placeholder="Paste their reply block"></textarea><button id="cx-complete" class="primary">Connect</button></div>
+          <div class="form-block"><h3>Accept someone</h3><textarea id="cx-accept-in" class="mono" placeholder="Paste their request block"></textarea><button id="cx-accept" class="secondary">Make invite</button><textarea id="cx-accept-out" class="mono" readonly placeholder="Send this invite block back"></textarea></div>
+        </div><p id="connect-status" class="message"></p></details>
+        <details class="surface disclosure"><summary>Invite through a relay</summary><div class="form-grid two"><div class="form-block"><button id="rly-invite" class="secondary">Generate relay invite</button><textarea id="rly-invite-out" class="mono" readonly></textarea></div><div class="form-block"><textarea id="rly-join-in" class="mono" placeholder="Paste relay invite"></textarea><button id="rly-join" class="primary">Join via relay</button></div></div><p id="relay-status" class="message"></p></details>
+        <details class="surface disclosure"><summary>Listeners and addressing</summary><div id="addressing" class="definition-list"></div><div class="action-row"><input id="listen-uri" placeholder="tcp://0.0.0.0:9002"><button id="listen-btn" class="secondary">Add listener</button></div><div id="listener-list" class="chip-list"></div></details>
+        <details class="surface disclosure"><summary>Trust and invitations</summary>
+          <div class="action-row"><button id="gen-invite" class="secondary">Generate invite code</button><code id="invite-out" class="mono"></code></div><div class="action-row"><input id="join-uri" placeholder="tcp://host:port"><input id="join-code" placeholder="Invite code"><button id="join-btn" class="secondary">Join</button></div>
+          <button id="show-cert" class="secondary">Show our root certificate</button><textarea id="cert-out" class="mono" readonly></textarea><textarea id="trust-in" class="mono" placeholder="Paste a root certificate to trust"></textarea><button id="trust-btn" class="secondary">Trust certificate</button><p id="manage-status" class="message"></p>
+        </details>
+        <details class="surface disclosure"><summary>Raw content-addressed app transfer</summary><p class="subtle">Advanced DHT package exchange. This is separate from installed signed apps.</p>
+          <div class="form-grid two"><label class="field"><span>Name</span><input id="app-name"></label><label class="field"><span>Version</span><input id="app-version" value="1.0.0"></label></div><label class="field"><span>Files</span><input id="app-files" type="file" multiple></label><button id="publish-btn" class="secondary">Publish content</button><code id="app-id-out" class="mono output"></code>
+          <div class="action-row"><input id="fetch-id" placeholder="40-character content id"><button id="fetch-btn" class="secondary">Fetch</button></div><div id="app-files-out"></div><p id="app-status" class="message"></p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="node-dialog" aria-labelledby="node-dialog-title">
+    <form method="dialog" class="dialog-head"><div><p class="eyebrow">Node details</p><h2 id="node-dialog-title">Mesh identity</h2></div><button class="icon-button" value="close" aria-label="Close">Close</button></form>
+    <div id="node-detail-body" class="node-detail"></div><div class="dialog-actions"><button id="detail-ping" class="primary">Ping node</button><span id="detail-status" class="message"></span></div>
+  </dialog>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
+"""
+
+
+STYLE_CSS = """
+:root{--ink:#eef4f8;--muted:#8c9aa7;--faint:#5f6c78;--base:#081018;--rail:#0b141d;--surface:#101b25;--raised:#14222d;--line:#26343f;--line-strong:#3b4b58;--cyan:#61d6c8;--cyan-dim:#173d3b;--blue:#75a7ff;--amber:#e6b76a;--red:#ff7b72;--radius:10px;--shadow:0 18px 55px rgba(0,0,0,.26)}
+*{box-sizing:border-box}html{background:var(--base);color:var(--ink);scroll-behavior:smooth}body{margin:0;font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--base)}button,input,textarea{font:inherit}button{cursor:pointer}.hidden,[hidden]{display:none!important}.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}.subtle{color:var(--muted)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.login-screen{min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(90deg,transparent 49.9%,rgba(255,255,255,.025) 50%,transparent 50.1%),var(--base);background-size:64px 64px}.login-card{width:min(430px,100%);padding:40px;background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--cyan);box-shadow:var(--shadow)}.login-card h1{margin:8px 0;font-size:30px;letter-spacing:-.04em}.login-card .field{margin:28px 0 14px}.mark{width:42px;height:42px;display:grid;place-items:center;background:var(--cyan);color:#061311;font-weight:900;letter-spacing:-.08em;border-radius:5px}.eyebrow{margin:0 0 4px;color:var(--cyan);font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.13em}
+.shell{min-height:100vh;display:grid;grid-template-columns:220px minmax(0,1fr)}.rail{position:sticky;top:0;height:100vh;padding:24px 18px;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}.identity{display:flex;align-items:center;gap:12px;padding:0 8px 28px}.identity strong,.identity span{display:block}.identity strong{font-size:17px}.identity span{color:var(--muted);font-size:12px}.tabs{display:flex;flex-direction:column;gap:5px}.tabs button{display:grid;grid-template-columns:28px 1fr;gap:8px;text-align:left;align-items:center;padding:11px 12px;color:var(--muted);background:transparent;border:1px solid transparent;border-radius:7px;font-weight:650}.tabs button:hover{color:var(--ink);background:rgba(255,255,255,.025)}.tabs button[aria-selected="true"]{color:var(--ink);background:var(--surface);border-color:var(--line)}.tab-index{font:10px/1 "SFMono-Regular",monospace;color:var(--faint)}.rail-foot{margin-top:auto;padding:16px 8px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:auto 1fr;gap:7px 9px;align-items:center;color:var(--muted);font-size:12px}.rail-foot .text-button{grid-column:2;text-align:left}.status-dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}.status-dot.up{background:var(--cyan);box-shadow:0 0 0 4px rgba(97,214,200,.1)}
+main{min-width:0;width:100%;max-width:1460px;padding:0 40px 56px}.topbar{height:86px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);margin-bottom:38px}.node-id{padding:0;background:transparent;border:0;color:var(--ink);font-size:13px}.top-meta{display:flex;gap:12px;align-items:center;color:var(--muted);font-size:12px}.state-pill,.count-pill{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}.state-pill.up{color:var(--cyan);border-color:#285c56;background:var(--cyan-dim)}.panel{animation:panel-in .18s ease-out}.page-head{display:flex;justify-content:space-between;gap:40px;align-items:end;margin-bottom:26px}.page-head h1{margin:0;max-width:760px;font-size:clamp(26px,3vw,42px);line-height:1.08;letter-spacing:-.045em}.lede{max-width:420px;margin:0;color:var(--muted)}.head-actions{display:flex;align-items:center;gap:12px}.surface{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:0 1px rgba(255,255,255,.02) inset}.surface-head,.list-head{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:18px}.surface h2,.list-head h2{margin:0;font-size:18px;letter-spacing:-.02em}
+.metrics{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:10px;margin-bottom:16px}.metric{min-height:104px;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column;justify-content:space-between}.metric strong{font-size:24px;letter-spacing:-.04em}.metric span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,.9fr);gap:16px}.traffic-card canvas{display:block;width:100%;height:300px;background:#0b151e;border:1px solid #1b2b36;border-radius:6px}.legend{display:flex;align-items:center;gap:16px;margin-top:12px;color:var(--muted);font-size:12px}.legend small{margin-left:auto}.swatch{display:inline-block;width:18px;height:2px;margin-right:6px;vertical-align:middle}.swatch.inbound{background:var(--cyan)}.swatch.outbound{background:var(--amber)}#graph{display:block;width:100%;min-height:310px;background:#0b151e;border:1px solid #1b2b36;border-radius:6px}.map-note{margin:11px 0 0;color:var(--muted);font-size:11px}.line-key{display:inline-block;width:22px;margin:0 5px 2px 12px;border-top:2px solid var(--blue)}.line-key.dashed{border-top-style:dashed;border-color:var(--amber)}.graph-node{cursor:pointer}.graph-node circle{stroke-width:2;transition:r .12s,filter .12s}.graph-node:hover circle,.graph-node:focus circle{r:14;filter:brightness(1.18)}.graph-node text{pointer-events:none;font:10px "SFMono-Regular",monospace}.graph-edge{fill:none;stroke-width:1.5;opacity:.7}.graph-edge.routed{stroke-dasharray:5 6;stroke:var(--amber)}.graph-edge.direct{stroke:var(--blue)}
+.segmented{display:inline-flex;padding:4px;margin-bottom:16px;background:var(--rail);border:1px solid var(--line);border-radius:8px}.segmented button{padding:8px 15px;border:0;border-radius:5px;background:transparent;color:var(--muted);font-weight:700}.segmented button.active{background:var(--raised);color:var(--ink)}.app-view{display:grid;gap:16px}.app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}.app-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.app-icon{width:34px;height:34px;display:grid;place-items:center;border-radius:6px;background:var(--cyan-dim);color:var(--cyan);font-weight:800}.list-surface{margin-bottom:16px}.search input{width:min(340px,42vw);margin:0}.list-tools{display:flex;align-items:center;gap:10px}.limit{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}.limit input{width:66px;margin:0}.record-list{display:flex;flex-direction:column}.record{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(110px,.6fr) minmax(150px,.8fr) auto;gap:16px;align-items:center;min-height:70px;padding:12px 4px;border-top:1px solid var(--line)}.record:first-child{border-top:0}.record-main{min-width:0}.record-main strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.record-main small,.record-meta{color:var(--muted);font-size:12px}.record-id{overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:12px}.record-actions{display:flex;justify-content:flex-end;gap:7px}.node-record{grid-template-columns:minmax(210px,1.2fr) minmax(140px,.8fr) minmax(110px,.5fr) auto}.empty{padding:34px 0;border-top:1px solid var(--line);color:var(--muted);text-align:center}.soft-count{color:var(--muted);font-size:13px;font-weight:500}.pager{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:15px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.pager button{padding:6px 10px}.pager button:disabled{opacity:.35;cursor:not-allowed}
+input,textarea{width:100%;padding:10px 12px;color:var(--ink);background:#0a141d;border:1px solid var(--line);border-radius:6px;outline:none}input:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(97,214,200,.09)}textarea{min-height:82px;resize:vertical;word-break:break-all}.field{display:block}.field>span{display:block;margin-bottom:6px;color:var(--muted);font-size:12px;font-weight:650}.primary,.secondary,.icon-button,.text-button{border-radius:6px;font-weight:750}.primary{padding:9px 14px;border:1px solid var(--cyan);background:var(--cyan);color:#071614}.secondary{padding:9px 13px;border:1px solid var(--line-strong);background:transparent;color:var(--ink)}.primary:hover,.secondary:hover{filter:brightness(1.1)}button:disabled{opacity:.5;cursor:wait}.wide{width:100%}.text-button{padding:0;border:0;background:transparent;color:var(--muted)}.icon-button{padding:7px 10px;border:1px solid var(--line);background:transparent;color:var(--muted)}.message{min-height:20px;margin:0;color:var(--muted);font-size:12px}.message.error{color:var(--red)}.action-row{display:flex;align-items:center;gap:10px;margin-top:12px}.action-row.wrap{flex-wrap:wrap}.action-row input{margin:0}.compact{width:90px}.disclosure{margin-bottom:16px}.disclosure>summary{cursor:pointer;font-size:16px;font-weight:750;list-style:none}.disclosure>summary:after{content:"+";float:right;color:var(--muted)}.disclosure[open]>summary:after{content:"-"}.disclosure[open]>summary{margin-bottom:20px}.form-grid{display:grid;gap:14px}.form-grid.two,.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{display:grid;gap:16px}.form-block{display:flex;flex-direction:column;gap:9px;padding:14px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.form-block h3{margin:0 0 4px}.info-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}.info-item{padding:7px 10px;background:var(--rail);border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:12px}.info-item strong{color:var(--ink);margin-left:5px}.transport-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.transport-card{padding:13px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.transport-card strong{display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:var(--cyan)}.transport-card span{display:block;color:var(--muted);font-size:12px}.definition-list{display:grid;grid-template-columns:120px 1fr;gap:9px 16px}.definition-list dt{color:var(--muted)}.definition-list dd{margin:0;word-break:break-all;white-space:pre-line}.chip-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.chip{display:inline-flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px}.chip button{padding:0;border:0;background:transparent;color:var(--red)}.output{display:block;margin-top:10px;word-break:break-all;color:var(--cyan)}
+dialog{width:min(680px,calc(100vw - 28px));padding:0;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:var(--shadow)}dialog::backdrop{background:rgba(1,6,10,.78);backdrop-filter:blur(3px)}.dialog-head{display:flex;justify-content:space-between;align-items:center;padding:20px 22px;border-bottom:1px solid var(--line)}.dialog-head h2{margin:0}.node-detail{padding:22px;display:grid;grid-template-columns:140px 1fr;gap:12px 18px}.node-detail .key{color:var(--muted);font-size:12px}.node-detail .value{min-width:0;word-break:break-all}.node-detail ul{margin:0;padding-left:18px}.dialog-actions{display:flex;align-items:center;gap:12px;padding:0 22px 22px}
+@keyframes panel-in{from{opacity:.3;transform:translateY(4px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+@media(max-width:1100px){.metrics{grid-template-columns:repeat(3,1fr)}.dashboard-grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr}.topology-card{min-height:420px}}
+@media(max-width:760px){.shell{display:block}.rail{position:fixed;z-index:20;left:0;right:0;top:auto;bottom:0;width:auto;height:68px;padding:7px 8px;background:rgba(11,20,29,.97);border:0;border-top:1px solid var(--line)}.identity,.rail-foot{display:none}.tabs{height:100%;display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.tabs button{display:flex;flex-direction:column;justify-content:center;gap:3px;padding:5px 2px;text-align:center;font-size:11px}.tab-index{display:none}main{padding:0 16px 92px}.topbar{height:74px;margin-bottom:28px}.top-meta{gap:7px}.page-head{display:block;margin-bottom:20px}.page-head .lede,.page-head .head-actions{margin-top:12px}.page-head h1{font-size:29px}.metrics{grid-template-columns:repeat(2,1fr)}.metric{min-height:90px}.metric strong{font-size:20px}.surface{padding:17px}.surface-head,.list-head{align-items:flex-start;flex-direction:column}.search,.search input{width:100%}.list-tools{width:100%;align-items:stretch}.list-tools .search{flex:1}.record,.node-record{grid-template-columns:minmax(0,1fr) auto;gap:8px}.record-meta,.record-id{grid-column:1}.record-actions{grid-column:2;grid-row:1 / span 3;flex-direction:column}.form-grid.two{grid-template-columns:1fr}.definition-list{grid-template-columns:1fr;gap:4px}.definition-list dd{margin-bottom:8px}.legend{flex-wrap:wrap}.legend small{width:100%;margin:0}#graph{min-height:260px}.node-detail{grid-template-columns:1fr;gap:3px}.node-detail .value{margin-bottom:9px}}
+"""
+
+
+APP_JS = r"""
+let TOKEN = null, statusTimer = null, storeTimer = null;
+let last = null, previous = null, activeTab = "overview", ticking = false;
+const rateHistory = [];
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value == null ? "" : value).replace(/[&<>"']/g,
+  (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+const short = (id) => id ? id.slice(0, 8) + "..." + id.slice(-5) : "unknown";
+
+async function api(path, method = "GET", body) {
+  const headers = {};
+  if (TOKEN) headers.Authorization = "Bearer " + TOKEN;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, {method, headers,
+    body:body === undefined ? undefined : JSON.stringify(body)});
+  if (response.status === 401) { showLogin(); throw new Error("unauthorized"); }
+  return response;
+}
+function setMessage(id, text, bad = false) {
+  const element = $(id); if (!element) return;
+  element.textContent = text || ""; element.classList.toggle("error", !!bad);
+}
+function fmtBytes(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "n/a";
+  let amount = Number(value), unit = 0; const units = ["B","KB","MB","GB","TB"];
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
+  return amount.toFixed(unit ? 1 : 0) + " " + units[unit];
+}
+function fmtDuration(value) {
+  let seconds = Math.max(0, Math.floor(value || 0));
+  const days = Math.floor(seconds / 86400); seconds %= 86400;
+  const hours = Math.floor(seconds / 3600); seconds %= 3600;
+  const minutes = Math.floor(seconds / 60);
+  return [days ? days + "d" : "",hours ? hours + "h" : "",minutes + "m"].filter(Boolean).join(" ");
+}
+function fmtAgo(value) {
+  const seconds = Math.max(0, Math.floor(value || 0));
+  if (seconds < 60) return seconds + "s ago";
+  if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
+  if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
+  return Math.floor(seconds / 86400) + "d ago";
+}
+
+function showLogin() {
+  TOKEN = null; try { sessionStorage.removeItem("nmesh_token"); } catch (_) {}
+  if (statusTimer) clearInterval(statusTimer); if (storeTimer) clearInterval(storeTimer);
+  statusTimer = storeTimer = null; $("app").classList.add("hidden"); $("login").classList.remove("hidden");
+}
+function startApp() {
+  $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+  selectTab((location.hash || "#overview").slice(1), false); tick();
+  if (!statusTimer) statusTimer = setInterval(tick, 2000);
+  if (!storeTimer) storeTimer = setInterval(() => activeTab === "apps" && refreshApps(), 7000);
+}
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); setMessage("login-error", "");
+  try {
+    const response = await fetch("/api/login", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:$("password").value})});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { setMessage("login-error", data.error || "Login failed", true); return; }
+    TOKEN = data.token; try { sessionStorage.setItem("nmesh_token", TOKEN); } catch (_) {}
+    $("password").value = ""; startApp();
+  } catch (_) { setMessage("login-error", "Console is not reachable", true); }
+});
+$("logout").addEventListener("click", async () => { try { await api("/api/logout", "POST"); } catch (_) {} showLogin(); });
+(async function resumeSession(){try{const response=await fetch("/api/state");if(response.ok)startApp();}catch(_){}})();
+
+function selectTab(name, updateHash = true) {
+  if (!document.querySelector(`[data-panel="${name}"]`)) name = "overview";
+  activeTab = name;
+  document.querySelectorAll("[data-tab]").forEach((button) => {
+    const selected = button.dataset.tab === name;
+    button.setAttribute("aria-selected", selected ? "true" : "false"); button.tabIndex = selected ? 0 : -1;
+  });
+  document.querySelectorAll("[data-panel]").forEach((panel) => { panel.hidden = panel.dataset.panel !== name; });
+  if (updateHash) window.history.replaceState(null, "", "#" + name);
+  if (name === "connectivity") refreshConnectivity(); if (name === "apps") refreshApps();
+}
+$("tabs").addEventListener("click", (event) => { const button=event.target.closest("[data-tab]");if(button)selectTab(button.dataset.tab); });
+$("tabs").addEventListener("keydown", (event) => {
+  if (!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(event.key)) return;
+  const buttons=[...document.querySelectorAll("[data-tab]")], current=buttons.findIndex((button)=>button.dataset.tab===activeTab);
+  const step=["ArrowRight","ArrowDown"].includes(event.key)?1:-1, next=buttons[(current+step+buttons.length)%buttons.length];
+  next.focus(); selectTab(next.dataset.tab); event.preventDefault();
+});
+
+async function tick() {
+  if (ticking) return; ticking = true;
+  try {
+    const response=await api("/api/state"); if(!response.ok)return;
+    const state=await response.json(); updateRates(state); last=state;
+    renderHeader(state); renderMetrics(state); drawChart(); drawGraph(state); renderSettings(state);
+  } catch (_) { $("rail-dot").classList.remove("up"); $("rail-state").textContent="Unavailable"; }
+  finally { ticking=false; }
+}
+function updateRates(state) {
+  let inbound=0,outbound=0;
+  const reset=!previous||previous.id!==state.id||state.uptime<previous.uptime||state.total.bytes_in<previous.bytes_in||state.total.bytes_out<previous.bytes_out;
+  if (!reset) { const elapsed=state.server_time-previous.time;if(elapsed>0){inbound=(state.total.bytes_in-previous.bytes_in)/elapsed;outbound=(state.total.bytes_out-previous.bytes_out)/elapsed;} }
+  else rateHistory.length=0;
+  previous={id:state.id,uptime:state.uptime,time:state.server_time,bytes_in:state.total.bytes_in,bytes_out:state.total.bytes_out};
+  rateHistory.push({inbound:Math.max(0,inbound),outbound:Math.max(0,outbound)});while(rateHistory.length>90)rateHistory.shift();
+  state._rates={inbound,outbound};
+}
+function renderHeader(state) {
+  $("self-node").textContent=short(state.id);$("node-uptime").textContent="Up "+fmtDuration(state.uptime);
+  const pill=$("node-state");pill.textContent=state.running?"Running":"Stopped";pill.className="state-pill"+(state.running?" up":"");
+  $("rail-dot").classList.toggle("up",!!state.running);$("rail-state").textContent=state.running?"Node online":"Node stopped";
+  const connected=state.authenticated_peers||0;$("overview-status").textContent=connected?`Actively connected to ${connected} node${connected===1?"":"s"}`:"Searching for a mesh neighbor";
+}
+function renderMetrics(state) {
+  const cpu=state.load&&state.load.cpu_percent!=null?Math.round(state.load.cpu_percent)+"%":"n/a";
+  const items=[["Active links",state.authenticated_peers||0],["Known nodes",state.routing_size||0],["E2E sessions",(state.e2e_sessions||[]).length],["Inbound",fmtBytes(state._rates.inbound)+"/s"],["Outbound",fmtBytes(state._rates.outbound)+"/s"],["CPU / memory",cpu+" / "+fmtBytes(state.load&&state.load.rss_bytes)]];
+  $("metrics").innerHTML=items.map(([label,value])=>`<div class="metric"><strong>${esc(value)}</strong><span>${esc(label)}</span></div>`).join("");
+  $("rate-now").textContent=fmtBytes(state._rates.inbound)+"/s in  "+fmtBytes(state._rates.outbound)+"/s out";
+}
+function drawChart() {
+  const canvas=$("chart"),context=canvas.getContext("2d"),width=canvas.width,height=canvas.height;context.clearRect(0,0,width,height);
+  context.strokeStyle="#1d303c";context.lineWidth=1;for(let row=1;row<5;row++){const y=row*height/5;context.beginPath();context.moveTo(0,y);context.lineTo(width,y);context.stroke();}
+  const maximum=Math.max(1,...rateHistory.flatMap((point)=>[point.inbound,point.outbound]));
+  const plot=(key,color)=>{context.beginPath();context.strokeStyle=color;context.lineWidth=2.5;rateHistory.forEach((point,index)=>{const x=index*width/Math.max(1,rateHistory.length-1),y=height-14-point[key]*(height-28)/maximum;index?context.lineTo(x,y):context.moveTo(x,y);});context.stroke();};
+  plot("inbound","#61d6c8");plot("outbound","#e6b76a");
+}
+
+const SVG_NS="http://www.w3.org/2000/svg";
+function svgElement(name,attrs={}){const node=document.createElementNS(SVG_NS,name);Object.entries(attrs).forEach(([key,value])=>node.setAttribute(key,String(value)));return node;}
+function drawGraph(state) {
+  const svg=$("graph");svg.replaceChildren();const topology=state.topology||{direct:[],routed:[]},direct=topology.direct||[],routed=topology.routed||[],center={x:310,y:194},positions=new Map();
+  direct.forEach((node,index)=>{const angle=Math.PI*2*index/Math.max(1,direct.length)-Math.PI/2;positions.set(node.id,{x:center.x+Math.cos(angle)*112,y:center.y+Math.sin(angle)*112});});
+  routed.forEach((node,index)=>{const angle=Math.PI*2*index/Math.max(1,routed.length)-Math.PI/2+.23;positions.set(node.id,{x:center.x+Math.cos(angle)*178,y:center.y+Math.sin(angle)*158});});
+  direct.forEach((node)=>{const point=positions.get(node.id);svg.appendChild(svgElement("line",{x1:center.x,y1:center.y,x2:point.x,y2:point.y,class:"graph-edge direct"}));});
+  routed.forEach((node)=>{const from=positions.get(node.via)||center,to=positions.get(node.id);svg.appendChild(svgElement("line",{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:"graph-edge routed"}));});
+  const addNode=(id,point,kind,label)=>{const group=svgElement("g",{class:"graph-node",tabindex:"0",role:"button","data-node-id":id,"aria-label":label});group.appendChild(svgElement("circle",{cx:point.x,cy:point.y,r:kind==="self"?14:11,fill:kind==="self"?"#eef4f8":kind==="direct"?"#75a7ff":"#e6b76a",stroke:kind==="self"?"#eef4f8":"#0b151e"}));const text=svgElement("text",{x:point.x,y:point.y+27,"text-anchor":"middle",fill:"#8c9aa7"});text.textContent=kind==="self"?"this node":short(id);group.appendChild(text);svg.appendChild(group);};
+  direct.forEach((node)=>addNode(node.id,positions.get(node.id),"direct",`Direct node ${node.id}`));routed.forEach((node)=>addNode(node.id,positions.get(node.id),"routed",`Routed session ${node.id} via ${node.via}`));addNode(state.id,center,"self","This node "+state.id);
+  $("map-count").textContent=`${direct.length} direct${routed.length?` + ${routed.length} routed`:""}`;
+}
+$("graph").addEventListener("click",(event)=>{const node=event.target.closest&&event.target.closest("[data-node-id]");if(node)openNode(node.dataset.nodeId);});
+$("graph").addEventListener("keydown",(event)=>{if(!["Enter"," "].includes(event.key))return;const node=event.target.closest("[data-node-id]");if(node){openNode(node.dataset.nodeId);event.preventDefault();}});
+$("self-node").addEventListener("click",()=>last&&openNode(last.id,{id:last.id,connected:true,self:true,addresses:last.advertised||[]}));
+
+const pages={active:{scope:"active",query:"",limit:20,offset:0,total:0},known:{scope:"known",query:"",limit:20,offset:0,total:0},catalog:{query:"",limit:20,offset:0,total:0},installed:{query:"",limit:20,offset:0,total:0}};
+async function fetchPage(kind) {
+  const page=pages[kind],base=kind==="catalog"?"/api/store/catalog":kind==="installed"?"/api/store/installed":"/api/nodes";
+  const params=new URLSearchParams({q:page.query,limit:String(page.limit),offset:String(page.offset)});if(page.scope)params.set("scope",page.scope);
+  const response=await api(base+"?"+params.toString());if(!response.ok)throw new Error("list failed");const data=await response.json();page.total=data.total;return data.items||[];
+}
+function pager(kind,id,render) {
+  const page=pages[kind],element=$(id),first=page.total?page.offset+1:0,lastItem=Math.min(page.total,page.offset+page.limit);
+  element.innerHTML=`<span>${first}-${lastItem} of ${page.total}</span><button class="secondary" data-page="prev" ${page.offset===0?"disabled":""}>Previous</button><button class="secondary" data-page="next" ${page.offset+page.limit>=page.total?"disabled":""}>Next</button>`;
+  element.onclick=(event)=>{const direction=event.target.dataset.page;if(!direction)return;page.offset=direction==="next"?page.offset+page.limit:Math.max(0,page.offset-page.limit);render();};
+}
+async function refreshConnectivity(){if(activeTab!=="connectivity")return;await Promise.all([renderNodeList("active"),renderNodeList("known")]);}
+async function renderNodeList(kind) {
+  const target=$(kind+"-list");
+  try {
+    const items=await fetchPage(kind);$(kind+"-count").textContent=`(${pages[kind].total})`;
+    target.innerHTML=items.length?items.map((node)=>{const detail=node.connected?"Authenticated direct link":node.has_key?"Identity key known":"Identity key unavailable",transport=node.transport||((node.addresses||[])[0]||"").split(":",1)[0]||"No address";return `<div class="record node-record"><div class="record-main"><strong class="mono">${esc(short(node.id))}</strong><small>${esc(detail)}</small></div><div class="record-meta">${esc(transport)}${node.rtt_ms!=null?` | ${esc(node.rtt_ms)} ms`:""}</div><div class="record-id mono">${node.seen_ago==null?"Live now":esc(fmtAgo(node.seen_ago))}</div><div class="record-actions"><button class="secondary" data-node-id="${esc(node.id)}">Details</button></div></div>`;}).join(""):`<div class="empty">${pages[kind].query?"No matching nodes":kind==="active"?"No authenticated links yet":"No known nodes yet"}</div>`;
+    pager(kind,kind+"-pager",()=>renderNodeList(kind));
+  } catch (_) { target.innerHTML='<div class="empty">Node list unavailable</div>'; }
+}
+document.querySelectorAll(".node-list").forEach((list)=>list.addEventListener("click",(event)=>{const button=event.target.closest("[data-node-id]");if(button)openNode(button.dataset.nodeId);}));
+function debounce(callback,delay=250){let timer;return(...args)=>{clearTimeout(timer);timer=setTimeout(()=>callback(...args),delay);};}
+$("active-search").addEventListener("input",debounce(()=>{pages.active.query=$("active-search").value.trim();pages.active.offset=0;renderNodeList("active");}));
+$("known-search").addEventListener("input",debounce(()=>{pages.known.query=$("known-search").value.trim();pages.known.offset=0;renderNodeList("known");}));
+$("known-limit").addEventListener("change",()=>{const value=Math.max(1,Math.min(100,parseInt($("known-limit").value,10)||20));$("known-limit").value=value;pages.known.limit=value;pages.known.offset=0;renderNodeList("known");});
+
+let detailNodeId=null;
+async function exactNode(scope,id){const params=new URLSearchParams({scope,q:id,limit:"20",offset:"0"}),response=await api("/api/nodes?"+params.toString());if(!response.ok)return null;return(await response.json()).items.find((item)=>item.id===id)||null;}
+async function openNode(id,seed={}) {
+  detailNodeId=id;const dialog=$("node-dialog");if(!dialog.open)dialog.showModal();$("node-dialog-title").textContent=short(id);$("node-detail-body").innerHTML='<div class="key">Status</div><div class="value">Loading current details...</div>';setMessage("detail-status","");
+  let known=null,active=null;if(last&&id!==last.id)[known,active]=await Promise.all([exactNode("known",id).catch(()=>null),exactNode("active",id).catch(()=>null)]);
+  const node=Object.assign({},known||{},active||{},seed,{id}),addresses=node.addresses||[];
+  const rows=[["Full node ID",`<span class="mono">${esc(id)}</span>`],["Relationship",node.self?"This console's node":active?"Authenticated direct link":known?"Known routing identity":"Routed session endpoint"],["Session",node.has_session===false?"Not established":active?"Open":node.self?"Local":"Not directly observed"],["Direction",node.self?"Local":node.is_client_side==null?"Unknown":node.is_client_side?"Outbound":"Inbound"],["Transport",esc(node.transport||"Unknown")],["RTT",node.rtt_ms==null?"Not measured":esc(node.rtt_ms)+" ms"],["Last seen",node.seen_ago==null?"Live / unavailable":esc(fmtAgo(node.seen_ago))],["Identity key",node.has_key==null?"Unknown":node.has_key?"Known":"Missing"],["Malformed input",node.malformed==null?"Not available":esc(node.malformed)],["Traffic",node.counters?`${esc(fmtBytes(node.counters.bytes_in))} in / ${esc(fmtBytes(node.counters.bytes_out))} out`:"Not available"],["Addresses",addresses.length?`<ul class="mono">${addresses.map((address)=>`<li>${esc(address)}</li>`).join("")}</ul>`:"None advertised"]];
+  $("node-detail-body").innerHTML=rows.map(([key,value])=>`<div class="key">${key}</div><div class="value">${value}</div>`).join("");$("detail-ping").classList.toggle("hidden",!!node.self);
+}
+$("detail-ping").addEventListener("click",async()=>{if(!detailNodeId)return;$("detail-ping").disabled=true;setMessage("detail-status","Pinging through the mesh...");try{const response=await api("/api/ping/node","POST",{id:detailNodeId}),data=await response.json();setMessage("detail-status",data.reachable?`Reachable in ${data.rtt_ms==null?"an unknown time":data.rtt_ms+" ms"} via ${data.via||"mesh"}`:"Node is currently unreachable",!data.reachable);tick();}catch(_){setMessage("detail-status","Ping failed",true);}finally{$("detail-ping").disabled=false;}});
+$("ping-btn").addEventListener("click",async()=>{$("ping-btn").disabled=true;setMessage("ping-status","Pinging...");try{const data=await(await api("/api/ping","POST")).json();setMessage("ping-status",`Sent ${data.sent||0} probes`);setTimeout(tick,800);}catch(_){setMessage("ping-status","Ping failed",true);}finally{$("ping-btn").disabled=false;}});
+
+let appView="installed";
+document.querySelector(".segmented").addEventListener("click",(event)=>{const button=event.target.closest("[data-app-view]");if(!button)return;appView=button.dataset.appView;document.querySelectorAll("[data-app-view]").forEach((item)=>item.classList.toggle("active",item===button));$("apps-installed-view").classList.toggle("hidden",appView!=="installed");$("apps-store-view").classList.toggle("hidden",appView!=="store");refreshApps();});
+async function refreshApps(){if(activeTab!=="apps")return;renderBuiltins();if(appView==="installed")await renderAppList("installed");else await renderAppList("catalog");}
+function renderBuiltins(){const apps=last&&last.apps||[];$("builtin-apps").innerHTML=apps.length?apps.map((app)=>`<div class="app-tile"><div class="action-row"><span class="app-icon">${esc((app.name||"A").slice(0,2).toUpperCase())}</span><div><strong>${esc(app.name)}</strong><div class="subtle">Running built-in</div></div></div><a class="primary" href="${esc(app.path)}">Open</a></div>`).join(""):'<div class="empty">No built-in apps are running</div>';}
+async function renderAppList(kind) {
+  const target=$(kind+"-list");try{const items=await fetchPage(kind);$(kind+"-count").textContent=`(${pages[kind].total})`;target.innerHTML=items.length?items.map((app)=>{const action=kind==="installed"?"uninstall":app.action,actionCell=action?`<button class="${action==="uninstall"?"secondary":"primary"}" data-app-id="${esc(app.app_id)}" data-app-action="${esc(action)}">${action==="uninstall"?"Delete local":action==="update"?"Update":"Install"}</button>`:'<span class="state-pill up">Installed</span>';return `<div class="record"><div class="record-main"><strong>${esc(app.name)}</strong><small>Version ${esc(app.version)}</small></div><div class="record-meta">${kind==="installed"?"Local package":esc(app.state||"Available")}</div><div class="record-id mono" title="${esc(app.app_id)}">${esc(short(app.app_id))}</div><div class="record-actions">${actionCell}</div></div>`;}).join(""):`<div class="empty">${pages[kind].query?"No matching apps":kind==="installed"?"No local packages installed":"No signed releases in the catalog"}</div>`;pager(kind,kind+"-pager",()=>renderAppList(kind));}catch(_){target.innerHTML='<div class="empty">App list unavailable</div>';}}
+$("installed-search").addEventListener("input",debounce(()=>{pages.installed.query=$("installed-search").value.trim();pages.installed.offset=0;renderAppList("installed");}));
+$("catalog-search").addEventListener("input",debounce(()=>{pages.catalog.query=$("catalog-search").value.trim();pages.catalog.offset=0;renderAppList("catalog");}));
+async function appAction(button){const action=button.dataset.appAction,appId=button.dataset.appId;if(action==="uninstall"&&!confirm("Delete this app from this node? The network catalog is not changed."))return;button.disabled=true;setMessage("store-status",action+" in progress...");try{const response=await api("/api/store/"+action,"POST",{app_id:appId}),data=await response.json().catch(()=>({}));setMessage("store-status",response.ok&&data.ok!==false?(action==="uninstall"?"Local app deleted":action+" complete"):data.error||action+" failed",!response.ok||data.ok===false);}catch(_){setMessage("store-status",action+" failed",true);}finally{button.disabled=false;await refreshApps();}}
+[$("catalog-list"),$("installed-list")].forEach((list)=>list.addEventListener("click",(event)=>{const button=event.target.closest("[data-app-action]");if(button)appAction(button);}));
+function fileToBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(",")[1]||"");reader.onerror=reject;reader.readAsDataURL(file);});}
+async function selectedFiles(input){const files={};for(const file of input.files)files[file.name]=await fileToBase64(file);return files;}
+$("store-publish-btn").addEventListener("click",async()=>{const name=$("store-name").value.trim(),version=$("store-version").value.trim()||"1.0.0",input=$("store-files");if(!name||!input.files.length){setMessage("store-status","Name and at least one file are required",true);return;}$("store-publish-btn").disabled=true;setMessage("store-status","Reading and signing files...");try{const response=await api("/api/store/publish","POST",{name,version,files:await selectedFiles(input)}),data=await response.json().catch(()=>({}));setMessage("store-status",response.ok?"Release published to the mesh":data.error||"Publish failed",!response.ok);if(response.ok)input.value="";}catch(_){setMessage("store-status","Publish failed",true);}finally{$("store-publish-btn").disabled=false;await renderAppList("catalog");}});
+
+function renderSettings(state) {
+  const network=state.network||{};$("relay-state").textContent=state.relay_capable?"Relay capable":"Client reachability";$("relay-state").className="state-pill"+(state.relay_capable?" up":"");
+  const summary=[["Internet",network.internet==null?"Checking":network.internet?"Online":"Offline"],["Public IP",network.public_ip||"Unknown"],["Public UDP",network.stun_addr||"Unknown"],["Pending seeks",state.pending_seeks||0]];$("network-summary").innerHTML=summary.map(([key,value])=>`<span class="info-item">${esc(key)}<strong>${esc(value)}</strong></span>`).join("");
+  $("transport-list").innerHTML=(state.transport_details||[]).map((transport)=>`<div class="transport-card"><strong>${esc(transport.scheme)}</strong><span>${esc(transport.peers||0)} peer(s)</span><span>${(transport.listening||[]).length} listener(s)</span><span>${(transport.ports||[]).length?"Ports "+esc(transport.ports.join(", ")):"No bound port"}</span></div>`).join("")||'<div class="empty">No transport registered</div>';
+  const udpOn=(state.transport_details||[]).some((transport)=>transport.hole_punch);$("punch-toggle").textContent="Hole punching "+(state.punch_enabled?"on":"off");$("keepalive-toggle").textContent="NAT keepalive "+(state.punch_keepalive?"on":"off");$("udp-toggle").textContent=udpOn?"Stop UDP":"Start UDP";$("udp-port").classList.toggle("hidden",udpOn);$("lan-toggle").textContent="LAN discovery "+(state.lan_discovery?"on":"off");
+  $("addressing").innerHTML=[["Advertised",(state.advertised||[]).join("\n")||"None"],["Local IPs",(state.local_ips||[]).join(", ")||"None"],["Schemes",(state.transports||[]).join(", ")||"None"]].map(([key,value])=>`<dt>${esc(key)}</dt><dd class="mono">${esc(value)}</dd>`).join("");
+  $("listener-list").innerHTML=(state.listening||[]).map((uri)=>`<span class="chip mono">${esc(uri)}<button data-remove-listener="${esc(uri)}" aria-label="Remove listener">x</button></span>`).join("");
+}
+async function toggle(path,body,message){try{const response=await api(path,"POST",body);if(!response.ok)throw new Error();setMessage("transport-status",message);tick();}catch(_){setMessage("transport-status","Control action failed",true);}}
+$("punch-toggle").addEventListener("click",()=>last&&toggle("/api/punch",{enabled:!last.punch_enabled},"Hole punching updated"));$("keepalive-toggle").addEventListener("click",()=>last&&toggle("/api/punch/keepalive",{enabled:!last.punch_keepalive},"NAT keepalive updated"));$("lan-toggle").addEventListener("click",()=>last&&toggle("/api/lan/discovery",{enabled:!last.lan_discovery},"LAN discovery updated"));$("net-recheck").addEventListener("click",()=>toggle("/api/net/recheck",{},"Network check requested"));
+$("reach-probe").addEventListener("click",async()=>{try{const data=await(await api("/api/reachability/probe","POST")).json();setMessage("transport-status",data.sent?`Sent ${data.sent} reachability probe(s)`:"No active peer can probe us");}catch(_){setMessage("transport-status","Probe failed",true);}});
+$("udp-toggle").addEventListener("click",()=>{if(!last)return;const on=(last.transport_details||[]).some((item)=>item.hole_punch),port=parseInt($("udp-port").value,10);if(!on&&!(port>0&&port<65536)){setMessage("transport-status","Enter a valid UDP port",true);return;}toggle("/api/udp",on?{action:"stop"}:{action:"start",port},on?"UDP stopped":"UDP started");});
+async function copyText(text){try{await navigator.clipboard.writeText(text);return true;}catch(_){return false;}}
+$("cx-request").addEventListener("click",async()=>{try{const data=await(await api("/api/connect/request","POST")).json();$("cx-request-out").value=data.block;setMessage("connect-status",await copyText(data.block)?"Request copied":"Request ready");}catch(_){setMessage("connect-status","Could not create request",true);}});
+$("cx-accept").addEventListener("click",async()=>{const block=$("cx-accept-in").value.trim();if(!block){setMessage("connect-status","Paste a request first",true);return;}try{const response=await api("/api/connect/accept","POST",{block}),data=await response.json();if(!response.ok)throw new Error(data.error);$("cx-accept-out").value=data.block;setMessage("connect-status",await copyText(data.block)?"Invite copied":"Invite ready");}catch(error){setMessage("connect-status",error.message||"Accept failed",true);}});
+$("cx-complete").addEventListener("click",async()=>{const block=$("cx-reply-in").value.trim();if(!block){setMessage("connect-status","Paste the reply first",true);return;}try{const response=await api("/api/connect/complete","POST",{block}),data=await response.json();setMessage("connect-status",response.ok?`Trying ${data.candidates} candidate address(es)`:data.error||"Connect failed",!response.ok);}catch(_){setMessage("connect-status","Connect failed",true);}});
+$("rly-invite").addEventListener("click",async()=>{try{const data=await(await api("/api/relay/invite","POST")).json();$("rly-invite-out").value=data.block;setMessage("relay-status",await copyText(data.block)?"Relay invite copied":"Relay invite ready");}catch(_){setMessage("relay-status","Invite failed",true);}});
+$("rly-join").addEventListener("click",async()=>{const block=$("rly-join-in").value.trim();if(!block){setMessage("relay-status","Paste a relay invite",true);return;}try{const response=await api("/api/relay/join","POST",{block}),data=await response.json();setMessage("relay-status",response.ok?`Joining through ${data.relays} relay(s)`:data.error||"Join failed",!response.ok);}catch(_){setMessage("relay-status","Join failed",true);}});
+$("listen-btn").addEventListener("click",async()=>{const uri=$("listen-uri").value.trim();if(!uri){setMessage("transport-status","Enter a listener URI",true);return;}try{const response=await api("/api/listen","POST",{uri});setMessage("transport-status",response.ok?"Listener added":(await response.json()).error||"Listener failed",!response.ok);if(response.ok)$("listen-uri").value="";tick();}catch(_){setMessage("transport-status","Listener failed",true);}});
+$("listener-list").addEventListener("click",async(event)=>{const uri=event.target.dataset.removeListener;if(uri){await api("/api/unlisten","POST",{uri}).catch(()=>{});tick();}});
+$("gen-invite").addEventListener("click",async()=>{try{$("invite-out").textContent=(await(await api("/api/invite","POST")).json()).code;}catch(_){setMessage("manage-status","Invite generation failed",true);}});
+$("show-cert").addEventListener("click",async()=>{try{$("cert-out").value=(await(await api("/api/rootcert")).json()).cert_hex;}catch(_){setMessage("manage-status","Certificate unavailable",true);}});
+$("trust-btn").addEventListener("click",async()=>{const cert_hex=$("trust-in").value.trim();if(!cert_hex){setMessage("manage-status","Paste a certificate",true);return;}try{const response=await api("/api/trust","POST",{cert_hex});setMessage("manage-status",response.ok?"Certificate trusted":"Invalid certificate",!response.ok);if(response.ok)$("trust-in").value="";}catch(_){setMessage("manage-status","Trust failed",true);}});
+$("join-btn").addEventListener("click",async()=>{const uri=$("join-uri").value.trim(),code=$("join-code").value.trim();if(!uri||!code){setMessage("manage-status","URI and invite code are required",true);return;}try{const response=await api("/api/join","POST",{uri,code});setMessage("manage-status",response.ok?"Join started":(await response.json()).error||"Join failed",!response.ok);}catch(_){setMessage("manage-status","Join failed",true);}});
+$("publish-btn").addEventListener("click",async()=>{const name=$("app-name").value.trim(),version=$("app-version").value.trim()||"1.0.0",input=$("app-files");if(!name||!input.files.length){setMessage("app-status","Name and files are required",true);return;}try{setMessage("app-status","Publishing content...");const response=await api("/api/app/publish","POST",{name,version,files:await selectedFiles(input)}),data=await response.json();if(response.ok){$("app-id-out").textContent=data.app_id;setMessage("app-status","Content published");}else setMessage("app-status",data.error||"Publish failed",true);}catch(_){setMessage("app-status","Publish failed",true);}});
+$("fetch-btn").addEventListener("click",async()=>{const app_id=$("fetch-id").value.trim();if(!app_id){setMessage("app-status","Enter a content id",true);return;}try{setMessage("app-status","Fetching content...");const response=await api("/api/app/fetch","POST",{app_id}),data=await response.json();if(!response.ok){setMessage("app-status",response.status===404?"Content not found":data.error||"Fetch failed",true);return;}$("app-files-out").innerHTML=Object.entries(data.files||{}).map(([path,b64])=>`<div class="action-row"><a class="primary" download="${esc(path)}" href="data:application/octet-stream;base64,${b64}">${esc(path)}</a></div>`).join("");setMessage("app-status",`${data.name} ${data.version} fetched`);}catch(_){setMessage("app-status","Fetch failed",true);}});
+"""
+
+
 CHAT_HTML = """<!doctype html>
 <html lang="en">
 <head>
