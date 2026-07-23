@@ -111,17 +111,23 @@ _PUNCH_SIG_MAX = 5000
 # PUNCH_ACK (raw UDP datagram): magic(4) | node_id(20) | nonce(16) | signature(64)
 _PUNCH_ACK_MAGIC = b"NPAK"
 
-_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
-                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
-                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    DIR_STORE, DIR_FIND, DIR_FOUND}
+# Direct types travel one authenticated hop (src must be the immediate peer):
+# per-link liveness, NAT punch signalling, and the catalog gossip (re-stamped
+# each hop). Everything else that addresses a *node id* is routable — forwarded
+# multi-hop across any transport toward its dst — so the DHT, the pseudo
+# directory and Kademlia discovery all work when the target is only reachable
+# through relays (A→…→X), not just a direct peer.
+_DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
+                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
 _MAX_EXTRA_ADDRS = 8
-_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY}
+_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
+                    FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
+                    DIR_STORE, DIR_FIND, DIR_FOUND}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -1737,23 +1743,16 @@ class MeshNode:
 
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
                                timeout: float = 5.0) -> list[NodeEntry]:
-        peer = next(
-            (p for p in self._peers
-             if p.authenticated_id == node_id and p.session is not None),
-            None,
-        )
-        if peer is None:
-            peer = await self._ensure_route_to(node_id, timeout)
-            if peer is None:
-                return []
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_finds[query_id] = future
-        packet = Packet.create(FIND_NODE, self._id.raw,
-                               NodeID(b"\xff" * 20).raw,
+        # Addressed to node_id and routed: a direct peer gets it in one hop, an
+        # id reachable only through relays gets it multi-hop. The FOUND_NODE
+        # reply routes back to us the same way.
+        packet = Packet.create(FIND_NODE, self._id.raw, node_id.raw,
                                target.raw + query_id)
         try:
-            await peer.send(packet)
+            await self._route_outbound(packet)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except (asyncio.TimeoutError, Exception):
             return []
@@ -3093,7 +3092,7 @@ class MeshNode:
             closest.append(NodeEntry(e.node_id, e.addresses, e.dsa_pub, chain))
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
                                  query_id + _encode_entries(closest))
-        await peer.send(response)
+        await self._route_outbound(response)   # routes back to the querier
 
     async def _handle_found_node(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3160,7 +3159,7 @@ class MeshNode:
         value = self._dht_store.get(key) or b""
         reply = Packet.create(FOUND_VALUE, self._id.raw, packet.src_id,
                               query_id + value)
-        await peer.send(reply)
+        await self._route_outbound(reply)   # routes back to the querier
 
     async def _handle_found_value(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3172,25 +3171,20 @@ class MeshNode:
             future.set_result(value if value else None)
 
     async def _dht_store_at(self, node_id: NodeID, key: bytes, value: bytes) -> None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return
+        # Addressed to node_id and routed (direct if adjacent, multi-hop if not).
         try:
-            await peer.send(Packet.create(STORE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + value))
+            await self._route_outbound(
+                Packet.create(STORE, self._id.raw, node_id.raw, key + value))
         except Exception:
             pass
 
     async def _dht_find_value_at(self, node_id: NodeID, key: bytes) -> bytes | None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return None
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_values[query_id] = future
         try:
-            await peer.send(Packet.create(FIND_VALUE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            await self._route_outbound(
+                Packet.create(FIND_VALUE, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
             return None
@@ -3439,7 +3433,8 @@ class MeshNode:
         key = packet.payload[:20]
         query_id = packet.payload[20:]
         body = query_id + _dir_encode(self._pseudo_store.get(key))
-        await peer.send(Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
+        await self._route_outbound(   # routes back to the querier
+            Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
 
     async def _handle_dir_found(self, peer: '_Peer', packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3450,25 +3445,20 @@ class MeshNode:
             future.set_result(packet.payload[_QID_LEN:])
 
     async def _dir_store_at(self, node_id: NodeID, claim: bytes) -> None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return
+        # Addressed to node_id and routed (direct if adjacent, multi-hop if not).
         try:
-            await peer.send(Packet.create(DIR_STORE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, claim))
+            await self._route_outbound(
+                Packet.create(DIR_STORE, self._id.raw, node_id.raw, claim))
         except Exception:
             pass
 
     async def _dir_find_at(self, node_id: NodeID, key: bytes) -> bytes | None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return None
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_dir[query_id] = future
         try:
-            await peer.send(Packet.create(DIR_FIND, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            await self._route_outbound(
+                Packet.create(DIR_FIND, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
             return None

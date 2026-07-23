@@ -109,6 +109,7 @@ class TestHandleFindNode:
         sender_id = NodeID.generate()
         target = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
+        node._peers[0].session = object()   # FOUND_NODE now routes back via _route_outbound
         query = Packet.create(FIND_NODE, sender_id.raw, node.id.raw, target.raw + b"\x00" * 8)
         fake.inject(query)
         await asyncio.sleep(0.05)
