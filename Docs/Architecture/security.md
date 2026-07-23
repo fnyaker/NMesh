@@ -94,4 +94,23 @@ chaîne, mais **routés** à travers le mesh (types `_ROUTABLE_TYPES`) jusqu'à 
 destination finale. Résultat : `_e2e_sessions[peer]`. Les DATA sont chiffrées
 sous cette session E2E (`create_encrypted`) : **les relais ne déchiffrent
 jamais** — ils ne voient que le header de routage.
+
+### Re-clé côté répondeur : candidat probé, jamais d'écrasement à l'aveugle
+
+Un handshake valide qui arrive alors qu'une session est **déjà vivante** peut
+être un doublon tardif (retry toutes les 5 s, chemin relayé lent) ou une vraie
+re-clé (le pair a perdu sa session). Écraser la session à l'aveugle empoisonne
+le lien dans le cas du doublon (l'initiateur ignore l'ACK, garde l'ancienne
+clé → désaccord de clés permanent → tout DATA dropé au GCM, silencieusement).
+Le répondeur dérive donc une session **candidate** (`_e2e_rekey`, bornée
+`_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`), ACK normalement, et ne **promeut** le
+candidat que lorsqu'un DATA **déchiffre** sous lui (`_handle_data`) — preuve
+que le pair détient réellement la nouvelle clé.
+
+Pourquoi c'est sûr : planter un candidat exige l'identité ML-DSA du pair
+(signature fraîche + chaîne ancrée, comme pour une établissement normal) ;
+promouvoir exige de décapsuler le KEM (seul le détenteur du secret KEM génère
+un DATA valide). Un handshake **rejoué** produit un candidat que l'attaquant ne
+peut jamais promouvoir (il ne décapsule pas notre ciphertext frais) → il
+expire. Un doublon légitime ne casse rien : la session vivante est conservée.
 </content>

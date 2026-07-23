@@ -143,6 +143,7 @@ _KAD_LOOKUP_MAX_ROUNDS = 2
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
 _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
+_DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallback
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -154,6 +155,17 @@ _LINK_KEEPALIVE_INTERVAL = 20.0
 # until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
 # self-repair / delay tolerance).
 _E2E_RETRY_INTERVAL = 5.0
+# Responder-side E2E re-key candidates (see _handle_e2e_handshake): when a valid
+# handshake arrives for a peer we ALREADY have a session with, answering naively
+# would overwrite the live session while the initiator (which keeps no matching
+# pending state for a stale/duplicate handshake) ignores our ACK — both ends
+# then hold different keys and every DATA packet is dropped on GCM failure,
+# silently and permanently. So a re-key is derived as a *candidate* only: it is
+# promoted to the live session exclusively by a DATA packet that successfully
+# decrypts under it (proof the peer actually completed that handshake). Bounded
+# and short-lived so a flood of valid-but-useless handshakes can't grow it.
+_E2E_REKEY_TTL = 30.0        # seconds a candidate session awaits proof
+_E2E_REKEY_MAX = 64          # distinct peers with a pending re-key candidate
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
@@ -863,6 +875,11 @@ class MeshNode:
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
         self._e2e_pending_data: dict[NodeID, list[bytes]] = {}
         self._e2e_attempt: dict[NodeID, float] = {}   # target -> last handshake attempt (monotonic)
+        # Responder-side re-key candidates: peer -> (candidate session, expiry).
+        # Promoted only by a DATA packet that decrypts under the candidate.
+        # Never persisted: a candidate is proof-of-completion awaited *now*;
+        # across a restart the peer re-handshakes anyway.
+        self._e2e_rekey: dict[NodeID, tuple[SessionKey, float]] = {}
         self._e2e_retry_task: asyncio.Task | None = None
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
@@ -1476,12 +1493,18 @@ class MeshNode:
                      if p.authenticated_id == nid and p.session is not None), None)
         if peer is not None:
             await self.ping(peer)
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + _DIRECT_PING_TIMEOUT
             while peer.ping_sent_at is not None and time.monotonic() < deadline:
                 await asyncio.sleep(0.02)
-            rtt = (round(peer.last_rtt * 1000, 1)
-                   if peer.ping_sent_at is None and peer.last_rtt is not None else None)
-            return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "direct"}
+            if peer.ping_sent_at is None:
+                # PONG received inside the window — the link provably works.
+                rtt = (round(peer.last_rtt * 1000, 1)
+                       if peer.last_rtt is not None else None)
+                return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "direct"}
+            # No PONG: the direct link is suspect (half-dead punched link, or a
+            # peer that never answers PINGs). Don't claim reachability on
+            # suspicion — fall through to the routed ECHO probe, which always
+            # gets a reply from a live node wherever the answer comes from.
         # Not a direct peer: probe over the mesh (multi-hop, relayed) rather than
         # only trying to form a direct link. This is what makes reaching a node by
         # id work when it's only reachable through a relay (remote / behind NAT).
@@ -3054,7 +3077,21 @@ class MeshNode:
         try:
             plaintext = packet.decrypt_payload(session)
         except Exception:
-            return
+            # The live key rejected it. If a re-key candidate is parked for this
+            # peer (they re-handshaked from scratch), this packet is the proof
+            # they completed it: a successful candidate decrypt promotes the
+            # candidate to the live session, healing the link. Anything else is
+            # hostile or corrupt and stays dropped, revealing nothing.
+            candidate = self._e2e_rekey_get(src)
+            if candidate is None:
+                return
+            try:
+                plaintext = packet.decrypt_payload(candidate)
+            except Exception:
+                return
+            self._e2e_sessions[src] = candidate
+            del self._e2e_rekey[src]
+            self._persist_state()
         await self._data_queue.put((src, plaintext))
 
     async def _handle_ping(self, peer: _Peer, packet: Packet) -> None:
@@ -3068,9 +3105,12 @@ class MeshNode:
         except (ValueError, UnicodeDecodeError):
             return
         valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
-        if not valid_uris:
-            return
-        self._routing.add(src, valid_uris, peer.dsa_pub)
+        if valid_uris:
+            self._routing.add(src, valid_uris, peer.dsa_pub)
+        # The PONG is unconditional: a node with nothing to advertise (a pure
+        # client, or a NATted node whose addresses are all unreachable) still
+        # deserves its liveness reply — withholding it leaves the sender's RTT
+        # bookkeeping stuck forever and makes a healthy link look dead.
         pong = Packet.create(PONG, self._id.raw, packet.src_id, b"")
         await peer.send(pong)
 
@@ -3713,7 +3753,22 @@ class MeshNode:
         if my_cert_chain is None:
             return
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
-        self._e2e_sessions[src] = SessionKey(shared_secret)
+        if src in self._e2e_sessions:
+            # We already hold a live session with this peer, so this handshake
+            # is either a stale/late duplicate (our retry loop, a slow relay)
+            # or the peer re-keying from scratch (it lost its session, e.g. a
+            # restart without persistence). Overwriting the live session right
+            # now would poison the link in the stale case: the initiator has no
+            # pending state for a duplicate, ignores our ACK, and keeps the OLD
+            # key while we would hold the NEW one — every DATA packet then
+            # fails GCM on both sides, silently, forever. Instead park the new
+            # key as a *candidate* and still ACK: a peer that truly re-keyed
+            # completes the handshake and its next DATA packet decrypts under
+            # the candidate, which promotes it; a stale duplicate never
+            # produces such a packet, so the candidate just expires.
+            self._e2e_rekey_store(src, SessionKey(shared_secret))
+        else:
+            self._e2e_sessions[src] = SessionKey(shared_secret)
         ack_sig = self._identity.sign(nonce + ciphertext + self._identity.dsa_public_key)
         ack_payload = _encode_e2e_handshake_ack(
             nonce, ciphertext, self._identity.dsa_public_key, my_cert_chain, ack_sig
@@ -3722,11 +3777,37 @@ class MeshNode:
         await self._route_outbound(ack)
         # We became the responder — flush anything we had queued for this peer,
         # otherwise data sent before the session existed is stranded forever.
+        # Always under the LIVE session (with a candidate pending, the old key
+        # is still the only one the peer provably holds).
         for payload in self._e2e_pending_data.pop(src, []):
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
             await self._route_outbound(pkt)
         self._persist_state()
+
+    def _e2e_rekey_store(self, src: NodeID, candidate: SessionKey) -> None:
+        """Park a responder-side re-key candidate, bounded and TTL'd."""
+        now = time.monotonic()
+        for nid in [n for n, (_, exp) in self._e2e_rekey.items() if exp <= now]:
+            del self._e2e_rekey[nid]
+        if src in self._e2e_rekey:
+            self._e2e_rekey[src] = (candidate, now + _E2E_REKEY_TTL)
+            return
+        if len(self._e2e_rekey) >= _E2E_REKEY_MAX:
+            oldest = min(self._e2e_rekey, key=lambda n: self._e2e_rekey[n][1])
+            del self._e2e_rekey[oldest]
+        self._e2e_rekey[src] = (candidate, now + _E2E_REKEY_TTL)
+
+    def _e2e_rekey_get(self, src: NodeID) -> SessionKey | None:
+        """Fetch a live (unexpired) re-key candidate for ``src``, if any."""
+        entry = self._e2e_rekey.get(src)
+        if entry is None:
+            return None
+        session, exp = entry
+        if exp <= time.monotonic():
+            del self._e2e_rekey[src]
+            return None
+        return session
 
     async def _handle_e2e_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         try:

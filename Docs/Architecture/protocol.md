@@ -43,14 +43,14 @@ un flood. Vérifié à la réception pour les types routables (voir portes).
 | Type | Val | Rôle |
 |---|---|---|
 | DATA | 0x00 | données applicatives (chiffrées E2E) |
-| PING / PONG | 0x01 / 0x02 | vivacité + **gossip d'adresses** (le PING porte `advertised_uris`) |
+| PING / PONG | 0x01 / 0x02 | vivacité + **gossip d'adresses** (le PING porte `advertised_uris` ; le PONG est **inconditionnel** — un nœud sans adresses annonçables y a droit) |
 | FIND_NODE / FOUND_NODE | 0x03 / 0x04 | lookup Kademlia (nœuds proches) |
 | FIND_VALUE / FOUND_VALUE | 0x05 / 0x06 | lookup DHT par clé |
 | STORE | 0x07 | stocker une valeur DHT (adressée par contenu) |
 | HANDSHAKE / HANDSHAKE_ACK | 0x08 / 0x09 | session par-saut (ML-KEM + ML-DSA + cert) |
 | INVITE / INVITE_ACK | 0x0A / 0x0B | (legacy) présentation de code d'invitation |
 | CHALLENGE | 0x0C | challenge d'authentification |
-| E2E_HANDSHAKE / _ACK | 0x0D / 0x0E | session de bout en bout |
+| E2E_HANDSHAKE / _ACK | 0x0D / 0x0E | session de bout en bout (re-clé avec session vivante : candidat probé par DATA, cf. `security.md`) |
 | OBSERVED_ADDR | 0x0F | « voici l'IP d'où je te vois » (découverte d'adresse publique) |
 | PUNCH_REQUEST / _RELAY | 0x10 / 0x11 | coordination de NAT hole punch via relais |
 | PUNCH_PROBE / _ACK | 0x12 / 0x13 | **datagrammes UDP bruts** (pas des Packet mesh), signés ML-DSA |

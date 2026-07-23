@@ -43,6 +43,59 @@ keepalive, un lien sain mais silencieux tombe. → `_link_keepalive_loop` (PING
 toutes les 20 s). Si tu vois des liens qui « tombent au bout d'un moment »,
 regarde le keepalive avant tout.
 
+### 4. Un `connect()` TCP sans timeout pend des minutes
+Dialer une adresse injoignable (IP privée d'un pair NATté apprise par gossip,
+hôte mort) sans borne laisse l'OS épuiser son timeout SYN (~2 min) **dans**
+`_ensure_route_to` — qui est awaité par `_forward_packet` (ça gèle la boucle de
+réception du lien entrant) et par le fallback de `console_ping_node`.
+→ Correctif : `_CONNECT_TIMEOUT` (4 s) via `async with asyncio.timeout(...)`
+(cancellable, cf. 3b) dans `TCPTransport.connect`. **Toute ouverture de
+connexion vers une adresse non prouvée doit être bornée.**
+
+## Sessions E2E & vivacité (les bugs « ça ne livre plus jamais »)
+
+### 5. Répondre à un E2E_HANDSHAKE en écrasant la session empoisonne le lien
+Le retry E2E réémet un handshake toutes les 5 s tant que de la data est en
+file. Sur un chemin lent (relais), un doublon arrive **après** l'établissement.
+Répondre naïvement = écraser la session côté répondeur avec une nouvelle clé,
+alors que l'initiateur n'a plus d'état pending pour ce doublon, **ignore l'ACK**
+et garde l'ancienne clé → les deux bouts chiffrent avec des clés différentes →
+chaque DATA échoue au GCM → **drop silencieux et permanent** (aucun des deux
+ne ré-initie : chacun « a » une session). Même effet en glare quand l'ACK
+double le handshake perdant en chemin.
+→ Correctif : avec une session déjà vivante, le répondeur dérive une clé
+**candidate** (bornée `_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`) et ACK quand même,
+mais ne la promeut que si un DATA **déchiffre** sous elle (preuve que le pair a
+réellement complété ce handshake — cas du pair qui a perdu sa session). Un
+doublon ne produit jamais un tel paquet → le candidat expire. Tests :
+`tests/test_nat_relay_fixes.py`, `tests/integration/test_nat_relay_e2e.py`.
+**Ne jamais réinstaller une session E2E sans preuve que le pair détient la clé.**
+
+### 6. Le PONG est inconditionnel
+`_handle_ping` ne répondait que si le PING portait des URI valides. Un nœud
+NATté sans listeners (ou sans adresses annonçables) ne recevait donc **jamais**
+de PONG : son `ping_sent_at` restait armé à vie (RTT jamais résolu) et le ping
+console d'un pair direct semblait mort. → Le PONG suit toujours les gates
+(payload non vide, src = pair authentifié, adresses décodables) ; seule la
+fusion dans la table de routage est conditionnée à des URI valides.
+
+### 7. Le timeout keepalive UDP était plus court que la cadence du trafic
+`_KEEPALIVE_TIMEOUT = 15 s` avec un keepalive toutes les 25 s et des PING mesh
+toutes les 20 s (commentaire : « 3 missed keepalives ») → dès que les phases
+s'alignaient, un lien punché **sain** était déclaré mort → flapping de route :
+`_route_outbound` préfère le pair direct mourant → ECHO/DATA aspirés dans un
+trou noir → « ping ne marche plus » intermittent dans les deux sens.
+→ `_KEEPALIVE_TIMEOUT = 75 s` (3 × intervalle). **Un timeout de mort doit
+toujours être ≥ 3 × la plus grande cadence de trafic légitime.**
+
+### 8. Fenêtre de séquence UDP : comparaison modulaire, pas de set infini
+La dédup receveur utilisait un `_recv_seen` **non borné** (spray de seq →
+mémoire) et cassait le lien au wrap 2³² (tout seq post-wrap déjà « vu »).
+→ `process_incoming` raisonne en distance modulaire (RFC 1982) autour du
+curseur de délivrance : en-ordre → livrer ; en-avant → buffer borné
+(`_MAX_REORDER`) ; en-arrière → duplicata, re-ACK. Aucun set, état borné par
+construction.
+
 ## Hole punching (voir aussi `transports.md`)
 
 - **Ne pas supprimer `_punch_pending` quand l'adresse UDP du pair est inconnue**
