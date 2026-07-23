@@ -1132,7 +1132,8 @@ CHAT_HTML = """<!doctype html>
       <button id="new-btn" class="icon" title="New chat">✎</button>
     </header>
     <div class="search-wrap">
-      <input id="side-search" type="search" placeholder="Search chats and people…">
+      <input id="side-search" type="search" placeholder="Search chats and people…" autocomplete="off">
+      <div id="side-results" class="dropdown hidden"></div>
     </div>
     <div id="chat-list" class="chat-list"></div>
   </aside>
@@ -1267,7 +1268,12 @@ code.mono{word-break:break-all}
   justify-content:center;font-size:18px;color:var(--muted)}
 .icon:hover{background:var(--accent-2);color:var(--accent)}
 .icon.send{color:var(--accent)}
-.search-wrap{padding:10px 12px}
+.search-wrap{padding:10px 12px;position:relative}
+.dropdown{position:absolute;left:12px;right:12px;top:48px;z-index:30;background:var(--panel);
+  border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);
+  max-height:340px;overflow:auto;padding:4px}
+.dropdown .dhead{font-size:11px;color:var(--muted);padding:6px 10px 2px;text-transform:uppercase;letter-spacing:.04em}
+.dropdown .note{padding:10px}
 .chat-list{flex:1;overflow-y:auto}
 
 /* chat list rows */
@@ -1686,6 +1692,45 @@ async function startChat(id){
   await api("/api/chat/contact","POST",{op:"add",id}).catch(()=>{});
   $("newchat").classList.add("hidden"); await poll(); openConv(id);
 }
+function resRow(avId,name,sub,onClick){
+  const d=document.createElement("div");d.className="res";
+  d.innerHTML=avatarHTML(avId,name)+'<div class="rn"><div class="p">'+esc(name)+'</div>'+
+    (sub?'<div class="i mono">'+esc(sub)+'</div>':'')+'</div>';
+  d.addEventListener("click",onClick);return d;
+}
+// Sidebar search: filters the chat list AND shows a dropdown of matching chats
+// and people (local directory + network DHT). Pseudos aren't unique, so several
+// hits can appear — the dropdown lets you pick the right node id.
+let sideT=null;
+function sideSearch(){
+  renderList();
+  const q=($("side-search").value||"").trim();
+  const dd=$("side-results");
+  if(!q){dd.classList.add("hidden");dd.innerHTML="";return;}
+  const ql=q.toLowerCase();
+  const chats=convList().filter(it=>convName(it.conv).toLowerCase().includes(ql));
+  dd.innerHTML="";
+  if(chats.length){
+    const h=document.createElement("div");h.className="dhead";h.textContent="Chats";dd.appendChild(h);
+    for(const it of chats.slice(0,8))
+      dd.appendChild(resRow(convAvatarId(it.conv),convName(it.conv),
+        convIsGroup(it.conv)?"group":short(it.conv),()=>{closeSide();openConv(it.conv);}));
+  }
+  const loading=document.createElement("div");loading.className="dhead";loading.textContent="People";dd.appendChild(loading);
+  const wait=document.createElement("div");wait.className="note muted";wait.textContent="Searching…";dd.appendChild(wait);
+  dd.classList.remove("hidden");
+  clearTimeout(sideT);
+  sideT=setTimeout(async()=>{
+    if(($("side-search").value||"").trim()!==q)return;   // stale
+    let hits=[]; try{hits=(await(await api("/api/chat/search","POST",{pseudo:q})).json()).results||[];}catch(_){}
+    hits=hits.filter(x=>!chats.some(c=>c.conv===x.id));
+    wait.remove();
+    if(hits.length){for(const r of hits)
+      dd.appendChild(resRow(r.id,r.pseudo||short(r.id),short(r.id),()=>{closeSide();startChat(r.id);}));}
+    else{const n=document.createElement("div");n.className="note muted";n.textContent="No people found.";dd.appendChild(n);}
+  },320);
+}
+function closeSide(){$("side-results").classList.add("hidden");$("side-search").value="";renderList();}
 function renderGroupPicker(){
   const el=$("grp-members");el.innerHTML="";
   const people=[...ST.contacts,...ST.known];
@@ -1707,7 +1752,9 @@ async function createGroup(){
 
 // ---- events ----
 function bind(){
-  $("side-search").addEventListener("input",renderList);
+  $("side-search").addEventListener("input",sideSearch);
+  $("side-search").addEventListener("focus",sideSearch);
+  document.addEventListener("click",(e)=>{if(!e.target.closest(".search-wrap"))$("side-results").classList.add("hidden");});
   $("me-btn").addEventListener("click",openSettings);
   $("new-btn").addEventListener("click",openNew);
   $("back-btn").addEventListener("click",()=>{sel=null;$("app").classList.remove("show-conv");$("conv").classList.add("hidden");$("empty").classList.remove("hidden");renderList();});

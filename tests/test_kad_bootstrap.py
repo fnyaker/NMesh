@@ -92,6 +92,7 @@ async def test_find_node_query_id_echoed():
     node, fake = await make_node()
     sender_id = NodeID.generate()
     node._peers[0].authenticated_id = sender_id
+    node._peers[0].session = object()   # FOUND_NODE now routes back via _route_outbound
 
     target = NodeID.generate()
     query_id = b"\xde\xad\xbe\xef\x01\x02\x03\x04"
