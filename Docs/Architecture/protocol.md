@@ -59,14 +59,20 @@ un flood. Vérifié à la réception pour les types routables (voir portes).
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT : « rappelle-moi pour confirmer que je suis joignable » |
 | CATALOG_ANNOUNCE | 0x18 | gossip d'une **release signée** pour le catalogue de l'app store |
 | DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | annuaire de pseudos : stocke/cherche/répond une **réclamation signée** pseudo→node_id |
+| ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **sonde de vivacité routable** : joindre un node id en multi-hop (ping à distance via relais) |
 
 Regroupements (constantes) :
-- `_DIRECT_TYPES` : messages de contrôle entre pairs directs → **exigent un pair
-  authentifié et `src_id == pair authentifié`** (inclut `CATALOG_ANNOUNCE`, re-
-  stampé à chaque saut lors du gossip épidémique, et `DIR_STORE`/`DIR_FIND`/
-  `DIR_FOUND`).
-- `_ROUTABLE_TYPES` = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK} : peuvent traverser
-  le mesh.
+- `_DIRECT_TYPES` : un seul saut authentifié → **exigent un pair authentifié et
+  `src_id == pair authentifié`**. Uniquement ce qui est intrinsèquement par-lien :
+  `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, la signalisation de punch
+  (`PUNCH_*`, `REACH_PROBE*`), et `CATALOG_ANNOUNCE` (re-stampé à chaque saut lors
+  du gossip épidémique).
+- `_ROUTABLE_TYPES` : **tout ce qui adresse un `node id`** → relayé multi-hop vers
+  `dst_id` (`_forward_packet`). Inclut `DATA`, `E2E_HANDSHAKE`/`_ACK`,
+  `ECHO_REQUEST`/`_REPLY`, **et le plan de contrôle Kademlia/DHT** : `FIND_NODE`/
+  `FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`, `DIR_STORE`/`DIR_FIND`/
+  `DIR_FOUND`. → le DHT et l'annuaire fonctionnent `A→X` à travers des relais,
+  pas seulement vers un pair direct.
 - `INVITE_SEEK` et `RELAY_CARRY` sont traités **avant** les portes (pré-auth,
   strictement bornés/token-gated).
 

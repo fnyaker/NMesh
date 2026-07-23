@@ -80,6 +80,8 @@ CATALOG_ANNOUNCE  = 0x18   # gossip a signed app-store release descriptor
 DIR_STORE         = 0x19   # store a signed pseudo-directory claim
 DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
 DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
+ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
+ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -109,17 +111,23 @@ _PUNCH_SIG_MAX = 5000
 # PUNCH_ACK (raw UDP datagram): magic(4) | node_id(20) | nonce(16) | signature(64)
 _PUNCH_ACK_MAGIC = b"NPAK"
 
-_DIRECT_TYPES    = {PING, PONG, FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE,
-                    STORE, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
-                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    DIR_STORE, DIR_FIND, DIR_FOUND}
+# Direct types travel one authenticated hop (src must be the immediate peer):
+# per-link liveness, NAT punch signalling, and the catalog gossip (re-stamped
+# each hop). Everything else that addresses a *node id* is routable — forwarded
+# multi-hop across any transport toward its dst — so the DHT, the pseudo
+# directory and Kademlia discovery all work when the target is only reachable
+# through relays (A→…→X), not just a direct peer.
+_DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
+                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
 _MAX_EXTRA_ADDRS = 8
-_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
+_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
+                    FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
+                    DIR_STORE, DIR_FIND, DIR_FOUND}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -140,6 +148,12 @@ _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 # established peer well inside that window — both sides do it, so each link
 # carries a packet each way and a few misses still leave margin.
 _LINK_KEEPALIVE_INTERVAL = 20.0
+# Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
+# session with, re-initiate on this cadence. Without it, a single lost handshake
+# (peer offline at send time, an ACK dropped in transit) stranded the queued data
+# until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
+# self-repair / delay tolerance).
+_E2E_RETRY_INTERVAL = 5.0
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
@@ -848,6 +862,8 @@ class MeshNode:
         self._e2e_pending_kem: dict[NodeID, bytes] = {}
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
         self._e2e_pending_data: dict[NodeID, list[bytes]] = {}
+        self._e2e_attempt: dict[NodeID, float] = {}   # target -> last handshake attempt (monotonic)
+        self._e2e_retry_task: asyncio.Task | None = None
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
@@ -865,6 +881,7 @@ class MeshNode:
         apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
         self._installed = InstalledApps(installed_path, apps_dir)
         self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._pending_echo: dict[bytes, asyncio.Future] = {}   # routed-ping query_id -> future
         # Pseudo directory: find node ids by pseudo, network-wide.
         self._pseudo_store = PseudoStore()
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
@@ -947,6 +964,7 @@ class MeshNode:
             )
             self._net_monitor.start()
         self._ensure_link_keepalive()
+        self._ensure_e2e_retry()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1228,6 +1246,7 @@ class MeshNode:
         self._peers.append(peer)
         self._running = True
         self._ensure_link_keepalive()
+        self._ensure_e2e_retry()
         await peer.start(self._handle_packet)
         return peer
 
@@ -1341,6 +1360,7 @@ class MeshNode:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._stop_link_keepalive()
+        await self._stop_e2e_retry()
         for peer in list(self._peers):
             await peer.stop()
         self._peers.clear()
@@ -1376,7 +1396,7 @@ class MeshNode:
             queue.append(payload)
             if len(queue) > _MAX_PENDING_PER_TARGET:
                 del queue[0]  # drop oldest — bounded backlog per target
-            if target not in self._e2e_pending_kem:
+            if self._should_initiate_e2e(target):
                 await self._initiate_e2e_handshake(target)
             self._persist_state()
             return
@@ -1454,17 +1474,61 @@ class MeshNode:
             return {"ok": False, "error": "self"}
         peer = next((p for p in self._peers
                      if p.authenticated_id == nid and p.session is not None), None)
-        if peer is None:
+        if peer is not None:
+            await self.ping(peer)
+            deadline = time.monotonic() + 3.0
+            while peer.ping_sent_at is not None and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            rtt = (round(peer.last_rtt * 1000, 1)
+                   if peer.ping_sent_at is None and peer.last_rtt is not None else None)
+            return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "direct"}
+        # Not a direct peer: probe over the mesh (multi-hop, relayed) rather than
+        # only trying to form a direct link. This is what makes reaching a node by
+        # id work when it's only reachable through a relay (remote / behind NAT).
+        rtt = await self._routed_ping(nid)
+        if rtt is None:
+            # Last resort: try to form a direct/punched link, then ping it.
             peer = await self._ensure_route_to(nid)
-        if peer is None or peer.authenticated_id != nid or peer.session is None:
+            if peer is not None and peer.authenticated_id == nid and peer.session is not None:
+                rtt = await self._routed_ping(nid)
+        if rtt is None:
             return {"ok": True, "reachable": False}
-        await self.ping(peer)
-        deadline = time.monotonic() + 3.0
-        while peer.ping_sent_at is not None and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        rtt = (round(peer.last_rtt * 1000, 1)
-               if peer.ping_sent_at is None and peer.last_rtt is not None else None)
-        return {"ok": True, "reachable": True, "rtt_ms": rtt}
+        return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "route"}
+
+    async def _routed_ping(self, target: NodeID, timeout: float = 5.0) -> float | None:
+        """Liveness probe that travels the mesh multi-hop: an ECHO_REQUEST routed
+        to ``target`` (forwarded hop by hop, across any transport), which replies
+        with an ECHO_REPLY routed back. Returns the round-trip in ms, or None."""
+        qid = os.urandom(_QID_LEN)
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_echo[qid] = fut
+        t0 = time.monotonic()
+        try:
+            await self._route_outbound(
+                Packet.create(ECHO_REQUEST, self._id.raw, target.raw, qid))
+            await asyncio.wait_for(asyncio.shield(fut), timeout)
+            return round((time.monotonic() - t0) * 1000, 1)
+        except Exception:
+            return None
+        finally:
+            self._pending_echo.pop(qid, None)
+            if not fut.done():
+                fut.cancel()
+
+    async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
+        # Delivered here because dst==self (forwarding routed it to us). Reply
+        # routed back to the origin so the round-trip crosses the same mesh path.
+        if len(packet.payload) != _QID_LEN:
+            return
+        await self._route_outbound(
+            Packet.create(ECHO_REPLY, self._id.raw, packet.src_id, packet.payload))
+
+    async def _handle_echo_reply(self, peer: _Peer, packet: Packet) -> None:
+        if len(packet.payload) != _QID_LEN:
+            return
+        fut = self._pending_echo.pop(packet.payload, None)
+        if fut is not None and not fut.done():
+            fut.set_result(True)
 
     def _ensure_link_keepalive(self) -> None:
         """Start the link-keepalive loop if it isn't already running."""
@@ -1679,23 +1743,16 @@ class MeshNode:
 
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
                                timeout: float = 5.0) -> list[NodeEntry]:
-        peer = next(
-            (p for p in self._peers
-             if p.authenticated_id == node_id and p.session is not None),
-            None,
-        )
-        if peer is None:
-            peer = await self._ensure_route_to(node_id, timeout)
-            if peer is None:
-                return []
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_finds[query_id] = future
-        packet = Packet.create(FIND_NODE, self._id.raw,
-                               NodeID(b"\xff" * 20).raw,
+        # Addressed to node_id and routed: a direct peer gets it in one hop, an
+        # id reachable only through relays gets it multi-hop. The FOUND_NODE
+        # reply routes back to us the same way.
+        packet = Packet.create(FIND_NODE, self._id.raw, node_id.raw,
                                target.raw + query_id)
         try:
-            await peer.send(packet)
+            await self._route_outbound(packet)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except (asyncio.TimeoutError, Exception):
             return []
@@ -1778,6 +1835,16 @@ class MeshNode:
         if peer is not None:
             await peer.send(packet)
 
+    def _should_initiate_e2e(self, target: NodeID) -> bool:
+        """True if we should (re)send an E2E handshake to ``target``: no session
+        yet, and either none in flight or the last attempt is stale enough to
+        retry. This is what makes a lost handshake self-heal instead of stranding
+        queued data forever."""
+        if target in self._e2e_sessions:
+            return False
+        last = self._e2e_attempt.get(target)
+        return last is None or (time.monotonic() - last) >= _E2E_RETRY_INTERVAL
+
     async def _initiate_e2e_handshake(self, target: NodeID) -> None:
         nonce = os.urandom(32)
         kem_pub, kem_secret = self._identity.generate_kem_keypair()
@@ -1789,9 +1856,42 @@ class MeshNode:
         payload = _encode_e2e_handshake(nonce, kem_pub, dsa_pub, cert_chain, signature)
         self._e2e_pending_kem[target] = kem_secret
         self._e2e_pending_nonce[target] = nonce
+        self._e2e_attempt[target] = time.monotonic()
         self._persist_state()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
         await self._route_outbound(packet)
+
+    def _ensure_e2e_retry(self) -> None:
+        if self._e2e_retry_task is None or self._e2e_retry_task.done():
+            self._e2e_retry_task = asyncio.create_task(self._e2e_retry_loop())
+
+    async def _e2e_retry_loop(self) -> None:
+        """Re-drive stalled E2E handshakes: any target with data still queued but
+        no session gets its handshake re-sent on a bounded cadence. Re-initiating
+        also nudges ``_route_outbound`` to look for a (possibly newly-available)
+        path to the peer. Never raises."""
+        while self._running:
+            await asyncio.sleep(_E2E_RETRY_INTERVAL)
+            # Prune bookkeeping for targets that are done (session up / no backlog).
+            for t in [t for t in self._e2e_attempt
+                      if t in self._e2e_sessions or t not in self._e2e_pending_data]:
+                self._e2e_attempt.pop(t, None)
+            for target in list(self._e2e_pending_data.keys()):
+                if self._should_initiate_e2e(target):
+                    try:
+                        await self._initiate_e2e_handshake(target)
+                    except Exception:
+                        pass
+
+    async def _stop_e2e_retry(self) -> None:
+        task = self._e2e_retry_task
+        self._e2e_retry_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _on_new_transport(self, transport: BaseTransport) -> None:
         if len(self._peers) >= _MAX_PEERS:
@@ -2618,6 +2718,8 @@ class MeshNode:
             DIR_STORE:         self._handle_dir_store,
             DIR_FIND:          self._handle_dir_find,
             DIR_FOUND:         self._handle_dir_found,
+            ECHO_REQUEST:      self._handle_echo_request,
+            ECHO_REPLY:        self._handle_echo_reply,
         }
         handler = handlers.get(packet.type)
         if handler:
@@ -2990,7 +3092,7 @@ class MeshNode:
             closest.append(NodeEntry(e.node_id, e.addresses, e.dsa_pub, chain))
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
                                  query_id + _encode_entries(closest))
-        await peer.send(response)
+        await self._route_outbound(response)   # routes back to the querier
 
     async def _handle_found_node(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3057,7 +3159,7 @@ class MeshNode:
         value = self._dht_store.get(key) or b""
         reply = Packet.create(FOUND_VALUE, self._id.raw, packet.src_id,
                               query_id + value)
-        await peer.send(reply)
+        await self._route_outbound(reply)   # routes back to the querier
 
     async def _handle_found_value(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3069,25 +3171,20 @@ class MeshNode:
             future.set_result(value if value else None)
 
     async def _dht_store_at(self, node_id: NodeID, key: bytes, value: bytes) -> None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return
+        # Addressed to node_id and routed (direct if adjacent, multi-hop if not).
         try:
-            await peer.send(Packet.create(STORE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + value))
+            await self._route_outbound(
+                Packet.create(STORE, self._id.raw, node_id.raw, key + value))
         except Exception:
             pass
 
     async def _dht_find_value_at(self, node_id: NodeID, key: bytes) -> bytes | None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return None
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_values[query_id] = future
         try:
-            await peer.send(Packet.create(FIND_VALUE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            await self._route_outbound(
+                Packet.create(FIND_VALUE, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
             return None
@@ -3336,7 +3433,8 @@ class MeshNode:
         key = packet.payload[:20]
         query_id = packet.payload[20:]
         body = query_id + _dir_encode(self._pseudo_store.get(key))
-        await peer.send(Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
+        await self._route_outbound(   # routes back to the querier
+            Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
 
     async def _handle_dir_found(self, peer: '_Peer', packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3347,25 +3445,20 @@ class MeshNode:
             future.set_result(packet.payload[_QID_LEN:])
 
     async def _dir_store_at(self, node_id: NodeID, claim: bytes) -> None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return
+        # Addressed to node_id and routed (direct if adjacent, multi-hop if not).
         try:
-            await peer.send(Packet.create(DIR_STORE, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, claim))
+            await self._route_outbound(
+                Packet.create(DIR_STORE, self._id.raw, node_id.raw, claim))
         except Exception:
             pass
 
     async def _dir_find_at(self, node_id: NodeID, key: bytes) -> bytes | None:
-        peer = await self._ensure_route_to(node_id, _DHT_QUERY_TIMEOUT)
-        if peer is None:
-            return None
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_dir[query_id] = future
         try:
-            await peer.send(Packet.create(DIR_FIND, self._id.raw,
-                                          NodeID(b"\xff" * 20).raw, key + query_id))
+            await self._route_outbound(
+                Packet.create(DIR_FIND, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
             return None
@@ -3374,19 +3467,41 @@ class MeshNode:
             if not future.done():
                 future.cancel()
 
+    def _direct_peer_ids(self) -> list[NodeID]:
+        """Node ids of our directly-connected authenticated peers. The directory
+        (like the DHT) can only exchange FIND/STORE with peers we have a live link
+        to, so in a hub/NAT topology these — not the abstract K-closest — are who
+        actually holds and answers. Including them makes lookup work when the
+        closest-to-key nodes aren't directly reachable."""
+        out, seen = [], set()
+        for p in self._peers:
+            nid = p.authenticated_id
+            if nid is not None and p.session is not None and nid.raw not in seen:
+                seen.add(nid.raw)
+                out.append(nid)
+        return out
+
+    async def _dir_targets(self, key: bytes) -> list[NodeID]:
+        """Union of the K nodes closest to ``key`` and our direct peers — bounded,
+        deduplicated, self excluded."""
+        targets, seen = [], set()
+        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K] + self._direct_peer_ids():
+            if nid != self._id and nid.raw not in seen:
+                seen.add(nid.raw)
+                targets.append(nid)
+        return targets
+
     async def publish_pseudo(self, app_id: bytes, pseudo: str) -> str:
         """Publish a signed claim that ``pseudo`` maps to this node, replicated to
-        the nodes closest to its key. Returns the directory key (hex)."""
+        the nodes closest to its key and to our direct peers. Returns the key."""
         claim = _dir_build_claim(app_id, pseudo, self._identity.dsa_public_key,
                                  self._identity.sign)
         parsed = _dir_parse_claim(claim, self._identity.verify)
         if parsed is not None:
             self._pseudo_store.put(parsed, claim)   # keep + re-serve locally
         key = _dir_key(app_id, pseudo)
-        targets = await self.kad_lookup(NodeID(key))
         await asyncio.gather(
-            *(self._dir_store_at(nid, claim)
-              for nid in targets[:_DIR_K] if nid != self._id),
+            *(self._dir_store_at(nid, claim) for nid in await self._dir_targets(key)),
             return_exceptions=True,
         )
         return key.hex()
@@ -3394,7 +3509,9 @@ class MeshNode:
     async def lookup_pseudo(self, app_id: bytes, pseudo: str) -> list[dict]:
         """Find every node claiming ``pseudo`` in this app's namespace. Returns
         ``[{"id": node_id_hex, "pseudo": pseudo}]`` — possibly several (pseudos
-        aren't unique); the node id is the real identity."""
+        aren't unique); the node id is the real identity. Queries the closest
+        nodes and our direct peers **in parallel** so one slow/unreachable peer
+        can't stall the whole lookup."""
         key = _dir_key(app_id, pseudo)
         found: dict[str, str] = {}
 
@@ -3407,11 +3524,12 @@ class MeshNode:
 
         for raw in self._pseudo_store.get(key):
             absorb(raw)
-        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K]:
-            if nid == self._id:
-                continue
-            blob = await self._dir_find_at(nid, key)
-            if blob:
+        blobs = await asyncio.gather(
+            *(self._dir_find_at(nid, key) for nid in await self._dir_targets(key)),
+            return_exceptions=True,
+        )
+        for blob in blobs:
+            if isinstance(blob, (bytes, bytearray)):
                 for raw in _dir_decode(blob):
                     absorb(raw)
         return [{"id": h, "pseudo": p} for h, p in found.items()]
