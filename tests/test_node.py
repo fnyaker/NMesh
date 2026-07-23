@@ -79,7 +79,7 @@ class TestHandlePing:
         assert closest[0].node_id == sender_id
 
     async def test_handle_ping_invalid_uri_dropped(self):
-        """A PING with a malformed URI in its address list is silently ignored."""
+        """A PING with a malformed URI in its address list drops the address, not the sender."""
         node, fake = await make_node()
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
@@ -89,7 +89,9 @@ class TestHandlePing:
         fake.inject(ping)
         await asyncio.sleep(0.05)
         await node.stop()
-        assert node._routing.get(sender_id) is None
+        entry = node._routing.get(sender_id)
+        assert entry is not None       # authenticated PING still proves recency
+        assert entry.addresses == []   # but the malformed URI itself was dropped
 
     async def test_handle_ping_old_plain_text_payload_ignored(self):
         """Old raw-string PING payload (no binary framing) must be silently dropped."""
@@ -123,6 +125,7 @@ class TestHandleFoundNode:
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
         entry = _make_entry("tcp://127.0.0.1:9002", issuer_node=node)
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         found = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                               b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(found)
@@ -139,9 +142,22 @@ class TestHandleFoundNode:
         # Create entry with invalid URI — _encode_entries will include it raw;
         # _decode_entries must then drop the entire entry.
         entry = _make_entry("not-a-uri", issuer_node=node)
+        node._pending_finds[b"\x00" * 8] = asyncio.get_running_loop().create_future()
         found = Packet.create(FOUND_NODE, sender_id.raw, node.id.raw,
                               b"\x00" * 8 + _encode_entries([entry]))
         fake.inject(found)
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert node._routing.get(entry.node_id) is None
+
+    async def test_unsolicited_found_node_does_not_mutate_routing(self):
+        node, fake = await make_node()
+        sender_id = NodeID.generate()
+        node._peers[0].authenticated_id = sender_id
+        entry = _make_entry("tcp://127.0.0.1:9002", issuer_node=node)
+        fake.inject(Packet.create(
+            FOUND_NODE, sender_id.raw, node.id.raw,
+            b"unsolict" + _encode_entries([entry])))
         await asyncio.sleep(0.05)
         await node.stop()
         assert node._routing.get(entry.node_id) is None

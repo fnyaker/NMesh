@@ -11,6 +11,7 @@ from src.node import (
     MeshNode, FIND_NODE, FOUND_NODE,
 )
 from src.node_id import NodeID
+from src.crypto import CryptoIdentity
 from src.packet import Packet
 from tests.conftest import (
     FakeTransport, make_node, make_manager,
@@ -131,3 +132,47 @@ async def test_kad_lookup_finds_node_via_bridge():
 
     await node_a.stop()
     await node_b.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_recovers_known_link_without_application_traffic():
+    manager = ConnectableFakeTransportManager()
+    node_a = MeshNode(transport_manager=manager)
+    node_b = MeshNode(transport_manager=make_manager())
+    node_a._cert_store.add(node_b._identity.self_signed_cert())
+    node_a._cert_store.add_root(node_b.id)
+    node_b._cert_store.add(node_a._identity.self_signed_cert())
+    node_b._cert_store.add_root(node_a.id)
+    manager.register_target("fake://persisted", node_b)
+    node_a._routing.add(node_b.id, ["fake://persisted"],
+                        node_b._identity.dsa_public_key)
+
+    await node_a.start([])
+    await node_a.wait_for_session(timeout=5.0)
+
+    assert any(p.authenticated_id == node_b.id and p.session is not None
+               for p in node_a._peers)
+    await node_a.stop()
+    await node_b.stop()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_targets_only_five_xor_nearest(monkeypatch):
+    node = MeshNode(transport_manager=make_manager())
+    identities = [CryptoIdentity() for _ in range(7)]
+    for index, identity in enumerate(identities):
+        node_id = NodeID.from_public_key(identity.dsa_public_key)
+        node._routing.add(node_id, [f"fake://node-{index}"],
+                          identity.dsa_public_key)
+    expected = [entry.node_id for entry in node._routing.get_closest(node.id, 5)]
+    attempted = []
+
+    async def fake_ensure(node_id, timeout=5.0):
+        attempted.append(node_id)
+        return None
+
+    monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
+    await node._maintain_neighbors()
+
+    assert attempted == expected
+    await node.stop()

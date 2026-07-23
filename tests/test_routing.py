@@ -1,6 +1,7 @@
 import pytest
 from src.routing import KBucket, RoutingTable, NodeEntry
 from src.node_id import NodeID
+from src.crypto import CryptoIdentity
 
 
 def make_id(byte: int) -> NodeID:
@@ -90,6 +91,14 @@ class TestRoutingTable:
         self.rt.add(n, ["tcp://a:1", "ble://aa"])
         assert self.rt.get(n).addresses == ["tcp://a:1", "ble://aa"]
 
+    def test_addresses_are_newest_first_and_bounded(self):
+        n = make_id(1)
+        self.rt.add(n, [f"tcp://old-{i}:1" for i in range(8)])
+        self.rt.add(n, ["tcp://fresh:1", "tcp://old-7:1"])
+        entry = self.rt.get(n)
+        assert entry.addresses[0] == "tcp://fresh:1"
+        assert len(entry.addresses) == 8
+
     def test_remove(self):
         n = make_id(1)
         self.rt.add(n, ["addr1"])
@@ -138,8 +147,12 @@ class TestRoutingTable:
 class TestExportImport:
     def test_roundtrip(self):
         rt = RoutingTable(make_id(0))
-        rt.add(make_id(1), ["tcp://a:1"], b"\x11" * 32)
-        rt.add(make_id(2), ["tcp://b:2", "spool:///x"], b"\x22" * 32)
+        first = CryptoIdentity()
+        second = CryptoIdentity()
+        first_id = NodeID.from_public_key(first.dsa_public_key)
+        second_id = NodeID.from_public_key(second.dsa_public_key)
+        rt.add(first_id, ["tcp://a:1"], first.dsa_public_key)
+        rt.add(second_id, ["tcp://b:2", "spool:///x"], second.dsa_public_key)
         rt.add(make_id(3), ["tcp://c:3"])  # no dsa_pub → not exportable
 
         exported = rt.export_entries()
@@ -147,9 +160,24 @@ class TestExportImport:
 
         rt2 = RoutingTable(make_id(0))
         rt2.import_entries(exported)
-        assert rt2.get(make_id(1)).addresses == ["tcp://a:1"]
-        assert rt2.get(make_id(2)).dsa_pub == b"\x22" * 32
+        assert rt2.get(first_id).addresses == ["tcp://a:1"]
+        assert rt2.get(second_id).dsa_pub == second.dsa_public_key
         assert rt2.get(make_id(3)) is None
+
+    def test_import_rejects_unbound_key_and_invalid_addresses(self):
+        rt = RoutingTable(make_id(0))
+        identity = CryptoIdentity()
+        node_id = NodeID.from_public_key(identity.dsa_public_key)
+        rt.import_entries([{
+            "id": node_id.raw.hex(),
+            "dsa_pub": CryptoIdentity().dsa_public_key.hex(),
+            "addresses": ["tcp://valid:1"],
+        }, {
+            "id": node_id.raw.hex(),
+            "dsa_pub": identity.dsa_public_key.hex(),
+            "addresses": ["not a uri", "tcp://valid:1"],
+        }])
+        assert rt.get(node_id).addresses == ["tcp://valid:1"]
 
     def test_import_ignores_garbage(self):
         rt = RoutingTable(make_id(0))
