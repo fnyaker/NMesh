@@ -59,6 +59,7 @@ un flood. Vérifié à la réception pour les types routables (voir portes).
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT : « rappelle-moi pour confirmer que je suis joignable » |
 | CATALOG_ANNOUNCE | 0x18 | gossip d'une **release signée** pour le catalogue de l'app store |
 | DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | annuaire de pseudos : stocke/cherche/répond une **réclamation signée** pseudo→node_id |
+| ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **sonde de vivacité routable** : joindre un node id en multi-hop (ping à distance via relais) |
 
 Regroupements (constantes) :
 - `_DIRECT_TYPES` : messages de contrôle entre pairs directs → **exigent un pair
