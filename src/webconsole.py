@@ -36,6 +36,7 @@ import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 from .webassets import INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS, CHAT_CSS
 
@@ -47,6 +48,9 @@ _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
+_LIST_DEFAULT_LIMIT = 20
+_LIST_MAX_LIMIT = 100
+_LIST_MAX_QUERY = 128
 # serve_forever() only notices a shutdown() between polls; the stdlib default is
 # 0.5s, which makes every stop() block that long. Poll tighter so teardown is
 # near-instant (idle cost is one cheap select wakeup per interval).
@@ -346,6 +350,58 @@ _CHAT_STATIC = {
 }
 
 
+def _parse_list_query(path: str, *, nodes: bool = False) -> tuple[str | None, str, int, int]:
+    raw_query = path.partition("?")[2]
+    for index, char in enumerate(raw_query):
+        if (char == "%" and (index + 2 >= len(raw_query)
+                             or any(c not in "0123456789abcdefABCDEF"
+                                    for c in raw_query[index + 1:index + 3]))):
+            raise ValueError("invalid query")
+    try:
+        params = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True,
+                          max_num_fields=4, encoding="utf-8", errors="strict")
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("invalid query") from exc
+    allowed = {"q", "limit", "offset"} | ({"scope"} if nodes else set())
+    if set(params) - allowed or any(len(values) != 1 for values in params.values()):
+        raise ValueError("invalid query")
+
+    scope = params.get("scope", [None])[0]
+    if nodes and scope not in ("active", "known"):
+        raise ValueError("invalid scope")
+    query = params.get("q", [""])[0]
+    if len(query) > _LIST_MAX_QUERY:
+        raise ValueError("query too long")
+
+    def pagination_value(name: str, default: int) -> int:
+        value = params.get(name, [str(default)])[0]
+        if not value or not value.isascii() or not value.isdigit():
+            raise ValueError(f"invalid {name}")
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid {name}") from exc
+
+    limit = pagination_value("limit", _LIST_DEFAULT_LIMIT)
+    offset = pagination_value("offset", 0)
+    if limit < 1 or limit > _LIST_MAX_LIMIT:
+        raise ValueError("invalid limit")
+    return scope, query.casefold(), limit, offset
+
+
+def _matches_list_query(item: dict, query: str) -> bool:
+    if not query:
+        return True
+    for value in item.values():
+        if isinstance(value, str) and query in value.casefold():
+            return True
+        if isinstance(value, (list, tuple)):
+            if any(isinstance(part, str) and query in part.casefold()
+                   for part in value):
+                return True
+    return False
+
+
 def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -430,6 +486,10 @@ def _make_handler(console: WebConsole):
                 ctype, text = _CHAT_STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
                 return
+            if path in ("/api/nodes", "/api/store/catalog",
+                        "/api/store/installed"):
+                self._handle_list_get(path)
+                return
             if path == "/api/state":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -505,6 +565,49 @@ def _make_handler(console: WebConsole):
                     self._json(503, {"error": "node unavailable"})
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_list_get(self, path: str) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                scope, query, limit, offset = _parse_list_query(
+                    self.path, nodes=path == "/api/nodes")
+            except ValueError:
+                self._json(400, {"error": "invalid query"})
+                return
+            try:
+                if path == "/api/nodes":
+                    items = console._call(
+                        _wrap(console._node.console_nodes, scope))
+                    if scope == "known":
+                        items.sort(key=lambda item: (
+                            item["seen_ago"], item["id"]))
+                    else:
+                        items.sort(key=lambda item: (
+                            item["id"], item.get("transport") or "",
+                            item.get("is_client_side", False),
+                            tuple(item.get("addresses", ()))))
+                elif path == "/api/store/catalog":
+                    items = console._call(
+                        _wrap(console._node.store_overview))["catalog"]
+                    items.sort(key=lambda item: (-item["ts"], item["app_id"]))
+                else:
+                    items = console._call(
+                        _wrap(console._node.installed_list))
+                    items.sort(key=lambda item: (
+                        str(item.get("name", "")).casefold(),
+                        str(item.get("app_id", ""))))
+                matched = [item for item in items
+                           if _matches_list_query(item, query)]
+                self._json(200, {
+                    "items": matched[offset:offset + limit],
+                    "total": len(matched),
+                    "limit": limit,
+                    "offset": offset,
+                })
+            except Exception:
+                self._json(503, {"error": "node unavailable"})
 
         def do_HEAD(self) -> None:
             self.do_GET()
