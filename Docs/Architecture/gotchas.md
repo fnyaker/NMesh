@@ -76,8 +76,13 @@ doublon ne produit jamais un tel paquet → le candidat expire. Tests :
 NATté sans listeners (ou sans adresses annonçables) ne recevait donc **jamais**
 de PONG : son `ping_sent_at` restait armé à vie (RTT jamais résolu) et le ping
 console d'un pair direct semblait mort. → Le PONG suit toujours les gates
-(payload non vide, src = pair authentifié, adresses décodables) ; seule la
-fusion dans la table de routage est conditionnée à des URI valides.
+(payload non vide, src = pair authentifié, adresses décodables).
+La fusion dans la table de routage, elle, se fait **toujours** pour l'émetteur
+authentifié (un PING prouve sa fraîcheur même sans adresse annonçable — sinon
+un pair NATté vivant se fait purger de la table faute d'adresse), mais **seules
+les URI valides** sont ajoutées à `addresses` : une entrée peut donc exister
+avec `addresses == []` (recency sans adresse exploitable), jamais avec une URI
+mal formée dedans.
 
 ### 7. Le timeout keepalive UDP était plus court que la cadence du trafic
 `_KEEPALIVE_TIMEOUT = 15 s` avec un keepalive toutes les 25 s et des PING mesh

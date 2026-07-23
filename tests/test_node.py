@@ -79,7 +79,7 @@ class TestHandlePing:
         assert closest[0].node_id == sender_id
 
     async def test_handle_ping_invalid_uri_dropped(self):
-        """A PING with a malformed URI in its address list is silently ignored."""
+        """A PING with a malformed URI in its address list drops the address, not the sender."""
         node, fake = await make_node()
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
@@ -89,7 +89,9 @@ class TestHandlePing:
         fake.inject(ping)
         await asyncio.sleep(0.05)
         await node.stop()
-        assert node._routing.get(sender_id) is None
+        entry = node._routing.get(sender_id)
+        assert entry is not None       # authenticated PING still proves recency
+        assert entry.addresses == []   # but the malformed URI itself was dropped
 
     async def test_handle_ping_old_plain_text_payload_ignored(self):
         """Old raw-string PING payload (no binary framing) must be silently dropped."""
