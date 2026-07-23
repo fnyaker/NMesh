@@ -686,6 +686,18 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/nodes/forget":
+                data = _parse_json(body)
+                node_id = (data or {}).get("id", "")
+                if not isinstance(node_id, str) or not node_id:
+                    self._json(400, {"error": "id required"})
+                    return
+                try:
+                    ok = console._call(console._node.console_forget_node(node_id))
+                    self._json(200 if ok else 404, {"ok": bool(ok)})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
             if path == "/api/lan/discovery":
                 data = _parse_json(body)
                 if not data or not isinstance(data.get("enabled"), bool):

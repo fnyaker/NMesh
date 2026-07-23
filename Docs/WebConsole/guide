@@ -53,6 +53,8 @@ Options :
 | POST    | `/api/login`     | `{password}` → `{token}` + pose le cookie `nmesh_session` |
 | POST    | `/api/logout`    | révoque le jeton (Bearer ou cookie) et efface le cookie |
 | GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge, **adressage**) |
+| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — liste paginée des pairs actifs / nœuds connus |
+| POST    | `/api/nodes/forget` | `{id}` — oublie un nœud connu (retire l'entrée de la table de routage, coupe une session live éventuelle) |
 | POST    | `/api/invite`    | génère un code d'invitation                    |
 | POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
 | GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
@@ -80,6 +82,13 @@ concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
 chaque IP locale), les URIs en écoute, les IP locales, et les transports
 enregistrés (● = actif). Le snapshot expose `advertised`, `listen`,
 `local_ips`, `transports`, `listening`.
+
+Dans la fiche détail d'un nœud (onglet **Connectivity**, bouton **Details**),
+**Forget node** retire ce nœud de la table de routage locale et coupe sa
+session si elle est active. Ce n'est **pas un bannissement** : la fusion
+automatique dans la table de routage à réception d'un PONG authentifié (et le
+maintien de voisinage) peuvent réapprendre le nœud s'il est encore joignable —
+voir `Docs/Architecture/gotchas.md`.
 
 La section **Apps (DHT)** de l'interface permet de publier une application
 (sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une
