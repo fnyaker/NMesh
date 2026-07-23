@@ -37,6 +37,18 @@ Le concept de base est Kademlia, mais le routage est **agnostique du medium** et
 - `_kademlia_lookup(target)` : `FIND_NODE` itératif borné (`_KAD_LOOKUP_TIMEOUT`,
   `_KAD_LOOKUP_MAX_ROUNDS`), agrège les `FOUND_NODE` jusqu'à stabilisation.
 
+### Joindre un id **à distance** (multi-hop) — pas seulement un pair direct
+
+Le plan de données (`DATA`, `E2E_HANDSHAKE`/`_ACK`) est **routable** : adressé à
+un `dst_id`, il est **relayé de saut en saut** (`_forward_packet`, glouton vers
+la cible) jusqu'au nœud destinataire — à travers n'importe quel medium. Pour
+**sonder la vivacité** d'un id qui n'est pas un pair direct, `console_ping_node`
+n'essaie plus seulement d'ouvrir un lien direct : il envoie un `ECHO_REQUEST`
+**routable** vers l'id (relayé via B), le destinataire répond par `ECHO_REPLY`
+routé en retour, et le RTT est mesuré (`_routed_ping`). Résultat : pinger `A→C`
+en passant par `B` fonctionne même si A et C ne peuvent pas se connecter en
+direct (distant / NAT). Le champ `via` de la réponse indique `direct` ou `route`.
+
 ## DHT adressé par contenu (`dht.py`)
 
 - `ContentStore.put(key, value)` **refuse** si `key != sha256(value)[:20]`

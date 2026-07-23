@@ -80,6 +80,8 @@ CATALOG_ANNOUNCE  = 0x18   # gossip a signed app-store release descriptor
 DIR_STORE         = 0x19   # store a signed pseudo-directory claim
 DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
 DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
+ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
+ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -119,7 +121,7 @@ _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
 _MAX_EXTRA_ADDRS = 8
-_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK}
+_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -873,6 +875,7 @@ class MeshNode:
         apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
         self._installed = InstalledApps(installed_path, apps_dir)
         self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._pending_echo: dict[bytes, asyncio.Future] = {}   # routed-ping query_id -> future
         # Pseudo directory: find node ids by pseudo, network-wide.
         self._pseudo_store = PseudoStore()
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
@@ -1465,17 +1468,61 @@ class MeshNode:
             return {"ok": False, "error": "self"}
         peer = next((p for p in self._peers
                      if p.authenticated_id == nid and p.session is not None), None)
-        if peer is None:
+        if peer is not None:
+            await self.ping(peer)
+            deadline = time.monotonic() + 3.0
+            while peer.ping_sent_at is not None and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            rtt = (round(peer.last_rtt * 1000, 1)
+                   if peer.ping_sent_at is None and peer.last_rtt is not None else None)
+            return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "direct"}
+        # Not a direct peer: probe over the mesh (multi-hop, relayed) rather than
+        # only trying to form a direct link. This is what makes reaching a node by
+        # id work when it's only reachable through a relay (remote / behind NAT).
+        rtt = await self._routed_ping(nid)
+        if rtt is None:
+            # Last resort: try to form a direct/punched link, then ping it.
             peer = await self._ensure_route_to(nid)
-        if peer is None or peer.authenticated_id != nid or peer.session is None:
+            if peer is not None and peer.authenticated_id == nid and peer.session is not None:
+                rtt = await self._routed_ping(nid)
+        if rtt is None:
             return {"ok": True, "reachable": False}
-        await self.ping(peer)
-        deadline = time.monotonic() + 3.0
-        while peer.ping_sent_at is not None and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        rtt = (round(peer.last_rtt * 1000, 1)
-               if peer.ping_sent_at is None and peer.last_rtt is not None else None)
-        return {"ok": True, "reachable": True, "rtt_ms": rtt}
+        return {"ok": True, "reachable": True, "rtt_ms": rtt, "via": "route"}
+
+    async def _routed_ping(self, target: NodeID, timeout: float = 5.0) -> float | None:
+        """Liveness probe that travels the mesh multi-hop: an ECHO_REQUEST routed
+        to ``target`` (forwarded hop by hop, across any transport), which replies
+        with an ECHO_REPLY routed back. Returns the round-trip in ms, or None."""
+        qid = os.urandom(_QID_LEN)
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_echo[qid] = fut
+        t0 = time.monotonic()
+        try:
+            await self._route_outbound(
+                Packet.create(ECHO_REQUEST, self._id.raw, target.raw, qid))
+            await asyncio.wait_for(asyncio.shield(fut), timeout)
+            return round((time.monotonic() - t0) * 1000, 1)
+        except Exception:
+            return None
+        finally:
+            self._pending_echo.pop(qid, None)
+            if not fut.done():
+                fut.cancel()
+
+    async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
+        # Delivered here because dst==self (forwarding routed it to us). Reply
+        # routed back to the origin so the round-trip crosses the same mesh path.
+        if len(packet.payload) != _QID_LEN:
+            return
+        await self._route_outbound(
+            Packet.create(ECHO_REPLY, self._id.raw, packet.src_id, packet.payload))
+
+    async def _handle_echo_reply(self, peer: _Peer, packet: Packet) -> None:
+        if len(packet.payload) != _QID_LEN:
+            return
+        fut = self._pending_echo.pop(packet.payload, None)
+        if fut is not None and not fut.done():
+            fut.set_result(True)
 
     def _ensure_link_keepalive(self) -> None:
         """Start the link-keepalive loop if it isn't already running."""
@@ -2672,6 +2719,8 @@ class MeshNode:
             DIR_STORE:         self._handle_dir_store,
             DIR_FIND:          self._handle_dir_find,
             DIR_FOUND:         self._handle_dir_found,
+            ECHO_REQUEST:      self._handle_echo_request,
+            ECHO_REPLY:        self._handle_echo_reply,
         }
         handler = handlers.get(packet.type)
         if handler:
