@@ -16,6 +16,10 @@ Source : `transport.py`, `transport_manager.py`, `tcp_transport.py`,
 ## TCP (`tcp_transport.py`)
 
 - Framing : préfixe **2 octets** (uint16 big-endian) = taille du `Packet` suivant.
+- `_CONNECT_TIMEOUT = 4 s` : un `connect()` sans réponse échoue vite (au lieu de
+  pendre sur le timeout SYN de l'OS) — indispensable quand on diale des adresses
+  non prouvées (IP privées d'un pair NATté apprises par gossip). Via
+  `asyncio.timeout`, jamais `wait_for` (annulation, cf. `gotchas.md` §3b).
 - `_READ_TIMEOUT = 60 s` : un `receive()` sans données pendant 60 s lève →
   le lien est considéré mort et reapé. **Un lien inactif meurt donc s'il n'y a
   pas de keepalive** (cf. §keepalive).
@@ -31,6 +35,13 @@ UDP est sans connexion et non fiable → une **couche de fiabilité** :
 - Frame : `NUDP`(magic 4o) + seq(4) + ack(4) + sack(4) + flags(1) + payload_len(2)
   + payload. ACK cumulatif + SACK, retransmission avec backoff (`_RTO_*`),
   réordonnancement borné, keepalive (25 s), tout borné.
+- Fenêtre de réception **modulaire** (RFC 1982) autour du curseur de délivrance :
+  en-ordre → livré ; en-avant → buffer borné (`_MAX_REORDER`) ; en-arrière →
+  duplicata, re-ACK. Pas de set de seq vus (état borné quoi qu'envoie un pair
+  hostile ; le wrap 2³² ne fige plus le lien).
+- Mort d'un lien : `_KEEPALIVE_TIMEOUT = 75 s` (3 × l'intervalle de 25 s, et
+  au-dessus de la cadence PING mesh de 20 s) — en dessous, un lien punché sain
+  mais silencieux était tué quand les phases s'alignaient (flapping de route).
 - `UDPServer` : **une socket partagée**, multiplexée par `(ip, port)` source.
   Un datagramme d'une source inconnue crée un `UDPTransport` + `on_new_connection`
   — comme un accept TCP. Datagrammes `NPPB`/`NPAK`/STUN routés vers
