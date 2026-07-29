@@ -101,6 +101,8 @@ Ordre exact appliqué à chaque paquet reçu :
    - `msg_id == compute_msg_id()` sinon rejet (anti-amplification) ;
    - `_is_seen(msg_id)` → déjà vu → rejet (déduplication bornée, `_MSG_DEDUP_MAX
      = 10 000`, éviction FIFO) ;
+   - `_learn_reverse_path` : le lien d'entrée est mémorisé comme chemin retour
+     vers `src_id` (borné/daté, cf. `routing.md`) ;
    - si `dst_id` n'est ni nous ni broadcast → `_forward_packet` puis return.
 5. Sinon, dispatch vers le handler du type.
 
@@ -108,13 +110,33 @@ Ordre exact appliqué à chaque paquet reçu :
 
 Pour un paquet dont on n'est pas la destination (TTL > 1) :
 1. **Pair direct** vers `dst` (authentifié, session) → envoyer (TTL-1).
-2. Sinon si `dst` est dans la table de routage → `_ensure_route_to` (à la
-   demande) puis envoyer.
+2. Sinon le **chemin retour observé** vers `dst` (`_route_hints`), s'il est
+   frais et son lien vivant — une preuve vaut mieux qu'une supposition XOR.
 3. Sinon **plus proche voisin** par distance XOR (`min(distance(dst, peer))`).
-4. Dernier recours : lookup Kademlia + route à la demande.
+4. Aucun candidat → `_defer_route` : lookup Kademlia + route à la demande dans
+   une **tâche de fond bornée**, jamais dans la boucle de réception du lien
+   entrant (elle y restait figée plusieurs secondes, et le `FOUND_NODE` attendu
+   devait souvent revenir par ce même lien — cf. `routing.md` et `gotchas.md`).
 
 `with_decremented_ttl()` à chaque saut ; TTL ≤ 1 → on ne relaie pas (anti-boucle,
 en complément de la déduplication `msg_id`).
+
+## Corps d'un `FOUND_NODE` (pool de certificats)
+
+```
+query_id(8) ‖ pool_count(H) ‖ [cert_len(H) ‖ cert]*pool_count
+            ‖ entry_count(B) ‖ entry*entry_count
+entry = node_id(20) ‖ addr_count(B) ‖ chain_len(B)
+        ‖ [addr_len(H) ‖ addr]*addr_count ‖ index(H)*chain_len
+```
+
+Les chaînes référencent le pool par index au lieu de répéter des certificats
+post-quantiques de ~7,3 ko. Bornes de décodage (rejet par défaut) :
+`pool_count ≤ _ENTRY_POOL_MAX`, `entry_count ≤ _ENTRY_COUNT_MAX` (= k),
+`chain_len ≤ _ENTRY_CHAIN_MAX`, index dans le pool. Un certificat illisible
+annule la chaîne de l'entrée (jamais une chaîne partielle). Côté émission, la
+réponse est **budgétée en octets** — voir `routing.md`, c'est un invariant :
+sans budget, la réponse dépassait le plafond du paquet et n'était jamais émise.
 
 ## Invariants (rappel, cf. CLAUDE.md)
 
