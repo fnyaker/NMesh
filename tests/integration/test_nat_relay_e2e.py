@@ -18,7 +18,6 @@ Real TCP on loopback. Excluded from the default suite (see pyproject addopts).
 """
 import asyncio
 import os
-import random
 
 import pytest
 
@@ -27,6 +26,7 @@ from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 import src.node as nodemod
 from src.packet import Packet
+from tests.integration import free_port
 
 
 def _mgr() -> TransportManager:
@@ -55,7 +55,7 @@ async def _nat_trio(base: int):
 
 class TestNatRelayRouting:
     async def test_ping_and_data_both_ways_through_relay(self):
-        base = random.randint(20000, 40000)
+        base = free_port()
         a, b, c = await _nat_trio(base)
         try:
             assert not any(p.authenticated_id == c.id for p in a._peers)
@@ -83,7 +83,7 @@ class TestE2ESessionRobustness:
         """A duplicate handshake arriving after establishment must leave the
         live session key intact on the responder (candidate parked instead),
         so delivery keeps working in both directions."""
-        base = random.randint(20000, 40000)
+        base = free_port()
         a, b, c = await _nat_trio(base)
         try:
             await a.send_data(c.id, b"first")
@@ -124,7 +124,7 @@ class TestE2ESessionRobustness:
     async def test_session_loss_rekeys_and_heals(self):
         """A 'restarted' A (E2E state wiped) re-handshakes; C parks a candidate
         and A's first DATA under the new key promotes it — delivery resumes."""
-        base = random.randint(20000, 40000)
+        base = free_port()
         a, b, c = await _nat_trio(base)
         try:
             await a.send_data(c.id, b"first")

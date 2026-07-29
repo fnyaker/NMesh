@@ -90,8 +90,15 @@ _ACK_REJECTED = 0x01
 _HS_HEADER   = struct.Struct('!HHH')
 # HANDSHAKE_ACK: ct_len(H) | dsa_len(H) | chain_bytes_len(H) | issued_cert_len(H)
 _ACK_HEADER  = struct.Struct('!HHHH')
-# FOUND_NODE entry: node_id(20) | addr_count(B) | chain_bytes_len(H)
-_ENTRY_HEADER = struct.Struct('!20sBH')
+# FOUND_NODE entry: node_id(20) | addr_count(B) | chain_len in pool indices(B)
+_ENTRY_HEADER = struct.Struct('!20sBB')
+# FOUND_NODE cert pool: pool_count(H) then per-cert length prefixes; entries
+# reference certs by index (H) instead of repeating them.
+_POOL_COUNT   = struct.Struct('!H')
+_POOL_INDEX   = struct.Struct('!H')
+_ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
+_ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
+_ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
 # Per-cert length prefix inside a chain blob
 _CERT_LEN    = struct.Struct('!H')
 # Address length prefix inside address lists
@@ -180,6 +187,43 @@ _NEIGHBOR_RETRY_TRACKED   = 128
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
+# Acquiring a route (Kademlia lookup + dial + hole punch) takes seconds. It must
+# never run inside a peer's receive loop: that link would process nothing else
+# meanwhile — and the FOUND_NODE the lookup waits for often has to come back
+# over that very link, so an inline lookup can only time out. Handlers hand the
+# slow path to a bounded set of background tasks instead.
+_MAX_DEFERRED_ROUTES      = 64
+# Cap on waiting for one peer's cancelled receive task to actually exit. Never
+# unbounded: shutdown must always finish (see _Peer.stop).
+_PEER_STOP_TIMEOUT        = 2.0
+# A post-quantum certificate is ~7 KB (ML-DSA-65 subject + issuer key +
+# signature), so a chain to a root is ~15 KB. Packing Kademlia's k=20 entries
+# into one FOUND_NODE therefore blows the 60 000-byte packet cap: Packet.create
+# raised, the reply was never sent, and *every* lookup in a mesh holding more
+# than four certified nodes silently timed out. Entries are packed closest-first
+# under a hard byte budget instead (certs shared through a pool, see
+# _EntryPacker) — fewer per reply, but the lookup converges over its rounds
+# instead of dying. Also caps the CPU one FIND_NODE can buy (one chain-to-root
+# BFS per packed entry) and the reflection an attacker gets out of a 28-byte
+# query addressed with someone else's src_id.
+_FOUND_NODE_MAX_BYTES     = 32_000
+# Candidates scanned to fill that budget. Only entries with a chain to a root
+# are usable (the receiver drops the rest), and those are scattered through the
+# table — scanning exactly k left replies empty whenever the k nearest happened
+# to be chain-less. Kademlia's k bounds what we *return*, not what we look at.
+_FIND_NODE_SCAN           = 64
+# Answering FIND_NODE/FIND_VALUE is the most expensive thing a single small
+# packet can ask of us (chain building, a DHT value up to the packet cap), and
+# the reply is routed to an *unverified* src_id — so it is also a reflection
+# lever. Bound it per ingress link, like the seek/catalog/directory planes.
+# This is a flood valve, NOT traffic shaping: one peer's legitimate peak is a
+# lookup's alpha × rounds plus a few concurrent lookups — measured at ~66 per
+# window on a relay star, and flat as the mesh grows, since it is bounded by one
+# node's lookup behaviour rather than by how many nodes exist. Set it well above
+# that; a cap near the legitimate peak silently kills real lookups, which is the
+# very failure mode this file is trying to remove.
+_QUERY_RATE_WINDOW        = 10.0
+_QUERY_RATE_MAX           = 512
 
 # Invite blocks (base64 join bundles: advertised URIs + invite code)
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
@@ -601,37 +645,117 @@ def _build_punch_ack(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
 def _parse_punch_ack(data: bytes) -> tuple[bytes, bytes, bytes] | None:
     """Parse a raw UDP punch-ack datagram. Returns (node_id, nonce, signature) or None."""
     return _parse_punch_frame(data, _PUNCH_ACK_MAGIC)
-# node_id(20) | addr_count(B) | chain_bytes_len(H)
-#   | [addr_len(H) | addr_bytes]*addr_count
-#   | chain_bytes
+
+
+# ---------------------------------------------------------------------------
+# FOUND_NODE entry codec
+# pool_count(H) | [cert_len(H) | cert_bytes]*pool_count
+#   | entry_count(B)
+#   | [ node_id(20) | addr_count(B) | chain_len(B)
+#       | [addr_len(H) | addr_bytes]*addr_count
+#       | pool_index(H)*chain_len ]*entry_count
 # ---------------------------------------------------------------------------
 
-def _encode_entries(entries: list[NodeEntry]) -> bytes:
-    out = bytes([len(entries)])
-    for e in entries:
-        chain_bytes = _encode_chain(e.cert_chain)
-        addrs = e.addresses[:_MAX_ADDRESSES]
-        out += _ENTRY_HEADER.pack(e.node_id.raw, len(addrs), len(chain_bytes))
+class _EntryPacker:
+    """Packs NodeEntry records for a FOUND_NODE under a byte budget.
+
+    Certificates are shared through a pool the entries index into. Chains
+    overwhelmingly end on the same network root and a post-quantum certificate
+    is ~7 KB, so repeating each chain per entry made the root alone half the
+    packet — and pushed the answer past the packet cap (see
+    ``_FOUND_NODE_MAX_BYTES``). Pooling also bounds how many signatures one
+    hostile FOUND_NODE can make a receiver verify.
+    """
+
+    def __init__(self, budget: int) -> None:
+        self._budget = budget
+        self._pool: list[bytes] = []
+        self._index: dict[bytes, int] = {}
+        self._entries: list[bytes] = []
+        # pool_count(H) + entry_count(B)
+        self._used = _POOL_COUNT.size + 1
+
+    def add(self, entry: NodeEntry) -> bool:
+        """Append ``entry``; False (and nothing added) if it wouldn't fit."""
+        if (len(self._entries) >= _ENTRY_COUNT_MAX
+                or len(entry.cert_chain) > _ENTRY_CHAIN_MAX):
+            return False
+        addrs = entry.addresses[:_MAX_ADDRESSES]
+        blob = _ENTRY_HEADER.pack(entry.node_id.raw, len(addrs),
+                                  len(entry.cert_chain))
         for addr in addrs:
             b = addr.encode('utf-8')
-            out += _ADDR_LEN.pack(len(b)) + b
-        out += chain_bytes
-    return out
+            blob += _ADDR_LEN.pack(len(b)) + b
+        added: list[bytes] = []
+        cost = len(blob) + _POOL_INDEX.size * len(entry.cert_chain)
+        for cert in entry.cert_chain:
+            raw = cert.serialize()
+            if raw not in self._index and raw not in added:
+                if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
+                    return False
+                added.append(raw)
+                cost += _CERT_LEN.size + len(raw)
+        if self._used + cost > self._budget:
+            return False
+        for raw in added:
+            self._index[raw] = len(self._pool)
+            self._pool.append(raw)
+        for cert in entry.cert_chain:
+            blob += _POOL_INDEX.pack(self._index[cert.serialize()])
+        self._entries.append(blob)
+        self._used += cost
+        return True
+
+    def encode(self) -> bytes:
+        pool = _POOL_COUNT.pack(len(self._pool))
+        for raw in self._pool:
+            pool += _CERT_LEN.pack(len(raw)) + raw
+        return pool + bytes([len(self._entries)]) + b"".join(self._entries)
+
+
+def _encode_entries(entries: list[NodeEntry]) -> bytes:
+    packer = _EntryPacker(1 << 30)
+    for entry in entries:
+        packer.add(entry)
+    return packer.encode()
 
 
 def _decode_entries(data: bytes) -> list[NodeEntry]:
-    if len(data) < 1:
+    if len(data) < _POOL_COUNT.size:
         raise ValueError("empty payload")
-    count = data[0]
-    offset = 1
+    pool_count = _POOL_COUNT.unpack_from(data, 0)[0]
+    if pool_count > _ENTRY_POOL_MAX:
+        raise ValueError(f"too many pooled certs: {pool_count}")
+    offset = _POOL_COUNT.size
+    pool: list[Certificate | None] = []
+    for _ in range(pool_count):
+        if offset + _CERT_LEN.size > len(data):
+            raise ValueError("truncated pooled cert length")
+        cert_len = _CERT_LEN.unpack_from(data, offset)[0]
+        offset += _CERT_LEN.size
+        if offset + cert_len > len(data):
+            raise ValueError("truncated pooled cert")
+        try:
+            pool.append(Certificate.deserialize(data[offset:offset + cert_len]))
+        except Exception:
+            pool.append(None)   # unusable cert: entries referencing it lose their chain
+        offset += cert_len
+    if offset >= len(data):
+        raise ValueError("missing entry count")
+    count = data[offset]
+    offset += 1
+    if count > _ENTRY_COUNT_MAX:
+        raise ValueError(f"too many entries: {count}")
     entries: list[NodeEntry] = []
     for _ in range(count):
         if offset + _ENTRY_HEADER.size > len(data):
             raise ValueError("truncated entry header")
-        raw_id, addr_count, chain_bytes_len = _ENTRY_HEADER.unpack_from(data, offset)
+        raw_id, addr_count, chain_len = _ENTRY_HEADER.unpack_from(data, offset)
         offset += _ENTRY_HEADER.size
         if addr_count > _MAX_ADDRESSES:
             raise ValueError(f"too many addresses in entry: {addr_count}")
+        if chain_len > _ENTRY_CHAIN_MAX:
+            raise ValueError(f"chain too long in entry: {chain_len}")
         addresses: list[str] = []
         valid = True
         for _ in range(addr_count):
@@ -652,16 +776,24 @@ def _decode_entries(data: bytes) -> list[NodeEntry]:
             if _validate_uri(addr) is None:
                 valid = False
             addresses.append(addr)
-        if offset + chain_bytes_len > len(data):
-            raise ValueError("truncated chain in entry")
-        chain_bytes = data[offset:offset + chain_bytes_len]
-        offset += chain_bytes_len
+        chain: list[Certificate] = []
+        chain_ok = True
+        for _ in range(chain_len):
+            if offset + _POOL_INDEX.size > len(data):
+                raise ValueError("truncated chain index in entry")
+            idx = _POOL_INDEX.unpack_from(data, offset)[0]
+            offset += _POOL_INDEX.size
+            if idx >= len(pool):
+                raise ValueError("chain index out of range")
+            cert = pool[idx]
+            if cert is None:
+                chain_ok = False   # one unusable cert voids the whole chain
+            elif chain_ok:
+                chain.append(cert)
+        if not chain_ok:
+            chain = []
         if not valid:
             continue  # drop entry with any malformed URI
-        try:
-            chain = _decode_chain(chain_bytes)
-        except Exception:
-            chain = []
         entries.append(NodeEntry(NodeID(raw_id), addresses, b"", chain))
     return entries
 
@@ -755,9 +887,16 @@ class _Peer:
         self.on_dead = None  # intentional shutdown — do not trigger reaping
         if self._task:
             self._task.cancel()
+            # Bounded. A cancelled receive task normally dies at once, but when
+            # the cancellation lands on a read future that was already cancelled
+            # the task is left flagged "cancelling", waiting for a wake-up that
+            # never comes — and stop() waited with it, forever (seen roughly one
+            # teardown in three with several peers). Closing the transport below
+            # tears the link down regardless, so give up waiting and finish.
             try:
-                await self._task
-            except asyncio.CancelledError:
+                async with asyncio.timeout(_PEER_STOP_TIMEOUT):
+                    await self._task
+            except (asyncio.CancelledError, TimeoutError, Exception):
                 pass
         await self.transport.close()
 
@@ -948,9 +1087,14 @@ class MeshNode:
         self._neighbor_task: asyncio.Task | None = None
         self._neighbor_wakeup = asyncio.Event()
         self._neighbor_retry: OrderedDict[NodeID, tuple[int, float]] = OrderedDict()
-        # Destination -> (authenticated local first hop, successful send time).
-        # No remote relay identities are inferred from this local observation.
+        # Source node id -> (authenticated local first hop it reached us over,
+        # observation time). Learned from inbound traffic only, so it records a
+        # path that provably carried a packet; no remote relay identities are
+        # inferred from this local observation.
         self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
+        # Background route acquisitions started from a receive loop (bounded).
+        self._deferred_routes: set = set()
+        self._query_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
         self._last_announced: tuple[str, ...] | None = None
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
@@ -1397,8 +1541,11 @@ class MeshNode:
         await self._stop_link_keepalive()
         await self._stop_e2e_retry()
         await self._stop_neighbor_maintenance()
-        for peer in list(self._peers):
-            await peer.stop()
+        await self._stop_deferred_routes()
+        # Concurrently: each peer.stop() is individually bounded, and stopping
+        # 128 links one after another would stack those bounds into minutes.
+        await asyncio.gather(*(peer.stop() for peer in list(self._peers)),
+                             return_exceptions=True)
         self._peers.clear()
         await self._transport_manager.close_all()
         await self._stop_punch_keepalive()
@@ -1588,6 +1735,7 @@ class MeshNode:
             await asyncio.wait_for(asyncio.shield(fut), timeout)
             return round((time.monotonic() - t0) * 1000, 1)
         except Exception:
+            self._forget_route_hint(target)   # unanswered — re-pick next time
             return None
         finally:
             self._pending_echo.pop(qid, None)
@@ -1600,7 +1748,8 @@ class MeshNode:
         if len(packet.payload) != _QID_LEN:
             return
         await self._route_outbound(
-            Packet.create(ECHO_REPLY, self._id.raw, packet.src_id, packet.payload))
+            Packet.create(ECHO_REPLY, self._id.raw, packet.src_id, packet.payload),
+            blocking=False)   # we are in a receive loop — never acquire inline
 
     async def _handle_echo_reply(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != _QID_LEN:
@@ -1891,7 +2040,7 @@ class MeshNode:
         if len(self._upgrade_last) >= _UPGRADE_MAX_TRACKED:
             self._upgrade_last.popitem(last=False)
         self._upgrade_last[target] = now
-        asyncio.create_task(self._ensure_route_to(target))
+        self._track_route_task(self._ensure_route_to(target))
 
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
                                timeout: float = 5.0) -> list[NodeEntry]:
@@ -1907,6 +2056,9 @@ class MeshNode:
             await self._route_outbound(packet)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except (asyncio.TimeoutError, Exception):
+            # Unanswered: whatever first hop we used is not carrying traffic to
+            # this id any more. Forget it so the next try re-picks by proximity.
+            self._forget_route_hint(node_id)
             return []
         finally:
             self._pending_finds.pop(query_id, None)
@@ -1957,6 +2109,60 @@ class MeshNode:
                 await self.ping(peer)
         await self._maintain_neighbors()
 
+    def _learn_reverse_path(self, peer: _Peer, packet: Packet) -> None:
+        """A routable packet just arrived from ``packet.src_id`` over ``peer``:
+        that link is a path back to that node id which *demonstrably carries
+        traffic*. XOR proximity is only a guess about an overlay we may not have
+        finished learning, so replies (FOUND_NODE, ECHO_REPLY, the E2E ack, DATA)
+        used to be routed by a fresh guess that could walk into a dead end while
+        the request's own path sat unused. Remember the ingress link instead.
+
+        Only ever *reorders* peers we have already authenticated, so it can
+        never introduce an unauthenticated next hop; bounded and TTL'd, and
+        dropped again as soon as a query through it goes unanswered."""
+        if peer.authenticated_id is None or packet.dst_id == _BROADCAST_ID:
+            return
+        src = NodeID(packet.src_id)
+        if src == self._id:
+            return
+        if peer.authenticated_id == src:
+            # We have the link ourselves; any hint could only be a longer path.
+            self._route_hints.pop(src, None)
+            return
+        self._route_hints[src] = (peer.authenticated_id, time.monotonic())
+        self._route_hints.move_to_end(src)
+        while len(self._route_hints) > _ROUTE_HINT_MAX:
+            self._route_hints.popitem(last=False)
+
+    def _forget_route_hint(self, target: NodeID) -> None:
+        """Drop the learned first hop for ``target``. Called when a routed query
+        through it goes unanswered, so the next attempt falls back to XOR
+        proximity instead of retrying a hop that went dark (or is lying)."""
+        self._route_hints.pop(target, None)
+
+    def _forget_hints_via(self, node_id: NodeID | None) -> None:
+        """Forget every hint whose first hop was ``node_id`` — that link is gone,
+        so the paths behind it are no longer known to work."""
+        if node_id is None:
+            return
+        for target in [t for t, (via, _) in self._route_hints.items()
+                       if via == node_id]:
+            del self._route_hints[target]
+
+    def _route_hint_peer(self, target: NodeID,
+                         exclude: _Peer | None = None) -> _Peer | None:
+        """The live peer a packet from ``target`` last reached us through."""
+        hint = self._route_hints.get(target)
+        if hint is None:
+            return None
+        via, seen_at = hint
+        if time.monotonic() - seen_at > _ROUTE_HINT_TTL:
+            del self._route_hints[target]
+            return None
+        return next((p for p in self._peers
+                     if p is not exclude and p.authenticated_id == via
+                     and p.session is not None), None)
+
     def _route_candidates(self, target: NodeID,
                           exclude: _Peer | None = None) -> list[_Peer]:
         peers = self._authenticated_peers(exclude=exclude)
@@ -1964,6 +2170,14 @@ class MeshNode:
             0 if peer.authenticated_id == target else 1,
             target.distance(peer.authenticated_id),
         ))
+        peers = peers[:_ROUTE_SEND_FANOUT]
+        # A direct link to the target is the shortest path that exists and keeps
+        # the lead; otherwise observed traffic beats XOR proximity.
+        if not peers or peers[0].authenticated_id != target:
+            hint = self._route_hint_peer(target, exclude=exclude)
+            if hint is not None:
+                peers = [hint] + [p for p in peers
+                                  if p.authenticated_id != hint.authenticated_id]
         return peers[:_ROUTE_SEND_FANOUT]
 
     async def _drop_failed_peer(self, peer: _Peer) -> None:
@@ -1973,20 +2187,8 @@ class MeshNode:
             pass
         if peer in self._peers:
             self._peers.remove(peer)
+        self._forget_hints_via(peer.authenticated_id)
         self._wake_neighbor_maintenance()
-
-    def _remember_route_hint(self, packet: Packet, peer: _Peer) -> None:
-        if (packet.src_id != self._id.raw or packet.dst_id == _BROADCAST_ID
-                or peer.authenticated_id is None):
-            return
-        target = NodeID(packet.dst_id)
-        if peer.authenticated_id == target:
-            self._route_hints.pop(target, None)
-            return
-        self._route_hints[target] = (peer.authenticated_id, time.monotonic())
-        self._route_hints.move_to_end(target)
-        while len(self._route_hints) > _ROUTE_HINT_MAX:
-            self._route_hints.popitem(last=False)
 
     async def _send_to_candidates(self, packet: Packet, candidates: list[_Peer],
                                   *, decrement: bool = False) -> _Peer | None:
@@ -1994,13 +2196,64 @@ class MeshNode:
         for peer in candidates:
             try:
                 await peer.send(outgoing)
-                self._remember_route_hint(packet, peer)
                 return peer
             except Exception:
                 await self._drop_failed_peer(peer)
         return None
 
-    async def _route_outbound(self, packet: Packet) -> _Peer | None:
+    def _track_route_task(self, coro) -> bool:
+        """Run background route work under a hard cap, tracked so stop() can
+        cancel it — an untracked task awaiting a dial outlives teardown."""
+        if not self._running or len(self._deferred_routes) >= _MAX_DEFERRED_ROUTES:
+            coro.close()
+            return False
+        task = asyncio.ensure_future(coro)
+        self._deferred_routes.add(task)
+        task.add_done_callback(self._deferred_routes.discard)
+        return True
+
+    def _defer_route(self, packet: Packet, *, decrement: bool = False,
+                     exclude: _Peer | None = None) -> None:
+        """Acquire a route for ``packet`` in the background, then send it.
+
+        Called from a peer's receive loop, where awaiting ``_ensure_route_to``
+        inline stalls the link for the whole on-demand budget — and deadlocks
+        outright when the lookup it starts can only be answered over that same
+        link. Bounded: past ``_MAX_DEFERRED_ROUTES`` in flight the packet is
+        dropped, exactly as an unroutable packet always was."""
+        self._track_route_task(
+            self._deferred_route_task(packet, decrement, exclude))
+
+    async def _deferred_route_task(self, packet: Packet, decrement: bool,
+                                   exclude: _Peer | None) -> None:
+        target = NodeID(packet.dst_id)
+        try:
+            peer = await self._ensure_route_to(target)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            peer = None
+        if not self._running:
+            return
+        # Acquisition may also have exposed a new relay even when the target
+        # itself stayed undiallable, so fall back to the refreshed neighbor set.
+        candidates = ([peer] if peer is not None and peer is not exclude
+                      else self._route_candidates(target, exclude=exclude))
+        await self._send_to_candidates(packet, candidates, decrement=decrement)
+
+    async def _stop_deferred_routes(self) -> None:
+        tasks = list(self._deferred_routes)
+        self._deferred_routes.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _route_outbound(self, packet: Packet, *,
+                              blocking: bool = True) -> _Peer | None:
+        """Send a packet toward its dst_id. ``blocking=False`` is mandatory for
+        callers running inside a peer's receive loop: it keeps the fast path
+        (send to a live candidate) and defers only the slow acquisition."""
         target = NodeID(packet.dst_id)
         peer = await self._send_to_candidates(
             packet, self._route_candidates(target))
@@ -2010,6 +2263,9 @@ class MeshNode:
             if peer.authenticated_id != target:
                 self._maybe_upgrade_path(target)
             return peer
+        if not blocking:
+            self._defer_route(packet)
+            return None
         peer = await self._ensure_route_to(target)
         if peer is not None:
             return await self._send_to_candidates(packet, [peer])
@@ -2166,6 +2422,7 @@ class MeshNode:
             await peer.transport.close()
         except Exception:
             pass
+        self._forget_hints_via(peer.authenticated_id)
         self._poke_net("peer-lost")
         self._wake_neighbor_maintenance()
 
@@ -2934,10 +3191,11 @@ class MeshNode:
             decrement=True)
         if peer is not None:
             return
-        # Only block an ingress loop on lookup/dial when no live relay exists.
-        peer = await self._ensure_route_to(target)
-        if peer is not None and peer is not from_peer:
-            await self._send_to_candidates(packet, [peer], decrement=True)
+        # No live relay. Acquiring one takes seconds and must not happen here:
+        # this runs in from_peer's receive loop, so an inline lookup/dial froze
+        # that link — and the FOUND_NODE it waits for often has to arrive over
+        # that very link, which made the wait unwinnable. Defer it.
+        self._defer_route(packet, decrement=True, exclude=from_peer)
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
         if packet.type == INVITE_SEEK:
@@ -2962,6 +3220,10 @@ class MeshNode:
                 return
             if self._is_seen(packet.msg_id):
                 return
+            # Past the gates the packet is well-formed, fresh, and came off an
+            # authenticated link: record that link as a path back to its source
+            # so the reply follows the way the request came.
+            self._learn_reverse_path(peer, packet)
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
                 await self._forward_packet(peer, packet)
                 return
@@ -3369,20 +3631,50 @@ class MeshNode:
             peer.last_rtt = max(0.0, time.monotonic() - peer.ping_sent_at)
             peer.ping_sent_at = None
 
+    def _query_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit for the expensive query replies
+        (FIND_NODE, FIND_VALUE): each buys a chain-building sweep or a DHT value
+        many times the size of the question, sent to an unverified src_id."""
+        now = time.monotonic()
+        for k in [k for k, (_, ws) in self._query_rate.items()
+                  if now - ws > _QUERY_RATE_WINDOW]:
+            del self._query_rate[k]
+        while len(self._query_rate) > _MAX_PEERS:
+            self._query_rate.popitem(last=False)
+        key = id(peer)
+        cnt, ws = self._query_rate.get(key, (0, now))
+        if now - ws > _QUERY_RATE_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _QUERY_RATE_MAX:
+            self._query_rate[key] = (cnt, ws)
+            return False
+        self._query_rate[key] = (cnt + 1, ws)
+        return True
+
     async def _handle_find_node(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) != 20 + _QID_LEN:
             return
+        if not self._query_allowed(peer):
+            return
         target = NodeID(packet.payload[:20])
         query_id = packet.payload[20:]
-        closest: list[NodeEntry] = []
-        for e in self._routing.get_closest(target):
+        # Closest-first under a hard byte budget: one PQ chain is ~15 KB, so a
+        # full k=20 answer would exceed the packet cap and never be sent at all
+        # (see _FOUND_NODE_MAX_BYTES). Chains are built lazily so the budget
+        # also caps the work one query can ask of us.
+        packer = _EntryPacker(_FOUND_NODE_MAX_BYTES)
+        for e in self._routing.get_closest(target, _FIND_NODE_SCAN):
             if not e.dsa_pub:
                 continue
-            chain = self._cert_store.get_chain_to_root(e.node_id) or []
-            closest.append(NodeEntry(e.node_id, e.addresses, e.dsa_pub, chain))
+            chain = self._cert_store.get_chain_to_root(e.node_id)
+            if not chain:
+                continue   # the receiver drops chain-less entries — don't spend budget
+            if not packer.add(NodeEntry(e.node_id, e.addresses, e.dsa_pub, chain)):
+                break
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
-                                 query_id + _encode_entries(closest))
-        await self._route_outbound(response)   # routes back to the querier
+                                 query_id + packer.encode())
+        # routes back to the querier — never inline, we are in a receive loop
+        await self._route_outbound(response, blocking=False)
 
     async def _handle_found_node(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3451,12 +3743,15 @@ class MeshNode:
         # payload: key(20) || query_id(8) ; reply carries the value or empty
         if len(packet.payload) != 20 + _QID_LEN:
             return
+        if not self._query_allowed(peer):
+            return
         key = packet.payload[:20]
         query_id = packet.payload[20:]
         value = self._dht_store.get(key) or b""
         reply = Packet.create(FOUND_VALUE, self._id.raw, packet.src_id,
                               query_id + value)
-        await self._route_outbound(reply)   # routes back to the querier
+        # routes back to the querier — never inline, we are in a receive loop
+        await self._route_outbound(reply, blocking=False)
 
     async def _handle_found_value(self, peer: _Peer, packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3484,6 +3779,7 @@ class MeshNode:
                 Packet.create(FIND_VALUE, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
+            self._forget_route_hint(node_id)   # unanswered — re-pick next time
             return None
         finally:
             self._pending_values.pop(query_id, None)
@@ -3730,8 +4026,10 @@ class MeshNode:
         key = packet.payload[:20]
         query_id = packet.payload[20:]
         body = query_id + _dir_encode(self._pseudo_store.get(key))
-        await self._route_outbound(   # routes back to the querier
-            Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body))
+        # routes back to the querier — never inline, we are in a receive loop
+        await self._route_outbound(
+            Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body),
+            blocking=False)
 
     async def _handle_dir_found(self, peer: '_Peer', packet: Packet) -> None:
         if len(packet.payload) < _QID_LEN:
@@ -3758,6 +4056,7 @@ class MeshNode:
                 Packet.create(DIR_FIND, self._id.raw, node_id.raw, key + query_id))
             return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
         except Exception:
+            self._forget_route_hint(node_id)   # unanswered — re-pick next time
             return None
         finally:
             self._pending_dir.pop(query_id, None)
@@ -4031,7 +4330,7 @@ class MeshNode:
             nonce, ciphertext, self._identity.dsa_public_key, my_cert_chain, ack_sig
         )
         ack = Packet.create(E2E_HANDSHAKE_ACK, self._id.raw, packet.src_id, ack_payload)
-        await self._route_outbound(ack)
+        await self._route_outbound(ack, blocking=False)   # in a receive loop
         # We became the responder — flush anything we had queued for this peer,
         # otherwise data sent before the session existed is stranded forever.
         # Always under the LIVE session (with a candidate pending, the old key
@@ -4039,7 +4338,7 @@ class MeshNode:
         for payload in self._e2e_pending_data.pop(src, []):
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
-            await self._route_outbound(pkt)
+            await self._route_outbound(pkt, blocking=False)
         self._persist_state()
 
     def _e2e_rekey_store(self, src: NodeID, candidate: SessionKey) -> None:
@@ -4091,7 +4390,7 @@ class MeshNode:
         for payload in pending:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,
                                           self._e2e_sessions[src])
-            await self._route_outbound(pkt)
+            await self._route_outbound(pkt, blocking=False)   # in a receive loop
         self._persist_state()
 
     async def _handle_handshake(self, peer: _Peer, packet: Packet) -> None:

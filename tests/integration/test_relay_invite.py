@@ -11,13 +11,13 @@ Excluded from the default suite (see pyproject addopts); run explicitly:
     pytest tests/integration/test_relay_invite.py -q
 """
 import asyncio
-import random
 
 import pytest
 
 from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
+from tests.integration import free_port
 
 
 def _mgr() -> TransportManager:
@@ -33,7 +33,7 @@ def _authed_relayed(node, other):
 
 class TestRelayedInvitation:
     async def test_join_via_relay_no_direct_link(self):
-        base = random.randint(20000, 40000)
+        base = free_port()
         R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
         await R.start([f"tcp://127.0.0.1:{base}"])
         # A joins the network through R (A dials R → R becomes a usable relay)
@@ -73,7 +73,7 @@ class TestRelayedInvitation:
             await R.stop()
 
     async def test_join_falls_back_to_next_relay(self):
-        base = random.randint(20000, 40000)
+        base = free_port()
         R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
         await R.start([f"tcp://127.0.0.1:{base}"])
         await A.join(f"tcp://127.0.0.1:{base}", R.generate_invite())

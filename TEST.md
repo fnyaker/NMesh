@@ -10,7 +10,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-Environ 280 tests en ~20 secondes.
+Environ 740 tests en ~20 secondes.
 
 ---
 
@@ -28,6 +28,11 @@ Ils vérifient notamment :
   sur le transport **spool** (répertoire/fichier, sans socket).
 - Le routage **multi-hop A→B→C** (les extrémités ne se parlent qu'à travers le
   relais), y compris sur deux médias fichier distincts.
+- Le routage **au-delà de la poignée de nœuds** (`test_routing_scale.py`) : un
+  relais dont la table dépasse la falaise historique des 5 nœuds certifiés doit
+  toujours répondre aux lookups, relayer ping/données/annuaire, apprendre le
+  chemin retour sur une chaîne, et rester réactif sous des paquets adressés à
+  des ids injoignables.
 - La reprise **après redémarrage** sans ré-invitation (routage + sessions E2E
   restaurés depuis le disque).
 - L'**auto-réparation** (purge d'un pair mort) et le trajet **app→mesh→app** via
@@ -56,6 +61,9 @@ que le job `docker`.
 tests/
 ├── test_packet.py / test_crypto.py / test_cert.py   — primitives
 ├── test_node.py / test_routing.py / test_handshake.py — nœud & routage
+├── test_routing_stability.py                          — régressions de routage :
+│     taille d'un FOUND_NODE, acquisition de route hors boucle de réception,
+│     chemin retour appris du trafic, démontage borné
 ├── test_e2e.py / test_data.py                        — chiffrement E2E
 ├── test_invite*.py / test_trust.py                   — invitations & confiance
 ├── test_fuzz.py                                       — entrées hostiles
