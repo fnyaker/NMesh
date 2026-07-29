@@ -52,6 +52,69 @@ réception du lien entrant) et par le fallback de `console_ping_node`.
 (cancellable, cf. 3b) dans `TCPTransport.connect`. **Toute ouverture de
 connexion vers une adresse non prouvée doit être bornée.**
 
+### 4b. `peer.stop()` attendait sans borne une tâche annulée qui ne meurt pas
+`_Peer.stop()` faisait `task.cancel()` puis `await task` **sans borne**. Quand
+l'annulation tombe sur une lecture dont le future était déjà annulé, la tâche
+reste marquée « cancelling » et attend un réveil qui n'arrive jamais → `stop()`
+n'en revient pas. Observé sur ~1 démontage sur 3 dès qu'un nœud a plusieurs
+pairs (le hang existait avant les correctifs de routage, il était juste rare).
+→ Attente bornée (`_PEER_STOP_TIMEOUT`) : la fermeture du transport qui suit
+détruit le lien de toute façon. `MeshNode.stop()` arrête aussi ses pairs **en
+parallèle** (`gather`), sinon 128 liens empilent 128 bornes.
+**Aucune attente de tâche au démontage ne doit être non bornée.**
+
+## Routage : les bugs « ça marche à 3 nœuds, plus à 6 »
+
+### 9. Un `FOUND_NODE` qui ne rentre pas dans un paquet — Kademlia meurt en silence
+Un certificat ML-DSA-65 pèse ~7,3 ko, donc une chaîne jusqu'à une racine ~14,6 ko.
+`_handle_find_node` empaquetait les `k = 20` entrées de Kademlia → ~292 ko, très
+au-delà du plafond de 60 000 octets. `Packet.create` levait `PacketError`,
+`_Peer._loop` avalait l'exception (« un paquet malformé ne tue pas le lien »), et
+**aucune réponse ne partait**. Dès la **5ᵉ** node certifiée dans la table, tous
+les `FIND_NODE` du réseau restaient sans réponse : plus de lookup, donc plus
+d'`_ensure_route_to` vers un id inconnu, donc un mesh qui « marchait au début »
+et se dégradait aux seuls pairs directs en grandissant. Aucun log, aucun test
+rouge — les topologies de test avaient 2-5 nœuds, juste sous la falaise.
+→ Réponse **budgétée** (`_FOUND_NODE_MAX_BYTES`) et certificats mutualisés dans
+un pool (`_EntryPacker`) ; entrées sans chaîne sautées. Voir `routing.md`.
+**Tout ce qui empaquette N certificats dans un paquet doit être borné en octets,
+et vérifié par un test à N > 5.**
+
+### 10. Acquérir une route depuis une boucle de réception : gel + interblocage
+`_forward_packet` et les handlers de réponse (`_handle_find_node`,
+`_handle_find_value`, `_handle_dir_find`, `_handle_echo_request`, E2E) awaitaient
+`_ensure_route_to` — lookup + dial + hole punch, plusieurs secondes — **dans**
+`_Peer._loop`. Deux conséquences :
+1. le lien entrant ne traite plus rien pendant tout le budget (un pair qui envoie
+   des paquets vers des ids injoignables gèle le lien à volonté : PING/PONG
+   perdus, RTT en vrac, « le ping ne répond plus ») ;
+2. le lookup lancé attend un `FOUND_NODE` qui doit souvent revenir **par ce
+   lien-là** — quand c'est notre seul pair, l'attente est perdue d'avance.
+Mesuré : un unique paquet non routable gelait le lien 4,95 s.
+→ `_defer_route` / `_route_outbound(blocking=False)` : chemin rapide en ligne,
+acquisition en tâche de fond bornée (`_MAX_DEFERRED_ROUTES`, annulée par
+`stop()`). **Ne jamais awaiter `_ensure_route_to` depuis un handler de paquet.**
+
+### 11. Les réponses étaient routées par une nouvelle supposition XOR
+Une réponse (`FOUND_NODE`, `ECHO_REPLY`, ACK E2E, `DATA`) repartait par un choix
+glouton recalculé de zéro, alors que le chemin que la requête venait d'emprunter
+était la seule information *prouvée* disponible. Sur une chaîne ça marche par
+accident ; dès qu'un nœud a plusieurs voisins, la réponse peut partir dans une
+impasse et le demandeur ne voit qu'un timeout.
+→ `_learn_reverse_path` / `_route_hints` (borné, daté, oublié au premier
+silence), consulté par `_route_candidates`. Détail et surface d'attaque assumée
+dans `routing.md`. **Un lien direct vers la cible garde toujours la priorité.**
+
+### 12. Une limite de débit calée sur le trafic normal casse le trafic normal
+Le garde-fou anti-réflexion sur `FIND_NODE`/`FIND_VALUE` a d'abord été posé à
+64 requêtes / 10 s par lien. Le pic **légitime** mesuré est ~66 (α × rounds d'un
+lookup, plus quelques lookups concurrents) : la limite refusait donc de vraies
+requêtes et rendait les lookups aléatoires — exactement la panne qu'on corrigeait.
+→ `_QUERY_RATE_MAX = 512` : une soupape anti-flood, pas du shaping.
+**Mesurer le pic légitime avant de fixer une borne de débit ; le pic ne grandit
+pas forcément avec le réseau (ici il est plat, borné par le comportement d'un
+lookup, pas par le nombre de nœuds).**
+
 ## Sessions E2E & vivacité (les bugs « ça ne livre plus jamais »)
 
 ### 5. Répondre à un E2E_HANDSHAKE en écrasant la session empoisonne le lien
