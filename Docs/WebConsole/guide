@@ -80,7 +80,7 @@ Options :
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → octets du terminal (base64) |
 | GET     | `/api/fleet/keys`  | clés SSH locales — **métadonnées seulement**, jamais le matériel |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
-| POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée |
+| POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée (`scan` sans `subnets` balaie **tous** les réseaux attachés) |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |
 | POST    | `/api/fleet/provision` | déploiement SSH sur des machines découvertes |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — apps **intégrées** |

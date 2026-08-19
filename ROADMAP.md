@@ -226,8 +226,12 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Status (disque/RAM/charge/uptime), update (plan dérivé par la node elle-même
   depuis ses propres faits — apt/dnf/pacman/zypper/apk/xbps/brew/pkg, argv jamais
   une chaîne shell), shell interactif sur pty borné.
-- Découverte LAN SSH (bornée, réseaux privés seulement, empreintes de clés d'hôte
-  présentées à l'opérateur) puis provisioning : bootstrap auto-extractible en une
+- Découverte LAN SSH sur **tous les réseaux attachés**, au préfixe réellement en
+  usage (`/proc/net/route`, ioctl, `ip`/`ifconfig`, repli) — un `/22` n'est plus
+  balayé comme un `/24`, et une seconde carte ou un VPN ne sont plus manqués.
+  Bornée, réseaux privés seulement, réseaux trop grands rétrécis autour de notre
+  adresse et signalés comme tels ; empreintes de clés d'hôte présentées à
+  l'opérateur, puis provisioning : bootstrap auto-extractible en une
   session SSH, intégrité SHA-256 vérifiée avant d'écrire, service de démarrage
   installé, et **reprise de confiance** par pré-autorisation à jeton unique.
 - Identifiants SSH : OpenSSH piloté par **pty**, jamais sur disque, jamais dans

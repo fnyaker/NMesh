@@ -16,6 +16,7 @@ against closed local ports, and the bootstrap is inspected as text.
 import asyncio
 import base64
 import io
+import ipaddress
 import json
 import os
 import tarfile
@@ -151,14 +152,78 @@ class TestKnownHosts:
 # LAN discovery
 # ---------------------------------------------------------------------------
 
+class TestNetworkDetection:
+    """The sweep covers every network the node is attached to, at the prefix
+    actually in use — not a /24 guessed around one address."""
+
+    def _detect(self, monkeypatch, networks):
+        monkeypatch.setattr(fleet_ssh, "local_networks", lambda: networks)
+        return fleet_ssh.detected_networks()
+
+    def test_every_attached_network_is_reported(self, monkeypatch):
+        found = self._detect(monkeypatch, [
+            {"cidr": "192.168.1.0/24", "ip": "192.168.1.10", "interface": "eth0"},
+            {"cidr": "10.42.0.0/22", "ip": "10.42.1.5", "interface": "wlan0"},
+            {"cidr": "172.20.0.0/24", "ip": "172.20.0.1", "interface": "docker0"},
+        ])
+        assert [e["scan"] for e in found] == ["192.168.1.0/24", "10.42.0.0/22",
+                                              "172.20.0.0/24"]
+        assert [e["interface"] for e in found] == ["eth0", "wlan0", "docker0"]
+        assert all(e["narrowed"] is False for e in found)
+
+    def test_real_prefix_is_honoured_not_assumed(self, monkeypatch):
+        """A /22 must be swept as a /22 — the whole point of the change."""
+        found = self._detect(monkeypatch, [
+            {"cidr": "10.42.0.0/22", "ip": "10.42.1.5", "interface": "wlan0"}])
+        assert found[0]["scan"] == "10.42.0.0/22"
+        assert found[0]["hosts"] == 1022
+
+    def test_oversized_network_is_narrowed_around_our_address(self, monkeypatch):
+        found = self._detect(monkeypatch, [
+            {"cidr": "10.0.0.0/16", "ip": "10.0.37.9", "interface": "eth0"}])
+        assert found[0]["narrowed"] is True
+        assert found[0]["cidr"] == "10.0.0.0/16"          # what was detected
+        scan = ipaddress.ip_network(found[0]["scan"])     # what is swept
+        assert scan.num_addresses <= fleet_ssh.MAX_NET_ADDRESSES
+        assert ipaddress.ip_address("10.0.37.9") in scan  # centred on us
+
+    def test_oversized_network_without_our_address_is_skipped(self, monkeypatch):
+        """Nothing to centre the slice on: skip openly rather than sweep an
+        arbitrary corner of someone's /8."""
+        assert self._detect(monkeypatch, [
+            {"cidr": "10.0.0.0/8", "ip": None, "interface": "eth0"}]) == []
+
+    def test_detection_is_bounded(self, monkeypatch):
+        found = self._detect(monkeypatch, [
+            {"cidr": f"10.{i}.0.0/24", "ip": f"10.{i}.0.2", "interface": "e"}
+            for i in range(100)])
+        assert len(found) <= fleet_ssh.MAX_SUBNETS
+
+    def test_local_subnets_are_what_gets_swept(self, monkeypatch):
+        monkeypatch.setattr(fleet_ssh, "local_networks", lambda: [
+            {"cidr": "10.0.0.0/16", "ip": "10.0.37.9", "interface": "eth0"},
+            {"cidr": "192.168.5.0/24", "ip": "192.168.5.2", "interface": "eth1"}])
+        subnets = fleet_ssh.local_subnets()
+        assert "192.168.5.0/24" in subnets
+        assert "10.0.0.0/16" not in subnets     # narrowed, not swept whole
+        hosts = fleet_ssh.subnet_hosts(subnets, limit=fleet_ssh.MAX_HOSTS)
+        assert len(hosts) <= fleet_ssh.MAX_HOSTS
+
+    def test_narrow_picks_the_largest_scannable_slice(self):
+        net = ipaddress.ip_network("10.0.0.0/8")
+        slice_ = fleet_ssh._narrow(net, "10.1.2.3")
+        assert slice_.num_addresses <= fleet_ssh.MAX_NET_ADDRESSES
+        assert slice_.num_addresses * 2 > fleet_ssh.MAX_NET_ADDRESSES
+        assert ipaddress.ip_address("10.1.2.3") in slice_
+
+
 class TestScan:
     def test_subnets_are_private_only(self):
         for net in fleet_ssh.local_subnets():
-            import ipaddress
             assert ipaddress.ip_network(net).is_private
 
     def test_oversized_subnet_is_refused(self):
-        """A /8 sweep is not a LAN discovery, it is a flood."""
+        """A /8 handed in explicitly is not a LAN discovery, it is a flood."""
         assert fleet_ssh.subnet_hosts(["10.0.0.0/8"]) == []
 
     def test_hosts_are_bounded(self):

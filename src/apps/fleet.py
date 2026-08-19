@@ -182,6 +182,7 @@ class ScanReceived:
     src: NodeID
     rid: str
     hosts: list
+    networks: list = field(default_factory=list)
 
 
 @dataclass
@@ -925,6 +926,10 @@ class FleetApp:
         self._reply(src, SCAN_RESULT, {
             "rid": rid, "hosts": hosts[:256],
             "subnets": subnets or fleet_ssh.local_subnets(),
+            # What this node is actually attached to, prefix and interface
+            # included, so the operator sees whether a big network was narrowed
+            # rather than silently swept in part.
+            "networks": [] if subnets else fleet_ssh.detected_networks(),
             "ssh_client": fleet_ssh.ssh_available(),
         })
 
@@ -932,8 +937,10 @@ class FleetApp:
         if not self._claim_inflight(src, document, "scan"):
             return
         hosts = document.get("hosts")
+        networks = document.get("networks")
         self._emit(ScanReceived(src, _rid(document),
-                                hosts[:256] if isinstance(hosts, list) else []))
+                                hosts[:256] if isinstance(hosts, list) else [],
+                                networks[:32] if isinstance(networks, list) else []))
 
     # ======================================================================
     # Provisioning
@@ -1099,6 +1106,7 @@ class FleetApp:
             host["keys"] = await fleet_ssh.host_key_fingerprints(host["ip"],
                                                                  host["port"])
         return {"hosts": hosts, "subnets": subnets or fleet_ssh.local_subnets(),
+                "networks": [] if subnets else fleet_ssh.detected_networks(),
                 "ssh_client": fleet_ssh.ssh_available(),
                 "keys": fleet_ssh.discover_private_keys()}
 

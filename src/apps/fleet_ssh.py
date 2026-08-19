@@ -37,7 +37,7 @@ import os
 import shutil
 import tempfile
 
-from ..ip_utils import local_ip_addresses
+from ..ip_utils import local_networks
 
 SSH_PORT = 22
 
@@ -47,7 +47,8 @@ MAX_CONCURRENCY = 128         # simultaneous connect attempts
 CONNECT_TIMEOUT = 1.5         # seconds per host
 BANNER_TIMEOUT = 1.5
 MAX_BANNER = 256
-MAX_SUBNETS = 8
+MAX_SUBNETS = 16              # attached networks considered in one sweep
+MAX_NET_ADDRESSES = 4096      # per network; anything larger is narrowed, not swept
 
 # Command bounds.
 EXEC_TIMEOUT = 120.0
@@ -223,30 +224,60 @@ def _pub_comment(path: str) -> str | None:
 # LAN discovery — who here speaks SSH?
 # ---------------------------------------------------------------------------
 
-def local_subnets(prefix: int = 24) -> list[str]:
-    """Candidate IPv4 subnets to sweep, derived from our own addresses.
+def detected_networks() -> list[dict]:
+    """Every network this node is attached to, with the prefix actually in use.
 
-    Only private ranges: a scan is intrusive, and sweeping a public prefix we
-    happen to sit in would be scanning strangers. IPv6 is skipped on purpose —
-    a /64 sweep is not a thing."""
-    nets: list[str] = []
-    for address in local_ip_addresses():
+    Real interface enumeration (see :func:`src.ip_utils.local_networks`), not a
+    /24 guessed around an address: a LAN on a /22 or /16 would otherwise be
+    swept as a fraction of itself, and interfaces the outbound-route probe never
+    touches (a second NIC, a VPN, a bridge) would be missed entirely.
+
+    A network larger than :data:`MAX_NET_ADDRESSES` is **narrowed** around our
+    own address rather than dropped: sweeping a /16 is 65k connects, which is
+    neither a LAN discovery nor something to start by accident. The narrowing is
+    reported so the operator can widen it deliberately by typing the prefix."""
+    out = []
+    for entry in local_networks():
         try:
-            ip = ipaddress.ip_address(address)
+            net = ipaddress.ip_network(entry["cidr"], strict=False)
         except ValueError:
             continue
-        if ip.version != 4 or not ip.is_private or ip.is_loopback:
-            continue
-        try:
-            net = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
-        except ValueError:
-            continue
-        text = str(net)
-        if text not in nets:
-            nets.append(text)
-        if len(nets) >= MAX_SUBNETS:
+        record = {
+            "cidr": str(net),
+            "scan": str(net),
+            "ip": entry.get("ip"),
+            "interface": entry.get("interface"),
+            "hosts": max(0, net.num_addresses - 2),
+            "narrowed": False,
+        }
+        if net.num_addresses > MAX_NET_ADDRESSES:
+            narrowed = _narrow(net, entry.get("ip"))
+            if narrowed is None:
+                continue          # too big and we cannot centre it: skip openly
+            record["scan"] = str(narrowed)
+            record["narrowed"] = True
+        out.append(record)
+        if len(out) >= MAX_SUBNETS:
             break
-    return nets
+    return out
+
+
+def _narrow(net, address) -> "ipaddress.IPv4Network | None":
+    """The largest scannable slice of ``net`` containing ``address``."""
+    if not address:
+        return None
+    prefix = net.prefixlen
+    while prefix < 32 and (1 << (32 - prefix)) > MAX_NET_ADDRESSES:
+        prefix += 1
+    try:
+        return ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+    except ValueError:
+        return None
+
+
+def local_subnets() -> list[str]:
+    """The subnets a sweep would actually cover, ready to expand into hosts."""
+    return [entry["scan"] for entry in detected_networks()]
 
 
 def subnet_hosts(subnets: list[str], limit: int = MAX_HOSTS) -> list[str]:
@@ -258,7 +289,7 @@ def subnet_hosts(subnets: list[str], limit: int = MAX_HOSTS) -> list[str]:
             net = ipaddress.ip_network(entry, strict=False)
         except ValueError:
             continue
-        if net.version != 4 or net.num_addresses > 4096:
+        if net.version != 4 or net.num_addresses > MAX_NET_ADDRESSES:
             continue          # refuse a sweep too large to be a LAN
         for host in net.hosts():
             text = str(host)

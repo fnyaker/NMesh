@@ -29,7 +29,7 @@ s'en sert pour autoriser de l'exécution à distance).
 | `pseudo_dir.py` | Annuaire de pseudos à clé sur Kademlia : réclamations signées auto-authentifiées (pseudo→node_id lié à la clé pub), find-by-pseudo réseau. |
 | `transport.py` / `transport_manager.py` | Interfaces `BaseTransport`/`BaseServer` + registre par schéma d'URL. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
-| `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales. |
+| `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales, **énumération des réseaux attachés** (interface + masque réel, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, puis repli). |
 | `webconsole.py` / `webassets.py` | Console web de gestion (HTTPS, stdlib). |
 | `app_channel.py` | Sections d'app : cadrage `app_id ‖ payload` dans la payload DATA, ids intégrés/déployés (démux du connecteur). |
 | `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
