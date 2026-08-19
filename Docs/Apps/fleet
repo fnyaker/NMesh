@@ -112,11 +112,51 @@ le LAN d'un site distant.
 
 ### Phase 1 — découvrir
 
-Balayage TCP borné des `/24` privés déduits des adresses locales, bannière SSH
-lue sans rien envoyer. Bornes : `MAX_HOSTS = 1024`, `MAX_CONCURRENCY = 128`,
-1,5 s par hôte, bannière plafonnée. Un `/8` est **refusé** : ce n'est pas une
-découverte de LAN, c'est une inondation. IPv6 est ignoré (un balayage de /64
-n'existe pas).
+Le scan couvre **tous les réseaux auxquels la node est attachée**, au préfixe
+réellement en usage — pas un `/24` supposé autour d'une adresse. Les interfaces
+et leurs masques sont énumérés par `src.ip_utils.local_networks()`, qui essaie
+plusieurs sources dans l'ordre de fiabilité et retombe jusqu'à ce que l'une
+réponde :
+
+1. `/proc/net/route` (Linux) — les routes **connectées** (sans passerelle) sont
+   par définition les réseaux attachés, avec leur masque exact ;
+2. `ioctl SIOCGIFADDR`/`SIOCGIFNETMASK` sur chaque interface de
+   `socket.if_nameindex()` ;
+3. la sortie de `ip -o -4 addr` ou `ifconfig -a` (macOS, BSD) ;
+4. en dernier recours seulement, l'ancien `/24` supposé autour de chaque adresse
+   connue — reconnaissable au fait qu'aucun nom d'interface n'y est attaché.
+
+Une machine qu'on ne sait pas introspecter donne donc **moins de réseaux**, jamais
+une exception.
+
+Ce qui est écarté, et pourquoi :
+
+| Écarté | Raison |
+|---|---|
+| IPv6 | un balayage de /64 n'existe pas |
+| loopback, link-local (`169.254/16`) | ce ne sont pas des LAN à découvrir |
+| préfixes publics | balayer un préfixe public où l'on se trouve, c'est scanner des inconnus |
+| `/31`, `/32` | pas d'hôtes à découvrir (liens point à point) |
+
+**Réseaux trop grands.** Un `/16`, c'est 65 000 connexions : ni une découverte de
+LAN, ni quelque chose qu'on lance par accident. Un réseau au-delà de
+`MAX_NET_ADDRESSES` (4096) est donc **rétréci autour de notre propre adresse**
+plutôt qu'abandonné, et le rétrécissement est **affiché** (`narrowed from
+10.0.0.0/16`) pour que l'opérateur puisse l'élargir délibérément en tapant le
+préfixe voulu dans le champ *Subnets*. Si on ne sait pas sur quoi centrer la
+tranche (adresse locale inconnue), le réseau est ignoré ouvertement plutôt que
+balayé dans un coin arbitraire.
+
+Le balayage lui-même : TCP borné, bannière SSH lue sans rien envoyer. Bornes :
+`MAX_HOSTS = 1024` au total, `MAX_SUBNETS = 16` réseaux, `MAX_CONCURRENCY = 128`,
+1,5 s par hôte, bannière plafonnée. Un `/8` fourni **explicitement** reste
+refusé.
+
+Le champ *Subnets* de l'interface permet de forcer une liste ; laissé vide, la
+détection automatique s'applique. Les réseaux effectivement balayés (avec leur
+interface, et le cas échéant la mention `narrowed`) sont affichés au-dessus des
+résultats, et repris dans le journal — « rien trouvé » n'est jamais ambigu sur
+*où* on a cherché.
 
 Pour chaque hôte trouvé, `ssh-keyscan` récupère les **clés d'hôte publiques** et
 leurs empreintes SHA-256, affichées dans la liste.
@@ -277,6 +317,7 @@ Une réponse non sollicitée est jetée.
 | `MAX_PENDING` | 256 demandes en attente (TTL 7 j) |
 | `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
 | `MAX_PAYLOAD` | 16 Mo poussés au provisioning |
+| `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 réseaux balayés / 4096 adresses par réseau avant rétrécissement |
 
 Le ledger **échoue fermé** : un blob corrompu ou altéré donne un ledger **vide**
 (on oublie qui on a cru, plutôt que de faire confiance à une liste forgée), et un

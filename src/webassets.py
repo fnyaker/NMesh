@@ -2259,11 +2259,12 @@ FLEET_HTML = """<!doctype html>
       <label class="fld grow">Scan from
         <select id="scan-from"></select>
       </label>
-      <label class="fld grow">Subnets (optional, comma separated)
-        <input id="scan-nets" class="mono" placeholder="192.168.1.0/24">
+      <label class="fld grow">Subnets — leave empty to sweep every attached network
+        <input id="scan-nets" class="mono" placeholder="auto (192.168.1.0/24, 10.0.0.0/22, …)">
       </label>
       <button id="scan-btn" class="primary">Scan LAN</button>
     </div>
+    <div id="scan-nets-found" class="nets"></div>
     <div id="scan-note" class="muted small"></div>
     <div id="hosts" class="hosts"></div>
     <div id="deploy" class="deploy hidden">
@@ -2391,6 +2392,10 @@ a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
 .bar i.hot{background:var(--danger)}
 .acts{display:flex;flex-wrap:wrap;gap:8px}
 .acts button{padding:6px 11px;font-size:13px}
+.nets{display:flex;flex-wrap:wrap;gap:8px}
+.net{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
+  border-radius:999px;padding:4px 11px;background:var(--panel);font-size:12px}
+.net .iface{color:var(--muted)}
 .hosts{display:grid;gap:6px}
 .host{display:flex;align-items:center;gap:10px;background:var(--panel);
   border:1px solid var(--line);border-radius:10px;padding:9px 12px}
@@ -2601,11 +2606,24 @@ async function runScan(){
   }catch(_){$("scan-note").textContent="Scan failed.";}
   finally{$("scan-btn").disabled=false;}
 }
+function renderNets(nets){
+  const el=$("scan-nets-found");
+  if(!nets||!nets.length){el.innerHTML="";return;}
+  el.innerHTML=nets.map(n=>
+    '<span class="net"><span class="mono">'+esc(n.scan||n.cidr)+'</span>'+
+    (n.interface?'<span class="iface">'+esc(n.interface)+'</span>':'')+
+    (n.narrowed?'<span class="pill warn" title="'+esc(n.cidr)+
+      ' is too large to sweep whole — this slice around this node\'s own '+
+      'address was scanned instead. Type a prefix above to widen it.">narrowed from '+
+      esc(n.cidr)+'</span>':'')+'</span>').join("");
+}
 function renderHosts(meta){
   if(!HOSTS.length){
     const scans=ST.scans||{}, from=$("scan-from").value;
     HOSTS=(scans[from]&&scans[from].hosts)||[];
   }
+  const scans=ST.scans||{}, from=$("scan-from").value;
+  renderNets((meta&&meta.networks)||(scans[from]&&scans[from].networks)||[]);
   if(meta&&meta.ssh_client===false)
     $("scan-note").textContent="That node has no ssh client, so it cannot deploy.";
   else if(HOSTS.length)$("scan-note").textContent=HOSTS.length+" SSH host(s) found.";

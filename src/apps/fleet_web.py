@@ -105,10 +105,11 @@ class FleetBridge:
         elif isinstance(event, ScanReceived):
             with self._lock:
                 self._scans[node_hex] = {"at": time.time(),
-                                         "hosts": event.hosts[:MAX_SCAN_HOSTS]}
+                                         "hosts": event.hosts[:MAX_SCAN_HOSTS],
+                                         "networks": event.networks[:32]}
                 self._bump()
-            self._say("ok", f"{short}… found {len(event.hosts)} SSH host(s)",
-                      node_hex)
+            self._say("ok", f"{short}… swept {_describe(event.networks)} and "
+                            f"found {len(event.hosts)} SSH host(s)", node_hex)
         elif isinstance(event, ShellOpened):
             self._open_shell_record(event.sid.hex(), node_hex)
             self._say("ok", f"shell opened on {short}…", node_hex)
@@ -279,12 +280,14 @@ class FleetBridge:
 
     def scan_local(self, subnets=None) -> dict:
         result = self._call(self._app.scan_local(subnets), timeout=360.0)
+        networks = result.get("networks") or []
         with self._lock:
             self._scans[self.me] = {"at": time.time(),
-                                    "hosts": result["hosts"][:MAX_SCAN_HOSTS]}
+                                    "hosts": result["hosts"][:MAX_SCAN_HOSTS],
+                                    "networks": networks[:32]}
             self._bump()
-        self._say("ok", f"local scan found {len(result['hosts'])} SSH host(s)",
-                  self.me)
+        self._say("ok", f"local scan swept {_describe(networks)} and found "
+                        f"{len(result['hosts'])} SSH host(s)", self.me)
         return result
 
     def provision_local(self, targets, *, username: str,
@@ -306,6 +309,24 @@ class FleetBridge:
     def local_keys(self) -> list:
         from . import fleet_ssh
         return fleet_ssh.discover_private_keys()
+
+
+def _describe(networks) -> str:
+    """One line naming what a sweep covered, so "found nothing" is never
+    ambiguous about *where* it looked."""
+    if not networks:
+        return "the given subnets"
+    parts = []
+    for entry in networks[:4]:
+        text = str(entry.get("scan") or entry.get("cidr") or "?")
+        if entry.get("interface"):
+            text += f" ({entry['interface']})"
+        if entry.get("narrowed"):
+            text += " [narrowed]"
+        parts.append(text)
+    if len(networks) > 4:
+        parts.append(f"+{len(networks) - 4} more")
+    return ", ".join(parts)
 
 
 def _is_hex(value) -> bool:
