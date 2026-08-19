@@ -412,6 +412,9 @@ def _base_options(known_hosts: str | None, creds: SshCredentials,
                     "-o", f"UserKnownHostsFile={known_hosts}",
                     "-o", "UpdateHostKeys=no"]
     else:
+        # Nothing confirmed to pin (no ssh-keyscan on the scanning host, or the
+        # target offered no key we could read). accept-new trusts the first key
+        # it sees; callers announce this so the operator knows what they got.
         options += ["-o", "StrictHostKeyChecking=accept-new"]
     if creds.has_key:
         options += ["-i", creds.key_path, "-o", "IdentitiesOnly=yes"]

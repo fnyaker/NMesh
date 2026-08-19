@@ -418,6 +418,7 @@ class TestProvisionRun:
         result = await fleet_provision.provision_host(
             "10.0.0.1", SshCredentials("root", password="p"),
             payload=b"x", preauth=document,
+            known_hosts_lines=["10.0.0.1 ssh-ed25519 AAAA"],
             on_progress=lambda h, s: seen.append(s))
         assert result["ok"] is True
         assert seen == ["unpacked", "done"]
@@ -436,3 +437,39 @@ class TestProvisionRun:
             "10.0.0.1", SshCredentials("root", password="p"),
             payload=b"x", preauth=document)
         assert result["ok"] is False
+
+
+class TestHostKeyPinning:
+    """Pinning is the difference between informed trust-on-first-use and a
+    shrug. When there is nothing to pin, that has to be visible."""
+
+    async def test_unpinned_run_announces_itself(self, monkeypatch):
+        async def fake_run(host, creds, command, **kwargs):
+            kwargs.get("on_output")("::step::done\n")
+            return 0, ""
+
+        monkeypatch.setattr(fleet_ssh, "run", fake_run)
+        document, _token = fleet_provision.make_preauth(
+            b"\x01" * 20, b"\x02" * 32, capabilities=["status"], join_uris=[],
+            join_code=None)
+        result = await fleet_provision.provision_host(
+            "10.0.0.1", SshCredentials("root", password="p"),
+            payload=b"x", preauth=document, known_hosts_lines=[])
+        assert result["pinned"] is False
+        assert any("no host key to pin" in step for step in result["steps"])
+
+    async def test_pinned_run_says_nothing_extra(self, monkeypatch):
+        async def fake_run(host, creds, command, **kwargs):
+            kwargs.get("on_output")("::step::done\n")
+            return 0, ""
+
+        monkeypatch.setattr(fleet_ssh, "run", fake_run)
+        document, _token = fleet_provision.make_preauth(
+            b"\x01" * 20, b"\x02" * 32, capabilities=["status"], join_uris=[],
+            join_code=None)
+        result = await fleet_provision.provision_host(
+            "10.0.0.1", SshCredentials("root", password="p"),
+            payload=b"x", preauth=document,
+            known_hosts_lines=["10.0.0.1 ssh-ed25519 AAAA"])
+        assert result["pinned"] is True
+        assert not any("no host key" in step for step in result["steps"])
