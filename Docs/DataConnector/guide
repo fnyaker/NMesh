@@ -75,6 +75,10 @@ Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | co
 | →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | cherche des node ids par pseudo |
 | ←    | `PSEUDO_KEY` (0x8A)  | `clé_annuaire(20)` ou vide  | réponse `PSEUDO_PUB` |
 | ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | réponse `PSEUDO_LOOKUP` |
+| →    | `AUTH_ASSERT` (0x0C) | `audience(20) + ctx(32) + ttl(4) + purpose(utf-8)` | émet une assertion signée en notre nom |
+| →    | `AUTH_VERIFY` (0x0D) | `flags(1) + ctx(32) + plen(2) + purpose + assertion` | vérifie l'assertion d'un pair |
+| ←    | `AUTH_ASSERTION`(0x8C)| l'assertion, ou vide en cas de refus | réponse `AUTH_ASSERT` |
+| ←    | `AUTH_PRINCIPAL`(0x8D)| JSON principal, ou `null`  | réponse `AUTH_VERIFY` |
 
 La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
 `SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
@@ -92,6 +96,20 @@ donne le contenu et, pour le privé, la clé de chiffrement ; le nœud namespace
 l'`app_id` de la session et fait la crypto DHT. Là encore l'`app_id` ne figure
 pas dans la trame. Côté client : `dht_put(contenu, enc_key?)` /
 `dht_get(clef_contenu, dec_key?)`. Détails : `Docs/Architecture/routing.md`.
+
+Les trames `AUTH_*` donnent à l'app l'**identité du nœud comme authentification**
+(un SSO) : `assert_to(audience, purpose, ctx)` émet un énoncé signé ML-DSA « ce
+nœud, dans **cette** app, à **cet** interlocuteur, pour **ce** motif, sur **ce**
+contexte », et `verify_assertion(blob, purpose=…, ctx=…)` vérifie celui d'un
+pair. Comme pour le tiroir, l'`app_id` **ne figure pas dans la trame** — le nœud
+le déduit de la session `AUTH` — donc une app ne peut jamais émettre pour la
+section d'une autre.
+
+Ce n'est **pas** un oracle de signature : le nœud ne signe jamais des octets
+choisis par l'app, seulement une structure bornée dans un domaine dédié, le
+contexte libre n'entrant que par un hash de 32 octets. Sans cette règle, une app
+pourrait faire signer un corps de certificat par la clé du nœud. Détails,
+bornes et modèle de menace : [`Docs/AppAuth/guide`](../AppAuth/guide).
 
 Les trames `PSEUDO_*` pilotent l'**annuaire de pseudos** (find-by-pseudo réseau) :
 `publish_pseudo(pseudo)` publie une réclamation signée pseudo→node_id (liée à la

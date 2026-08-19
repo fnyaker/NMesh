@@ -88,6 +88,12 @@ qu'une app ne voit que sa section. Une payload trop courte pour porter un
 `app_id` est jetée. `app_id` réservé pour les apps intégrées (`builtin_id`),
 lié à la clé auteur pour les apps déployées (`deployed_id`, package signé).
 
+Les apps intégrées occupent chacune leur section : `builtin_id("chat")`,
+`builtin_id("fleet")`. L'app de gestion **n'ajoute aucun type de paquet** — son
+protocole (enrôlement, status, update, shell, scan, provisioning) vit
+entièrement dans sa section de `DATA`, donc le plan de gestion du nœud est
+intouché. Voir [`Docs/Apps/fleet`](../Apps/fleet).
+
 ## Portes de validation (`_handle_packet`) — le cœur sécurité
 
 Ordre exact appliqué à chaque paquet reçu :

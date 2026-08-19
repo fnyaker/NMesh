@@ -76,6 +76,14 @@ Options :
 | POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                    |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
 | POST    | `/api/chat/search` | `{pseudo}` → local + annuaire DHT réseau + requête 1-saut |
+| GET     | `/api/fleet/state` | `?since=N` → nodes gérées, notifications d'enrôlement, journal, capabilities, faits machine |
+| GET     | `/api/fleet/shell` | `?sid=&offset=` → octets du terminal (base64) |
+| GET     | `/api/fleet/keys`  | clés SSH locales — **métadonnées seulement**, jamais le matériel |
+| POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
+| POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée |
+| POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |
+| POST    | `/api/fleet/provision` | déploiement SSH sur des machines découvertes |
+| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — apps **intégrées** |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -122,6 +130,37 @@ la surface :
 Câblage : passer un `chat_bridge` (un `src.apps.chat_web.ChatBridge` enveloppant
 une `ChatApp`) à `WebConsole(...)`. Le lanceur `scripts/nmesh_node.py` le fait
 par défaut ; `--no-chat` le désactive. Voir `Docs/Apps/chat`.
+
+## App Fleet intégrée (`/fleet`)
+
+Gestion à distance et déploiement automatisé, servie par le **même serveur
+console** (même session, même cookie) comme la sous-page de chat.
+**Désactivée par défaut** : elle peut ouvrir un shell, donc on l'active
+explicitement (`--fleet`, ou le bouton **Enable** de l'onglet Apps).
+
+La page expose : la bande de **notifications** quand un opérateur demande à gérer
+cette node (avec le choix des capabilities accordées — on peut restreindre,
+jamais élargir), les cartes de status des nodes gérées (disque, RAM, charge,
+uptime, distro), les actions update / shell / scan, l'assistant de découverte LAN
+et de provisioning SSH, et un journal d'activité.
+
+Les routes `/api/fleet/*` exigent la **même session** que le reste de la console,
+et n'existent pas (404) quand l'app est désactivée. Elles ne permettent que de
+*demander* : les trois portes d'autorisation vivent côté node cible, cette
+console ne peut rien s'accorder à elle-même. Voir [`Docs/Apps/fleet`](../Apps/fleet).
+
+## Apps intégrées : installer, activer, désactiver
+
+L'onglet **Apps** liste les apps livrées avec le nœud avec leur état et les
+actions Install / Enable / Disable / Uninstall (`/api/apps/*`). Deux états
+distincts : **installed** (le nœud garde l'état de l'app ; désinstaller **purge
+son tiroir chiffré**) et **enabled** (l'app est branchée au mesh maintenant ;
+désactiver l'arrête, son état survit). La bascule est **à chaud** — pas de
+redémarrage du nœud — et persistée dans `<data>/apps.json`.
+
+Câblage : passer un `app_host` (un `src.app_registry.AppHost`) à `WebConsole(...)`.
+`scripts/nmesh_node.py` le fait ; le paramètre `chat_bridge` reste supporté pour
+un runner qui héberge une seule app lui-même.
 
 ## Rejoindre / relier deux réseaux
 

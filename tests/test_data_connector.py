@@ -14,7 +14,8 @@ from src.data_connector import (
 )
 from src.app_channel import APP_ID_LEN, GENERIC_APP_ID, builtin_id, frame
 from src.node_id import NodeID
-from tests.conftest import make_node
+from src.node import MeshNode
+from tests.conftest import make_manager, make_node
 import os
 
 TOKEN = "test-token-abc"
@@ -375,3 +376,118 @@ class TestPseudoDir:
         finally:
             await alpha.close(); await beta.close()
             await conn.stop(); await node.stop()
+
+
+# ---------------------------------------------------------------------------
+# App identity over the connector (the SSO an external app gets)
+# ---------------------------------------------------------------------------
+
+class TestConnectorAppAuth:
+    """The connector hands an app the node's identity as a login. The property
+    that matters: the app id comes from the AUTH session, so one app can never
+    speak for another's section, and the node never signs app-chosen bytes."""
+
+    async def _pair(self):
+        from src.app_auth import CTX_LEN, ctx_hash
+        node = MeshNode(transport_manager=make_manager())
+        conn = DataConnector(node, host="127.0.0.1", port=0)
+        await conn.start()
+        return node, conn
+
+    async def test_mint_and_verify_roundtrip(self):
+        from src.app_auth import ctx_hash
+        node, conn = await self._pair()
+        app_id = builtin_id("auth-demo")
+        client = ConnectorClient(conn.host, conn.port, conn.token, app_id)
+        await client.connect()
+        try:
+            ctx = ctx_hash(b"reboot now")
+            blob = await client.assert_to(node.id, "demo.action", ctx)
+            assert blob
+            principal = await client.verify_assertion(blob, purpose="demo.action",
+                                                      ctx=ctx)
+            assert principal is not None
+            assert principal["id"] == node.id.raw.hex()
+            assert principal["purpose"] == "demo.action"
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_assertion_is_bound_to_its_section(self):
+        """An assertion minted in one app's section must not verify in another's
+        — that is the whole point of scoping."""
+        node, conn = await self._pair()
+        one = ConnectorClient(conn.host, conn.port, conn.token,
+                              builtin_id("app-one"))
+        two = ConnectorClient(conn.host, conn.port, conn.token,
+                              builtin_id("app-two"))
+        await one.connect()
+        await two.connect()
+        try:
+            blob = await one.assert_to(node.id, "shared.purpose")
+            assert await one.verify_assertion(blob, purpose="shared.purpose")
+            assert await two.verify_assertion(blob, purpose="shared.purpose") is None
+        finally:
+            await one.close()
+            await two.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_replay_is_refused(self):
+        node, conn = await self._pair()
+        client = ConnectorClient(conn.host, conn.port, conn.token,
+                                 builtin_id("replay-demo"))
+        await client.connect()
+        try:
+            blob = await client.assert_to(node.id, "once")
+            assert await client.verify_assertion(blob, purpose="once") is not None
+            assert await client.verify_assertion(blob, purpose="once") is None
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_wrong_purpose_is_refused(self):
+        node, conn = await self._pair()
+        client = ConnectorClient(conn.host, conn.port, conn.token,
+                                 builtin_id("purpose-demo"))
+        await client.connect()
+        try:
+            blob = await client.assert_to(node.id, "read.status")
+            assert await client.verify_assertion(blob, purpose="open.shell") is None
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_bad_minting_input_is_refused_not_raised(self):
+        node, conn = await self._pair()
+        client = ConnectorClient(conn.host, conn.port, conn.token,
+                                 builtin_id("bounds-demo"))
+        await client.connect()
+        try:
+            assert await client.assert_to(node.id, "") is None
+            assert await client.assert_to(node.id, "x" * 500) is None
+            assert await client.assert_to(node.id, "ok", ttl=0) is None
+            assert await client.assert_to(node.id, "ok", ttl=10 ** 9) is None
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_garbage_never_verifies_and_never_crashes(self):
+        node, conn = await self._pair()
+        client = ConnectorClient(conn.host, conn.port, conn.token,
+                                 builtin_id("fuzz-demo"))
+        await client.connect()
+        try:
+            for _ in range(60):
+                assert await client.verify_assertion(os.urandom(96)) is None
+            # The section still works afterwards.
+            blob = await client.assert_to(node.id, "still.alive")
+            assert await client.verify_assertion(blob, purpose="still.alive")
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()

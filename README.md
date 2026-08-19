@@ -29,6 +29,11 @@ jamais le contenu.
 - **Persistance opt-in** — sessions et pairs survivent au redémarrage
   (chiffrés au repos).
 - **Console web de gestion** + **connecteur de données** pour brancher des apps.
+- **Identité applicative (SSO)** — une app se sert de l'identité mesh du nœud pour
+  authentifier ses pairs : assertions signées, scopées, fraîches, à usage unique.
+- **Gestion de parc & déploiement** — app *Fleet* : enrôler des nodes avec
+  capabilities, lire leur status, les mettre à jour, ouvrir un shell, découvrir
+  le LAN et y installer NMesh par SSH.
 - **Dépendances minimales** — stdlib Python + `liboqs-python` + `cryptography`.
 
 ## Démarrage rapide
@@ -52,6 +57,7 @@ Options utiles (tout argument est transmis au lanceur) :
 ./start.sh --connector-port 8790          # expose un connecteur pour brancher des apps
 ./start.sh --spool /mnt/usb/mesh          # ajoute un lien store-and-forward (clé USB)
 ./start.sh --console-host 0.0.0.0         # console accessible depuis le LAN
+./start.sh --fleet                        # active l'app de gestion de parc (/fleet)
 ```
 
 Vérifier une installation sans démarrer de nœud (utile en CI) :

@@ -16,7 +16,7 @@ livrent `pip`/`venv` à part — voir [`Docs/Setup/guide`](Docs/Setup/guide).
 À la main : `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Environ 740 tests en ~20 secondes.
+Environ 1000 tests en ~20 secondes.
 
 ---
 
@@ -43,6 +43,10 @@ Ils vérifient notamment :
   restaurés depuis le disque).
 - L'**auto-réparation** (purge d'un pair mort) et le trajet **app→mesh→app** via
   les connecteurs de données.
+- L'**app de gestion sur mesh réel** (`tests/integration/test_fleet.py`) :
+  enrôlement complet avec décision humaine puis commande autorisée, opérateur non
+  enrôlé qui n'obtient rien, capability non accordée refusée, révocation qui
+  coupe l'accès, et isolation de section (une autre app ne voit rien du trafic).
 
 ---
 
@@ -75,6 +79,13 @@ tests/
 ├── test_fuzz.py                                       — entrées hostiles
 ├── test_spool.py                                      — bundle & transport fichier
 ├── test_webconsole.py / test_data_connector.py       — console & connecteur
+├── test_app_auth.py                                  — identité applicative :
+│     scoping (app/audience/purpose/ctx), fraîcheur, anti-rejeu, liaison de clé,
+│     parsing hostile, login mutuel
+├── test_fleet*.py / test_console_fleet.py            — app de gestion : les trois
+│     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
+│     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
+│     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
 ├── test_session_store.py                             — persistance (chiffrée)
 └── integration/                                       — nœuds réels (TCP + spool)
 ```
