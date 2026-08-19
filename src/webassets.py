@@ -1433,7 +1433,16 @@ $("ping-btn").addEventListener("click",async()=>{$("ping-btn").disabled=true;set
 let appView="installed";
 document.querySelector(".segmented").addEventListener("click",(event)=>{const button=event.target.closest("[data-app-view]");if(!button)return;appView=button.dataset.appView;document.querySelectorAll("[data-app-view]").forEach((item)=>item.classList.toggle("active",item===button));$("apps-installed-view").classList.toggle("hidden",appView!=="installed");$("apps-store-view").classList.toggle("hidden",appView!=="store");refreshApps();});
 async function refreshApps(){if(activeTab!=="apps")return;renderBuiltins();if(appView==="installed")await renderAppList("installed");else await renderAppList("catalog");}
-function renderBuiltins(){const apps=last&&last.apps||[];$("builtin-apps").innerHTML=apps.length?apps.map((app)=>`<div class="app-tile"><div class="action-row"><span class="app-icon">${esc((app.name||"A").slice(0,2).toUpperCase())}</span><div><strong>${esc(app.name)}</strong><div class="subtle">Running built-in</div></div></div><a class="primary" href="${esc(app.path)}">Open</a></div>`).join(""):'<div class="empty">No built-in apps are running</div>';}
+function builtinState(app){if(!app.installed)return"Not installed";return app.running?"Running":"Installed, stopped";}
+function renderBuiltins(){const apps=last&&last.apps||[];$("builtin-apps").innerHTML=apps.length?apps.map((app)=>{const toggle=!app.installed?"install":(app.enabled?"disable":"enable"),label=!app.installed?"Install":(app.enabled?"Disable":"Enable");return `<div class="app-tile"><div class="action-row"><span class="app-icon">${esc((app.name||"A").slice(0,2).toUpperCase())}</span><div><strong>${esc(app.name)}</strong><div class="subtle">${esc(app.description||builtinState(app))}</div><div class="subtle">${esc(builtinState(app))}</div></div></div><div class="record-actions">${typeof app.enabled==="boolean"?`<button class="${toggle==="disable"?"secondary":"primary"}" data-builtin-id="${esc(app.id)}" data-builtin-action="${toggle}">${label}</button>`:""}${app.installed&&typeof app.enabled==="boolean"?`<button class="secondary" data-builtin-id="${esc(app.id)}" data-builtin-action="uninstall">Uninstall</button>`:""}${app.running!==false?`<a class="primary" href="${esc(app.path)}">Open</a>`:""}</div></div>`;}).join(""):'<div class="empty">No built-in apps</div>';}
+async function builtinAction(button){const action=button.dataset.builtinAction,id=button.dataset.builtinId;
+  // Uninstalling a built-in purges its encrypted drawer, so confirm it first.
+  if(action==="uninstall"&&!confirm("Uninstall "+id+"? Its stored state on this node is erased."))return;
+  button.disabled=true;setMessage("store-status",action+" in progress...");
+  try{const response=await api("/api/apps/"+action,"POST",{id});const data=await response.json().catch(()=>({}));setMessage("store-status",response.ok&&data.ok!==false?id+" "+action+"d":data.error||action+" failed",!response.ok||data.ok===false);if(data.apps&&last)last.apps=data.apps;}
+  catch(_){setMessage("store-status",action+" failed",true);}
+  finally{button.disabled=false;renderBuiltins();}}
+$("builtin-apps").addEventListener("click",(event)=>{const button=event.target.closest("[data-builtin-action]");if(button)builtinAction(button);});
 async function renderAppList(kind) {
   const target=$(kind+"-list");try{const items=await fetchPage(kind);$(kind+"-count").textContent=`(${pages[kind].total})`;target.innerHTML=items.length?items.map((app)=>{const action=kind==="installed"?"uninstall":app.action,actionCell=action?`<button class="${action==="uninstall"?"secondary":"primary"}" data-app-id="${esc(app.app_id)}" data-app-action="${esc(action)}">${action==="uninstall"?"Delete local":action==="update"?"Update":"Install"}</button>`:'<span class="state-pill up">Installed</span>';return `<div class="record"><div class="record-main"><strong>${esc(app.name)}</strong><small>Version ${esc(app.version)}</small></div><div class="record-meta">${kind==="installed"?"Local package":esc(app.state||"Available")}</div><div class="record-id mono" title="${esc(app.app_id)}">${esc(short(app.app_id))}</div><div class="record-actions">${actionCell}</div></div>`;}).join(""):`<div class="empty">${pages[kind].query?"No matching apps":kind==="installed"?"No local packages installed":"No signed releases in the catalog"}</div>`;pager(kind,kind+"-pager",()=>renderAppList(kind));}catch(_){target.innerHTML='<div class="empty">App list unavailable</div>';}}
 $("installed-search").addEventListener("input",debounce(()=>{pages.installed.query=$("installed-search").value.trim();pages.installed.offset=0;renderAppList("installed");}));
@@ -2177,6 +2186,595 @@ $("login-form").addEventListener("submit",async(e)=>{
   e.preventDefault();$("err").textContent="";
   try{const res=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:$("password").value})});
     if(!res.ok){const j=await res.json().catch(()=>({}));$("err").textContent=j.error||"login failed";return;}
+    $("password").value=""; await enter((await res.json()).token);
+  }catch(_){$("err").textContent="network error";}
+});
+bind();
+(function(){let tok=null;try{tok=sessionStorage.getItem("nmesh_token");}catch(_){}
+  enter(tok).then((ok)=>{if(!ok)$("login").classList.remove("hidden");});})();
+"""
+
+
+# ---------------------------------------------------------------------------
+# Fleet sub-page — remote management & deployment
+#
+# Same contract as the chat sub-page: the static shell is served by the console,
+# every call sits behind the console session (cookie, or bearer via
+# sessionStorage so a token never touches disk). The strict CSP applies, so
+# there is no inline script and no external resource.
+# ---------------------------------------------------------------------------
+
+FLEET_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NMesh Fleet</title>
+<link rel="stylesheet" href="/fleet.css">
+</head>
+<body>
+<div id="login" class="center">
+  <form id="login-form" class="card">
+    <div class="logo">NMesh<span>fleet</span></div>
+    <p class="muted">Sign in with the console password</p>
+    <input id="password" type="password" placeholder="Console password" autocomplete="current-password" autofocus>
+    <button type="submit">Enter</button>
+    <div id="err" class="err"></div>
+  </form>
+</div>
+
+<div id="app" class="app hidden">
+  <header class="top">
+    <div class="logo">NMesh<span>fleet</span></div>
+    <div class="grow"></div>
+    <div id="me" class="mono muted"></div>
+    <a class="btn ghost" href="/">Console</a>
+  </header>
+
+  <section id="inbox" class="band hidden">
+    <h2>Requests to manage this node</h2>
+    <div id="pending" class="cards"></div>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="nodes">Nodes</button>
+    <button class="tab" data-tab="discover">Discover &amp; deploy</button>
+    <button class="tab" data-tab="shell">Shell</button>
+    <button class="tab" data-tab="activity">Activity</button>
+  </nav>
+
+  <section id="tab-nodes" class="tabbody">
+    <div class="row wrap gap">
+      <input id="add-id" class="mono grow" placeholder="Node ID to manage (40 hex)" autocomplete="off">
+      <input id="add-label" placeholder="Label (optional)">
+      <button id="add-btn" class="primary">Request access</button>
+    </div>
+    <div id="add-caps" class="caps"></div>
+    <p class="muted small">The target node raises a notification; someone there must accept before anything runs.</p>
+    <div id="nodes" class="cards"></div>
+  </section>
+
+  <section id="tab-discover" class="tabbody hidden">
+    <div class="row wrap gap">
+      <label class="fld grow">Scan from
+        <select id="scan-from"></select>
+      </label>
+      <label class="fld grow">Subnets (optional, comma separated)
+        <input id="scan-nets" class="mono" placeholder="192.168.1.0/24">
+      </label>
+      <button id="scan-btn" class="primary">Scan LAN</button>
+    </div>
+    <div id="scan-note" class="muted small"></div>
+    <div id="hosts" class="hosts"></div>
+    <div id="deploy" class="deploy hidden">
+      <h3>Install NMesh on the selected machines</h3>
+      <div class="row wrap gap">
+        <label class="fld">SSH user<input id="ssh-user" autocomplete="off" placeholder="root"></label>
+        <label class="fld">Password<input id="ssh-pass" type="password" autocomplete="new-password" placeholder="(optional)"></label>
+        <label class="fld grow">Private key
+          <select id="ssh-key"></select>
+        </label>
+        <label class="fld">Key passphrase<input id="ssh-kpass" type="password" autocomplete="new-password" placeholder="(optional)"></label>
+      </div>
+      <p class="muted small">Give a password, a key, or both — both are tried. Secrets are held in memory
+        for the run only: never written to disk, never passed on a command line.</p>
+      <div class="fld">Capabilities the new machines grant you</div>
+      <div id="deploy-caps" class="caps"></div>
+      <div class="row gap">
+        <button id="deploy-btn" class="primary">Deploy to <span id="deploy-count">0</span> machine(s)</button>
+        <span id="deploy-state" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-shell" class="tabbody hidden">
+    <div class="row wrap gap">
+      <label class="fld grow">Node<select id="shell-node"></select></label>
+      <button id="shell-open" class="primary">Open shell</button>
+      <button id="shell-kill" class="ghost">Close</button>
+    </div>
+    <pre id="term" class="term">Open a shell on a node that granted you the shell capability.</pre>
+    <form id="term-form" class="row gap">
+      <input id="term-in" class="mono grow" placeholder="Type a command and press Enter" autocomplete="off" spellcheck="false">
+      <button type="submit" class="primary">Send</button>
+    </form>
+  </section>
+
+  <section id="tab-activity" class="tabbody hidden">
+    <div id="log" class="log"></div>
+  </section>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="sheet">
+    <header class="sheet-head"><b id="modal-title"></b><button id="modal-close" class="icon">&#10005;</button></header>
+    <div id="modal-body" class="sheet-body"></div>
+  </div>
+</div>
+
+<script src="/fleet.js"></script>
+</body>
+</html>"""
+
+FLEET_CSS = """
+:root{
+  --bg:#f2f4f7; --panel:#fff; --line:#e5e8ee; --text:#0f1720; --muted:#7a8699;
+  --accent:#3a7afe; --accent-2:#eaf1ff; --ok:#1f9d55; --warn:#b7791f;
+  --danger:#e5484d; --shadow:0 1px 2px rgba(16,24,40,.08); --term:#0b1220;
+  --term-text:#d6e2f5;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0e1621;--panel:#0f1a26;--line:#1e2b3a;--text:#e7edf5;--muted:#8aa0b6;
+    --accent:#4f8cff;--accent-2:#16283f;--ok:#4ac37e;--warn:#e0a94a;--danger:#ff6b6f;
+    --shadow:0 1px 2px rgba(0,0,0,.3);--term:#060b14;--term-text:#cfe0f7;}
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hidden{display:none !important}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+.grow{flex:1}
+.row{display:flex;align-items:flex-end;gap:10px}
+.row.wrap{flex-wrap:wrap}
+.gap{gap:10px}
+.center{min-height:100%;display:grid;place-items:center;padding:20px}
+.logo{font-weight:700;font-size:20px}
+.logo span{color:var(--accent);margin-left:4px}
+.card,.sheet{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  box-shadow:var(--shadow)}
+.card{padding:22px;width:min(360px,92vw);display:grid;gap:12px}
+input,select,button,textarea{font:inherit;color:inherit}
+input,select{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:9px 11px;min-width:0}
+input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button{border:1px solid var(--line);background:var(--panel);border-radius:9px;
+  padding:9px 14px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.ghost{background:transparent}
+button.danger{color:var(--danger);border-color:var(--danger)}
+button.icon{border:0;background:transparent;font-size:18px;padding:4px 8px}
+button:disabled{opacity:.5;cursor:not-allowed}
+a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
+  padding:9px 14px;color:inherit}
+.err{color:var(--danger);min-height:1.2em}
+.top{display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--panel);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.band{padding:14px 18px;background:var(--accent-2);border-bottom:1px solid var(--line)}
+.band h2{margin:0 0 10px;font-size:15px}
+.tabs{display:flex;gap:4px;padding:10px 18px 0;flex-wrap:wrap}
+.tab{border-radius:9px 9px 0 0;border-bottom-color:transparent}
+.tab.active{background:var(--accent-2);border-color:var(--accent);color:var(--accent)}
+.tabbody{padding:18px;display:grid;gap:14px}
+.fld{display:grid;gap:5px;font-size:13px;color:var(--muted)}
+.fld input,.fld select{color:var(--text)}
+.caps{display:flex;flex-wrap:wrap;gap:10px}
+.cap{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
+  border-radius:999px;padding:5px 12px;background:var(--panel);font-size:13px;cursor:pointer}
+.cap input{min-width:auto}
+.cards{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.node{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:14px;display:grid;gap:10px;box-shadow:var(--shadow)}
+.node h3{margin:0;font-size:15px;display:flex;align-items:center;gap:8px}
+.node .id{font-size:12px}
+.pill{border-radius:999px;padding:2px 9px;font-size:12px;background:var(--accent-2);
+  color:var(--accent)}
+.pill.ok{background:rgba(31,157,85,.14);color:var(--ok)}
+.pill.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:13px}
+.stat b{display:block;font-weight:600}
+.bar{height:6px;border-radius:999px;background:var(--line);overflow:hidden;margin-top:4px;display:block}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar i.hot{background:var(--danger)}
+.acts{display:flex;flex-wrap:wrap;gap:8px}
+.acts button{padding:6px 11px;font-size:13px}
+.hosts{display:grid;gap:6px}
+.host{display:flex;align-items:center;gap:10px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+.host .fp{font-size:12px;word-break:break-all}
+.deploy{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:14px;display:grid;gap:12px}
+.deploy h3{margin:0;font-size:15px}
+.term{background:var(--term);color:var(--term-text);border-radius:12px;padding:12px;
+  min-height:340px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;margin:0}
+.log{display:grid;gap:4px;font-size:13px;max-height:70vh;overflow:auto}
+.line{display:flex;gap:10px;padding:6px 10px;background:var(--panel);
+  border:1px solid var(--line);border-radius:9px}
+.line time{color:var(--muted);font-variant-numeric:tabular-nums}
+.line.ok b{color:var(--ok)}
+.line.warn b{color:var(--warn)}
+.line.err b{color:var(--danger)}
+.line .txt{white-space:pre-wrap;word-break:break-word;flex:1}
+.modal{position:fixed;inset:0;background:rgba(8,12,20,.5);display:grid;place-items:center;
+  padding:20px;z-index:20}
+.sheet{width:min(520px,94vw);max-height:86vh;overflow:auto}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;border-bottom:1px solid var(--line)}
+.sheet-body{padding:16px;display:grid;gap:12px}
+@media (max-width:640px){.stats{grid-template-columns:1fr}.tabbody{padding:12px}}
+"""
+
+FLEET_JS = r"""
+"use strict";
+let TOKEN=null, VER=0, timer=null, ST={}, TAB="nodes";
+let SHELL={sid:null,node:null,off:0}, PICKED={}, HOSTS=[], KEYS=[];
+const $=(id)=>document.getElementById(id);
+const esc=(s)=>String(s==null?"":s).replace(/[&<>"]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const short=(h)=>h?h.slice(0,10)+"…"+h.slice(-4):"";
+
+async function api(path,method="GET",body){
+  const h={}; if(TOKEN)h["Authorization"]="Bearer "+TOKEN;
+  if(body)h["Content-Type"]="application/json";
+  const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});
+  if(r.status===401){logout();throw new Error("unauth");}
+  return r;
+}
+function logout(){TOKEN=null;try{sessionStorage.removeItem("nmesh_token");}catch(_){}
+  if(timer){clearInterval(timer);timer=null;}
+  $("app").classList.add("hidden");$("login").classList.remove("hidden");}
+
+// ---- formatting ----
+function bytes(n){
+  if(n==null)return "—";
+  const u=["B","KB","MB","GB","TB"];let i=0,v=Number(n);
+  while(v>=1024&&i<u.length-1){v/=1024;i++;}
+  return (v<10?v.toFixed(1):Math.round(v))+" "+u[i];
+}
+function dur(s){
+  if(s==null)return "—";
+  s=Math.max(0,Math.floor(s));
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return d?d+"d "+h+"h":(h?h+"h "+m+"m":m+"m");
+}
+function pct(used,total){return (total>0)?Math.min(100,Math.round(100*used/total)):0;}
+function bar(p){return '<span class="bar"><i class="'+(p>=88?"hot":"")+'" style="width:'+p+'%"></i></span>';}
+
+// ---- capability pickers ----
+function capBoxes(container,checked){
+  const caps=ST.capabilities||[];
+  container.innerHTML=caps.map(c=>
+    '<label class="cap" title="'+esc(c.description)+'">'+
+    '<input type="checkbox" value="'+esc(c.name)+'"'+
+    ((checked||[]).indexOf(c.name)>=0?" checked":"")+'> '+esc(c.name)+'</label>').join("");
+}
+function capsOf(container){
+  return Array.prototype.slice.call(container.querySelectorAll("input:checked"))
+    .map(i=>i.value);
+}
+
+// ---- polling ----
+async function poll(){
+  let j; try{ j=await(await api("/api/fleet/state?since="+VER)).json(); }catch(_){return;}
+  const first=!ST.capabilities;
+  ST=j; if(typeof j.log_seq==="number")VER=j.log_seq;
+  $("me").textContent=short(j.me);
+  if(first){capBoxes($("add-caps"),["status","update"]);
+            capBoxes($("deploy-caps"),["status","update"]);}
+  renderPending(); renderNodes(); renderNodePickers(); renderLog();
+  if(SHELL.node)pollShell();
+}
+
+// ---- pending requests (the notification) ----
+function renderPending(){
+  const list=ST.pending_in||[];
+  $("inbox").classList.toggle("hidden",list.length===0);
+  $("pending").innerHTML=list.map(p=>
+    '<div class="node"><h3>Access request</h3>'+
+    '<div class="muted mono id">'+esc(short(p.id))+'</div>'+
+    (p.label?'<div>'+esc(p.label)+'</div>':'')+
+    '<div>Wants: '+(p.caps||[]).map(c=>'<span class="pill">'+esc(c)+'</span>').join(" ")+'</div>'+
+    '<div class="acts"><button class="primary" data-approve="'+esc(p.id)+'">Review &amp; accept</button>'+
+    '<button class="danger" data-deny="'+esc(p.id)+'">Deny</button></div></div>').join("");
+}
+
+function approveDialog(id){
+  const p=(ST.pending_in||[]).find(x=>x.id===id); if(!p)return;
+  $("modal-title").textContent="Accept "+short(id)+"?";
+  $("modal-body").innerHTML=
+    '<p class="muted small">Each capability you grant lets that node act on this one. '+
+    'You can narrow the list; you cannot grant more than was asked.</p>'+
+    '<div id="ap-caps" class="caps"></div>'+
+    '<div class="row gap"><button id="ap-ok" class="primary">Grant access</button>'+
+    '<button id="ap-no" class="ghost">Cancel</button></div>';
+  const box=$("ap-caps");
+  box.innerHTML=(p.caps||[]).map(c=>{
+    const d=(ST.capabilities||[]).find(x=>x.name===c);
+    return '<label class="cap" title="'+esc(d?d.description:"")+'">'+
+      '<input type="checkbox" value="'+esc(c)+'" checked> '+esc(c)+'</label>';}).join("");
+  $("ap-ok").addEventListener("click",async()=>{
+    await api("/api/fleet/approve","POST",{node:id,caps:capsOf(box)});
+    closeModal(); poll();});
+  $("ap-no").addEventListener("click",closeModal);
+  $("modal").classList.remove("hidden");
+}
+function closeModal(){$("modal").classList.add("hidden");$("modal-body").innerHTML="";}
+
+// ---- managed nodes ----
+function statusHTML(s){
+  if(!s)return '<div class="muted small">No status yet.</div>';
+  const m=s.memory||{}, disks=(s.disks||[]), root=disks[0]||null, host=s.host||{};
+  const load=(s.load&&s.load.length)?s.load[0].toFixed(2):"—";
+  let out='<div class="stats">'+
+    '<div class="stat"><span class="muted">Uptime</span><b>'+dur(s.uptime)+'</b></div>'+
+    '<div class="stat"><span class="muted">Load / '+(s.cpu_count||"?")+' cpu</span><b>'+load+'</b></div>'+
+    '<div class="stat"><span class="muted">Memory</span><b>'+bytes(m.used)+' / '+bytes(m.total)+'</b>'+
+      bar(pct(m.used,m.total))+'</div>';
+  if(root)out+='<div class="stat"><span class="muted">Disk '+esc(root.mount)+'</span>'+
+      '<b>'+bytes(root.free)+' free</b>'+bar(pct(root.total-root.free,root.total))+'</div>';
+  out+='</div>';
+  if(host.distro||host.package_manager)
+    out+='<div class="muted small">'+esc(host.distro||host.system||"")+
+      (host.package_manager?' · '+esc(host.package_manager):'')+
+      (host.arch?' · '+esc(host.arch):'')+
+      (host.can_update===false?' · <b>cannot self-update</b>':'')+'</div>';
+  return out;
+}
+function renderNodes(){
+  const list=ST.managed||[], pend=ST.pending_out||[];
+  let html=pend.map(p=>
+    '<div class="node"><h3>'+esc(p.label||short(p.id))+' <span class="pill warn">awaiting</span></h3>'+
+    '<div class="muted mono id">'+esc(short(p.id))+'</div>'+
+    '<div class="muted small">Waiting for someone on that node to accept.</div>'+
+    '<div class="acts"><button class="danger" data-revoke="'+esc(p.id)+'">Cancel</button></div></div>').join("");
+  html+=list.map(n=>{
+    const caps=n.caps||[], can=(c)=>caps.indexOf(c)>=0;
+    return '<div class="node"><h3>'+esc(n.label||short(n.id))+
+      ' <span class="pill ok">managed</span></h3>'+
+      '<div class="muted mono id">'+esc(short(n.id))+'</div>'+
+      '<div>'+caps.map(c=>'<span class="pill">'+esc(c)+'</span>').join(" ")+'</div>'+
+      statusHTML(n.status)+
+      '<div class="acts">'+
+      (can("status")?'<button data-status="'+esc(n.id)+'">Refresh</button>':'')+
+      (can("update")?'<button data-update="'+esc(n.id)+'">Update</button>':'')+
+      (can("shell")?'<button data-shell="'+esc(n.id)+'">Shell</button>':'')+
+      (can("scan")?'<button data-scan="'+esc(n.id)+'">Scan LAN</button>':'')+
+      '<button class="danger" data-revoke="'+esc(n.id)+'">Revoke</button>'+
+      '</div></div>';}).join("");
+  $("nodes").innerHTML=html||'<div class="muted">No nodes yet. Ask one to let you manage it.</div>';
+}
+
+function renderNodePickers(){
+  const managed=ST.managed||[];
+  fill($("shell-node"),managed.filter(n=>(n.caps||[]).indexOf("shell")>=0)
+       .map(n=>[n.id,n.label||short(n.id)]));
+  fill($("scan-from"),[[ST.me,"This node (local LAN)"]].concat(
+    managed.filter(n=>(n.caps||[]).indexOf("scan")>=0)
+           .map(n=>[n.id,n.label||short(n.id)])));
+}
+function fill(sel,pairs){
+  const keep=sel.value;
+  sel.innerHTML=pairs.map(p=>'<option value="'+esc(p[0])+'">'+esc(p[1])+'</option>').join("");
+  if(pairs.some(p=>p[0]===keep))sel.value=keep;
+}
+
+// ---- activity ----
+function renderLog(){
+  const lines=ST.log||[];
+  if(!lines.length)return;
+  const box=$("log");
+  const atEnd=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
+  for(const l of lines){
+    const el=document.createElement("div");
+    el.className="line "+esc(l.level);
+    el.innerHTML='<time>'+new Date(l.at*1000).toLocaleTimeString()+'</time>'+
+      '<b>'+esc(l.level)+'</b><span class="txt">'+esc(l.text)+'</span>';
+    box.appendChild(el);
+  }
+  while(box.childElementCount>500)box.removeChild(box.firstChild);
+  if(atEnd)box.scrollTop=box.scrollHeight;
+}
+
+// ---- discovery & deployment ----
+async function runScan(){
+  const from=$("scan-from").value;
+  const nets=$("scan-nets").value.split(",").map(s=>s.trim()).filter(Boolean);
+  $("scan-btn").disabled=true;
+  $("scan-note").textContent="Scanning… this takes a moment.";
+  try{
+    const j=await(await api("/api/fleet/scan","POST",{node:from,subnets:nets})).json();
+    if(j.hosts){HOSTS=j.hosts;KEYS=j.keys||[];renderHosts(j);}
+    else $("scan-note").textContent="Scan running on the remote node — results appear here.";
+  }catch(_){$("scan-note").textContent="Scan failed.";}
+  finally{$("scan-btn").disabled=false;}
+}
+function renderHosts(meta){
+  if(!HOSTS.length){
+    const scans=ST.scans||{}, from=$("scan-from").value;
+    HOSTS=(scans[from]&&scans[from].hosts)||[];
+  }
+  if(meta&&meta.ssh_client===false)
+    $("scan-note").textContent="That node has no ssh client, so it cannot deploy.";
+  else if(HOSTS.length)$("scan-note").textContent=HOSTS.length+" SSH host(s) found.";
+  else $("scan-note").textContent="No SSH hosts found.";
+  PICKED={};
+  $("hosts").innerHTML=HOSTS.map((h,i)=>{
+    const fp=(h.keys||[]).map(k=>k.fingerprint).filter(Boolean)[0]||"";
+    return '<label class="host"><input type="checkbox" data-host="'+i+'">'+
+      '<span class="mono">'+esc(h.ip)+':'+esc(String(h.port))+'</span>'+
+      '<span class="muted small grow">'+esc(h.banner||"")+'</span>'+
+      (fp?'<span class="muted fp mono">'+esc(fp)+'</span>':
+          '<span class="pill warn">no host key</span>')+'</label>';}).join("");
+  if(KEYS.length)
+    fill($("ssh-key"),[["","(no key — password only)"]].concat(
+      KEYS.map(k=>[k.path,k.name+(k.encrypted?" (passphrase)":"")+(k.comment?" — "+k.comment:"")])));
+  else fill($("ssh-key"),[["","(no local key found)"]]);
+  $("deploy").classList.toggle("hidden",HOSTS.length===0);
+  updateCount();
+}
+function updateCount(){
+  const n=Object.keys(PICKED).length;
+  $("deploy-count").textContent=n;
+  $("deploy-btn").disabled=n===0;
+}
+async function deploy(){
+  const targets=Object.keys(PICKED).map(i=>{
+    const h=HOSTS[i];
+    return {ip:h.ip,port:h.port,label:h.ip,
+            known_hosts:(h.keys||[]).map(k=>k.line).filter(Boolean)};
+  });
+  if(!targets.length)return;
+  const body={node:$("scan-from").value,targets:targets,
+    username:$("ssh-user").value.trim(),
+    password:$("ssh-pass").value||null,
+    key_path:$("ssh-key").value||null,
+    key_passphrase:$("ssh-kpass").value||null,
+    caps:capsOf($("deploy-caps"))};
+  if(!body.username){$("deploy-state").textContent="An SSH user is required.";return;}
+  if(!body.password&&!body.key_path){
+    $("deploy-state").textContent="Give a password, a key, or both.";return;}
+  $("deploy-btn").disabled=true;
+  $("deploy-state").textContent="Deploying… watch the Activity tab.";
+  try{
+    const j=await(await api("/api/fleet/provision","POST",body)).json();
+    if(j.results){
+      const ok=j.results.filter(r=>r.ok).length;
+      $("deploy-state").textContent="Done: "+ok+"/"+j.results.length+" succeeded.";
+    }else $("deploy-state").textContent="Running on the remote node.";
+  }catch(_){$("deploy-state").textContent="Deployment failed to start.";}
+  finally{
+    // Drop the secrets from the DOM as soon as the run has been handed over.
+    $("ssh-pass").value=""; $("ssh-kpass").value="";
+    $("deploy-btn").disabled=false; poll();
+  }
+}
+
+// ---- shell ----
+async function openShell(){
+  const node=$("shell-node").value;
+  if(!node){$("term").textContent="No node has granted you a shell.";return;}
+  $("term").textContent="";
+  SHELL={sid:null,node:node,off:0};
+  try{ await api("/api/fleet/shell","POST",{node:node,cols:100,rows:30}); }
+  catch(_){ $("term").textContent="Could not open a shell."; }
+}
+async function pollShell(){
+  if(!SHELL.node)return;
+  if(!SHELL.sid){
+    const s=(ST.shells||[]).filter(x=>x.node===SHELL.node&&x.open).pop();
+    if(!s)return;
+    SHELL.sid=s.sid; SHELL.off=0;
+  }
+  let j; try{
+    j=await(await api("/api/fleet/shell?sid="+encodeURIComponent(SHELL.sid)+
+                      "&offset="+SHELL.off)).json();
+  }catch(_){return;}
+  if(!j)return;
+  if(j.data){
+    const raw=atob(j.data);
+    let text;
+    try{ text=new TextDecoder().decode(Uint8Array.from(raw,c=>c.charCodeAt(0))); }
+    catch(_){ text=raw; }
+    const box=$("term");
+    const atEnd=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
+    // Strip CSI escapes: this is a log pane, not a terminal emulator.
+    box.textContent+=text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g,"").replace(/\x1b[=>()][0-9A-Za-z]?/g,"");
+    if(box.textContent.length>200000)box.textContent=box.textContent.slice(-200000);
+    if(atEnd)box.scrollTop=box.scrollHeight;
+  }
+  SHELL.off=j.seq;
+  if(!j.open){$("term").textContent+="\n[session closed]\n";SHELL.sid=null;SHELL.node=null;}
+}
+async function sendLine(text){
+  if(!SHELL.sid)return;
+  const enc=new TextEncoder().encode(text+"\n");
+  let bin=""; enc.forEach(b=>{bin+=String.fromCharCode(b);});
+  await api("/api/fleet/input","POST",{node:SHELL.node,sid:SHELL.sid,data:btoa(bin)});
+}
+
+// ---- wiring ----
+function bind(){
+  document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
+    TAB=b.dataset.tab;
+    document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===b));
+    document.querySelectorAll(".tabbody").forEach(x=>
+      x.classList.toggle("hidden",x.id!=="tab-"+TAB));
+    if(TAB==="discover"&&!HOSTS.length)renderHosts(null);
+  }));
+  document.body.addEventListener("click",async(e)=>{
+    const t=e.target.closest("button"); if(!t)return;
+    const d=t.dataset;
+    if(d.approve)return approveDialog(d.approve);
+    if(d.deny){await api("/api/fleet/deny","POST",{node:d.deny});return poll();}
+    if(d.revoke){await api("/api/fleet/revoke","POST",{node:d.revoke});return poll();}
+    if(d.status){await api("/api/fleet/status","POST",{node:d.status});return;}
+    if(d.update){await api("/api/fleet/update","POST",{node:d.update});return;}
+    if(d.scan){$("scan-from").value=d.scan;HOSTS=[];
+      document.querySelector('.tab[data-tab="discover"]').click();return runScan();}
+    if(d.shell){$("shell-node").value=d.shell;
+      document.querySelector('.tab[data-tab="shell"]').click();return openShell();}
+  });
+  $("hosts").addEventListener("change",(e)=>{
+    const i=e.target.dataset.host; if(i===undefined)return;
+    if(e.target.checked)PICKED[i]=true; else delete PICKED[i];
+    updateCount();
+  });
+  $("add-btn").addEventListener("click",async()=>{
+    const id=$("add-id").value.trim().toLowerCase();
+    if(!/^[0-9a-f]{40}$/.test(id))return;
+    await api("/api/fleet/enrol","POST",
+              {node:id,caps:capsOf($("add-caps")),label:$("add-label").value.trim()});
+    $("add-id").value="";$("add-label").value="";poll();
+  });
+  $("scan-btn").addEventListener("click",runScan);
+  $("deploy-btn").addEventListener("click",deploy);
+  $("shell-open").addEventListener("click",openShell);
+  $("shell-kill").addEventListener("click",async()=>{
+    if(!SHELL.sid)return;
+    await api("/api/fleet/close","POST",{node:SHELL.node,sid:SHELL.sid});
+    SHELL={sid:null,node:null,off:0};
+  });
+  $("term-form").addEventListener("submit",async(e)=>{
+    e.preventDefault();
+    const v=$("term-in").value; $("term-in").value="";
+    await sendLine(v);
+  });
+  $("modal-close").addEventListener("click",closeModal);
+  $("modal").addEventListener("click",(e)=>{if(e.target===$("modal"))closeModal();});
+}
+
+// ---- auth / boot ----
+async function enter(token){
+  const h={}; if(token)h["Authorization"]="Bearer "+token;
+  const r=await fetch("/api/fleet/state?since=0",{headers:h});
+  if(!r.ok)return false;
+  TOKEN=token||null;
+  if(TOKEN){try{sessionStorage.setItem("nmesh_token",TOKEN);}catch(_){}}
+  $("login").classList.add("hidden");$("app").classList.remove("hidden");
+  await poll(); if(timer)clearInterval(timer); timer=setInterval(poll,1500);
+  return true;
+}
+$("login-form").addEventListener("submit",async(e)=>{
+  e.preventDefault();$("err").textContent="";
+  try{
+    const res=await fetch("/api/login",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:$("password").value})});
+    if(!res.ok){const j=await res.json().catch(()=>({}));
+      $("err").textContent=j.error||"login failed";return;}
     $("password").value=""; await enter((await res.json()).token);
   }catch(_){$("err").textContent="network error";}
 });

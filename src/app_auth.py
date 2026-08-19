@@ -391,6 +391,12 @@ class AppAuth:
     def node_id(self) -> NodeID:
         return self._node_id
 
+    @property
+    def public_key(self) -> bytes:
+        """Our own ML-DSA public key — the thing a peer needs to verify us. It
+        is public by definition; the private half never leaves the identity."""
+        return self._identity.dsa_public_key
+
     # -- assertions -------------------------------------------------------
 
     def assert_to(self, audience: bytes | NodeID, purpose: str,

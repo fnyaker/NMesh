@@ -15,7 +15,7 @@ import random
 
 import pytest
 
-from src.app_auth import ctx_hash, make_assertion
+from src.app_auth import AppAuth, ctx_hash, make_assertion
 from src.apps import fleet
 from src.apps.fleet import (
     CommandResult, EnrolAnswered, EnrolRequested, FleetApp, Failure,
@@ -48,7 +48,8 @@ class Peer:
         self.identity = CryptoIdentity()
         self.id = NodeID.from_public_key(self.identity.dsa_public_key)
         self.client = StubClient()
-        self.app = FleetApp(self.client, self.identity, node_id=self.id,
+        self.app = FleetApp(self.client,
+                            AppAuth(self.identity, fleet.FLEET_APP_ID, self.id),
                             state=FleetState(), repo_root=repo_root,
                             auto_status=False)
 
