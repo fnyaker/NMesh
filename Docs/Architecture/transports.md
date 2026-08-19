@@ -100,7 +100,12 @@ un relais commun. Machinerie (constantes `_PUNCH_*`) :
 
 Un lien sain mais **inactif** est reapé au `_READ_TIMEOUT` (TCP 60 s). Le nœud
 PING donc chaque pair établi toutes les **20 s** (`_LINK_KEEPALIVE_INTERVAL`),
-bien en deçà. Les deux extrémités le font → trafic dans les deux sens ; toute
+bien en deçà. Les liens du **set maintenu** (`_neighbor_slots`, les
+`_NEIGHBOR_FLOOR = 3` plus proches — cf. `routing.md`) sont pingés **en
+premier** : ce sont ceux que le nœud s'engage à tenir, ils ne doivent jamais
+être affamés par un pair lent ou mort placé plus tôt dans la liste. Si le
+compte de liens vivants passe sous le plancher à la fin d'un cycle, la
+maintenance de voisinage est réveillée immédiatement. Les deux extrémités le font → trafic dans les deux sens ; toute
 trame entrante réarme le timeout. Démarré dans `start()`/`join()`, arrêté dans
 `stop()`. Ne lève jamais. (Ce PING porte aussi `advertised_uris` → gossip
 d'adresses, cf. `routing.md`.)

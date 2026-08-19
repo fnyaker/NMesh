@@ -6,9 +6,15 @@ Rapides, sans réseau réel. Couvrent toute la logique interne, y compris le
 fuzzing (aucun octet hostile ne crashe un parseur).
 
 ```bash
-pip install -r requirements.txt
+NMESH_SETUP_ONLY=1 ./start.sh   # installe tout, ne lance pas de nœud
+. .venv/bin/activate
 pytest
 ```
+
+(`start.sh` installe aussi les dépendances de test ; il gère les distros qui
+livrent `pip`/`venv` à part — voir [`Docs/Setup/guide`](Docs/Setup/guide).
+À la main : `python3 -m venv .venv && . .venv/bin/activate &&
+pip install -r requirements.txt`.)
 
 Environ 740 tests en ~20 secondes.
 

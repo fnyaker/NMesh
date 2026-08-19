@@ -37,6 +37,12 @@ jamais le contenu.
 ./start.sh                         # crée un venv, installe les deps, lance un nœud + console
 ```
 
+Sur une machine neuve, le script se débrouille seul : il détecte la distribution
+(apt, dnf/yum, pacman, zypper, apk, xbps, Homebrew, FreeBSD, Termux), installe
+ce qui manque — **y compris `pip`/`venv` quand la distro les livre à part
+(Ubuntu, Debian, Alpine, Arch)** — et compile liboqs. La liste complète des cas
+traités est dans [`Docs/Setup/guide`](Docs/Setup/guide).
+
 Au premier lancement, le mot de passe de la console est **généré et affiché une
 fois** — notez-le. Puis ouvrez l'URL affichée (console web en HTTPS).
 
@@ -48,9 +54,17 @@ Options utiles (tout argument est transmis au lanceur) :
 ./start.sh --console-host 0.0.0.0         # console accessible depuis le LAN
 ```
 
-Sans le script, à la main :
+Vérifier une installation sans démarrer de nœud (utile en CI) :
 
 ```bash
+NMESH_SETUP_ONLY=1 ./start.sh
+```
+
+Sans le script, à la main (dans un venv — depuis PEP 668, la plupart des distros
+refusent d'installer dans le Python système) :
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 python scripts/nmesh_node.py --data ./data
 ```
@@ -137,7 +151,7 @@ hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
 src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
 scripts/          nmesh_node.py (lanceur), build_pyz.py
 docker/           image et compose du nœud-relais
-Docs/             guides (transports, console, connecteur, format des paquets)
+Docs/             guides (installation, transports, console, connecteur, paquets)
 tests/            unitaires + tests/integration (nœuds réels)
 ```
 </content>

@@ -174,15 +174,49 @@ chat publie automatiquement au `set_pseudo` et cherche le réseau au `search`.
 ## Maintenance de voisinage cible et recovery au démarrage
 
 Un nœud ne survit pas à un voisinage éparse : il entretient activement un
-**groupe cible de 5 voisins** choisis par distance XOR, et peut atteindre n'importe quel
-node-id en relayant à travers ses voisins et la DHT même sans pair direct
-commun.
+**groupe de voisins** choisis par distance XOR (le seul critère de maintien de
+table), et peut atteindre n'importe quel node-id en relayant à travers ses
+voisins et la DHT même sans pair direct commun.
 
-- Cible `_NEIGHBOR_TARGET = 5` : au démarrage (`start()`) et à chaud toutes les
-  `_NEIGHBOR_REFRESH = 30 s`, le nœud cherche les entrées XOR-les-plus-proches
-  dont il n'a pas encore de session authentifiée, privilégie les buckets
-  éloignés, puis tente `_connect_routing` sur les adresses connues (IPv6 puis
+### Les deux régimes (`_maintain_neighbors`)
+
+Le cycle tourne toutes les `_NEIGHBOR_REFRESH = 30 s` (au démarrage via
+`start()`, puis en boucle), mais son contenu dépend de ce qu'on tient déjà :
+
+- **Recherche** — tant que le nœud tient **moins de `_NEIGHBOR_FLOOR = 3` liens
+  authentifiés vivants** : `kad_lookup` sur son propre id pour rafraîchir son
+  voisinage, puis dial dirigé des `_NEIGHBOR_TARGET = 5` entrées
+  XOR-les-plus-proches dont il n'a pas de session (`_connect_routing`, IPv6 puis
   IPv4). C'est un dial dirigé, pas un broadcast.
+- **Silence** — dès `_NEIGHBOR_FLOOR` liens tenus : ni lookup ni dial. Un nœud
+  qui cherche son propre id indéfiniment n'est que du trafic, et un mesh qui ne
+  se stabilise jamais est un mesh qu'un adversaire peut tenir occupé. Perdre un
+  des trois liens (`_drop_failed_peer`, keepalive) relance immédiatement la
+  recherche.
+- `force=True` (join/`bootstrap`) impose un cycle de recherche complet quoi
+  qu'on tienne déjà : une table fraîche doit se peupler.
+
+### Promotion d'une node vue en transit
+
+Le set maintenu (`_neighbor_slots`) = les `_NEIGHBOR_FLOOR` liens vivants les
+plus proches ; sa **borne d'intérêt** (`_neighbor_cutoff`) est la distance du
+plus mauvais des trois.
+
+- `_learn_reverse_path` voit passer tout paquet routable : si son `src_id` n'est
+  pas déjà un pair et qu'il est **strictement plus proche** que la borne, il
+  entre dans `_neighbor_watch` (`_note_neighbor_candidate`).
+- Le cycle suivant dial ces candidates **même en régime silencieux** : une fois
+  la session établie, la nouvelle entre dans le set et la moins intéressante en
+  sort. Le lien évincé n'est **jamais coupé de force** (il peut porter du trafic
+  applicatif ou relayer pour d'autres) : il cesse simplement d'être garanti.
+- Bornes et sécurité : `_neighbor_watch` est plafonnée
+  (`_NEIGHBOR_WATCH_TRACKED = 64`, plus ancienne évincée), les entrées devenues
+  vivantes ou dépassées sont purgées à chaque cycle
+  (`_neighbor_promotions`, au plus `_NEIGHBOR_TARGET` par cycle), et **observer
+  ne réveille jamais la boucle** : un `src_id` de paquet routé n'est pas
+  authentifié, il ne doit pas piloter notre cadence de dial. Au pire il coûte
+  une tentative avec back-off vers une identité qui devra ensuite prouver sa clé
+  au handshake (`NodeID` = hash de la clé DSA).
 - Back-off par identité : chaque identité en échec retarde ses prochaines
   tentatives (`_neighbor_retry_until`, minimum `2 s`, plafond `60 s`) ; le
   nombre d'identités suivies est borné (`_NEIGHBOR_RETRY_TRACKED = 128`) pour

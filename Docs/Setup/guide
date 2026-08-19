@@ -1,0 +1,64 @@
+# Installation — ce que `./start.sh` règle tout seul
+
+`./start.sh` doit démarrer un nœud sur une machine **neuve**, sans rien
+demander. Les distributions ne sont d'accord sur rien : ni sur la présence de
+`pip`, ni sur le droit d'installer quoi que ce soit hors venv, ni sur les noms
+de paquets. Ce document liste les cas réels traités par le script — si tu
+changes un de ces comportements, mets ce fichier à jour dans le même commit.
+
+```bash
+./start.sh                     # installe tout puis lance le nœud
+NMESH_SETUP_ONLY=1 ./start.sh  # installe et vérifie, sans lancer le nœud (CI)
+```
+
+## Les pièges par distribution
+
+| Cas | Où ça mord | Traitement |
+|---|---|---|
+| **Pas de `pip` du tout** | Ubuntu/Debian : `python3` est livré sans `ensurepip`, `python3 -m venv` meurt sur *« ensurepip is not available »* | Sonde `venv_capable()` (crée un venv jetable **et** vérifie que `pip` y répond), puis installe `python3-venv python3-pip` |
+| **`pip` dans un paquet séparé** | Alpine (`py3-pip`), Arch (`python-pip`), Fedora/openSUSE/Void (`python3-pip`) | Même sonde, nom de paquet par famille (`pkg_names pipvenv`) |
+| **Environnement « externally managed » (PEP 668)** | Debian ≥12, Ubuntu ≥23.04, Fedora ≥38, Arch, openSUSE, Homebrew : `pip install` refuse de toucher au système | On n'installe **jamais** dans le système : tout passe par le venv. Aucun `--break-system-packages` |
+| **`python3-venv` pointe sur le mauvais interpréteur** | Debian/Ubuntu avec plusieurs Python (deadsnakes) | Repli sur `python<X.Y>-venv`, puis `python3-full` |
+| **`venv` définitivement indisponible** | Images Python amputées | Repli sur `virtualenv` (qui embarque son propre pip), paquet distro puis binaire |
+| **Pas de Python ≥ 3.10** | Debian minimal, RHEL ancien | Installe le paquet `python` de la famille, puis re-cherche (du plus récent au plus ancien) |
+| **Pas de `sudo`** | Conteneurs (souvent root), Termux | root → préfixe vide ; ni root ni `sudo` → message explicite, on n'essaie pas |
+| **`sudo` sans mot de passe possible** | Job non interactif | Détecté (`sudo -n` + absence de TTY) : on affiche la commande à lancer à la main au lieu de bloquer sur un prompt |
+| **`apt` interactif** | Debian/Ubuntu | `DEBIAN_FRONTEND=noninteractive` |
+| **Mise à jour partielle** | Arch (`pacman -Sy` puis install = système cassé) | `pacman -Syu --needed` avant tout install |
+| **Nom de paquet inconnu de cette release** | `ninja` vs `ninja-build`, `python3-dev` vs `python3-devel` | Le lot est retenté **paquet par paquet** : un nom inconnu n'annule pas les autres |
+| **`cmake` trop vieux** | CentOS 7 & co (2.8) — liboqs ne configure pas | Version vérifiée (≥ 3.18), sinon `pip install cmake ninja` dans le venv |
+| **Distro inconnue** | Dérivées exotiques | `ID`/`ID_LIKE` d'abord, sinon le gestionnaire réellement installé ; en dernier recours cmake/ninja par pip |
+| **Distros déclaratives** | NixOS, Gentoo | On n'installe rien dans le dos de l'utilisateur : commande `nix-shell` / `emerge` affichée |
+| **Pas de wheel pour la plateforme** | musl, ARM 32 bits, RISC-V : `cryptography` se compile | Sur échec de `pip install`, installe Rust + headers OpenSSL/FFI (`pkg_names native`) et retente |
+| **Pas de `git`** | Images minimales | Les sources liboqs sont récupérées en tarball (même ref, même origine) via `curl` |
+| **venv hérité cassé** | Upgrade de distro qui supprime l'interpréteur, venv créé sans pip | `venv_broken()` le détecte à chaque lancement et le recrée |
+| **Peu de RAM, beaucoup de cœurs** | Build liboqs OOM-killé (~1,5 Go par unité de compilation) | Parallélisme plafonné par `MemAvailable` |
+
+## Familles gérées
+
+`apt` (Debian, Ubuntu, Mint, Pop!\_OS, Kali, Raspbian…), `dnf`/`yum` (Fedora,
+RHEL, Rocky, Alma, Amazon Linux, CentOS 7), `pacman` (Arch, Manjaro,
+EndeavourOS…), `zypper` (openSUSE, SLES), `apk` (Alpine), `xbps` (Void),
+Homebrew (macOS), `pkg` (FreeBSD), `pkg` (Termux/Android), plus les cas
+déclaratifs NixOS et Gentoo (instructions seulement).
+
+## Structure du script
+
+Tout ce qui précède la bannière `MAIN` n'est que des **définitions** ; la suite
+est le déroulé (Python → venv/pip → outils de build → venv → dépendances →
+vérification → lancement). La suite de tests source le fichier avec
+`NMESH_START_LIB=1` : elle exerce la détection, les noms de paquets, `sudo`, la
+sonde venv et la vérification de `cmake` avec un `PATH` isolé et de faux
+gestionnaires de paquets, sans jamais rien installer
+(`tests/test_start_script.py`).
+
+## Pourquoi liboqs est compilé
+
+Aucune distro ne fournit un liboqs digne de confiance : Debian/Ubuntu n'en ont
+jamais eu (retiré d'unstable en avril 2025), Fedora reste sur 0.10.0 — trop
+vieux pour garantir ML-KEM-768 / ML-DSA-65. Le script compile donc la **release
+correspondant exactement au wrapper `liboqs-python` installé**, dans
+`$OQS_INSTALL_PATH` (défaut `~/_oqs`), seul endroit où le wrapper cherche.
+Sur macOS, la formule Homebrew officielle est acceptée après vérification des
+deux algorithmes requis. Détail des pièges liboqs :
+[`../Architecture/gotchas.md`](../Architecture/gotchas.md).

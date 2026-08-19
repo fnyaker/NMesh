@@ -219,6 +219,20 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
 - Les identités en échec accumulent un back-off indépendant ; sans borne
   (`_NEIGHBOR_RETRY_TRACKED`), une table de routage énorme peut faire grandir
   ce suivi sans fin. Cette table est une simple `dict` bornée en taille.
+- **Au-dessus de `_NEIGHBOR_FLOOR = 3` liens vivants, un cycle de maintenance ne
+  fait plus rien** (ni `kad_lookup`, ni dial) — c'est voulu (voir
+  `routing.md`). Un test qui attend un dial doit donc soit rester sous le
+  plancher, soit appeler `_maintain_neighbors(force=True)` ; sinon il constate
+  un silence parfaitement normal et conclut à tort à une régression.
+- La **promotion** (une node vue en transit, plus proche que notre pire
+  créneau) dial *même en régime silencieux* : c'est un second chemin, en plus du
+  scan par bucket, qui peut créer un raccourci dans un test de topologie en
+  chaîne. Même parade : `_stop_neighbor_maintenance()` après le join.
+- Observer une candidate ne **réveille jamais** la boucle de maintenance. C'est
+  délibéré : le `src_id` d'un paquet routé n'est pas authentifié, et réveiller
+  sur réception laisserait n'importe qui choisir un id proche du nôtre pour
+  fixer notre cadence de dial (amplification). La candidate est traitée au
+  cycle suivant, au plus 30 s après.
 - Le dial multi-peer partage un deadline commun : on évite d'« attendre le plus
   lent » quand la cible est simplement injoignable. Un échec collectif est
   distingué d'un échec partiel (certains pairs répondent, d'autres non) pour
