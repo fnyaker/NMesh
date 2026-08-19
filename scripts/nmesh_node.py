@@ -15,7 +15,8 @@ import os
 import shlex
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, ROOT)
 from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
@@ -25,9 +26,78 @@ from src.webconsole import WebConsole
 from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
+from src.app_registry import FLEET_APP_ID, AppHost, AppRegistry
 from src.apps.chat import ChatApp
 from src.apps.chat_state import ChatState, DrawerStore
 from src.apps.chat_web import ChatBridge
+from src.apps.fleet import FleetApp
+from src.apps.fleet_state import FleetState
+from src.apps.fleet_web import FleetBridge
+from src.apps import fleet_provision
+
+
+def _chat_factory(node, connector):
+    """Build the chat app on demand (the app host calls this when enabling it).
+
+    State and message history live in the node's encrypted per-app drawer
+    (``CHAT_APP_ID``) — contacts and pseudos never sit in the clear, and the feed
+    survives restarts. With no ``--data`` the drawer is RAM-only."""
+    async def build():
+        client = ConnectorClient(connector.host, connector.port,
+                                 connector.token, CHAT_APP_ID)
+        await client.connect()
+        store = DrawerStore(node.app_storage, CHAT_APP_ID)
+        state = ChatState(store=store)
+        app = ChatApp(client, node_id=node.id, state=state)
+        return app, ChatBridge(app, store=store)
+    return build
+
+
+def _fleet_factory(node, connector, data_dir):
+    """Build the fleet app on demand.
+
+    The trust ledger lives in the fleet drawer, encrypted at rest like every
+    other app's state. ``repo_root`` is the tree this node would push when
+    provisioning; without one the provision capability reports itself
+    unavailable instead of half working."""
+    async def build():
+        client = ConnectorClient(connector.host, connector.port,
+                                 connector.token, FLEET_APP_ID)
+        await client.connect()
+        store = DrawerStore(node.app_storage, FLEET_APP_ID)
+        app = FleetApp(client, node.app_auth(FLEET_APP_ID),
+                       state=FleetState(store=store), repo_root=ROOT)
+        return app, FleetBridge(app)
+    return build
+
+
+async def _adopt_operator(node, host, preauth, path) -> None:
+    """First start after provisioning: join the mesh the operator named, adopt
+    them as an operator, prove which provisioning run we came from, and delete
+    the pre-authorisation.
+
+    The file is removed whatever happens. It is single-use by construction — the
+    operator only honours the token once — so keeping it around after the
+    attempt would leave a stale secret on disk for no benefit."""
+    try:
+        for uri in preauth.get("join_uris") or []:
+            try:
+                await node.join(uri, preauth.get("join_code") or "")
+                break
+            except Exception:
+                continue
+        app = host.app("fleet")
+        if app is not None:
+            await app.claim_preauth(preauth)
+            print(f"  Fleet         : adopted operator "
+                  f"{preauth['operator_id'].hex()[:16]}…")
+    except Exception as exc:
+        print(f"  Fleet         : pre-authorisation failed ({type(exc).__name__})")
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 async def main() -> None:
@@ -54,6 +124,11 @@ async def main() -> None:
                     help="launch an app wired to the mesh (repeatable); needs --connector-port")
     ap.add_argument("--no-chat", action="store_true",
                     help="disable the built-in chat app (served at /chat on the console)")
+    ap.add_argument("--fleet", action="store_true",
+                    help="enable the built-in fleet app (remote management + "
+                         "deployment, served at /fleet). Off by default: it can "
+                         "open a shell, so it is enabled deliberately. The "
+                         "console's Apps page toggles it too.")
     ap.add_argument("--no-tls", action="store_true")
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
     # Read from the environment so a password never lands in the process args
@@ -96,39 +171,54 @@ async def main() -> None:
             if pub:
                 print(f"  STUN          : public UDP addr {pub[0]}:{pub[1]}")
 
-    # A data connector backs both the built-in chat app and any --launch'd apps.
-    # When only chat needs it, bind an ephemeral loopback port; --connector-port
-    # exposes a fixed one for external apps.
+    # A data connector backs every built-in app and any --launch'd apps. When
+    # only the built-ins need it, bind an ephemeral loopback port;
+    # --connector-port exposes a fixed one for external apps.
+    registry = AppRegistry(args.data)
+    if args.no_chat:
+        registry.set_enabled("chat", False)
+    if args.fleet:
+        registry.set_installed("fleet", True)
+        registry.set_enabled("fleet", True)
+
+    # A machine provisioned by an operator carries a pre-authorisation: it names
+    # who to trust and proves which provisioning run this node came from. Its
+    # presence is also what turns the fleet app on for a headless box nobody can
+    # click "enable" on.
+    preauth = None
+    if args.data:
+        preauth_path = os.path.join(args.data, fleet_provision.PREAUTH_FILENAME)
+        preauth = fleet_provision.read_preauth(preauth_path)
+        if preauth is not None:
+            registry.set_installed("fleet", True)
+            registry.set_enabled("fleet", True)
+
     connector = None
     launcher = None
-    chat_app = None
-    chat_bridge = None
-    if not args.no_chat or args.connector_port is not None:
+    host = None
+    wants_apps = registry.is_enabled("chat") or registry.is_enabled("fleet")
+    if wants_apps or args.connector_port is not None:
         connector = DataConnector(node, host="127.0.0.1", port=args.connector_port or 0)
         await connector.start()
         launcher = ProcessLauncher(connector, node_id=node.id)
         for cmd in args.launch:
             await launcher.launch(shlex.split(cmd))
     elif args.launch:
-        print("  NOTE          : --launch ignored (requires --connector-port or chat)")
+        print("  NOTE          : --launch ignored (requires --connector-port or an app)")
 
-    if not args.no_chat and connector is not None:
-        chat_client = ConnectorClient(connector.host, connector.port,
-                                      connector.token, CHAT_APP_ID)
-        await chat_client.connect()
-        # Persist chat state + message history in the node's encrypted per-app
-        # drawer (CHAT_APP_ID) — contacts/pseudos never sit in the clear, and the
-        # feed survives restarts. With no --data the drawer is RAM-only.
-        chat_store = DrawerStore(node.app_storage, CHAT_APP_ID)
-        chat_state = ChatState(store=chat_store)
-        chat_app = ChatApp(chat_client, node_id=node.id, state=chat_state)
-        await chat_app.start()
-        chat_bridge = ChatBridge(chat_app, store=chat_store)
+    if connector is not None:
+        host = AppHost(registry, app_storage=node.app_storage)
+        host.register("chat", _chat_factory(node, connector))
+        host.register("fleet", _fleet_factory(node, connector, args.data))
+        await host.apply()
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
                          state_dir=args.data, use_tls=not args.no_tls,
-                         password=args.console_password, chat_bridge=chat_bridge)
+                         password=args.console_password, app_host=host)
     console.start(loop=asyncio.get_running_loop())
+
+    if preauth is not None and host is not None:
+        await _adopt_operator(node, host, preauth, preauth_path)
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
@@ -141,8 +231,10 @@ async def main() -> None:
     if args.udp is not None and not args.no_udp:
         print(f"  UDP listener  : udp://0.0.0.0:{args.udp}   (NAT hole punching)")
     print(f"  Web console   : {console.url}")
-    if chat_bridge is not None:
-        print(f"  Chat app      : {console.url}chat   (built-in, in-app)")
+    for app in (host.overview() if host is not None else []):
+        if app["running"]:
+            print(f"  App           : {app['name']:<6} {console.url.rstrip('/')}"
+                  f"{app['path']}")
     if console.generated_password:
         print(f"  Password      : {console.generated_password}   (shown once — save it)")
     elif args.console_password:
@@ -165,9 +257,9 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
-        console.stop()          # also detaches the chat bridge listener
-        if chat_app is not None:
-            await chat_app.stop()   # closes the in-process connector client
+        console.stop()
+        if host is not None:
+            await host.stop_all()   # stops each app + its console bridge
         if launcher is not None:
             await launcher.stop_all()
         if connector is not None:

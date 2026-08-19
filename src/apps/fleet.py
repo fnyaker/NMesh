@@ -59,7 +59,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from ..app_auth import AppAuth, ctx_hash
+from ..app_auth import ctx_hash
 from ..app_channel import builtin_id
 from ..node_id import NodeID
 from . import fleet_host, fleet_provision, fleet_ssh
@@ -260,18 +260,19 @@ class _Shell:
 class FleetApp:
     """Fleet management over a :class:`~src.data_connector.ConnectorClient`.
 
-    ``repo_root`` is the NMesh tree this node would push when provisioning; with
-    none, the provision capability reports itself unavailable rather than half
-    working."""
+    ``auth`` is the app-scoped authentication service the node hands out
+    (``node.app_auth(FLEET_APP_ID)``): the app signs and verifies through it and
+    never sees the node's signing key. ``repo_root`` is the NMesh tree this node
+    would push when provisioning; with none, the provision capability reports
+    itself unavailable rather than half working."""
 
-    def __init__(self, client, identity, *, node_id: NodeID,
-                 state: FleetState | None = None,
+    def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None,
                  auto_status: bool = True) -> None:
         self._client = client
-        self.node_id = node_id
+        self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
+        self.node_id = auth.node_id
         self.state = state or FleetState()
-        self._auth = AppAuth(identity, FLEET_APP_ID, node_id)
         self._repo_root = repo_root
         self._auto_status = auto_status
         self._facts: fleet_host.HostFacts | None = None
@@ -1122,7 +1123,7 @@ class FleetApp:
         try:
             for target in targets:
                 preauth, token = fleet_provision.make_preauth(
-                    self.node_id.raw, self._auth._identity.dsa_public_key,
+                    self.node_id.raw, self._auth.public_key,
                     capabilities=caps, join_uris=join_uris or [],
                     join_code=join_code, label=target.get("label", target["ip"]))
                 digest = fleet_provision.token_digest(token)
