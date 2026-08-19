@@ -400,7 +400,12 @@ async def provision_host(host: str, creds: SshCredentials, *,
                         pass
 
     result = {"host": host, "ok": False, "steps": steps, "status": None,
-              "error": None}
+              "error": None, "pinned": bool(known_hosts_lines)}
+    if not known_hosts_lines:
+        # No confirmed host key to pin, so this run falls back to accept-on-first
+        # use. That is a real weakening (a machine in the middle would be
+        # accepted once), so it is announced rather than done quietly.
+        on_output("::step::warning: no host key to pin — trusting on first use\n")
     try:
         status, _output = await fleet_ssh.run(
             host, creds, ["/bin/sh", "-s"], port=port,

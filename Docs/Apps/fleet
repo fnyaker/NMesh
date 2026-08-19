@@ -189,6 +189,11 @@ unique :
   un `print` accidentel ou une trace rendant ses locales ne fuit rien. `wipe()`
   lâche les références dès la fin du run (les `str` CPython étant immuables, la
   borne honnête est « pas conservé », pas « effacé de la RAM »).
+- Quand **aucune** clé d'hôte n'a pu être confirmée (pas de `ssh-keyscan` sur la
+  machine qui scanne, ou cible muette), le run retombe sur `accept-new` — un
+  affaiblissement réel, donc **annoncé** : une étape `warning: no host key to
+  pin` apparaît dans le journal et le résultat porte `pinned: false`. Jamais
+  silencieux.
 - Les clés d'hôte ne sont **pas** acceptées à l'aveugle : le scan montre les
   empreintes, l'opérateur confirme, et le run épingle exactement celles-là dans
   un `known_hosts` jetable (0600, supprimé après) avec
