@@ -422,3 +422,154 @@ class TestShutdownAlwaysFinishes:
         assert time.monotonic() - started < _PEER_STOP_TIMEOUT + 2.0
         assert all(t.closed for t in transports)
         assert not node._peers
+
+
+# ---------------------------------------------------------------------------
+# 5 — a lookup that reaches the id it is looking for must *learn* it
+# ---------------------------------------------------------------------------
+
+class TestResponderAnswersAboutItself:
+    """Kademlia's reply classically excludes the responder. Here a querier often
+    reaches a node only through a relay, so leaving ourselves out meant it never
+    learned our entry: the FIND_NODE routed to the very id being looked up came
+    back with that node's neighbours, the shortlist stopped improving, and the
+    lookup gave up one hop short of an id it had actually reached. Seen as a
+    flaky `_kademlia_lookup` returning False in a relay star."""
+
+    async def test_reply_contains_the_responder_when_it_is_the_target(self):
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 4)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+
+        await node._handle_find_node(
+            peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
+                                node.id.raw, node.id.raw + os.urandom(_QID_LEN)))
+
+        entries = _decode_entries(
+            next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
+        assert entries[0].node_id == node.id, "we are the closest entry to our own id"
+        assert entries[0].cert_chain, "our entry must carry its chain or it is dropped"
+        await node.stop()
+
+    async def test_own_entry_is_ranked_by_distance_like_any_other(self):
+        """No privilege: for a target next to another node, that node comes
+        first — the budget is not spent on us just because we are answering."""
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 8)
+        nearest = min((e.node_id for e in node._routing.all_entries()),
+                      key=lambda n: n.distance(NodeID(b"\x00" * 20)))
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+
+        await node._handle_find_node(
+            peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
+                                node.id.raw, nearest.raw + os.urandom(_QID_LEN)))
+
+        entries = _decode_entries(
+            next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
+        assert entries[0].node_id == nearest
+        await node.stop()
+
+    async def test_own_entry_still_verifies_at_the_receiver(self):
+        """The entry is only useful if the receiver accepts it: chain valid and
+        its first certificate's subject *is* the node id (no relay forgery)."""
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 2)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+
+        await node._handle_find_node(
+            peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
+                                node.id.raw, node.id.raw + os.urandom(_QID_LEN)))
+
+        own = next(e for e in _decode_entries(
+            next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
+            if e.node_id == node.id)
+        assert node._cert_store.verify_chain(own.cert_chain) is not None
+        assert own.cert_chain[0].subject_id == node.id
+        await node.stop()
+
+
+class TestLookupDoesNotInheritAnotherLookupsFailure:
+    """`_kademlia_lookup` used to return an in-flight lookup's verdict as its
+    own. That lookup started from another shortlist at another time, so a fresh
+    caller could be told "not found" for an id it never actually asked about."""
+
+    async def _finished_pending(self, node: MeshNode, target: NodeID):
+        """A lookup for ``target`` that is already in flight and about to end
+        without having learned it."""
+        event = asyncio.Event()
+        node._pending_lookups[target] = event
+
+        async def finish():
+            await asyncio.sleep(0)
+            node._pending_lookups.pop(target, None)
+            event.set()
+
+        asyncio.ensure_future(finish())
+        return event
+
+    async def test_runs_its_own_lookup_after_piggybacking(self):
+        node = MeshNode(transport_manager=make_manager())
+        target = NodeID(os.urandom(20))
+        await self._finished_pending(node, target)
+        calls = []
+
+        async def fake_kad_lookup(t, **kwargs):
+            calls.append(t)
+            node._routing.add(t, ["tcp://10.9.9.9:9000"], b"key")
+            return [t]
+
+        node.kad_lookup = fake_kad_lookup
+        assert await node._kademlia_lookup(target, timeout=5.0) is True
+        assert calls == [target], "the fresh caller must ask for itself"
+        await node.stop()
+
+    async def test_no_second_lookup_when_the_first_found_it(self):
+        node = MeshNode(transport_manager=make_manager())
+        target = NodeID(os.urandom(20))
+        event = asyncio.Event()
+        node._pending_lookups[target] = event
+
+        async def finish():
+            await asyncio.sleep(0)
+            node._routing.add(target, ["tcp://10.9.9.9:9000"], b"key")
+            node._pending_lookups.pop(target, None)
+            event.set()
+
+        asyncio.ensure_future(finish())
+        calls = []
+        node.kad_lookup = lambda *a, **k: calls.append(1)
+
+        assert await node._kademlia_lookup(target, timeout=5.0) is True
+        assert calls == [], "no redundant round when the answer is already there"
+        await node.stop()
+
+    async def test_gives_up_when_the_slot_was_taken_again(self):
+        """Bounded: a caller never chains onto a second in-flight lookup, so two
+        nodes cannot keep deferring to each other."""
+        node = MeshNode(transport_manager=make_manager())
+        target = NodeID(os.urandom(20))
+        event = asyncio.Event()
+        node._pending_lookups[target] = event
+
+        async def finish():
+            await asyncio.sleep(0)
+            event.set()          # released, but the slot stays occupied
+
+        asyncio.ensure_future(finish())
+        calls = []
+        node.kad_lookup = lambda *a, **k: calls.append(1)
+
+        assert await node._kademlia_lookup(target, timeout=5.0) is False
+        assert calls == []
+        await node.stop()
+
+    async def test_timeout_keeps_the_in_flight_verdict(self):
+        node = MeshNode(transport_manager=make_manager())
+        target = NodeID(os.urandom(20))
+        node._pending_lookups[target] = asyncio.Event()   # never set
+        calls = []
+        node.kad_lookup = lambda *a, **k: calls.append(1)
+
+        assert await node._kademlia_lookup(target, timeout=0.05) is False
+        assert calls == [], "a timed-out wait must not start a second lookup"
+        await node.stop()

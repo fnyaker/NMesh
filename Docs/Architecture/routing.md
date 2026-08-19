@@ -228,6 +228,13 @@ plus mauvais des trois.
   deadline commun. Un pair qui échoue n'entraîne pas la chute du message : on
   essaie le suivant. L'échec total est repris par l'acquisition de route en
   tâche de fond (`_defer_route`), jamais en bloquant le lien entrant.
+- Un lookup **n'hérite pas du verdict d'un autre**. `_kademlia_lookup` déduplique
+  par cible (`_pending_lookups`) : s'il en existe un en vol, il l'attend — mais
+  si la cible n'est toujours pas dans la table à la fin, il **relance le sien**
+  avec le budget restant. Cet autre lookup était parti d'une autre shortlist, à
+  un autre moment ; rendre son échec comme le nôtre, c'est abandonner un id
+  qu'on n'a jamais demandé. Une seule reprise : si le créneau est repris entre
+  temps, on rend `False` — deux nœuds ne peuvent pas s'enchaîner indéfiniment.
 - Dernier recours : `_kademlia_lookup(target)` itératif borné (`_KAD_LOOKUP_MAX_ROUNDS = 4`,
   `_KAD_LOOKUP_TIMEOUT = 3.0 s`) agrège `FOUND_NODE` jusqu'à stabilisation ;
   les résultats alimentent `_connect_routing` et la table de routage.
@@ -257,6 +264,17 @@ La réponse est donc **budgétée** :
   utilisables sont dispersées dans la table (une table apprise par gossip en
   contient beaucoup sans chaîne) ; se limiter aux k plus proches renvoyait une
   réponse **vide** dès que ces k-là n'avaient pas de chaîne.
+- **Le répondeur se met lui-même dans la réponse**, classé par distance comme
+  n'importe quelle autre entrée. Kademlia exclut classiquement le répondeur (le
+  demandeur le connaît déjà, il vient de lui parler) — faux ici : un `FIND_NODE`
+  est **routé**, donc le demandeur peut n'atteindre le répondeur qu'à travers un
+  relais et ne jamais apprendre son entrée. Un lookup routé jusqu'à l'id
+  **exactement recherché** revenait alors avec les voisins de cette node, la
+  shortlist cessait de progresser, et le lookup abandonnait à un hop d'un id
+  qu'il avait pourtant atteint (`_kademlia_lookup` renvoie
+  `routing.contains(target)`). Le récepteur vérifie toujours la chaîne **et**
+  que le sujet du premier certificat *est* le node_id de l'entrée : un relais ne
+  peut pas forger cette entrée.
 - Moins d'entrées par réponse = quelques rounds de plus, jamais un lookup mort.
 - `_query_allowed` limite `FIND_NODE`/`FIND_VALUE` par lien entrant
   (`_QUERY_RATE_MAX` par `_QUERY_RATE_WINDOW`) : ce sont les seules requêtes
