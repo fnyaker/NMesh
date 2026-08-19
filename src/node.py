@@ -180,6 +180,16 @@ _ANNOUNCE_FANOUT       = 5
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
 _NEIGHBOR_TARGET          = 5
+# Floor of live maintained links. Below it the node is *searching*: it runs a
+# discovery cycle every _NEIGHBOR_REFRESH. At or above it the neighbourhood is
+# considered joined and the cycle stays quiet — a node that keeps looking up its
+# own id forever is pure traffic, and a mesh that never settles is a mesh an
+# adversary can keep busy. The floor is also what the keepalive guarantees.
+_NEIGHBOR_FLOOR           = 3
+# Identities seen carrying traffic that are XOR-closer to us than the least
+# interesting slot we hold. Bounded: a peer relaying for the whole network must
+# never grow our state (src ids in routed packets are not authenticated).
+_NEIGHBOR_WATCH_TRACKED   = 64
 _NEIGHBOR_REFRESH         = 30.0
 _NEIGHBOR_RETRY_MIN       = 2.0
 _NEIGHBOR_RETRY_MAX       = 60.0
@@ -1087,6 +1097,8 @@ class MeshNode:
         self._neighbor_task: asyncio.Task | None = None
         self._neighbor_wakeup = asyncio.Event()
         self._neighbor_retry: OrderedDict[NodeID, tuple[int, float]] = OrderedDict()
+        # Candidate neighbours spotted in transit (node_id -> observation time).
+        self._neighbor_watch: OrderedDict[NodeID, float] = OrderedDict()
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -1773,16 +1785,26 @@ class MeshNode:
         """Ping every established peer on an interval so a healthy but idle link
         isn't torn down by the transport's read timeout. Both sides run this, so
         each link sees inbound traffic in both directions. Never raises: a link
-        that is genuinely dead is reaped by its own receive loop."""
+        that is genuinely dead is reaped by its own receive loop.
+
+        The maintained set (`_neighbor_slots`) is pinged first: those are the
+        links the node commits to, so they must never be the ones starved by a
+        slow or dead peer earlier in the list. Dropping below the floor puts
+        maintenance back into its searching regime immediately."""
         while self._running:
             await asyncio.sleep(_LINK_KEEPALIVE_INTERVAL)
-            for peer in list(self._peers):
+            slots = self._neighbor_slots()
+            peers = sorted(self._peers,
+                           key=lambda p: 0 if p.authenticated_id in slots else 1)
+            for peer in peers:
                 if peer.authenticated_id is None or peer.session is None:
                     continue
                 try:
                     await self.ping(peer)
                 except Exception:
                     pass
+            if len(self._live_neighbors()) < _NEIGHBOR_FLOOR:
+                self._wake_neighbor_maintenance()
 
     async def _stop_link_keepalive(self) -> None:
         task = self._keepalive_task
@@ -1805,6 +1827,70 @@ class MeshNode:
             seen.add(peer.authenticated_id)
             out.append(peer)
         return out
+
+    def _live_neighbors(self) -> list[NodeID]:
+        """Identities we hold a live authenticated link with, nearest first."""
+        ids = [p.authenticated_id for p in self._authenticated_peers()
+               if p.authenticated_id is not None]
+        ids.sort(key=self._id.distance)
+        return ids
+
+    def _neighbor_slots(self) -> list[NodeID]:
+        """The maintained set: the `_NEIGHBOR_FLOOR` XOR-nearest live links.
+
+        These are the links the node insists on: they get the keepalive first
+        and losing one puts maintenance back into its searching regime.
+        """
+        return self._live_neighbors()[:_NEIGHBOR_FLOOR]
+
+    def _neighbor_cutoff(self) -> int | None:
+        """Distance of the least interesting maintained slot, or None while the
+        set is not full — below the floor every identity is worth having."""
+        slots = self._neighbor_slots()
+        if len(slots) < _NEIGHBOR_FLOOR:
+            return None
+        return self._id.distance(slots[-1])
+
+    def _note_neighbor_candidate(self, node_id: NodeID) -> None:
+        """A packet from ``node_id`` just came through. Remember it when it is a
+        better neighbour than the worst slot we maintain, so the next
+        maintenance cycle dials it and it takes that slot.
+
+        Deliberately does *not* wake maintenance: the loop already runs every
+        `_NEIGHBOR_REFRESH`, and dialling on a packet's arrival would let anyone
+        who picks a source id close to ours set our dialling pace. The src id of
+        a routed packet is unauthenticated — it can only ever cost one
+        backed-off dial to an identity that then has to prove itself in the
+        handshake (NodeID = hash of its DSA key).
+        """
+        if node_id == self._id:
+            return
+        if any(p.authenticated_id == node_id and p.session is not None
+               for p in self._peers):
+            return
+        cutoff = self._neighbor_cutoff()
+        if cutoff is not None and self._id.distance(node_id) >= cutoff:
+            return
+        self._neighbor_watch[node_id] = time.monotonic()
+        self._neighbor_watch.move_to_end(node_id)
+        while len(self._neighbor_watch) > _NEIGHBOR_WATCH_TRACKED:
+            self._neighbor_watch.popitem(last=False)
+
+    def _neighbor_promotions(self) -> list[NodeID]:
+        """Watched candidates still worth dialling, nearest first. Entries that
+        became live, or that a closer slot has since made uninteresting, are
+        dropped here — the watch list never keeps stale work."""
+        cutoff = self._neighbor_cutoff()
+        live = set(self._live_neighbors())
+        out: list[NodeID] = []
+        for node_id in list(self._neighbor_watch):
+            if node_id in live or (cutoff is not None
+                                   and self._id.distance(node_id) >= cutoff):
+                del self._neighbor_watch[node_id]
+                continue
+            out.append(node_id)
+        out.sort(key=self._id.distance)
+        return out[:_NEIGHBOR_TARGET]
 
     def _wake_neighbor_maintenance(self) -> None:
         if self._running:
@@ -1842,14 +1928,28 @@ class MeshNode:
             except TimeoutError:
                 pass
 
-    async def _maintain_neighbors(self) -> None:
+    async def _maintain_neighbors(self, *, force: bool = False) -> None:
         """Run one bounded discovery/reconnect cycle.
 
-        With no known or discoverable identity there is intentionally nothing
-        to dial. Once one live seed exists, iterative lookup refreshes the local
-        neighborhood before selecting the nearest five identities.
+        Two regimes. Below `_NEIGHBOR_FLOOR` live links the node is *searching*:
+        an iterative lookup refreshes its own neighborhood, then it dials the
+        XOR-nearest identities it knows (with no known or discoverable identity
+        there is intentionally nothing to dial). At or above the floor it is
+        joined and stays quiet — no lookup, no dial — except for *promotions*:
+        identities seen carrying traffic that are closer to us than the least
+        interesting slot we hold. Dialling one makes it a maintained neighbour
+        and pushes that worst slot out of the set.
+
+        ``force`` runs a full searching cycle whatever we hold; join/bootstrap
+        use it to populate a fresh table.
         """
-        if self._authenticated_peers():
+        live = self._live_neighbors()
+        searching = force or len(live) < _NEIGHBOR_FLOOR
+        promotions = self._neighbor_promotions()
+        if not searching and not promotions:
+            return
+
+        if searching and self._authenticated_peers():
             try:
                 async with asyncio.timeout(_KAD_LOOKUP_TIMEOUT * 2):
                     await self.kad_lookup(self._id, k=20, alpha=3,
@@ -1859,13 +1959,19 @@ class MeshNode:
 
         now = time.monotonic()
         live_ids = {p.authenticated_id for p in self._authenticated_peers()}
-        desired = [entry.node_id for entry in
-                   self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
+        desired = list(promotions)
+        if searching:
+            desired += [entry.node_id for entry in
+                        self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
         attempts = []
+        seen: set[NodeID] = set()
         for node_id in desired:
             if node_id in live_ids:
                 self._neighbor_retry.pop(node_id, None)
                 continue
+            if node_id in seen:
+                continue
+            seen.add(node_id)
             _, next_try = self._neighbor_retry.get(node_id, (0, 0.0))
             if now >= next_try:
                 attempts.append(node_id)
@@ -2101,13 +2207,13 @@ class MeshNode:
     async def bootstrap(self) -> None:
         """Kademlia join: advertise own addresses then iteratively populate routing table."""
         if not self._authenticated_peers():
-            await self._maintain_neighbors()
+            await self._maintain_neighbors(force=True)
         if not self._authenticated_peers():
             return
         for peer in list(self._peers):
             if peer.session is not None and self._addresses:
                 await self.ping(peer)
-        await self._maintain_neighbors()
+        await self._maintain_neighbors(force=True)
 
     def _learn_reverse_path(self, peer: _Peer, packet: Packet) -> None:
         """A routable packet just arrived from ``packet.src_id`` over ``peer``:
@@ -2129,6 +2235,9 @@ class MeshNode:
             # We have the link ourselves; any hint could only be a longer path.
             self._route_hints.pop(src, None)
             return
+        # Traffic from a node we have no link to: it may be a better neighbour
+        # than the worst slot we maintain (see _note_neighbor_candidate).
+        self._note_neighbor_candidate(src)
         self._route_hints[src] = (peer.authenticated_id, time.monotonic())
         self._route_hints.move_to_end(src)
         while len(self._route_hints) > _ROUTE_HINT_MAX:
