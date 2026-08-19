@@ -237,6 +237,22 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   lent » quand la cible est simplement injoignable. Un échec collectif est
   distingué d'un échec partiel (certains pairs répondent, d'autres non) pour
   que le fallback Kademlia ne « double-dial » pas des candidats déjà valides.
+- **Un lookup vers un id qu'on connaît déjà comme pair du réseau ne le fait pas
+  entrer dans la table.** Symptôme observé en CI (~1 run sur 8, bien avant
+  d'être compris) : `_kademlia_lookup(z)` renvoie `False` en 50 ms dans une
+  étoile relais, alors que le relais connaît parfaitement `z`. Deux causes
+  cumulées, corrigées ensemble :
+  1. la shortlist contenait `z` (distance 0) → le `FIND_NODE` partait **vers
+     `z` lui-même**, qui répondait avec ses voisins sans **jamais s'inclure** ;
+     la shortlist ne progressait plus, le lookup s'arrêtait au premier round et
+     `routing.contains(z)` restait faux. Le répondeur s'inclut désormais dans sa
+     réponse (`_handle_find_node`, cf. `routing.md`) ;
+  2. `_kademlia_lookup` renvoyait le verdict d'un lookup **déjà en vol** sur la
+     même cible (`_pending_lookups`) — parti d'une autre shortlist, à un autre
+     moment. Il relance maintenant le sien avec le budget restant.
+  Moralité pour le débogage : un lookup qui échoue en quelques dizaines de ms
+  n'a rien demandé au réseau. Regarder `_pending_lookups` **avant** de suspecter
+  le transport.
 - **Un test de topologie en chaîne (A-B-C-D-E, sans raccourci) doit désactiver
   la maintenance de voisinage**, pas seulement `_punch_enabled`. Dès que les
   nœuds ont chacun une adresse TCP écoutable, `_maintain_neighbors` les

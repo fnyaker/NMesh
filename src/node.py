@@ -2028,13 +2028,24 @@ class MeshNode:
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
 
     async def _kademlia_lookup(self, target: NodeID, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
         existing = self._pending_lookups.get(target)
         if existing is not None:
             try:
                 await asyncio.wait_for(existing.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                pass
-            return self._routing.contains(target)
+                return self._routing.contains(target)
+            if self._routing.contains(target):
+                return True
+            # That lookup answered a different question: it started from another
+            # shortlist, at another time. Reporting its failure as ours would
+            # give up on an id we never actually asked about — run our own with
+            # what is left of the budget. Only once: if someone else has taken
+            # the slot again meanwhile we stop, so two nodes can never chain
+            # lookups into each other indefinitely.
+            timeout = deadline - time.monotonic()
+            if timeout <= 0 or self._pending_lookups.get(target) is not None:
+                return False
 
         event = asyncio.Event()
         self._pending_lookups[target] = event
@@ -3772,13 +3783,26 @@ class MeshNode:
         # (see _FOUND_NODE_MAX_BYTES). Chains are built lazily so the budget
         # also caps the work one query can ask of us.
         packer = _EntryPacker(_FOUND_NODE_MAX_BYTES)
-        for e in self._routing.get_closest(target, _FIND_NODE_SCAN):
-            if not e.dsa_pub:
+        # Kademlia's answer classically excludes the responder — but here a
+        # querier can only reach us *through* a relay, so leaving ourselves out
+        # means it never learns our entry. A lookup routed to the very id it is
+        # looking for then comes back with that node's neighbours, the shortlist
+        # stops improving, and the lookup ends one hop short of an id it had
+        # actually reached. So rank ourselves among the candidates like any other
+        # entry: the receiver still verifies the chain and that its first cert
+        # subject *is* the entry's node id, so a relay cannot forge this.
+        candidates = [(e.node_id, e.addresses, e.dsa_pub)
+                      for e in self._routing.get_closest(target, _FIND_NODE_SCAN)]
+        candidates.append((self._id, self.advertised_uris(),
+                           self._identity.dsa_public_key))
+        candidates.sort(key=lambda c: target.distance(c[0]))
+        for node_id, addresses, dsa_pub in candidates:
+            if not dsa_pub:
                 continue
-            chain = self._cert_store.get_chain_to_root(e.node_id)
+            chain = self._cert_store.get_chain_to_root(node_id)
             if not chain:
                 continue   # the receiver drops chain-less entries — don't spend budget
-            if not packer.add(NodeEntry(e.node_id, e.addresses, e.dsa_pub, chain)):
+            if not packer.add(NodeEntry(node_id, addresses, dsa_pub, chain)):
                 break
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
                                  query_id + packer.encode())

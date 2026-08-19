@@ -137,6 +137,9 @@ post-quantiques de ~7,3 ko. Bornes de décodage (rejet par défaut) :
 annule la chaîne de l'entrée (jamais une chaîne partielle). Côté émission, la
 réponse est **budgétée en octets** — voir `routing.md`, c'est un invariant :
 sans budget, la réponse dépassait le plafond du paquet et n'était jamais émise.
+L'émetteur **s'inclut** dans les candidats (classé par distance) : un `FIND_NODE`
+routé peut venir d'un demandeur qui ne l'atteint qu'à travers un relais et qui,
+sinon, n'apprendrait jamais son entrée (cf. `routing.md`).
 
 ## Invariants (rappel, cf. CLAUDE.md)
 
