@@ -15,6 +15,7 @@ import pytest
 from src.apps import fleet_host
 from src.apps.fleet_state import (
     CAPABILITIES, MAX_OPERATORS, MAX_PENDING, MAX_PROVISION_RECORDS,
+    MAX_SSH_KEYS,
     FleetState, clean_caps, clean_label,
 )
 
@@ -266,3 +267,78 @@ class TestHostFacts:
             plan={"refresh": ["apk", "update"], "upgrade": ["apk", "upgrade"]})
         assert fleet_host.update_argv(facts) == [["apk", "update"],
                                                  ["apk", "upgrade"]]
+
+
+class TestSshKeyVault:
+    """Un conteneur n'a pas de `~/.ssh` : l'opérateur doit pouvoir confier une
+    clé au nœud. Elle vit dans le tiroir chiffré, et ce que l'interface lit ne
+    contient **jamais** le matériel."""
+
+    KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+           "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2\n"
+           "-----END OPENSSH PRIVATE KEY-----\n")
+
+    def test_roundtrip(self):
+        state = FleetState()
+        entry = state.add_ssh_key("laptop", self.KEY)
+        assert entry["name"] == "laptop"
+        assert state.ssh_key_material(entry["id"]) == self.KEY
+
+    def test_listing_never_leaks_material(self):
+        state = FleetState()
+        state.add_ssh_key("laptop", self.KEY)
+        assert "PRIVATE KEY" not in json.dumps(state.ssh_keys())
+
+    def test_only_private_keys_are_accepted(self):
+        state = FleetState()
+        for junk in ("", "hello", None, 42, "ssh-ed25519 AAAA me@host",
+                     "x" * 200_000):
+            assert state.add_ssh_key("k", junk) is None
+        assert state.ssh_keys() == []
+
+    def test_same_key_twice_is_one_entry(self):
+        state = FleetState()
+        state.add_ssh_key("a", self.KEY)
+        state.add_ssh_key("b", self.KEY)
+        assert len(state.ssh_keys()) == 1
+
+    def test_encrypted_key_is_flagged(self):
+        state = FleetState()
+        entry = state.add_ssh_key("k", "-----BEGIN RSA PRIVATE KEY-----\n"
+                                       "Proc-Type: 4,ENCRYPTED\nabc\n")
+        assert entry["encrypted"] is True
+
+    def test_vault_is_bounded(self):
+        state = FleetState()
+        for i in range(MAX_SSH_KEYS + 10):
+            state.add_ssh_key(f"k{i}", self.KEY.replace("b3B", f"b{i:02d}"))
+        assert len(state.ssh_keys()) <= MAX_SSH_KEYS
+
+    def test_removal_drops_the_material(self):
+        state = FleetState()
+        entry = state.add_ssh_key("laptop", self.KEY)
+        assert state.remove_ssh_key(entry["id"]) is True
+        assert state.ssh_key_material(entry["id"]) is None
+        assert state.remove_ssh_key(entry["id"]) is False
+
+    def test_material_is_stored_in_the_drawer_not_the_index(self):
+        """Le blob d'état reste petit : le matériel a sa propre entrée."""
+        store = MemoryStore()
+        state = FleetState(store)
+        entry = state.add_ssh_key("laptop", self.KEY)
+        assert "PRIVATE KEY" not in store.data["fleet-state"].decode()
+        assert store.data["sshkey:" + entry["id"]].decode() == self.KEY
+
+    def test_survives_a_reopen(self):
+        store = MemoryStore()
+        entry = FleetState(store).add_ssh_key("laptop", self.KEY)
+        assert FleetState(store).ssh_key_material(entry["id"]) == self.KEY
+
+    def test_a_full_drawer_refuses_rather_than_half_stores(self):
+        class FullStore(MemoryStore):
+            def put(self, key, value):
+                return key == "fleet-state"
+
+        state = FleetState(FullStore())
+        assert state.add_ssh_key("laptop", self.KEY) is None
+        assert state.ssh_keys() == []

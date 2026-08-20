@@ -38,6 +38,7 @@ wiped by the caller.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -74,13 +75,18 @@ def build_payload(root: str) -> bytes:
     and compare, bounded in size."""
     buffer = io.BytesIO()
     added = []
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for entry in PAYLOAD_INCLUDE:
-            path = os.path.join(root, entry)
-            if not os.path.exists(path):
-                continue
-            archive.add(path, arcname=entry, filter=_payload_filter)
-            added.append(entry)
+    # gzip stamps the current time into its header, so the same tree would hash
+    # differently from one second to the next — and the bootstrap embeds that
+    # hash. Pin mtime=0 so "same tree, same bytes" actually holds and an
+    # operator can state exactly what they deployed.
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for entry in PAYLOAD_INCLUDE:
+                path = os.path.join(root, entry)
+                if not os.path.exists(path):
+                    continue
+                archive.add(path, arcname=entry, filter=_payload_filter)
+                added.append(entry)
     # An empty tree still gzips to a valid (tiny) archive, which would push a
     # working bootstrap that installs nothing. Require the parts a node needs.
     if not {"src", "start.sh"} <= set(added):

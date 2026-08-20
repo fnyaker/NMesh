@@ -115,6 +115,7 @@ MAX_INFLIGHT = 64                 # requests we track as an operator
 UPDATE_TIMEOUT = 1800.0
 UPDATE_CHUNK = 4096
 SCAN_TIMEOUT = 300.0
+MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 _ASSERTION_TTL = 300              # a command signature is good for five minutes
 
@@ -971,6 +972,7 @@ class FleetApp:
     async def request_provision(self, target: NodeID, *, targets: list[dict],
                                 username: str, password: str | None = None,
                                 key_path: str | None = None,
+                                key_data: str | None = None,
                                 key_passphrase: str | None = None,
                                 caps: list[str] | None = None,
                                 join_uris: list[str] | None = None,
@@ -995,6 +997,11 @@ class FleetApp:
             document["password"] = str(password)
         if key_path:
             document["key_path"] = str(key_path)[:512]
+        if key_data:
+            # A key the far node has no path for (uploaded through the console).
+            # It rides the same end-to-end-encrypted payload as the password,
+            # to a node already trusted with `provision`, and is wiped there.
+            document["key_data"] = str(key_data)[:MAX_KEY_DATA]
         if key_passphrase:
             document["key_passphrase"] = str(key_passphrase)
         await self._send(target, self._signed_frame(
@@ -1023,6 +1030,7 @@ class FleetApp:
                 str(document.get("username", "")),
                 password=document.get("password"),
                 key_path=document.get("key_path"),
+                key_data=_key_material(document.get("key_data")),
                 key_passphrase=document.get("key_passphrase"))
         except fleet_ssh.SshError as exc:
             self._fail(src, rid, str(exc))
@@ -1173,6 +1181,7 @@ class FleetApp:
     async def provision_local(self, targets: list[dict], *, username: str,
                               password: str | None = None,
                               key_path: str | None = None,
+                              key_data: str | None = None,
                               key_passphrase: str | None = None,
                               caps: list[str] | None = None,
                               join_uris: list[str] | None = None,
@@ -1183,7 +1192,7 @@ class FleetApp:
             raise fleet_provision.ProvisionError("no NMesh tree to push")
         targets = _clean_targets(targets)
         creds = fleet_ssh.SshCredentials(username, password=password,
-                                         key_path=key_path,
+                                         key_path=key_path, key_data=key_data,
                                          key_passphrase=key_passphrase)
         payload = fleet_provision.build_payload(self._repo_root)
         caps = clean_caps(caps) or ["status", "update"]
@@ -1240,6 +1249,14 @@ class FleetApp:
 # ---------------------------------------------------------------------------
 # Helpers — all hostile-input safe
 # ---------------------------------------------------------------------------
+
+def _key_material(value) -> str | None:
+    """Validate key material arriving from the network before it is written to
+    a file. Shape check only — OpenSSH reads the file and is the real judge."""
+    if not isinstance(value, str) or not 0 < len(value) <= MAX_KEY_DATA:
+        return None
+    return value if "PRIVATE KEY" in value else None
+
 
 def _dump_json(document: dict, *trim_keys: str) -> bytes:
     """Serialise a reply so it fits one DATA frame.

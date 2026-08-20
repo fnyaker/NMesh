@@ -18,6 +18,7 @@ import base64
 import io
 import ipaddress
 import json
+import time
 import os
 import tarfile
 
@@ -439,9 +440,14 @@ class TestPayload:
             assert not name.endswith(".pyc")
 
     def test_payload_is_reproducible(self):
-        """Same tree, same bytes: the operator can state what they deployed."""
-        assert (fleet_provision.build_payload(ROOT)
-                == fleet_provision.build_payload(ROOT))
+        """Same tree, same bytes: the operator can state what they deployed.
+
+        gzip stamps the current time into its header, so this used to hold only
+        when both builds landed in the same second — and the bootstrap embeds
+        the payload's hash."""
+        first = fleet_provision.build_payload(ROOT)
+        time.sleep(1.1)
+        assert fleet_provision.build_payload(ROOT) == first
 
     def test_empty_tree_is_refused(self, tmp_path):
         with pytest.raises(fleet_provision.ProvisionError):
@@ -641,3 +647,54 @@ class TestHostKeyPinning:
             known_hosts_lines=["10.0.0.1 ssh-ed25519 AAAA"])
         assert result["pinned"] is True
         assert not any("no host key" in step for step in result["steps"])
+
+
+class TestMaterialisedKey:
+    """`ssh -i` veut un chemin, donc une clé importée doit toucher un système de
+    fichiers. La fenêtre est *une commande* : dossier 0700, fichier 0600,
+    supprimé en sortie."""
+
+    KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
+
+    def test_material_becomes_a_private_file(self):
+        creds = SshCredentials("root", key_data=self.KEY)
+        with fleet_ssh.MaterialisedKey(creds) as key:
+            assert key.path is not None
+            assert oct(os.stat(key.path).st_mode)[-3:] == "600"
+            assert oct(os.stat(os.path.dirname(key.path)).st_mode)[-3:] == "700"
+            content = open(key.path).read()
+            path = key.path
+        assert content.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+        assert content.endswith("\n")      # OpenSSH refuses a key without one
+        assert not os.path.exists(path)    # gone with the command
+
+    def test_a_key_with_a_path_is_passed_through(self):
+        creds = SshCredentials("root", key_path="/home/me/.ssh/id")
+        with fleet_ssh.MaterialisedKey(creds) as key:
+            assert key.path == "/home/me/.ssh/id"
+
+    def test_no_key_writes_nothing(self):
+        creds = SshCredentials("root", password="p")
+        with fleet_ssh.MaterialisedKey(creds) as key:
+            assert key.path is None
+
+    def test_material_reaches_the_ssh_command_line_as_a_path(self):
+        creds = SshCredentials("root", key_data=self.KEY)
+        with fleet_ssh.MaterialisedKey(creds) as key:
+            options = fleet_ssh._base_options(None, creds, 22, key.path)
+            assert "-i" in options
+            assert options[options.index("-i") + 1] == key.path
+            assert "IdentitiesOnly=yes" in options
+        # …et jamais le matériel lui-même.
+        assert self.KEY not in " ".join(options)
+
+    def test_wipe_drops_the_material(self):
+        creds = SshCredentials("root", key_data=self.KEY)
+        assert creds.has_key is True
+        creds.wipe()
+        assert creds.has_key is False
+
+    def test_repr_hides_the_material(self):
+        creds = SshCredentials("root", key_data=self.KEY)
+        assert "PRIVATE KEY" not in repr(creds)
+        assert "<set>" in repr(creds)

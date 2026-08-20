@@ -10,6 +10,10 @@
 #   NMESH_CONNECTOR_PORT  data connector port      (optional)
 #   NMESH_SPOOL           spool directory          (optional, store-and-forward)
 #   NMESH_DATA            state directory          (default /data)
+#   NMESH_FLEET           set to enable the fleet app (remote management +
+#                           deployment, served at /fleet). Off unless asked for:
+#                           it can open a shell. The console's Apps tab toggles
+#                           it too, and that choice persists in NMESH_DATA.
 #   NMESH_NO_TLS          set to disable console TLS (not recommended)
 set -e
 
@@ -23,6 +27,7 @@ set -- --listen "$LISTEN" --console-host "$CONSOLE_HOST" \
 
 [ -n "$NMESH_CONNECTOR_PORT" ] && set -- "$@" --connector-port "$NMESH_CONNECTOR_PORT"
 [ -n "$NMESH_SPOOL" ] && set -- "$@" --spool "$NMESH_SPOOL"
+[ -n "$NMESH_FLEET" ] && set -- "$@" --fleet
 [ -n "$NMESH_NO_TLS" ] && set -- "$@" --no-tls
 
 exec python -u scripts/nmesh_node.py "$@"

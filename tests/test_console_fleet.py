@@ -400,3 +400,92 @@ class TestOperationTracking:
             console.stop()
             await host.stop_all()
             await node.stop()
+
+
+class TestKeyUpload:
+    """Importer une clé depuis la console — le seul moyen d'en donner une à un
+    nœud en conteneur, où `~/.ssh` n'existe pas."""
+
+    KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+           "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAA\n"
+           "-----END OPENSSH PRIVATE KEY-----\n")
+
+    async def test_upload_then_list_then_remove(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await _post(console, "/api/fleet/keys", token,
+                                             {"name": "laptop", "data": self.KEY})
+            assert status == 200 and body["ok"] is True
+            key_id = body["key"]["id"]
+            assert body["key"]["name"] == "laptop"
+
+            _s, _h, raw, listing = await _get(console, "/api/fleet/keys", token)
+            assert b"PRIVATE KEY" not in raw          # metadata only, ever
+            assert any(k["id"] == key_id for k in listing["keys"])
+
+            status, _, _, body = await _post(console, "/api/fleet/keys-remove",
+                                             token, {"id": key_id})
+            assert status == 200
+            assert not any(k["id"] == key_id for k in body["keys"])
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_base64_upload_is_accepted(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            encoded = "b64:" + base64.b64encode(self.KEY.encode()).decode()
+            status, _, _, body = await _post(console, "/api/fleet/keys", token,
+                                             {"name": "k", "data": encoded})
+            assert status == 200 and body["ok"] is True
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_junk_is_refused(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            for data in ("hello", "", None, 42,
+                         "ssh-ed25519 AAAAC3Nz me@host"):
+                status, _, _, body = await _post(console, "/api/fleet/keys",
+                                                 token, {"name": "k", "data": data})
+                assert status == 400 and body["ok"] is False
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_upload_requires_a_session(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _post(console, "/api/fleet/keys", None,
+                                          {"name": "k", "data": self.KEY})
+            assert status == 401
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_uploaded_key_is_offered_for_provisioning(self):
+        """Le pont doit résoudre l'id choisi en *matériel*, puisque la machine
+        qui s'en servira n'a aucun chemin vers ce fichier."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            _s, _h, _b, body = await _post(console, "/api/fleet/keys", token,
+                                           {"name": "k", "data": self.KEY})
+            bridge = host.bridge("fleet")
+            path, material = bridge._resolve_key(body["key"]["id"], None)
+            assert path is None and material == self.KEY
+            # Une clé du disque voyage à l'inverse par son chemin.
+            path, material = bridge._resolve_key("file:/home/me/.ssh/id", None)
+            assert path == "/home/me/.ssh/id" and material is None
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()

@@ -202,6 +202,38 @@ sont détectées dans `~/.ssh` — **métadonnées seulement** (chemin, chiffré
 non, commentaire de la `.pub`) ; le matériel de clé n'entre jamais dans l'état de
 l'app, c'est `ssh -i` qui lit le fichier au moment de se connecter.
 
+#### Donner une clé à un nœud en conteneur
+
+Un conteneur n'a pas de `~/.ssh` : la détection ne trouve rien. Deux voies, au
+choix, décrites dans [`docker/docker-compose.yml`](../../docker/docker-compose.yml) :
+
+1. **Monter ses clés en lecture seule** (`- ${HOME}/.ssh:/root/.ssh:ro`, ou une
+   seule clé). Lecture seule à dessein : le nœud ne fait que lire une clé.
+2. **Importer une clé depuis la console** — *Fleet → Discover & deploy →
+   « Upload a key… »*. Le bloc est visible **sans scan préalable**, puisque
+   donner sa clé vient avant de chercher des machines.
+
+Une clé importée est rangée dans le **tiroir chiffré** de l'app (AES-256-GCM
+sous une clé dérivée de l'identité du nœud — même frontière de confiance que le
+fichier d'identité), une entrée de tiroir par clé pour que le blob d'état reste
+petit. Ce que l'interface lit (`/api/fleet/keys`) ne contient **jamais** le
+matériel : identifiant, nom, « chiffrée ou non », origine.
+
+`ssh -i` veut un chemin, donc une clé importée doit bien toucher un système de
+fichiers à un moment. La fenêtre est **une commande** : dossier temporaire 0700,
+fichier 0600, supprimé en sortie (`MaterialisedKey`, même forme que
+`KnownHosts`). C'est le compromis assumé de cette fonction, et il est borné.
+
+Quand le provisioning tourne sur une node **distante**, une clé importée n'a
+aucun chemin là-bas : c'est son **matériel** qui voyage, dans la même payload
+chiffrée de bout en bout que le mot de passe, vers une node déjà enrôlée avec
+`provision`, et il y est effacé à la fin du run. Une clé du disque voyage à
+l'inverse par son simple chemin.
+
+L'image Docker embarque `openssh-client` : sans lui la capability `provision` se
+déclare indisponible, ce qui est correct mais inutile pour une image dont c'est
+justement le rôle.
+
 Puis, en **une seule session SSH** :
 
 1. un **bootstrap auto-extractible** (`/bin/sh`, POSIX pur) est poussé sur
@@ -381,6 +413,7 @@ Une réponse non sollicitée est jetée.
 | `MAX_PENDING` | 256 demandes en attente (TTL 7 j) |
 | `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
 | `MAX_PAYLOAD` | 16 Mo poussés au provisioning |
+| `MAX_SSH_KEYS` / `MAX_SSH_KEY_BYTES` | 8 clés importées / 64 Ko par clé |
 | `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 réseaux balayés / 4096 adresses par réseau avant rétrécissement |
 
 Le ledger **échoue fermé** : un blob corrompu ou altéré donne un ledger **vide**
