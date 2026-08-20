@@ -115,6 +115,7 @@ MAX_INFLIGHT = 64                 # requests we track as an operator
 UPDATE_TIMEOUT = 1800.0
 UPDATE_CHUNK = 4096
 SCAN_TIMEOUT = 300.0
+KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 _ASSERTION_TTL = 300              # a command signature is good for five minutes
 
 _LEN = struct.Struct("!H")
@@ -158,6 +159,7 @@ class Revoked:
 class StatusReceived:
     src: NodeID
     status: dict
+    rid: str = ""
 
 
 @dataclass
@@ -184,6 +186,7 @@ class ScanReceived:
     hosts: list
     networks: list = field(default_factory=list)
     rejected: list = field(default_factory=list)
+    truncated: int = 0
 
 
 @dataclass
@@ -463,8 +466,10 @@ class FleetApp:
         except Exception:
             pass          # a dead peer must not break a handler
 
-    def _reply(self, target: NodeID, kind: int, document: dict) -> None:
-        self._spawn(self._send(target, bytes([kind]) + _dump_json(document)))
+    def _reply(self, target: NodeID, kind: int, document: dict,
+               *trim_keys: str) -> None:
+        self._spawn(self._send(target,
+                               bytes([kind]) + _dump_json(document, *trim_keys)))
 
     def _fail(self, target: NodeID, rid: str, error: str) -> None:
         self._reply(target, ERROR, {"rid": rid, "error": error[:256]})
@@ -664,7 +669,7 @@ class FleetApp:
         status = document.get("status")
         if isinstance(status, dict):
             self.state.record_status(src.raw.hex(), status)
-            self._emit(StatusReceived(src, status))
+            self._emit(StatusReceived(src, status, _rid(document)))
 
     # ======================================================================
     # Update
@@ -929,12 +934,10 @@ class FleetApp:
             return
         # Fingerprints let the operator confirm host keys before provisioning,
         # which is what makes the later trust-on-first-use an informed one.
-        for host in hosts[:64]:
-            try:
-                host["keys"] = await fleet_ssh.host_key_fingerprints(host["ip"],
-                                                                    host["port"])
-            except Exception:
-                host["keys"] = []
+        # Bounded and concurrent: one ssh-keyscan per host, run in series with
+        # no overall deadline, left a remote scan looking stalled for minutes
+        # while the operator saw nothing at all.
+        await fleet_ssh.attach_host_keys(hosts, timeout=KEYSCAN_TIMEOUT)
         self._reply(src, SCAN_RESULT, {
             "rid": rid, "hosts": hosts[:256],
             "targets": entries or fleet_ssh.local_subnets(),
@@ -946,7 +949,7 @@ class FleetApp:
             # rather than silently swept in part.
             "networks": [] if entries else fleet_ssh.detected_networks(),
             "ssh_client": fleet_ssh.ssh_available(),
-        })
+        }, "hosts", "networks", "rejected", "targets")
 
     def _on_scan_result(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "scan"):
@@ -954,10 +957,12 @@ class FleetApp:
         hosts = document.get("hosts")
         networks = document.get("networks")
         rejected = document.get("rejected")
+        truncated = document.get("truncated")
         self._emit(ScanReceived(src, _rid(document),
                                 hosts[:256] if isinstance(hosts, list) else [],
                                 networks[:32] if isinstance(networks, list) else [],
-                                rejected[:32] if isinstance(rejected, list) else []))
+                                rejected[:32] if isinstance(rejected, list) else [],
+                                truncated if isinstance(truncated, int) else 0))
 
     # ======================================================================
     # Provisioning
@@ -1040,7 +1045,8 @@ class FleetApp:
                     str(document.get("join_code") or "")))
         finally:
             creds.wipe()          # the secret does not outlive the run
-        self._reply(src, PROVISION_RESULT, {"rid": rid, "results": results})
+        self._reply(src, PROVISION_RESULT, {"rid": rid, "results": results},
+                    "results")
 
     async def _provision_one(self, src: NodeID, rid: str, target: dict,
                              creds, payload: bytes, caps: list[str],
@@ -1157,9 +1163,7 @@ class FleetApp:
 
     async def scan_local(self, entries: list[str] | None = None) -> dict:
         hosts, rejected = await fleet_ssh.scan(entries)
-        for host in hosts[:64]:
-            host["keys"] = await fleet_ssh.host_key_fingerprints(host["ip"],
-                                                                 host["port"])
+        await fleet_ssh.attach_host_keys(hosts, timeout=KEYSCAN_TIMEOUT)
         return {"hosts": hosts, "rejected": rejected[:32],
                 "targets": entries or fleet_ssh.local_subnets(),
                 "networks": [] if entries else fleet_ssh.detected_networks(),
@@ -1237,8 +1241,41 @@ class FleetApp:
 # Helpers — all hostile-input safe
 # ---------------------------------------------------------------------------
 
-def _dump_json(document: dict) -> bytes:
-    return json.dumps(document, separators=(",", ":")).encode("utf-8")[:MAX_BODY]
+def _dump_json(document: dict, *trim_keys: str) -> bytes:
+    """Serialise a reply so it fits one DATA frame.
+
+    Cutting JSON at a byte offset produces something the far side cannot parse
+    and therefore drops in silence — the worst possible failure for a reply the
+    operator is waiting on. So we drop **entries**, never bytes: the named list
+    keys are shortened until the frame fits, and ``truncated`` says how many
+    went. A short answer beats an answer that never arrives."""
+    blob = _encode(document)
+    if len(blob) <= MAX_BODY:
+        return blob
+    document = dict(document)
+    dropped = 0
+    for key in trim_keys:
+        items = document.get(key)
+        if not isinstance(items, list) or not items:
+            continue
+        keep = len(items)
+        while keep > 0:
+            keep = keep * 3 // 4 if keep > 4 else keep - 1
+            document[key] = items[:keep]
+            document["truncated"] = dropped + (len(items) - keep)
+            blob = _encode(document)
+            if len(blob) <= MAX_BODY:
+                return blob
+        dropped += len(items)
+        document[key] = []
+    # Even with every list emptied the fixed part is too big: say so rather
+    # than send a frame nobody can read.
+    return _encode({"rid": str(document.get("rid", ""))[:RID_LEN * 2],
+                    "truncated": dropped, "error": "reply too large"})
+
+
+def _encode(document: dict) -> bytes:
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
 
 
 def _load_json(raw: bytes) -> dict | None:

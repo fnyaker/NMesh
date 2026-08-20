@@ -1242,7 +1242,7 @@ STYLE_CSS = """
 .shell{min-height:100vh;display:grid;grid-template-columns:220px minmax(0,1fr)}.rail{position:sticky;top:0;height:100vh;padding:24px 18px;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}.identity{display:flex;align-items:center;gap:12px;padding:0 8px 28px}.identity strong,.identity span{display:block}.identity strong{font-size:17px}.identity span{color:var(--muted);font-size:12px}.tabs{display:flex;flex-direction:column;gap:5px}.tabs button{display:grid;grid-template-columns:28px 1fr;gap:8px;text-align:left;align-items:center;padding:11px 12px;color:var(--muted);background:transparent;border:1px solid transparent;border-radius:7px;font-weight:650}.tabs button:hover{color:var(--ink);background:rgba(255,255,255,.025)}.tabs button[aria-selected="true"]{color:var(--ink);background:var(--surface);border-color:var(--line)}.tab-index{font:10px/1 "SFMono-Regular",monospace;color:var(--faint)}.rail-foot{margin-top:auto;padding:16px 8px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:auto 1fr;gap:7px 9px;align-items:center;color:var(--muted);font-size:12px}.rail-foot .text-button{grid-column:2;text-align:left}.status-dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}.status-dot.up{background:var(--cyan);box-shadow:0 0 0 4px rgba(97,214,200,.1)}
 main{min-width:0;width:100%;max-width:1460px;padding:0 40px 56px}.topbar{height:86px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);margin-bottom:38px}.node-id{padding:0;background:transparent;border:0;color:var(--ink);font-size:13px}.top-meta{display:flex;gap:12px;align-items:center;color:var(--muted);font-size:12px}.state-pill,.count-pill{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}.state-pill.up{color:var(--cyan);border-color:#285c56;background:var(--cyan-dim)}.panel{animation:panel-in .18s ease-out}.page-head{display:flex;justify-content:space-between;gap:40px;align-items:end;margin-bottom:26px}.page-head h1{margin:0;max-width:760px;font-size:clamp(26px,3vw,42px);line-height:1.08;letter-spacing:-.045em}.lede{max-width:420px;margin:0;color:var(--muted)}.head-actions{display:flex;align-items:center;gap:12px}.surface{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:0 1px rgba(255,255,255,.02) inset}.surface-head,.list-head{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:18px}.surface h2,.list-head h2{margin:0;font-size:18px;letter-spacing:-.02em}
 .metrics{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:10px;margin-bottom:16px}.metric{min-height:104px;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column;justify-content:space-between}.metric strong{font-size:24px;letter-spacing:-.04em}.metric span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,.9fr);gap:16px}.traffic-card canvas{display:block;width:100%;height:300px;background:#0b151e;border:1px solid #1b2b36;border-radius:6px}.legend{display:flex;align-items:center;gap:16px;margin-top:12px;color:var(--muted);font-size:12px}.legend small{margin-left:auto}.swatch{display:inline-block;width:18px;height:2px;margin-right:6px;vertical-align:middle}.swatch.inbound{background:var(--cyan)}.swatch.outbound{background:var(--amber)}#graph{display:block;width:100%;min-height:310px;background:#0b151e;border:1px solid #1b2b36;border-radius:6px}.map-note{margin:11px 0 0;color:var(--muted);font-size:11px}.line-key{display:inline-block;width:22px;margin:0 5px 2px 12px;border-top:2px solid var(--blue)}.line-key.dashed{border-top-style:dashed;border-color:var(--amber)}.graph-node{cursor:pointer}.graph-node circle{stroke-width:2;transition:r .12s,filter .12s}.graph-node:hover circle,.graph-node:focus circle{r:14;filter:brightness(1.18)}.graph-node text{pointer-events:none;font:10px "SFMono-Regular",monospace}.graph-edge{fill:none;stroke-width:1.5;opacity:.7}.graph-edge.routed{stroke-dasharray:5 6;stroke:var(--amber)}.graph-edge.direct{stroke:var(--blue)}
-.segmented{display:inline-flex;padding:4px;margin-bottom:16px;background:var(--rail);border:1px solid var(--line);border-radius:8px}.segmented button{padding:8px 15px;border:0;border-radius:5px;background:transparent;color:var(--muted);font-weight:700}.segmented button.active{background:var(--raised);color:var(--ink)}.app-view{display:grid;gap:16px}.app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}.app-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.app-icon{width:34px;height:34px;display:grid;place-items:center;border-radius:6px;background:var(--cyan-dim);color:var(--cyan);font-weight:800}.list-surface{margin-bottom:16px}.search input{width:min(340px,42vw);margin:0}.list-tools{display:flex;align-items:center;gap:10px}.limit{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}.limit input{width:66px;margin:0}.record-list{display:flex;flex-direction:column}.record{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(110px,.6fr) minmax(150px,.8fr) auto;gap:16px;align-items:center;min-height:70px;padding:12px 4px;border-top:1px solid var(--line)}.record:first-child{border-top:0}.record-main{min-width:0}.record-main strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.record-main small,.record-meta{color:var(--muted);font-size:12px}.record-id{overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:12px}.record-actions{display:flex;justify-content:flex-end;gap:7px}.node-record{grid-template-columns:minmax(210px,1.2fr) minmax(140px,.8fr) minmax(110px,.5fr) auto}.empty{padding:34px 0;border-top:1px solid var(--line);color:var(--muted);text-align:center}.soft-count{color:var(--muted);font-size:13px;font-weight:500}.pager{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:15px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.pager button{padding:6px 10px}.pager button:disabled{opacity:.35;cursor:not-allowed}
+.segmented{display:inline-flex;padding:4px;margin-bottom:16px;background:var(--rail);border:1px solid var(--line);border-radius:8px}.segmented button{padding:8px 15px;border:0;border-radius:5px;background:transparent;color:var(--muted);font-weight:700}.segmented button.active{background:var(--raised);color:var(--ink)}.app-view{display:grid;gap:16px}.app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}.app-card{display:flex;flex-direction:column;gap:12px;padding:16px;background:var(--rail);border:1px solid var(--line);border-radius:8px}.app-card-head{display:flex;align-items:center;gap:12px;min-width:0}.app-icon{flex:0 0 auto;width:36px;height:36px;display:grid;place-items:center;border-radius:7px;background:var(--cyan-dim);color:var(--cyan);font-weight:800;font-size:13px}.app-card-id{min-width:0;flex:1}.app-card-id strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.app-state{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.app-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--faint)}.app-state.on::before{background:var(--cyan);box-shadow:0 0 0 3px rgba(97,214,200,.15)}.app-state.off::before{background:var(--amber)}.app-desc{flex:1;margin:0;color:var(--muted);font-size:13px;line-height:1.55}.app-card-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding-top:2px}.app-card-actions .grow{flex:1 1 0;min-width:0}.app-card-actions>button,.app-card-actions>.app-open{padding:8px 12px;font-size:13px;white-space:nowrap}.app-card-actions>.app-open{margin-left:auto}.app-open{border:1px solid var(--cyan);border-radius:6px;background:var(--cyan);color:#071614;font-weight:700;text-decoration:none;line-height:1.4}.app-open:hover{filter:brightness(1.06)}.list-surface{margin-bottom:16px}.search input{width:min(340px,42vw);margin:0}.list-tools{display:flex;align-items:center;gap:10px}.limit{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}.limit input{width:66px;margin:0}.record-list{display:flex;flex-direction:column}.record{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(110px,.6fr) minmax(150px,.8fr) auto;gap:16px;align-items:center;min-height:70px;padding:12px 4px;border-top:1px solid var(--line)}.record:first-child{border-top:0}.record-main{min-width:0}.record-main strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.record-main small,.record-meta{color:var(--muted);font-size:12px}.record-id{overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:12px}.record-actions{display:flex;justify-content:flex-end;gap:7px}.node-record{grid-template-columns:minmax(210px,1.2fr) minmax(140px,.8fr) minmax(110px,.5fr) auto}.empty{padding:34px 0;border-top:1px solid var(--line);color:var(--muted);text-align:center}.soft-count{color:var(--muted);font-size:13px;font-weight:500}.pager{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:15px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.pager button{padding:6px 10px}.pager button:disabled{opacity:.35;cursor:not-allowed}
 input,textarea{width:100%;padding:10px 12px;color:var(--ink);background:#0a141d;border:1px solid var(--line);border-radius:6px;outline:none}input:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(97,214,200,.09)}textarea{min-height:82px;resize:vertical;word-break:break-all}.field{display:block}.field>span{display:block;margin-bottom:6px;color:var(--muted);font-size:12px;font-weight:650}.primary,.secondary,.icon-button,.text-button{border-radius:6px;font-weight:750}.primary{padding:9px 14px;border:1px solid var(--cyan);background:var(--cyan);color:#071614}.secondary{padding:9px 13px;border:1px solid var(--line-strong);background:transparent;color:var(--ink)}.primary:hover,.secondary:hover{filter:brightness(1.1)}button:disabled{opacity:.5;cursor:wait}.wide{width:100%}.text-button{padding:0;border:0;background:transparent;color:var(--muted)}.icon-button{padding:7px 10px;border:1px solid var(--line);background:transparent;color:var(--muted)}.message{min-height:20px;margin:0;color:var(--muted);font-size:12px}.message.error{color:var(--red)}.action-row{display:flex;align-items:center;gap:10px;margin-top:12px}.action-row.wrap{flex-wrap:wrap}.action-row input{margin:0}.compact{width:90px}.disclosure{margin-bottom:16px}.disclosure>summary{cursor:pointer;font-size:16px;font-weight:750;list-style:none}.disclosure>summary:after{content:"+";float:right;color:var(--muted)}.disclosure[open]>summary:after{content:"-"}.disclosure[open]>summary{margin-bottom:20px}.form-grid{display:grid;gap:14px}.form-grid.two,.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{display:grid;gap:16px}.form-block{display:flex;flex-direction:column;gap:9px;padding:14px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.form-block h3{margin:0 0 4px}.info-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}.info-item{padding:7px 10px;background:var(--rail);border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:12px}.info-item strong{color:var(--ink);margin-left:5px}.transport-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.transport-card{padding:13px;background:var(--rail);border:1px solid var(--line);border-radius:7px}.transport-card strong{display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:var(--cyan)}.transport-card span{display:block;color:var(--muted);font-size:12px}.definition-list{display:grid;grid-template-columns:120px 1fr;gap:9px 16px}.definition-list dt{color:var(--muted)}.definition-list dd{margin:0;word-break:break-all;white-space:pre-line}.chip-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.chip{display:inline-flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px}.chip button{padding:0;border:0;background:transparent;color:var(--red)}.output{display:block;margin-top:10px;word-break:break-all;color:var(--cyan)}
 dialog{width:min(680px,calc(100vw - 28px));padding:0;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:var(--shadow)}dialog::backdrop{background:rgba(1,6,10,.78);backdrop-filter:blur(3px)}.dialog-head{display:flex;justify-content:space-between;align-items:center;padding:20px 22px;border-bottom:1px solid var(--line)}.dialog-head h2{margin:0}.node-detail{padding:22px;display:grid;grid-template-columns:140px 1fr;gap:12px 18px}.node-detail .key{color:var(--muted);font-size:12px}.node-detail .value{min-width:0;word-break:break-all}.node-detail ul{margin:0;padding-left:18px}.dialog-actions{display:flex;align-items:center;gap:12px;padding:0 22px 22px}
 @keyframes panel-in{from{opacity:.3;transform:translateY(4px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
@@ -1433,15 +1433,49 @@ $("ping-btn").addEventListener("click",async()=>{$("ping-btn").disabled=true;set
 let appView="installed";
 document.querySelector(".segmented").addEventListener("click",(event)=>{const button=event.target.closest("[data-app-view]");if(!button)return;appView=button.dataset.appView;document.querySelectorAll("[data-app-view]").forEach((item)=>item.classList.toggle("active",item===button));$("apps-installed-view").classList.toggle("hidden",appView!=="installed");$("apps-store-view").classList.toggle("hidden",appView!=="store");refreshApps();});
 async function refreshApps(){if(activeTab!=="apps")return;renderBuiltins();if(appView==="installed")await renderAppList("installed");else await renderAppList("catalog");}
-function builtinState(app){if(!app.installed)return"Not installed";return app.running?"Running":"Installed, stopped";}
-function renderBuiltins(){const apps=last&&last.apps||[];$("builtin-apps").innerHTML=apps.length?apps.map((app)=>{const toggle=!app.installed?"install":(app.enabled?"disable":"enable"),label=!app.installed?"Install":(app.enabled?"Disable":"Enable");return `<div class="app-tile"><div class="action-row"><span class="app-icon">${esc((app.name||"A").slice(0,2).toUpperCase())}</span><div><strong>${esc(app.name)}</strong><div class="subtle">${esc(app.description||builtinState(app))}</div><div class="subtle">${esc(builtinState(app))}</div></div></div><div class="record-actions">${typeof app.enabled==="boolean"?`<button class="${toggle==="disable"?"secondary":"primary"}" data-builtin-id="${esc(app.id)}" data-builtin-action="${toggle}">${label}</button>`:""}${app.installed&&typeof app.enabled==="boolean"?`<button class="secondary" data-builtin-id="${esc(app.id)}" data-builtin-action="uninstall">Uninstall</button>`:""}${app.running!==false?`<a class="primary" href="${esc(app.path)}">Open</a>`:""}</div></div>`;}).join(""):'<div class="empty">No built-in apps</div>';}
-async function builtinAction(button){const action=button.dataset.builtinAction,id=button.dataset.builtinId;
+function builtinState(app){
+  if(!app.installed)return{label:"Not installed",cls:""};
+  if(app.running)return{label:"Running",cls:"on"};
+  return{label:app.enabled?"Enabled, starting":"Stopped",cls:"off"};
+}
+function builtinCard(app){
+  const state=builtinState(app),known=typeof app.enabled==="boolean";
+  const toggle=!app.installed?"install":(app.enabled?"disable":"enable");
+  const label=!app.installed?"Install":(app.enabled?"Disable":"Enable");
+  const actions=[];
+  if(known)actions.push(`<button class="${app.enabled?"secondary":"primary"}" data-builtin-id="${esc(app.id)}" data-builtin-action="${toggle}">${label}</button>`);
+  if(known&&app.installed)actions.push(`<button class="secondary" data-builtin-id="${esc(app.id)}" data-builtin-action="uninstall">Uninstall</button>`);
+  actions.push('<span class="grow"></span>');
+  if(app.running!==false)actions.push(`<a class="app-open" href="${esc(app.path)}">Open</a>`);
+  return `<article class="app-card">
+    <div class="app-card-head">
+      <span class="app-icon">${esc((app.name||"A").slice(0,2).toUpperCase())}</span>
+      <span class="app-card-id"><strong>${esc(app.name)}</strong>
+        <span class="app-state ${state.cls}">${esc(state.label)}</span></span>
+    </div>
+    <p class="app-desc">${esc(app.description||"Built-in application.")}</p>
+    <div class="app-card-actions">${actions.join("")}</div>
+  </article>`;
+}
+function renderBuiltins(){
+  const apps=last&&last.apps||[];
+  $("builtin-apps").innerHTML=apps.length?apps.map(builtinCard).join("")
+    :'<div class="empty">No built-in apps</div>';
+}
+async function builtinAction(button){
+  const action=button.dataset.builtinAction,id=button.dataset.builtinId;
   // Uninstalling a built-in purges its encrypted drawer, so confirm it first.
   if(action==="uninstall"&&!confirm("Uninstall "+id+"? Its stored state on this node is erased."))return;
   button.disabled=true;setMessage("store-status",action+" in progress...");
-  try{const response=await api("/api/apps/"+action,"POST",{id});const data=await response.json().catch(()=>({}));setMessage("store-status",response.ok&&data.ok!==false?id+" "+action+"d":data.error||action+" failed",!response.ok||data.ok===false);if(data.apps&&last)last.apps=data.apps;}
-  catch(_){setMessage("store-status",action+" failed",true);}
-  finally{button.disabled=false;renderBuiltins();}}
+  try{
+    const response=await api("/api/apps/"+action,"POST",{id});
+    const data=await response.json().catch(()=>({}));
+    setMessage("store-status",response.ok&&data.ok!==false?id+" "+action+"d"
+      :data.error||action+" failed",!response.ok||data.ok===false);
+    if(data.apps&&last)last.apps=data.apps;
+  }catch(_){setMessage("store-status",action+" failed",true);}
+  finally{button.disabled=false;renderBuiltins();}
+}
 $("builtin-apps").addEventListener("click",(event)=>{const button=event.target.closest("[data-builtin-action]");if(button)builtinAction(button);});
 async function renderAppList(kind) {
   const target=$(kind+"-list");try{const items=await fetchPage(kind);$(kind+"-count").textContent=`(${pages[kind].total})`;target.innerHTML=items.length?items.map((app)=>{const action=kind==="installed"?"uninstall":app.action,actionCell=action?`<button class="${action==="uninstall"?"secondary":"primary"}" data-app-id="${esc(app.app_id)}" data-app-action="${esc(action)}">${action==="uninstall"?"Delete local":action==="update"?"Update":"Install"}</button>`:'<span class="state-pill up">Installed</span>';return `<div class="record"><div class="record-main"><strong>${esc(app.name)}</strong><small>Version ${esc(app.version)}</small></div><div class="record-meta">${kind==="installed"?"Local package":esc(app.state||"Available")}</div><div class="record-id mono" title="${esc(app.app_id)}">${esc(short(app.app_id))}</div><div class="record-actions">${actionCell}</div></div>`;}).join(""):`<div class="empty">${pages[kind].query?"No matching apps":kind==="installed"?"No local packages installed":"No signed releases in the catalog"}</div>`;pager(kind,kind+"-pager",()=>renderAppList(kind));}catch(_){target.innerHTML='<div class="empty">App list unavailable</div>';}}
@@ -2243,6 +2277,8 @@ FLEET_HTML = """<!doctype html>
     <button class="tab" data-tab="activity">Activity</button>
   </nav>
 
+  <div id="jobs" class="jobs"></div>
+
   <section id="tab-nodes" class="tabbody">
     <div class="row wrap gap">
       <input id="add-id" class="mono grow" placeholder="Node ID to manage (40 hex)" autocomplete="off">
@@ -2318,16 +2354,15 @@ FLEET_HTML = """<!doctype html>
 </html>"""
 
 FLEET_CSS = """
+/* Same palette as the management console (STYLE_CSS). The console has no light
+   theme, and /fleet is served by it and linked from it — following the OS
+   preference here made one half of the product light and the other dark. */
 :root{
-  --bg:#f2f4f7; --panel:#fff; --line:#e5e8ee; --text:#0f1720; --muted:#7a8699;
-  --accent:#3a7afe; --accent-2:#eaf1ff; --ok:#1f9d55; --warn:#b7791f;
-  --danger:#e5484d; --shadow:0 1px 2px rgba(16,24,40,.08); --term:#0b1220;
-  --term-text:#d6e2f5;
-}
-@media (prefers-color-scheme:dark){
-  :root{--bg:#0e1621;--panel:#0f1a26;--line:#1e2b3a;--text:#e7edf5;--muted:#8aa0b6;
-    --accent:#4f8cff;--accent-2:#16283f;--ok:#4ac37e;--warn:#e0a94a;--danger:#ff6b6f;
-    --shadow:0 1px 2px rgba(0,0,0,.3);--term:#060b14;--term-text:#cfe0f7;}
+  --bg:#081018; --panel:#101b25; --rail:#0b141d; --line:#26343f;
+  --line-strong:#3b4b58; --text:#eef4f8; --muted:#8c9aa7; --faint:#5f6c78;
+  --accent:#61d6c8; --accent-2:#173d3b; --on-accent:#071614;
+  --ok:#61d6c8; --warn:#e6b76a; --danger:#ff7b72;
+  --shadow:0 12px 34px rgba(0,0,0,.28); --term:#060b14; --term-text:#cfe0f7;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -2348,13 +2383,13 @@ body{background:var(--bg);color:var(--text);
   box-shadow:var(--shadow)}
 .card{padding:22px;width:min(360px,92vw);display:grid;gap:12px}
 input,select,button,textarea{font:inherit;color:inherit}
-input,select{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+input,select{background:var(--rail);border:1px solid var(--line);border-radius:9px;
   padding:9px 11px;min-width:0}
 input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
-button{border:1px solid var(--line);background:var(--panel);border-radius:9px;
+button{border:1px solid var(--line-strong);background:transparent;border-radius:9px;color:var(--text);
   padding:9px 14px;cursor:pointer}
 button:hover{border-color:var(--accent)}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:700}
 button.ghost{background:transparent}
 button.danger{color:var(--danger);border-color:var(--danger)}
 button.icon{border:0;background:transparent;font-size:18px;padding:4px 8px}
@@ -2362,13 +2397,13 @@ button:disabled{opacity:.5;cursor:not-allowed}
 a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
   padding:9px 14px;color:inherit}
 .err{color:var(--danger);min-height:1.2em}
-.top{display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--panel);
+.top{display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--rail);
   border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
 .band{padding:14px 18px;background:var(--accent-2);border-bottom:1px solid var(--line)}
 .band h2{margin:0 0 10px;font-size:15px}
 .tabs{display:flex;gap:4px;padding:10px 18px 0;flex-wrap:wrap}
 .tab{border-radius:9px 9px 0 0;border-bottom-color:transparent}
-.tab.active{background:var(--accent-2);border-color:var(--accent);color:var(--accent)}
+.tab.active{background:var(--accent-2);border-color:var(--accent);color:var(--accent);font-weight:700}
 .tabbody{padding:18px;display:grid;gap:14px}
 .fld{display:grid;gap:5px;font-size:13px;color:var(--muted)}
 .fld input,.fld select{color:var(--text)}
@@ -2392,6 +2427,16 @@ a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
 .bar i.hot{background:var(--danger)}
 .acts{display:flex;flex-wrap:wrap;gap:8px}
 .acts button{padding:6px 11px;font-size:13px}
+.jobs{display:flex;flex-wrap:wrap;gap:8px;padding:0 18px}
+.jobs:empty{display:none}
+.job{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);
+  border-radius:999px;padding:5px 12px;background:var(--panel);font-size:12px}
+.job::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.job.running::before{background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+.job.ok::before{background:var(--ok)}
+.job.failed::before{background:var(--danger)}
+.job .who{color:var(--muted)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 .nets{display:flex;flex-wrap:wrap;gap:8px}
 .net{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
   border-radius:999px;padding:4px 11px;background:var(--panel);font-size:12px}
@@ -2427,6 +2472,8 @@ FLEET_JS = r"""
 "use strict";
 let TOKEN=null, VER=0, timer=null, ST={}, TAB="nodes";
 let SHELL={sid:null,node:null,off:0}, PICKED={}, HOSTS=[], KEYS=[];
+let SCAN_AT=null;               // "when did the selected node last report a scan"
+let DEPLOY_RID=null;            // the remote deployment we are waiting on
 const $=(id)=>document.getElementById(id);
 const esc=(s)=>String(s==null?"":s).replace(/[&<>"]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const short=(h)=>h?h.slice(0,10)+"…"+h.slice(-4):"";
@@ -2479,7 +2526,20 @@ async function poll(){
   $("me").textContent=short(j.me);
   if(first){capBoxes($("add-caps"),["status","update"]);
             capBoxes($("deploy-caps"),["status","update"]);}
-  renderPending(); renderNodes(); renderNodePickers(); renderLog();
+  renderPending(); renderNodes(); renderNodePickers(); renderLog(); renderJobs();
+  // A scan asked of a remote node answers asynchronously: its result lands in
+  // ST.scans on a later poll, so the discover tab has to redraw here. Without
+  // this the results arrived and were never shown — "nothing happens".
+  const stamp=scanStamp();
+  if(stamp!==SCAN_AT){SCAN_AT=stamp;HOSTS=[];renderHosts(null);}
+  if(DEPLOY_RID){
+    const job=(ST.jobs||[]).find(j=>j.rid===DEPLOY_RID);
+    if(job&&job.state!=="running"){
+      $("deploy-state").textContent=(job.state==="ok"?"Done: ":"Failed: ")+
+        (job.detail||job.state);
+      DEPLOY_RID=null;
+    }
+  }
   if(SHELL.node)pollShell();
 }
 
@@ -2601,10 +2661,34 @@ async function runScan(){
   $("scan-note").textContent="Scanning… this takes a moment.";
   try{
     const j=await(await api("/api/fleet/scan","POST",{node:from,targets:nets})).json();
-    if(j.hosts){HOSTS=j.hosts;KEYS=j.keys||[];renderHosts(j);}
-    else $("scan-note").textContent="Scan running on the remote node — results appear here.";
+    if(j.hosts){HOSTS=j.hosts;KEYS=j.keys||[];SCAN_AT=null;renderHosts(j);}
+    else{
+      // Remote: the answer comes back through the poll, so arm the watcher and
+      // let poll() redraw when ST.scans changes.
+      SCAN_AT=scanStamp(); HOSTS=[];
+      $("scan-note").textContent="Scan running on the remote node…";
+    }
   }catch(_){$("scan-note").textContent="Scan failed.";}
   finally{$("scan-btn").disabled=false;}
+}
+function renderJobs(){
+  const jobs=(ST.jobs||[]).slice(-6).reverse();
+  $("jobs").innerHTML=jobs.map(j=>{
+    const who=nodeLabel(j.node);
+    const what=j.state==="running"?"…":(j.detail||(j.state==="ok"?"done":"failed"));
+    return '<span class="job '+esc(j.state)+'" title="'+esc(j.rid)+'">'+
+      esc(j.kind)+' <span class="who">'+esc(who)+'</span> '+esc(what)+'</span>';
+  }).join("");
+}
+function nodeLabel(id){
+  if(!id)return "";
+  if(id===ST.me)return "this node";
+  const n=(ST.managed||[]).find(x=>x.id===id);
+  return (n&&n.label)||short(id);
+}
+function scanStamp(){
+  const entry=(ST.scans||{})[$("scan-from").value];
+  return entry?entry.at:null;
 }
 function renderNets(nets){
   const el=$("scan-nets-found");
@@ -2618,19 +2702,23 @@ function renderNets(nets){
       esc(n.cidr)+'</span>':'')+'</span>').join("");
 }
 function renderHosts(meta){
-  if(!HOSTS.length){
-    const scans=ST.scans||{}, from=$("scan-from").value;
-    HOSTS=(scans[from]&&scans[from].hosts)||[];
-  }
-  const scans=ST.scans||{}, from=$("scan-from").value;
-  renderNets((meta&&meta.networks)||(scans[from]&&scans[from].networks)||[]);
+  // A local scan answers in the POST body (meta); a remote one lands in the
+  // polled snapshot. Either way the stored result is the source of truth.
+  const stored=(ST.scans||{})[$("scan-from").value]||{};
+  if(!HOSTS.length)HOSTS=(meta&&meta.hosts)||stored.hosts||[];
+  renderNets((meta&&meta.networks)||stored.networks||[]);
+  const notes=[];
   if(meta&&meta.ssh_client===false)
-    $("scan-note").textContent="That node has no ssh client, so it cannot deploy.";
-  else if(HOSTS.length)$("scan-note").textContent=HOSTS.length+" SSH host(s) found.";
-  else $("scan-note").textContent="No SSH hosts found.";
-  const bad=(meta&&meta.rejected)||[];
-  if(bad.length)$("scan-note").textContent+=
-    " Could not understand: "+bad.map(esc).join(", ")+".";
+    notes.push("That node has no ssh client, so it cannot deploy.");
+  else if(HOSTS.length)notes.push(HOSTS.length+" SSH host(s) found.");
+  else if(SCAN_AT||meta)notes.push("No SSH hosts found.");
+  else notes.push("Not scanned yet.");
+  const bad=(meta&&meta.rejected)||stored.rejected||[];
+  if(bad.length)notes.push("Could not understand: "+bad.join(", ")+".");
+  const cut=(meta&&meta.truncated)||stored.truncated||0;
+  if(cut)notes.push(cut+" result(s) dropped — the reply did not fit one frame; "
+                    +"narrow the target to see them.");
+  $("scan-note").textContent=notes.join(" ");
   PICKED={};
   $("hosts").innerHTML=HOSTS.map((h,i)=>{
     const fp=(h.keys||[]).map(k=>k.fingerprint).filter(Boolean)[0]||"";
@@ -2674,7 +2762,11 @@ async function deploy(){
     if(j.results){
       const ok=j.results.filter(r=>r.ok).length;
       $("deploy-state").textContent="Done: "+ok+"/"+j.results.length+" succeeded.";
-    }else $("deploy-state").textContent="Running on the remote node.";
+    }else{
+      // Remote: the outcome arrives through the polled job list.
+      DEPLOY_RID=j.rid||null;
+      $("deploy-state").textContent="Running on the remote node…";
+    }
   }catch(_){$("deploy-state").textContent="Deployment failed to start.";}
   finally{
     // Drop the secrets from the DOM as soon as the run has been handed over.
@@ -2759,6 +2851,9 @@ function bind(){
     await api("/api/fleet/enrol","POST",
               {node:id,caps:capsOf($("add-caps")),label:$("add-label").value.trim()});
     $("add-id").value="";$("add-label").value="";poll();
+  });
+  $("scan-from").addEventListener("change",()=>{
+    HOSTS=[];PICKED={};SCAN_AT=scanStamp();renderHosts(null);
   });
   $("scan-btn").addEventListener("click",runScan);
   $("deploy-btn").addEventListener("click",deploy);
