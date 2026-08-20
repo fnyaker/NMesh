@@ -2259,8 +2259,8 @@ FLEET_HTML = """<!doctype html>
       <label class="fld grow">Scan from
         <select id="scan-from"></select>
       </label>
-      <label class="fld grow">Subnets — leave empty to sweep every attached network
-        <input id="scan-nets" class="mono" placeholder="auto (192.168.1.0/24, 10.0.0.0/22, …)">
+      <label class="fld grow">Targets — a subnet, a machine, or nothing to sweep every attached network
+        <input id="scan-nets" class="mono" placeholder="auto — or 192.168.1.0/24, 10.0.0.5, nas.lan:2222">
       </label>
       <button id="scan-btn" class="primary">Scan LAN</button>
     </div>
@@ -2600,7 +2600,7 @@ async function runScan(){
   $("scan-btn").disabled=true;
   $("scan-note").textContent="Scanning… this takes a moment.";
   try{
-    const j=await(await api("/api/fleet/scan","POST",{node:from,subnets:nets})).json();
+    const j=await(await api("/api/fleet/scan","POST",{node:from,targets:nets})).json();
     if(j.hosts){HOSTS=j.hosts;KEYS=j.keys||[];renderHosts(j);}
     else $("scan-note").textContent="Scan running on the remote node — results appear here.";
   }catch(_){$("scan-note").textContent="Scan failed.";}
@@ -2628,6 +2628,9 @@ function renderHosts(meta){
     $("scan-note").textContent="That node has no ssh client, so it cannot deploy.";
   else if(HOSTS.length)$("scan-note").textContent=HOSTS.length+" SSH host(s) found.";
   else $("scan-note").textContent="No SSH hosts found.";
+  const bad=(meta&&meta.rejected)||[];
+  if(bad.length)$("scan-note").textContent+=
+    " Could not understand: "+bad.map(esc).join(", ")+".";
   PICKED={};
   $("hosts").innerHTML=HOSTS.map((h,i)=>{
     const fp=(h.keys||[]).map(k=>k.fingerprint).filter(Boolean)[0]||"";

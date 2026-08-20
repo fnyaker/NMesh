@@ -34,10 +34,11 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import os
+import socket
 import shutil
 import tempfile
 
-from ..ip_utils import local_networks
+from ..ip_utils import bounded_getaddrinfo, local_networks, split_host_port
 
 SSH_PORT = 22
 
@@ -291,6 +292,11 @@ def subnet_hosts(subnets: list[str], limit: int = MAX_HOSTS) -> list[str]:
             continue
         if net.version != 4 or net.num_addresses > MAX_NET_ADDRESSES:
             continue          # refuse a sweep too large to be a LAN
+        if not net.is_private or net.is_loopback or net.is_link_local:
+            # Sweeping a public prefix is scanning strangers, whoever typed it.
+            # Naming one machine is different and stays allowed — see
+            # parse_targets.
+            continue
         for host in net.hosts():
             text = str(host)
             if text in seen:
@@ -333,23 +339,132 @@ async def probe_host(ip: str, port: int = SSH_PORT,
     }
 
 
-async def scan(subnets: list[str] | None = None, *, port: int = SSH_PORT,
+async def parse_targets(entries: list[str], *,
+                        default_port: int = SSH_PORT,
+                        limit: int = MAX_HOSTS) -> tuple[list[tuple[str, int]], list[str]]:
+    """Turn what the operator typed into concrete ``(ip, port)`` probes.
+
+    Four shapes are accepted, so "scan my LAN" and "look at exactly that box"
+    are the same field:
+
+    ==========================  ==============================================
+    ``192.168.1.0/24``          a subnet to sweep
+    ``192.168.1.42``            one machine, default SSH port
+    ``192.168.1.42:2222``       one machine, explicit port
+    ``nas.lan`` / ``nas:2222``  one machine by name, resolved here
+    ==========================  ==============================================
+
+    Returns ``(targets, rejected)`` — whatever could not be understood comes
+    back named, rather than being dropped in silence.
+
+    A **subnet** must still be private and small enough to be a LAN: sweeping a
+    public range is scanning strangers. A **single host** the operator typed by
+    hand is one connect to a machine they named, so it is allowed anywhere —
+    naming a box is not a sweep."""
+    targets: list[tuple[str, int]] = []
+    rejected: list[str] = []
+    seen: set[tuple[str, int]] = set()
+
+    def keep(ip: str, port: int) -> None:
+        key = (ip, port)
+        if key not in seen and len(targets) < limit:
+            seen.add(key)
+            targets.append(key)
+
+    for raw in list(entries)[:MAX_SUBNETS * 4]:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        if "/" in text:                                   # a subnet
+            hosts = subnet_hosts([text], limit=limit - len(targets))
+            if not hosts:
+                rejected.append(text)
+            for ip in hosts:
+                keep(ip, default_port)
+            continue
+        host, port = _split_target(text, default_port)
+        if host is None:
+            rejected.append(text)
+            continue
+        resolved = await _resolve(host)
+        if resolved is None:
+            rejected.append(text)
+            continue
+        keep(resolved, port)
+    return targets, rejected
+
+
+def _split_target(text: str, default_port: int) -> tuple[str | None, int]:
+    """Split ``host``, ``host:port`` or ``[v6]:port``. Port defaults, and an
+    out-of-range one makes the whole entry invalid rather than silently 22."""
+    if text.startswith("["):
+        parsed = split_host_port(text)
+        if parsed is None:
+            return (text[1:-1], default_port) if text.endswith("]") else (None, 0)
+        host, port_text = parsed
+    elif text.count(":") == 1:
+        host, port_text = text.rsplit(":", 1)
+    else:
+        # A bare IPv6 literal has several colons and no port.
+        return (text, default_port) if text else (None, 0)
+    if not host:
+        return None, 0
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None, 0
+    return (host, port) if 0 < port < 65536 else (None, 0)
+
+
+async def _resolve(host: str) -> str | None:
+    """An IP literal passes straight through; a name is resolved off the loop.
+
+    Names must be resolved *here* rather than left to ``open_connection``: that
+    would resolve on asyncio's default executor, which is joined at shutdown
+    (``gotchas.md`` §2)."""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        info = await bounded_getaddrinfo(host, 0, type=socket.SOCK_STREAM,
+                                         timeout=5.0)
+    except (OSError, asyncio.TimeoutError, Exception):
+        return None
+    for entry in info:
+        address = entry[4][0]
+        if address:
+            return address.split("%", 1)[0]
+    return None
+
+
+async def scan(entries: list[str] | None = None, *, port: int = SSH_PORT,
                timeout: float = CONNECT_TIMEOUT,
                concurrency: int = MAX_CONCURRENCY,
                limit: int = MAX_HOSTS,
-               progress=None) -> list[dict]:
-    """Sweep the LAN for SSH listeners. Bounded in hosts, in parallelism and in
-    time; returns the responders sorted by address."""
-    targets = subnet_hosts(subnets if subnets is not None else local_subnets(),
-                           limit=limit)
+               progress=None) -> tuple[list[dict], list[str]]:
+    """Look for SSH listeners and return ``(found, rejected)``.
+
+    ``entries`` mixes subnets and precise machines (see :func:`parse_targets`).
+    With none, every attached network is swept. Bounded in hosts, in parallelism
+    and in time."""
+    if entries:
+        targets, rejected = await parse_targets(entries, default_port=port,
+                                                limit=limit)
+    else:
+        targets = [(ip, port) for ip in subnet_hosts(local_subnets(), limit=limit)]
+        rejected = []
     semaphore = asyncio.Semaphore(max(1, min(concurrency, MAX_CONCURRENCY)))
     results: list[dict] = []
     done = 0
 
-    async def one(ip: str) -> None:
+    async def one(ip: str, target_port: int) -> None:
         nonlocal done
         async with semaphore:
-            found = await probe_host(ip, port, timeout)
+            found = await probe_host(ip, target_port, timeout)
         if found is not None:
             results.append(found)
         done += 1
@@ -359,9 +474,18 @@ async def scan(subnets: list[str] | None = None, *, port: int = SSH_PORT,
             except Exception:
                 pass  # a progress callback must never break the sweep
 
-    await asyncio.gather(*(one(ip) for ip in targets), return_exceptions=True)
-    results.sort(key=lambda item: tuple(int(p) for p in item["ip"].split(".")))
-    return results
+    await asyncio.gather(*(one(ip, p) for ip, p in targets),
+                         return_exceptions=True)
+    results.sort(key=_sort_key)
+    return results, rejected
+
+
+def _sort_key(item: dict):
+    """Numeric for IPv4 so .9 precedes .10; textual for anything else."""
+    try:
+        return (0, int(ipaddress.ip_address(item["ip"])), item["port"])
+    except ValueError:
+        return (1, 0, item["port"])
 
 
 async def host_key_fingerprints(ip: str, port: int = SSH_PORT,

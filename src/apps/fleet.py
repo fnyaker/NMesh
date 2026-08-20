@@ -183,6 +183,7 @@ class ScanReceived:
     rid: str
     hosts: list
     networks: list = field(default_factory=list)
+    rejected: list = field(default_factory=list)
 
 
 @dataclass
@@ -265,16 +266,24 @@ class FleetApp:
     (``node.app_auth(FLEET_APP_ID)``): the app signs and verifies through it and
     never sees the node's signing key. ``repo_root`` is the NMesh tree this node
     would push when provisioning; with none, the provision capability reports
-    itself unavailable rather than half working."""
+    itself unavailable rather than half working.
+
+    ``mesh_invite()`` returns ``{"uris": [...], "code": "..."}`` — a fresh
+    single-use invitation to *this* node's mesh. Provisioning calls it once per
+    machine so the new node joins through the node that installed it and has its
+    certificate signed by it (see ``Docs/Apps/fleet``). Keeping it a callable
+    rather than a node reference is what lets the app stay ignorant of the node,
+    exactly like every other connector app."""
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
-                 repo_root: str | None = None,
+                 repo_root: str | None = None, mesh_invite=None,
                  auto_status: bool = True) -> None:
         self._client = client
         self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
         self.node_id = auth.node_id
         self.state = state or FleetState()
         self._repo_root = repo_root
+        self._mesh_invite = mesh_invite
         self._auto_status = auto_status
         self._facts: fleet_host.HostFacts | None = None
         self._events: asyncio.Queue = asyncio.Queue()
@@ -886,11 +895,14 @@ class FleetApp:
     # ======================================================================
 
     async def request_scan(self, target: NodeID,
-                           subnets: list[str] | None = None) -> str:
+                           targets: list[str] | None = None) -> str:
+        """Ask ``target`` to look for SSH hosts. ``targets`` may name subnets
+        *or* precise machines (``10.0.0.5``, ``nas.lan:2222``); empty means
+        every network that node is attached to."""
         rid = self._new_rid(target, "scan")
         document = {"rid": rid}
-        if subnets:
-            document["subnets"] = [str(s)[:64] for s in subnets][:8]
+        if targets:
+            document["targets"] = [str(t)[:255] for t in targets][:64]
         await self._send(target, self._signed_frame(
             SCAN_REQUEST, target, PURPOSE_BY_CAP["scan"], document))
         return rid
@@ -899,16 +911,16 @@ class FleetApp:
         rid = _rid(document)
         if not self._authorised(src, "scan", rid):
             return
-        subnets = document.get("subnets")
-        subnets = [s for s in subnets if isinstance(s, str)][:8] \
-            if isinstance(subnets, list) else None
-        self._spawn(self._run_scan(src, rid, subnets))
+        entries = document.get("targets")
+        entries = [t for t in entries if isinstance(t, str)][:64] \
+            if isinstance(entries, list) else None
+        self._spawn(self._run_scan(src, rid, entries))
 
     async def _run_scan(self, src: NodeID, rid: str,
-                        subnets: list[str] | None) -> None:
+                        entries: list[str] | None) -> None:
         try:
             async with asyncio.timeout(SCAN_TIMEOUT):
-                hosts = await fleet_ssh.scan(subnets)
+                hosts, rejected = await fleet_ssh.scan(entries)
         except (asyncio.TimeoutError, OSError):
             self._fail(src, rid, "scan timed out")
             return
@@ -925,11 +937,14 @@ class FleetApp:
                 host["keys"] = []
         self._reply(src, SCAN_RESULT, {
             "rid": rid, "hosts": hosts[:256],
-            "subnets": subnets or fleet_ssh.local_subnets(),
+            "targets": entries or fleet_ssh.local_subnets(),
+            # Anything we could not make sense of comes back named, so a typo
+            # reads as a typo instead of "nothing found".
+            "rejected": rejected[:32],
             # What this node is actually attached to, prefix and interface
             # included, so the operator sees whether a big network was narrowed
             # rather than silently swept in part.
-            "networks": [] if subnets else fleet_ssh.detected_networks(),
+            "networks": [] if entries else fleet_ssh.detected_networks(),
             "ssh_client": fleet_ssh.ssh_available(),
         })
 
@@ -938,9 +953,11 @@ class FleetApp:
             return
         hosts = document.get("hosts")
         networks = document.get("networks")
+        rejected = document.get("rejected")
         self._emit(ScanReceived(src, _rid(document),
                                 hosts[:256] if isinstance(hosts, list) else [],
-                                networks[:32] if isinstance(networks, list) else []))
+                                networks[:32] if isinstance(networks, list) else [],
+                                rejected[:32] if isinstance(rejected, list) else []))
 
     # ======================================================================
     # Provisioning
@@ -1035,9 +1052,16 @@ class FleetApp:
         ends up managed by the human who asked, not by the relay that installed
         it."""
         host = target["ip"]
+        # The mesh invitation comes from *this* node — the one running the scan
+        # and the SSH. It is on the same LAN as the machine being installed, so
+        # it is the one actually reachable, and the certificate it issues at the
+        # handshake anchors the newcomer to the network. The operator is a
+        # separate matter: it is who the machine will *obey*, carried by the
+        # pre-authorisation, and it need not be reachable at first boot.
+        uris, code = self._fresh_invitation(join_uris, join_code)
         preauth, token = fleet_provision.make_preauth(
             src.raw, self._operator_key(src), capabilities=caps,
-            join_uris=join_uris, join_code=join_code,
+            join_uris=uris, join_code=code,
             label=target.get("label", host))
         self._reply(src, PROVISION_PROGRESS, {
             "rid": rid, "host": host, "step": "starting",
@@ -1054,7 +1078,38 @@ class FleetApp:
             on_progress=on_progress)
         result["token_digest"] = fleet_provision.token_digest(token)
         result["label"] = target.get("label", host)
+        # Installed but with nowhere to join is a half-success worth naming: the
+        # machine will run and never appear on the mesh.
+        result["joins"] = bool(uris and code)
         return result
+
+    def _fresh_invitation(self, fallback_uris: list[str],
+                          fallback_code: str) -> tuple[list[str], str]:
+        """One single-use mesh invitation for one machine.
+
+        Minted per target, never shared: an invitation is single-use by design,
+        so one machine failing to come up must not burn another's. The window is
+        long because the machine only redeems it *after* installing its
+        dependencies, which can take a long while on a small box.
+
+        Falls back to whatever the caller passed when this node cannot invite
+        (no provider wired) — the machine is then installed but joins nothing,
+        which the caller reports rather than hiding."""
+        if self._mesh_invite is None:
+            return fallback_uris, fallback_code
+        try:
+            invitation = self._mesh_invite()
+        except Exception:
+            return fallback_uris, fallback_code
+        if not isinstance(invitation, dict):
+            return fallback_uris, fallback_code
+        uris = invitation.get("uris")
+        code = invitation.get("code")
+        if not isinstance(code, str) or not code:
+            return fallback_uris, fallback_code
+        uris = [u for u in uris if isinstance(u, str)][:8] \
+            if isinstance(uris, list) else []
+        return (uris or fallback_uris), code
 
     def _operator_key(self, src: NodeID) -> bytes:
         entry = self.state.operator(src.raw.hex()) or {}
@@ -1100,13 +1155,14 @@ class FleetApp:
     # Local provisioning (this node's own LAN, no relay involved)
     # ======================================================================
 
-    async def scan_local(self, subnets: list[str] | None = None) -> dict:
-        hosts = await fleet_ssh.scan(subnets)
+    async def scan_local(self, entries: list[str] | None = None) -> dict:
+        hosts, rejected = await fleet_ssh.scan(entries)
         for host in hosts[:64]:
             host["keys"] = await fleet_ssh.host_key_fingerprints(host["ip"],
                                                                  host["port"])
-        return {"hosts": hosts, "subnets": subnets or fleet_ssh.local_subnets(),
-                "networks": [] if subnets else fleet_ssh.detected_networks(),
+        return {"hosts": hosts, "rejected": rejected[:32],
+                "targets": entries or fleet_ssh.local_subnets(),
+                "networks": [] if entries else fleet_ssh.detected_networks(),
                 "ssh_client": fleet_ssh.ssh_available(),
                 "keys": fleet_ssh.discover_private_keys()}
 
@@ -1130,10 +1186,12 @@ class FleetApp:
         results = []
         try:
             for target in targets:
+                uris, code = self._fresh_invitation(join_uris or [],
+                                                    join_code or "")
                 preauth, token = fleet_provision.make_preauth(
                     self.node_id.raw, self._auth.public_key,
-                    capabilities=caps, join_uris=join_uris or [],
-                    join_code=join_code, label=target.get("label", target["ip"]))
+                    capabilities=caps, join_uris=uris, join_code=code,
+                    label=target.get("label", target["ip"]))
                 digest = fleet_provision.token_digest(token)
                 self.state.add_provisioned(digest, host=target["ip"], caps=caps,
                                            label=target.get("label", target["ip"]))
@@ -1143,6 +1201,7 @@ class FleetApp:
                     known_hosts_lines=target.get("known_hosts"),
                     on_progress=on_progress)
                 result["token_digest"] = digest
+                result["joins"] = bool(uris and code)
                 results.append(result)
         finally:
             creds.wipe()

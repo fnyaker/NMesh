@@ -58,6 +58,12 @@ Rejoindre = prouver la connaissance d'un code **sans l'envoyer en clair**.
   (`hmac.compare_digest`), purge les codes expirés.
 - **Usage unique** : `consume(challenge, response)` supprime le code qui matche.
 - Anti-bruteforce : `_MAX_FAILURES = 3` → lockout `_LOCKOUT_TTL = 60 s`.
+- **TTL par code.** `generate_code(ttl)` allonge la fenêtre d'un code précis,
+  borné par `_MAX_TTL` (6 h). C'est pour les invitations qui ne sont pas tapées
+  à la main : celle qu'une node dépose sur une machine en cours de provisioning
+  n'est redeemée qu'après l'installation des dépendances, bien au-delà des
+  5 minutes par défaut. Usage unique et lockout s'appliquent inchangés ; seule
+  la fenêtre bouge, et c'est un choix explicite de l'appelant.
 
 ## Handshake par-saut (établissement d'une session entre 2 pairs directs)
 

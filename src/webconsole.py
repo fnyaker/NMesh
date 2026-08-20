@@ -975,11 +975,13 @@ def _make_handler(console: WebConsole):
                 elif action == "update":
                     self._json(200, {"rid": fleet.update(node)})
                 elif action == "scan":
-                    subnets = data.get("subnets")
+                    # ``targets`` mixes subnets and precise machines; ``subnets``
+                    # is accepted as the older spelling of the same field.
+                    targets = data.get("targets") or data.get("subnets")
                     if node and node != fleet.me:
-                        self._json(200, {"rid": fleet.scan(node, subnets)})
+                        self._json(200, {"rid": fleet.scan(node, targets)})
                     else:
-                        self._json(200, fleet.scan_local(subnets))
+                        self._json(200, fleet.scan_local(targets))
                 elif action == "shell":
                     self._json(200, {"rid": fleet.open_shell(
                         node, _dim_param(data.get("cols"), 80),

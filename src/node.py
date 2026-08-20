@@ -1132,8 +1132,12 @@ class MeshNode:
     def session(self) -> SessionKey | None:
         return next((p.session for p in self._peers if p.session is not None), None)
 
-    def generate_invite(self) -> str:
-        return self._invite.generate_code()
+    def generate_invite(self, ttl_seconds: float | None = None) -> str:
+        """Émet un code d'invitation. ``ttl_seconds`` allonge la fenêtre (borné
+        par `invite._MAX_TTL`) pour les invitations qui ne sont pas tapées à la
+        main — typiquement celle déposée sur une machine en cours de
+        provisioning, qui ne s'en servira qu'après l'installation."""
+        return self._invite.generate_code(ttl_seconds)
 
     async def start(self, addresses: list[str]) -> None:
         self._running = True

@@ -66,9 +66,45 @@ def _fleet_factory(node, connector, data_dir):
         await client.connect()
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),
-                       state=FleetState(store=store), repo_root=ROOT)
+                       state=FleetState(store=store), repo_root=ROOT,
+                       mesh_invite=lambda: _mesh_invitation(node))
         return app, FleetBridge(app)
     return build
+
+
+# A provisioned machine redeems its invitation only after installing its
+# dependencies, which on a small box can take far longer than the 5 minutes a
+# hand-typed code lives. This one is single-use, delivered over an authenticated
+# SSH channel to one machine, and deleted after use — so a longer window is the
+# right trade, and it is bounded by `invite._MAX_TTL`.
+PROVISION_INVITE_TTL = 3 * 3600
+
+
+def _mesh_invitation(node) -> dict:
+    """A fresh single-use invitation to this node's mesh, plus where to reach it.
+
+    Redeeming it runs the ordinary invite → handshake path, so the newcomer's
+    certificate is **issued and signed by this node** — the one that scanned and
+    installed it — and chains from there to the network's root."""
+    return {"uris": node.advertised_uris()[:8],
+            "code": node.generate_invite(PROVISION_INVITE_TTL)}
+
+
+async def _join_mesh(node, preauth) -> bool:
+    """Redeem the invitation left by the provisioner, and wait for the session.
+
+    ``join`` returning is not proof of anything: the handshake that issues our
+    certificate completes afterwards. We wait for a live session before saying
+    we joined, and we try each advertised address in turn — the provisioner may
+    advertise several and only the LAN one is reachable from here."""
+    for uri in preauth.get("join_uris") or []:
+        try:
+            await node.join(uri, preauth.get("join_code") or "")
+            await node.wait_for_session(timeout=30.0)
+            return True
+        except Exception:
+            continue          # unreachable address, or a code already redeemed
+    return False
 
 
 async def _adopt_operator(node, host, preauth, path) -> None:
@@ -80,16 +116,16 @@ async def _adopt_operator(node, host, preauth, path) -> None:
     operator only honours the token once — so keeping it around after the
     attempt would leave a stale secret on disk for no benefit."""
     try:
-        for uri in preauth.get("join_uris") or []:
-            try:
-                await node.join(uri, preauth.get("join_code") or "")
-                break
-            except Exception:
-                continue
+        joined = await _join_mesh(node, preauth)
+        if not joined:
+            # Claiming would go nowhere with no route to anyone. Say so plainly
+            # rather than leaving a machine that looks provisioned and is not.
+            print("  Fleet         : could not join the mesh — not adopted")
+            return
         app = host.app("fleet")
         if app is not None:
             await app.claim_preauth(preauth)
-            print(f"  Fleet         : adopted operator "
+            print(f"  Fleet         : joined the mesh and adopted operator "
                   f"{preauth['operator_id'].hex()[:16]}…")
     except Exception as exc:
         print(f"  Fleet         : pre-authorisation failed ({type(exc).__name__})")
