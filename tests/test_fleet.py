@@ -507,3 +507,64 @@ class TestHostileInput:
                                         "known_hosts": "nope"}])
         assert cleaned == [{"ip": "10.0.0.1", "port": 22, "label": "10.0.0.1",
                             "known_hosts": []}]
+
+
+# ---------------------------------------------------------------------------
+# Réponses qui doivent tenir dans une trame
+# ---------------------------------------------------------------------------
+
+class TestReplyFraming:
+    """Couper du JSON à un offset produit quelque chose que le destinataire ne
+    parse pas et jette en silence — la pire panne possible pour une réponse que
+    l'opérateur attend. On coupe donc des **entrées**, jamais des octets."""
+
+    def _fat_hosts(self, count):
+        return [{"ip": f"10.0.{i // 256}.{i % 256}", "port": 22,
+                 "banner": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5",
+                 "keys": [{"type": "ssh-rsa", "fingerprint": "SHA256:" + "C" * 43,
+                           "line": f"10.0.0.{i} ssh-rsa " + "D" * 600}
+                          for _ in range(3)]}
+                for i in range(count)]
+
+    def test_small_reply_is_untouched(self):
+        document = {"rid": "aa" * 8, "hosts": [{"ip": "10.0.0.1"}]}
+        assert json.loads(fleet._dump_json(document, "hosts")) == document
+
+    def test_oversized_reply_stays_parseable(self):
+        document = {"rid": "aa" * 8, "hosts": self._fat_hosts(400),
+                    "networks": [], "rejected": [], "ssh_client": True}
+        blob = fleet._dump_json(document, "hosts", "networks")
+        assert len(blob) <= fleet.MAX_BODY
+        parsed = json.loads(blob)                     # the whole point
+        assert parsed["rid"] == "aa" * 8
+        assert 0 < len(parsed["hosts"]) < 400
+        assert parsed["truncated"] == 400 - len(parsed["hosts"])
+
+    def test_truncation_survives_the_dispatcher(self, operator, agent):
+        """A trimmed reply must still be understood by the far side."""
+        document = {"rid": "bb" * 8, "hosts": self._fat_hosts(400)}
+        blob = fleet._dump_json(document, "hosts")
+        assert fleet._load_json(blob) is not None
+
+    def test_an_untrimmable_reply_reports_itself(self):
+        """Nothing left to drop: send a readable error, not a broken frame."""
+        document = {"rid": "cc" * 8, "note": "x" * (fleet.MAX_BODY + 100)}
+        parsed = json.loads(fleet._dump_json(document, "hosts"))
+        assert parsed["error"] == "reply too large"
+        assert parsed["rid"] == "cc" * 8
+
+    async def test_scan_result_reaches_the_operator_when_huge(self, operator, agent):
+        """End to end through the real dispatchers: a fat scan result is
+        trimmed, not lost."""
+        await enrol(operator, agent, caps=["scan"])
+        rid = await operator.app.request_scan(agent.id, ["10.0.0.0/30"])
+        operator.take_sent()
+        agent.app._reply(operator.id, fleet.SCAN_RESULT,
+                         {"rid": rid, "hosts": self._fat_hosts(400),
+                          "networks": [], "rejected": []},
+                         "hosts", "networks", "rejected")
+        await deliver(agent, operator)
+        received = [e for e in operator.drain_events()
+                    if isinstance(e, ScanReceived)]
+        assert len(received) == 1
+        assert received[0].hosts and received[0].truncated > 0

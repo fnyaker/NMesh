@@ -19,7 +19,9 @@ import pytest
 from src import MeshNode
 from src.app_registry import FLEET_APP_ID
 from src.data_connector import ConnectorClient, DataConnector
-from src.apps.fleet import FleetApp, StatusReceived, EnrolRequested, Failure
+from src.apps.fleet import (FleetApp, StatusReceived, EnrolRequested,
+                            Failure, ScanReceived)
+from src.apps.fleet_web import FleetBridge
 from src.apps.fleet_state import FleetState
 from src.node_id import NodeID
 from src.tcp_transport import TCPTransport, TCPServer
@@ -297,3 +299,95 @@ class TestProvisionedNodeJoinsTheMesh:
                 ["tcp://fallback:1"], "fb")
         finally:
             await party.close()
+
+
+# ---------------------------------------------------------------------------
+# Le scan **distant** : la panne que l'utilisateur a rencontrée
+# ---------------------------------------------------------------------------
+
+class TestRemoteScan:
+    """Un scan demandé à une node distante doit revenir jusqu'au pont console.
+    C'est le chemin complet : requête signée → autorisation → balayage sur
+    l'autre machine → réponse routée → état visible par l'interface."""
+
+    async def _ssh_listener(self):
+        async def handle(reader, writer):
+            writer.write(b"SSH-2.0-OpenSSH_9.6\r\n")
+            await writer.drain()
+            writer.close()
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server, server.sockets[0].getsockname()[1]
+
+    @staticmethod
+    async def _via_thread(fn, *args):
+        """Le pont marshalle vers la boucle : l'appeler *depuis* la boucle
+        interbloque (cf. `gotchas.md`). Comme la console, on passe par un thread."""
+        return await asyncio.to_thread(fn, *args)
+
+    async def _enrolled(self, port_base, caps):
+        operator, agent = await _linked_pair(port_base)
+        await operator.app.request_enrolment(agent.id, caps=caps)
+        await agent.wait_for(EnrolRequested)
+        await agent.app.approve_enrolment(operator.hex)
+        async with asyncio.timeout(20.0):
+            while operator.app.state.managed_one(agent.hex) is None:
+                await asyncio.sleep(0.05)
+        return operator, agent
+
+    async def test_remote_scan_result_reaches_the_console_bridge(self):
+        operator, agent = await self._enrolled(19330, ["scan"])
+        bridge = FleetBridge(operator.app)
+        bridge.start(asyncio.get_running_loop())
+        server, port = await self._ssh_listener()
+        try:
+            rid = await self._via_thread(
+                bridge.scan, agent.hex, [f"127.0.0.1:{port}"])
+            event = await operator.wait_for(ScanReceived, timeout=60.0)
+            assert event.src == agent.id
+            assert [(h["ip"], h["port"]) for h in event.hosts] == [("127.0.0.1", port)]
+
+            # Ce que l'interface lit réellement : le snapshot du pont.
+            snapshot = await self._via_thread(bridge.snapshot)
+            stored = snapshot["scans"][agent.hex]
+            assert [h["port"] for h in stored["hosts"]] == [port]
+            # …et l'opération est marquée terminée, pas « en cours » à vie.
+            job = next(j for j in snapshot["jobs"] if j["rid"] == rid)
+            assert job["state"] == "ok" and job["kind"] == "scan"
+        finally:
+            server.close()
+            bridge.stop()
+            await operator.close()
+            await agent.close()
+
+    async def test_remote_scan_without_the_capability_is_reported(self):
+        """Un refus doit se voir comme un refus, pas comme un silence."""
+        operator, agent = await self._enrolled(19331, ["status"])
+        bridge = FleetBridge(operator.app)
+        bridge.start(asyncio.get_running_loop())
+        try:
+            rid = await self._via_thread(bridge.scan, agent.hex,
+                                         ["127.0.0.1:22"])
+            failure = await operator.wait_for(Failure, timeout=30.0)
+            assert "not authorised" in failure.error
+            snapshot = await self._via_thread(bridge.snapshot)
+            job = next(j for j in snapshot["jobs"] if j["rid"] == rid)
+            assert job["state"] == "failed"
+        finally:
+            bridge.stop()
+            await operator.close()
+            await agent.close()
+
+    async def test_remote_status_closes_its_job(self):
+        operator, agent = await self._enrolled(19332, ["status"])
+        bridge = FleetBridge(operator.app)
+        bridge.start(asyncio.get_running_loop())
+        try:
+            rid = await self._via_thread(bridge.status, agent.hex)
+            await operator.wait_for(StatusReceived, timeout=30.0)
+            snapshot = await self._via_thread(bridge.snapshot)
+            job = next(j for j in snapshot["jobs"] if j["rid"] == rid)
+            assert job["state"] == "ok"
+        finally:
+            bridge.stop()
+            await operator.close()
+            await agent.close()

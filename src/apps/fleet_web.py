@@ -35,6 +35,7 @@ MAX_LOG = 500                 # activity lines kept for the UI
 MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
 MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
+MAX_JOBS = 64                 # tracked operations (bounded, oldest evicted)
 _CALL_TIMEOUT = 30.0
 
 
@@ -50,6 +51,14 @@ class FleetBridge:
         self._log_seq = 0
         self._scans: dict[str, dict] = {}          # node hex -> last scan result
         self._shells: "OrderedDict[str, dict]" = OrderedDict()
+        # rid -> what we asked, of whom, and how it ended. A remote action
+        # answers asynchronously; without this the page has no way to say
+        # whether it succeeded, failed, or is still running.
+        self._jobs: "OrderedDict[str, dict]" = OrderedDict()
+        # Outcomes that arrived before the calling thread had recorded the rid.
+        # A nearby peer can answer in under a millisecond, well before
+        # ``_call`` returns, so completion must not depend on that ordering.
+        self._done_early: "OrderedDict[str, tuple]" = OrderedDict()
         self._notice: str = ""
 
     # -- lifecycle --------------------------------------------------------
@@ -94,27 +103,39 @@ class FleetBridge:
         elif isinstance(event, Revoked):
             self._say("warn", f"{short}… revoked the relationship", node_hex)
         elif isinstance(event, StatusReceived):
+            self._finish(event.rid, "ok")
             with self._lock:
                 self._bump()
         elif isinstance(event, CommandOutput):
             self._say("out", event.text.rstrip(), node_hex)
         elif isinstance(event, CommandResult):
+            detail = ""
+            if event.kind == "provision":
+                results = event.detail.get("results") or []
+                good = sum(1 for entry in results if entry.get("ok"))
+                detail = f"{good}/{len(results)} machine(s) installed"
+            self._finish(event.rid, "ok" if event.ok else "failed", detail)
             self._say("ok" if event.ok else "err",
                       f"{event.kind} {'finished' if event.ok else 'failed'} "
-                      f"on {short}…", node_hex)
+                      f"on {short}…" + (f" — {detail}" if detail else ""),
+                      node_hex)
         elif isinstance(event, ScanReceived):
             with self._lock:
                 self._scans[node_hex] = {"at": time.time(),
                                          "hosts": event.hosts[:MAX_SCAN_HOSTS],
                                          "networks": event.networks[:32],
-                                         "rejected": event.rejected[:32]}
+                                         "rejected": event.rejected[:32],
+                                         "truncated": event.truncated}
                 self._bump()
+            self._finish(event.rid, "ok",
+                         f"{len(event.hosts)} SSH host(s)")
             self._say("ok", f"{short}… swept {_describe(event.networks)} and "
                             f"found {len(event.hosts)} SSH host(s)", node_hex)
             for bad in event.rejected:
                 self._say("warn", f"{short}… could not understand target "
                                   f"{bad!r}", node_hex)
         elif isinstance(event, ShellOpened):
+            self._finish(event.rid, "ok")
             self._open_shell_record(event.sid.hex(), node_hex)
             self._say("ok", f"shell opened on {short}…", node_hex)
         elif isinstance(event, ShellOutput):
@@ -128,7 +149,40 @@ class FleetBridge:
                 self._bump()
             self._say("warn", f"shell closed on {short}…", node_hex)
         elif isinstance(event, Failure):
+            self._finish(event.rid, "failed", event.error)
             self._say("err", f"{short}…: {event.error}", node_hex)
+
+    def _job(self, rid: str, kind: str, node_hex: str) -> str:
+        """Record an operation as running. Returns the rid unchanged so callers
+        can keep returning it."""
+        if not rid:
+            return rid
+        with self._lock:
+            while len(self._jobs) >= MAX_JOBS:
+                self._jobs.popitem(last=False)
+            job = {"rid": rid, "kind": kind, "node": node_hex,
+                   "state": "running", "detail": "", "at": time.time()}
+            early = self._done_early.pop(rid, None)
+            if early is not None:
+                job.update(state=early[0], detail=early[1])
+            self._jobs[rid] = job
+            self._bump()
+        return rid
+
+    def _finish(self, rid: str, state: str, detail: str = "") -> None:
+        """Close an operation. Safe in either order: an outcome that beats its
+        own registration is parked and applied when the job appears."""
+        if not rid:
+            return
+        with self._lock:
+            job = self._jobs.get(rid)
+            if job is None:
+                while len(self._done_early) >= MAX_JOBS:
+                    self._done_early.popitem(last=False)
+                self._done_early[rid] = (state, detail[:256])
+                return
+            job.update(state=state, detail=detail[:256], at=time.time())
+            self._bump()
 
     def _open_shell_record(self, sid: str, node_hex: str) -> None:
         with self._lock:
@@ -163,6 +217,7 @@ class FleetBridge:
             shells = [{"sid": r["sid"], "node": r["node"], "open": r["open"],
                        "seq": r["seq"], "status": r["status"]}
                       for r in self._shells.values()]
+            jobs = [dict(job) for job in self._jobs.values()]
         return {
             "me": self.me,
             "version": version,
@@ -176,6 +231,7 @@ class FleetBridge:
             "provisioned": state.provisioned(),
             "scans": scans,
             "shells": shells,
+            "jobs": jobs,
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
                              for cap in CAPABILITIES],
             "host": self._app.facts.as_dict(),
@@ -227,17 +283,20 @@ class FleetBridge:
         return self._call(self._app.revoke(str(node_hex)))
 
     def status(self, node_hex: str) -> str:
-        return self._call(self._app.request_status(self._node(node_hex)))
+        return self._job(self._call(self._app.request_status(
+            self._node(node_hex))), "status", node_hex)
 
     def update(self, node_hex: str) -> str:
-        return self._call(self._app.request_update(self._node(node_hex)))
+        return self._job(self._call(self._app.request_update(
+            self._node(node_hex))), "update", node_hex)
 
     def scan(self, node_hex: str, targets=None) -> str:
-        return self._call(self._app.request_scan(self._node(node_hex), targets))
+        return self._job(self._call(self._app.request_scan(
+            self._node(node_hex), targets)), "scan", node_hex)
 
     def open_shell(self, node_hex: str, cols: int = 80, rows: int = 24) -> str:
-        return self._call(self._app.open_shell(self._node(node_hex),
-                                               cols=cols, rows=rows))
+        return self._job(self._call(self._app.open_shell(
+            self._node(node_hex), cols=cols, rows=rows)), "shell", node_hex)
 
     def shell_input(self, node_hex: str, sid: str, data: bytes) -> bool:
         raw = bytes.fromhex(sid) if _is_hex(sid) else b""
@@ -274,11 +333,11 @@ class FleetBridge:
         The credential passed in from the browser is handed straight to the app
         and never stored here — the bridge keeps a log of *steps*, never of the
         login that produced them."""
-        return self._call(self._app.request_provision(
+        return self._job(self._call(self._app.request_provision(
             self._node(node_hex), targets=targets, username=username,
             password=password, key_path=key_path,
             key_passphrase=key_passphrase, caps=clean_caps(caps) if caps else None,
-            join_uris=join_uris, join_code=join_code))
+            join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
     # -- local (this node's own LAN) --------------------------------------
 
@@ -289,7 +348,8 @@ class FleetBridge:
             self._scans[self.me] = {"at": time.time(),
                                     "hosts": result["hosts"][:MAX_SCAN_HOSTS],
                                     "networks": networks[:32],
-                                    "rejected": (result.get("rejected") or [])[:32]}
+                                    "rejected": (result.get("rejected") or [])[:32],
+                                    "truncated": result.get("truncated") or 0}
             self._bump()
         self._say("ok", f"local scan swept {_describe(networks, result.get('targets'))}"
                         f" and found {len(result['hosts'])} SSH host(s)", self.me)

@@ -20,7 +20,7 @@ import tempfile
 import pytest
 
 from src.app_registry import FLEET_APP_ID, AppHost, AppRegistry
-from src.apps.fleet import FleetApp
+from src.apps.fleet import FleetApp, Failure, StatusReceived
 from src.apps.fleet_state import FleetState
 from src.apps.fleet_web import FleetBridge
 from src.crypto import CryptoIdentity
@@ -298,6 +298,104 @@ class TestFleetRoutes:
             _s, _h, raw, body = await _get(console, "/api/fleet/keys", token)
             assert "keys" in body
             assert b"PRIVATE KEY" not in raw
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+
+class TestOperationTracking:
+    """Une action distante répond de façon asynchrone. Sans suivi, la page n'a
+    aucun moyen de dire si elle a réussi, échoué, ou tourne encore — c'est
+    exactement ce qui faisait qu'un scan distant « ne faisait rien »."""
+
+    async def _bridge(self):
+        node = MeshNode(transport_manager=make_manager())
+        app = FleetApp(StubClient(), node.app_auth(FLEET_APP_ID),
+                       state=FleetState(), auto_status=False)
+        bridge = FleetBridge(app)
+        bridge.start(asyncio.get_running_loop())
+        return node, app, bridge
+
+    async def test_a_started_operation_is_visible_as_running(self):
+        node, app, bridge = await self._bridge()
+        try:
+            rid = await asyncio.to_thread(bridge.status, "aa" * 20)
+            job = next(j for j in bridge.snapshot()["jobs"] if j["rid"] == rid)
+            assert job == {"rid": rid, "kind": "status", "node": "aa" * 20,
+                           "state": "running", "detail": "", "at": job["at"]}
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_completion_closes_the_job(self):
+        node, app, bridge = await self._bridge()
+        try:
+            rid = await asyncio.to_thread(bridge.status, "aa" * 20)
+            app._emit(StatusReceived(NodeID(bytes.fromhex("aa" * 20)),
+                                     {"uptime": 1.0}, rid))
+            job = next(j for j in bridge.snapshot()["jobs"] if j["rid"] == rid)
+            assert job["state"] == "ok"
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_a_refusal_shows_as_failed(self):
+        node, app, bridge = await self._bridge()
+        try:
+            rid = await asyncio.to_thread(bridge.scan, "aa" * 20, ["10.0.0.1"])
+            app._emit(Failure(NodeID(bytes.fromhex("aa" * 20)), rid,
+                              "not authorised for scan"))
+            job = next(j for j in bridge.snapshot()["jobs"] if j["rid"] == rid)
+            assert job["state"] == "failed"
+            assert "not authorised" in job["detail"]
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_an_answer_that_beats_its_registration_still_lands(self):
+        """Un pair proche répond en moins d'une milliseconde, avant même que le
+        thread appelant ait noté le rid. La clôture ne doit pas dépendre de cet
+        ordre — sinon l'opération reste « en cours » à vie."""
+        node, app, bridge = await self._bridge()
+        try:
+            rid = "ff" * 8
+            bridge._finish(rid, "ok", "arrivé en avance")   # avant le _job
+            bridge._job(rid, "scan", "aa" * 20)
+            job = next(j for j in bridge.snapshot()["jobs"] if j["rid"] == rid)
+            assert job["state"] == "ok" and job["detail"] == "arrivé en avance"
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_job_table_is_bounded(self):
+        node, app, bridge = await self._bridge()
+        try:
+            from src.apps.fleet_web import MAX_JOBS
+            for i in range(MAX_JOBS + 40):
+                bridge._job(f"{i:016x}", "status", "aa" * 20)
+            assert len(bridge.snapshot()["jobs"]) <= MAX_JOBS
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_early_completions_are_bounded_too(self):
+        node, app, bridge = await self._bridge()
+        try:
+            from src.apps.fleet_web import MAX_JOBS
+            for i in range(MAX_JOBS + 40):
+                bridge._finish(f"{i:016x}", "ok")
+            assert len(bridge._done_early) <= MAX_JOBS
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_jobs_appear_in_the_console_snapshot(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            _s, _h, _b, snapshot = await _get(console, "/api/fleet/state", token)
+            assert "jobs" in snapshot and isinstance(snapshot["jobs"], list)
         finally:
             console.stop()
             await host.stop_all()
