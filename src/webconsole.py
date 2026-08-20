@@ -44,6 +44,7 @@ from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
 _MAX_CHAT_UPLOAD = 64 * 1024 * 1024   # chat file/avatar uploads (base64)
+_MAX_KEY_UPLOAD = 128 * 1024          # one private key, generously bounded
 _APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
@@ -661,6 +662,8 @@ def _make_handler(console: WebConsole):
                 cap = _MAX_APP_BODY
             elif path in ("/api/chat/file", "/api/chat/profile"):
                 cap = _MAX_CHAT_UPLOAD
+            elif path == "/api/fleet/keys":
+                cap = _MAX_KEY_UPLOAD
             else:
                 cap = _MAX_BODY
             body = self._read_body(cap)
@@ -999,6 +1002,22 @@ def _make_handler(console: WebConsole):
                 elif action == "close":
                     ok = fleet.close_shell(node, data.get("sid", ""))
                     self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "keys":
+                    # Uploading a private key: it goes straight into the node's
+                    # encrypted drawer and is never echoed back.
+                    material = data.get("data")
+                    if isinstance(material, str) and material.startswith("b64:"):
+                        decoded = _b64_field(material[4:])
+                        material = decoded.decode("utf-8", "replace") if decoded else None
+                    entry = fleet.add_key(data.get("name", ""), material) \
+                        if isinstance(material, str) else None
+                    self._json(200 if entry else 400,
+                               {"ok": bool(entry), "key": entry,
+                                "keys": fleet.local_keys()})
+                elif action == "keys-remove":
+                    ok = fleet.remove_key(data.get("id", ""))
+                    self._json(200 if ok else 404,
+                               {"ok": bool(ok), "keys": fleet.local_keys()})
                 elif action == "provision":
                     self._handle_provision(fleet, node, data)
                 else:
@@ -1026,6 +1045,7 @@ def _make_handler(console: WebConsole):
                 username=username,
                 password=data.get("password") or None,
                 key_path=data.get("key_path") or None,
+                key_id=data.get("key_id") or None,
                 key_passphrase=data.get("key_passphrase") or None,
                 caps=data.get("caps"),
                 join_uris=data.get("join_uris"),

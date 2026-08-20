@@ -326,6 +326,7 @@ class FleetBridge:
 
     def provision(self, node_hex: str, targets, *, username: str,
                   password: str | None = None, key_path: str | None = None,
+                  key_id: str | None = None,
                   key_passphrase: str | None = None, caps=None,
                   join_uris=None, join_code: str | None = None) -> str:
         """Kick off a provisioning run on a managed node.
@@ -333,9 +334,10 @@ class FleetBridge:
         The credential passed in from the browser is handed straight to the app
         and never stored here — the bridge keeps a log of *steps*, never of the
         login that produced them."""
+        path, material = self._resolve_key(key_id, key_path)
         return self._job(self._call(self._app.request_provision(
             self._node(node_hex), targets=targets, username=username,
-            password=password, key_path=key_path,
+            password=password, key_path=path, key_data=material,
             key_passphrase=key_passphrase, caps=clean_caps(caps) if caps else None,
             join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
@@ -359,23 +361,48 @@ class FleetBridge:
 
     def provision_local(self, targets, *, username: str,
                         password: str | None = None, key_path: str | None = None,
+                        key_id: str | None = None,
                         key_passphrase: str | None = None, caps=None,
                         join_uris=None, join_code: str | None = None) -> list:
         def on_progress(host: str, step: str) -> None:
             self._say("out", f"{host}: {step}", self.me)
 
+        path, material = self._resolve_key(key_id, key_path)
         results = self._call(self._app.provision_local(
-            targets, username=username, password=password, key_path=key_path,
-            key_passphrase=key_passphrase, caps=caps, join_uris=join_uris,
-            join_code=join_code, on_progress=on_progress), timeout=3600.0)
+            targets, username=username, password=password, key_path=path,
+            key_data=material, key_passphrase=key_passphrase, caps=caps,
+            join_uris=join_uris, join_code=join_code,
+            on_progress=on_progress), timeout=3600.0)
         ok = sum(1 for entry in results if entry.get("ok"))
         self._say("ok" if ok == len(results) else "err",
                   f"provisioned {ok}/{len(results)} machine(s)", self.me)
         return results
 
     def local_keys(self) -> list:
+        """Keys the operator can pick: those found on disk, plus those uploaded
+        into this node's encrypted drawer. Metadata only — never material."""
         from . import fleet_ssh
-        return fleet_ssh.discover_private_keys()
+        found = [dict(entry, source="file", id="file:" + entry["path"])
+                 for entry in fleet_ssh.discover_private_keys()]
+        return found + self._app.state.ssh_keys()
+
+    def add_key(self, name: str, material: str) -> dict | None:
+        """Store an uploaded private key. Returns its metadata, never the key."""
+        return self._app.state.add_ssh_key(name, material)
+
+    def remove_key(self, key_id: str) -> bool:
+        return self._app.state.remove_ssh_key(str(key_id))
+
+    def _resolve_key(self, key_id, key_path):
+        """Turn the operator's choice into what the run needs.
+
+        A key found on disk travels as a *path*; an uploaded one has no path on
+        the machine that will use it, so its material goes instead."""
+        if isinstance(key_id, str) and key_id.startswith("file:"):
+            return key_id[5:], None
+        if isinstance(key_id, str) and key_id:
+            return None, self._app.state.ssh_key_material(key_id)
+        return (key_path or None), None
 
 
 def _describe(networks, targets=None) -> str:

@@ -140,16 +140,21 @@ class SshCredentials:
     this releases rather than scrubs — the honest bound is "not kept", not
     "erased from RAM")."""
 
-    __slots__ = ("username", "_password", "key_path", "_key_passphrase")
+    __slots__ = ("username", "_password", "key_path", "_key_data",
+                 "_key_passphrase")
 
     def __init__(self, username: str, *, password: str | None = None,
-                 key_path: str | None = None,
+                 key_path: str | None = None, key_data: str | None = None,
                  key_passphrase: str | None = None) -> None:
         if not username or len(username) > 64 or any(c.isspace() for c in username):
             raise SshError("invalid username")
         self.username = username
         self._password = password or None
         self.key_path = key_path or None
+        # Key *material*, for a key that has no path on this machine — one
+        # uploaded through the console, or sent to the node running the SSH.
+        # It is written to a private temp file only while a command runs.
+        self._key_data = key_data or None
         self._key_passphrase = key_passphrase or None
 
     @property
@@ -158,18 +163,55 @@ class SshCredentials:
 
     @property
     def has_key(self) -> bool:
-        return self.key_path is not None
+        return self.key_path is not None or self._key_data is not None
 
     def wipe(self) -> None:
         self._password = None
         self._key_passphrase = None
+        self._key_data = None
 
     def __repr__(self) -> str:
         return (f"SshCredentials(username={self.username!r}, "
                 f"password={'<set>' if self._password else None}, "
-                f"key_path={self.key_path!r})")
+                f"key_path={self.key_path!r}, "
+                f"key_data={'<set>' if self._key_data else None})")
 
     __str__ = __repr__
+
+
+class MaterialisedKey:
+    """Give OpenSSH a file for a key we only hold as bytes.
+
+    ``ssh -i`` needs a path, so an uploaded key has to touch a filesystem at
+    some point. The window is one command: a 0700 directory holding a 0600 file,
+    removed on the way out — the same shape as :class:`KnownHosts`. A key that
+    already has a path is passed through untouched, and nothing is written."""
+
+    def __init__(self, creds: SshCredentials) -> None:
+        self._creds = creds
+        self._dir: str | None = None
+        self.path = creds.key_path
+
+    def __enter__(self) -> "MaterialisedKey":
+        if self._creds.key_path or not self._creds._key_data:
+            return self
+        self._dir = tempfile.mkdtemp(prefix="nmesh-key-")
+        os.chmod(self._dir, 0o700)
+        self.path = os.path.join(self._dir, "id")
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            material = self._creds._key_data
+            if not material.endswith("\n"):
+                material += "\n"     # OpenSSH refuses a key without a final newline
+            os.write(descriptor, material.encode("utf-8"))
+        finally:
+            os.close(descriptor)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._dir is not None:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            self._dir, self.path = None, self._creds.key_path
 
 
 def discover_private_keys(ssh_dir: str | None = None) -> list[dict]:
@@ -585,7 +627,7 @@ async def _fingerprint(known_hosts_line: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _base_options(known_hosts: str | None, creds: SshCredentials,
-                  port: int) -> list[str]:
+                  port: int, key_path: str | None = None) -> list[str]:
     """Common ``ssh`` options. No secret appears here — argv is world-readable."""
     options = [
         "-p", str(port),
@@ -608,8 +650,9 @@ def _base_options(known_hosts: str | None, creds: SshCredentials,
         # target offered no key we could read). accept-new trusts the first key
         # it sees; callers announce this so the operator knows what they got.
         options += ["-o", "StrictHostKeyChecking=accept-new"]
-    if creds.has_key:
-        options += ["-i", creds.key_path, "-o", "IdentitiesOnly=yes"]
+    key_path = key_path or creds.key_path
+    if key_path:
+        options += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
         methods = "publickey,password,keyboard-interactive" if creds.has_password \
             else "publickey"
     else:
@@ -665,8 +708,8 @@ async def run(host: str, creds: SshCredentials, command: list[str], *,
         raise SshError("no ssh client on this host")
     if not command:
         raise SshError("empty command")
-    with KnownHosts(known_hosts_lines or []) as known:
-        argv = (["ssh"] + _base_options(known.path, creds, port)
+    with KnownHosts(known_hosts_lines or []) as known, MaterialisedKey(creds) as key:
+        argv = (["ssh"] + _base_options(known.path, creds, port, key.path)
                 + [f"{creds.username}@{host}", "--"] + list(command))
         return await _spawn_with_pty(argv, creds, stdin_data, timeout, on_output)
 

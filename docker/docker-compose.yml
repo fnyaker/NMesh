@@ -27,6 +27,11 @@ services:
       # logs; read it with:
       #     docker compose -f docker/docker-compose.yml logs nmesh | grep Password
       # NMESH_CONSOLE_PASSWORD: "choose-your-own-password"
+      #
+      # Fleet app (remote management + deployment, served at /fleet). Off by
+      # default because it can open a shell; uncomment to have it start enabled,
+      # or toggle it from the console's Apps tab (the choice persists in /data).
+      # NMESH_FLEET: "1"
     ports:
       - "9000:9000"                 # mesh TCP — reachable so this node can relay
       - "8787:8787"                 # web console — exposed on all interfaces
@@ -34,6 +39,28 @@ services:
                                     # it host-only instead: "127.0.0.1:8787:8787".
     volumes:
       - nmesh_data:/data            # identity, certs, sessions, console password persist here
+      #
+      # SSH keys for the fleet app's LAN provisioning.
+      # A container has no ~/.ssh, so key auto-detection finds nothing. Two ways
+      # to give the node a key — pick either:
+      #
+      #  1. Mount your own keys read-only. The path below is where the node
+      #     looks (its HOME is /root inside the image). Read-only on purpose:
+      #     the node only ever reads a key, never writes one.
+      # - ${HOME}/.ssh:/root/.ssh:ro
+      #     Narrower, and usually what you want — expose one key, not the whole
+      #     directory (mount the .pub too if you want its comment shown):
+      # - ${HOME}/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      # - ${HOME}/.ssh/id_ed25519.pub:/root/.ssh/id_ed25519.pub:ro
+      #
+      #  2. Or upload a key from the console: Fleet → Discover & deploy →
+      #     "Add a key". It is stored in this node's *encrypted* app store
+      #     (inside /data) and written to a private temp file only while a
+      #     command runs. Nothing to mount.
+      #
+      # Either way the key never leaves this node except, for a provisioning run
+      # you asked a managed node to perform, inside the end-to-end-encrypted
+      # payload sent to that node.
 
 volumes:
   nmesh_data:

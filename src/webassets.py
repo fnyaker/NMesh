@@ -2302,19 +2302,32 @@ FLEET_HTML = """<!doctype html>
     </div>
     <div id="scan-nets-found" class="nets"></div>
     <div id="scan-note" class="muted small"></div>
+
+    <div class="keys-bar">
+      <label class="fld grow">SSH private key used to deploy
+        <select id="ssh-key"></select>
+      </label>
+      <input id="key-file" type="file" hidden>
+      <button type="button" id="key-add">Upload a key…</button>
+      <button type="button" id="key-del" class="ghost">Remove</button>
+      <div id="key-note" class="muted small">Keys in <code>~/.ssh</code> are found
+        automatically. In a container there is none, so upload one here: it is kept in
+        this node's <b>encrypted</b> app store and written to a private temporary file
+        only while a command runs.</div>
+    </div>
     <div id="hosts" class="hosts"></div>
     <div id="deploy" class="deploy hidden">
       <h3>Install NMesh on the selected machines</h3>
       <div class="row wrap gap">
         <label class="fld">SSH user<input id="ssh-user" autocomplete="off" placeholder="root"></label>
         <label class="fld">Password<input id="ssh-pass" type="password" autocomplete="new-password" placeholder="(optional)"></label>
-        <label class="fld grow">Private key
-          <select id="ssh-key"></select>
-        </label>
         <label class="fld">Key passphrase<input id="ssh-kpass" type="password" autocomplete="new-password" placeholder="(optional)"></label>
       </div>
       <p class="muted small">Give a password, a key, or both — both are tried. Secrets are held in memory
-        for the run only: never written to disk, never passed on a command line.</p>
+        for the run only: never written to disk, never passed on a command line.
+        An uploaded key is kept in this node's <b>encrypted</b> app store and written to a
+        private temporary file only while a command runs — useful in a container, where
+        there is no <code>~/.ssh</code> to read.</p>
       <div class="fld">Capabilities the new machines grant you</div>
       <div id="deploy-caps" class="caps"></div>
       <div class="row gap">
@@ -2437,6 +2450,10 @@ a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
 .job.failed::before{background:var(--danger)}
 .job .who{color:var(--muted)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.keys-bar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;
+  padding:14px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.keys-bar .fld{min-width:240px}
+.keys-bar #key-note{flex-basis:100%;margin:0}
 .nets{display:flex;flex-wrap:wrap;gap:8px}
 .net{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
   border-radius:999px;padding:4px 11px;background:var(--panel);font-size:12px}
@@ -2727,12 +2744,47 @@ function renderHosts(meta){
       '<span class="muted small grow">'+esc(h.banner||"")+'</span>'+
       (fp?'<span class="muted fp mono">'+esc(fp)+'</span>':
           '<span class="pill warn">no host key</span>')+'</label>';}).join("");
-  if(KEYS.length)
-    fill($("ssh-key"),[["","(no key — password only)"]].concat(
-      KEYS.map(k=>[k.path,k.name+(k.encrypted?" (passphrase)":"")+(k.comment?" — "+k.comment:"")])));
-  else fill($("ssh-key"),[["","(no local key found)"]]);
+  renderKeys();
   $("deploy").classList.toggle("hidden",HOSTS.length===0);
   updateCount();
+}
+function keyNote(text){$("key-note").textContent=text;}
+function keyLabel(k){
+  return k.name+(k.encrypted?" (passphrase)":"")
+    +(k.source==="uploaded"?" — uploaded":(k.comment?" — "+k.comment:""));
+}
+function renderKeys(){
+  const opts=[["","(no key — password only)"]].concat(
+    KEYS.map(k=>[k.id||("file:"+k.path),keyLabel(k)]));
+  fill($("ssh-key"),opts);
+  $("key-del").disabled=!(KEYS.length&&$("ssh-key").value.indexOf("file:")!==0
+                          &&$("ssh-key").value!=="");
+}
+async function loadKeys(){
+  try{ KEYS=(await(await api("/api/fleet/keys")).json()).keys||[]; }
+  catch(_){ KEYS=[]; }
+  renderKeys();
+}
+async function uploadKey(file){
+  if(!file)return;
+  if(file.size>128*1024){keyNote("That file is too large for a key.");return;}
+  const text=await file.text();
+  if(text.indexOf("PRIVATE KEY")<0){
+    keyNote("That does not look like a private key.");return;}
+  const r=await api("/api/fleet/keys","POST",{name:file.name,data:text});
+  const j=await r.json().catch(()=>({}));
+  KEYS=j.keys||KEYS; renderKeys();
+  if(j.key)$("ssh-key").value=j.key.id;
+  keyNote(r.ok?("Key "+(j.key?j.key.name:"")+" added — it will be used to deploy.")
+              :"Could not store that key.");
+  renderKeys();
+}
+async function removeKey(){
+  const id=$("ssh-key").value;
+  if(!id||id.indexOf("file:")===0)return;
+  if(!confirm("Remove this key from the node's store?"))return;
+  const j=await(await api("/api/fleet/keys-remove","POST",{id})).json().catch(()=>({}));
+  KEYS=j.keys||KEYS; renderKeys();
 }
 function updateCount(){
   const n=Object.keys(PICKED).length;
@@ -2749,11 +2801,11 @@ async function deploy(){
   const body={node:$("scan-from").value,targets:targets,
     username:$("ssh-user").value.trim(),
     password:$("ssh-pass").value||null,
-    key_path:$("ssh-key").value||null,
+    key_id:$("ssh-key").value||null,
     key_passphrase:$("ssh-kpass").value||null,
     caps:capsOf($("deploy-caps"))};
   if(!body.username){$("deploy-state").textContent="An SSH user is required.";return;}
-  if(!body.password&&!body.key_path){
+  if(!body.password&&!body.key_id){
     $("deploy-state").textContent="Give a password, a key, or both.";return;}
   $("deploy-btn").disabled=true;
   $("deploy-state").textContent="Deploying… watch the Activity tab.";
@@ -2856,6 +2908,12 @@ function bind(){
     HOSTS=[];PICKED={};SCAN_AT=scanStamp();renderHosts(null);
   });
   $("scan-btn").addEventListener("click",runScan);
+  $("key-add").addEventListener("click",()=>$("key-file").click());
+  $("key-file").addEventListener("change",(e)=>{
+    const f=e.target.files[0]; e.target.value=""; uploadKey(f);
+  });
+  $("key-del").addEventListener("click",removeKey);
+  $("ssh-key").addEventListener("change",renderKeys);
   $("deploy-btn").addEventListener("click",deploy);
   $("shell-open").addEventListener("click",openShell);
   $("shell-kill").addEventListener("click",async()=>{
@@ -2880,7 +2938,8 @@ async function enter(token){
   TOKEN=token||null;
   if(TOKEN){try{sessionStorage.setItem("nmesh_token",TOKEN);}catch(_){}}
   $("login").classList.add("hidden");$("app").classList.remove("hidden");
-  await poll(); if(timer)clearInterval(timer); timer=setInterval(poll,1500);
+  await poll(); await loadKeys();
+  if(timer)clearInterval(timer); timer=setInterval(poll,1500);
   return true;
 }
 $("login-form").addEventListener("submit",async(e)=>{

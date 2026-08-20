@@ -78,7 +78,8 @@ Options :
 | POST    | `/api/chat/search` | `{pseudo}` → local + annuaire DHT réseau + requête 1-saut |
 | GET     | `/api/fleet/state` | `?since=N` → nodes gérées, notifications d'enrôlement, journal, capabilities, faits machine |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → octets du terminal (base64) |
-| GET     | `/api/fleet/keys`  | clés SSH locales — **métadonnées seulement**, jamais le matériel |
+| GET     | `/api/fleet/keys`  | clés SSH disponibles (disque + importées) — **métadonnées seulement** |
+| POST    | `/api/fleet/keys` / `keys-remove` | importe / retire une clé privée (tiroir chiffré) |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
 | POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée. `scan` prend `targets` (sous-réseaux **et/ou** machines précises : `10.0.0.5`, `nas.lan:2222`) ; vide → **tous** les réseaux attachés |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |

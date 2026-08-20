@@ -26,6 +26,7 @@ list is bounded, and a corrupt or tampered blob yields an **empty** ledger
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import time
@@ -45,6 +46,9 @@ MAX_MANAGED = 4096
 MAX_PENDING = 256
 MAX_PROVISION_RECORDS = 512
 MAX_LABEL = 128
+MAX_SSH_KEYS = 8                  # uploaded private keys held at once
+MAX_SSH_KEY_BYTES = 64 * 1024
+_KEY_PREFIX = "sshkey:"           # drawer key holding one uploaded private key
 _STATE_KEY = "fleet-state"
 _STATE_BUDGET = 200 * 1024        # serialised ledger ceiling (under the drawer cap)
 PENDING_TTL = 7 * 86400           # an unanswered request expires after a week
@@ -89,6 +93,8 @@ class FleetState:
         self._pending_in: dict[str, dict] = {}   # requests awaiting our decision
         self._pending_out: dict[str, dict] = {}  # our requests awaiting an answer
         self._provisioned: dict[str, dict] = {}  # token digest -> provisioning run
+        self._ssh_keys: dict[str, dict] = {}     # key id -> metadata (never material)
+        self._ram_keys: dict[str, str] = {}      # material when no drawer is wired
         self._version = 0
         self._load()
 
@@ -116,6 +122,7 @@ class FleetState:
         self._pending_out = _load_map(document.get("pending_out"), MAX_PENDING)
         self._provisioned = _load_map(document.get("provisioned"),
                                       MAX_PROVISION_RECORDS)
+        self._ssh_keys = _load_map(document.get("ssh_keys"), MAX_SSH_KEYS)
         self._expire_pending()
 
     def _save(self) -> None:
@@ -128,6 +135,7 @@ class FleetState:
             "pending_in": self._pending_in,
             "pending_out": self._pending_out,
             "provisioned": self._provisioned,
+            "ssh_keys": self._ssh_keys,
         }
         try:
             blob = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -348,10 +356,89 @@ class FleetState:
                 self._save()
             return entry
 
+    # -- uploaded SSH keys ------------------------------------------------
+    #
+    # A container has no ``~/.ssh``, so an operator needs a way to hand the node
+    # a key. The material lives in the app's **encrypted drawer** (AES-256-GCM
+    # under a key derived from the node identity — the same trust boundary as
+    # the identity file itself), one drawer entry per key so the state blob
+    # stays small. Metadata and material are kept apart on purpose: everything
+    # the UI reads goes through :meth:`ssh_keys`, which never returns material.
+
+    def add_ssh_key(self, name: str, material: str) -> dict | None:
+        if not looks_like_private_key(material):
+            return None
+        key_id = _key_id(material)
+        with self._lock:
+            if key_id not in self._ssh_keys and len(self._ssh_keys) >= MAX_SSH_KEYS:
+                return None
+            entry = {
+                "name": clean_label(name) or f"key-{key_id[:8]}",
+                "encrypted": ("ENCRYPTED" in material
+                              or ("OPENSSH PRIVATE KEY" in material
+                                  and "bcrypt" in material)),
+                "at": time.time(),
+            }
+            if self._store is not None:
+                try:
+                    if not self._store.put(_KEY_PREFIX + key_id,
+                                           material.encode("utf-8")):
+                        return None      # drawer full — refuse, do not half-store
+                except Exception:
+                    return None
+            else:
+                self._ram_keys[key_id] = material
+            self._ssh_keys[key_id] = entry
+            self._save()
+            return dict(entry, id=key_id)
+
+    def ssh_keys(self) -> list[dict]:
+        """Metadata only — never the key material."""
+        with self._lock:
+            return [dict(entry, id=key_id, source="uploaded")
+                    for key_id, entry in self._ssh_keys.items()]
+
+    def ssh_key_material(self, key_id: str) -> str | None:
+        with self._lock:
+            if key_id not in self._ssh_keys:
+                return None
+            if self._store is None:
+                return self._ram_keys.get(key_id)
+            try:
+                blob = self._store.get(_KEY_PREFIX + key_id)
+            except Exception:
+                return None
+            return blob.decode("utf-8", "replace") if blob else None
+
+    def remove_ssh_key(self, key_id: str) -> bool:
+        with self._lock:
+            if self._ssh_keys.pop(str(key_id), None) is None:
+                return False
+            self._ram_keys.pop(key_id, None)
+            if self._store is not None:
+                try:
+                    self._store.delete(_KEY_PREFIX + key_id)
+                except Exception:
+                    pass
+            self._save()
+            return True
+
     def provisioned(self) -> list[dict]:
         with self._lock:
             return [dict(entry, digest=key)
                     for key, entry in self._provisioned.items()]
+
+
+def _key_id(material: str) -> str:
+    """Content-derived id, so uploading the same key twice is one entry."""
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def looks_like_private_key(material) -> bool:
+    """Cheap shape check before anything is stored. Not a parse: OpenSSH reads
+    the file itself at connect time and is the real judge."""
+    return (isinstance(material, str) and 0 < len(material) <= MAX_SSH_KEY_BYTES
+            and "PRIVATE KEY" in material)
 
 
 def _is_node_hex(value) -> bool:

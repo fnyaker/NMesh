@@ -12,6 +12,14 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
+# The fleet app drives the system OpenSSH client to discover and provision
+# machines (see Docs/Apps/fleet). Without it the provision capability reports
+# itself unavailable, which is the correct behaviour but a poor default for an
+# image whose whole point is managing other machines.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependencies already live in the base image (installed from the same
 # requirements.txt). Only the application code is added here.
 COPY src/ ./src/
