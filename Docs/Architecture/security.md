@@ -58,6 +58,12 @@ Rejoindre = prouver la connaissance d'un code **sans l'envoyer en clair**.
   (`hmac.compare_digest`), purge les codes expirés.
 - **Usage unique** : `consume(challenge, response)` supprime le code qui matche.
 - Anti-bruteforce : `_MAX_FAILURES = 3` → lockout `_LOCKOUT_TTL = 60 s`.
+- **TTL par code.** `generate_code(ttl)` allonge la fenêtre d'un code précis,
+  borné par `_MAX_TTL` (6 h). C'est pour les invitations qui ne sont pas tapées
+  à la main : celle qu'une node dépose sur une machine en cours de provisioning
+  n'est redeemée qu'après l'installation des dépendances, bien au-delà des
+  5 minutes par défaut. Usage unique et lockout s'appliquent inchangés ; seule
+  la fenêtre bouge, et c'est un choix explicite de l'appelant.
 
 ## Handshake par-saut (établissement d'une session entre 2 pairs directs)
 
@@ -114,3 +120,39 @@ un DATA valide). Un handshake **rejoué** produit un candidat que l'attaquant ne
 peut jamais promouvoir (il ne décapsule pas notre ciphertext frais) → il
 expire. Un doublon légitime ne casse rien : la session vivante est conservée.
 </content>
+
+## Identité applicative (au-dessus de la session E2E)
+
+Source : `app_auth.py`, exposé par `node.app_auth(app_id)` et par les trames
+`AUTH_*` du connecteur. Détail complet : [`Docs/AppAuth/guide`](../AppAuth/guide).
+
+La session E2E authentifie le **transport** : quand une payload DATA arrive à une
+app, son `src_id` est prouvé. Mais cette preuve est confinée à une session
+vivante — irrécupérable après redémarrage, intransmissible, et muette sur
+l'**intention**. `app_auth` ajoute une **assertion** : un énoncé signé ML-DSA
+« le nœud S affirme, dans l'app A, à B, pour le purpose P, sur le contexte C, à
+l'instant T », portable, scopé, frais et à usage unique.
+
+Deux invariants de sécurité, à ne pas casser :
+
+- **Ce n'est pas un oracle de signature.** La même clé ML-DSA signe certificats,
+  handshakes, releases et réclamations d'annuaire. Rien dans `app_auth` ne signe
+  des octets fournis par l'app : l'entrée signée est toujours
+  `b"nmesh-app-auth-v1" ‖ <champs structurés bornés>`, et le contexte libre
+  n'entre que par un hash 32 o. Le domaine est distinct de tous les autres du
+  dépôt. Une app ne peut donc pas faire signer un corps de certificat.
+- **L'`app_id` vient de la session, jamais de la trame** — comme pour le tiroir
+  et la DHT par-app. Une app ne peut pas émettre pour la section d'une autre.
+
+L'identité du signataire n'est pas un champ séparé : `NodeID` dérive de la clé
+présentée, donc il n'y a pas d'id à mentir (même invariant que le handshake).
+
+`verify_assertion` ordonne ses contrôles du moins cher au plus cher et ne brûle
+le nonce anti-rejeu **qu'après** les contrôles bon marché — sinon un flot
+d'assertions invalides évincerait des entrées vivantes d'un cache borné.
+
+**Authentification n'est pas autorisation.** Une assertion prouve « qui, pour
+quoi » ; décider si ce « qui » a le droit reste à l'app. L'app Fleet
+(`Docs/Apps/fleet`) tient pour ça un ledger de capabilities local et persistant,
+et exige les **trois** portes : mesh authentifié, enrôlé avec la capability, et
+signature fraîche sur les octets exacts de la commande.

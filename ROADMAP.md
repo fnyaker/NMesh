@@ -202,6 +202,61 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Envoi de fichiers depuis la web UI du chat (aujourd'hui : texte + affichage
   des fichiers reçus).
 
+### Identité applicative (`src/app_auth.py`) — fait
+- Le mesh authentifiait le transport ; une app n'avait rien de **portable** ni de
+  **lié à une intention**. Assertions signées ML-DSA scopées
+  `(app, audience, purpose, ctx)`, fraîches, à usage unique, vérifiables
+  hors-ligne après redémarrage.
+- **Jamais un oracle de signature** : l'entrée signée est toujours
+  `domaine ‖ champs structurés bornés`, le contexte libre n'entre que par un hash
+  32 o, et le domaine est distinct de tous les autres du dépôt — une app ne peut
+  pas faire signer un corps de certificat par la clé du nœud. L'`app_id` vient de
+  la session, jamais de la trame.
+- Exposé aux apps intégrées par `node.app_auth(app_id)` (l'app ne touche jamais
+  la clé) et aux apps externes par les trames `AUTH_*` du connecteur.
+- Doc : `Docs/AppAuth/guide`.
+
+### App de gestion de parc « Fleet » (`src/apps/fleet*.py`) — fait
+- Enrôlement avec **notification et décision humaine** sur la node cible ;
+  approuver peut restreindre, jamais élargir. Grant signé conservé côté opérateur
+  comme preuve auditable du consentement.
+- **Capabilities par action** (`status`, `update`, `scan`, `provision`, `shell`).
+- Trois portes indépendantes avant exécution : mesh authentifié, enrôlé avec la
+  capability, signature fraîche sur les octets exacts de la commande.
+- Status (disque/RAM/charge/uptime), update (plan dérivé par la node elle-même
+  depuis ses propres faits — apt/dnf/pacman/zypper/apk/xbps/brew/pkg, argv jamais
+  une chaîne shell), shell interactif sur pty borné.
+- Découverte LAN SSH sur **tous les réseaux attachés**, au préfixe réellement en
+  usage (`/proc/net/route`, ioctl, `ip`/`ifconfig`, repli) — un `/22` n'est plus
+  balayé comme un `/24`, et une seconde carte ou un VPN ne sont plus manqués.
+  Bornée, réseaux trop grands rétrécis autour de notre adresse et signalés comme
+  tels. Le champ de cible accepte aussi une **machine précise** (`10.0.0.5`,
+  `nas.lan:2222`, `[fd00::5]:22`) : nommer une machine n'est pas balayer, donc
+  c'est permis hors des plages privées, alors qu'un **préfixe** public reste
+  refusé. Ce qui n'est pas compris revient nommé, jamais avalé. Empreintes de
+  clés d'hôte présentées à l'opérateur, puis provisioning : bootstrap auto-extractible en une
+  session SSH, intégrité SHA-256 vérifiée avant d'écrire, service de démarrage
+  installé, et **reprise de confiance** par pré-autorisation à jeton unique.
+- Identifiants SSH : OpenSSH piloté par **pty**, jamais sur disque, jamais dans
+  `argv`, jamais dans l'environnement. Clés d'hôte épinglées après confirmation
+  humaine (`StrictHostKeyChecking=yes`), pas d'`accept-new`.
+- **Intégration au réseau automatisée** : la node qui lance le scan émet une
+  invitation fraîche et à usage unique **par machine**, la dépose dans la
+  pré-autorisation avec ses propres URI, et la machine neuve rejoint le mesh à
+  son premier démarrage — flux ordinaire invitation → handshake → `issue_cert`,
+  donc **son certificat est signé par la node qui l'a installée** et chaîne
+  jusqu'à la racine du réseau. C'est aussi la node joignable : elle est sur le
+  même LAN, là où l'opérateur peut être derrière un NAT.
+- `generate_invite(ttl)` : TTL par code (borné 6 h). Un code tapé à la main vit
+  5 minutes ; celui déposé sur une machine en cours d'installation n'est redeemé
+  qu'après le build des dépendances. Usage unique et lockout inchangés.
+- Doc : `Docs/Apps/fleet`.
+
+### Cycle de vie des apps intégrées (`src/app_registry.py`) — fait
+- `installed` / `enabled` distincts et persistés ; désinstaller **purge le tiroir
+  chiffré** de l'app. Bascule à chaud depuis la console, sans redémarrer le nœud.
+- Fleet est **désactivée par défaut** (elle peut ouvrir un shell).
+
 ### Long terme
 - Trust score par nœud + révocation en cas de trahison.
 - Persistance de la trust/cert table sur disque.

@@ -10,6 +10,7 @@ import struct
 import threading
 import time
 from collections import OrderedDict
+from .app_auth import AppAuth
 from .node_id import NodeID
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
@@ -1131,8 +1132,12 @@ class MeshNode:
     def session(self) -> SessionKey | None:
         return next((p.session for p in self._peers if p.session is not None), None)
 
-    def generate_invite(self) -> str:
-        return self._invite.generate_code()
+    def generate_invite(self, ttl_seconds: float | None = None) -> str:
+        """Émet un code d'invitation. ``ttl_seconds`` allonge la fenêtre (borné
+        par `invite._MAX_TTL`) pour les invitations qui ne sont pas tapées à la
+        main — typiquement celle déposée sur une machine en cours de
+        provisioning, qui ne s'en servira qu'après l'installation."""
+        return self._invite.generate_code(ttl_seconds)
 
     async def start(self, addresses: list[str]) -> None:
         self._running = True
@@ -4359,6 +4364,17 @@ class MeshNode:
     @property
     def app_storage(self):
         return self._app_storage
+
+    def app_auth(self, app_id: bytes) -> AppAuth:
+        """Hand an app an authentication service scoped to its section.
+
+        This is how an app uses the node's mesh identity as a login (see
+        ``Docs/AppAuth/guide``): it can mint assertions naming *this* node and
+        verify a peer's, but it never touches the signing key, and every
+        signature it can cause is confined to the app-auth domain and to its own
+        ``app_id``. An app therefore cannot mint an assertion for another app's
+        section, nor steer the signer at a certificate or a handshake."""
+        return AppAuth(self._identity, app_id, self._id)
 
     def app_store_put(self, app_id: bytes, key: str, value: bytes) -> bool:
         return self._app_storage.put(app_id, key, value)

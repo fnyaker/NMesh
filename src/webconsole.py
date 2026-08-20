@@ -38,7 +38,8 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-from .webassets import INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS, CHAT_CSS
+from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
+                        CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
@@ -84,14 +85,19 @@ def _scrypt(password: str, salt: bytes) -> bytes:
 class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
-                 password: str | None = None, chat_bridge=None) -> None:
+                 password: str | None = None, chat_bridge=None,
+                 app_host=None) -> None:
         self._node = node
         self.host = host
         self.port = port
         self._state_dir = state_dir
         self._use_tls = use_tls
-        # Optional in-process chat app surfaced at /chat (see src.apps.chat_web).
-        self._chat = chat_bridge
+        # Built-in apps. With an ``app_host`` the console follows what is
+        # actually running (apps can be enabled/disabled live from the Apps
+        # page); ``chat_bridge`` remains the direct wiring for a runner that
+        # hosts one app itself.
+        self._app_host = app_host
+        self._chat_bridge = chat_bridge
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -236,17 +242,39 @@ class WebConsole:
 
     # -- lifecycle --------------------------------------------------------
 
+    @property
+    def _chat(self):
+        """The live chat bridge, or None when the app is disabled/absent."""
+        if self._app_host is not None:
+            return self._app_host.bridge("chat")
+        return self._chat_bridge
+
+    @property
+    def _fleet(self):
+        """The live fleet bridge, or None when the app is disabled/absent."""
+        return self._app_host.bridge("fleet") if self._app_host else None
+
     def _apps(self) -> list:
-        """Built-in apps hosted in-process by this console (for the Apps list)."""
+        """Built-in apps and their state (for the Apps page).
+
+        With an app host this is the registry's view — installed, enabled,
+        running — so the page can toggle them. Without one, it degrades to
+        naming whatever bridge was wired directly."""
+        if self._app_host is not None:
+            return self._app_host.overview()
         apps = []
-        if self._chat is not None:
-            apps.append({"id": "chat", "name": "Chat", "path": "/chat"})
+        if self._chat_bridge is not None:
+            apps.append({"id": "chat", "name": "Chat", "path": "/chat",
+                         "installed": True, "enabled": True, "running": True,
+                         "description": ""})
         return apps
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
-        if self._chat is not None:
-            self._chat.start(self._loop)
+        if self._app_host is not None:
+            self._app_host.bind_console(self._loop)
+        elif self._chat_bridge is not None:
+            self._chat_bridge.start(self._loop)
         handler = _make_handler(self)
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         if self._ssl_ctx is not None:
@@ -268,8 +296,8 @@ class WebConsole:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
-        if self._chat is not None:
-            self._chat.stop()
+        if self._app_host is None and self._chat_bridge is not None:
+            self._chat_bridge.stop()
 
     @property
     def url(self) -> str:
@@ -347,6 +375,14 @@ _CHAT_STATIC = {
     "/chat": ("text/html; charset=utf-8", CHAT_HTML),
     "/chat.js": ("application/javascript; charset=utf-8", CHAT_JS),
     "/chat.css": ("text/css; charset=utf-8", CHAT_CSS),
+}
+
+# Fleet sub-page assets, served only when the fleet app is running. Same rule as
+# chat: the page itself is public, every /api/fleet/* call needs the session.
+_FLEET_STATIC = {
+    "/fleet": ("text/html; charset=utf-8", FLEET_HTML),
+    "/fleet.js": ("application/javascript; charset=utf-8", FLEET_JS),
+    "/fleet.css": ("text/css; charset=utf-8", FLEET_CSS),
 }
 
 
@@ -485,6 +521,13 @@ def _make_handler(console: WebConsole):
             if console._chat is not None and path in _CHAT_STATIC:
                 ctype, text = _CHAT_STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
+                return
+            if console._fleet is not None and path in _FLEET_STATIC:
+                ctype, text = _FLEET_STATIC[path]
+                self._send(200, ctype, text.encode("utf-8"))
+                return
+            if path.startswith("/api/fleet/"):
+                self._handle_fleet_get(path)
                 return
             if path in ("/api/nodes", "/api/store/catalog",
                         "/api/store/installed"):
@@ -856,6 +899,15 @@ def _make_handler(console: WebConsole):
                     return
                 self._handle_chat_post(path, _parse_json(body))
                 return
+            if path.startswith("/api/fleet/"):
+                if console._fleet is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                self._handle_fleet_post(path, _parse_json(body))
+                return
+            if path.startswith("/api/apps/"):
+                self._handle_apps_post(path, _parse_json(body))
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
@@ -870,6 +922,143 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        # -- fleet (remote management) ------------------------------------
+        #
+        # Every route below is behind the same session as the rest of the
+        # console. The node-side capability checks still apply on the far end:
+        # this console can only ask, never grant itself anything.
+
+        def _handle_fleet_get(self, path: str) -> None:
+            if console._fleet is None:
+                self._json(404, {"error": "not found"})
+                return
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            query = parse_qs(self.path.partition("?")[2])
+            if path == "/api/fleet/state":
+                since = _int_param(query, "since", 0)
+                self._json(200, console._fleet.snapshot(since))
+                return
+            if path == "/api/fleet/shell":
+                sid = (query.get("sid") or [""])[0]
+                data = console._fleet.shell_data(sid, _int_param(query, "offset", 0))
+                self._json(200 if data else 404, data or {"error": "no session"})
+                return
+            if path == "/api/fleet/keys":
+                # Paths and comments of local SSH keys — never key material.
+                self._json(200, {"keys": console._fleet.local_keys()})
+                return
+            self._json(404, {"error": "not found"})
+
+        def _handle_fleet_post(self, path: str, data) -> None:
+            fleet = console._fleet
+            data = data or {}
+            node = data.get("node") or data.get("id") or ""
+            action = path.rsplit("/", 1)[1]
+            try:
+                if action == "enrol":
+                    ok = fleet.enrol(node, data.get("caps"), data.get("label", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "approve":
+                    ok = fleet.approve(node, data.get("caps"))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "deny":
+                    ok = fleet.deny(node, data.get("reason", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "revoke":
+                    ok = fleet.revoke(node)
+                    self._json(200 if ok else 404, {"ok": bool(ok)})
+                elif action == "status":
+                    self._json(200, {"rid": fleet.status(node)})
+                elif action == "update":
+                    self._json(200, {"rid": fleet.update(node)})
+                elif action == "scan":
+                    # ``targets`` mixes subnets and precise machines; ``subnets``
+                    # is accepted as the older spelling of the same field.
+                    targets = data.get("targets") or data.get("subnets")
+                    if node and node != fleet.me:
+                        self._json(200, {"rid": fleet.scan(node, targets)})
+                    else:
+                        self._json(200, fleet.scan_local(targets))
+                elif action == "shell":
+                    self._json(200, {"rid": fleet.open_shell(
+                        node, _dim_param(data.get("cols"), 80),
+                        _dim_param(data.get("rows"), 24))})
+                elif action == "input":
+                    raw = _b64_field(data.get("data"))
+                    ok = raw is not None and fleet.shell_input(
+                        node, data.get("sid", ""), raw)
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "resize":
+                    ok = fleet.shell_resize(node, data.get("sid", ""),
+                                            _dim_param(data.get("cols"), 80),
+                                            _dim_param(data.get("rows"), 24))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "close":
+                    ok = fleet.close_shell(node, data.get("sid", ""))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "provision":
+                    self._handle_provision(fleet, node, data)
+                else:
+                    self._json(404, {"error": "not found"})
+            except ValueError:
+                self._json(400, {"error": "bad request"})
+            except Exception as exc:
+                self._json(503, {"error": str(exc)[:200]})
+
+        def _handle_provision(self, fleet, node: str, data) -> None:
+            """Start a provisioning run.
+
+            The credential arrives in this request body and is passed straight
+            through to the app. It is never written to the console's state, its
+            log, or its session — and the response never echoes it back."""
+            targets = data.get("targets")
+            if not isinstance(targets, list) or not targets:
+                self._json(400, {"error": "targets required"})
+                return
+            username = data.get("username")
+            if not isinstance(username, str) or not username:
+                self._json(400, {"error": "username required"})
+                return
+            kwargs = dict(
+                username=username,
+                password=data.get("password") or None,
+                key_path=data.get("key_path") or None,
+                key_passphrase=data.get("key_passphrase") or None,
+                caps=data.get("caps"),
+                join_uris=data.get("join_uris"),
+                join_code=data.get("join_code"),
+            )
+            if node and node != fleet.me:
+                self._json(200, {"rid": fleet.provision(node, targets, **kwargs)})
+            else:
+                self._json(200, {"results": fleet.provision_local(targets, **kwargs)})
+
+        # -- built-in apps (install / enable) -----------------------------
+
+        def _handle_apps_post(self, path: str, data) -> None:
+            host = console._app_host
+            if host is None:
+                self._json(404, {"error": "not found"})
+                return
+            # ``id`` is the registry key; ``name`` is accepted as the older
+            # spelling so a caller written against either keeps working.
+            data = data or {}
+            name = data.get("id") or data.get("name")
+            action = path.rsplit("/", 1)[1]
+            if not isinstance(name, str) or action not in (
+                    "enable", "disable", "install", "uninstall"):
+                self._json(400, {"error": "bad request"})
+                return
+            try:
+                ok = console._call(getattr(host, action)(name), timeout=30.0)
+            except Exception as exc:
+                self._json(503, {"error": str(exc)[:200]})
+                return
+            self._json(200 if ok else 400, {"ok": bool(ok),
+                                            "apps": console._apps()})
 
         def _handle_chat_post(self, path: str, data) -> None:
             chat = console._chat
@@ -1070,6 +1259,32 @@ def _make_handler(console: WebConsole):
                        extra_headers=[_set_cookie_header(token, console._use_tls)])
 
     return Handler
+
+
+def _int_param(query: dict, name: str, default: int) -> int:
+    try:
+        return max(0, int((query.get(name) or [str(default)])[0]))
+    except (ValueError, TypeError):
+        return default
+
+
+def _dim_param(value, default: int) -> int:
+    """Clamp a terminal dimension coming from the browser."""
+    try:
+        return max(1, min(int(value), 1000))
+    except (TypeError, ValueError):
+        return default
+
+
+def _b64_field(value) -> bytes | None:
+    """Decode a base64 field from a request body. Terminal input is bytes, not
+    text, so it travels base64-encoded; anything undecodable is refused."""
+    if not isinstance(value, str) or len(value) > _MAX_BODY:
+        return None
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return None
 
 
 def _chat_conv(data) -> str | None:
