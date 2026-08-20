@@ -37,6 +37,24 @@ générant un PING/PONG juste avant l'arrêt).
 propage l'annulation proprement. **Ne pas réintroduire `wait_for` sur un chemin
 qui doit rester annulable.**
 
+### 2b. Lire un pty dans un thread refige le shutdown (même piège que 2)
+Le shell distant de l'app Fleet et le pilotage d'OpenSSH lisent tous deux un
+**pty maître**. La tentation est `loop.run_in_executor(None, os.read, fd, n)` —
+et c'est exactement le piège du point 2 sous un autre visage : la lecture d'un
+pty dont le pair ne ferme jamais **ne rend pas la main**, le thread reste dans
+l'executor par défaut, et asyncio **joint cet executor au shutdown** → `stop()`
+ne revient jamais.
+→ Correctif : `fleet_ssh.watch_pty()` — `os.set_blocking(fd, False)` +
+`loop.add_reader(fd, …)`. Aucun thread à joindre, aucune lecture où se coincer,
+et l'EOF (EIO sur Linux quand l'enfant raccroche) retire proprement le reader.
+**Tout fd qui peut ne jamais rendre la main se lit par `add_reader`, jamais dans
+un thread.**
+
+Corollaire dans la même zone : la tâche qui pompe un pty ferme sa propre session
+en fin de flux. Si `close()` annule cette tâche sans garde, elle s'annule
+elle-même en plein démontage et ne finit jamais son nettoyage — d'où le
+`task is not asyncio.current_task()` dans `_Shell.close()`.
+
 ### 3. Un lien TCP inactif meurt tout seul
 `receive()` TCP lève au `_READ_TIMEOUT` (60 s) sans données → lien reapé. Sans
 keepalive, un lien sain mais silencieux tombe. → `_link_keepalive_loop` (PING
@@ -195,6 +213,13 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
 - **Filet anti-hang** : `--timeout=120 --timeout-method=thread` — tout test qui
   dépasse 120 s échoue avec une trace (au lieu de 5 h). Si un test légitime
   approche cette limite, il y a un vrai problème, pas une limite trop basse.
+- **La console tient la boucle : ne l'appelez pas depuis la boucle.** Le serveur
+  HTTP tourne dans un thread et marshalle chaque action vers la boucle asyncio
+  (`run_coroutine_threadsafe(...).result()`). Un test (ou un script) qui fait un
+  appel HTTP **synchrone depuis la boucle** bloque celle-ci pendant que le thread
+  serveur attend qu'elle exécute sa coroutine → interblocage franc, qui ressemble
+  à un timeout réseau. Tous les tests console passent par
+  `await asyncio.to_thread(_request, …)` ; garder ce motif.
 - **Attendre une condition, pas dormir.** Remplacer `await asyncio.sleep(0.1)`
   « pour laisser propager » par un poll sur l'état observable (les transports en
   mémoire propagent en ~ms). Les tests négatifs (« rien ne se passe ») gardent un

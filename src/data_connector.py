@@ -37,6 +37,7 @@ import os
 import secrets
 import struct
 
+from .app_auth import CTX_LEN, MAX_PURPOSE_LEN
 from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
 from .node_id import NodeID
 
@@ -46,6 +47,8 @@ _MAX_CLIENTS = 64
 
 _KLEN = struct.Struct("!H")   # key-length prefix for STORE_PUT
 _MAX_LIST = 60_000            # cap on a serialised key list reply
+_ASSERT_HEAD = struct.Struct("!20s32sI")     # audience, ctx, ttl
+_VERIFY_HEAD = struct.Struct("!B32sH")       # flags, ctx, purpose length
 
 # client → server
 _AUTH = 0x01
@@ -59,6 +62,8 @@ _APP_DHT_PUT = 0x08   # body = flag(1) ‖ keylen(2) ‖ enc_key ‖ content
 _APP_DHT_GET = 0x09   # body = keylen(2) ‖ dec_key ‖ content_key(20)
 _PSEUDO_PUB = 0x0A    # body = pseudo(utf-8)    — publish my pseudo→node id
 _PSEUDO_LOOKUP = 0x0B # body = pseudo(utf-8)    — find node ids by pseudo
+_AUTH_ASSERT = 0x0C   # body = audience(20) ‖ ctx(32) ‖ ttl(4) ‖ purpose(utf-8)
+_AUTH_VERIFY = 0x0D   # body = flags(1) ‖ ctx(32) ‖ plen(2) ‖ purpose ‖ assertion
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
@@ -71,6 +76,8 @@ _APP_DHT_KEY = 0x88   # body = content_key(20) or empty on error  (PUT reply)
 _APP_DHT_VALUE = 0x89 # body = present(1) ‖ content                (GET reply)
 _PSEUDO_KEY = 0x8A    # body = dir_key(20) or empty                (PUB reply)
 _PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo}]                (LOOKUP reply)
+_AUTH_ASSERTION = 0x8C # body = the signed assertion, or empty on refusal
+_AUTH_PRINCIPAL = 0x8D # body = JSON principal, or JSON null when it fails
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -101,6 +108,9 @@ class DataConnector:
         self._token_bytes = self.token.encode("utf-8")
         # writer -> app_id: each client is bound to one app section.
         self._clients: dict[asyncio.StreamWriter, bytes] = {}
+        # app_id -> AppAuth. One per section, kept so its replay cache persists
+        # across frames and across a client reconnecting.
+        self._auths: dict[bytes, object] = {}
         self._server: asyncio.AbstractServer | None = None
         self._pump_task: asyncio.Task | None = None
 
@@ -205,6 +215,11 @@ class DataConnector:
                 elif ftype in (_PSEUDO_PUB, _PSEUDO_LOOKUP):
                     # Pseudo directory, namespaced by this client's app_id.
                     await self._handle_pseudo(writer, app_id, ftype, body)
+                elif ftype in (_AUTH_ASSERT, _AUTH_VERIFY):
+                    # App-level identity. Same rule as the drawer and the app
+                    # DHT: the app id comes from the AUTH session, never the
+                    # frame, so an app can only ever speak for its own section.
+                    await self._handle_app_auth(writer, app_id, ftype, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError, OSError):
             pass
@@ -295,6 +310,69 @@ class DataConnector:
                 content = None
             present = b"\x01" if content is not None else b"\x00"
             await _write_frame(writer, _APP_DHT_VALUE, present + (content or b""))
+
+    def _auth_for(self, app_id: bytes):
+        """The app-auth service for this section, created once and kept.
+
+        Keeping it matters: the replay cache lives inside it, so a fresh one per
+        frame would make every assertion verifiable twice."""
+        auth = self._auths.get(app_id)
+        if auth is None:
+            auth = self._node.app_auth(app_id)
+            if len(self._auths) >= _MAX_CLIENTS:
+                self._auths.pop(next(iter(self._auths)), None)
+            self._auths[app_id] = auth
+        return auth
+
+    async def _handle_app_auth(self, writer: asyncio.StreamWriter, app_id: bytes,
+                               ftype: int, body: bytes) -> None:
+        """Mint or verify an app-auth assertion for this client's section.
+
+        The node signs only a structured statement in the app-auth domain (see
+        :mod:`src.app_auth`) — never bytes the app chose — so this is an identity
+        service, not a signing oracle. Every malformed frame is answered with an
+        empty/negative reply rather than an error (reject by default)."""
+        auth = self._auth_for(app_id)
+        if ftype == _AUTH_ASSERT:
+            if len(body) < _ASSERT_HEAD.size:
+                await _write_frame(writer, _AUTH_ASSERTION, b"")
+                return
+            audience, ctx, ttl = _ASSERT_HEAD.unpack_from(body, 0)
+            purpose_raw = body[_ASSERT_HEAD.size:]
+            if len(purpose_raw) > MAX_PURPOSE_LEN:
+                await _write_frame(writer, _AUTH_ASSERTION, b"")
+                return
+            try:
+                blob = auth.assert_to(audience, purpose_raw.decode("utf-8"),
+                                      ctx, ttl)
+            except Exception:
+                blob = b""      # bad purpose / ttl / audience — refuse, don't raise
+            await _write_frame(writer, _AUTH_ASSERTION, blob)
+        elif ftype == _AUTH_VERIFY:
+            if len(body) < _VERIFY_HEAD.size:
+                await _write_frame(writer, _AUTH_PRINCIPAL, b"null")
+                return
+            flags, ctx, plen = _VERIFY_HEAD.unpack_from(body, 0)
+            off = _VERIFY_HEAD.size
+            if len(body) < off + plen or plen > MAX_PURPOSE_LEN:
+                await _write_frame(writer, _AUTH_PRINCIPAL, b"null")
+                return
+            try:
+                purpose = body[off:off + plen].decode("utf-8") if plen else None
+            except UnicodeDecodeError:
+                await _write_frame(writer, _AUTH_PRINCIPAL, b"null")
+                return
+            principal = auth.verify(body[off + plen:], purpose=purpose,
+                                    ctx=ctx if flags & 1 else None)
+            document = None if principal is None else {
+                "id": principal.node_id.raw.hex(),
+                "purpose": principal.purpose,
+                "ctx": principal.ctx.hex(),
+                "issued_at": principal.issued_at,
+                "expires_at": principal.expires_at,
+            }
+            await _write_frame(writer, _AUTH_PRINCIPAL,
+                               json.dumps(document).encode("utf-8"))
 
     async def _handle_pseudo(self, writer: asyncio.StreamWriter, app_id: bytes,
                              ftype: int, body: bytes) -> None:
@@ -455,6 +533,42 @@ class ConnectorClient:
         except Exception:
             return []
         return [x for x in out if isinstance(x, dict)] if isinstance(out, list) else []
+
+    # -- app identity (this app's section) --------------------------------
+    #
+    # The node signs a structured statement in the app-auth domain, bound to the
+    # app id this client authenticated with. An app therefore proves "this node,
+    # inside *this* app, to *that* audience, for *this* purpose" — and can never
+    # mint a statement for another section, nor get arbitrary bytes signed.
+    # See Docs/AppAuth/guide.
+
+    async def assert_to(self, audience: NodeID | bytes, purpose: str,
+                        ctx: bytes = b"\x00" * CTX_LEN,
+                        ttl: int = 120) -> bytes | None:
+        """Mint a signed assertion naming our node. None if the node refused it
+        (bad purpose, ttl or audience)."""
+        raw = audience.raw if isinstance(audience, NodeID) else bytes(audience)
+        body = (_ASSERT_HEAD.pack(raw, bytes(ctx), int(ttl))
+                + purpose.encode("utf-8"))
+        blob = await self._roundtrip(_AUTH_ASSERT, body, _AUTH_ASSERTION)
+        return blob or None
+
+    async def verify_assertion(self, blob: bytes, *, purpose: str | None = None,
+                               ctx: bytes | None = None) -> dict | None:
+        """Verify a peer's assertion addressed to us. Returns the principal
+        (``{id, purpose, ctx, issued_at, expires_at}``) or None on any failure —
+        wrong app, wrong audience, wrong purpose, stale, replayed, or forged."""
+        encoded = purpose.encode("utf-8") if purpose else b""
+        body = (_VERIFY_HEAD.pack(1 if ctx is not None else 0,
+                                  bytes(ctx) if ctx is not None else b"\x00" * CTX_LEN,
+                                  len(encoded))
+                + encoded + blob)
+        resp = await self._roundtrip(_AUTH_VERIFY, body, _AUTH_PRINCIPAL)
+        try:
+            document = json.loads(resp.decode("utf-8"))
+        except Exception:
+            return None
+        return document if isinstance(document, dict) else None
 
     async def recv(self) -> tuple[NodeID, bytes]:
         if self._inbox:

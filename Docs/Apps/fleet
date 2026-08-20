@@ -1,0 +1,415 @@
+# Fleet — gestion à distance et déploiement automatisé
+
+App intégrée, servie à `/fleet` dans la console. Modules :
+[`fleet.py`](../../src/apps/fleet.py) (protocole + les deux rôles),
+[`fleet_state.py`](../../src/apps/fleet_state.py) (ledger de confiance),
+[`fleet_host.py`](../../src/apps/fleet_host.py) (faits machine + plan de mise à
+jour), [`fleet_ssh.py`](../../src/apps/fleet_ssh.py) (scan LAN + SSH),
+[`fleet_provision.py`](../../src/apps/fleet_provision.py) (bootstrap),
+[`fleet_web.py`](../../src/apps/fleet_web.py) (pont console).
+
+> **Désactivée par défaut.** Elle peut ouvrir un shell : on ne l'active pas
+> parce qu'elle a été livrée. `--fleet` au lancement, ou le bouton **Enable**
+> dans l'onglet Apps de la console. Voir
+> [`Docs/AppStore/guide`](../AppStore/guide) pour les apps déployées, et
+> ci-dessous pour installer/désinstaller une app **intégrée**.
+
+## Les deux rôles
+
+Chaque nœud fait tourner la même app et peut jouer les deux rôles :
+
+- **agent** — il obéit : répond au status, lance son propre gestionnaire de
+  paquets, ouvre un shell, balaie son LAN, provisionne des machines qu'il
+  atteint. Uniquement pour un opérateur **qu'il a enrôlé**, et uniquement pour
+  les **capabilities** que cet enrôlement a accordées ;
+- **opérateur** — il pilote : demande aux nœuds de l'enrôler, garde la liste de
+  ceux qui ont accepté, leur envoie des commandes.
+
+## Autorisation — trois portes indépendantes
+
+Une commande ne s'exécute que si les trois tiennent. Elles sont indépendantes
+exprès : qu'une seule cède ne suffit pas.
+
+1. **Le mesh a authentifié l'émetteur.** La payload DATA porte un `src_id`
+   prouvé par la session E2E (ML-DSA + chaîne de certificats).
+2. **Il est enrôlé ici, avec cette capability.** Le ledger est local, persistant,
+   et ne grandit que par une décision locale explicite.
+3. **La commande porte une signature fraîche sur ses propres octets.** Chaque
+   requête embarque une assertion app-auth (voir
+   [`Docs/AppAuth/guide`](../AppAuth/guide)) dont l'audience est **ce** nœud, le
+   `purpose` nomme la capability, et le `ctx` est le hash du corps de la requête.
+   Une commande rejouée, redirigée ou modifiée ne vérifie pas.
+
+La porte 3 est de la défense en profondeur sur la 1, mais elle apporte ce que la
+1 ne peut pas : la preuve est **portable**. « Ce nœud a autorisé exactement cette
+commande, à cet instant » reste vérifiable une fois la session disparue — c'est
+ce qui rend une fonction d'exécution à distance **auditable** et pas seulement
+fonctionnelle.
+
+> **L'exception assumée : le shell.** Signer chaque frappe coûterait une
+> signature post-quantique par caractère. **Ouvrir** un shell est signé ; les
+> frappes qui suivent sont liées au `sid` retourné et circulent sur le même canal
+> chiffré de bout en bout, depuis le même pair authentifié. L'acte signé est
+> « ouvre un shell en mon nom », qui est l'acte qui compte. Une entrée nommant un
+> `sid` depuis un **autre** nœud est jetée.
+
+## Capabilities
+
+Du plus inoffensif au total. Une seule n'implique jamais une autre.
+
+| Capability | Ce qu'elle autorise |
+|---|---|
+| `status` | lire uptime, charge, mémoire, disques |
+| `update` | lancer l'upgrade du gestionnaire de paquets de la machine |
+| `scan` | balayer le LAN de cette machine à la recherche d'hôtes SSH |
+| `provision` | installer NMesh sur des machines de ce LAN |
+| `shell` | ouvrir un shell interactif sous l'utilisateur du nœud |
+
+## Enrôlement — la notification
+
+1. Sur le PC opérateur : onglet **Nodes**, coller le node id, cocher les
+   capabilities, **Request access**.
+2. Sur la node cible : une bande **« Requests to manage this node »** apparaît en
+   haut de `/fleet`. Quelqu'un doit répondre.
+3. **Review & accept** ouvre la liste des capabilities demandées. On peut
+   **restreindre**, jamais élargir : approuver ne peut pas accorder plus que ce
+   que la demande affichait.
+4. À l'acceptation, l'opérateur reçoit un **grant signé** qu'il conserve — la
+   preuve que ce nœud a réellement consenti, vérifiable des mois plus tard.
+
+Rien n'est accordé avant cette réponse humaine. Une demande répétée **rafraîchit**
+l'entrée au lieu de s'empiler, et la file est plafonnée : un pair ne peut pas
+noyer la notification.
+
+`Revoke` coupe la relation dans les deux sens, prévient l'autre bout, et ferme
+les shells ouverts par ce pair.
+
+## Ce qu'on fait d'une node gérée
+
+- **Status** — uptime, charge, mémoire, disques, distro, gestionnaire de paquets.
+  Le dernier status est mis en cache pour l'affichage.
+- **Update** — la node dérive **elle-même** son plan depuis ses propres faits
+  (`fleet_host.update_argv`) : apt, dnf, yum, pacman, zypper, apk, xbps, brew,
+  pkg, avec `sudo -n`/`doas` si elle n'est pas root. Chaque commande est une
+  **liste argv** issue d'une table fixe — rien de ce que l'opérateur envoie n'y
+  entre, donc il n'y a aucune surface d'injection. Une machine sans gestionnaire
+  connu, ou sans chemin vers root, **refuse d'emblée** au lieu de commencer
+  quelque chose qu'elle ne peut pas finir. La sortie est streamée en direct.
+- **Shell** — un vrai pty. Bornes : `MAX_SHELLS = 4` simultanés par node,
+  inactivité `SHELL_IDLE_TIMEOUT` (15 min) → reap, entrée plafonnée, SIGHUP puis
+  kill à la fermeture. L'environnement du shell est **nettoyé** : le jeton du
+  connecteur qui vit dans `os.environ` n'est jamais transmis à un enfant.
+- **Scan LAN** / **Provisioning** — ci-dessous.
+
+La détection des faits machine se fait **à l'installation de l'app** (premier
+démarrage) et est mise en cache ; `refresh_facts()` la relance.
+
+## Découverte LAN et provisioning
+
+Onglet **Discover & deploy**. Le scan peut tourner **localement** ou sur
+n'importe quelle node gérée ayant `scan` — c'est ce qui permet de déployer sur
+le LAN d'un site distant.
+
+### Phase 1 — découvrir
+
+Le scan couvre **tous les réseaux auxquels la node est attachée**, au préfixe
+réellement en usage — pas un `/24` supposé autour d'une adresse. Les interfaces
+et leurs masques sont énumérés par `src.ip_utils.local_networks()`, qui essaie
+plusieurs sources dans l'ordre de fiabilité et retombe jusqu'à ce que l'une
+réponde :
+
+1. `/proc/net/route` (Linux) — les routes **connectées** (sans passerelle) sont
+   par définition les réseaux attachés, avec leur masque exact ;
+2. `ioctl SIOCGIFADDR`/`SIOCGIFNETMASK` sur chaque interface de
+   `socket.if_nameindex()` ;
+3. la sortie de `ip -o -4 addr` ou `ifconfig -a` (macOS, BSD) ;
+4. en dernier recours seulement, l'ancien `/24` supposé autour de chaque adresse
+   connue — reconnaissable au fait qu'aucun nom d'interface n'y est attaché.
+
+Une machine qu'on ne sait pas introspecter donne donc **moins de réseaux**, jamais
+une exception.
+
+Ce qui est écarté, et pourquoi :
+
+| Écarté | Raison |
+|---|---|
+| IPv6 | un balayage de /64 n'existe pas |
+| loopback, link-local (`169.254/16`) | ce ne sont pas des LAN à découvrir |
+| préfixes publics | balayer un préfixe public où l'on se trouve, c'est scanner des inconnus |
+| `/31`, `/32` | pas d'hôtes à découvrir (liens point à point) |
+
+**Réseaux trop grands.** Un `/16`, c'est 65 000 connexions : ni une découverte de
+LAN, ni quelque chose qu'on lance par accident. Un réseau au-delà de
+`MAX_NET_ADDRESSES` (4096) est donc **rétréci autour de notre propre adresse**
+plutôt qu'abandonné, et le rétrécissement est **affiché** (`narrowed from
+10.0.0.0/16`) pour que l'opérateur puisse l'élargir délibérément en tapant le
+préfixe voulu dans le champ *Subnets*. Si on ne sait pas sur quoi centrer la
+tranche (adresse locale inconnue), le réseau est ignoré ouvertement plutôt que
+balayé dans un coin arbitraire.
+
+Le balayage lui-même : TCP borné, bannière SSH lue sans rien envoyer. Bornes :
+`MAX_HOSTS = 1024` au total, `MAX_SUBNETS = 16` réseaux, `MAX_CONCURRENCY = 128`,
+1,5 s par hôte, bannière plafonnée. Un `/8` fourni **explicitement** reste
+refusé.
+
+### Cibler une machine précise
+
+Le champ *Targets* accepte quatre formes, si bien que « balaie mon LAN » et
+« regarde exactement cette machine » passent par le même endroit :
+
+| Saisie | Effet |
+|---|---|
+| *(vide)* | balaie tous les réseaux attachés (détection automatique) |
+| `192.168.1.0/24` | balaie ce sous-réseau |
+| `192.168.1.42` | **une seule machine**, port SSH par défaut |
+| `192.168.1.42:2222` | une seule machine, port explicite |
+| `nas.lan` / `nas.lan:2222` | une seule machine par son nom |
+| `[fd00::5]:2222` | une seule machine en IPv6 |
+
+Les noms sont résolus **en amont**, pas laissés à `open_connection` : celui-ci
+résoudrait sur l'executor par défaut d'asyncio, qui est joint au shutdown
+(`gotchas.md` §2). Le résolveur borné vit dans `ip_utils.bounded_getaddrinfo`,
+partagé avec le client STUN.
+
+Nommer une machine n'est **pas** balayer : un hôte précis tapé à la main est
+autorisé où qu'il soit, y compris hors des plages privées et en IPv6 — c'est une
+connexion vers une machine que l'opérateur a désignée. Un **préfixe** public,
+lui, reste refusé quel que soit celui qui l'a tapé : balayer une plage publique,
+c'est scanner des inconnus.
+
+Ce qui n'est pas compris (port hors bornes, nom introuvable, préfixe refusé)
+revient **nommé** dans `rejected`, affiché sous les résultats et journalisé : une
+faute de frappe se lit comme une faute de frappe, jamais comme « rien trouvé ».
+
+Laissé vide, la détection automatique s'applique. Les réseaux effectivement balayés (avec leur
+interface, et le cas échéant la mention `narrowed`) sont affichés au-dessus des
+résultats, et repris dans le journal — « rien trouvé » n'est jamais ambigu sur
+*où* on a cherché.
+
+Pour chaque hôte trouvé, `ssh-keyscan` récupère les **clés d'hôte publiques** et
+leurs empreintes SHA-256, affichées dans la liste.
+
+### Phase 2 — choisir et déployer
+
+L'utilisateur coche les machines, renseigne un utilisateur SSH, et **un mot de
+passe, une clé, ou les deux** (les deux sont tentés). Les clés privées locales
+sont détectées dans `~/.ssh` — **métadonnées seulement** (chemin, chiffrée ou
+non, commentaire de la `.pub`) ; le matériel de clé n'entre jamais dans l'état de
+l'app, c'est `ssh -i` qui lit le fichier au moment de se connecter.
+
+Puis, en **une seule session SSH** :
+
+1. un **bootstrap auto-extractible** (`/bin/sh`, POSIX pur) est poussé sur
+   l'entrée standard de `sh -s` ;
+2. il vérifie le **SHA-256** de la charge utile **avant d'écrire un seul
+   fichier** ;
+3. il déballe NMesh dans `/opt/nmesh` (root) ou `~/.nmesh` ;
+4. il écrit la **pré-autorisation** en 0600 ;
+5. il lance `start.sh` en mode setup, qui sait déjà installer les dépendances sur
+   chaque distribution supportée ;
+6. il installe un service de démarrage (systemd, OpenRC, launchd, sinon un
+   lancement en arrière-plan **sans persistance**, annoncé comme tel) et démarre.
+
+Chaque étape émet un marqueur `::step::` que la console transforme en progression
+dans l'onglet **Activity**. Une machine qui refuse d'être provisionnée est un
+**résultat**, pas une exception : le lot continue.
+
+### Phase 3 — la reprise de confiance
+
+Le but est que la nouvelle machine finisse par faire confiance à l'opérateur —
+sans humain pour cliquer « accepter » sur un boîtier sans écran.
+
+Deux choses distinctes se jouent ici, et il vaut la peine de ne pas les
+confondre :
+
+- **l'appartenance au réseau** — un certificat signé, une place dans le mesh ;
+- **la relation de gestion** — qui cette machine va *obéir*.
+
+**Le certificat est signé par la node qui a lancé le scan.** C'est elle qui émet
+une **invitation fraîche, à usage unique, une par machine** (jamais partagée :
+l'échec de l'une ne doit pas brûler celle d'une autre), et qui l'écrit dans la
+pré-autorisation avec ses propres URI. Au premier démarrage, la machine neuve
+rejoint le mesh par cette invitation : c'est le flux ordinaire
+**invitation → handshake → `issue_cert`**, simplement automatisé. Le certificat
+émis chaîne ensuite jusqu'à la racine du réseau.
+
+C'est aussi la bonne node topologiquement : elle est sur le **même LAN** que la
+machine installée, donc joignable, là où l'opérateur peut être derrière un NAT à
+l'autre bout du monde.
+
+> **Fenêtre de l'invitation.** Un code tapé à la main vit 5 minutes. Celui-ci
+> n'est redeemé qu'**après** l'installation des dépendances, qui peut prendre
+> des dizaines de minutes sur une petite machine : `generate_invite(ttl)` permet
+> donc une fenêtre plus longue (3 h au provisioning, bornée par
+> `invite._MAX_TTL`). Il reste à **usage unique**, livré à une seule machine par
+> un canal SSH authentifié, et le lockout anti-bruteforce s'applique inchangé.
+
+La pré-autorisation porte, elle, le **node id et la clé publique de l'opérateur**
+(livrés par le canal SSH authentifié, qui est la racine de confiance de ce
+volet-là) plus un **jeton à usage unique**. Au premier démarrage, la node :
+
+1. rejoint le mesh via l'invitation, et **attend la session** — `join` qui rend
+   la main ne prouve rien, le handshake qui délivre le certificat vient après ;
+2. enrôle l'opérateur avec les capabilities prévues ;
+3. prouve la possession du jeton, ce qui permet à l'opérateur de **lier cette
+   identité mesh toute neuve au run de provisioning** qu'il vient de faire ;
+4. **supprime le fichier**, quoi qu'il arrive.
+
+Si la jointure échoue, la machine ne réclame rien et le dit : réclamer n'irait
+nulle part sans route vers qui que ce soit, et une machine « provisionnée » qui
+n'est sur aucun réseau doit se voir comme telle. Le résultat de provisioning
+porte `joins: false` quand aucune invitation n'a pu être émise.
+
+Le jeton n'est pas un secret long terme : il répond une fois à « la node qui
+vient d'apparaître est-elle bien celle que j'ai installée ? ». L'opérateur ne
+garde que `sha256(jeton)`, et un jeton réclamé deux fois ne trouve plus rien.
+
+Le `node id` de l'opérateur doit dériver de la clé livrée avec lui, sinon le
+fichier est rejeté — même invariant que partout ailleurs.
+
+## Sécurité des identifiants SSH
+
+C'est le seul endroit de NMesh qui détient un identifiant **étranger**. Règle
+unique :
+
+> Un identifiant vit **en mémoire**, le temps d'un run, et **nulle part
+> ailleurs**.
+
+- Pas sur disque, pas dans `argv` (que `ps` montre à tout utilisateur local), pas
+  dans l'environnement (`/proc/<pid>/environ`), pas dans une ligne de journal,
+  pas dans le tiroir de l'app, pas dans un paquet mesh en clair.
+- Le mécanisme : un **pseudo-terminal**. OpenSSH ne lit un mot de passe que
+  depuis son terminal de contrôle ; on lui en fournit un, on écrit le secret
+  dedans au prompt, et on le referme.
+- Chaque type de prompt est répondu **une seule fois** : un re-prompt signifie
+  que le secret était faux, et le rejouer ne ferait que brûler des tentatives
+  contre un lockout.
+- `SshCredentials` n'a pas de `__dict__` (`__slots__`) et son `repr` est rédigé :
+  un `print` accidentel ou une trace rendant ses locales ne fuit rien. `wipe()`
+  lâche les références dès la fin du run (les `str` CPython étant immuables, la
+  borne honnête est « pas conservé », pas « effacé de la RAM »).
+- Quand **aucune** clé d'hôte n'a pu être confirmée (pas de `ssh-keyscan` sur la
+  machine qui scanne, ou cible muette), le run retombe sur `accept-new` — un
+  affaiblissement réel, donc **annoncé** : une étape `warning: no host key to
+  pin` apparaît dans le journal et le résultat porte `pinned: false`. Jamais
+  silencieux.
+- Les clés d'hôte ne sont **pas** acceptées à l'aveugle : le scan montre les
+  empreintes, l'opérateur confirme, et le run épingle exactement celles-là dans
+  un `known_hosts` jetable (0600, supprimé après) avec
+  `StrictHostKeyChecking=yes`. C'est du TOFU avec un humain dans la boucle, pas
+  un `accept-new` qui signe pour n'importe quel intercepteur.
+- `IdentityAgent=none` + `IdentitiesOnly=yes` : ce qui authentifie est ce que
+  l'opérateur a choisi, pas ce que l'agent contient par hasard.
+
+**Quand le provisioning tourne sur une node distante**, l'identifiant traverse le
+mesh à l'intérieur de la payload DATA **chiffrée de bout en bout**, vers une node
+que l'opérateur a explicitement enrôlée avec `provision`, et y est effacé dès la
+fin du run. Cette confiance est déjà totale — `provision` implique que la node
+distante exécute du code qu'on lui envoie — donc ça n'ajoute pas d'exposition que
+l'enrôlement n'accordait pas déjà. C'est un choix explicite, pas un oubli.
+
+### Pourquoi OpenSSH plutôt qu'une pile SSH en Python
+
+Réécrire SSH, c'est réécrire du code cryptographique de protocole (échange de
+clés, vérification de clé d'hôte, multiplexage de canaux) sur le chemin qui
+provisionne des machines neuves. La charte met la sécurité en premier et préfère
+ne pas inventer de crypto : le binaire `ssh` du système est audité, omniprésent,
+et n'ajoute **aucune** dépendance Python. Le coût est une exigence runtime (un
+client `ssh` sur la machine qui provisionne), qu'on **détecte et signale** au
+lieu d'en faire une faiblesse silencieuse.
+
+## Installer / activer une app intégrée
+
+Registre : [`src/app_registry.py`](../../src/app_registry.py). Deux états
+distincts, parce qu'ils ne veulent pas dire la même chose :
+
+- **installed** — ce nœud garde l'état de l'app. **Désinstaller purge son tiroir
+  chiffré** (ledger, historique). C'est réel et irréversible, pas un drapeau.
+- **enabled** — l'app est branchée au mesh maintenant. Désactiver l'arrête et
+  ferme sa section ; son état survit, donc réactiver reprend où on en était.
+
+Depuis la console : onglet **Apps**, boutons Install / Enable / Disable /
+Uninstall. En ligne de commande : `--fleet`, `--no-chat`. Le choix est persisté
+dans `<data>/apps.json` (aucun secret : des noms et deux booléens ; un fichier
+corrompu redonne les défauts, jamais une app activée que l'opérateur n'a pas
+activée).
+
+## Protocole (dans la section `fleet` du plan DATA)
+
+```
+requête signée : type(1) ‖ alen(2) ‖ assertion ‖ corps_json
+réponse        : type(1) ‖ corps_json
+flux shell     : type(1) ‖ sid(16) ‖ octets bruts
+```
+
+| Type | Val | Sens | Signé |
+|---|---|---|---|
+| `ENROL_REQUEST` | 0x01 | opérateur → node | ✅ `fleet.enrol` |
+| `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | ✅ `fleet.grant` |
+| `PREAUTH_CLAIM` | 0x05 | nouvelle node → opérateur | ✅ `fleet.preauth` |
+| `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | requête seulement |
+| `ERROR` | 0x12 | ← | — |
+| `UPDATE_REQUEST` / `_OUTPUT` / `_RESULT` | 0x20–0x22 | → / ← / ← | requête seulement |
+| `SHELL_OPEN` / `_OPENED` | 0x30 / 0x31 | → / ← | ouverture seulement |
+| `SHELL_INPUT` / `_OUTPUT` / `_RESIZE` / `_CLOSE` | 0x32–0x35 | ↔ | lié au `sid` |
+| `SCAN_REQUEST` / `_RESULT` | 0x40 / 0x41 | → / ← | requête seulement |
+| `PROVISION_REQUEST` / `_PROGRESS` / `_RESULT` | 0x42–0x44 | → / ← / ← | requête seulement |
+
+**Aucun nouveau type de paquet mesh** : tout circule dans `DATA`, section
+`builtin_id("fleet")`. Le plan de gestion du nœud est intouché.
+
+Les réponses ne sont pas signées : elles empruntent le canal E2E déjà
+authentifié, et ne sont acceptées que si elles répondent à un `rid` que **nous**
+avons émis, pour ce type d'action, **depuis le nœud** à qui nous l'avons envoyé.
+Une réponse non sollicitée est jetée.
+
+## Bornes
+
+| Constante | Valeur |
+|---|---|
+| `MAX_BODY` | 56 000 o par trame JSON |
+| `MAX_SHELLS` | 4 shells hébergés simultanément |
+| `SHELL_IDLE_TIMEOUT` | 900 s |
+| `SHELL_INPUT_MAX` | 8192 o par trame d'entrée |
+| `MAX_INFLIGHT` | 64 requêtes suivies côté opérateur |
+| `MAX_OPERATORS` / `MAX_MANAGED` | 64 / 4096 |
+| `MAX_PENDING` | 256 demandes en attente (TTL 7 j) |
+| `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
+| `MAX_PAYLOAD` | 16 Mo poussés au provisioning |
+| `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 réseaux balayés / 4096 adresses par réseau avant rétrécissement |
+
+Le ledger **échoue fermé** : un blob corrompu ou altéré donne un ledger **vide**
+(on oublie qui on a cru, plutôt que de faire confiance à une liste forgée), et un
+nom de capability inconnu est jeté au chargement — un fichier trafiqué ne peut
+pas faire passer une capability en douce.
+
+## API console
+
+Toutes derrière la session console (Bearer ou cookie). Détails :
+[`Docs/WebConsole/guide`](../WebConsole/guide).
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, faits) |
+| GET | `/api/fleet/shell?sid=&offset=` | octets du terminal (base64) |
+| GET | `/api/fleet/keys` | clés SSH locales — **métadonnées seulement** |
+| POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
+| POST | `/api/fleet/status` / `update` / `scan` | actions |
+| POST | `/api/fleet/shell` / `input` / `resize` / `close` | shell |
+| POST | `/api/fleet/provision` | déploiement |
+| POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | apps intégrées |
+
+## Tests
+
+- [`tests/test_fleet.py`](../../tests/test_fleet.py) — les trois portes, en
+  isolation : commande non signée, corps modifié, signature rejouée, signature
+  pour un autre nœud ou un autre `purpose`, émetteur non enrôlé, capability
+  absente, réponse non sollicitée, shell adressé par un tiers, fuzzing.
+- [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — ledger (échec
+  fermé, bornes) et faits machine.
+- [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — le
+  secret ne fuit nulle part, le bootstrap n'est pas une surface d'injection.
+- [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes et
+  bascules d'apps.
+- [`tests/integration/test_fleet.py`](../../tests/integration/test_fleet.py) —
+  deux nœuds réels, vrai mesh.

@@ -7,6 +7,10 @@
 
 Les guides d'usage (comment brancher une app, écrire un transport…) restent
 dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
+Deux guides sont adjacents à la sécurité et méritent d'être lus avec
+`security.md` : [`Docs/AppAuth/guide`](../AppAuth/guide) (l'identité mesh comme
+authentification pour les apps) et [`Docs/Apps/fleet`](../Apps/fleet) (l'app qui
+s'en sert pour autoriser de l'exécution à distance).
 
 ## Carte du code (`src/`)
 
@@ -25,7 +29,7 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 | `pseudo_dir.py` | Annuaire de pseudos à clé sur Kademlia : réclamations signées auto-authentifiées (pseudo→node_id lié à la clé pub), find-by-pseudo réseau. |
 | `transport.py` / `transport_manager.py` | Interfaces `BaseTransport`/`BaseServer` + registre par schéma d'URL. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
-| `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales. |
+| `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales, **énumération des réseaux attachés** (interface + masque réel, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, puis repli), résolveur DNS borné hors executor. |
 | `webconsole.py` / `webassets.py` | Console web de gestion (HTTPS, stdlib). |
 | `app_channel.py` | Sections d'app : cadrage `app_id ‖ payload` dans la payload DATA, ids intégrés/déployés (démux du connecteur). |
 | `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
@@ -33,6 +37,9 @@ dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
 | `app_package.py` | Packages adressés par contenu + **release signée** (déploiement : app_id lié à l'auteur ML-DSA, `ts` signé pour l'ordre des versions). |
 | `app_catalog.py` | App store : catalogue réseau (releases signées, gossipé, anti-rollback) + registre local d'apps installées. |
 | `app_storage.py` | Store local par app (« tiroir ») : clé→valeur chiffré au repos (AES-256-GCM, clé par app dérivée de l'identité), isolé par `app_id`, borné. |
+| `app_auth.py` | **Identité applicative** (SSO) : assertions signées ML-DSA scopées `(app, audience, purpose, ctx)`, fraîcheur, anti-rejeu, login mutuel. Domaine de signature séparé — jamais un oracle. |
+| `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
+| `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), pont console (`fleet_web.py`). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
 
 ## Les documents
