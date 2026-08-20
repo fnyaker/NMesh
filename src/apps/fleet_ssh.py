@@ -510,6 +510,43 @@ async def host_key_fingerprints(ip: str, port: int = SSH_PORT,
     return out[:8]
 
 
+MAX_KEYSCAN_HOSTS = 64        # hosts we fingerprint in one pass
+KEYSCAN_CONCURRENCY = 8
+
+
+async def attach_host_keys(hosts: list[dict], *, timeout: float = 60.0,
+                           limit: int = MAX_KEYSCAN_HOSTS) -> None:
+    """Fill each host's ``keys`` in place, under one overall deadline.
+
+    Concurrent and bounded on purpose. Fingerprinting host by host in series
+    with only a per-host timeout meant a scan of a busy LAN could sit for many
+    minutes after the sweep itself had finished, with nothing to show for it —
+    on a remote node that reads as "the scan did nothing". Hosts we do not get
+    to keep an empty key list, which the UI already renders as "no host key"."""
+    for host in hosts:
+        host.setdefault("keys", [])
+    semaphore = asyncio.Semaphore(KEYSCAN_CONCURRENCY)
+
+    async def one(host: dict) -> None:
+        async with semaphore:
+            try:
+                host["keys"] = await host_key_fingerprints(host["ip"],
+                                                           host["port"])
+            except Exception:
+                host["keys"] = []
+
+    tasks = [asyncio.create_task(one(h)) for h in hosts[:limit]]
+    if not tasks:
+        return
+    try:
+        async with asyncio.timeout(timeout):
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.TimeoutError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _keyscan(ip: str, port: int, timeout: float) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(

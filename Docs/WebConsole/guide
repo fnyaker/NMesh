@@ -151,8 +151,10 @@ console ne peut rien s'accorder à elle-même. Voir [`Docs/Apps/fleet`](../Apps/
 
 ## Apps intégrées : installer, activer, désactiver
 
-L'onglet **Apps** liste les apps livrées avec le nœud avec leur état et les
-actions Install / Enable / Disable / Uninstall (`/api/apps/*`). Deux états
+L'onglet **Apps** liste les apps livrées avec le nœud sous forme de cartes —
+icône, nom, état (point vert « Running », ambre « Stopped », éteint « Not
+installed »), description, puis les actions Install / Enable / Disable /
+Uninstall et le lien **Open** (`/api/apps/*`). Deux états
 distincts : **installed** (le nœud garde l'état de l'app ; désinstaller **purge
 son tiroir chiffré**) et **enabled** (l'app est branchée au mesh maintenant ;
 désactiver l'arrête, son état survit). La bascule est **à chaud** — pas de

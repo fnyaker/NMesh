@@ -225,6 +225,25 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   mémoire propagent en ~ms). Les tests négatifs (« rien ne se passe ») gardent un
   timeout court, mais borné.
 
+## App layer : les pannes silencieuses d'une réponse
+
+- **Ne jamais couper du JSON à un offset d'octets.** `_dump_json` de l'app Fleet
+  tronquait à `MAX_BODY` pour tenir dans une trame DATA. Le résultat n'est pas
+  une réponse courte : c'est du JSON invalide, que le destinataire jette
+  silencieusement. Vu de l'opérateur, la commande « ne fait rien ». On retire
+  désormais des **entrées** (listes nommées) jusqu'à ce que ça passe, avec un
+  compteur `truncated`. **Toute réponse à taille variable doit être ajustée par
+  éléments, jamais par octets.**
+- **Une action asynchrone doit avoir un état observable.** Un scan demandé à une
+  node distante revenait bien sur le fil, mais l'interface ne redessinait jamais
+  l'onglet concerné : le résultat arrivait dans l'état et n'était jamais affiché.
+  Une boucle de polling doit redessiner *tout* ce qui peut changer, pas seulement
+  ce que l'utilisateur vient de déclencher.
+- **Une clôture peut précéder son enregistrement.** Le pont note l'opération
+  après que l'appel a rendu la main ; un pair proche répond avant. La clôture
+  doit être idempotente et indépendante de l'ordre, sinon l'opération reste
+  « en cours » pour toujours. (Symptôme : un test vert seul, rouge en parallèle.)
+
 ## Divers
 
 - `console.stop()` bloquait 0,5 s : `ThreadingHTTPServer.serve_forever()` sonde
