@@ -187,7 +187,12 @@ résultats, et repris dans le journal — « rien trouvé » n'est jamais ambigu
 *où* on a cherché.
 
 Pour chaque hôte trouvé, `ssh-keyscan` récupère les **clés d'hôte publiques** et
-leurs empreintes SHA-256, affichées dans la liste.
+leurs empreintes SHA-256, affichées dans la liste. Cette passe est **concurrente
+et sous une échéance globale** (`KEYSCAN_TIMEOUT`) : la faire hôte par hôte avec
+seulement un délai par hôte laissait un scan de LAN chargé immobile plusieurs
+minutes après la fin du balayage — vu d'une node distante, ça se lit « le scan
+n'a rien fait ». Les hôtes non atteints gardent une liste de clés vide, que
+l'interface affiche déjà comme « no host key ».
 
 ### Phase 2 — choisir et déployer
 
@@ -383,6 +388,34 @@ Le ledger **échoue fermé** : un blob corrompu ou altéré donne un ledger **vi
 nom de capability inconnu est jeté au chargement — un fichier trafiqué ne peut
 pas faire passer une capability en douce.
 
+## Suivi des opérations
+
+Une action envoyée à une node distante répond **de façon asynchrone** : la
+requête HTTP rend la main tout de suite, la réponse arrive plus tard par le
+mesh. Le pont console tient donc un registre d'opérations (`jobs` dans le
+snapshot) : `rid`, type, node visée, état (`running` / `ok` / `failed`) et un
+détail. L'interface l'affiche en bandeau, et le panneau de déploiement suit le
+sien au lieu de rester figé sur « en cours ».
+
+Deux propriétés à ne pas casser :
+
+- **La clôture ne dépend pas de l'ordre.** Un pair proche peut répondre en moins
+  d'une milliseconde, avant que le thread appelant ait noté le `rid`. Une
+  clôture qui arrive trop tôt est mise de côté et appliquée à l'enregistrement,
+  sinon l'opération resterait « en cours » à vie.
+- **Tout est borné** (`MAX_JOBS`), y compris la table des clôtures anticipées.
+
+## Taille des réponses
+
+Une réponse doit tenir dans **une trame DATA**. Couper du JSON à un offset
+d'octets produit quelque chose que le destinataire ne parse pas et jette en
+silence — la pire panne possible pour une réponse qu'un opérateur attend. Les
+réponses sont donc ajustées en **retirant des entrées**, jamais des octets :
+`_dump_json(document, *listes_à_réduire)` raccourcit les listes nommées jusqu'à
+ce que la trame passe, et `truncated` dit combien sont partis. L'interface le
+signale (« N result(s) dropped… narrow the target »). S'il ne reste plus rien à
+retirer, une erreur lisible part à la place d'une trame illisible.
+
 ## API console
 
 Toutes derrière la session console (Bearer ou cookie). Détails :
@@ -390,7 +423,7 @@ Toutes derrière la session console (Bearer ou cookie). Détails :
 
 | Méthode | Route | Rôle |
 |---|---|---|
-| GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, faits) |
+| GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, faits, **jobs**, scans) |
 | GET | `/api/fleet/shell?sid=&offset=` | octets du terminal (base64) |
 | GET | `/api/fleet/keys` | clés SSH locales — **métadonnées seulement** |
 | POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
