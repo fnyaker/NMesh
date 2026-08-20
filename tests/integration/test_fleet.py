@@ -25,6 +25,9 @@ from src.node_id import NodeID
 from src.tcp_transport import TCPTransport, TCPServer
 from src.transport_manager import TransportManager
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
 
 def _mgr() -> TransportManager:
     mgr = TransportManager()
@@ -62,14 +65,14 @@ class Party:
                     return event
 
 
-async def _party(node) -> Party:
+async def _party(node, *, mesh_invite=None) -> Party:
     connector = DataConnector(node, host="127.0.0.1", port=0)
     await connector.start()
     client = ConnectorClient(connector.host, connector.port, connector.token,
                              FLEET_APP_ID)
     await client.connect()
     app = FleetApp(client, node.app_auth(FLEET_APP_ID), state=FleetState(),
-                   auto_status=False)
+                   repo_root=ROOT, mesh_invite=mesh_invite, auto_status=False)
     await app.start()
     return Party(node, connector, app)
 
@@ -189,3 +192,108 @@ class TestSectionIsolation:
             await other.close()
             await operator.close()
             await agent.close()
+
+
+# ---------------------------------------------------------------------------
+# L'intégration au réseau d'une machine provisionnée
+# ---------------------------------------------------------------------------
+
+class TestProvisionedNodeJoinsTheMesh:
+    """Une machine provisionnée doit finir **membre du réseau**, avec un
+    certificat émis par la node qui a lancé le scan. C'est le flux d'invitation
+    ordinaire — invitation → handshake → `issue_cert` — simplement automatisé.
+
+    Le transfert SSH n'est pas rejouable ici (pas de machine cible), mais tout ce
+    qui suit l'est : l'invitation que le provisionneur dépose, sa redemption par
+    la nouvelle node, et la chaîne de certificats qui en résulte."""
+
+    async def test_certificate_is_issued_by_the_scanning_node(self):
+        provisioner = MeshNode(_mgr())
+        await provisioner.start(["tcp://127.0.0.1:19320"])
+        party = await _party(
+            provisioner,
+            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19320"],
+                                 "code": provisioner.generate_invite(3600)})
+        newcomer = MeshNode(_mgr())
+        try:
+            # Ce que le provisioning dépose sur la machine neuve.
+            uris, code = party.app._fresh_invitation([], "")
+            assert uris and code
+
+            # Ce que la machine neuve en fait à son premier démarrage.
+            await newcomer.join(uris[0], code)
+            await newcomer.wait_for_session(timeout=20.0)
+            await provisioner.wait_for_session(timeout=20.0)
+
+            # Le certificat de la nouvelle node est émis par le provisionneur.
+            chain = newcomer._cert_store.get_chain_to_root(newcomer.id)
+            assert chain, "la nouvelle node n'a pas de chaîne de certificats"
+            assert chain[0].subject_id == newcomer.id
+            assert chain[0].issuer_id == provisioner.id
+            # Et cette chaîne remonte bien à une racine que le réseau reconnaît.
+            assert newcomer._cert_store.verify_chain(chain) is not None
+        finally:
+            await party.close()
+            await newcomer.stop()
+
+    async def test_the_invitation_is_single_use(self):
+        """Deux machines ne partagent jamais un code : le premier qui l'utilise
+        le consomme, et un second essai échoue."""
+        provisioner = MeshNode(_mgr())
+        await provisioner.start(["tcp://127.0.0.1:19321"])
+        party = await _party(
+            provisioner,
+            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19321"],
+                                 "code": provisioner.generate_invite(3600)})
+        first = MeshNode(_mgr())
+        second = MeshNode(_mgr())
+        try:
+            uris, code = party.app._fresh_invitation([], "")
+            await first.join(uris[0], code)
+            await first.wait_for_session(timeout=20.0)
+
+            with pytest.raises(Exception):
+                await second.join(uris[0], code)
+                await second.wait_for_session(timeout=5.0)
+        finally:
+            await party.close()
+            await first.stop()
+            await second.stop()
+
+    async def test_each_machine_gets_its_own_invitation(self):
+        """Une invitation par machine : l'échec de l'une ne brûle pas l'autre."""
+        provisioner = MeshNode(_mgr())
+        await provisioner.start(["tcp://127.0.0.1:19322"])
+        party = await _party(
+            provisioner,
+            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19322"],
+                                 "code": provisioner.generate_invite(3600)})
+        try:
+            _uris_a, code_a = party.app._fresh_invitation([], "")
+            _uris_b, code_b = party.app._fresh_invitation([], "")
+            assert code_a != code_b
+        finally:
+            await party.close()
+
+    async def test_without_a_provider_the_caller_sees_no_invitation(self):
+        """Sans moyen d'inviter, la machine serait installée sans rejoindre
+        quoi que ce soit — le résultat doit le dire, pas le cacher."""
+        node = MeshNode(_mgr())
+        party = await _party(node, mesh_invite=None)
+        try:
+            uris, code = party.app._fresh_invitation([], "")
+            assert uris == [] and code == ""
+        finally:
+            await party.close()
+
+    async def test_a_broken_provider_does_not_break_provisioning(self):
+        def boom():
+            raise RuntimeError("no invite for you")
+
+        node = MeshNode(_mgr())
+        party = await _party(node, mesh_invite=boom)
+        try:
+            assert party.app._fresh_invitation(["tcp://fallback:1"], "fb") == (
+                ["tcp://fallback:1"], "fb")
+        finally:
+            await party.close()

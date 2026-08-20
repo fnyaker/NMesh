@@ -152,8 +152,36 @@ Le balayage lui-même : TCP borné, bannière SSH lue sans rien envoyer. Bornes 
 1,5 s par hôte, bannière plafonnée. Un `/8` fourni **explicitement** reste
 refusé.
 
-Le champ *Subnets* de l'interface permet de forcer une liste ; laissé vide, la
-détection automatique s'applique. Les réseaux effectivement balayés (avec leur
+### Cibler une machine précise
+
+Le champ *Targets* accepte quatre formes, si bien que « balaie mon LAN » et
+« regarde exactement cette machine » passent par le même endroit :
+
+| Saisie | Effet |
+|---|---|
+| *(vide)* | balaie tous les réseaux attachés (détection automatique) |
+| `192.168.1.0/24` | balaie ce sous-réseau |
+| `192.168.1.42` | **une seule machine**, port SSH par défaut |
+| `192.168.1.42:2222` | une seule machine, port explicite |
+| `nas.lan` / `nas.lan:2222` | une seule machine par son nom |
+| `[fd00::5]:2222` | une seule machine en IPv6 |
+
+Les noms sont résolus **en amont**, pas laissés à `open_connection` : celui-ci
+résoudrait sur l'executor par défaut d'asyncio, qui est joint au shutdown
+(`gotchas.md` §2). Le résolveur borné vit dans `ip_utils.bounded_getaddrinfo`,
+partagé avec le client STUN.
+
+Nommer une machine n'est **pas** balayer : un hôte précis tapé à la main est
+autorisé où qu'il soit, y compris hors des plages privées et en IPv6 — c'est une
+connexion vers une machine que l'opérateur a désignée. Un **préfixe** public,
+lui, reste refusé quel que soit celui qui l'a tapé : balayer une plage publique,
+c'est scanner des inconnus.
+
+Ce qui n'est pas compris (port hors bornes, nom introuvable, préfixe refusé)
+revient **nommé** dans `rejected`, affiché sous les résultats et journalisé : une
+faute de frappe se lit comme une faute de frappe, jamais comme « rien trouvé ».
+
+Laissé vide, la détection automatique s'applique. Les réseaux effectivement balayés (avec leur
 interface, et le cas échéant la mention `narrowed`) sont affichés au-dessus des
 résultats, et repris dans le journal — « rien trouvé » n'est jamais ambigu sur
 *où* on a cherché.
@@ -191,15 +219,46 @@ dans l'onglet **Activity**. Une machine qui refuse d'être provisionnée est un
 Le but est que la nouvelle machine finisse par faire confiance à l'opérateur —
 sans humain pour cliquer « accepter » sur un boîtier sans écran.
 
-La pré-autorisation porte le **node id et la clé publique de l'opérateur**
-(livrés par le canal SSH authentifié, qui est la racine de confiance ici) plus un
-**jeton à usage unique**. Au premier démarrage, la node :
+Deux choses distinctes se jouent ici, et il vaut la peine de ne pas les
+confondre :
 
-1. enrôle l'opérateur avec les capabilities prévues ;
-2. rejoint le mesh via les URI/code d'invitation fournis ;
+- **l'appartenance au réseau** — un certificat signé, une place dans le mesh ;
+- **la relation de gestion** — qui cette machine va *obéir*.
+
+**Le certificat est signé par la node qui a lancé le scan.** C'est elle qui émet
+une **invitation fraîche, à usage unique, une par machine** (jamais partagée :
+l'échec de l'une ne doit pas brûler celle d'une autre), et qui l'écrit dans la
+pré-autorisation avec ses propres URI. Au premier démarrage, la machine neuve
+rejoint le mesh par cette invitation : c'est le flux ordinaire
+**invitation → handshake → `issue_cert`**, simplement automatisé. Le certificat
+émis chaîne ensuite jusqu'à la racine du réseau.
+
+C'est aussi la bonne node topologiquement : elle est sur le **même LAN** que la
+machine installée, donc joignable, là où l'opérateur peut être derrière un NAT à
+l'autre bout du monde.
+
+> **Fenêtre de l'invitation.** Un code tapé à la main vit 5 minutes. Celui-ci
+> n'est redeemé qu'**après** l'installation des dépendances, qui peut prendre
+> des dizaines de minutes sur une petite machine : `generate_invite(ttl)` permet
+> donc une fenêtre plus longue (3 h au provisioning, bornée par
+> `invite._MAX_TTL`). Il reste à **usage unique**, livré à une seule machine par
+> un canal SSH authentifié, et le lockout anti-bruteforce s'applique inchangé.
+
+La pré-autorisation porte, elle, le **node id et la clé publique de l'opérateur**
+(livrés par le canal SSH authentifié, qui est la racine de confiance de ce
+volet-là) plus un **jeton à usage unique**. Au premier démarrage, la node :
+
+1. rejoint le mesh via l'invitation, et **attend la session** — `join` qui rend
+   la main ne prouve rien, le handshake qui délivre le certificat vient après ;
+2. enrôle l'opérateur avec les capabilities prévues ;
 3. prouve la possession du jeton, ce qui permet à l'opérateur de **lier cette
    identité mesh toute neuve au run de provisioning** qu'il vient de faire ;
 4. **supprime le fichier**, quoi qu'il arrive.
+
+Si la jointure échoue, la machine ne réclame rien et le dit : réclamer n'irait
+nulle part sans route vers qui que ce soit, et une machine « provisionnée » qui
+n'est sur aucun réseau doit se voir comme telle. Le résultat de provisioning
+porte `joins: false` quand aucune invitation n'a pu être émise.
 
 Le jeton n'est pas un secret long terme : il répond une fois à « la node qui
 vient d'apparaître est-elle bien celle que j'ai installée ? ». L'opérateur ne

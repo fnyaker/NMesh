@@ -217,6 +217,109 @@ class TestNetworkDetection:
         assert ipaddress.ip_address("10.1.2.3") in slice_
 
 
+class TestPreciseTargets:
+    """« Balaie mon LAN » et « regarde exactement cette machine » passent par le
+    même champ. Ce qui n'est pas compris revient nommé, jamais jeté en silence."""
+
+    async def test_single_ip(self):
+        targets, rejected = await fleet_ssh.parse_targets(["10.0.0.5"])
+        assert targets == [("10.0.0.5", 22)]
+        assert rejected == []
+
+    async def test_single_ip_with_port(self):
+        targets, _ = await fleet_ssh.parse_targets(["10.0.0.5:2222"])
+        assert targets == [("10.0.0.5", 2222)]
+
+    async def test_hostname_is_resolved_here(self):
+        """Résolu en amont, pas laissé à open_connection : celui-ci résoudrait
+        sur l'executor par défaut, joint au shutdown (gotchas §2)."""
+        targets, rejected = await fleet_ssh.parse_targets(["localhost"])
+        assert rejected == []
+        assert targets and targets[0][1] == 22
+        assert targets[0][0] in ("127.0.0.1", "::1")
+
+    async def test_hostname_with_port(self):
+        targets, _ = await fleet_ssh.parse_targets(["localhost:2022"])
+        assert targets and targets[0][1] == 2022
+
+    async def test_unresolvable_name_is_reported_not_dropped(self):
+        targets, rejected = await fleet_ssh.parse_targets(
+            ["nx-" + "z" * 20 + ".invalid"])
+        assert targets == []
+        assert len(rejected) == 1
+
+    async def test_subnet_and_machine_mix(self):
+        targets, rejected = await fleet_ssh.parse_targets(
+            ["192.168.9.0/30", "10.1.2.3:22"])
+        assert ("10.1.2.3", 22) in targets
+        assert ("192.168.9.1", 22) in targets
+        assert rejected == []
+
+    async def test_explicit_public_host_is_allowed(self):
+        """Nommer une machine, ce n'est pas balayer : un hôte précis tapé à la
+        main est autorisé où qu'il soit."""
+        targets, rejected = await fleet_ssh.parse_targets(["93.184.216.34"])
+        assert targets == [("93.184.216.34", 22)]
+        assert rejected == []
+
+    async def test_public_subnet_is_still_refused(self):
+        """Un préfixe public reste un balayage d'inconnus."""
+        targets, rejected = await fleet_ssh.parse_targets(["93.184.216.0/24"])
+        assert targets == []
+        assert rejected == ["93.184.216.0/24"]
+
+    async def test_bad_ports_are_rejected(self):
+        for bad in ("10.0.0.5:0", "10.0.0.5:70000", "10.0.0.5:ssh",
+                    "10.0.0.5:-1"):
+            targets, rejected = await fleet_ssh.parse_targets([bad])
+            assert targets == [] and rejected == [bad]
+
+    async def test_ipv6_literal_target(self):
+        """Un /64 ne se balaie pas, mais désigner une machine en v6 est légitime."""
+        targets, rejected = await fleet_ssh.parse_targets(["[::1]:2222"])
+        assert targets == [("::1", 2222)]
+        assert rejected == []
+
+    async def test_duplicates_collapse(self):
+        targets, _ = await fleet_ssh.parse_targets(
+            ["10.0.0.5", "10.0.0.5:22", "10.0.0.5"])
+        assert targets == [("10.0.0.5", 22)]
+
+    async def test_junk_never_raises(self):
+        entries = ["", "   ", "///", ":::", "..", "10.0.0.999", None, 5,
+                   "a" * 300, "1.2.3.4:", ":22"]
+        targets, rejected = await fleet_ssh.parse_targets(entries)
+        assert isinstance(targets, list) and isinstance(rejected, list)
+
+    async def test_total_is_bounded(self):
+        targets, _ = await fleet_ssh.parse_targets(
+            ["10.0.0.0/24", "10.0.1.0/24"], limit=40)
+        assert len(targets) <= 40
+
+    async def test_scan_reaches_a_named_machine(self):
+        """Bout en bout : une cible précise atteint bien un vrai listener."""
+        async def handle(reader, writer):
+            writer.write(b"SSH-2.0-OpenSSH_9.6\r\n")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            found, rejected = await fleet_ssh.scan([f"127.0.0.1:{port}"],
+                                                   timeout=2.0)
+        finally:
+            server.close()
+        assert rejected == []
+        assert [(h["ip"], h["port"]) for h in found] == [("127.0.0.1", port)]
+
+    async def test_scan_reports_what_it_could_not_parse(self):
+        found, rejected = await fleet_ssh.scan(["10.0.0.5:notaport"],
+                                                timeout=0.2)
+        assert found == []
+        assert rejected == ["10.0.0.5:notaport"]
+
+
 class TestScan:
     def test_subnets_are_private_only(self):
         for net in fleet_ssh.local_subnets():

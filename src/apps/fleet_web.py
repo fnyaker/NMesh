@@ -106,10 +106,14 @@ class FleetBridge:
             with self._lock:
                 self._scans[node_hex] = {"at": time.time(),
                                          "hosts": event.hosts[:MAX_SCAN_HOSTS],
-                                         "networks": event.networks[:32]}
+                                         "networks": event.networks[:32],
+                                         "rejected": event.rejected[:32]}
                 self._bump()
             self._say("ok", f"{short}… swept {_describe(event.networks)} and "
                             f"found {len(event.hosts)} SSH host(s)", node_hex)
+            for bad in event.rejected:
+                self._say("warn", f"{short}… could not understand target "
+                                  f"{bad!r}", node_hex)
         elif isinstance(event, ShellOpened):
             self._open_shell_record(event.sid.hex(), node_hex)
             self._say("ok", f"shell opened on {short}…", node_hex)
@@ -228,8 +232,8 @@ class FleetBridge:
     def update(self, node_hex: str) -> str:
         return self._call(self._app.request_update(self._node(node_hex)))
 
-    def scan(self, node_hex: str, subnets=None) -> str:
-        return self._call(self._app.request_scan(self._node(node_hex), subnets))
+    def scan(self, node_hex: str, targets=None) -> str:
+        return self._call(self._app.request_scan(self._node(node_hex), targets))
 
     def open_shell(self, node_hex: str, cols: int = 80, rows: int = 24) -> str:
         return self._call(self._app.open_shell(self._node(node_hex),
@@ -278,16 +282,19 @@ class FleetBridge:
 
     # -- local (this node's own LAN) --------------------------------------
 
-    def scan_local(self, subnets=None) -> dict:
-        result = self._call(self._app.scan_local(subnets), timeout=360.0)
+    def scan_local(self, targets=None) -> dict:
+        result = self._call(self._app.scan_local(targets), timeout=360.0)
         networks = result.get("networks") or []
         with self._lock:
             self._scans[self.me] = {"at": time.time(),
                                     "hosts": result["hosts"][:MAX_SCAN_HOSTS],
-                                    "networks": networks[:32]}
+                                    "networks": networks[:32],
+                                    "rejected": (result.get("rejected") or [])[:32]}
             self._bump()
-        self._say("ok", f"local scan swept {_describe(networks)} and found "
-                        f"{len(result['hosts'])} SSH host(s)", self.me)
+        self._say("ok", f"local scan swept {_describe(networks, result.get('targets'))}"
+                        f" and found {len(result['hosts'])} SSH host(s)", self.me)
+        for bad in result.get("rejected") or []:
+            self._say("warn", f"could not understand target {bad!r}", self.me)
         return result
 
     def provision_local(self, targets, *, username: str,
@@ -311,11 +318,12 @@ class FleetBridge:
         return fleet_ssh.discover_private_keys()
 
 
-def _describe(networks) -> str:
+def _describe(networks, targets=None) -> str:
     """One line naming what a sweep covered, so "found nothing" is never
     ambiguous about *where* it looked."""
     if not networks:
-        return "the given subnets"
+        named = [str(t) for t in (targets or [])][:4]
+        return ", ".join(named) if named else "the given targets"
     parts = []
     for entry in networks[:4]:
         text = str(entry.get("scan") or entry.get("cidr") or "?")

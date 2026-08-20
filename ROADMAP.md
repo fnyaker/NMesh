@@ -229,14 +229,27 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
 - Découverte LAN SSH sur **tous les réseaux attachés**, au préfixe réellement en
   usage (`/proc/net/route`, ioctl, `ip`/`ifconfig`, repli) — un `/22` n'est plus
   balayé comme un `/24`, et une seconde carte ou un VPN ne sont plus manqués.
-  Bornée, réseaux privés seulement, réseaux trop grands rétrécis autour de notre
-  adresse et signalés comme tels ; empreintes de clés d'hôte présentées à
-  l'opérateur, puis provisioning : bootstrap auto-extractible en une
+  Bornée, réseaux trop grands rétrécis autour de notre adresse et signalés comme
+  tels. Le champ de cible accepte aussi une **machine précise** (`10.0.0.5`,
+  `nas.lan:2222`, `[fd00::5]:22`) : nommer une machine n'est pas balayer, donc
+  c'est permis hors des plages privées, alors qu'un **préfixe** public reste
+  refusé. Ce qui n'est pas compris revient nommé, jamais avalé. Empreintes de
+  clés d'hôte présentées à l'opérateur, puis provisioning : bootstrap auto-extractible en une
   session SSH, intégrité SHA-256 vérifiée avant d'écrire, service de démarrage
   installé, et **reprise de confiance** par pré-autorisation à jeton unique.
 - Identifiants SSH : OpenSSH piloté par **pty**, jamais sur disque, jamais dans
   `argv`, jamais dans l'environnement. Clés d'hôte épinglées après confirmation
   humaine (`StrictHostKeyChecking=yes`), pas d'`accept-new`.
+- **Intégration au réseau automatisée** : la node qui lance le scan émet une
+  invitation fraîche et à usage unique **par machine**, la dépose dans la
+  pré-autorisation avec ses propres URI, et la machine neuve rejoint le mesh à
+  son premier démarrage — flux ordinaire invitation → handshake → `issue_cert`,
+  donc **son certificat est signé par la node qui l'a installée** et chaîne
+  jusqu'à la racine du réseau. C'est aussi la node joignable : elle est sur le
+  même LAN, là où l'opérateur peut être derrière un NAT.
+- `generate_invite(ttl)` : TTL par code (borné 6 h). Un code tapé à la main vit
+  5 minutes ; celui déposé sur une machine en cours d'installation n'est redeemé
+  qu'après le build des dépendances. Usage unique et lockout inchangés.
 - Doc : `Docs/Apps/fleet`.
 
 ### Cycle de vie des apps intégrées (`src/app_registry.py`) — fait

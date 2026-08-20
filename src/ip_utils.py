@@ -8,12 +8,42 @@ advertise (one per local address, plus any externally-discovered address).
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
+import threading
 
 from .uri import _validate_uri
 
 _WILDCARD = {"0.0.0.0", "::", ""}
+
+
+async def bounded_getaddrinfo(host: str, port: int, *,
+                              family=socket.AF_UNSPEC,
+                              type=socket.SOCK_STREAM,
+                              timeout: float = 5.0):
+    """DNS resolution that can never wedge interpreter shutdown.
+
+    ``loop.getaddrinfo`` runs on asyncio's default executor, which is *joined*
+    at shutdown — a lookup that hangs on a restricted network would block it
+    forever (see ``Docs/Architecture/gotchas.md`` §2). Resolve in a daemon
+    thread we abandon on timeout instead."""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+
+    def _worker() -> None:
+        try:
+            result = socket.getaddrinfo(host, port, family=family, type=type)
+        except Exception as exc:
+            result = exc
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(result))
+
+    threading.Thread(target=_worker, name="nmesh-dns", daemon=True).start()
+    res = await asyncio.wait_for(fut, timeout)
+    if isinstance(res, BaseException):
+        raise res
+    return res
 
 
 def split_host_port(opaque: str) -> tuple[str, str] | None:
