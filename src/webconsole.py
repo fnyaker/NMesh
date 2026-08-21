@@ -38,6 +38,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+from . import updater
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 
@@ -542,6 +543,7 @@ def _make_handler(console: WebConsole):
                     snap = console._call(console._node.console_snapshot())
                     snap["server_time"] = time.time()
                     snap["apps"] = console._apps()
+                    snap["version"] = updater.__version__
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
@@ -587,6 +589,24 @@ def _make_handler(console: WebConsole):
                     self._json(404, {"error": "not found"})
                     return
                 self._send_binary(data, "avatar")
+                return
+            if path == "/api/update/check":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                try:
+                    result = console._call(updater.check(), timeout=40.0)
+                except updater.UpdateError as exc:
+                    self._json(200, {"error": str(exc)[:256],
+                                     "current": updater.__version__})
+                    return
+                except Exception:
+                    self._json(503, {"error": "update check failed"})
+                    return
+                ok, reason = updater.updatable()
+                result["can_apply"] = ok
+                result["blocked"] = reason
+                self._json(200, result)
                 return
             if path == "/api/rootcert":
                 if not self._authed():
@@ -911,6 +931,9 @@ def _make_handler(console: WebConsole):
             if path.startswith("/api/apps/"):
                 self._handle_apps_post(path, _parse_json(body))
                 return
+            if path == "/api/update/apply":
+                self._handle_update_apply(_parse_json(body))
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
@@ -925,6 +948,50 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_update_apply(self, data) -> None:
+            """Install a release — only ever the one the operator confirmed.
+
+            The request must name the version. If GitHub has moved on since the
+            page was drawn, the mismatch is refused: a tab left open for an hour
+            must not install something nobody looked at."""
+            data = data or {}
+            wanted = data.get("version")
+            if not isinstance(wanted, str) or not wanted:
+                self._json(400, {"error": "version required"})
+                return
+            if data.get("confirm") is not True:
+                self._json(400, {"error": "confirmation required"})
+                return
+            ok, reason = updater.updatable()
+            if not ok:
+                self._json(409, {"error": reason})
+                return
+            try:
+                latest = console._call(updater.check(), timeout=40.0)
+            except updater.UpdateError as exc:
+                self._json(502, {"error": str(exc)[:256]})
+                return
+            except Exception:
+                self._json(503, {"error": "update check failed"})
+                return
+            if latest.get("latest") != wanted:
+                self._json(409, {
+                    "error": f"the latest release is now {latest.get('latest')}, "
+                             f"not {wanted} — check again and re-confirm"})
+                return
+            if not latest.get("available"):
+                self._json(409, {"error": "already up to date"})
+                return
+            try:
+                result = console._call(updater.apply(wanted), timeout=400.0)
+            except updater.UpdateError as exc:
+                self._json(502, {"error": str(exc)[:256]})
+                return
+            except Exception as exc:
+                self._json(500, {"error": f"update failed: {type(exc).__name__}"})
+                return
+            self._json(200, {"ok": True, **result})
 
         # -- fleet (remote management) ------------------------------------
         #

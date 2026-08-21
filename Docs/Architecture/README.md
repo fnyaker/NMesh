@@ -41,6 +41,7 @@ s'en sert pour autoriser de l'exécution à distance).
 | `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
 | `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), pont console (`fleet_web.py`). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
+| `version.py` / `updater.py` | Version courante et comparaison de tags ; vérification des releases GitHub et remplacement de l'arbre installé — **jamais sans confirmation de l'opérateur**, l'état du nœud n'est pas touché, l'arbre précédent est conservé et restauré en cas d'échec. Voir [`../Setup/guide`](../Setup/guide). |
 
 ## Les documents
 

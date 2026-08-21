@@ -87,6 +87,16 @@ tests/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
 ├── test_session_store.py                             — persistance (chiffrée)
+├── test_start_script.py / test_install_script.py     — les deux scripts, sourcés
+│     en mode bibliothèque (rien n'est installé) : distro, sudo, sonde venv pour
+│     l'un ; détection d'init (systemctl sans systemd), privilèges, chemins,
+│     unités générées, copie d'arbre pour l'autre
+├── test_updater.py                                    — mise à jour GitHub :
+│     comparaison de versions, champs hostiles bornés, archive piégée (chemin
+│     absolu, traversée, lien symbolique, fichier spécial), état et venv jamais
+│     touchés, restauration après échec, dépôt épinglé
+├── test_docker_image_tree.py                          — l'image embarque ce que
+│     le provisioning fleet exige (« no NMesh tree at /app »)
 └── integration/                                       — nœuds réels (TCP + spool)
 ```
 </content>

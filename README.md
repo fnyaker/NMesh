@@ -75,6 +75,31 @@ pip install -r requirements.txt
 python scripts/nmesh_node.py --data ./data
 ```
 
+## Installer durablement (méthode recommandée)
+
+Pour une machine qui doit **héberger** un nœud, `install.sh` copie l'arbre dans
+un emplacement durable, active le démarrage au boot (systemd, OpenRC ou
+launchd) puis lance le nœud :
+
+```bash
+./install.sh                       # installe, active au boot, lance
+./install.sh --fleet               # …et active l'app de gestion de parc
+./install.sh --uninstall           # retire le service et les fichiers
+```
+
+Il ne réimplémente rien de `start.sh` : il lui délègue les dépendances et le
+service qu'il écrit pointe sur `start.sh`, si bien qu'un nœud qui redémarre
+revérifie et répare son installation. Relancer `install.sh` met à jour sur
+place — **l'état du nœud n'est jamais touché**.
+
+Le nœud sait aussi se mettre à jour depuis GitHub : console web →
+**Settings → Updates**. La vérification est manuelle, l'installation demande
+une confirmation qui nomme la version, et rien n'est jamais installé sans ce
+clic. Détails : [`Docs/Setup/guide`](Docs/Setup/guide).
+
+Docker reste possible (`docker/`), mais ce n'est plus la voie conseillée pour
+une machine dédiée.
+
 ## Console web
 
 Interface de gestion **responsive** (4 onglets : Vue d'ensemble, Apps, Connectivité,
@@ -112,6 +137,11 @@ Un transport = tout ce qui déplace des octets. Fournis :
 [`Docs/Transports/spool`](Docs/Transports/spool).
 
 ## Déploiements
+
+### Service système (recommandé)
+
+`./install.sh` — voir [Installer durablement](#installer-durablement-méthode-recommandée)
+ci-dessus.
 
 ### Docker (héberger un nœud-relais)
 
@@ -156,6 +186,8 @@ hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
 ```
 src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
 scripts/          nmesh_node.py (lanceur), build_pyz.py
+start.sh          installe les dépendances et lance un nœud depuis l'arbre courant
+install.sh        installe l'arbre à demeure + service de démarrage, puis lance
 docker/           image et compose du nœud-relais
 Docs/             guides (installation, transports, console, connecteur, paquets)
 tests/            unitaires + tests/integration (nœuds réels)

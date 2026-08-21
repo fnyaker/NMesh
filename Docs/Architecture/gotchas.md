@@ -253,6 +253,19 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   publiée seulement aux MAJ de deps ; l'image applicative build FROM elle). Le
   build de base a besoin de `make` → `build-essential`, pas `gcc` seul (sinon
   CMake : « CMAKE_MAKE_PROGRAM is not set »).
+- Docker : l'image applicative doit copier **`start.sh` et `pyproject.toml`** en
+  plus de `src/` et `scripts/`. Sans eux, l'app fleet échoue à l'exécution avec
+  « no NMesh tree at /app » — `build_payload` exige `src` **et** `start.sh` pour
+  pousser un arbre installable. Rien ne casse à la construction, d'où
+  `tests/test_docker_image_tree.py`.
+- `systemctl` présent ne prouve **pas** que systemd tourne : beaucoup d'images
+  de conteneur le livrent sans init derrière, et chaque appel meurt sur « Failed
+  to connect to bus ». Le vrai test d'un systemd démarré est l'existence de
+  `/run/systemd/system` — `install.sh` exige les deux.
+- `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
+  de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
+  sort en erreur tuait tout le script après que l'arbre eut été copié. C'est
+  maintenant un avertissement, l'installation reste utilisable à la main.
 
 ## Maintenance de voisinage
 
