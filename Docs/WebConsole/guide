@@ -85,6 +85,8 @@ Options :
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |
 | POST    | `/api/fleet/provision` | déploiement SSH sur des machines découvertes |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — apps **intégrées** |
+| GET     | `/api/update/check` | interroge les releases GitHub → `{current, latest?, newer, notes?, updatable, reason?}` |
+| POST    | `/api/update/apply` | `{version}` — installe cette release **exacte** ; un écart avec ce que GitHub propose est refusé |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -164,6 +166,18 @@ redémarrage du nœud — et persistée dans `<data>/apps.json`.
 Câblage : passer un `app_host` (un `src.app_registry.AppHost`) à `WebConsole(...)`.
 `scripts/nmesh_node.py` le fait ; le paramètre `chat_bridge` reste supporté pour
 un runner qui héberge une seule app lui-même.
+
+## Mises à jour (Settings → Updates)
+
+Le panneau **Settings** affiche la version du nœud et un bouton *Check for
+updates*. S'il existe une release GitHub plus récente, elle est montrée avec
+ses notes ; *Install* ouvre une confirmation qui **nomme la version**, et la
+requête envoyée rappelle cette même version — un écart avec ce que GitHub
+propose au moment du clic est refusé plutôt que d'installer quelque chose que
+l'opérateur n'a pas vu. Aucune mise à jour n'a jamais lieu sans ce clic.
+
+Ce qui est remplacé, ce qui ne l'est pas, et les cas de refus (conteneur,
+répertoire non inscriptible) : [`../Setup/guide`](../Setup/guide).
 
 ## Rejoindre / relier deux réseaux
 

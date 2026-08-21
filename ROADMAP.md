@@ -257,7 +257,25 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   chiffré** de l'app. Bascule à chaud depuis la console, sans redémarrer le nœud.
 - Fleet est **désactivée par défaut** (elle peut ouvrir un shell).
 
+### Installation à demeure et mise à jour (`install.sh`, `src/updater.py`) — fait
+- `install.sh` : copie l'arbre dans un emplacement durable (`/opt/nmesh` en root,
+  `~/.local/share/nmesh` sinon), pose un service systemd / OpenRC / launchd,
+  puis lance. Il **délègue tout** à `start.sh` (dépendances, distro, liboqs) et
+  le service pointe sur `start.sh` : un nœud qui redémarre se répare seul.
+- Réinstallation = mise à jour sur place, **l'état n'est jamais touché**.
+  `--uninstall` retire service et fichiers, `--purge` va jusqu'à l'identité.
+- Mise à jour depuis GitHub (console → Settings → Updates) : vérification
+  manuelle, confirmation qui **nomme la version**, version rappelée dans la
+  requête et revérifiée côté nœud. Seuls les répertoires de code/doc sont
+  remplacés ; l'arbre précédent est gardé et restauré en cas d'échec. Refus
+  explicite sur image de conteneur ou répertoire non inscriptible.
+- Limite connue : **pas encore de signature de release vérifiée par le nœud**
+  (confiance TLS + GitHub + publieurs). C'est la prochaine étape de ce chantier.
+- Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
+
 ### Long terme
+- **Signer les releases** (ML-DSA) et vérifier la signature avant d'appliquer une
+  mise à jour, pour sortir de la confiance en GitHub seul.
 - Trust score par nœud + révocation en cas de trahison.
 - Persistance de la trust/cert table sur disque.
 - meshnet-daemon : embarque la lib, écoute sur socket, multi-clients.

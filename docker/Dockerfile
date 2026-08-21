@@ -21,9 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies already live in the base image (installed from the same
-# requirements.txt). Only the application code is added here.
+# requirements.txt, which the base already placed in /app). Only the application
+# code is added here.
 COPY src/ ./src/
 COPY scripts/ ./scripts/
+# The fleet app pushes this tree to machines it provisions, and the bootstrap it
+# sends runs `start.sh` there to install dependencies (see Docs/Apps/fleet).
+# Without these the payload cannot be built at all — "no NMesh tree at /app".
+COPY start.sh pyproject.toml ./
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

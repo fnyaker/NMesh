@@ -1,0 +1,210 @@
+"""L'installeur ./install.sh doit poser NMesh proprement sur n'importe quelle machine.
+
+Il ne réimplémente rien de `start.sh` : il installe une copie de l'arbre et
+pointe un service dessus. Les pièges couverts ici sont ceux qui cassent une
+installation réelle — `systemctl` présent sans systemd derrière (le cas de la
+plupart des images de conteneur), pas de root, pas de sudo, et l'état du nœud
+qui doit survivre à une mise à jour.
+
+On source install.sh en mode bibliothèque (NMESH_INSTALL_LIB=1) : rien n'est
+installé, rien n'est lancé.
+"""
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+INSTALL = ROOT / "install.sh"
+BASH = shutil.which("bash")
+
+pytestmark = pytest.mark.skipif(BASH is None,
+                                reason="bash requis pour tester l'installeur")
+
+
+def run_snippet(tmp_path, snippet, *, fake_bins=(), env=None, isolate=False):
+    """Source install.sh en mode bibliothèque puis exécute `snippet`."""
+    stub_dir = tmp_path / "stubbin"
+    stub_dir.mkdir(exist_ok=True)
+    base_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if isolate:
+        for tool in ("dirname", "id", "cat", "mkdir", "rm", "tar", "env", "uname"):
+            real = shutil.which(tool)
+            if real and not (stub_dir / tool).exists():
+                (stub_dir / tool).symlink_to(real)
+        base_path = ""
+    for name, body in fake_bins:
+        path = stub_dir / name
+        if path.is_symlink():
+            path.unlink()
+        path.write_text(body)
+        path.chmod(0o755)
+    environment = {
+        "PATH": f"{stub_dir}:{base_path}" if base_path else str(stub_dir),
+        "HOME": str(tmp_path / "home"),
+        "NMESH_INSTALL_LIB": "1",
+    }
+    environment.update(env or {})
+    (tmp_path / "home").mkdir(exist_ok=True)
+    return subprocess.run(
+        [BASH, "-c", f'. "{INSTALL}"\n{snippet}'],
+        capture_output=True, text=True, env=environment, timeout=60)
+
+
+class TestInitDetection:
+    def test_systemctl_without_systemd_is_not_systemd(self, tmp_path):
+        """Le piège des conteneurs : `systemctl` est là, systemd non. Toute
+        commande finirait par « Failed to connect to bus »."""
+        result = run_snippet(
+            tmp_path, "detect_init",
+            fake_bins=[("systemctl", "#!/bin/sh\nexit 1\n")],
+            isolate=True)
+        assert result.stdout.strip() == "none"
+
+    def test_launchd_is_detected(self, tmp_path):
+        result = run_snippet(tmp_path, "detect_init",
+                             fake_bins=[("launchctl", "#!/bin/sh\nexit 0\n")],
+                             isolate=True)
+        assert result.stdout.strip() == "launchd"
+
+    def test_nothing_at_all_is_none(self, tmp_path):
+        assert run_snippet(tmp_path, "detect_init",
+                           isolate=True).stdout.strip() == "none"
+
+
+class TestPrivileges:
+    def test_no_sudo_no_doas_is_refused_not_guessed(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'detect_sudo; echo "[$SUDO]"',
+            fake_bins=[("id", "#!/bin/sh\necho 1000\n")], isolate=True)
+        assert result.stdout.strip() == "[none]"
+
+    def test_doas_is_accepted(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'detect_sudo; echo "[$SUDO]"',
+            fake_bins=[("id", "#!/bin/sh\necho 1000\n"),
+                       ("doas", "#!/bin/sh\nexit 0\n")], isolate=True)
+        assert result.stdout.strip() == "[doas]"
+
+    def test_root_needs_no_prefix(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'detect_sudo; echo "[$SUDO]"',
+            fake_bins=[("id", "#!/bin/sh\necho 0\n")], isolate=True)
+        assert result.stdout.strip() == "[]"
+
+
+class TestPaths:
+    def test_root_installs_under_opt(self, tmp_path):
+        result = run_snippet(tmp_path, "default_prefix",
+                             fake_bins=[("id", "#!/bin/sh\necho 0\n")],
+                             isolate=True)
+        assert result.stdout.strip() == "/opt/nmesh"
+
+    def test_a_user_install_needs_no_root(self, tmp_path):
+        result = run_snippet(tmp_path, "default_prefix",
+                             fake_bins=[("id", "#!/bin/sh\necho 1000\n")],
+                             isolate=True)
+        prefix = result.stdout.strip()
+        assert prefix.endswith("/nmesh")
+        assert not prefix.startswith("/opt")
+
+    def test_root_state_lives_in_var_lib(self, tmp_path):
+        result = run_snippet(tmp_path, "default_data /opt/nmesh",
+                             fake_bins=[("id", "#!/bin/sh\necho 0\n")],
+                             isolate=True)
+        assert result.stdout.strip() == "/var/lib/nmesh"
+
+
+class TestServiceUnits:
+    def test_systemd_unit_runs_start_sh(self, tmp_path):
+        """Le service pointe sur start.sh, jamais sur python : un nœud qui
+        démarre revérifie ses dépendances et se répare tout seul."""
+        out = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nm "--fleet" multi-user.target'
+        ).stdout
+        assert "ExecStart=/opt/nmesh/start.sh --fleet" in out
+        assert "Environment=NMESH_DATA=/var/lib/nmesh" in out
+        assert "User=nm" in out
+        assert "Restart=always" in out
+        assert "NoNewPrivileges=yes" in out
+        # L'updater ne redémarre le nœud que s'il sait qu'on le relancera.
+        assert "Environment=NMESH_SERVICE_MANAGED=1" in out
+
+    def test_systemd_unit_omits_user_when_empty(self, tmp_path):
+        out = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh "" "" default.target').stdout
+        assert "User=" not in out
+        assert "WantedBy=default.target" in out
+
+    def test_openrc_service_runs_start_sh(self, tmp_path):
+        out = run_snippet(
+            tmp_path,
+            'openrc_service /opt/nmesh /var/lib/nmesh nm "--fleet" nmesh').stdout
+        assert 'command="/opt/nmesh/start.sh"' in out
+        assert 'command_args="--fleet"' in out
+        assert 'NMESH_DATA="/var/lib/nmesh"' in out
+        assert "NMESH_SERVICE_MANAGED=1" in out
+
+    def test_launchd_plist_is_well_formed(self, tmp_path):
+        out = run_snippet(
+            tmp_path,
+            'launchd_plist /opt/nmesh /var/lib/nmesh org.nmesh.x "--fleet"').stdout
+        import xml.etree.ElementTree as ET
+        ET.fromstring(out)          # lève si le plist est mal formé
+        assert "/opt/nmesh/start.sh" in out
+        assert "<string>--fleet</string>" in out
+        assert "NMESH_SERVICE_MANAGED" in out
+
+
+class TestTreeCopy:
+    def test_copies_the_runtime_tree_only(self, tmp_path):
+        src = tmp_path / "src_tree"
+        (src / "src").mkdir(parents=True)
+        (src / "src" / "node.py").write_text("code")
+        (src / "src" / "__pycache__").mkdir()
+        (src / "src" / "__pycache__" / "x.pyc").write_text("junk")
+        (src / "start.sh").write_text("#!/bin/sh\n")
+        (src / ".git").mkdir()
+        (src / ".git" / "HEAD").write_text("ref")
+        (src / ".venv").mkdir()
+        (src / ".venv" / "marker").write_text("venv")
+        (src / "data").mkdir()
+        (src / "data" / "node.key").write_text("IDENTITY")
+        dst = tmp_path / "dst"
+        result = run_snippet(tmp_path, f'copy_tree "{src}" "{dst}"')
+        assert result.returncode == 0, result.stderr
+
+        assert (dst / "src" / "node.py").read_text() == "code"
+        assert (dst / "start.sh").exists()
+        # Ni l'historique, ni le venv, ni l'état du nœud n'ont à être copiés.
+        assert not (dst / ".git").exists()
+        assert not (dst / ".venv").exists()
+        assert not (dst / "data").exists()
+        assert not (dst / "src" / "__pycache__").exists()
+
+    def test_an_empty_source_is_refused(self, tmp_path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        result = run_snippet(tmp_path,
+                             f'copy_tree "{empty}" "{tmp_path}/out" || echo REFUSED')
+        assert "REFUSED" in result.stdout
+
+
+class TestHelp:
+    def test_help_mentions_the_essentials(self):
+        result = subprocess.run([BASH, str(INSTALL), "--help"],
+                                capture_output=True, text=True, timeout=30,
+                                cwd=str(ROOT))
+        assert result.returncode == 0
+        for expected in ("--uninstall", "--prefix", "--purge", "start.sh"):
+            assert expected in result.stdout
+
+    def test_the_script_parses(self):
+        assert subprocess.run([BASH, "-n", str(INSTALL)], timeout=30).returncode == 0
+
+    def test_the_script_is_executable(self):
+        assert os.access(INSTALL, os.X_OK)

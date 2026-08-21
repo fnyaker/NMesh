@@ -1,4 +1,107 @@
-# Installation — ce que `./start.sh` règle tout seul
+# Installation — `./install.sh` et `./start.sh`
+
+Deux scripts, un seul cerveau :
+
+| | Ce que ça fait | Quand |
+|---|---|---|
+| `./start.sh` | installe les dépendances puis lance le nœud **depuis l'arbre courant** | essai, développement, conteneur |
+| `./install.sh` | copie l'arbre dans un endroit durable, pose un service de démarrage, puis appelle `start.sh` | **méthode recommandée** sur une machine qui doit héberger un nœud |
+
+`install.sh` ne réimplémente **rien** de `start.sh` : il lui délègue tout le
+travail de dépendances (`NMESH_SETUP_ONLY=1 ./start.sh`) et le service qu'il
+écrit pointe sur `start.sh`, jamais sur `python` directement. Conséquence
+voulue : un nœud qui redémarre revérifie son installation et se répare seul
+après une mise à jour de distro ou un venv cassé. Docker reste possible
+(`docker/`), mais ce n'est plus la voie conseillée pour une machine dédiée.
+
+```bash
+./install.sh                        # installe, active au boot, lance
+./install.sh --fleet                # …et active l'app fleet
+./install.sh --prefix /srv/nmesh    # choisir l'emplacement
+./install.sh --no-start             # installe et active, sans lancer
+./install.sh --uninstall            # retire le service et les fichiers
+./install.sh --uninstall --purge    # …et l'identité + l'état du nœud
+```
+
+Tout autre argument est passé au nœud, exactement comme avec `start.sh`.
+
+### Où ça atterrit
+
+| | Arbre | État (identité, certs, sessions) |
+|---|---|---|
+| root | `/opt/nmesh` | `/var/lib/nmesh` |
+| utilisateur | `~/.local/share/nmesh` | `~/.local/share/nmesh/data` |
+
+Surcharges : `--prefix` / `NMESH_PREFIX`, `--data` / `NMESH_DATA`,
+`--service` / `NMESH_SERVICE` (défaut `nmesh`), `--run-as` / `NMESH_USER`.
+
+L'arbre copié exclut `.git`, `.venv`, `data/` et les `__pycache__` : ni
+historique, ni environnement virtuel de la machine d'origine, ni état d'un
+autre nœud ne voyagent.
+
+### Réinstaller par-dessus
+
+Relancer `./install.sh` **met à jour sur place** : l'arbre est remplacé,
+**l'état n'est jamais touché** (identité, certificats, sessions, venv), le
+service est redémarré. C'est le chemin normal d'une mise à jour manuelle.
+
+### Gestionnaires de service gérés
+
+systemd (système et utilisateur), OpenRC, launchd. Aucun des trois → le script
+le dit et affiche la commande à lancer à la main ; il n'échoue pas pour
+autant, l'installation reste valide.
+
+Piège traité : `systemctl` présent **sans** systemd derrière (le cas de
+beaucoup d'images de conteneur) ferait échouer chaque appel avec *« Failed to
+connect to bus »*. La détection exige donc aussi `/run/systemd/system`, le
+vrai test d'un systemd démarré. De même, un gestionnaire de service qui refuse
+le service ne fait pas échouer l'installation : c'est un avertissement, et
+l'arbre installé reste lançable à la main.
+
+Chaque unité écrite exporte `NMESH_SERVICE_MANAGED=1` : c'est ce qui autorise
+l'updater (ci-dessous) à redémarrer le nœud, sachant que quelque chose le
+relancera.
+
+Les tests sourcent `install.sh` avec `NMESH_INSTALL_LIB=1` et exercent la
+détection d'init, les privilèges, les chemins, les unités générées et la copie
+d'arbre sans rien installer (`tests/test_install_script.py`).
+
+## Mise à jour depuis GitHub
+
+Un nœud sait vérifier s'il existe une release plus récente et l'installer —
+**jamais sans confirmation explicite de l'opérateur**.
+
+Console web → **Settings → Updates** : *Check for updates* interroge l'API
+GitHub des releases ; si une version plus récente existe, elle est affichée
+avec ses notes, et *Install* demande une confirmation qui **nomme la version**.
+La requête d'installation rappelle cette version : si GitHub a changé entre
+l'affichage et le clic, l'écart est refusé plutôt que d'installer quelque chose
+que personne n'a vu.
+
+API correspondante : `GET /api/update/check`, `POST /api/update/apply`
+(voir [`../WebConsole/guide`](../WebConsole/guide)).
+
+Ce qui est remplacé : **uniquement** les répertoires de code et de doc de
+l'arbre installé. L'état du nœud, le venv et tout le reste sont laissés
+intacts. L'arbre précédent est déplacé dans `.nmesh-previous` et restauré si le
+remplacement échoue en cours de route.
+
+Refus explicites (`updatable()`), plutôt que de casser une installation :
+
+- l'arbre courant n'a pas de `src/` ;
+- le répertoire d'installation n'est pas accessible en écriture ;
+- le nœud tourne depuis une image de conteneur → on met à jour l'image, pas
+  l'arbre.
+
+Modèle de confiance, dit sans détour : la confiance repose aujourd'hui sur TLS,
+sur GitHub et sur les personnes qui publient les releases. **Il n'y a pas
+encore de signature de release vérifiée par le nœud** — c'est une limite
+connue, documentée dans `src/updater.py`.
+
+Version courante : `src/version.py` (un test lie ce fichier à
+`pyproject.toml`, les deux ne peuvent pas diverger).
+
+## Ce que `./start.sh` règle tout seul
 
 `./start.sh` doit démarrer un nœud sur une machine **neuve**, sans rien
 demander. Les distributions ne sont d'accord sur rien : ni sur la présence de
