@@ -132,6 +132,11 @@ class TestServiceUnits:
         assert "NoNewPrivileges=yes" in out
         # L'updater ne redémarre le nœud que s'il sait qu'on le relancera.
         assert "Environment=NMESH_SERVICE_MANAGED=1" in out
+        # liboqs est construit *dans* le préfixe : un compte système n'a pas de
+        # home où le nœud pourrait retrouver sa bibliothèque de crypto.
+        assert "Environment=HOME=/opt/nmesh" in out
+        assert "Environment=OQS_INSTALL_PATH=/opt/nmesh/_oqs" in out
+        assert "ProtectSystem=full" in out
 
     def test_systemd_unit_omits_user_when_empty(self, tmp_path):
         out = run_snippet(
@@ -148,6 +153,7 @@ class TestServiceUnits:
         assert 'command_args="--fleet"' in out
         assert 'NMESH_DATA="/var/lib/nmesh"' in out
         assert "NMESH_SERVICE_MANAGED=1" in out
+        assert 'OQS_INSTALL_PATH="/opt/nmesh/_oqs"' in out
 
     def test_launchd_plist_is_well_formed(self, tmp_path):
         out = run_snippet(
@@ -158,6 +164,76 @@ class TestServiceUnits:
         assert "/opt/nmesh/start.sh" in out
         assert "<string>--fleet</string>" in out
         assert "NMESH_SERVICE_MANAGED" in out
+        assert "OQS_INSTALL_PATH" in out
+
+
+class TestServiceAccount:
+    """Le nœud tourne sous un compte à lui : son identité, son store de sessions
+    et le hash du mot de passe console ne doivent être lisibles que par lui."""
+
+    def test_an_existing_account_is_not_recreated(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'SUDO=; create_service_user nmesh /opt/nmesh && echo REUSED',
+            fake_bins=[("id", "#!/bin/sh\nexit 0\n"),
+                       ("useradd", "#!/bin/sh\necho CREATED >&2\nexit 0\n")],
+            isolate=True)
+        assert "REUSED" in result.stdout
+        assert "CREATED" not in result.stderr
+
+    def test_creation_falls_through_to_the_next_tool(self, tmp_path):
+        """Chaque distro épelle « compte système » autrement et refuse les
+        options des autres : on essaie, on ne devine pas."""
+        result = run_snippet(
+            tmp_path, 'SUDO=; create_service_user nmesh /opt/nmesh && echo CREATED',
+            fake_bins=[("id", "#!/bin/sh\nexit 1\n"),
+                       ("useradd", "#!/bin/sh\nexit 1\n"),
+                       ("adduser", "#!/bin/sh\nexit 0\n")],
+            isolate=True)
+        assert "CREATED" in result.stdout
+
+    def test_no_tool_at_all_is_reported_not_assumed(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'SUDO=; create_service_user nmesh /opt/nmesh || echo NO_ACCOUNT',
+            fake_bins=[("id", "#!/bin/sh\nexit 1\n")], isolate=True)
+        assert "NO_ACCOUNT" in result.stdout
+
+    def test_owner_spec_without_a_group_is_the_bare_name(self, tmp_path):
+        """`chown nmesh:nmesh` échoue net quand la distro a mis le compte dans
+        `nogroup` — et laisserait l'arbre illisible pour le nœud."""
+        result = run_snippet(tmp_path, "owner_spec nmesh",
+                             fake_bins=[("id", "#!/bin/sh\nexit 1\n")],
+                             isolate=True)
+        assert result.stdout.strip() == "nmesh"
+
+    def test_owner_spec_uses_the_group_when_there_is_one(self, tmp_path):
+        result = run_snippet(tmp_path, "owner_spec nmesh",
+                             fake_bins=[("id", "#!/bin/sh\necho nmesh\n")],
+                             isolate=True)
+        assert result.stdout.strip() == "nmesh:nmesh"
+
+
+class TestDirectories:
+    def test_a_writable_parent_is_never_escalated(self, tmp_path):
+        """Le bug réel : `sudo mkdir -p ~/.local/share/nmesh/data` donnait le
+        répertoire à root, et le nœud mourait sur sa toute première écriture
+        (« Permission denied: …/data/node.key.tmp »)."""
+        marker = tmp_path / "sudo-was-called"
+        target = tmp_path / "home" / "share" / "nmesh" / "data"
+        result = run_snippet(
+            tmp_path,
+            f'SUDO=sudo; is_root() {{ return 1; }}; ensure_dir "{target}" ""',
+            fake_bins=[("sudo", f"#!/bin/sh\ntouch {marker}\nexec \"$@\"\n")])
+        assert result.returncode == 0, result.stderr
+        assert target.is_dir()
+        assert not marker.exists()
+
+    def test_an_unreachable_parent_does_escalate(self, tmp_path):
+        marker = tmp_path / "sudo-was-called"
+        result = run_snippet(
+            tmp_path,
+            f'SUDO=sudo; is_root() {{ return 1; }}; ensure_dir /proc/nmesh-nope "" || true',
+            fake_bins=[("sudo", f"#!/bin/sh\ntouch {marker}\nexit 1\n")])
+        assert marker.exists()
 
 
 class TestTreeCopy:

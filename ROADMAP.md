@@ -262,6 +262,11 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `~/.local/share/nmesh` sinon), pose un service systemd / OpenRC / launchd,
   puis lance. Il **délègue tout** à `start.sh` (dépendances, distro, liboqs) et
   le service pointe sur `start.sh` : un nœud qui redémarre se répare seul.
+- Compte système dédié en installation root (`nmesh`, sans login ni mot de
+  passe) : il possède seul l'arbre et l'état, en mode 700, et l'unité systemd
+  ajoute `NoNewPrivileges` / `PrivateTmp` / `PrivateDevices` / `ProtectSystem`.
+  Installation autonome sous le préfixe (`HOME` épinglé → liboqs dans
+  `<prefix>/_oqs`). Repli documenté quand aucun compte ne peut être créé.
 - Réinstallation = mise à jour sur place, **l'état n'est jamais touché**.
   `--uninstall` retire service et fichiers, `--purge` va jusqu'à l'identité.
 - Mise à jour depuis GitHub (console → Settings → Updates) : vérification

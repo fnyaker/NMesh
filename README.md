@@ -92,6 +92,11 @@ service qu'il écrit pointe sur `start.sh`, si bien qu'un nœud qui redémarre
 revérifie et répare son installation. Relancer `install.sh` met à jour sur
 place — **l'état du nœud n'est jamais touché**.
 
+En root, le nœud reçoit un **compte système à lui** (`nmesh`, sans shell ni mot
+de passe) qui possède seul l'installation et l'état, en mode 700 : la clé
+d'identité n'est lisible par aucun autre compte de la machine. `--run-as root`
+ou `--run-as quelquun` pour en décider autrement.
+
 Le nœud sait aussi se mettre à jour depuis GitHub : console web →
 **Settings → Updates**. La vérification est manuelle, l'installation demande
 une confirmation qui nomme la version, et rien n'est jamais installé sans ce

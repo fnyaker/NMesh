@@ -39,6 +39,48 @@ L'arbre copié exclut `.git`, `.venv`, `data/` et les `__pycache__` : ni
 historique, ni environnement virtuel de la machine d'origine, ni état d'un
 autre nœud ne voyagent.
 
+### Le nœud a son propre compte
+
+Le répertoire d'état contient la **clé d'identité** du nœud, son store de
+sessions chiffré et le hash du mot de passe de la console. Le faire tourner
+sous le compte de la personne qui l'a installé, c'est donner tout ça à
+n'importe quel processus de ce compte — navigateur compris.
+
+Une installation **root** crée donc un compte système `nmesh` (pas de shell de
+login, pas de mot de passe, rien d'autre sur la machine ne lui appartient) et
+lui donne l'arbre **et** l'état, tous deux en **mode 700**. Rien hormis ce
+compte et root ne peut lire la clé d'identité.
+
+- `--run-as root` : ne pas créer de compte, le nœud tourne en root.
+- `--run-as quelquun` : utiliser un compte existant.
+- `NMESH_ACCOUNT=nom` : changer le nom du compte créé.
+- Compte impossible à créer (distro exotique) → avertissement, repli sur le
+  comportement précédent ; l'installation n'échoue pas pour autant.
+- Installation **non-root** : aucun compte ne peut être créé, tout appartient à
+  l'utilisateur courant en 700, et le script le dit clairement.
+- `--uninstall --purge` supprime aussi le compte, puisque plus rien ne lui
+  appartient. Sans `--purge` il est gardé : il possède l'état conservé.
+
+L'unité systemd générée ajoute `NoNewPrivileges`, `PrivateTmp`,
+`PrivateDevices` et `ProtectSystem=full`.
+
+Compromis assumé : l'arbre appartient au compte du nœud et non à root, donc le
+processus peut réécrire son propre code. C'est le prix de l'auto-réparation au
+démarrage et de la mise à jour depuis la console — deux choses qu'un arbre
+root-only casserait.
+
+### L'installation est autonome
+
+`HOME` est épinglé sur le répertoire d'installation, pour le `start.sh` de
+l'installation **comme** pour le service. Conséquence : `liboqs` est construit
+dans `<prefix>/_oqs` au lieu du home de qui installe. C'est ce qui permet au
+nœud — qui tourne sous un compte système sans home utilisable — de retrouver sa
+bibliothèque de crypto au démarrage et de se réparer seul. Le venv est déjà
+dans `<prefix>/.venv` ; l'arbre de build de liboqs est effacé après coup.
+
+Sur une installation existante, la première réinstallation reconstruit donc
+liboqs au nouvel emplacement (quelques minutes).
+
 ### Réinstaller par-dessus
 
 Relancer `./install.sh` **met à jour sur place** : l'arbre est remplacé,
@@ -63,8 +105,9 @@ l'updater (ci-dessous) à redémarrer le nœud, sachant que quelque chose le
 relancera.
 
 Les tests sourcent `install.sh` avec `NMESH_INSTALL_LIB=1` et exercent la
-détection d'init, les privilèges, les chemins, les unités générées et la copie
-d'arbre sans rien installer (`tests/test_install_script.py`).
+détection d'init, les privilèges, les chemins, la création du compte, les
+unités générées et la copie d'arbre sans rien installer
+(`tests/test_install_script.py`).
 
 ## Mise à jour depuis GitHub
 

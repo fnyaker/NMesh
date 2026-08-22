@@ -64,8 +64,19 @@ class CryptoIdentity:
         secret = self._signer.export_secret_key()
         data = struct.pack('!HH', len(pub), len(secret)) + pub + secret
         tmp = path + ".tmp"
-        with open(tmp, 'wb') as f:
-            f.write(data)
+        # La clé privée du nœud *est* son identité sur le mesh. Elle est créée
+        # en 0600 dès l'ouverture — pas par un chmod après coup, qui laisserait
+        # une fenêtre où n'importe qui sur la machine peut la lire.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        # Un fichier déjà présent en 0644 (identité écrite par une version
+        # antérieure) garde son mode à travers le replace : on le corrige.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
 
     @classmethod

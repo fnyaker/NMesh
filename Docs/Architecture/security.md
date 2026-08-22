@@ -7,7 +7,11 @@ Source : `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
 
 - `CryptoIdentity` (`crypto.py`) détient une paire **ML-DSA-65** (signature).
   La clé privée reste en mémoire ; `save/load` la persiste en binaire brut sous
-  le répertoire d'état (`node.key`).
+  le répertoire d'état (`node.key`), **créée en 0600 dès l'ouverture** (pas un
+  `chmod` après coup, qui laisserait une fenêtre de lecture) et re-serrée si un
+  fichier plus permissif traîne d'une version antérieure. Le répertoire d'état
+  lui-même est en 700 et appartient au compte dédié du nœud quand il a été posé
+  par `install.sh` (voir [`../Setup/guide`](../Setup/guide)).
 - `NodeID = sha256(clé_publique_DSA)[:20]` (`NodeID.from_public_key`). Donc
   **l'ID est dérivable de la clé** : un `NodeID` qui ne correspond pas à la clé
   présentée est un mensonge → rejet (`claimed_id != NodeID(packet.src_id)`).
