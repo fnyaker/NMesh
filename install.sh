@@ -22,6 +22,11 @@
 #   as root          /opt/nmesh          state in /var/lib/nmesh
 #   as a user        ~/.local/share/nmesh  state in ~/.local/share/nmesh/data
 #
+# As root the node gets its own locked-down system account (`nmesh`, no login,
+# no password): it owns the install and the state, both mode 700, so nothing on
+# the machine but that account and root can read the node's identity keys.
+# `--run-as root` opts out; `--run-as somebody` uses an existing account.
+#
 # Re-running it upgrades in place: the tree is replaced, **state is never
 # touched**, and the service is restarted.
 #
@@ -29,7 +34,7 @@
 #   NMESH_PREFIX=path    install directory
 #   NMESH_DATA=path      node state directory
 #   NMESH_SERVICE=name   service name (default nmesh)
-#   NMESH_USER=name      user the service runs as (default: the invoking user)
+#   NMESH_USER=name      account the service runs as (root install: nmesh)
 #
 # Everything above the "MAIN" banner is definitions only: the test-suite sources
 # this file with NMESH_INSTALL_LIB=1 to exercise them without installing.
@@ -129,6 +134,103 @@ copy_tree() {
         | ( cd "$dst" && tar -xf - )
 }
 
+# ── directories ──────────────────────────────────────────────────────────────
+# Escalating to create a directory hands it to root. `sudo mkdir -p
+# ~/.local/share/nmesh/data` did exactly that on a user install: the node runs
+# as the user and died on its very first write with
+# "Permission denied: .../data/node.key.tmp". So: create it ourselves whenever
+# we can, escalate only when the parent really is out of reach, and always make
+# sure whoever will run the node ends up owning it. Re-running the installer
+# therefore also repairs a directory a previous run got wrong.
+ensure_dir() {
+    local path="$1" owner="${2:-}"
+    if [ ! -d "$path" ]; then
+        mkdir -p "$path" 2>/dev/null || run_priv mkdir -p "$path" || return 1
+    fi
+    [ -n "$owner" ] || return 0
+    if is_root; then
+        run_priv chown -R "$owner" "$path" 2>/dev/null || true
+    elif [ ! -w "$path" ]; then
+        run_priv chown -R "$owner" "$path" 2>/dev/null \
+            || warn "Could not give $path to $owner — the node will not be able to write there"
+    fi
+}
+
+# `run_priv` is a no-op as root and refuses loudly when there is no way up.
+run_priv() {
+    if [ -z "$SUDO" ]; then "$@"; return; fi
+    if [ "$SUDO" = none ]; then
+        fail "This step needs root and neither sudo nor doas is available: $*"
+    fi
+    $SUDO "$@"
+}
+
+# ── the node's own account ───────────────────────────────────────────────────
+# A node's data directory holds its identity key, its session store and the
+# console password hash. Running it under the account of whoever happened to
+# install it means every process that user runs can read all of that. So a root
+# install gives the node an account of its own: no login shell, no password,
+# nothing else on the machine belongs to it — and its files are mode 700.
+#
+# Nothing here is fatal: an account that cannot be created falls back to the
+# invoking user, which is exactly what the previous behaviour was.
+nologin_path() {
+    local candidate
+    for candidate in /usr/sbin/nologin /sbin/nologin /usr/bin/nologin; do
+        [ -x "$candidate" ] && { echo "$candidate"; return; }
+    done
+    echo /bin/false
+}
+
+user_exists() {
+    id -u "$1" >/dev/null 2>&1
+}
+
+# Every distro spells "create a system account" differently and most of them
+# reject the others' flags, so this tries them in turn rather than guessing from
+# the distro name — the account either exists at the end or it does not.
+create_service_user() {
+    local name="$1" home="$2" shell
+    user_exists "$name" && return 0
+    shell="$(nologin_path)"
+    if command -v useradd >/dev/null 2>&1; then
+        run_priv useradd --system --no-create-home --home-dir "$home" \
+                 --shell "$shell" "$name" 2>/dev/null && return 0
+        run_priv useradd -r -M -d "$home" -s "$shell" "$name" 2>/dev/null && return 0
+    fi
+    if command -v adduser >/dev/null 2>&1; then
+        run_priv adduser --system --group --no-create-home --home "$home" \
+                 --shell "$shell" "$name" 2>/dev/null && return 0
+        # busybox / Alpine: the group has to be made first.
+        run_priv addgroup -S "$name" 2>/dev/null || true
+        run_priv adduser -S -D -H -h "$home" -s "$shell" -G "$name" "$name" \
+                 2>/dev/null && return 0
+    fi
+    if command -v pw >/dev/null 2>&1; then          # FreeBSD
+        run_priv pw useradd "$name" -d "$home" -s "$shell" -w no 2>/dev/null \
+            && return 0
+    fi
+    return 1
+}
+
+delete_service_user() {
+    local name="$1"
+    user_exists "$name" || return 0
+    command -v userdel  >/dev/null 2>&1 && run_priv userdel  "$name" 2>/dev/null && return 0
+    command -v deluser  >/dev/null 2>&1 && run_priv deluser  "$name" 2>/dev/null && return 0
+    command -v pw       >/dev/null 2>&1 && run_priv pw userdel "$name" 2>/dev/null && return 0
+    return 1
+}
+
+# `chown user:group` when the account has a group of its own, `chown user`
+# otherwise — a `chown x:x` against a system that put the account in `nogroup`
+# fails outright and would leave the tree unreadable to the node.
+owner_spec() {
+    local name="$1" group
+    group="$(id -gn "$name" 2>/dev/null || true)"
+    if [ -n "$group" ]; then echo "$name:$group"; else echo "$name"; fi
+}
+
 # ── service definitions ──────────────────────────────────────────────────────
 # Every unit points at start.sh, not at python directly. That is deliberate: a
 # node that boots then re-verifies its own dependencies heals itself after a
@@ -148,6 +250,12 @@ Type=simple
 ${user:+User=$user}
 WorkingDirectory=$prefix
 Environment=NMESH_DATA=$data
+# The whole install is self-contained under $prefix — including liboqs, which
+# start.sh looks for under \$HOME. A system account has no usable home, so
+# pointing HOME at the install directory is what keeps the node able to find
+# its crypto library and to repair itself on boot.
+Environment=HOME=$prefix
+Environment=OQS_INSTALL_PATH=$prefix/_oqs
 # Tells the updater it may restart the node through the service manager rather
 # than leaving the operator with a stopped node after an update.
 Environment=NMESH_SERVICE_MANAGED=1
@@ -157,6 +265,8 @@ RestartSec=5
 # The node needs no new privileges and no private state outside its data dir.
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
 
 [Install]
 WantedBy=$5
@@ -175,6 +285,8 @@ command_background=true
 command_user="${user:-root}"
 directory="$prefix"
 export NMESH_DATA="$data"
+export HOME="$prefix"
+export OQS_INSTALL_PATH="$prefix/_oqs"
 export NMESH_SERVICE_MANAGED=1
 pidfile="/run/\$RC_SVCNAME.pid"
 output_log="/var/log/\$RC_SVCNAME.log"
@@ -200,6 +312,8 @@ launchd_plist() {
         echo '  </array>'
         echo '  <key>EnvironmentVariables</key><dict>'
         echo "    <key>NMESH_DATA</key><string>$data</string>"
+        echo "    <key>HOME</key><string>$prefix</string>"
+        echo "    <key>OQS_INSTALL_PATH</key><string>$prefix/_oqs</string>"
         echo "    <key>NMESH_SERVICE_MANAGED</key><string>1</string>"
         echo '  </dict>'
         echo "  <key>WorkingDirectory</key><string>$prefix</string>"
@@ -244,7 +358,7 @@ while [ $# -gt 0 ]; do
         --no-start)   DO_START=false; shift;;
         --uninstall)  UNINSTALL=true; shift;;
         --purge)      PURGE=true; shift;;
-        -h|--help)    sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+        -h|--help)    sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
         *)            NODE_ARGS+=("$1"); shift;;
     esac
 done
@@ -253,7 +367,13 @@ detect_sudo
 INIT="$(detect_init)"
 [ -n "$PREFIX" ] || PREFIX="$(default_prefix)"
 [ -n "$DATA" ]   || DATA="$(default_data "$PREFIX")"
-[ -n "$RUN_USER" ] || { is_root || RUN_USER="$(id -un)"; }
+# As root the node gets a dedicated account (created further down); otherwise it
+# can only run as whoever is installing it. `--run-as root` is the way out.
+SERVICE_ACCOUNT="${NMESH_ACCOUNT:-nmesh}"
+if [ -z "$RUN_USER" ]; then
+    if is_root; then RUN_USER="$SERVICE_ACCOUNT"; else RUN_USER="$(id -un)"; fi
+fi
+[ "$RUN_USER" = root ] && RUN_USER=""
 
 UNIT_PATH=""
 case "$INIT" in
@@ -262,15 +382,6 @@ case "$INIT" in
     openrc)         UNIT_PATH="/etc/init.d/$SERVICE";;
     launchd)        UNIT_PATH="$HOME/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
 esac
-
-# `run_priv` is a no-op as root and refuses loudly when there is no way up.
-run_priv() {
-    if [ -z "$SUDO" ]; then "$@"; return; fi
-    if [ "$SUDO" = none ]; then
-        fail "This step needs root and neither sudo nor doas is available: $*"
-    fi
-    $SUDO "$@"
-}
 
 # ── uninstall ────────────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = true ]; then
@@ -309,6 +420,14 @@ if [ "$UNINSTALL" = true ]; then
     elif [ -d "$DATA" ]; then
         info "State kept in $DATA (use --purge to delete the node's identity too)"
     fi
+    # The account only ever existed to own files that are now gone. Without
+    # --purge it is left in place: it still owns the state we just kept.
+    if [ "$PURGE" = true ] && is_root && [ "$RUN_USER" = "$SERVICE_ACCOUNT" ] \
+       && user_exists "$SERVICE_ACCOUNT"; then
+        delete_service_user "$SERVICE_ACCOUNT" \
+            && ok "Removed the $SERVICE_ACCOUNT account" \
+            || warn "Could not remove the $SERVICE_ACCOUNT account"
+    fi
     exit 0
 fi
 
@@ -336,30 +455,73 @@ else
     else
         info "Installing to $PREFIX"
     fi
-    run_priv mkdir -p "$PREFIX"
     # A user install must own its directory; a root install stays root-owned.
-    if ! is_root && [ ! -w "$PREFIX" ]; then
-        run_priv chown "$(id -u):$(id -g)" "$PREFIX"
-    fi
+    ensure_dir "$PREFIX" "$(is_root || echo "$(id -u):$(id -g)")" \
+        || fail "Could not create $PREFIX"
     copy_tree "$SOURCE_REAL" "$PREFIX" || fail "Could not copy the NMesh tree"
     chmod +x "$PREFIX/start.sh" "$PREFIX/install.sh" 2>/dev/null || true
     ok "Files installed in $PREFIX"
 fi
 
-run_priv mkdir -p "$DATA"
-if [ -n "$RUN_USER" ] && is_root; then
-    run_priv chown -R "$RUN_USER" "$DATA" || true
+# ── the account the node runs under ──────────────────────────────────────────
+if is_root && [ "$RUN_USER" = "$SERVICE_ACCOUNT" ] && ! user_exists "$RUN_USER"; then
+    if create_service_user "$RUN_USER" "$PREFIX"; then
+        ok "Created the $RUN_USER system account (no login, no password)"
+    else
+        warn "Could not create a $RUN_USER account — the node will run as root"
+        RUN_USER=""
+    fi
 fi
-# State is a secret store (identity key, session store, console password hash).
-chmod 700 "$DATA" 2>/dev/null || true
+if [ -n "$RUN_USER" ] && ! user_exists "$RUN_USER"; then
+    fail "No such user: $RUN_USER"
+fi
+
+if [ -n "$RUN_USER" ]; then
+    OWNER="$(owner_spec "$RUN_USER")"
+elif is_root; then
+    OWNER="root"
+else
+    OWNER="$(id -u):$(id -g)"
+fi
+
+ensure_dir "$DATA" "$OWNER" || fail "Could not create $DATA"
 ok "State directory $DATA"
 
 # ── dependencies: delegated to start.sh, never duplicated ────────────────────
+# HOME is pinned to the install directory so liboqs is built *inside* it: the
+# node must find the same library at boot as the one built here, and a system
+# account has no home of its own to find it in.
 info "Installing dependencies (this is start.sh doing its usual work)…"
-if ! ( cd "$PREFIX" && NMESH_SETUP_ONLY=1 ./start.sh ); then
+if ! ( cd "$PREFIX" && HOME="$PREFIX" OQS_INSTALL_PATH="$PREFIX/_oqs" \
+       NMESH_SETUP_ONLY=1 ./start.sh ); then
     fail "Dependency setup failed — fix the errors above and re-run ./install.sh"
 fi
 ok "Dependencies ready"
+# start.sh builds liboqs under $HOME, which we just pinned to the install
+# directory: the built library stays, its build tree has no reason to.
+rm -rf "$PREFIX/_oqs_build" 2>/dev/null || true
+
+# ── lock it down ─────────────────────────────────────────────────────────────
+# Only now: the venv and liboqs were just built as the invoking user, and they
+# live inside the install directory. Both trees go to the node's account, mode
+# 700 — nothing else on the machine can read its identity key, and the node can
+# still repair and update itself.
+lock_down() {
+    local path="$1"
+    [ -d "$path" ] || return 0
+    if [ "$OWNER" != "$(id -u):$(id -g)" ]; then
+        run_priv chown -R "$OWNER" "$path" 2>/dev/null \
+            || warn "Could not give $path to $OWNER"
+    fi
+    chmod 700 "$path" 2>/dev/null || run_priv chmod 700 "$path" 2>/dev/null || true
+}
+lock_down "$PREFIX"
+lock_down "$DATA"
+if [ -n "$RUN_USER" ]; then
+    ok "Install and state belong to $RUN_USER alone (mode 700)"
+else
+    warn "The node runs as $(id -un): every process of that user can read its identity key"
+fi
 
 # ── service ──────────────────────────────────────────────────────────────────
 ARGS="${NODE_ARGS[*]:-}"
@@ -420,7 +582,11 @@ case "$INIT" in
         ok "Agent org.nmesh.$SERVICE will start at login";;
     *)
         warn "No supported init system found — nothing will start automatically."
-        warn "Run it yourself with:  cd $PREFIX && NMESH_DATA=$DATA ./start.sh $ARGS";;
+        if [ -n "$RUN_USER" ]; then
+            warn "Run it yourself with:  sudo -u $RUN_USER env HOME=$PREFIX OQS_INSTALL_PATH=$PREFIX/_oqs NMESH_DATA=$DATA $PREFIX/start.sh $ARGS"
+        else
+            warn "Run it yourself with:  cd $PREFIX && NMESH_DATA=$DATA ./start.sh $ARGS"
+        fi;;
 esac
 
 # ── start ────────────────────────────────────────────────────────────────────
@@ -450,6 +616,7 @@ echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Installed in : $PREFIX"
 echo "  State in     : $DATA"
+echo "  Runs as      : ${RUN_USER:-root} (files mode 700)"
 echo "  Service      : $SERVICE ($INIT)"
 echo "  Follow it    : $(service_hint "$INIT" "$SERVICE")"
 echo ""

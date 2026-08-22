@@ -119,3 +119,41 @@ class TestPacketAad:
         p2 = Packet(version=1, type=0x01, ttl=64, src_id=bytes(range(1, 21)),
                     dst_id=DST, msg_id=0, nonce=NONCE, gcm_tag=GCM_TAG, payload=b"")
         assert p1.aad() != p2.aad()
+
+
+class TestIdentityOnDisk:
+    """La clé privée *est* l'identité du nœud sur le mesh : sur disque, elle ne
+    doit être lisible que par le compte qui fait tourner le nœud."""
+
+    def test_saved_identity_is_owner_only(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        CryptoIdentity().save(path)
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+
+    def test_a_permissive_file_from_an_older_version_is_tightened(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        identity = CryptoIdentity()
+        identity.save(path)
+        os.chmod(path, 0o644)
+        identity.save(path)
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+
+    def test_the_umask_cannot_loosen_it(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        previous = os.umask(0)
+        try:
+            CryptoIdentity().save(path)
+        finally:
+            os.umask(previous)
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+
+    def test_it_still_round_trips(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        identity = CryptoIdentity()
+        identity.save(path)
+        assert CryptoIdentity.load(path).dsa_public_key == identity.dsa_public_key
+
+    def test_no_temporary_file_is_left_behind(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        CryptoIdentity().save(path)
+        assert not os.path.exists(path + ".tmp")

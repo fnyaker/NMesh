@@ -262,6 +262,18 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   de conteneur le livrent sans init derrière, et chaque appel meurt sur « Failed
   to connect to bus ». Le vrai test d'un systemd démarré est l'existence de
   `/run/systemd/system` — `install.sh` exige les deux.
+- `sudo mkdir -p` sur un chemin **du home de l'utilisateur** donne le répertoire
+  à root. `install.sh` créait ainsi `~/.local/share/nmesh/data` en root-owned
+  pour une installation utilisateur, et le nœud — qui tourne sous ce compte —
+  mourait sur sa toute première écriture : *« PermissionError: …
+  /data/node.key.tmp »*. `ensure_dir` crée donc le répertoire **sans escalader**
+  quand il le peut, n'escalade qu'en dernier recours, et remet toujours le
+  propriétaire attendu (ce qui répare aussi une installation précédente).
+- Un compte système n'a pas de home utilisable, or `start.sh` cherche liboqs
+  sous `$HOME/_oqs`. Le nœud lancé sous `nmesh` ne trouvait donc pas sa crypto.
+  `install.sh` épingle `HOME` sur le répertoire d'installation — à l'install
+  **et** dans l'unité — pour que la bibliothèque construite soit exactement
+  celle que le service charge.
 - `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
   de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
   sort en erreur tuait tout le script après que l'arbre eut été copié. C'est

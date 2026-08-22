@@ -90,7 +90,8 @@ tests/
 ├── test_start_script.py / test_install_script.py     — les deux scripts, sourcés
 │     en mode bibliothèque (rien n'est installé) : distro, sudo, sonde venv pour
 │     l'un ; détection d'init (systemctl sans systemd), privilèges, chemins,
-│     unités générées, copie d'arbre pour l'autre
+│     création du compte système dédié, répertoires jamais donnés à root par
+│     erreur, unités générées, copie d'arbre pour l'autre
 ├── test_updater.py                                    — mise à jour GitHub :
 │     comparaison de versions, champs hostiles bornés, archive piégée (chemin
 │     absolu, traversée, lien symbolique, fichier spécial), état et venv jamais
