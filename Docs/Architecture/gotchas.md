@@ -274,6 +274,19 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   `install.sh` épingle `HOME` sur le répertoire d'installation — à l'install
   **et** dans l'unité — pour que la bibliothèque construite soit exactement
   celle que le service charge.
+- Un service n'hérite pas d'un environnement de session : systemd ne transmet ni
+  `HOME` ni `USER`. Sous `set -u`, le `$HOME` nu de `start.sh` tuait le script
+  avant tout démarrage — *« HOME : variable sans liaison »* — et systemd le
+  relançait en boucle. `node_home()` résout un répertoire réellement
+  inscriptible (environnement → entrée passwd → répertoire d'installation).
+  **Aucun script lancé par un service ne doit déréférencer une variable
+  d'environnement de session sans repli.**
+- liboqs n'est compilé qu'une fois par machine : le résultat est mis en cache
+  sous `/var/cache/nmesh/liboqs-<version du wrapper>` et réutilisé par toute
+  install ultérieure (préfixe différent, second nœud). La réutilisation est
+  décidée **fonctionnellement** — le wrapper charge la bibliothèque candidate et
+  ML-KEM-768 / ML-DSA-65 répondent — jamais sur un nom de fichier ou un numéro
+  de version, et la vérification est refaite à destination après la copie.
 - `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
   de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
   sort en erreur tuait tout le script après que l'arbre eut été copié. C'est

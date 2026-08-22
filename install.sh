@@ -74,11 +74,24 @@ is_root() { [ "$(id -u)" -eq 0 ]; }
 # A user install must not need root, so it goes under the XDG data directory. A
 # root install goes to /opt with state in /var/lib, where an administrator
 # expects to find it.
+# Same reasoning as start.sh's node_home: never dereference HOME bare under
+# `set -u`. The installer is normally run by a person, but it is also run from
+# scripts and CI where the environment is bare.
+caller_home() {
+    if [ -n "${HOME:-}" ] && [ -d "${HOME:-}" ]; then echo "$HOME"; return; fi
+    local entry=""
+    if command -v getent >/dev/null 2>&1; then
+        entry="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || entry=""
+    fi
+    if [ -n "$entry" ] && [ -d "$entry" ]; then echo "$entry"; return; fi
+    pwd
+}
+
 default_prefix() {
     if is_root; then
         echo "/opt/nmesh"
     else
-        echo "${XDG_DATA_HOME:-$HOME/.local/share}/nmesh"
+        echo "${XDG_DATA_HOME:-$(caller_home)/.local/share}/nmesh"
     fi
 }
 
@@ -378,9 +391,9 @@ fi
 UNIT_PATH=""
 case "$INIT" in
     systemd-system) UNIT_PATH="/etc/systemd/system/$SERVICE.service";;
-    systemd-user)   UNIT_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE.service";;
+    systemd-user)   UNIT_PATH="${XDG_CONFIG_HOME:-$(caller_home)/.config}/systemd/user/$SERVICE.service";;
     openrc)         UNIT_PATH="/etc/init.d/$SERVICE";;
-    launchd)        UNIT_PATH="$HOME/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
+    launchd)        UNIT_PATH="$(caller_home)/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
 esac
 
 # ── uninstall ────────────────────────────────────────────────────────────────
@@ -488,11 +501,46 @@ ensure_dir "$DATA" "$OWNER" || fail "Could not create $DATA"
 ok "State directory $DATA"
 
 # ── dependencies: delegated to start.sh, never duplicated ────────────────────
+# Compiling liboqs takes minutes and produces the same library every time. Point
+# start.sh at the places this machine may already have one — the invoking user's
+# home (a plain ./start.sh leaves a build there), their previous user install,
+# and the standard root install. It verifies each candidate by actually loading
+# it before reusing it; anything unusable is rebuilt as before.
+# start.sh caches a built liboqs so the next install reuses it. Because this
+# script pins HOME to the install directory, start.sh would otherwise put that
+# cache *inside* the prefix — one cache per install, which caches nothing. Name
+# a machine-wide location instead.
+liboqs_cache_root() {
+    if is_root; then
+        echo "/var/cache/nmesh"
+    else
+        local home
+        home="$(caller_home)"
+        echo "${XDG_CACHE_HOME:-$home/.cache}/nmesh"
+    fi
+}
+
+reuse_prefixes() {
+    local home="" list=""
+    if [ -n "${SUDO_USER:-}" ] && command -v getent >/dev/null 2>&1; then
+        home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)" || home=""
+    fi
+    [ -n "$home" ] || home="$(caller_home)"
+    for candidate in "$home/_oqs" \
+                     "${XDG_DATA_HOME:-$home/.local/share}/nmesh/_oqs" \
+                     "$SOURCE_REAL/_oqs" "/opt/nmesh/_oqs"; do
+        list="${list:+$list:}$candidate"
+    done
+    echo "$list"
+}
+
 # HOME is pinned to the install directory so liboqs is built *inside* it: the
 # node must find the same library at boot as the one built here, and a system
 # account has no home of its own to find it in.
 info "Installing dependencies (this is start.sh doing its usual work)…"
 if ! ( cd "$PREFIX" && HOME="$PREFIX" OQS_INSTALL_PATH="$PREFIX/_oqs" \
+       OQS_REUSE_FROM="$(reuse_prefixes)" \
+       NMESH_LIBOQS_CACHE="$(liboqs_cache_root)" \
        NMESH_SETUP_ONLY=1 ./start.sh ); then
     fail "Dependency setup failed — fix the errors above and re-run ./install.sh"
 fi

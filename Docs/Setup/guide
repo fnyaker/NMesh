@@ -78,8 +78,47 @@ nœud — qui tourne sous un compte système sans home utilisable — de retrouv
 bibliothèque de crypto au démarrage et de se réparer seul. Le venv est déjà
 dans `<prefix>/.venv` ; l'arbre de build de liboqs est effacé après coup.
 
-Sur une installation existante, la première réinstallation reconstruit donc
-liboqs au nouvel emplacement (quelques minutes).
+Un service n'hérite d'aucun environnement de session : ni `HOME`, ni `USER`.
+`start.sh` ne déréférence donc plus jamais `$HOME` nu — sous `set -u` cela
+tuait le script au démarrage (*« HOME : variable sans liaison »*) et le nœud
+repartait en boucle de redémarrage. `node_home()` résout un répertoire
+réellement inscriptible : l'environnement s'il est utilisable, sinon l'entrée
+passwd du compte, sinon le répertoire d'installation. Conséquence pratique :
+un nœud dont l'unité est ancienne (sans `Environment=HOME=`) démarre quand
+même.
+
+### liboqs n'est compilé qu'une fois par machine
+
+Compiler liboqs prend plusieurs minutes et produit la même bibliothèque à
+chaque fois. Elle est donc **mise en cache**, indexée par la version du wrapper
+`liboqs-python` :
+
+| | Cache |
+|---|---|
+| root | `/var/cache/nmesh/liboqs-<version>` |
+| utilisateur | `${XDG_CACHE_HOME:-~/.cache}/nmesh/liboqs-<version>` |
+
+Un nouvel emplacement d'installation (`--prefix` différent, passage d'une
+install utilisateur à `/opt`, second nœud sur la même machine) **réutilise** ce
+cache au lieu de recompiler. `start.sh` regarde aussi les préfixes que
+`install.sh` lui indique (`OQS_REUSE_FROM`, liste séparée par `:`) : le home de
+qui installe, son ancienne install utilisateur, `/opt/nmesh`.
+
+La réutilisation n'est jamais décidée sur un numéro de version ou un nom de
+fichier : le wrapper **charge** réellement la bibliothèque candidate et les deux
+algorithmes requis répondent, sinon on recompile. Après la copie, la
+vérification est refaite **à destination**. Une montée de version du wrapper
+change la clé du cache et force donc un vrai rebuild — wrapper et bibliothèque
+doivent rester appariés.
+
+Le remplissage du cache est *best effort* : un `/var/cache` en lecture seule ou
+plein coûte un rebuild à la prochaine install, jamais un échec de celle-ci.
+
+Réglages : `NMESH_LIBOQS_CACHE=chemin` (emplacement du cache),
+`OQS_REUSE_FROM=a:b:c` (préfixes à examiner), `OQS_INSTALL_PATH` (destination).
+
+Mettre à jour le nœud (console ou réinstallation) ne touche pas à `_oqs` : rien
+n'est recompilé.
 
 ### Réinstaller par-dessus
 

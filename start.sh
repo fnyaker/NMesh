@@ -36,6 +36,28 @@ fail() { echo -e "${R}[✗]${N} $*"; exit 1; }
 info() { echo -e "${B}[i]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
 
+# ── where "home" is when there is no session ─────────────────────────────────
+# A node started by a service manager inherits almost nothing: no HOME, often no
+# USER. Under `set -u` a bare $HOME then aborts the script outright — which is
+# exactly how a systemd-started node died on "HOME: unbound variable", restart
+# after restart. Resolve a directory we can actually write to instead: the
+# environment if it is usable, the account's own passwd entry otherwise, and
+# failing that the install directory, which belongs to the node by construction
+# (step 0 above cd'd into it).
+node_home() {
+    if [ -n "${HOME:-}" ] && [ -d "${HOME:-}" ] && [ -w "${HOME:-}" ]; then
+        echo "$HOME"; return
+    fi
+    local entry=""
+    if command -v getent >/dev/null 2>&1; then
+        entry="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || entry=""
+    fi
+    if [ -n "$entry" ] && [ -d "$entry" ] && [ -w "$entry" ]; then
+        echo "$entry"; return
+    fi
+    pwd
+}
+
 # ── package manager abstraction ──────────────────────────────────────────────
 # Distros disagree on everything that matters here: whether pip and venv ship
 # with the interpreter (Debian, Alpine and Arch split them out), whether pip may
@@ -376,6 +398,99 @@ oqs.Signature("ML-DSA-65")
 PYEOF
 }
 
+# ── reusing a liboqs that is already on this machine ─────────────────────────
+# Compiling liboqs takes minutes, and it is the same library whatever prefix it
+# ends up in. Installing to a *new* prefix (a user install moving to /opt, a
+# second node, a changed --prefix) would otherwise pay that cost again for a
+# build that is already sitting on disk.
+#
+# The test is functional, never a version string: the wrapper actually loads the
+# candidate and both required algorithms answer. A library that fails that is
+# not reused, it is rebuilt.
+liboqs_usable_at() (
+    [ -n "$1" ] && [ -d "$1" ] || return 1
+    export OQS_INSTALL_PATH="$1"
+    pq_ready
+)
+
+# Where a built liboqs is kept so the *next* install does not rebuild it. Keyed
+# by the wrapper version: a wrapper bump must recompile, since the two have to
+# stay in lockstep around the crypto.
+liboqs_cache_dir() {
+    local base="${NMESH_LIBOQS_CACHE:-}"
+    if [ -z "$base" ]; then
+        if [ "$(id -u)" = 0 ]; then
+            base=/var/cache/nmesh
+        else
+            base="${XDG_CACHE_HOME:-$(node_home)/.cache}/nmesh"
+        fi
+    fi
+    echo "$base/liboqs-$1"
+}
+
+# Keep a copy of what was just built. Best effort by design: a read-only or
+# full /var/cache costs the next install a rebuild, it must never fail this one.
+cache_liboqs() {
+    local cache part
+    cache="$(liboqs_cache_dir "${1:-}")"
+    [ "$cache" != "$OQS_PREFIX" ] || return 0
+    mkdir -p "$cache" 2>/dev/null || return 0
+    for part in lib lib64 include; do
+        [ -d "$OQS_PREFIX/$part" ] || continue
+        rm -rf "$cache/$part" 2>/dev/null || true
+        cp -a "$OQS_PREFIX/$part" "$cache/" 2>/dev/null || return 0
+    done
+    # The library is not a secret and the next install may run as someone else.
+    chmod -R a+rX "$cache" 2>/dev/null || true
+    return 0
+}
+
+# Prefixes worth looking at: only directories that *are* liboqs install trees.
+# A system-wide library needs no copy at all — `pq_lib_on_disk` already finds it
+# through the linker path, so we never get here for one.
+liboqs_candidates() {
+    local item
+    liboqs_cache_dir "${1:-}"
+    # OQS_REUSE_FROM is a colon-separated list, the way PATH is: install.sh
+    # fills it with the places a previous install may have left a build.
+    if [ -n "${OQS_REUSE_FROM:-}" ]; then
+        local IFS=:
+        for item in $OQS_REUSE_FROM; do
+            [ -n "$item" ] && [ "$item" != "$OQS_PREFIX" ] && echo "$item"
+        done
+    fi
+    for item in "$(node_home)/_oqs" "/opt/nmesh/_oqs"; do
+        [ "$item" != "$OQS_PREFIX" ] && echo "$item"
+    done
+    return 0
+}
+
+adopt_liboqs() {
+    local candidate
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
+        liboqs_usable_at "$candidate" || continue
+        mkdir -p "$OQS_PREFIX"
+        # lib on most systems, lib64 on Fedora/openSUSE — copy whichever exist,
+        # headers included: the wrapper only needs the shared object, but a
+        # complete prefix is what a later rebuild-check expects to find.
+        local part copied=false
+        for part in lib lib64 include; do
+            [ -d "$candidate/$part" ] || continue
+            cp -a "$candidate/$part" "$OQS_PREFIX/" 2>/dev/null && copied=true
+        done
+        [ "$copied" = true ] || continue
+        # Copying is not proof: re-check *at the destination* before believing
+        # it — named explicitly rather than through the ambient
+        # OQS_INSTALL_PATH, so this holds wherever it is called from.
+        if liboqs_usable_at "$OQS_PREFIX"; then
+            ADOPTED_FROM="$candidate"
+            return 0
+        fi
+    done < <(liboqs_candidates "${1:-}")
+    return 1
+}
+
 # Fetch the liboqs sources for $OQS_PY_VER into $SRC: the tag matching the
 # wrapper version, else its x.y.0, else main. Minimal images often have no git,
 # so a tarball of the same ref from the same origin is an accepted fallback.
@@ -506,7 +621,12 @@ if ! have_build_tools; then
 fi
 
 # ── step 5: Python dependencies ──────────────────────────────────────────────
-OQS_PREFIX="${OQS_INSTALL_PATH:-$HOME/_oqs}"
+OQS_PREFIX="${OQS_INSTALL_PATH:-$(node_home)/_oqs}"
+# Exported, not just computed: the wrapper reads this variable at import time,
+# and so do the probes below. Without it they fall back to their own idea of
+# "home", which is not necessarily the one this script just used — the library
+# would be built in one place and looked for in another.
+export OQS_INSTALL_PATH="$OQS_PREFIX"
 
 if pq_ready && python -c "import cryptography, pytest, pytest_asyncio" >/dev/null 2>&1; then
     ok "Dependencies already installed (fast start)"
@@ -532,15 +652,23 @@ else
         brew list liboqs &>/dev/null || brew install liboqs || true
     fi
 
+    # The wrapper version decides which liboqs release we need — both for
+    # reusing one and for building it, so it is resolved before either.
+    if ! pq_ready; then
+        OQS_PY_VER=$(python -c "import importlib.metadata as m; print(m.version('liboqs-python'))") \
+            || fail "liboqs-python is not installed"
+        if adopt_liboqs "$OQS_PY_VER"; then
+            ok "Reused the liboqs already built in $ADOPTED_FROM (no recompile)"
+        fi
+    fi
+
     if ! pq_ready; then
         # Build the liboqs release matching the installed wrapper so the two
         # stay in lockstep — a mismatched wrapper/library pair around the
         # crypto is not acceptable, even when it happens to load.
-        OQS_PY_VER=$(python -c "import importlib.metadata as m; print(m.version('liboqs-python'))") \
-            || fail "liboqs-python is not installed"
         info "Building liboqs $OQS_PY_VER from source (one-time — a few minutes)…"
 
-        BUILD_DIR="${LIBOQS_BUILD_DIR:-$HOME/_oqs_build}"
+        BUILD_DIR="${LIBOQS_BUILD_DIR:-$(node_home)/_oqs_build}"
         rm -rf "$BUILD_DIR"
         mkdir -p "$BUILD_DIR"
         SRC="$BUILD_DIR/liboqs"
@@ -583,6 +711,9 @@ else
             || fail "liboqs install failed"
         # The install lives in $OQS_PREFIX — the build tree is dead weight.
         rm -rf "$BUILD_DIR"
+        # Keep a copy so the next install — another prefix, another node on this
+        # machine — reuses it instead of spending these minutes again.
+        cache_liboqs "$OQS_PY_VER"
     fi
 
     pq_ready || fail "post-quantum crypto still unusable after install — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"

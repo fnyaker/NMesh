@@ -367,3 +367,165 @@ def test_missing_compiler_is_detected(tmp_path):
         isolate=True,
     )
     assert out == "MISSING"
+
+
+# ── un service n'hérite pas d'un environnement de session ────────────────────
+# systemd ne transmet ni HOME ni USER par défaut. Sous `set -u`, un `$HOME` nu
+# tuait le script au démarrage — « HOME : variable sans liaison » — et le nœud
+# repartait en boucle de redémarrage sans jamais se lancer.
+
+def test_home_unset_does_not_kill_the_script(tmp_path):
+    """Le cas exact du bug : aucun HOME dans l'environnement."""
+    out = run_snippet(tmp_path, "node_home", env={"HOME": ""})
+    assert out, "node_home doit toujours répondre quelque chose"
+    assert Path(out).is_dir()
+
+
+def test_home_is_used_when_it_is_usable(tmp_path):
+    home = tmp_path / "real-home"
+    home.mkdir()
+    out = run_snippet(tmp_path, "node_home", env={"HOME": str(home)})
+    assert out == str(home)
+
+
+def test_a_home_that_does_not_exist_is_not_trusted(tmp_path):
+    """Un compte système pointe souvent sur /nonexistent : écrire là échouerait
+    plus tard, au pire moment."""
+    out = run_snippet(tmp_path, "node_home",
+                      env={"HOME": str(tmp_path / "nonexistent")})
+    assert out != str(tmp_path / "nonexistent")
+    assert Path(out).is_dir()
+
+
+def test_an_unwritable_home_is_not_trusted(tmp_path):
+    home = tmp_path / "readonly-home"
+    home.mkdir(mode=0o500)
+    try:
+        out = run_snippet(tmp_path, "node_home", env={"HOME": str(home)})
+    finally:
+        home.chmod(0o700)
+    assert Path(out).is_dir()
+
+
+def test_the_whole_script_survives_an_empty_environment(tmp_path):
+    """Plus large que node_home : sourcer start.sh avec un environnement nu ne
+    doit lever aucune variable sans liaison."""
+    proc = subprocess.run(
+        [BASH, "-c", f'. "{START}"; echo SOURCED'],
+        capture_output=True, text=True, timeout=60,
+        env={"NMESH_START_LIB": "1", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+    assert proc.returncode == 0, proc.stderr
+    assert "SOURCED" in proc.stdout
+    assert "unbound" not in proc.stderr and "sans liaison" not in proc.stderr
+
+
+# ── ne pas recompiler liboqs pour rien ───────────────────────────────────────
+# Compiler liboqs prend des minutes et produit la même bibliothèque à chaque
+# fois. Changer de préfixe (install utilisateur qui passe en /opt, second nœud,
+# --prefix différent) ne doit pas repayer ce prix.
+
+def test_candidates_split_the_list_and_skip_the_destination(tmp_path):
+    out = run_snippet(tmp_path, """
+        OQS_PREFIX=/dest/_oqs
+        OQS_REUSE_FROM="/a/_oqs:/b/_oqs::/dest/_oqs"
+        liboqs_candidates 1.2.3
+    """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
+    lines = out.splitlines()
+    assert "/a/_oqs" in lines and "/b/_oqs" in lines
+    assert "/dest/_oqs" not in lines          # inutile : c'est là qu'on écrit
+    assert "" not in lines
+
+
+def test_a_missing_candidate_is_not_usable(tmp_path):
+    out = run_snippet(tmp_path, f"""
+        liboqs_usable_at "{tmp_path}/nowhere" && echo USABLE || echo NOT_USABLE
+    """)
+    assert out == "NOT_USABLE"
+
+
+def test_adoption_copies_the_library_instead_of_building(tmp_path):
+    source = tmp_path / "old" / "_oqs"
+    (source / "lib").mkdir(parents=True)
+    (source / "lib" / "liboqs.so").write_text("ELF")
+    (source / "include").mkdir()
+    (source / "include" / "oqs.h").write_text("header")
+    dest = tmp_path / "new" / "_oqs"
+    out = run_snippet(tmp_path, f"""
+        OQS_PREFIX="{dest}"
+        OQS_REUSE_FROM="{source}"
+        # Le contrôle est fonctionnel : la bibliothèque doit être *là* et se
+        # charger. On simule les deux états successifs.
+        pq_ready() {{ [ -f "${{OQS_INSTALL_PATH:-}}/lib/liboqs.so" ]; }}
+        adopt_liboqs 1.2.3 && echo "ADOPTED:$ADOPTED_FROM" || echo NOT_ADOPTED
+    """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
+    assert out == f"ADOPTED:{source}"
+    assert (dest / "lib" / "liboqs.so").read_text() == "ELF"
+    assert (dest / "include" / "oqs.h").exists()
+
+
+def test_an_unloadable_candidate_is_never_adopted(tmp_path):
+    """Un répertoire qui *ressemble* à une install liboqs ne suffit pas : si le
+    wrapper ne le charge pas, on recompile."""
+    source = tmp_path / "old" / "_oqs"
+    (source / "lib").mkdir(parents=True)
+    (source / "lib" / "liboqs.so").write_text("not really a library")
+    dest = tmp_path / "new" / "_oqs"
+    out = run_snippet(tmp_path, f"""
+        OQS_PREFIX="{dest}"
+        OQS_REUSE_FROM="{source}"
+        pq_ready() {{ return 1; }}
+        adopt_liboqs 1.2.3 && echo ADOPTED || echo NOT_ADOPTED
+    """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
+    assert out == "NOT_ADOPTED"
+
+
+def test_nothing_to_adopt_is_not_an_error(tmp_path):
+    out = run_snippet(tmp_path, f"""
+        OQS_PREFIX="{tmp_path}/dest/_oqs"
+        OQS_REUSE_FROM=""
+        pq_ready() {{ return 1; }}
+        adopt_liboqs 1.2.3 && echo ADOPTED || echo NOT_ADOPTED
+    """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
+    assert out == "NOT_ADOPTED"
+
+
+def test_the_cache_is_keyed_by_the_wrapper_version(tmp_path):
+    """Une montée de version du wrapper doit recompiler : wrapper et
+    bibliothèque restent appariés autour de la crypto."""
+    cache = tmp_path / "cache"
+    first = run_snippet(tmp_path, "liboqs_cache_dir 0.16.0",
+                        env={"NMESH_LIBOQS_CACHE": str(cache)})
+    second = run_snippet(tmp_path, "liboqs_cache_dir 0.17.0",
+                         env={"NMESH_LIBOQS_CACHE": str(cache)})
+    assert first != second
+    assert first.endswith("liboqs-0.16.0")
+
+
+def test_a_build_fills_the_cache(tmp_path):
+    built = tmp_path / "prefix"
+    (built / "lib").mkdir(parents=True)
+    (built / "lib" / "liboqs.so").write_text("ELF")
+    cache = tmp_path / "cache"
+    run_snippet(tmp_path, f"""
+        OQS_PREFIX="{built}"
+        cache_liboqs 0.16.0
+    """, env={"NMESH_LIBOQS_CACHE": str(cache)})
+    assert (cache / "liboqs-0.16.0" / "lib" / "liboqs.so").read_text() == "ELF"
+
+
+def test_an_unwritable_cache_does_not_break_the_install(tmp_path):
+    """Un /var/cache plein ou en lecture seule coûte un rebuild la prochaine
+    fois — jamais l'échec de l'installation en cours."""
+    built = tmp_path / "prefix"
+    (built / "lib").mkdir(parents=True)
+    (built / "lib" / "liboqs.so").write_text("ELF")
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(mode=0o500)
+    try:
+        out = run_snippet(tmp_path, f"""
+            OQS_PREFIX="{built}"
+            cache_liboqs 0.16.0 && echo SURVIVED
+        """, env={"NMESH_LIBOQS_CACHE": str(blocked / "cache")})
+    finally:
+        blocked.chmod(0o700)
+    assert out == "SURVIVED"

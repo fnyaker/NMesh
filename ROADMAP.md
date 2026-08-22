@@ -267,6 +267,10 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   ajoute `NoNewPrivileges` / `PrivateTmp` / `PrivateDevices` / `ProtectSystem`.
   Installation autonome sous le préfixe (`HOME` épinglé → liboqs dans
   `<prefix>/_oqs`). Repli documenté quand aucun compte ne peut être créé.
+- liboqs compilé une seule fois par machine : cache
+  `/var/cache/nmesh/liboqs-<version>` réutilisé par toute install ultérieure,
+  réutilisation validée fonctionnellement (le wrapper charge la bibliothèque),
+  pas sur un numéro de version.
 - Réinstallation = mise à jour sur place, **l'état n'est jamais touché**.
   `--uninstall` retire service et fichiers, `--purge` va jusqu'à l'identité.
 - Mise à jour depuis GitHub (console → Settings → Updates) : vérification
