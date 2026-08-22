@@ -88,6 +88,9 @@ tests/
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
 ├── test_session_store.py                             — persistance (chiffrée)
 ├── test_start_script.py / test_install_script.py     — les deux scripts, sourcés
+│     dont : environnement nu façon systemd (HOME absent, home inexistant ou non
+│     inscriptible) et réutilisation de liboqs (cache, candidat inchargeable
+│     jamais adopté, vérification à destination)
 │     en mode bibliothèque (rien n'est installé) : distro, sudo, sonde venv pour
 │     l'un ; détection d'init (systemctl sans systemd), privilèges, chemins,
 │     création du compte système dédié, répertoires jamais donnés à root par

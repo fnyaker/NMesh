@@ -190,7 +190,12 @@ async def main() -> None:
         app_storage_path=os.path.join(args.data, "app_store") if args.data else None,
         app_store_dir=os.path.join(args.data, "appstore") if args.data else None,
     )
-    listen_uris = [f"tcp://{args.listen}"]
+    # `--listen` takes host:port, but "tcp://host:port" is the spelling every
+    # other address in this project uses, so it gets typed here too. Accept it
+    # rather than building "tcp://tcp://…", which binds but prints an address
+    # nobody can connect to.
+    listen_addr = args.listen.removeprefix("tcp://")
+    listen_uris = [f"tcp://{listen_addr}"]
     if args.spool:
         listen_uris.append(f"spool://{args.spool}")
     await node.start(listen_uris)
@@ -257,7 +262,7 @@ async def main() -> None:
         await _adopt_operator(node, host, preauth, preauth_path)
 
     print("=" * 60)
-    print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{args.listen}")
+    print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{listen_addr}")
     if pub_ip:
         print(f"  Public IP     : {pub_ip}   (self-discovered)")
     for uri in node.advertised_uris():
