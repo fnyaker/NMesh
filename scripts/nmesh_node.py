@@ -34,6 +34,7 @@ from src.apps.fleet import FleetApp
 from src.apps.fleet_state import FleetState
 from src.apps.fleet_web import FleetBridge
 from src.apps import fleet_provision
+from src import config
 
 
 def _chat_factory(node, connector):
@@ -136,36 +137,67 @@ async def _adopt_operator(node, host, preauth, path) -> None:
             pass
 
 
+def _settle(args) -> str:
+    """Fill in everything the command line did not say, from the config file.
+
+    Every option below defaults to ``None`` in the parser precisely so "absent"
+    can be told from "set to the value that happens to be the default". Order is
+    command line > file > built-in default, so a unit or a script that passes
+    flags keeps behaving exactly as it did before the file existed.
+
+    Returns the path of the file it read, for the console to edit."""
+    path = config.path_for(ROOT, args.config)
+    values, problems = config.load(path)
+    for problem in problems:
+        # A configuration we cannot understand is reported and skipped: a node
+        # that refuses to boot is worse than one running on its defaults.
+        print(f"  Config        : {problem}")
+    settled = config.defaults()
+    settled.update(values)
+    for name in config.SETTINGS:
+        given = getattr(args, name, None)
+        if given is not None and given != []:
+            settled[name] = given
+    for name, value in settled.items():
+        setattr(args, name, value)
+    return path
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--listen", default="0.0.0.0:9000", help="node TCP listen addr")
-    ap.add_argument("--udp", default=9001, type=int,
+    # Defaults live in src/config.py, not here: the parser must be able to say
+    # "this flag was not given" so the file can speak. See _settle().
+    ap.add_argument("--config", default=None,
+                    help=f"configuration file (default: {config.FILENAME} next "
+                         "to the install, or $NMESH_CONFIG)")
+    ap.add_argument("--listen", default=None, help="node TCP listen addr")
+    ap.add_argument("--udp", default=None, type=int,
                     help="UDP listen port for hole punching (default 9001)")
-    ap.add_argument("--no-udp", action="store_true",
+    ap.add_argument("--no-udp", action="store_true", default=None,
                     help="disable the UDP listener (punching stays controllable from the console)")
-    ap.add_argument("--stun", action="store_true",
+    ap.add_argument("--stun", action="store_true", default=None,
                     help="use STUN to discover public UDP address (fallback)")
-    ap.add_argument("--punch-keepalive", action="store_true",
+    ap.add_argument("--punch-keepalive", action="store_true", default=None,
                     help="keep the UDP NAT mapping open continuously (stay "
                          "reachable / relay behind NAT)")
-    ap.add_argument("--lan-discovery", action="store_true",
+    ap.add_argument("--lan-discovery", action="store_true", default=None,
                     help="answer LAN relay-discovery beacons (be findable as a "
                          "relay by joiners on the same network)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
-    ap.add_argument("--console-host", default="127.0.0.1")
-    ap.add_argument("--console-port", type=int, default=8787)
+    ap.add_argument("--console-host", default=None)
+    ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--connector-port", type=int, default=None,
                     help="expose a data connector on this loopback port for apps")
     ap.add_argument("--launch", action="append", default=[], metavar="CMD",
                     help="launch an app wired to the mesh (repeatable); needs --connector-port")
-    ap.add_argument("--no-chat", action="store_true",
+    ap.add_argument("--no-chat", action="store_true", default=None,
                     help="disable the built-in chat app (served at /chat on the console)")
-    ap.add_argument("--fleet", action="store_true",
+    ap.add_argument("--fleet", action="store_true", default=None,
                     help="enable the built-in fleet app (remote management + "
                          "deployment, served at /fleet). Off by default: it can "
                          "open a shell, so it is enabled deliberately. The "
                          "console's Apps page toggles it too.")
-    ap.add_argument("--no-tls", action="store_true")
+    ap.add_argument("--no-tls", action="store_true", default=None)
     ap.add_argument("--data", default=None, help="state dir (persists identity + console creds)")
     # Read from the environment so a password never lands in the process args
     # (visible in `ps`); a CLI flag still overrides it when given explicitly.
@@ -174,6 +206,7 @@ async def main() -> None:
                     help="console password (default: $NMESH_CONSOLE_PASSWORD, "
                          "else a strong one is generated and printed once)")
     args = ap.parse_args()
+    config_path = _settle(args)
 
     if args.data:
         os.makedirs(args.data, exist_ok=True)
@@ -255,7 +288,8 @@ async def main() -> None:
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
                          state_dir=args.data, use_tls=not args.no_tls,
-                         password=args.console_password, app_host=host)
+                         password=args.console_password, app_host=host,
+                         config_path=config_path)
     console.start(loop=asyncio.get_running_loop())
 
     if preauth is not None and host is not None:
@@ -263,6 +297,7 @@ async def main() -> None:
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{listen_addr}")
+    print(f"  Config        : {config_path}")
     if pub_ip:
         print(f"  Public IP     : {pub_ip}   (self-discovered)")
     for uri in node.advertised_uris():

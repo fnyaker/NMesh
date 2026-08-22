@@ -87,6 +87,8 @@ Options :
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — apps **intégrées** |
 | GET     | `/api/update/check` | interroge les releases GitHub → `{current, latest?, newer, notes?, updatable, reason?}` |
 | POST    | `/api/update/apply` | `{version}` — installe cette release **exacte** ; un écart avec ce que GitHub propose est refusé |
+| GET     | `/api/config`    | réglages du nœud : valeurs courantes, éditables ou non, problèmes du fichier |
+| POST    | `/api/config`    | `{settings:{…}}` — écrit le fichier ; une valeur refusée n'écrit **rien** |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -178,6 +180,24 @@ l'opérateur n'a pas vu. Aucune mise à jour n'a jamais lieu sans ce clic.
 
 Ce qui est remplacé, ce qui ne l'est pas, et les cas de refus (conteneur,
 répertoire non inscriptible) : [`../Setup/guide`](../Setup/guide).
+
+## Configuration du nœud (Settings → Configuration)
+
+Toutes les options de lancement sont éditables depuis la console et stockées
+dans `<prefix>/nmesh.conf`. Le formulaire est construit à partir de ce que le
+nœud déclare (`GET /api/config`), jamais d'une liste codée dans la page.
+
+Rien n'est appliqué à chaud : les changements prennent effet **au redémarrage**
+du nœud, et la page le dit. Une valeur refusée n'écrit rien du tout — un champ
+fautif n'emporte pas les autres, et la console ne peut pas produire un fichier
+sur lequel le nœud refuserait de démarrer.
+
+`launch` (ce que le nœud exécute) et `data` (où vit l'état) sont **affichés mais
+non éditables ici** : le premier appartient à qui détient le fichier, le second
+à l'installeur. Le mot de passe console n'est pas un réglage.
+
+Détail du format, des bornes et de la priorité ligne de commande > fichier >
+défaut : [`../Setup/guide`](../Setup/guide).
 
 ## Rejoindre / relier deux réseaux
 

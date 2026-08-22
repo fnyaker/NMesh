@@ -97,6 +97,11 @@ de passe) qui possède seul l'installation et l'état, en mode 700 : la clé
 d'identité n'est lisible par aucun autre compte de la machine. `--run-as root`
 ou `--run-as quelquun` pour en décider autrement.
 
+Les options de lancement vivent dans `/opt/nmesh/nmesh.conf`, écrit par
+l'installeur et éditable depuis la console (**Settings → Configuration**) — plus
+besoin d'ouvrir une unité systemd pour changer un port. Un drapeau passé
+explicitement l'emporte toujours sur le fichier.
+
 Le nœud sait aussi se mettre à jour depuis GitHub : console web →
 **Settings → Updates**. La vérification est manuelle, l'installation demande
 une confirmation qui nomme la version, et rien n'est jamais installé sans ce
@@ -190,7 +195,7 @@ hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
 
 ```
 src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
-scripts/          nmesh_node.py (lanceur), build_pyz.py
+scripts/          nmesh_node.py (lanceur), nmesh_config.py, build_pyz.py
 start.sh          installe les dépendances et lance un nœud depuis l'arbre courant
 install.sh        installe l'arbre à demeure + service de démarrage, puis lance
 docker/           image et compose du nœud-relais
