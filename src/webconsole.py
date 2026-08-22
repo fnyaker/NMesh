@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 from . import updater
+from . import config as node_config
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 
@@ -88,12 +89,16 @@ class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
                  password: str | None = None, chat_bridge=None,
-                 app_host=None) -> None:
+                 app_host=None, config_path: str | None = None) -> None:
         self._node = node
         self.host = host
         self.port = port
         self._state_dir = state_dir
         self._use_tls = use_tls
+        # The node's configuration file, when it was started from one. Without
+        # it the settings page reports that there is nothing to edit rather than
+        # inventing a path and writing somewhere nobody asked for.
+        self._config_path = config_path
         # Built-in apps. With an ``app_host`` the console follows what is
         # actually running (apps can be enabled/disabled live from the Apps
         # page); ``chat_bridge`` remains the direct wiring for a runner that
@@ -270,6 +275,26 @@ class WebConsole:
                          "installed": True, "enabled": True, "running": True,
                          "description": ""})
         return apps
+
+    def _config_snapshot(self) -> dict:
+        """The configuration as the settings page needs it: current values,
+        which of them may be edited from here, and anything wrong with the file.
+
+        Read from disk on every request rather than cached: the file can be
+        edited by hand, and a page showing what the node was started with rather
+        than what the file now says would be actively misleading."""
+        if not self._config_path:
+            return {"available": False,
+                    "reason": "this node was not started from a configuration file"}
+        values, problems = node_config.load(self._config_path)
+        merged = node_config.defaults()
+        merged.update(values)
+        return {"available": True,
+                "path": self._config_path,
+                "settings": node_config.public(merged),
+                "problems": problems[:16],
+                "restart_required": False,
+                "service_managed": updater.service_managed()}
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
@@ -608,6 +633,12 @@ def _make_handler(console: WebConsole):
                 result["blocked"] = reason
                 self._json(200, result)
                 return
+            if path == "/api/config":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                self._json(200, console._config_snapshot())
+                return
             if path == "/api/rootcert":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -934,6 +965,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/update/apply":
                 self._handle_update_apply(_parse_json(body))
                 return
+            if path == "/api/config":
+                self._handle_config_save(_parse_json(body))
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
@@ -948,6 +982,41 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_config_save(self, data) -> None:
+            """Write the node's configuration file.
+
+            Every field is validated before anything is written: a rejected
+            value leaves the stored one alone, so one bad entry in a form can
+            never produce a file the node would refuse to start on. Nothing is
+            applied live — the node reads this at startup, and the answer says
+            so rather than letting the page imply otherwise."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            if not console._config_path:
+                self._json(409, {"error": "this node was not started from a "
+                                          "configuration file"})
+                return
+            current, _problems = node_config.load(console._config_path)
+            merged = node_config.defaults()
+            merged.update(current)
+            merged, rejected = node_config.apply_edits(
+                merged, (data or {}).get("settings"))
+            if rejected:
+                self._json(400, {"error": "some settings were refused",
+                                 "rejected": rejected[:16]})
+                return
+            try:
+                node_config.save(console._config_path, merged)
+            except OSError as exc:
+                self._json(500, {"error": f"could not write the configuration: "
+                                          f"{exc.strerror or 'error'}"})
+                return
+            self._json(200, {"saved": True,
+                             "path": console._config_path,
+                             "restart_required": True,
+                             "service_managed": updater.service_managed()})
 
         def _handle_update_apply(self, data) -> None:
             """Install a release — only ever the one the operator confirmed.

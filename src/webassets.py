@@ -1212,6 +1212,17 @@ INDEX_HTML = """<!doctype html>
         <pre id="update-notes" class="notes" hidden></pre>
       </article>
       <article class="surface">
+        <div class="surface-head"><div><p class="eyebrow">Startup options</p><h2>Configuration</h2></div><span id="config-pill" class="state-pill"></span></div>
+        <p class="subtle">Everything the node takes as a launch option, kept in a file next to the install.
+          Changes are written to that file and take effect when the node restarts — nothing here changes a running node.
+          Options passed on the command line still win over the file.</p>
+        <p id="config-path" class="subtle mono"></p>
+        <div id="config-problems" class="message" hidden></div>
+        <div id="config-fields" class="form-grid two"></div>
+        <div class="action-row"><button id="config-save" class="primary">Save configuration</button><button id="config-reload" class="secondary">Reload from file</button></div>
+        <p id="config-status" class="message"></p>
+      </article>
+      <article class="surface">
         <div class="surface-head"><div><p class="eyebrow">Transport health</p><h2>Reachability</h2></div><span id="relay-state" class="state-pill"></span></div>
         <div id="network-summary" class="info-strip"></div><div id="transport-list" class="transport-grid"></div>
         <div class="action-row wrap"><button id="punch-toggle" class="secondary"></button><button id="keepalive-toggle" class="secondary"></button><button id="udp-toggle" class="secondary"></button><input id="udp-port" class="compact" type="number" min="1" max="65535" value="9001"><button id="lan-toggle" class="secondary"></button><button id="reach-probe" class="secondary">Confirm reachability</button><button id="net-recheck" class="secondary">Re-check network</button></div><p id="transport-status" class="message"></p>
@@ -1339,6 +1350,9 @@ function selectTab(name, updateHash = true) {
   document.querySelectorAll("[data-panel]").forEach((panel) => { panel.hidden = panel.dataset.panel !== name; });
   if (updateHash) window.history.replaceState(null, "", "#" + name);
   if (name === "connectivity") refreshConnectivity(); if (name === "apps") refreshApps();
+  // Read on entry rather than on a timer: the file can be edited by hand, and a
+  // stale form would offer to save values the file no longer holds.
+  if (name === "settings") loadConfig();
 }
 $("tabs").addEventListener("click", (event) => { const button=event.target.closest("[data-tab]");if(button)selectTab(button.dataset.tab); });
 $("tabs").addEventListener("keydown", (event) => {
@@ -1547,6 +1561,97 @@ async function applyUpdate(){
 }
 $("update-check").addEventListener("click",checkForUpdates);
 $("update-apply").addEventListener("click",applyUpdate);
+
+// ── the node's configuration file ───────────────────────────────────────────
+// The form is built from what the node reports, never from a list hard-coded
+// here: a setting added on the node side shows up on its own, and one the node
+// refuses to expose cannot be typed into existence from this page.
+let CONFIG_FIELDS = [];
+
+function configFieldId(name){return "cfg-"+name.replace(/_/g,"-");}
+
+function renderConfig(data){
+  const fields=$("config-fields"),pill=$("config-pill"),problems=$("config-problems");
+  fields.innerHTML=""; CONFIG_FIELDS=[];
+  if(!data||!data.available){
+    pill.textContent="unavailable";
+    $("config-path").textContent=(data&&data.reason)||"No configuration file for this node.";
+    $("config-save").disabled=true; $("config-reload").disabled=true;
+    return;
+  }
+  pill.textContent="restart to apply";
+  $("config-path").textContent=data.path;
+  $("config-save").disabled=false; $("config-reload").disabled=false;
+  if(data.problems&&data.problems.length){
+    problems.textContent="Problems in the file: "+data.problems.join(" · ");
+    problems.hidden=false;
+  }else problems.hidden=true;
+  for(const setting of data.settings||[]){
+    CONFIG_FIELDS.push(setting);
+    const id=configFieldId(setting.name);
+    const label=document.createElement("label");
+    label.className="field";
+    const title=document.createElement("span");
+    title.textContent=setting.name.replace(/_/g," ")+(setting.editable?"":" (file only)");
+    title.title=setting.help+"  —  "+setting.flag;
+    label.appendChild(title);
+    let input;
+    if(setting.kind==="bool"){
+      input=document.createElement("input"); input.type="checkbox";
+      input.checked=!!setting.value;
+    }else if(setting.kind==="list"){
+      input=document.createElement("textarea"); input.className="mono";
+      input.value=(setting.value||[]).join("\n");
+    }else{
+      input=document.createElement("input");
+      input.type=setting.kind==="int"?"number":"text";
+      if(setting.kind==="int"){input.min=1;input.max=65535;}
+      input.value=setting.value===null||setting.value===undefined?"":String(setting.value);
+    }
+    input.id=id;
+    // Not editable here means not editable here: `launch` chooses what the node
+    // executes, and `data` is the installer's business.
+    if(!setting.editable)input.disabled=true;
+    label.appendChild(input);
+    const help=document.createElement("small");
+    help.className="subtle"; help.textContent=setting.help;
+    label.appendChild(help);
+    fields.appendChild(label);
+  }
+}
+
+async function loadConfig(){
+  try{
+    renderConfig(await(await api("/api/config")).json());
+  }catch(_){setMessage("config-status","Could not read the configuration.",true);}
+}
+
+async function saveConfig(){
+  const settings={};
+  for(const setting of CONFIG_FIELDS){
+    if(!setting.editable)continue;
+    const input=$(configFieldId(setting.name));
+    if(!input)continue;
+    settings[setting.name]=setting.kind==="bool"?input.checked:input.value;
+  }
+  const button=$("config-save");
+  button.disabled=true; setMessage("config-status","Saving…");
+  try{
+    const response=await api("/api/config","POST",{settings});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok){
+      setMessage("config-status",(data.error||"Save failed")+(data.rejected?": "+data.rejected.join(" · "):""),true);
+      return;
+    }
+    setMessage("config-status",data.service_managed
+      ? "Saved. Restart the node for it to take effect (systemd will bring it back)."
+      : "Saved. Restart the node for it to take effect.");
+    await loadConfig();
+  }catch(_){setMessage("config-status","Save failed",true);}
+  finally{button.disabled=false;}
+}
+$("config-save").addEventListener("click",saveConfig);
+$("config-reload").addEventListener("click",loadConfig);
 
 function renderSettings(state) {
   renderVersion(state);

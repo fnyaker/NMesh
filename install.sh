@@ -571,8 +571,27 @@ else
     warn "The node runs as $(id -un): every process of that user can read its identity key"
 fi
 
+# ── configuration file ───────────────────────────────────────────────────────
+# Node options belong in a file the operator (and the console) can edit, not
+# baked into a service unit. Anything the file cannot express stays on the
+# command line, so nothing is silently dropped. The merge is done by the node's
+# own code rather than reimplemented here in shell: one parser, one validator.
+CONFIG_FILE="$PREFIX/${NMESH_CONFIG_NAME:-nmesh.conf}"
+LEFTOVER=()
+if [ -x "$PREFIX/.venv/bin/python" ]; then
+    info "Writing $CONFIG_FILE"
+    while IFS= read -r leftover; do
+        [ -n "$leftover" ] && LEFTOVER+=("$leftover")
+    done < <( cd "$PREFIX" && ./.venv/bin/python scripts/nmesh_config.py \
+              "$CONFIG_FILE" "${NODE_ARGS[@]+"${NODE_ARGS[@]}"}" || true )
+    [ -f "$CONFIG_FILE" ] && ok "Options stored in $CONFIG_FILE" \
+        || warn "Could not write $CONFIG_FILE — options stay on the command line"
+else
+    LEFTOVER=("${NODE_ARGS[@]+"${NODE_ARGS[@]}"}")
+fi
+
 # ── service ──────────────────────────────────────────────────────────────────
-ARGS="${NODE_ARGS[*]:-}"
+ARGS="${LEFTOVER[*]:-}"
 case "$INIT" in
     systemd-system)
         info "Installing systemd unit $UNIT_PATH"

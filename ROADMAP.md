@@ -282,6 +282,17 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   (confiance TLS + GitHub + publieurs). C'est la prochaine étape de ce chantier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### Configuration du nœud (`src/config.py`) — fait
+- Toutes les options de lancement dans `<prefix>/nmesh.conf`, écrit par
+  `install.sh` et éditable depuis la console (Settings → Configuration).
+- Priorité ligne de commande > fichier > défaut : une unité existante qui passe
+  des arguments ne change pas de comportement.
+- Lecture défensive et bornée ; un fichier incompréhensible est signalé puis
+  écarté, jamais fatal. Une valeur refusée par la console n'écrit rien.
+- `launch` et `data` affichés mais non éditables depuis le web ; le mot de passe
+  console n'est pas un réglage.
+- Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
+
 ### Long terme
 - **Signer les releases** (ML-DSA) et vérifier la signature avant d'appliquer une
   mise à jour, pour sortir de la confiance en GitHub seul.

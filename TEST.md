@@ -99,6 +99,10 @@ tests/
 │     comparaison de versions, champs hostiles bornés, archive piégée (chemin
 │     absolu, traversée, lien symbolique, fichier spécial), état et venv jamais
 │     touchés, restauration après échec, dépôt épinglé
+├── test_config.py                                     — fichier de configuration :
+│     analyse hostile (ligne cassée, clé inconnue, fichier géant, octets
+│     aléatoires, valeur qui tente d'ouvrir une seconde ligne), précédence,
+│     réglages non éditables depuis la console, mode 0600, fusion installeur
 ├── test_docker_image_tree.py                          — l'image embarque ce que
 │     le provisioning fleet exige (« no NMesh tree at /app »)
 └── integration/                                       — nœuds réels (TCP + spool)

@@ -120,6 +120,59 @@ Réglages : `NMESH_LIBOQS_CACHE=chemin` (emplacement du cache),
 Mettre à jour le nœud (console ou réinstallation) ne touche pas à `_oqs` : rien
 n'est recompilé.
 
+### Le fichier de configuration
+
+Tout ce que le lanceur accepte en option vit dans **`<prefix>/nmesh.conf`**
+(par défaut `/opt/nmesh/nmesh.conf`). C'est ce fichier que `install.sh` écrit et
+que la console édite : les options d'un nœud installé en service ne sont plus
+enterrées dans une unité que personne ne veut ouvrir.
+
+Ordre de priorité : **ligne de commande > fichier > défaut**. Un drapeau passé
+explicitement gagne toujours, donc une unité existante qui passe des arguments
+continue de se comporter exactement comme avant.
+
+```
+# Enable the fleet app (remote management, can open a shell)
+fleet = true
+console_port = 8787
+listen = 0.0.0.0:9000
+```
+
+- `./install.sh --fleet --console-host 0.0.0.0` écrit ces réglages dans le
+  fichier au lieu de les mettre dans `ExecStart` ; ce que le fichier ne sait pas
+  exprimer reste sur la ligne de commande, rien n'est perdu en silence.
+  La fusion est faite par le code du nœud (`scripts/nmesh_config.py`), pas
+  réimplémentée en shell : un seul analyseur, un seul validateur.
+- Réinstaller ne l'écrase pas : seules les options réellement redonnées changent.
+- Il survit aux mises à jour (l'updater ne remplace que le code et la doc) et à
+  une réinstallation (`copy_tree` n'efface rien).
+- Emplacement surchargeable : `--config chemin` ou `NMESH_CONFIG`.
+- Écrit en **0600**, atomiquement, comme la clé d'identité.
+
+Deux réglages ne sont **pas** éditables depuis la console, délibérément :
+
+| | Pourquoi |
+|---|---|
+| `launch` | il choisit ce que le nœud **exécute** ; ça appartient à qui détient le fichier, pas à un formulaire web. La console l'affiche pour que personne ne soit surpris de ce qui tourne |
+| `data` | c'est l'installeur qui décide où vit l'état |
+
+Le mot de passe de la console n'y figure pas non plus : ce serait un
+identifiant en clair dans un fichier fait pour être lu et édité. Il reste dans
+`$NMESH_CONSOLE_PASSWORD`, ou généré et affiché une fois.
+
+Lecture défensive, comme toute entrée du processus : taille et nombre de lignes
+bornés, valeurs validées une par une, clés inconnues signalées et ignorées.
+**Un fichier incompréhensible est signalé puis écarté, jamais fatal** — un nœud
+qui refuse de démarrer est un pire résultat qu'un nœud sur ses valeurs par
+défaut. Les problèmes s'affichent au démarrage *et* dans la console.
+
+Édition depuis la console : **Settings → Configuration**. Le formulaire est
+construit à partir de ce que le nœud déclare, jamais d'une liste codée dans la
+page — un réglage ajouté côté nœud apparaît tout seul, et un réglage que le nœud
+refuse d'exposer ne peut pas être inventé depuis le navigateur. Rien n'est
+appliqué à chaud : les changements prennent effet au redémarrage du nœud, et
+l'interface le dit.
+
 ### Réinstaller par-dessus
 
 Relancer `./install.sh` **met à jour sur place** : l'arbre est remplacé,

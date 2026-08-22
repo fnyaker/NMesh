@@ -913,3 +913,141 @@ async def _tls_login(console, password=PW):
     status, _, _, j = await asyncio.to_thread(
         _request, console, "POST", "/api/login", None, {"password": password}, None, True)
     return status, (j or {}).get("token")
+
+
+class TestConfiguration:
+    """Les options de lancement sont éditables depuis la console.
+
+    Deux exigences se croisent ici : la console ne doit jamais écrire une valeur
+    que le nœud refuserait au démarrage, et elle ne doit jamais devenir un moyen
+    de choisir ce que le nœud exécute."""
+
+    async def test_reading_needs_a_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "GET", "/api/config")
+                assert status == 401
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_writing_needs_a_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", None,
+                    {"settings": {"fleet": True}})
+                assert status == 401
+                assert not os.path.exists(path)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_round_trip_through_the_console(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "GET", "/api/config", token)
+                assert status == 200 and body["available"] is True
+                names = {s["name"] for s in body["settings"]}
+                assert {"listen", "fleet", "console_port"} <= names
+
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", token,
+                    {"settings": {"fleet": True, "console_port": 9443}})
+                assert status == 200 and body["restart_required"] is True
+
+                from src import config as node_config
+                stored, problems = node_config.load(path)
+                assert problems == []
+                assert stored["fleet"] is True and stored["console_port"] == 9443
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_refused_value_writes_nothing_at_all(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                _, token = await _login(console)
+                await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", token,
+                    {"settings": {"fleet": True}})
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", token,
+                    {"settings": {"console_port": 99999}})
+                assert status == 400 and body["rejected"]
+                from src import config as node_config
+                stored, _ = node_config.load(path)
+                # Le fichier précédent est intact : un champ fautif n'emporte
+                # pas ce qui était déjà réglé.
+                assert stored["fleet"] is True
+                assert stored.get("console_port") == 8787
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_the_console_cannot_choose_what_the_node_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", token,
+                    {"settings": {"launch": "/bin/sh -c whatever"}})
+                assert status == 400
+                assert any("launch" in r for r in body["rejected"])
+                from src import config as node_config
+                stored, _ = node_config.load(path)
+                assert not stored.get("launch")
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_an_unknown_setting_cannot_be_invented(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            node, console = await _make_console(config_path=path)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/config", token,
+                    {"settings": {"backdoor": "1"}})
+                assert status == 400 and body["rejected"]
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_node_without_a_config_file_says_so(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/config", token)
+            assert status == 200 and body["available"] is False
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/config", token,
+                {"settings": {"fleet": True}})
+            assert status == 409
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_problems_in_the_file_are_surfaced_not_hidden(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nmesh.conf")
+            with open(path, "w") as handle:
+                handle.write("nonsense\nbackdoor = yes\nfleet = true\n")
+            node, console = await _make_console(config_path=path)
+            try:
+                _, token = await _login(console)
+                _, _, _, body = await asyncio.to_thread(
+                    _request, console, "GET", "/api/config", token)
+                assert len(body["problems"]) == 2
+                fleet = [s for s in body["settings"] if s["name"] == "fleet"][0]
+                assert fleet["value"] is True
+            finally:
+                console.stop(); await node.stop()
