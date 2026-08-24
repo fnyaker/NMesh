@@ -84,6 +84,70 @@ noyer la notification.
 `Revoke` coupe la relation dans les deux sens, prévient l'autre bout, et ferme
 les shells ouverts par ce pair.
 
+## `update` et `shell` : deux routes vers root, volontairement différentes
+
+Il n'y a **pas** de capability « root ». Il y a deux capabilities dont les
+propriétés de sécurité n'ont rien à voir, et c'est voulu.
+
+### `update` — non assisté, donc étroit
+
+Mettre à jour demande root **sans humain devant**. Donner au compte du nœud une
+règle sudo générale pour ça voudrait dire que n'importe quel bug du processus
+est root — le même bug qui, autrement, atteint un compte non privilégié et
+s'arrête là.
+
+Le droit accordé est donc **un script**, et la règle sudoers ne nomme que ce
+chemin, sans arguments :
+
+```
+nmesh ALL=(root) NOPASSWD: /usr/local/lib/nmesh/nmesh-update
+```
+
+Deux détails qui font tout :
+
+- le script vit sous `/usr/local/lib`, **pas dans le préfixe d'installation** —
+  celui-ci appartient au compte du nœud, qui pourrait sinon réécrire ce qu'il a
+  le droit de lancer en root ;
+- il **refuse tout argument** et exécute une séquence figée (le plan du
+  gestionnaire de paquets détecté) : rien de ce que le nœud envoie ne
+  l'influence, ni un nom de paquet, ni un drapeau, ni une chaîne shell.
+
+S'accorde avec `./install.sh --allow-update`, se retire en relançant sans le
+drapeau. Le fichier sudoers est **validé par `visudo` avant d'être installé** :
+un fichier qui ne parse pas peut casser `sudo` pour toute la machine.
+
+Sans ce droit, `update` retombe sur `sudo -n <gestionnaire>` — ce qui, sur un
+nœud installé proprement (compte de service sans règle sudo), échoue. La
+console affiche donc `update_granted` : « le droit est là » ou « on compte sur
+un sudo sans mot de passe », deux choses différentes.
+
+### `shell` — assisté, donc il suffit de taper `sudo`
+
+Le shell distant tourne sur un pty dont il est le **terminal de contrôle**
+(ioctl `TIOCSCTTY`). Sans ça, la session n'a aucun terminal : `/dev/tty` ne
+s'ouvre pas, `sudo` refuse de demander un mot de passe (« a terminal is
+required ») et le contrôle de tâches est éteint. C'était le cas ; ça ne l'est
+plus.
+
+Conséquence : pour devenir root dans un shell fleet, on tape `sudo`, et **un
+humain qui connaît le mot de passe le tape**. Il n'y a aucun accès root
+permanent sans identifiant, et rien à accorder d'avance.
+
+Côté navigateur, le panneau est un vrai terminal : les frappes partent
+**brutes** (Ctrl-C, Tab, flèches, Ctrl-D), rien n'est écho localement, et un
+petit émulateur écrit pour l'occasion interprète les séquences d'échappement.
+C'est ce qui rend un prompt de mot de passe correct : le pty distant coupe
+l'écho, et il n'y a rien de ce côté-ci pour l'afficher — là où un champ texte
+ligne par ligne l'aurait montré en clair.
+
+### Progression d'un update
+
+Un update dure des minutes. Chaque étape est annoncée **avant** de tourner (une
+progression qui n'apparaît qu'une fois l'étape finie est un résumé, pas une
+progression) : `step 1/2 : apt-get update`, puis la sortie réelle, puis le
+résultat avec le temps écoulé. La liste des nodes montre une barre et l'étape
+courante, et garde la dernière issue une fois terminé.
+
 ## Ce qu'on fait d'une node gérée
 
 - **Status** — uptime, charge, mémoire, disques, distro, gestionnaire de paquets.

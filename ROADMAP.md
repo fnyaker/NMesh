@@ -295,6 +295,17 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### `update` et `shell` : deux routes vers root séparées — fait
+- Pas de capability « root ». `update` (non assisté) obtient un droit **étroit**
+  via `install.sh --allow-update` : un script root-owned hors du préfixe, sans
+  argument, séquence figée, règle sudoers validée par `visudo`, retirable.
+- `shell` devient un vrai terminal (`TIOCSCTTY`) : `sudo` y demande son mot de
+  passe à un humain, donc aucun accès root permanent sans identifiant. Frappes
+  brutes côté navigateur + petit émulateur écrit en stdlib JS, sans dépendance.
+- Progression d'update annoncée étape par étape, avant chaque étape, avec barre
+  et dernière issue dans la liste des nodes.
+- Doc : `Docs/Apps/fleet`, `Docs/Setup/guide`, `Docs/Architecture/gotchas.md`.
+
 ### Déploiement distant aligné sur `install.sh` — fait
 - Le bootstrap ne pose plus rien lui-même : il livre l'arbre et appelle son
   `install.sh`. Compte de service dédié, modes 700, service pointant sur

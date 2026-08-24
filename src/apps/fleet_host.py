@@ -160,9 +160,25 @@ class HostFacts:
         return asdict(self)
 
     @property
+    def update_granted(self) -> bool:
+        """True when this node holds the narrow grant `install.sh --allow-update`
+        writes: one root-owned script it may run, and nothing else."""
+        return os.path.exists(UPDATE_WRAPPER)
+
+    @property
     def can_update(self) -> bool:
-        """True when this node has both a package manager and a way to be root."""
-        return bool(self.package_manager) and self.escalation != "none"
+        """True when this node has both a package manager and a way to be root.
+
+        The grant counts on its own: with the wrapper installed there is a real,
+        narrow route to root. Without it we can only say that a sudo binary
+        exists — whether it would answer without a password is something only
+        trying would tell us, and trying leaves failures in the target's auth
+        log."""
+        if not self.package_manager:
+            return False
+        if self.update_granted and self.escalation != "none":
+            return True
+        return self.escalation != "none"
 
 
 def detect() -> HostFacts:
@@ -211,6 +227,29 @@ def update_argv(facts: HostFacts) -> list[list[str]] | None:
         prefix = [facts.escalation, "-n"] if facts.escalation == "sudo" else [facts.escalation]
         commands = [prefix + command for command in commands]
     return commands
+
+
+# The one root command an `install.sh --allow-update` node is allowed to run.
+# Root owns it and the node cannot write it; it takes no arguments and runs a
+# fixed sequence. See scripts/nmesh_sudoers.py.
+UPDATE_WRAPPER = "/usr/local/lib/nmesh/nmesh-update"
+
+
+def update_plan(facts) -> list:
+    """The commands to run for an update, preferring the granted wrapper.
+
+    When the wrapper is installed we run *that*, through sudo, and nothing else
+    — a narrow grant is only narrow if it is the thing actually used. Without
+    it we fall back to the package manager directly, which needs the node to
+    already be root or to have a broader sudo rule of its own."""
+    if os.path.exists(UPDATE_WRAPPER):
+        if os.geteuid() == 0 if hasattr(os, "geteuid") else False:
+            return [[UPDATE_WRAPPER]]
+        if facts.escalation == "sudo":
+            return [["sudo", "-n", UPDATE_WRAPPER]]
+        if facts.escalation == "doas":
+            return [["doas", UPDATE_WRAPPER]]
+    return update_argv(facts)
 
 
 # ---------------------------------------------------------------------------
@@ -337,5 +376,6 @@ def collect_status(facts: HostFacts | None = None) -> dict:
             "package_manager": facts.package_manager,
             "init_system": facts.init_system,
             "can_update": facts.can_update,
+            "update_granted": facts.update_granted,
         }
     return snapshot

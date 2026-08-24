@@ -138,7 +138,11 @@ class TestManifestChunking:
         root_bytes, mchunks = pack_root(manifest)
         root = parse_root(root_bytes)
         key = next(iter(mchunks))
-        bad = dict(mchunks); bad[key] = b"x" + mchunks[key][1:]
+        # Flipped, not overwritten with a fixed byte: the content is random, so
+        # "replace the first byte with x" leaves it unchanged once every 256
+        # runs — and the test then fails for having altered nothing.
+        bad = dict(mchunks)
+        bad[key] = bytes([mchunks[key][0] ^ 0xFF]) + mchunks[key][1:]
         with pytest.raises(AppPackageError):
             reassemble_bytes(root["size"], root["sha256"], root["chunks"], bad.get)
 

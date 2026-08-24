@@ -191,6 +191,33 @@ refuse d'exposer ne peut pas être inventé depuis le navigateur. Rien n'est
 appliqué à chaud : les changements prennent effet au redémarrage du nœud, et
 l'interface le dit.
 
+### Laisser le nœud lancer les mises à jour système
+
+```bash
+./install.sh --allow-update          # accorde le droit
+./install.sh                         # relancer sans le drapeau le retire
+```
+
+La capability `update` de l'app fleet a besoin de root **sans humain devant**.
+Le droit accordé n'est pas une règle sudo générale — ce serait faire de
+n'importe quel bug du nœud un bug root — mais **un script** que root possède et
+que le nœud ne peut pas réécrire, qui refuse tout argument et exécute une
+séquence figée :
+
+```
+nmesh ALL=(root) NOPASSWD: /usr/local/lib/nmesh/nmesh-update
+```
+
+Il est délibérément sous `/usr/local/lib` et pas dans le préfixe
+d'installation : celui-ci appartient au compte du nœud, qui pourrait sinon
+réécrire ce qu'il a le droit de lancer en root. Le fichier sudoers est
+**validé par `visudo` avant installation** — un fichier qui ne parse pas peut
+casser `sudo` pour toute la machine.
+
+Sans ce droit, le nœud n'a aucune route vers root et `update` échoue. Pour une
+commande root ponctuelle, il y a le shell fleet : `sudo` y demande son mot de
+passe à un humain, ce qui ne laisse aucun accès permanent derrière.
+
 ### Reprendre la main sur la console
 
 ```bash

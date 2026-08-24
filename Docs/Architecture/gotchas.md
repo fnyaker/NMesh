@@ -331,6 +331,13 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   **Un défaut n'a le droit d'exister qu'à un seul endroit** — ici
   `src/config.py`. Corollaire : le nœud annonce au démarrage les réglages du
   fichier écrasés par la ligne de commande.
+- Un pty sur les descripteurs d'un shell ne suffit **pas** : il faut en faire le
+  **terminal de contrôle** de la session (ioctl `TIOCSCTTY`). Sans ça,
+  `/dev/tty` ne s'ouvre pas, `sudo` refuse de demander un mot de passe et le
+  contrôle de tâches est éteint — un pty avec un prompt dedans, pas un
+  terminal. `start_new_session=True` a déjà fait le `setsid()` quand le
+  `preexec_fn` tourne : la session existe, elle ne possède simplement aucun
+  terminal.
 - `sudo` et `su` refusent de demander un mot de passe sans terminal. Un `ssh`
   sans `-tt` ne donne pas de tty au shell distant : « sudo: a terminal is
   required ». Et avec `-tt`, le prompt distant revient sur **stdout** de ssh et

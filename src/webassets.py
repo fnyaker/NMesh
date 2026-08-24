@@ -2752,9 +2752,13 @@ FLEET_HTML = """<!doctype html>
       <button id="shell-open" class="primary">Open shell</button>
       <button id="shell-kill" class="ghost">Close</button>
     </div>
-    <pre id="term" class="term">Open a shell on a node that granted you the shell capability.</pre>
+    <pre id="term" class="term" tabindex="0" role="textbox" aria-label="Remote shell">Open a shell on a node that granted you the shell capability.</pre>
+    <p class="muted small">Click the terminal and type — keystrokes go straight to the remote shell,
+      including Ctrl-C, Tab and the arrow keys. Nothing is echoed here, so a password prompt
+      (<code>sudo</code>, <code>ssh</code>) stays invisible exactly as it would in a real terminal.
+      The line box below is a convenience for pasting a long command.</p>
     <form id="term-form" class="row gap">
-      <input id="term-in" class="mono grow" placeholder="Type a command and press Enter" autocomplete="off" spellcheck="false">
+      <input id="term-in" class="mono grow" placeholder="…or type a whole line here and press Enter" autocomplete="off" spellcheck="false">
       <button type="submit" class="primary">Send</button>
     </form>
   </section>
@@ -2894,6 +2898,15 @@ a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
 @media (max-width:640px){.stats{grid-template-columns:1fr}.tabbody{padding:12px}}
 .fld.chk{flex-direction:row;align-items:center;gap:.45rem;font-weight:400}
 .fld.chk input{width:auto;margin:0}
+.term{white-space:pre;overflow:auto}
+.term:focus{outline:2px solid var(--cyan);outline-offset:2px}
+.t-b{font-weight:700}
+.t-c0{color:#5b6673}.t-c1{color:#ff6b6b}.t-c2{color:#7ee787}.t-c3{color:#e3b341}
+.t-c4{color:#79b8ff}.t-c5{color:#d2a8ff}.t-c6{color:#61d6c8}.t-c7{color:#e6edf3}
+.t-cur{background:var(--cyan);color:#071614}
+.upd{margin:8px 0}
+.upd-bar{height:4px;background:var(--line);border-radius:999px;overflow:hidden;margin-bottom:5px}
+.upd-bar i{display:block;height:100%;background:var(--cyan);transition:width .4s}
 """
 
 FLEET_JS = r"""
@@ -3026,6 +3039,24 @@ function statusHTML(s){
       (host.can_update===false?' · <b>cannot self-update</b>':'')+'</div>';
   return out;
 }
+// An update runs for minutes. Show where it has got to, not just that a log is
+// scrolling somewhere — and keep the last outcome visible once it is over.
+function updateHTML(nodeId){
+  const u=(ST.updates||{})[nodeId];
+  if(!u)return "";
+  const position=u.total?(u.index+"/"+u.total):String(u.index||"");
+  if(u.running){
+    const pct=u.total?Math.round(100*Math.max(0,u.index-1)/u.total):0;
+    return '<div class="upd"><div class="upd-bar"><i style="width:'+pct+'%"></i></div>'+
+      '<span class="muted small">updating — step '+esc(position)+
+      (u.name?" · "+esc(u.name):"")+"</span></div>";
+  }
+  const when=u.elapsed?(" in "+Math.round(u.elapsed)+"s"):"";
+  return '<div class="muted small">last update: '+
+    (u.ok?'<span class="pill ok">done'+esc(when)+'</span>'
+         :'<span class="pill warn">failed at step '+esc(position)+'</span>')+"</div>";
+}
+
 function renderNodes(){
   const list=ST.managed||[], pend=ST.pending_out||[];
   let html=pend.map(p=>
@@ -3039,6 +3070,7 @@ function renderNodes(){
       ' <span class="pill ok">managed</span></h3>'+
       '<div class="muted mono id">'+esc(short(n.id))+'</div>'+
       '<div>'+caps.map(c=>'<span class="pill">'+esc(c)+'</span>').join(" ")+'</div>'+
+      updateHTML(n.id)+
       statusHTML(n.status)+
       '<div class="acts">'+
       (can("status")?'<button data-status="'+esc(n.id)+'">Refresh</button>':'')+
@@ -3255,14 +3287,179 @@ async function deploy(){
   }
 }
 
+// ---- a small terminal ------------------------------------------------------
+// Written rather than depended on: a shell you can type `sudo` into needs a
+// terminal, not a log pane, and pulling in an emulator library for it would
+// cost a name in the supply chain this project keeps deliberately short.
+//
+// What it implements is what a shell session actually uses: printable text,
+// CR/LF/BS/TAB/BEL, cursor movement, the two erase commands, and SGR colours.
+// Anything else is consumed and ignored rather than printed — an unknown escape
+// must never end up on screen as garbage.
+function Term(cols,rows){
+  this.cols=cols; this.rows=rows;
+  this.x=0; this.y=0; this.sgr=""; this.scrollback=[];
+  this.grid=[]; for(let i=0;i<rows;i++)this.grid.push(this.blankRow());
+  this.pending="";
+}
+Term.prototype.blankRow=function(){
+  const row=[]; for(let i=0;i<this.cols;i++)row.push({ch:" ",cls:""});
+  return row;
+};
+Term.prototype.newline=function(){
+  this.y++;
+  if(this.y>=this.rows){
+    this.scrollback.push(this.grid.shift());
+    if(this.scrollback.length>2000)this.scrollback.shift();
+    this.grid.push(this.blankRow());
+    this.y=this.rows-1;
+  }
+};
+Term.prototype.put=function(ch){
+  if(this.x>=this.cols){this.x=0;this.newline();}
+  this.grid[this.y][this.x]={ch:ch,cls:this.sgr};
+  this.x++;
+};
+Term.prototype.eraseLine=function(mode){
+  const row=this.grid[this.y];
+  const from=mode===1?0:(mode===2?0:this.x);
+  const to=mode===0?this.cols:(mode===1?this.x+1:this.cols);
+  for(let i=from;i<to&&i<this.cols;i++)row[i]={ch:" ",cls:""};
+};
+Term.prototype.eraseDisplay=function(mode){
+  if(mode===2||mode===3){
+    for(let y=0;y<this.rows;y++)this.grid[y]=this.blankRow();
+    if(mode===2){this.x=0;this.y=0;}
+    return;
+  }
+  this.eraseLine(mode===1?1:0);
+  if(mode===0)for(let y=this.y+1;y<this.rows;y++)this.grid[y]=this.blankRow();
+  else for(let y=0;y<this.y;y++)this.grid[y]=this.blankRow();
+};
+Term.prototype.sgrClass=function(params){
+  // Only the attributes that make output readable: reset, bold, and the eight
+  // foreground colours (plus their bright forms).
+  let cls=this.sgr;
+  for(const raw of params){
+    const n=raw===""?0:parseInt(raw,10);
+    if(n===0)cls="";
+    else if(n===1)cls=(cls+" t-b").trim();
+    else if(n>=30&&n<=37)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-30);
+    else if(n>=90&&n<=97)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-90)+" t-b";
+    else if(n===39)cls=cls.replace(/t-c\d/g,"").trim();
+  }
+  return cls.replace(/\s+/g," ").trim();
+};
+Term.prototype.write=function(text){
+  let data=this.pending+text; this.pending="";
+  for(let i=0;i<data.length;i++){
+    const ch=data[i];
+    if(ch==="\x1b"){
+      // An escape may be split across two chunks: keep the tail and retry.
+      const rest=data.slice(i);
+      const csi=/^\x1b\[([0-9;?]*)([ -\/]*)([@-~])/.exec(rest);
+      if(csi){ this.csi(csi[1],csi[3]); i+=csi[0].length-1; continue; }
+      const osc=/^\x1b\][^\x07\x1b]*(\x07|\x1b\\)/.exec(rest);
+      if(osc){ i+=osc[0].length-1; continue; }        // window title and friends
+      const two=/^\x1b[=>()#][0-9A-Za-z]?/.exec(rest);
+      if(two){ i+=two[0].length-1; continue; }
+      if(rest.length<8){ this.pending=rest; return; }  // incomplete, wait
+      continue;                                        // unknown: drop it
+    }
+    if(ch==="\n"){ this.newline(); continue; }
+    if(ch==="\r"){ this.x=0; continue; }
+    if(ch==="\b"){ if(this.x>0)this.x--; continue; }
+    if(ch==="\t"){ const next=(Math.floor(this.x/8)+1)*8;
+                   while(this.x<next&&this.x<this.cols)this.put(" ");
+                   continue; }
+    if(ch==="\x07")continue;                          // bell
+    if(ch<" ")continue;                                // other control bytes
+    this.put(ch);
+  }
+};
+Term.prototype.csi=function(paramText,final){
+  const params=paramText.replace("?","").split(";");
+  const n=Math.max(1,parseInt(params[0]||"1",10)||1);
+  switch(final){
+    case "A": this.y=Math.max(0,this.y-n); break;
+    case "B": this.y=Math.min(this.rows-1,this.y+n); break;
+    case "C": this.x=Math.min(this.cols-1,this.x+n); break;
+    case "D": this.x=Math.max(0,this.x-n); break;
+    case "G": this.x=Math.min(this.cols-1,Math.max(0,n-1)); break;
+    case "H": case "f": {
+      const row=Math.max(1,parseInt(params[0]||"1",10)||1);
+      const col=Math.max(1,parseInt(params[1]||"1",10)||1);
+      this.y=Math.min(this.rows-1,row-1); this.x=Math.min(this.cols-1,col-1);
+      break;
+    }
+    case "J": this.eraseDisplay(parseInt(params[0]||"0",10)||0); break;
+    case "K": this.eraseLine(parseInt(params[0]||"0",10)||0); break;
+    case "m": this.sgr=this.sgrClass(params); break;
+    default: break;                                    // consumed, never printed
+  }
+};
+Term.prototype.render=function(showCursor){
+  const rows=this.scrollback.slice(-800).concat(this.grid);
+  // Where the cursor is, in the concatenated view. Drawn because a terminal you
+  // type into without one is disorienting — and because on a password prompt
+  // the cursor not moving is the visible sign that echo is off.
+  const cursorRow=showCursor===false?-1:this.scrollback.slice(-800).length+this.y;
+  const out=[];
+  for(let index=0;index<rows.length;index++){
+    const row=rows[index];
+    let line="",cls=null,run="";
+    const flush=()=>{
+      if(!run)return;
+      line+=cls?('<span class="'+cls+'">'+escHtml(run)+"</span>"):escHtml(run);
+      run="";
+    };
+    for(let column=0;column<row.length;column++){
+      const cell=row[column];
+      const isCursor=index===cursorRow&&column===this.x;
+      const cellCls=isCursor?(cell.cls+" t-cur").trim():cell.cls;
+      if(cellCls!==cls){flush();cls=cellCls;}
+      run+=cell.ch;
+    }
+    flush();
+    // Trailing blanks are trimmed: a row is `cols` cells wide, and padding
+    // every line to the full width would make the pane scroll sideways for
+    // nothing. The cursor cell survives because it carries a class.
+    out.push(line.replace(/(\s|&nbsp;)+$/,""));
+  }
+  return out.join("\n");
+};
+function escHtml(text){
+  return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
 // ---- shell ----
+let TERM=null;
+function termSize(){
+  // Measured from the pane rather than assumed: the remote pty is told these
+  // dimensions, and a shell that thinks it has a different width redraws wrong.
+  const box=$("term");
+  const probe=document.createElement("span");
+  probe.style.cssText="position:absolute;visibility:hidden;white-space:pre";
+  probe.textContent="0".repeat(80);
+  box.appendChild(probe);
+  const charWidth=(probe.getBoundingClientRect().width/80)||8;
+  const lineHeight=parseFloat(getComputedStyle(box).lineHeight)||16;
+  box.removeChild(probe);
+  const cols=Math.max(20,Math.min(200,Math.floor((box.clientWidth-24)/charWidth)));
+  const rows=Math.max(10,Math.min(60,Math.floor((box.clientHeight-24)/lineHeight)));
+  return {cols:cols,rows:rows};
+}
 async function openShell(){
   const node=$("shell-node").value;
   if(!node){$("term").textContent="No node has granted you a shell.";return;}
+  const size=termSize();
+  TERM=new Term(size.cols,size.rows);
   $("term").textContent="";
   SHELL={sid:null,node:node,off:0};
-  try{ await api("/api/fleet/shell","POST",{node:node,cols:100,rows:30}); }
-  catch(_){ $("term").textContent="Could not open a shell."; }
+  try{ await api("/api/fleet/shell","POST",
+                 {node:node,cols:size.cols,rows:size.rows}); }
+  catch(_){ $("term").textContent="Could not open a shell."; return; }
+  $("term").focus();
 }
 async function pollShell(){
   if(!SHELL.node)return;
@@ -3283,19 +3480,48 @@ async function pollShell(){
     catch(_){ text=raw; }
     const box=$("term");
     const atEnd=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
-    // Strip CSI escapes: this is a log pane, not a terminal emulator.
-    box.textContent+=text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g,"").replace(/\x1b[=>()][0-9A-Za-z]?/g,"");
-    if(box.textContent.length>200000)box.textContent=box.textContent.slice(-200000);
+    if(!TERM)TERM=new Term(80,24);
+    TERM.write(text);
+    box.innerHTML=TERM.render();
     if(atEnd)box.scrollTop=box.scrollHeight;
   }
   SHELL.off=j.seq;
   if(!j.open){$("term").textContent+="\n[session closed]\n";SHELL.sid=null;SHELL.node=null;}
 }
-async function sendLine(text){
+async function sendBytes(text){
   if(!SHELL.sid)return;
-  const enc=new TextEncoder().encode(text+"\n");
+  const enc=new TextEncoder().encode(text);
   let bin=""; enc.forEach(b=>{bin+=String.fromCharCode(b);});
   await api("/api/fleet/input","POST",{node:SHELL.node,sid:SHELL.sid,data:btoa(bin)});
+}
+
+// What a key sends. Nothing is echoed locally: the remote pty decides what
+// comes back, which is exactly why a password prompt stays invisible — the pty
+// turns echo off and there is nothing on this side to show it anyway.
+function keyBytes(event){
+  if(event.ctrlKey&&!event.altKey&&event.key.length===1){
+    const code=event.key.toUpperCase().charCodeAt(0);
+    if(code>=64&&code<=95)return String.fromCharCode(code-64);   // ^A..^_
+    if(event.key==="?")return "\x7f";
+  }
+  switch(event.key){
+    case "Enter": return "\r";
+    case "Backspace": return "\x7f";
+    case "Tab": return "\t";
+    case "Escape": return "\x1b";
+    case "ArrowUp": return "\x1b[A";
+    case "ArrowDown": return "\x1b[B";
+    case "ArrowRight": return "\x1b[C";
+    case "ArrowLeft": return "\x1b[D";
+    case "Home": return "\x1b[H";
+    case "End": return "\x1b[F";
+    case "Delete": return "\x1b[3~";
+    case "PageUp": return "\x1b[5~";
+    case "PageDown": return "\x1b[6~";
+    default: break;
+  }
+  if(event.key.length===1&&!event.ctrlKey&&!event.metaKey)return event.key;
+  return null;
 }
 
 // ---- wiring ----
@@ -3352,7 +3578,23 @@ function bind(){
   $("term-form").addEventListener("submit",async(e)=>{
     e.preventDefault();
     const v=$("term-in").value; $("term-in").value="";
-    await sendLine(v);
+    await sendBytes(v+"\n");
+  });
+  // Raw keystrokes: this is what makes it a terminal rather than a form. The
+  // pane is focusable, so a click puts the keyboard where the user is looking.
+  $("term").addEventListener("keydown",async(e)=>{
+    if(!SHELL.sid)return;
+    if((e.ctrlKey||e.metaKey)&&["c","v","C","V"].includes(e.key)&&
+       window.getSelection().toString())return;      // let copy/paste through
+    const bytes=keyBytes(e);
+    if(bytes===null)return;
+    e.preventDefault();
+    await sendBytes(bytes);
+  });
+  $("term").addEventListener("paste",async(e)=>{
+    if(!SHELL.sid)return;
+    e.preventDefault();
+    await sendBytes((e.clipboardData||window.clipboardData).getData("text"));
   });
   $("modal-close").addEventListener("click",closeModal);
   $("modal").addEventListener("click",(e)=>{if(e.target===$("modal"))closeModal();});
