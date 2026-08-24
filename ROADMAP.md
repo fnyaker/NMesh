@@ -295,6 +295,14 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### Trace protocolaire (`src/trace.py`) — fait
+- Enregistrement borné de ce que le nœud envoie/reçoit, par type de message.
+  Métadonnées de routage seulement : **jamais de payload**.
+- Éteinte par défaut, bornée en mémoire et en durée, s'arrête seule ; bornes
+  demandées plafonnées. Console → Settings → Protocol trace, export JSON.
+- A servi immédiatement : boucle `FIND_NODE`/`FOUND_NODE` entre deux nœuds au
+  repos, 3036 kbit/s → 2,1 kbit/s (cf. `Docs/Architecture/gotchas.md` §12).
+
 ### Long terme
 - **Signer les releases** (ML-DSA) et vérifier la signature avant d'appliquer une
   mise à jour, pour sortir de la confiance en GitHub seul.

@@ -89,6 +89,9 @@ Options :
 | POST    | `/api/update/apply` | `{version}` — installe cette release **exacte** ; un écart avec ce que GitHub propose est refusé |
 | GET     | `/api/config`    | réglages du nœud : valeurs courantes, éditables ou non, problèmes du fichier |
 | POST    | `/api/config`    | `{settings:{…}}` — écrit le fichier ; une valeur refusée n'écrit **rien** |
+| GET     | `/api/trace`     | `?events=1` → état + totaux par type de message (et les événements) |
+| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — bornes réclamées **plafonnées**, jamais obéies |
+| GET     | `/api/trace/export` | la trace complète en JSON (téléchargement) |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -198,6 +201,29 @@ non éditables ici** : le premier appartient à qui détient le fichier, le seco
 
 Détail du format, des bornes et de la priorité ligne de commande > fichier >
 défaut : [`../Setup/guide`](../Setup/guide).
+
+## Trace protocolaire (Settings → Protocol trace)
+
+Le graphe de débit dit *combien*, jamais *quoi*. La trace enregistre ce que le
+nœud envoie et reçoit réellement, par type de message — pour les questions du
+genre « pourquoi deux nœuds au repos se parlent-ils ? ».
+
+C'est exactement l'outil qui a servi à trouver la boucle `FIND_NODE` /
+`FOUND_NODE` documentée dans
+[`../Architecture/gotchas.md`](../Architecture/gotchas.md) : un tableau par type
+de message, et la réponse était dans la première ligne.
+
+Ce qui est enregistré : instant, sens, type de message, taille sur le fil, TTL,
+et les ids source/destination du header. **Jamais de payload** — ni le chiffré,
+ni le clair, ni une clé. Le header est déjà visible de tout relais du chemin ;
+le payload est ce que ce projet existe pour protéger, et un outil de debug n'est
+pas une raison de l'écrire quelque part.
+
+Ce n'est pas anodin pour autant : une trace est un relevé de **métadonnées de
+routage** — qui ce nœud fréquente, quand, et combien. Donc : éteinte par défaut,
+en mémoire, bornée en nombre d'événements *et* en durée, elle s'arrête seule, et
+elle ne va sur disque que si un opérateur le demande (0600). Les bornes
+réclamées par la requête sont **plafonnées**, pas obéies.
 
 ## Rejoindre / relier deux réseaux
 

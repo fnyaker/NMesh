@@ -1051,3 +1051,127 @@ class TestConfiguration:
                 assert fleet["value"] is True
             finally:
                 console.stop(); await node.stop()
+
+
+class TestTrace:
+    """La trace est un enregistrement de métadonnées de routage : elle exige la
+    même session que le reste, et ne doit jamais rendre de payload."""
+
+    async def test_reading_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/trace")
+            assert status == 401
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/trace/export")
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_starting_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", None,
+                {"action": "start"})
+            assert status == 401
+            assert node.trace.status()["running"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_start_then_stop(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", token,
+                {"action": "start", "seconds": 30})
+            assert status == 200 and body["running"] is True
+            assert node.trace.status()["running"] is True
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", token,
+                {"action": "stop"})
+            assert status == 200 and body["running"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_nonsense_action_is_refused(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", token,
+                {"action": "rm -rf"})
+            assert status == 400
+            assert node.trace.status()["running"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_hostile_bounds_are_clamped_not_obeyed(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", token,
+                {"action": "start", "seconds": 10 ** 9, "events": 10 ** 9})
+            from src import trace as trace_mod
+            assert body["capacity"] <= trace_mod.MAX_EVENTS
+            assert body["seconds_left"] <= trace_mod.MAX_SECONDS
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_non_numeric_bounds_do_not_break_it(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/trace", token,
+                {"action": "start", "seconds": "banana", "events": None})
+            assert status == 200 and body["running"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_export_carries_no_payload(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await asyncio.to_thread(_request, console, "POST", "/api/trace",
+                                    token, {"action": "start", "seconds": 30})
+
+            class _Packet:
+                type = 0x01
+                payload = b"PLAINTEXT-MUST-NOT-APPEAR"
+                ttl = 64
+                src_id = b"\x01" * 20
+                dst_id = b"\x02" * 20
+
+            node.trace.record("in", _Packet(), 80)
+            _, _, raw, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/trace/export", token)
+            assert b"PLAINTEXT-MUST-NOT-APPEAR" not in raw
+            assert b"nmesh-trace-1" in raw
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_message_types_are_named_not_hex(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await asyncio.to_thread(_request, console, "POST", "/api/trace",
+                                    token, {"action": "start", "seconds": 30})
+
+            class _Found:
+                type = 0x04          # FOUND_NODE
+                payload = b""
+                ttl = 64
+                src_id = b"\x01" * 20
+                dst_id = b"\x02" * 20
+
+            node.trace.record("in", _Found(), 15000)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/trace", token)
+            assert body["summary"]["rows"][0]["type"] == "FOUND_NODE"
+        finally:
+            console.stop(); await node.stop()

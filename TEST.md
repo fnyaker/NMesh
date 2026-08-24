@@ -86,6 +86,10 @@ tests/
 │     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
+├── test_trace.py                                      — trace protocolaire :
+│     jamais de payload dans ce qui est gardé, anneau borné, arrêt automatique,
+│     paquet malformé qui ne lève pas, débit calculé sur la fenêtre d'
+│     enregistrement (pas sur la rafale), fichier en 0600
 ├── test_session_store.py                             — persistance (chiffrée)
 ├── test_start_script.py / test_install_script.py     — les deux scripts, sourcés
 │     dont : environnement nu façon systemd (HOME absent, home inexistant ou non
@@ -106,5 +110,9 @@ tests/
 ├── test_docker_image_tree.py                          — l'image embarque ce que
 │     le provisioning fleet exige (« no NMesh tree at /app »)
 └── integration/                                       — nœuds réels (TCP + spool)
+      dont test_idle_chatter.py : deux nœuds joints et inactifs restent
+      silencieux (la boucle FIND_NODE/FOUND_NODE qui saturait le lien), et la
+      découverte fonctionne toujours quand il y a vraiment quelque chose à
+      trouver
 ```
 </content>

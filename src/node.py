@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from .app_auth import AppAuth
+from .trace import Trace
 from .node_id import NodeID
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
@@ -83,6 +84,15 @@ DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
 DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
 ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
 ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
+
+# Built from this module's own constants so a message type added above can never
+# be missing here — a trace showing "0x1e" for a type the code knows the name of
+# is exactly the moment a trace stops being useful.
+MESSAGE_NAMES = {
+    value: name for name, value in list(globals().items())
+    if isinstance(value, int) and name.isupper() and not name.startswith("_")
+    and 0x00 <= value <= 0xFF
+}
 
 _ACK_ACCEPTED = 0x00
 _ACK_REJECTED = 0x01
@@ -192,6 +202,14 @@ _NEIGHBOR_FLOOR           = 3
 # never grow our state (src ids in routed packets are not authenticated).
 _NEIGHBOR_WATCH_TRACKED   = 64
 _NEIGHBOR_REFRESH         = 30.0
+# A wake may shorten the wait, never remove it. Without this floor a cycle whose
+# own replies wake it runs flat out: FIND_NODE → FOUND_NODE → wake → FIND_NODE,
+# and since a FOUND_NODE carries certificate chains (~15 kB) that loop fills a
+# link entirely. **No loop driven by what a peer sends us may run unbounded.**
+_NEIGHBOR_MIN_INTERVAL    = 5.0
+# A mesh smaller than the floor can never reach it, so "searching" would stay
+# true for the life of the node. Cycles that discover nothing back off to here.
+_NEIGHBOR_IDLE_MAX        = 300.0
 _NEIGHBOR_RETRY_MIN       = 2.0
 _NEIGHBOR_RETRY_MAX       = 60.0
 _NEIGHBOR_RETRY_TRACKED   = 128
@@ -839,6 +857,10 @@ class _Peer:
         self.last_rtt: float | None = None
         self.counters = Counters()   # per-link throughput
         self.total = None            # node-wide Counters, set by the node
+        # Node-wide Trace, set by the node alongside `total`. None (or disabled)
+        # costs one attribute test per packet, which is the point: this sits on
+        # the hot path of every packet in and out.
+        self.trace = None
         # Invoked when the receive loop exits on its own (dead link or abuse),
         # so the node can prune this peer. Cleared on intentional stop().
         self.on_dead = None
@@ -880,6 +902,8 @@ class _Peer:
             self.counters.on_in(nbytes)
             if self.total is not None:
                 self.total.on_in(nbytes)
+            if self.trace is not None:
+                self.trace.record("in", packet, nbytes, self.authenticated_id)
             try:
                 await on_packet(self, packet)
             except asyncio.CancelledError:
@@ -893,6 +917,8 @@ class _Peer:
         self.counters.on_out(nbytes)
         if self.total is not None:
             self.total.on_out(nbytes)
+        if self.trace is not None:
+            self.trace.record("out", packet, nbytes, self.authenticated_id)
 
     async def stop(self) -> None:
         self.on_dead = None  # intentional shutdown — do not trigger reaping
@@ -1066,6 +1092,10 @@ class MeshNode:
         self._dir_rate: OrderedDict[int, tuple] = OrderedDict()      # id(peer)->(n,win)
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
+        # Off until an operator turns it on. Handed to every peer so the two
+        # packet funnels (_Peer.send and _Peer._loop) can record without the
+        # node having to know anything about tracing.
+        self.trace = Trace()
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
         # keys stay in RAM only. When enabled, resume prior sessions on start.
         self._session_store = None
@@ -1097,6 +1127,10 @@ class MeshNode:
         self._keepalive_task: asyncio.Task | None = None
         self._neighbor_task: asyncio.Task | None = None
         self._neighbor_wakeup = asyncio.Event()
+        # Consecutive maintenance cycles that discovered nothing. Drives the
+        # backoff, and tells the keepalive loop to stop nudging a search that
+        # has nothing left to find.
+        self._neighbor_idle_cycles = 0
         self._neighbor_retry: OrderedDict[NodeID, tuple[int, float]] = OrderedDict()
         # Candidate neighbours spotted in transit (node_id -> observation time).
         self._neighbor_watch: OrderedDict[NodeID, float] = OrderedDict()
@@ -1437,6 +1471,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
+        peer.trace = self.trace
         peer.remote_addr = address
         peer.join_code = code
         self._peers.append(peer)
@@ -1808,7 +1843,15 @@ class MeshNode:
                     await self.ping(peer)
                 except Exception:
                     pass
-            if len(self._live_neighbors()) < _NEIGHBOR_FLOOR:
+            # Only nudge maintenance while it is still finding things. A mesh
+            # smaller than the floor is below it permanently, and nudging every
+            # keepalive there means a certificate-carrying lookup every 20 s
+            # that can only ever learn what we already know. Real events (a peer
+            # lost or gained, an identity we had not seen) wake the loop
+            # directly and reset its backoff, so nothing is missed by staying
+            # quiet here.
+            if (len(self._live_neighbors()) < _NEIGHBOR_FLOOR
+                    and self._neighbor_idle_cycles == 0):
                 self._wake_neighbor_maintenance()
 
     async def _stop_link_keepalive(self) -> None:
@@ -1898,7 +1941,13 @@ class MeshNode:
         return out[:_NEIGHBOR_TARGET]
 
     def _wake_neighbor_maintenance(self) -> None:
+        """Something changed — look again soon, and from a clean backoff.
+
+        Resetting here is the half that makes the backoff safe: it may grow to
+        five minutes while nothing is happening, but any real event brings it
+        straight back to the normal cadence."""
         if self._running:
+            self._neighbor_idle_cycles = 0
             self._neighbor_wakeup.set()
 
     def _ensure_neighbor_maintenance(self) -> None:
@@ -1918,18 +1967,41 @@ class MeshNode:
                 pass
 
     async def _neighbor_maintenance_loop(self) -> None:
-        """Recover an empty node and maintain its five XOR-nearest known links."""
+        """Recover an empty node and maintain its five XOR-nearest known links.
+
+        Two bounds sit on this loop, and both exist because of the same failure:
+        a cycle asks FIND_NODE, the answer wakes the loop, and the next cycle
+        starts with no delay at all — a two-node mesh sat at ~3 Mbit/s of
+        certificate chains doing nothing.
+
+        `_NEIGHBOR_MIN_INTERVAL` is the floor a wake cannot go below. The
+        backoff is for the other half: a mesh smaller than `_NEIGHBOR_FLOOR`
+        can never reach it, so searching never ends on its own. Cycles that
+        turn up nothing new stretch the wait out to `_NEIGHBOR_IDLE_MAX`; a
+        real change — a peer gained or lost, an identity we had not seen —
+        wakes the loop and resets it."""
         while self._running:
             self._neighbor_wakeup.clear()
+            before = len(self._live_neighbors())
+            known_before = len(self._routing.all_entries())
             try:
                 await self._maintain_neighbors()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass
+            productive = (len(self._live_neighbors()) != before
+                          or len(self._routing.all_entries()) != known_before)
+            self._neighbor_idle_cycles = (
+                0 if productive else min(self._neighbor_idle_cycles + 1, 8))
+            wait = min(_NEIGHBOR_IDLE_MAX,
+                       _NEIGHBOR_REFRESH * (2 ** self._neighbor_idle_cycles))
             try:
-                async with asyncio.timeout(_NEIGHBOR_REFRESH):
+                async with asyncio.timeout(wait):
                     await self._neighbor_wakeup.wait()
+                # Woken early. Honour the floor anyway: the wake says there is
+                # something to do, not that it must be done this instant.
+                await asyncio.sleep(_NEIGHBOR_MIN_INTERVAL)
             except TimeoutError:
                 pass
 
@@ -2464,6 +2536,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=False)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
+        peer.trace = self.trace
         self._peers.append(peer)
         self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
@@ -2502,6 +2575,7 @@ class MeshNode:
                     peer = _Peer(transport, is_client_side=True)
                     peer.on_dead = self._reap_peer
                     peer.total = self._metrics.total
+                    peer.trace = self.trace
                     peer.remote_addr = uri
                     self._peers.append(peer)
                     await peer.start(self._handle_packet)
@@ -2526,6 +2600,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
+        peer.trace = self.trace
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
@@ -3828,6 +3903,7 @@ class MeshNode:
         if len(entries) > 20:
             return
         valid_entries: list[NodeEntry] = []
+        learned_new = False
         for entry in entries:
             if not entry.cert_chain:
                 continue
@@ -3840,12 +3916,24 @@ class MeshNode:
             dsa_pub = first.subject_pub
             for cert in entry.cert_chain:
                 self._cert_add(cert)
+            # Whether this is news has to be asked *before* adding it, and it
+            # decides whether maintenance is worth waking: a reply that only
+            # restates identities we already hold is not a reason to go looking
+            # again — that is a question answered by its own answer.
+            #
+            # Our own id is excluded, and not as a detail: the table refuses to
+            # store it, so `contains` is false for it forever and every reply
+            # that mentions us back would look like a discovery. That alone kept
+            # the loop running.
+            if (entry.node_id != self._id
+                    and not self._routing.contains(entry.node_id)):
+                learned_new = True
             self._routing.add(entry.node_id, entry.addresses, dsa_pub)
             valid_entries.append(entry)
         self._pending_finds.pop(query_id, None)
         if not future.done():
             future.set_result(valid_entries)
-        if valid_entries:
+        if learned_new:
             self._wake_neighbor_maintenance()
 
     # -- DHT (content-addressed value store) ------------------------------
@@ -5016,6 +5104,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=True)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
+        peer.trace = self.trace
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"
         self._peers.append(peer)

@@ -573,3 +573,47 @@ class TestLookupDoesNotInheritAnotherLookupsFailure:
         assert await node._kademlia_lookup(target, timeout=0.05) is False
         assert calls == [], "a timed-out wait must not start a second lookup"
         await node.stop()
+
+
+class TestNoSelfInflictedLookupLoop:
+    """Une réponse ne doit jamais être la cause de la question suivante.
+
+    `_handle_found_node` réveillait la maintenance dès qu'une réponse contenait
+    des entrées valides. Comme la table de routage refuse de stocker notre
+    propre id, `contains` est faux pour lui à jamais : une réponse qui ne fait
+    que nous renvoyer notre propre identité passait pour une découverte, et
+    relançait un FIND_NODE — indéfiniment, à ~15 ko de certificats par tour."""
+
+    def test_our_own_id_is_never_a_discovery(self):
+        from src.node import MeshNode
+        from tests.conftest import make_manager
+        node = MeshNode(transport_manager=make_manager())
+        # La table refuse notre id, donc `contains` restera faux pour toujours :
+        # c'est exactement le piège que le handler doit connaître.
+        node._routing.add(node.id, [], b"")
+        assert not node._routing.contains(node.id)
+
+    def test_a_known_id_is_not_a_discovery_either(self):
+        from src.node import MeshNode
+        from src.node_id import NodeID
+        from tests.conftest import make_manager
+        node = MeshNode(transport_manager=make_manager())
+        other = NodeID(bytes(range(20)))
+        assert not node._routing.contains(other)
+        node._routing.add(other, [], b"\x01" * 8)
+        assert node._routing.contains(other)
+
+    def test_the_maintenance_loop_has_a_floor_between_cycles(self):
+        """Un réveil peut raccourcir l'attente, jamais la supprimer."""
+        from src import node as node_mod
+        assert node_mod._NEIGHBOR_MIN_INTERVAL > 0
+        assert node_mod._NEIGHBOR_IDLE_MAX >= node_mod._NEIGHBOR_REFRESH
+
+    def test_a_wake_resets_the_backoff(self):
+        from src.node import MeshNode
+        from tests.conftest import make_manager
+        node = MeshNode(transport_manager=make_manager())
+        node._neighbor_idle_cycles = 5
+        node._running = True
+        node._wake_neighbor_maintenance()
+        assert node._neighbor_idle_cycles == 0

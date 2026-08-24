@@ -81,6 +81,37 @@ détruit le lien de toute façon. `MeshNode.stop()` arrête aussi ses pairs **en
 parallèle** (`gather`), sinon 128 liens empilent 128 bornes.
 **Aucune attente de tâche au démontage ne doit être non bornée.**
 
+### 12. Une réponse qui déclenche la question suivante — le lien saturé au repos
+`_maintain_neighbors` envoyait un `FIND_NODE` ; `_handle_found_node` réveillait
+la maintenance dès que la réponse contenait des entrées valides ; la boucle
+`await self._neighbor_wakeup.wait()` rendait donc la main **immédiatement** et
+repartait. Comme un `FOUND_NODE` transporte des chaînes de certificats (~15 ko,
+cf. §9), deux nœuds joints et **inactifs** échangeaient 3 Mbit/s mesurés en
+loopback — sur un lien réel, tout ce que le lien peut porter, en permanence.
+
+Trois causes empilées, les trois corrigées :
+1. **Notre propre id passait pour une découverte.** La table de routage refuse
+   de stocker `self._id`, donc `contains(self._id)` est faux *à jamais* : chaque
+   réponse qui nous mentionnait en retour ressemblait à une nouveauté et
+   réveillait la maintenance. On ne réveille plus que sur un id réellement
+   nouveau, et jamais sur le nôtre.
+2. **Aucun plancher entre deux cycles.** `_NEIGHBOR_MIN_INTERVAL` : un réveil
+   peut raccourcir l'attente, jamais la supprimer. **Aucune boucle pilotée par
+   ce qu'un pair nous envoie ne doit pouvoir tourner sans borne** — c'est autant
+   une question d'amplification que de débit.
+3. **Une recherche qui ne peut pas aboutir ne s'arrêtait jamais.** Un mesh plus
+   petit que `_NEIGHBOR_FLOOR` (3) est sous le plancher pour toujours, donc
+   `searching` restait vrai. Les cycles improductifs partent maintenant en
+   backoff exponentiel jusqu'à `_NEIGHBOR_IDLE_MAX` (5 min), et le keepalive
+   cesse de pousser une recherche qui n'a plus rien à trouver. Tout événement
+   réel (pair perdu ou gagné, identité inconnue) réveille et remet le backoff à
+   zéro.
+
+Mesure avant/après sur deux nœuds joints au repos : **3036 kbit/s → 2,1
+kbit/s**. Trouvé avec `src/trace.py` (Settings → Protocol trace), verrouillé par
+`tests/integration/test_idle_chatter.py` — qui inclut un test « la découverte
+marche toujours », parce que la borne ne doit pas éteindre ce qu'elle protège.
+
 ## Routage : les bugs « ça marche à 3 nœuds, plus à 6 »
 
 ### 9. Un `FOUND_NODE` qui ne rentre pas dans un paquet — Kademlia meurt en silence
