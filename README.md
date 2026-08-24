@@ -121,6 +121,10 @@ explicitement l'emporte toujours, et le nœud annonce au démarrage les réglage
 du fichier qu'une option de la ligne de commande a écrasés. Détail des réglages
 et des bornes : [`Docs/Setup/guide`](Docs/Setup/guide).
 
+Mot de passe de la console : modifiable depuis la console (**Settings → Console
+password**, le mot de passe courant est exigé), ou réinitialisable sur la
+machine avec `./install.sh --reset-password` si tu l'as perdu.
+
 Le nœud sait aussi se mettre à jour depuis GitHub : console web →
 **Settings → Updates**. La vérification est manuelle, l'installation demande
 une confirmation qui nomme la version, et rien n'est jamais installé sans ce
@@ -214,7 +218,7 @@ hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
 
 ```
 src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
-scripts/          nmesh_node.py (lanceur), nmesh_config.py, build_pyz.py
+scripts/          nmesh_node.py (lanceur), nmesh_config.py, nmesh_password.py, build_pyz.py
 start.sh          installe les dépendances et lance un nœud depuis l'arbre courant
 install.sh        installe l'arbre à demeure + service de démarrage, puis lance
 docker/           image et compose du nœud-relais

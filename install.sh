@@ -12,6 +12,7 @@
 #   ./install.sh --fleet                # …and enable the fleet app
 #   ./install.sh --prefix /srv/nmesh    # choose where it lives
 #   ./install.sh --no-start             # install and enable, don't start now
+#   ./install.sh --reset-password       # set a new console password, print it
 #   ./install.sh --uninstall            # remove the service and the files
 #   ./install.sh --uninstall --purge    # …and the node's identity + state
 #
@@ -360,6 +361,7 @@ RUN_USER="${NMESH_USER:-}"
 DO_START=true
 UNINSTALL=false
 PURGE=false
+RESET_PASSWORD=false
 NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -370,8 +372,9 @@ while [ $# -gt 0 ]; do
         --run-as)     RUN_USER="${2:-}"; shift 2;;
         --no-start)   DO_START=false; shift;;
         --uninstall)  UNINSTALL=true; shift;;
+        --reset-password) RESET_PASSWORD=true; shift;;
         --purge)      PURGE=true; shift;;
-        -h|--help)    sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+        -h|--help)    sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
         *)            NODE_ARGS+=("$1"); shift;;
     esac
 done
@@ -395,6 +398,52 @@ case "$INIT" in
     openrc)         UNIT_PATH="/etc/init.d/$SERVICE";;
     launchd)        UNIT_PATH="$(caller_home)/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
 esac
+
+# ── reset the console password ───────────────────────────────────────────────
+# Stands alone: it touches only the credential file, and must work on a node
+# that is already installed and running without reinstalling anything. The
+# hashing is the node's own code (scripts/nmesh_password.py) rather than a
+# second implementation here — a credential format that drifted between two
+# writers would be a silent authentication bug.
+if [ "$RESET_PASSWORD" = true ]; then
+    [ -d "$DATA" ] || fail "No state directory at $DATA — is this node installed?"
+    PYTHON_BIN="$PREFIX/.venv/bin/python"
+    [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3 || true)"
+    [ -n "$PYTHON_BIN" ] || fail "No python available to rewrite the credential"
+    SCRIPT="$PREFIX/scripts/nmesh_password.py"
+    [ -f "$SCRIPT" ] || SCRIPT="$SOURCE_DIR/scripts/nmesh_password.py"
+    [ -f "$SCRIPT" ] || fail "nmesh_password.py not found — update this install first"
+
+    NEW_PASSWORD="$(run_priv "$PYTHON_BIN" "$SCRIPT" "$DATA")" \
+        || fail "Could not write a new console password"
+    # The file belongs to the node, not to whoever ran the installer.
+    if [ -n "$RUN_USER" ] && user_exists "$RUN_USER"; then
+        run_priv chown "$(owner_spec "$RUN_USER")" "$DATA/console.cred" 2>/dev/null || true
+    fi
+    ok "New console password: $NEW_PASSWORD"
+    warn "Shown once — save it now."
+
+    # The node reads its credential at startup, so this only takes effect on a
+    # restart. Do it here rather than leave an operator wondering why the new
+    # password does not work yet.
+    case "$INIT" in
+        systemd-system) run_priv systemctl restart "$SERVICE" >/dev/null 2>&1 \
+                            && ok "Node restarted" \
+                            || warn "Restart the node for it to take effect";;
+        systemd-user)   systemctl --user restart "$SERVICE" >/dev/null 2>&1 \
+                            && ok "Node restarted" \
+                            || warn "Restart the node for it to take effect";;
+        openrc)         run_priv rc-service "$SERVICE" restart >/dev/null 2>&1 \
+                            && ok "Node restarted" \
+                            || warn "Restart the node for it to take effect";;
+        launchd)        launchctl unload "$UNIT_PATH" >/dev/null 2>&1 || true
+                        launchctl load "$UNIT_PATH" >/dev/null 2>&1 \
+                            && ok "Node restarted" \
+                            || warn "Restart the node for it to take effect";;
+        *)              warn "Restart the node for it to take effect";;
+    esac
+    exit 0
+fi
 
 # ── uninstall ────────────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = true ]; then

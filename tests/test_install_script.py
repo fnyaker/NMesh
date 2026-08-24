@@ -288,6 +288,22 @@ class TestOrdering:
         assert 'chown -R "$OWNER"' in text
 
 
+class TestPasswordReset:
+    def test_the_flag_is_documented(self):
+        import subprocess as sp
+        result = sp.run([BASH, str(INSTALL), "--help"], capture_output=True,
+                        text=True, timeout=30, cwd=str(ROOT))
+        assert "--reset-password" in result.stdout
+
+    def test_it_delegates_the_hashing_to_the_node(self):
+        """Le format du credential ne doit exister qu'à un seul endroit : une
+        seconde implémentation en shell qui divergerait serait un bug
+        d'authentification silencieux."""
+        text = INSTALL.read_text()
+        assert "nmesh_password.py" in text
+        assert "scrypt" not in text
+
+
 class TestHelp:
     def test_help_mentions_the_essentials(self):
         result = subprocess.run([BASH, str(INSTALL), "--help"],

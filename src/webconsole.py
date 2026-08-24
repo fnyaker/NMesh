@@ -40,6 +40,7 @@ from urllib.parse import parse_qs
 
 from . import updater
 from . import config as node_config
+from . import console_auth
 from .node import MESSAGE_NAMES
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
@@ -125,36 +126,51 @@ class WebConsole:
     # -- credentials ------------------------------------------------------
 
     def _cred_path(self) -> str | None:
-        return os.path.join(self._state_dir, "console.cred") if self._state_dir else None
+        return console_auth.path_for(self._state_dir)
 
     def _load_or_create_credentials(self, password: str | None):
         path = self._cred_path()
-        if password is None and path and os.path.exists(path):
-            try:
-                with open(path) as f:
-                    tag, salt_hex, hash_hex = f.read().strip().split("$")
-                if tag == "scrypt":
-                    return bytes.fromhex(salt_hex), bytes.fromhex(hash_hex)
-            except Exception:
-                pass  # unreadable/corrupt → regenerate below
         if password is None:
-            password = secrets.token_urlsafe(18)
+            stored = console_auth.read(path)
+            if stored is not None:
+                return stored
+            password = console_auth.generate()
             self.generated_password = password
-        salt = secrets.token_bytes(16)
-        pw_hash = _scrypt(password, salt)
         if path:
-            tmp = path + ".tmp"
-            with open(tmp, "w") as f:
-                f.write(f"scrypt${salt.hex()}${pw_hash.hex()}")
-            os.replace(tmp, path)
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        return salt, pw_hash
+            return console_auth.write(path, password)
+        # No state directory: the credential lives for this process only.
+        salt = secrets.token_bytes(16)
+        return salt, console_auth.hash_password(password, salt)
 
     def _check_password(self, password: str) -> bool:
-        return hmac.compare_digest(_scrypt(password, self._salt), self._pw_hash)
+        return console_auth.check(password, self._salt, self._pw_hash)
+
+    def set_password(self, new_password: str) -> None:
+        """Replace the console password. Raises ``CredentialError`` on a bad one.
+
+        The stored hash is swapped only after the new file is written, so a
+        failed write leaves the old password working rather than a node nobody
+        can log into."""
+        console_auth.validate(new_password)
+        path = self._cred_path()
+        if path:
+            self._salt, self._pw_hash = console_auth.write(path, new_password)
+        else:
+            salt = secrets.token_bytes(16)
+            self._salt = salt
+            self._pw_hash = console_auth.hash_password(new_password, salt)
+
+    def _revoke_all_tokens_except(self, keep: str | None) -> int:
+        """Every other session dies with the old password.
+
+        The caller's own session is kept: someone changing their password
+        because they think a session was stolen must not be logged out by the
+        very act of fixing it, and the stolen one is gone either way."""
+        with self._tokens_lock:
+            doomed = [token for token in self._tokens if token != keep]
+            for token in doomed:
+                self._tokens.pop(token, None)
+        return len(doomed)
 
     # -- TLS --------------------------------------------------------------
 
@@ -1003,6 +1019,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/trace":
                 self._handle_trace(_parse_json(body))
                 return
+            if path == "/api/password":
+                self._handle_password(_parse_json(body))
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
@@ -1017,6 +1036,44 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_password(self, data) -> None:
+            """Change the console password.
+
+            A valid session is not enough: the **current password** must be in
+            the request. A stolen session token must not be able to lock the
+            owner out of their own node — that turns a session theft into a
+            permanent takeover.
+
+            A wrong current password counts toward the same lockout as a failed
+            login, so this endpoint cannot be used to guess it faster."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            if console._locked_out():
+                self._json(429, {"error": "too many attempts — wait a minute"})
+                return
+            data = data or {}
+            current = data.get("current")
+            new = data.get("new")
+            if not isinstance(current, str) or not console._check_password(current):
+                console._record_login_result(False)
+                self._json(403, {"error": "the current password is wrong"})
+                return
+            console._record_login_result(True)
+            try:
+                console.set_password(new)
+            except console_auth.CredentialError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            except OSError as exc:
+                # The old password still works: set_password swaps the stored
+                # hash only after the file is written.
+                self._json(500, {"error": f"could not save the new password: "
+                                          f"{exc.strerror or 'error'}"})
+                return
+            revoked = console._revoke_all_tokens_except(self._session_token())
+            self._json(200, {"changed": True, "sessions_revoked": revoked})
 
         def _handle_trace(self, data) -> None:
             """Start or stop the protocol trace.

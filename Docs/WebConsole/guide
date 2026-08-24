@@ -92,6 +92,7 @@ Options :
 | GET     | `/api/trace`     | `?events=1` → état + totaux par type de message (et les événements) |
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — bornes réclamées **plafonnées**, jamais obéies |
 | GET     | `/api/trace/export` | la trace complète en JSON (téléchargement) |
+| POST    | `/api/password`  | `{current, new}` — change le mot de passe ; le **courant est exigé** même avec une session valide |
 
 La section **Expert — addressing & transports** montre toutes les URIs
 concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
@@ -201,6 +202,28 @@ non éditables ici** : le premier appartient à qui détient le fichier, le seco
 
 Détail du format, des bornes et de la priorité ligne de commande > fichier >
 défaut : [`../Setup/guide`](../Setup/guide).
+
+## Changer le mot de passe (Settings → Console password)
+
+`POST /api/password` exige le **mot de passe courant**, même depuis une session
+valide. C'est la propriété qui compte : sans ça, un vol de session deviendrait
+une prise de contrôle définitive du nœud — le voleur changerait le mot de passe
+et enfermerait dehors la personne à qui il appartient.
+
+- Un mauvais mot de passe courant compte dans le **même verrouillage** que la
+  page de login : cet endpoint n'est pas un moyen de deviner plus vite.
+- Nouveau mot de passe : 12 caractères au minimum, 256 au maximum (scrypt sur
+  une entrée non bornée est un déni de service), pas d'espaces en bordure.
+- En cas de succès, **toutes les autres sessions sont fermées** ; celle qui a
+  fait le changement reste ouverte — quelqu'un qui change son mot de passe
+  parce qu'il soupçonne une session volée ne doit pas être déconnecté par le
+  geste même qui corrige le problème.
+- Le hash n'est remplacé en mémoire qu'**après** l'écriture du fichier : une
+  écriture qui échoue laisse l'ancien mot de passe fonctionnel plutôt qu'un
+  nœud dans lequel plus personne ne peut entrer.
+
+Mot de passe complètement perdu → `./install.sh --reset-password` sur la
+machine elle-même (voir [`../Setup/guide`](../Setup/guide)).
 
 ## Trace protocolaire (Settings → Protocol trace)
 

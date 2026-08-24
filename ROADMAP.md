@@ -295,6 +295,16 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### Mot de passe de la console (`src/console_auth.py`) — fait
+- Changement depuis la console (`POST /api/password`) : le mot de passe
+  **courant est exigé** même avec une session valide — sinon un vol de session
+  deviendrait une prise de contrôle définitive. Mauvais essai compté dans le
+  verrouillage du login. Les autres sessions sont fermées, pas celle qui change.
+- `./install.sh --reset-password` sur la machine : réécrit le credential,
+  affiche le nouveau mot de passe une fois, redémarre le service, ne touche à
+  rien d'autre. Hachage délégué au code du nœud, pas réimplémenté en shell.
+- Doc : `Docs/WebConsole/guide`, `Docs/Setup/guide`.
+
 ### Trace protocolaire (`src/trace.py`) — fait
 - Enregistrement borné de ce que le nœud envoie/reçoit, par type de message.
   Métadonnées de routage seulement : **jamais de payload**.

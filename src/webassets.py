@@ -1212,6 +1212,19 @@ INDEX_HTML = """<!doctype html>
         <pre id="update-notes" class="notes" hidden></pre>
       </article>
       <article class="surface">
+        <div class="surface-head"><div><p class="eyebrow">Access</p><h2>Console password</h2></div></div>
+        <p class="subtle">Changing it needs the current one, even from a signed-in session: a stolen session
+          must never be able to lock you out of your own node. Every other session is signed out; this one stays.
+          Lost it entirely? <code class="mono">./install.sh --reset-password</code> on the machine itself.</p>
+        <div class="form-grid two">
+          <label class="field"><span>Current password</span><input id="pw-current" type="password" autocomplete="current-password"></label>
+          <label class="field"><span>New password</span><input id="pw-new" type="password" autocomplete="new-password"></label>
+          <label class="field"><span>Repeat new password</span><input id="pw-repeat" type="password" autocomplete="new-password"></label>
+        </div>
+        <div class="action-row"><button id="pw-save" class="primary">Change password</button></div>
+        <p id="pw-status" class="message"></p>
+      </article>
+      <article class="surface">
         <div class="surface-head"><div><p class="eyebrow">Diagnostics</p><h2>Protocol trace</h2></div><span id="trace-pill" class="state-pill"></span></div>
         <p class="subtle">Records what this node actually sends and receives, by message type — for questions the
           throughput graph cannot answer, like "why are two idle nodes talking at all?".
@@ -1668,6 +1681,27 @@ async function saveConfig(){
 }
 $("config-save").addEventListener("click",saveConfig);
 $("config-reload").addEventListener("click",loadConfig);
+
+// ── console password ────────────────────────────────────────────────────────
+async function changePassword(){
+  const current=$("pw-current").value,fresh=$("pw-new").value,repeat=$("pw-repeat").value;
+  if(!current||!fresh){setMessage("pw-status","Both the current and the new password are needed.",true);return;}
+  // Checked here as a courtesy; the node checks everything again for real.
+  if(fresh!==repeat){setMessage("pw-status","The two new passwords do not match.",true);return;}
+  const button=$("pw-save");
+  button.disabled=true; setMessage("pw-status","Changing…");
+  try{
+    const response=await api("/api/password","POST",{current,new:fresh});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok){setMessage("pw-status",data.error||"Could not change the password",true);return;}
+    setMessage("pw-status","Password changed."
+      +(data.sessions_revoked?" "+data.sessions_revoked+" other session(s) signed out.":""));
+    // Never leave a password sitting in a form field.
+    $("pw-current").value=""; $("pw-new").value=""; $("pw-repeat").value="";
+  }catch(_){setMessage("pw-status","Could not change the password",true);}
+  finally{button.disabled=false;}
+}
+$("pw-save").addEventListener("click",changePassword);
 
 // ── protocol trace ──────────────────────────────────────────────────────────
 // Polled only while it is recording: a diagnostic that keeps asking questions

@@ -86,6 +86,10 @@ tests/
 │     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
+├── test_console_auth.py                               — credential console :
+│     mot de passe jamais stocké, sel par credential, fichier corrompu ou
+│     algorithme inconnu refusés, entrée démesurée rejetée avant le hachage,
+│     mode 0600 même sous umask permissif
 ├── test_trace.py                                      — trace protocolaire :
 │     jamais de payload dans ce qui est gardé, anneau borné, arrêt automatique,
 │     paquet malformé qui ne lève pas, débit calculé sur la fenêtre d'
