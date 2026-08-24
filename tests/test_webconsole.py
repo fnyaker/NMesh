@@ -1314,3 +1314,87 @@ class TestPasswordChange:
                     assert "a-brand-new-password" not in handle.read()
             finally:
                 console.stop(); await node.stop()
+
+
+class TestJoinTicket:
+    """Émettre un ticket et rejoindre avec, depuis la console."""
+
+    async def test_issuing_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/ticket", None, {"ttl": 600})
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_node_with_no_public_address_is_told_why(self):
+        """409 avec une explication, pas un ticket qui ne peut pas marcher."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/ticket", token, {"ttl": 600})
+            assert status == 409
+            assert "public" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_reachable_node_issues_a_ticket_with_its_qr(self):
+        node, console = await _make_console()
+        node.reachability = lambda: [
+            {"transport": "tcp", "scope": "world", "anchor": "",
+             "address": "tcp://203.0.113.7:9000", "confirmed": True}]
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/ticket", token, {"ttl": 600})
+            assert status == 200
+            from src import join_ticket
+            parsed = join_ticket.decode(body["ticket"])
+            assert parsed["uri"] == "tcp://203.0.113.7:9000"
+            assert body["qr_svg"].startswith("<svg")
+            # Le code voyage dans le ticket ; le répéter le mettrait dans un
+            # endroit de plus.
+            assert "code" not in body
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_silly_lifetime_is_clamped_not_obeyed(self):
+        node, console = await _make_console()
+        node.reachability = lambda: [
+            {"transport": "tcp", "scope": "world", "anchor": "",
+             "address": "tcp://203.0.113.7:9000", "confirmed": True}]
+        try:
+            _, token = await _login(console)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/ticket", token, {"ttl": 10 ** 9})
+            from src import join_ticket
+            assert body["ttl"] == join_ticket.MAX_TTL
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_joining_with_a_broken_ticket_is_refused_locally(self):
+        """Une faute de frappe doit échouer ici, avec un message clair, pas en
+        composant une adresse au hasard."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/join", token,
+                {"ticket": "NOT-A-REAL-TICKET"})
+            assert status == 400
+            assert body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_joining_still_accepts_a_uri_and_a_code(self):
+        """Le ticket s'ajoute au join complet, il ne le remplace pas."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/join", token, {"uri": "tcp://"})
+            assert status == 400          # uri et code exigés, comme avant
+        finally:
+            console.stop(); await node.stop()

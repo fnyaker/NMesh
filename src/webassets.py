@@ -1261,6 +1261,41 @@ INDEX_HTML = """<!doctype html>
           <div class="form-block"><h3>Join someone</h3><button id="cx-request" class="secondary">Create request</button><textarea id="cx-request-out" class="mono" readonly placeholder="Send this request block"></textarea><textarea id="cx-reply-in" class="mono" placeholder="Paste their reply block"></textarea><button id="cx-complete" class="primary">Connect</button></div>
           <div class="form-block"><h3>Accept someone</h3><textarea id="cx-accept-in" class="mono" placeholder="Paste their request block"></textarea><button id="cx-accept" class="secondary">Make invite</button><textarea id="cx-accept-out" class="mono" readonly placeholder="Send this invite block back"></textarea></div>
         </div><p id="connect-status" class="message"></p></details>
+        <details class="surface disclosure" open><summary>Quick join (ticket &amp; QR code)</summary>
+          <p class="subtle">One short string carrying the address <em>and</em> a single-use code — readable aloud,
+            typable on a phone, scannable from a screen. <strong>The ticket is the secret</strong>: anyone who can
+            read it can join until it expires or is used once. Only a node with a confirmed public address can
+            issue one, because a scanner has nothing else to go on.</p>
+          <div class="form-grid two">
+            <div class="form-block">
+              <h3>Invite someone</h3>
+              <label class="field"><span>Valid for</span>
+                <select id="tk-ttl">
+                  <option value="60">1 minute</option>
+                  <option value="300">5 minutes</option>
+                  <option value="600" selected>10 minutes</option>
+                  <option value="3600">1 hour</option>
+                  <option value="21600">6 hours (maximum)</option>
+                </select>
+              </label>
+              <button id="tk-make" class="secondary">Create join ticket</button>
+              <div id="tk-qr" class="qr-holder"></div>
+              <code id="tk-text" class="mono output"></code>
+              <p id="tk-status" class="message"></p>
+            </div>
+            <div class="form-block">
+              <h3>Use a ticket</h3>
+              <textarea id="tk-in" class="mono" placeholder="Paste or scan a join ticket"></textarea>
+              <div class="action-row wrap">
+                <button id="tk-join" class="primary">Join</button>
+                <button id="tk-scan" class="secondary">Scan with camera</button>
+                <button id="tk-scan-stop" class="secondary" hidden>Stop camera</button>
+              </div>
+              <video id="tk-video" class="qr-video" hidden muted playsinline></video>
+              <p id="tk-scan-status" class="message"></p>
+            </div>
+          </div>
+        </details>
         <details class="surface disclosure"><summary>Invite through a relay</summary><div class="form-grid two"><div class="form-block"><button id="rly-invite" class="secondary">Generate relay invite</button><textarea id="rly-invite-out" class="mono" readonly></textarea></div><div class="form-block"><textarea id="rly-join-in" class="mono" placeholder="Paste relay invite"></textarea><button id="rly-join" class="primary">Join via relay</button></div></div><p id="relay-status" class="message"></p></details>
         <details class="surface disclosure"><summary>Listeners and addressing</summary><div id="addressing" class="definition-list"></div><div class="action-row"><input id="listen-uri" placeholder="tcp://0.0.0.0:9002"><button id="listen-btn" class="secondary">Add listener</button></div><div id="listener-list" class="chip-list"></div></details>
         <details class="surface disclosure"><summary>Trust and invitations</summary>
@@ -1299,6 +1334,9 @@ dialog{width:min(680px,calc(100vw - 28px));padding:0;color:var(--ink);background
 @keyframes panel-in{from{opacity:.3;transform:translateY(4px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 @media(max-width:1100px){.metrics{grid-template-columns:repeat(3,1fr)}.dashboard-grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr}.topology-card{min-height:420px}}
 @media(max-width:760px){.shell{display:block}.rail{position:fixed;z-index:20;left:0;right:0;top:auto;bottom:0;width:auto;height:68px;padding:7px 8px;background:rgba(11,20,29,.97);border:0;border-top:1px solid var(--line)}.identity,.rail-foot{display:none}.tabs{height:100%;display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.tabs button{display:flex;flex-direction:column;justify-content:center;gap:3px;padding:5px 2px;text-align:center;font-size:11px}.tab-index{display:none}main{padding:0 16px 92px}.topbar{height:74px;margin-bottom:28px}.top-meta{gap:7px}.page-head{display:block;margin-bottom:20px}.page-head .lede,.page-head .head-actions{margin-top:12px}.page-head h1{font-size:29px}.metrics{grid-template-columns:repeat(2,1fr)}.metric{min-height:90px}.metric strong{font-size:20px}.surface{padding:17px}.surface-head,.list-head{align-items:flex-start;flex-direction:column}.search,.search input{width:100%}.list-tools{width:100%;align-items:stretch}.list-tools .search{flex:1}.record,.node-record{grid-template-columns:minmax(0,1fr) auto;gap:8px}.record-meta,.record-id{grid-column:1}.record-actions{grid-column:2;grid-row:1 / span 3;flex-direction:column}.form-grid.two{grid-template-columns:1fr}.definition-list{grid-template-columns:1fr;gap:4px}.definition-list dd{margin-bottom:8px}.legend{flex-wrap:wrap}.legend small{width:100%;margin:0}#graph{min-height:260px}.node-detail{grid-template-columns:1fr;gap:3px}.node-detail .value{margin-bottom:9px}}
+.qr-holder{display:flex;justify-content:center;margin:.75rem 0}
+.qr-holder svg{max-width:220px;width:100%;height:auto;border-radius:6px}
+.qr-video{width:100%;max-width:320px;border-radius:8px;margin:.5rem 0;background:#000}
 """
 
 
@@ -1681,6 +1719,94 @@ async function saveConfig(){
 }
 $("config-save").addEventListener("click",saveConfig);
 $("config-reload").addEventListener("click",loadConfig);
+
+// ── quick join: tickets and QR codes ────────────────────────────────────────
+async function makeTicket(){
+  const button=$("tk-make");
+  button.disabled=true; setMessage("tk-status","Creating…");
+  $("tk-qr").innerHTML=""; $("tk-text").textContent="";
+  try{
+    const response=await api("/api/ticket","POST",{ttl:Number($("tk-ttl").value)});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok){setMessage("tk-status",data.error||"Could not create a ticket",true);return;}
+    $("tk-text").textContent=data.ticket;
+    // The SVG comes from the node, built from the ticket it just minted.
+    $("tk-qr").innerHTML=data.qr_svg||"";
+    const minutes=Math.round((data.ttl||0)/60);
+    const window_=minutes>=60?(minutes/60)+" hour(s)":minutes+" minute(s)";
+    setMessage("tk-status","Valid for "+window_+". Single use — treat it like a password.");
+  }catch(_){setMessage("tk-status","Could not create a ticket",true);}
+  finally{button.disabled=false;}
+}
+
+async function joinWithTicket(){
+  const ticket=$("tk-in").value.trim();
+  if(!ticket){setMessage("tk-scan-status","Paste or scan a ticket first.",true);return;}
+  const button=$("tk-join");
+  button.disabled=true; setMessage("tk-scan-status","Joining…");
+  try{
+    const response=await api("/api/join","POST",{ticket});
+    const data=await response.json().catch(()=>({}));
+    setMessage("tk-scan-status",response.ok?"Joined.":(data.error||"Join failed"),!response.ok);
+    if(response.ok)$("tk-in").value="";
+  }catch(_){setMessage("tk-scan-status","Join failed",true);}
+  finally{button.disabled=false;}
+}
+
+// Scanning uses the browser's own BarcodeDetector — no library, consistent with
+// a project that takes a dependency only when there is no alternative. Where it
+// is missing, say so plainly instead of failing silently: pasting still works.
+let SCAN_STOP=null;
+async function startScan(){
+  const video=$("tk-video"),status="tk-scan-status";
+  if(!("BarcodeDetector" in window)){
+    setMessage(status,"This browser cannot scan QR codes. Paste the ticket instead.",true);
+    return;
+  }
+  let formats=[];
+  try{formats=await window.BarcodeDetector.getSupportedFormats();}catch(_){}
+  if(formats.length&&!formats.includes("qr_code")){
+    setMessage(status,"This browser cannot scan QR codes. Paste the ticket instead.",true);
+    return;
+  }
+  let stream;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+  }catch(_){
+    // Denied, no camera, or a page not served over HTTPS/localhost.
+    setMessage(status,"No camera available. It needs your permission, and a secure page (HTTPS or localhost).",true);
+    return;
+  }
+  const detector=new window.BarcodeDetector({formats:["qr_code"]});
+  video.srcObject=stream; video.hidden=false;
+  $("tk-scan").hidden=true; $("tk-scan-stop").hidden=false;
+  await video.play().catch(()=>{});
+  setMessage(status,"Point the camera at the ticket's QR code.");
+  let running=true;
+  const timer=setInterval(async()=>{
+    if(!running)return;
+    try{
+      const found=await detector.detect(video);
+      if(found&&found.length){
+        $("tk-in").value=found[0].rawValue||"";
+        setMessage(status,"Ticket scanned — check it, then press Join.");
+        stopScan();
+      }
+    }catch(_){/* a frame that could not be read is not an error worth showing */}
+  },350);
+  SCAN_STOP=()=>{
+    running=false; clearInterval(timer);
+    stream.getTracks().forEach((track)=>track.stop());
+    video.srcObject=null; video.hidden=true;
+    $("tk-scan").hidden=false; $("tk-scan-stop").hidden=true;
+    SCAN_STOP=null;
+  };
+}
+function stopScan(){if(SCAN_STOP)SCAN_STOP();}
+$("tk-make").addEventListener("click",makeTicket);
+$("tk-join").addEventListener("click",joinWithTicket);
+$("tk-scan").addEventListener("click",startScan);
+$("tk-scan-stop").addEventListener("click",stopScan);
 
 // ── console password ────────────────────────────────────────────────────────
 async function changePassword(){

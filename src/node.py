@@ -2818,6 +2818,53 @@ class MeshNode:
                 pass
         return out
 
+    def public_endpoints(self) -> list[str]:
+        """Addresses a stranger on the open internet can actually dial.
+
+        Confirmed world-scope descriptors only: "we think this address is
+        public" is not the same as "an inbound connection arrived on it", and a
+        join ticket that points at an address nobody can reach is worse than no
+        ticket at all — it fails after the operator has already shared it."""
+        out: list[str] = []
+        for descriptor in self.reachability():
+            if descriptor.get("scope") != "world" or not descriptor.get("confirmed"):
+                continue
+            address = descriptor.get("address")
+            # Tickets carry a TCP endpoint: it is the transport a scanner on an
+            # arbitrary network can open without hole punching.
+            if isinstance(address, str) and address.startswith("tcp://"):
+                if address not in out:
+                    out.append(address)
+        return out
+
+    def issue_join_ticket(self, ttl: float | None = None) -> dict:
+        """Mint a compact join ticket. Raises ``ValueError`` if we are not
+        publicly reachable — the whole point of this shape of invitation is that
+        the scanner needs nothing but the string."""
+        from . import join_ticket
+        endpoints = self.public_endpoints()
+        if not endpoints:
+            raise ValueError(
+                "this node has no confirmed public address — a scanned ticket "
+                "would have nowhere to connect. Use the full join instead.")
+        parsed = _validate_uri(endpoints[0])
+        hostport = split_host_port(parsed[1]) if parsed else None
+        if hostport is None:
+            raise ValueError("could not read our own public address")
+        host, port = hostport
+        window = join_ticket.clamp_ttl(ttl)
+        code, seed = self._invite.generate_seeded_code(window)
+        text = join_ticket.encode(host.strip("[]"), port, seed,
+                                  time.time() + window)
+        return {
+            "ticket": text,
+            "uri": f"tcp://{host}:{port}",
+            "code": code,
+            "expires_at": time.time() + window,
+            "ttl": window,
+            "endpoints": endpoints,
+        }
+
     def relay_capable(self) -> bool:
         """True if we are confirmed reachable by a broad audience — i.e. we can
         serve as a rendezvous/relay for others. Any transport may qualify."""

@@ -28,6 +28,9 @@ jamais le contenu.
   confiance ; pas d'autorité centrale.
 - **Persistance opt-in** — sessions et pairs survivent au redémarrage
   (chiffrés au repos).
+- **Join rapide** — une chaîne de 34 caractères (ou un QR code scannable à la
+  caméra) qui porte l'adresse et un code à usage unique, depuis un nœud
+  publiquement joignable.
 - **Console web de gestion** + **connecteur de données** pour brancher des apps.
 - **Identité applicative (SSO)** — une app se sert de l'identité mesh du nœud pour
   authentifier ses pairs : assertions signées, scopées, fraîches, à usage unique.
