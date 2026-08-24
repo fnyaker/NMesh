@@ -12,6 +12,7 @@
 #   ./install.sh --fleet                # …and enable the fleet app
 #   ./install.sh --prefix /srv/nmesh    # choose where it lives
 #   ./install.sh --no-start             # install and enable, don't start now
+#   ./install.sh --allow-update         # let the node run system updates as root
 #   ./install.sh --reset-password       # set a new console password, print it
 #   ./install.sh --uninstall            # remove the service and the files
 #   ./install.sh --uninstall --purge    # …and the node's identity + state
@@ -362,6 +363,7 @@ DO_START=true
 UNINSTALL=false
 PURGE=false
 RESET_PASSWORD=false
+ALLOW_UPDATE=false
 NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -373,8 +375,10 @@ while [ $# -gt 0 ]; do
         --no-start)   DO_START=false; shift;;
         --uninstall)  UNINSTALL=true; shift;;
         --reset-password) RESET_PASSWORD=true; shift;;
+        --allow-update)   ALLOW_UPDATE=true; shift;;
+        --no-allow-update) ALLOW_UPDATE=false; shift;;
         --purge)      PURGE=true; shift;;
-        -h|--help)    sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+        -h|--help)    sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
         *)            NODE_ARGS+=("$1"); shift;;
     esac
 done
@@ -620,6 +624,56 @@ if [ -x "$PREFIX/.venv/bin/python" ]; then
         || warn "Could not write $CONFIG_FILE — options stay on the command line"
 else
     LEFTOVER=("${NODE_ARGS[@]+"${NODE_ARGS[@]}"}")
+fi
+
+# ── the one root command the node may run ────────────────────────────────────
+# The fleet app's `update` capability runs the system package manager, which
+# needs root with no human present. A general sudo rule for the node's account
+# would mean any bug in the node process is root — the same bug that otherwise
+# reaches an unprivileged account and stops there. So the grant is one wrapper
+# script, taking no arguments, running a fixed sequence.
+#
+# It lives under /usr/local/lib, **not** in the install prefix: the prefix
+# belongs to the node's own account, which could then rewrite the very thing it
+# is allowed to run as root.
+if [ "$ALLOW_UPDATE" = true ]; then
+    if [ -z "$RUN_USER" ]; then
+        warn "--allow-update: the node already runs as root, nothing to grant"
+    elif [ "$SUDO" = none ] && ! is_root; then
+        warn "--allow-update needs root to write a sudoers rule — skipped"
+    else
+        info "Granting $RUN_USER one root command (system updates)"
+        WRAPPER="$("$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --path 2>/dev/null)" || WRAPPER=""
+        TMP_WRAP="$(mktemp)"; TMP_RULE="$(mktemp)"
+        if [ -n "$WRAPPER" ] \
+           && "$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --wrapper > "$TMP_WRAP" \
+           && "$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --rule "$RUN_USER" > "$TMP_RULE"; then
+            run_priv mkdir -p "$(dirname "$WRAPPER")"
+            run_priv cp "$TMP_WRAP" "$WRAPPER"
+            run_priv chown root:root "$WRAPPER" 2>/dev/null || true
+            run_priv chmod 755 "$WRAPPER"
+            # A sudoers file that does not parse can break `sudo` for everyone
+            # on the machine. Never install one without asking visudo first.
+            if command -v visudo >/dev/null 2>&1 && ! run_priv visudo -cqf "$TMP_RULE"; then
+                warn "the generated sudoers rule did not validate — not installed"
+            else
+                run_priv cp "$TMP_RULE" /etc/sudoers.d/nmesh
+                run_priv chown root:root /etc/sudoers.d/nmesh 2>/dev/null || true
+                run_priv chmod 440 /etc/sudoers.d/nmesh
+                ok "$RUN_USER may run $WRAPPER as root — and nothing else"
+            fi
+        else
+            warn "no package manager this node knows how to drive — update not granted"
+        fi
+        rm -f "$TMP_WRAP" "$TMP_RULE"
+    fi
+else
+    # Re-running without the flag takes the grant away: the absence of a right
+    # has to be expressible, or it can only ever be added.
+    if [ -f /etc/sudoers.d/nmesh ]; then
+        run_priv rm -f /etc/sudoers.d/nmesh
+        info "Removed the update grant (pass --allow-update to keep it)"
+    fi
 fi
 
 # ── lock it down ─────────────────────────────────────────────────────────────

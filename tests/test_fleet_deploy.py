@@ -244,3 +244,98 @@ class TestRefusals:
             assert "root" not in str(exc), exc
         except Exception:
             pass          # l'échec SSH qui suit n'est pas ce qu'on teste ici
+
+
+class TestUpdateGrant:
+    """`update` a besoin de root sans humain. Le droit accordé est **un**
+    script, que le nœud ne peut pas réécrire — pas une règle sudo générale."""
+
+    def _sudoers(self, *args):
+        return subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(ROOT, "scripts", "nmesh_sudoers.py"), *args],
+            capture_output=True, text=True, timeout=60, cwd=ROOT)
+
+    def test_the_wrapper_is_not_inside_the_install_prefix(self):
+        """Le préfixe appartient au compte du nœud : y mettre le script
+        autorisé reviendrait à le laisser réécrire ce qu'il a le droit de
+        lancer en root."""
+        from src.apps import fleet_host
+        assert not fleet_host.UPDATE_WRAPPER.startswith("/opt/nmesh")
+        assert fleet_host.UPDATE_WRAPPER.startswith("/usr/local/")
+
+    def test_the_rule_names_one_path_and_no_arguments(self):
+        result = self._sudoers("--rule", "nmesh")
+        assert result.returncode == 0, result.stderr
+        line = [l for l in result.stdout.splitlines() if not l.startswith("#")][0]
+        from src.apps import fleet_host
+        assert line.strip().endswith(fleet_host.UPDATE_WRAPPER)
+        assert "ALL" not in line.split("NOPASSWD:")[1]      # pas de joker
+
+    def test_the_wrapper_refuses_arguments(self, tmp_path):
+        """Rien de ce que le nœud envoie ne doit pouvoir l'influencer."""
+        result = self._sudoers("--wrapper")
+        assert result.returncode == 0, result.stderr
+        script = tmp_path / "nmesh-update"
+        script.write_text(result.stdout)
+        script.chmod(0o755)
+        refused = subprocess.run(["/bin/sh", str(script), "--anything"],
+                                 capture_output=True, text=True, timeout=30)
+        assert refused.returncode == 2
+        assert "no arguments" in refused.stderr
+
+    def test_the_wrapper_is_valid_shell_and_announces_its_steps(self):
+        result = self._sudoers("--wrapper")
+        assert sh_check(result.stdout) == 0
+        assert "::nmesh-step::" in result.stdout
+
+    def test_a_bad_account_name_is_refused(self):
+        assert self._sudoers("--rule", "a b").returncode != 0
+
+    def test_the_plan_prefers_the_grant_when_it_is_there(self):
+        from unittest import mock
+        from src.apps import fleet_host
+        facts = fleet_host.HostFacts(
+            escalation="sudo", package_manager="apt",
+            plan={"refresh": ["apt-get", "update"], "upgrade": ["apt-get", "-y", "upgrade"]})
+        with mock.patch("os.path.exists", lambda p: p == fleet_host.UPDATE_WRAPPER), \
+             mock.patch("os.geteuid", lambda: 1000):
+            assert fleet_host.update_plan(facts) == \
+                [["sudo", "-n", fleet_host.UPDATE_WRAPPER]]
+            assert facts.update_granted is True
+
+    def test_without_the_grant_it_falls_back_to_the_package_manager(self):
+        from src.apps import fleet_host
+        facts = fleet_host.HostFacts(
+            escalation="sudo", package_manager="apt",
+            plan={"refresh": ["apt-get", "update"], "upgrade": ["apt-get", "-y", "upgrade"]})
+        plan = fleet_host.update_plan(facts)
+        assert plan and plan[0][0] == "sudo"
+        assert facts.update_granted is False
+
+
+class TestUpdateProgress:
+    def test_a_step_marker_becomes_progress_not_output(self):
+        from src.apps.fleet import _take_step_marker
+        step, text = _take_step_marker("before\n::nmesh-step::2/3 apt-get\nafter\n")
+        assert step == {"index": 2, "total": 3, "name": "apt-get"}
+        assert "nmesh-step" not in text
+        assert "before" in text and "after" in text
+
+    def test_plain_output_is_untouched(self):
+        from src.apps.fleet import _take_step_marker
+        assert _take_step_marker("just output") == (None, "just output")
+
+    def test_a_malformed_marker_never_raises(self):
+        from src.apps.fleet import _take_step_marker
+        for bad in ("::nmesh-step::\n", "::nmesh-step::x/y z\n",
+                    "::nmesh-step::99\n", "::nmesh-step::done\n"):
+            step, text = _take_step_marker(bad)
+            assert "nmesh-step" not in text
+
+    def test_step_names_read_as_something_a_human_recognises(self):
+        from src.apps.fleet import _step_name
+        assert _step_name(["sudo", "-n", "/usr/bin/apt-get", "update", "-qq"]) \
+            == "apt-get update"
+        assert _step_name(["/usr/local/lib/nmesh/nmesh-update"]) == "nmesh-update"
+        assert _step_name([]) == "step"

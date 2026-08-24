@@ -169,6 +169,10 @@ class CommandOutput:
     rid: str
     kind: str            # "update" | "provision"
     text: str
+    # Set when this frame marks a step rather than carrying output:
+    # {"index", "total", "name", "elapsed"}. An update is minutes long, and
+    # a wall of package-manager output is not progress.
+    step: dict | None = None
 
 
 @dataclass
@@ -222,6 +226,28 @@ class Failure:
 # ---------------------------------------------------------------------------
 # Local shell sessions (agent side)
 # ---------------------------------------------------------------------------
+
+def _make_controlling_tty(slave_fd: int):
+    """Make the pty the new session's **controlling terminal**.
+
+    A pty on the shell's file descriptors is not enough. Without this ioctl the
+    session has no controlling terminal at all: `/dev/tty` cannot be opened, so
+    `sudo` refuses to ask for a password ("a terminal is required"), job control
+    is off, and every program that wants to talk to the user directly fails. One
+    ioctl is the difference between a pipe with a prompt in it and a terminal.
+
+    ``start_new_session=True`` has already called ``setsid()`` by the time this
+    runs, so calling it again here would fail — the session exists, it just owns
+    no terminal yet. Runs in the forked child, before exec: keep it tiny."""
+    def _setup() -> None:
+        try:
+            import fcntl
+            import termios
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        except Exception:
+            pass          # a platform without it still gets a usable pipe
+    return _setup
+
 
 class _Shell:
     """One interactive shell bound to one operator, on a pty."""
@@ -686,7 +712,7 @@ class FleetApp:
         rid = _rid(document)
         if not self._authorised(src, "update", rid):
             return
-        commands = fleet_host.update_argv(self.facts)
+        commands = fleet_host.update_plan(self.facts)
         if commands is None:
             self._fail(src, rid, "no package manager, or no path to root")
             return
@@ -701,13 +727,25 @@ class FleetApp:
         command string to inject into."""
         ok = True
         status = 0
-        for command in commands:
+        started = time.monotonic()
+        total = len(commands)
+        for index, command in enumerate(commands, start=1):
+            # Announced before it runs, not after: an update is minutes long and
+            # a progress line that only appears once a step is over is not
+            # progress, it is a summary.
+            self._reply(src, UPDATE_OUTPUT, {
+                "rid": rid, "kind": "update", "text": "",
+                "step": {"index": index, "total": total,
+                         "name": _step_name(command),
+                         "elapsed": round(time.monotonic() - started, 1)}})
             status = await self._stream_command(src, rid, command, "update",
                                                 UPDATE_OUTPUT, UPDATE_TIMEOUT)
             if status != 0:
                 ok = False
                 break
-        self._reply(src, UPDATE_RESULT, {"rid": rid, "ok": ok, "status": status})
+        self._reply(src, UPDATE_RESULT, {
+            "rid": rid, "ok": ok, "status": status,
+            "elapsed": round(time.monotonic() - started, 1)})
 
     async def _stream_command(self, src: NodeID, rid: str, argv: list[str],
                               kind: str, out_type: int, timeout: float) -> int:
@@ -727,9 +765,15 @@ class FleetApp:
                 chunk = await proc.stdout.read(UPDATE_CHUNK)
                 if not chunk:
                     return
-                self._reply(src, out_type, {
-                    "rid": rid, "kind": kind,
-                    "text": chunk.decode("utf-8", "replace")[:UPDATE_CHUNK]})
+                text = chunk.decode("utf-8", "replace")[:UPDATE_CHUNK]
+                # The granted wrapper announces its own steps. Turn those into
+                # progress rather than printing them as noise.
+                step, text = _take_step_marker(text)
+                document = {"rid": rid, "kind": kind, "text": text}
+                if step is not None:
+                    document["step"] = step
+                if text or step is not None:
+                    self._reply(src, out_type, document)
 
         pump_task = asyncio.create_task(pump())
         try:
@@ -750,9 +794,12 @@ class FleetApp:
 
     def _on_update_output(self, src: NodeID, document: dict) -> None:
         rid = _rid(document)
-        if rid in self._inflight:
-            self._emit(CommandOutput(src, rid, "update",
-                                     str(document.get("text", ""))[:UPDATE_CHUNK]))
+        if rid not in self._inflight:
+            return
+        step = document.get("step")
+        self._emit(CommandOutput(src, rid, "update",
+                                 str(document.get("text", ""))[:UPDATE_CHUNK],
+                                 step if isinstance(step, dict) else None))
 
     def _on_update_result(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "update"):
@@ -794,7 +841,8 @@ class FleetApp:
             proc = await asyncio.create_subprocess_exec(
                 shell_path, "-i",
                 stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                start_new_session=True, env=_shell_env())
+                start_new_session=True, env=_shell_env(),
+                preexec_fn=_make_controlling_tty(slave_fd))
         except (OSError, ValueError) as exc:
             os.close(master_fd)
             os.close(slave_fd)
@@ -1399,6 +1447,50 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except Exception:
         pass
+
+
+_STEP_MARKER = "::nmesh-step::"
+
+
+def _step_name(command: list) -> str:
+    """A human name for a step, from the command about to run."""
+    if not command:
+        return "step"
+    tail = [part for part in command if not part.startswith("-")]
+    binary = os.path.basename(tail[0]) if tail else os.path.basename(command[0])
+    if binary in ("sudo", "doas") and len(tail) > 1:
+        binary = os.path.basename(tail[1])
+    verb = next((part for part in command[1:]
+                 if not part.startswith("-") and "/" not in part), "")
+    return f"{binary} {verb}".strip()
+
+
+def _take_step_marker(text: str):
+    """Split a chunk into ``(step, remaining text)``.
+
+    The wrapper announces its own steps on stdout because it is the only thing
+    that knows how many it has. Recognising them here keeps them out of the
+    output pane, where they would read as noise."""
+    if _STEP_MARKER not in text:
+        return None, text
+    step = None
+    kept = []
+    for line in text.splitlines(keepends=True):
+        marker = line.strip()
+        if marker.startswith(_STEP_MARKER):
+            body = marker[len(_STEP_MARKER):].strip()
+            if body == "done":
+                continue
+            index, _, name = body.partition(" ")
+            position, _, total = index.partition("/")
+            try:
+                step = {"index": int(position), "total": int(total or position),
+                        "name": name or "step"}
+            except ValueError:
+                step = None
+            continue
+        kept.append(line)
+    return step, "".join(kept)
 
 
 def _clean_env() -> dict:

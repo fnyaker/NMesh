@@ -35,6 +35,14 @@ MAX_LOG = 500                 # activity lines kept for the UI
 MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
 MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
+MAX_UPDATES = 64              # per-node update progress kept for the UI
+
+
+def _step_line(step: dict) -> str:
+    index, total = step.get("index") or 0, step.get("total") or 0
+    name = str(step.get("name") or "step")[:64]
+    position = f"{index}/{total}" if total else str(index)
+    return f"step {position}: {name}"
 # How much of a failed machine's own output reaches the activity log. Bounded
 # because it comes from a machine we do not control, and because a log nobody
 # can scroll is a log nobody reads.
@@ -54,6 +62,10 @@ class FleetBridge:
         self._log: deque = deque(maxlen=MAX_LOG)
         self._log_seq = 0
         self._scans: dict[str, dict] = {}          # node hex -> last scan result
+        # node hex -> where its update has got to. An update runs for minutes;
+        # the node list should say so rather than leaving a scrolling log as the
+        # only sign of life.
+        self._updates: "OrderedDict[str, dict]" = OrderedDict()
         self._shells: "OrderedDict[str, dict]" = OrderedDict()
         # rid -> what we asked, of whom, and how it ended. A remote action
         # answers asynchronously; without this the page has no way to say
@@ -111,8 +123,16 @@ class FleetBridge:
             with self._lock:
                 self._bump()
         elif isinstance(event, CommandOutput):
-            self._say("out", event.text.rstrip(), node_hex)
+            if event.step:
+                self._note_update_step(node_hex, event.step)
+                self._say("step", _step_line(event.step), node_hex)
+            if event.text.strip():
+                self._say("out", event.text.rstrip(), node_hex)
         elif isinstance(event, CommandResult):
+            if event.kind == "update":
+                self._finish_update(node_hex, event.ok,
+                                    event.detail.get("elapsed")
+                                    if isinstance(event.detail, dict) else None)
             detail = ""
             if event.kind == "provision":
                 results = event.detail.get("results") or []
@@ -218,6 +238,7 @@ class FleetBridge:
             version = self._version + state.version
             log = [entry for entry in self._log if entry["seq"] > since]
             scans = {node: dict(value) for node, value in self._scans.items()}
+            updates = {node: dict(value) for node, value in self._updates.items()}
             shells = [{"sid": r["sid"], "node": r["node"], "open": r["open"],
                        "seq": r["seq"], "status": r["status"]}
                       for r in self._shells.values()]
@@ -234,6 +255,7 @@ class FleetBridge:
             "pending_out": state.pending_out(),
             "provisioned": state.provisioned(),
             "scans": scans,
+            "updates": updates,
             "shells": shells,
             "jobs": jobs,
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
@@ -327,6 +349,33 @@ class FleetBridge:
                 record["open"] = False
             self._bump()
         return True
+
+    def _note_update_step(self, node_hex: str, step: dict) -> None:
+        """Remember where an update has got to, so the node list can show it.
+
+        An update takes minutes; without this the only sign it is alive is a
+        scrolling log, which says nothing about how far along it is."""
+        with self._lock:
+            self._updates[node_hex] = {
+                "index": int(step.get("index") or 0),
+                "total": int(step.get("total") or 0),
+                "name": str(step.get("name") or "")[:64],
+                "at": time.time(),
+                "running": True,
+            }
+            while len(self._updates) > MAX_UPDATES:
+                self._updates.pop(next(iter(self._updates)), None)
+            self._bump()
+
+    def _finish_update(self, node_hex: str, ok: bool, elapsed) -> None:
+        with self._lock:
+            entry = self._updates.get(node_hex)
+            if entry is None:
+                entry = {"index": 0, "total": 0, "name": ""}
+                self._updates[node_hex] = entry
+            entry.update({"running": False, "ok": bool(ok), "at": time.time(),
+                          "elapsed": elapsed})
+            self._bump()
 
     def provision(self, node_hex: str, targets, *, username: str,
                   password: str | None = None, key_path: str | None = None,
