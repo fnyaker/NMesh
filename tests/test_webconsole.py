@@ -1175,3 +1175,142 @@ class TestTrace:
             assert body["summary"]["rows"][0]["type"] == "FOUND_NODE"
         finally:
             console.stop(); await node.stop()
+
+
+class TestPasswordChange:
+    """Changer le mot de passe depuis la console.
+
+    La propriété qui compte : une session volée ne doit pas suffire. Sans le
+    mot de passe courant, un vol de session deviendrait une prise de contrôle
+    définitive du nœud."""
+
+    async def test_a_session_alone_is_not_enough(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": "not-the-password", "new": "a-new-password-1"})
+                assert status == 403
+                assert console._check_password(PW)      # inchangé
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_without_a_session_it_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", None,
+                    {"current": PW, "new": "a-new-password-1"})
+                assert status == 401
+                assert console._check_password(PW)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_valid_change_takes_effect(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW, "new": "a-brand-new-password"})
+                assert status == 200 and body["changed"] is True
+                assert console._check_password("a-brand-new-password")
+                assert not console._check_password(PW)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_it_survives_a_restart_of_the_console(self):
+        """Le nouveau mot de passe doit être sur disque, pas seulement en RAM."""
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW, "new": "a-brand-new-password"})
+            finally:
+                console.stop()
+            try:
+                fresh = WebConsole(node, host="127.0.0.1", port=0,
+                                   use_tls=False, state_dir=d)
+                assert fresh._check_password("a-brand-new-password")
+                assert not fresh._check_password(PW)
+            finally:
+                await node.stop()
+
+    async def test_other_sessions_are_signed_out_but_not_this_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, mine = await _login(console)
+                _, other = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", mine,
+                    {"current": PW, "new": "a-brand-new-password"})
+                assert status == 200 and body["sessions_revoked"] == 1
+                assert console._valid_token(mine)
+                assert not console._valid_token(other)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_weak_new_password_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW, "new": "short"})
+                assert status == 400 and "12" in body["error"]
+                assert console._check_password(PW)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_a_missing_new_password_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW})
+                assert status == 400
+                assert console._check_password(PW)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_guessing_the_current_password_hits_the_lockout(self):
+        """Cet endpoint ne doit pas être un moyen de deviner le mot de passe
+        plus vite que la page de login."""
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                for _ in range(_LOGIN_MAX_FAILURES):
+                    await asyncio.to_thread(
+                        _request, console, "POST", "/api/password", token,
+                        {"current": "wrong", "new": "a-brand-new-password"})
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW, "new": "a-brand-new-password"})
+                assert status == 429
+                assert console._check_password(PW)
+            finally:
+                console.stop(); await node.stop()
+
+    async def test_the_stored_file_never_holds_the_password(self):
+        with tempfile.TemporaryDirectory() as d:
+            node, console = await _make_console(state_dir=d)
+            try:
+                _, token = await _login(console)
+                await asyncio.to_thread(
+                    _request, console, "POST", "/api/password", token,
+                    {"current": PW, "new": "a-brand-new-password"})
+                with open(os.path.join(d, "console.cred")) as handle:
+                    assert "a-brand-new-password" not in handle.read()
+            finally:
+                console.stop(); await node.stop()

@@ -191,6 +191,30 @@ refuse d'exposer ne peut pas être inventé depuis le navigateur. Rien n'est
 appliqué à chaud : les changements prennent effet au redémarrage du nœud, et
 l'interface le dit.
 
+### Reprendre la main sur la console
+
+```bash
+./install.sh --reset-password        # nouveau mot de passe, affiché une fois
+```
+
+Réécrit le credential dans le répertoire d'état, le redonne au compte du nœud,
+redémarre le service, et **affiche le nouveau mot de passe une seule fois**.
+Ne touche à rien d'autre : ni l'arbre, ni l'identité, ni les certificats. Ça
+marche sur un nœud déjà installé, sans réinstaller.
+
+Le hachage est fait par le code du nœud (`scripts/nmesh_password.py`), jamais
+réimplémenté en shell : un format de credential qui divergerait entre deux
+écrivains serait un bug d'authentification silencieux. Le script lit un mot de
+passe choisi sur **stdin** (`--stdin`) plutôt qu'en argument, où tout le monde
+le lirait dans `ps`.
+
+Accès requis : le répertoire d'état, c'est-à-dire root ou le compte du nœud —
+exactement le niveau d'accès qu'une reprise en main doit demander.
+
+Depuis la console, avec le mot de passe courant :
+**Settings → Console password** (voir
+[`../WebConsole/guide`](../WebConsole/guide)).
+
 ### Réinstaller par-dessus
 
 Relancer `./install.sh` **met à jour sur place** : l'arbre est remplacé,

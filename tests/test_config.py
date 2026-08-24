@@ -310,3 +310,53 @@ class TestInstallerMerge:
         result = self.run(path, "--console-port", "70000")
         assert "70000" in result.stderr
         assert config.load(str(path))[0].get("console_port") == 8787
+
+
+class TestPasswordScript:
+    """`install.sh --reset-password` passe par scripts/nmesh_password.py."""
+
+    SCRIPT = os.path.join(ROOT, "scripts", "nmesh_password.py")
+
+    def run(self, *args, stdin=None):
+        return subprocess.run([sys.executable, self.SCRIPT, *args],
+                              input=stdin, capture_output=True, text=True,
+                              timeout=60, cwd=ROOT)
+
+    def test_it_generates_and_prints_a_password(self, tmp_path):
+        result = self.run(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+        password = result.stdout.strip()
+        from src import console_auth
+        salt, digest = console_auth.read(str(tmp_path / "console.cred"))
+        assert console_auth.check(password, salt, digest)
+
+    def test_stdout_carries_the_password_and_nothing_else(self):
+        """install.sh capture stdout : une bannière qui s'y glisserait
+        deviendrait le mot de passe."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            result = self.run(d)
+            assert len(result.stdout.strip().splitlines()) == 1
+
+    def test_a_chosen_password_comes_from_stdin_not_the_arguments(self, tmp_path):
+        """Un mot de passe en argument est lisible par tout le monde dans
+        `ps`."""
+        result = self.run(str(tmp_path), "--stdin", stdin="a-chosen-password\n")
+        assert result.returncode == 0, result.stderr
+        from src import console_auth
+        salt, digest = console_auth.read(str(tmp_path / "console.cred"))
+        assert console_auth.check("a-chosen-password", salt, digest)
+
+    def test_a_weak_password_is_refused_and_nothing_is_written(self, tmp_path):
+        result = self.run(str(tmp_path), "--stdin", stdin="short\n")
+        assert result.returncode == 1
+        assert not (tmp_path / "console.cred").exists()
+
+    def test_a_missing_state_directory_is_reported(self, tmp_path):
+        result = self.run(str(tmp_path / "nowhere"))
+        assert result.returncode == 1 and "no such state directory" in result.stderr
+
+    def test_the_written_file_is_owner_only(self, tmp_path):
+        self.run(str(tmp_path))
+        mode = stat.S_IMODE(os.stat(tmp_path / "console.cred").st_mode)
+        assert mode == 0o600
