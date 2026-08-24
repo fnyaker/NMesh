@@ -97,10 +97,29 @@ de passe) qui possède seul l'installation et l'état, en mode 700 : la clé
 d'identité n'est lisible par aucun autre compte de la machine. `--run-as root`
 ou `--run-as quelquun` pour en décider autrement.
 
-Les options de lancement vivent dans `/opt/nmesh/nmesh.conf`, écrit par
-l'installeur et éditable depuis la console (**Settings → Configuration**) — plus
-besoin d'ouvrir une unité systemd pour changer un port. Un drapeau passé
-explicitement l'emporte toujours sur le fichier.
+### Où sont les fichiers
+
+| | Installation | Configuration | État (identité, certs, sessions) |
+|---|---|---|---|
+| root | `/opt/nmesh` | `/opt/nmesh/nmesh.conf` | `/var/lib/nmesh` |
+| utilisateur | `~/.local/share/nmesh` | `~/.local/share/nmesh/nmesh.conf` | `~/.local/share/nmesh/data` |
+| depuis un checkout (`./start.sh`) | le dossier courant | `./nmesh.conf` | `./data` |
+
+Le fichier de configuration porte **toutes les options de lancement**. Il est
+écrit par l'installeur et éditable depuis la console (**Settings →
+Configuration**) — plus besoin d'ouvrir une unité systemd pour changer un port.
+Il survit aux mises à jour et aux réinstallations.
+
+```bash
+./install.sh --prefix /srv/nmesh          # déplace l'installation, donc la config avec
+NMESH_CONFIG=/etc/nmesh.conf ./start.sh   # ou nommer le fichier directement
+./start.sh --config /etc/nmesh.conf       # idem, en argument
+```
+
+Priorité : **ligne de commande > fichier > défaut**. Un drapeau passé
+explicitement l'emporte toujours, et le nœud annonce au démarrage les réglages
+du fichier qu'une option de la ligne de commande a écrasés. Détail des réglages
+et des bornes : [`Docs/Setup/guide`](Docs/Setup/guide).
 
 Le nœud sait aussi se mettre à jour depuis GitHub : console web →
 **Settings → Updates**. La vérification est manuelle, l'installation demande
