@@ -86,6 +86,11 @@ tests/
 │     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
+├── test_fleet_deploy.py                               — déploiement distant :
+│     install.sh voyage dans le payload et rien ne le réimplémente, aucun mot de
+│     passe écrit dans un script, élévation dite et non sondée, ordre des
+│     prompts (connexion puis élévation, jamais rejoué), refus d'un install
+│     système sans route vers root
 ├── test_join_ticket.py / test_qr.py                   — ticket compact et QR :
 │     aller-retour, casse et espaces indifférents, faute de frappe attrapée,
 │     octets aléatoires qui ne lèvent que TicketError, nom d'hôte refusé ;

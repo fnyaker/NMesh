@@ -60,6 +60,11 @@ _MAX_KEY_BYTES = 64 * 1024
 # Prompts OpenSSH writes to the tty. Matched case-insensitively on the tail of
 # the output so far, so a prompt split across reads is still caught.
 _PASSWORD_PROMPTS = (b"password:", b"password for", b"'s password:")
+# `sudo` and `su` also read from the controlling tty, so the same pty that
+# answers OpenSSH answers them. They are matched separately from the login
+# prompt because the secret is a different one: escalating is not logging in,
+# and typing the SSH password at a sudo prompt would burn a real attempt.
+_ELEVATE_PROMPTS = (b"[sudo] password for", b"nmesh-elevate-password:")
 _PASSPHRASE_PROMPTS = (b"enter passphrase for key", b"passphrase for key")
 _DENIED = (b"permission denied", b"authentication failed",
            b"too many authentication failures")
@@ -141,14 +146,27 @@ class SshCredentials:
     "erased from RAM")."""
 
     __slots__ = ("username", "_password", "key_path", "_key_data",
-                 "_key_passphrase")
+                 "_key_passphrase", "sudo_user", "_sudo_password", "can_sudo")
 
     def __init__(self, username: str, *, password: str | None = None,
                  key_path: str | None = None, key_data: str | None = None,
-                 key_passphrase: str | None = None) -> None:
+                 key_passphrase: str | None = None,
+                 can_sudo: bool = True, sudo_user: str | None = None,
+                 sudo_password: str | None = None) -> None:
         if not username or len(username) > 64 or any(c.isspace() for c in username):
             raise SshError("invalid username")
+        if sudo_user is not None and (
+                not sudo_user or len(sudo_user) > 64
+                or any(c.isspace() for c in sudo_user)):
+            raise SshError("invalid sudo username")
         self.username = username
+        # Whether the login account may itself run sudo, and — when it may not —
+        # the account that can. Escalation is stated by the operator rather than
+        # discovered: probing for it means failed sudo attempts in the target's
+        # auth log, and a machine that logs those is right to.
+        self.can_sudo = bool(can_sudo)
+        self.sudo_user = sudo_user or None
+        self._sudo_password = sudo_password or None
         self._password = password or None
         self.key_path = key_path or None
         # Key *material*, for a key that has no path on this machine — one
@@ -162,6 +180,23 @@ class SshCredentials:
         return self._password is not None
 
     @property
+    def has_elevation(self) -> bool:
+        """Can this run reach root at all? (Being root already is decided on
+        the target, not here.)"""
+        return self.can_sudo or self.sudo_user is not None
+
+    @property
+    def elevate_secret(self) -> str | None:
+        """The password an escalation prompt should be answered with.
+
+        Sudo for the login user asks for *its* password, which is the SSH one
+        unless the operator said otherwise; ``su`` to another account asks for
+        that account's."""
+        if self.sudo_user is not None:
+            return self._sudo_password
+        return self._sudo_password or self._password
+
+    @property
     def has_key(self) -> bool:
         return self.key_path is not None or self._key_data is not None
 
@@ -169,10 +204,13 @@ class SshCredentials:
         self._password = None
         self._key_passphrase = None
         self._key_data = None
+        self._sudo_password = None
 
     def __repr__(self) -> str:
         return (f"SshCredentials(username={self.username!r}, "
                 f"password={'<set>' if self._password else None}, "
+                f"sudo_user={self.sudo_user!r}, "
+                f"sudo_password={'<set>' if self._sudo_password else None}, "
                 f"key_path={self.key_path!r}, "
                 f"key_data={'<set>' if self._key_data else None})")
 
@@ -694,7 +732,7 @@ class KnownHosts:
 async def run(host: str, creds: SshCredentials, command: list[str], *,
               port: int = SSH_PORT, known_hosts_lines: list[str] | None = None,
               stdin_data: bytes = b"", timeout: float = EXEC_TIMEOUT,
-              on_output=None) -> tuple[int, str]:
+              request_tty: bool = False, on_output=None) -> tuple[int, str]:
     """Run ``command`` (an argv list, never a shell string) on ``host``.
 
     Returns ``(exit_status, output)``. The password — if any — is written into
@@ -703,33 +741,68 @@ async def run(host: str, creds: SshCredentials, command: list[str], *,
 
     ``stdin_data`` is piped to the remote command through a separate pipe, so a
     provisioning payload never has to share the channel that carries the
-    secret."""
+    secret.
+
+    ``request_tty`` forces a terminal on the **remote** side (``-tt``). Without
+    one, ``sudo`` and ``su`` refuse to ask for a password at all — and with one,
+    their prompt travels back to the local pty where the same machinery that
+    answers OpenSSH answers them. It is mutually exclusive with ``stdin_data``:
+    with a remote tty, stdin *is* the terminal, so piped data and a password
+    prompt would be reading the same channel."""
     if not ssh_available():
         raise SshError("no ssh client on this host")
     if not command:
         raise SshError("empty command")
+    if request_tty and stdin_data:
+        raise SshError("cannot pipe data into a command that needs a terminal")
     with KnownHosts(known_hosts_lines or []) as known, MaterialisedKey(creds) as key:
-        argv = (["ssh"] + _base_options(known.path, creds, port, key.path)
-                + [f"{creds.username}@{host}", "--"] + list(command))
-        return await _spawn_with_pty(argv, creds, stdin_data, timeout, on_output)
+        argv = ["ssh"] + _base_options(known.path, creds, port, key.path)
+        if request_tty:
+            argv += ["-tt"]
+        argv += [f"{creds.username}@{host}", "--"] + list(command)
+        return await _spawn_with_pty(argv, creds, stdin_data, timeout,
+                                     on_output, tty_stdio=request_tty)
+
+
+def _silence_echo(fd: int) -> None:
+    """Stop the tty echoing what we type back at us.
+
+    Without this, a password written into the pty comes straight back out on the
+    same terminal and lands in the collected output — which is streamed to the
+    operator's log. The secret would leak by being *typed*, which is a poor way
+    to lose one."""
+    import termios
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~termios.ECHO          # lflag
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except (termios.error, OSError):
+        pass                               # a tty that will not co-operate
 
 
 async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
                           stdin_data: bytes, timeout: float,
-                          on_output) -> tuple[int, str]:
+                          on_output, tty_stdio: bool = False) -> tuple[int, str]:
     """Spawn ssh with a controlling pty for prompts and a pipe for payload data.
 
     The pty is what makes the "secret never on disk, never in argv" property
     work: OpenSSH reads its prompts from the terminal, so the password crosses a
-    kernel tty buffer into the child and nothing else ever holds it."""
+    kernel tty buffer into the child and nothing else ever holds it.
+
+    ``tty_stdio`` puts ssh's stdin and stdout on that same pty. It is what a
+    remote terminal (``-tt``) needs: ``sudo``'s prompt then travels back over
+    the channel to ssh's stdout, and the answer has to go into ssh's stdin to be
+    forwarded on. Routing both through the pty keeps the secret in a terminal
+    from end to end instead of putting it through a pipe."""
     import pty
 
     parent_fd, child_fd = pty.openpty()
+    _silence_echo(parent_fd)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            stdin=child_fd if tty_stdio else asyncio.subprocess.PIPE,
+            stdout=child_fd if tty_stdio else asyncio.subprocess.PIPE,
             stderr=child_fd,          # prompts and diagnostics go to the tty
             start_new_session=True,   # the pty becomes the controlling terminal
             preexec_fn=_make_controlling_tty(child_fd),
@@ -741,7 +814,8 @@ async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
     os.close(child_fd)
 
     collected = bytearray()
-    prompts_answered = {"password": 0, "passphrase": 0}
+    prompts_answered = {"password": 0, "passphrase": 0, "elevate": 0,
+                        "may_elevate": 1 if tty_stdio else 0}
     tail = b""
 
     def on_tty(chunk: bytes) -> None:
@@ -778,8 +852,12 @@ async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    out_task = asyncio.create_task(pump_stdout())
-    in_task = asyncio.create_task(feed_stdin())
+    # With tty_stdio there are no pipes to pump: stdin and stdout are the pty,
+    # which the reader above already watches and the prompt answerer writes to.
+    tasks = []
+    if not tty_stdio:
+        tasks.append(asyncio.create_task(pump_stdout()))
+        tasks.append(asyncio.create_task(feed_stdin()))
     try:
         async with asyncio.timeout(timeout):
             status = await proc.wait()
@@ -789,9 +867,9 @@ async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
         collected += b"\n[nmesh] timed out\n"
     finally:
         stop_tty()
-        for task in (out_task, in_task):
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(out_task, in_task, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
         try:
             os.close(parent_fd)
         except OSError:
@@ -850,11 +928,30 @@ def _prompt_answer(tail: bytes, creds: SshCredentials,
             answered["passphrase"] += 1
             return creds._key_passphrase.encode("utf-8") + b"\n"
         return None
-    if any(marker in tail for marker in _PASSWORD_PROMPTS):
-        if creds._password and answered["password"] == 0:
-            answered["password"] += 1
-            return creds._password.encode("utf-8") + b"\n"
+    if not any(marker in tail
+               for marker in _PASSWORD_PROMPTS + _ELEVATE_PROMPTS):
         return None
+    # Which secret a password prompt wants is decided by *when* it appears, not
+    # by how it is worded: `sudo` prompts with "password for" and `su` with a
+    # bare "password:", both indistinguishable from OpenSSH's. The login prompt
+    # is the one that comes first — after it (or with key auth, where it never
+    # comes at all), a password prompt is an escalation asking for its own
+    # secret. Answering that one with the SSH password would burn a real login
+    # attempt against whatever lockout the target runs.
+    login_pending = creds._password is not None and answered["password"] == 0
+    if login_pending and not any(marker in tail for marker in _ELEVATE_PROMPTS):
+        answered["password"] += 1
+        return creds._password.encode("utf-8") + b"\n"
+    # Only a run that asked for a remote terminal can be facing sudo or su.
+    # Everywhere else a second password prompt is OpenSSH re-asking because the
+    # first answer was wrong, and replaying it just burns login attempts against
+    # whatever lockout the target runs.
+    if not answered.get("may_elevate"):
+        return None
+    secret = creds.elevate_secret
+    if secret and answered.get("elevate", 0) == 0:
+        answered["elevate"] = answered.get("elevate", 0) + 1
+        return secret.encode("utf-8") + b"\n"
     return None
 
 

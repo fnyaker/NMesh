@@ -46,16 +46,24 @@ import os
 import secrets
 import tarfile
 import time
+from collections import deque
 
 from . import fleet_ssh
 from .fleet_ssh import SshCredentials, SshError
 
 # The tree we ship. Everything a node needs to run, and nothing else — no state
 # directory, no keys, no venv, no git history.
-PAYLOAD_INCLUDE = ("src", "scripts", "start.sh", "requirements.txt",
-                   "pyproject.toml")
+# `install.sh` is not optional here: the bootstrap hands the whole install over
+# to it rather than reimplementing one, so a payload without it installs nothing.
+PAYLOAD_INCLUDE = ("src", "scripts", "start.sh", "install.sh",
+                   "requirements.txt", "pyproject.toml")
 PAYLOAD_EXCLUDE_DIRS = {"__pycache__", ".git", ".venv", "data", "tests"}
 MAX_PAYLOAD = 16 * 1024 * 1024        # refuse to push an implausible tree
+# What a failed run keeps of the target's own output. Enough to see the error a
+# package manager or a compiler printed, bounded because it comes from a machine
+# we do not control.
+_TAIL_LINES = 60
+_TAIL_LINE_CHARS = 500
 TOKEN_LEN = 32
 PROVISION_TIMEOUT = 1800.0            # dependency builds are slow on small boxes
 
@@ -89,7 +97,7 @@ def build_payload(root: str) -> bytes:
                 added.append(entry)
     # An empty tree still gzips to a valid (tiny) archive, which would push a
     # working bootstrap that installs nothing. Require the parts a node needs.
-    if not {"src", "start.sh"} <= set(added):
+    if not {"src", "start.sh", "install.sh"} <= set(added):
         raise ProvisionError(f"no NMesh tree at {root}")
     data = buffer.getvalue()
     if len(data) > MAX_PAYLOAD:
@@ -192,11 +200,8 @@ def _sh_quote(value: str) -> str:
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
-def build_bootstrap(payload: bytes, preauth: dict, *,
-                    install_dir: str | None = None,
-                    service_name: str = "nmesh",
-                    setup_only: bool = False) -> str:
-    """Render the self-extracting ``/bin/sh`` script.
+def build_bootstrap(payload: bytes, preauth: dict, *, stage: str) -> str:
+    """Phase one: the self-extracting delivery script, piped in on stdin.
 
     Plain POSIX shell — the target may have no bash. Every step prints a
     ``::step::`` marker the caller turns into progress, and any failure exits
@@ -205,16 +210,52 @@ def build_bootstrap(payload: bytes, preauth: dict, *,
     digest = hashlib.sha256(payload).hexdigest()
     preauth_encoded = base64.b64encode(
         json.dumps(preauth, separators=(",", ":")).encode("utf-8")).decode("ascii")
-    default_dir = install_dir or ""
     return _BOOTSTRAP.format(
         payload_b64=_wrap(encoded),
         preauth_b64=preauth_encoded,
         sha256=digest,
-        install_dir=_sh_quote(default_dir),
+        stage=_sh_quote(stage),
+        preauth_name=_sh_quote(PREAUTH_FILENAME),
+    )
+
+
+def build_install_phase(*, stage: str, install_dir: str | None = None,
+                        data_dir: str | None = None,
+                        service_name: str = "nmesh",
+                        setup_only: bool = False,
+                        mode: str = "system",
+                        sudo_user: str | None = None,
+                        can_sudo: bool = True) -> str:
+    """Phase two: escalate and install, run under a remote terminal.
+
+    ``mode`` is ``"system"`` (a dedicated service account under ``/opt``, what a
+    machine meant to host a node should get) or ``"user"`` (the login account's
+    own home, where root is not available or not wanted). This script installs
+    nothing itself: it calls the delivered tree's ``install.sh``, so a remote
+    deploy and a local one are the same install."""
+    if mode not in ("system", "user"):
+        raise ProvisionError("install mode must be 'system' or 'user'")
+    return _INSTALL_PHASE.format(
+        stage=_sh_quote(stage),
+        install_dir=_sh_quote(install_dir or ""),
+        data_dir=_sh_quote(data_dir or ""),
         service=_sh_quote(service_name),
         preauth_name=_sh_quote(PREAUTH_FILENAME),
         setup_only="1" if setup_only else "0",
+        mode=_sh_quote(mode),
+        sudo_user=_sh_quote(sudo_user or ""),
+        can_sudo="1" if can_sudo else "0",
     )
+
+
+def staging_name() -> str:
+    """A fresh, unguessable staging directory *name*, under the login home.
+
+    A name rather than a path because the scripts prefix it with ``$HOME``
+    themselves — quoting it here would stop the shell expanding that.
+    Unguessable so a hostile local user on the target cannot pre-create it and
+    have us unpack into somewhere they control."""
+    return f".nmesh-deploy-{secrets.token_hex(8)}"
 
 
 def _wrap(text: str, width: int = 76) -> str:
@@ -222,28 +263,17 @@ def _wrap(text: str, width: int = 76) -> str:
 
 
 _BOOTSTRAP = r"""#!/bin/sh
+# Phase one: deliver and verify. Runs as the login user, needs no privilege, and
+# leaves everything in one staging directory the second phase consumes. It is
+# piped in on stdin, so nothing here may ever want a terminal.
 set -eu
 
 say() {{ echo "::step::$1"; }}
 die() {{ echo "::error::$1" >&2; exit 1; }}
 
-INSTALL_DIR={install_dir}
-SERVICE={service}
+STAGE="$HOME"/{stage}
 PREAUTH_NAME={preauth_name}
-SETUP_ONLY={setup_only}
 WANT_SHA={sha256}
-
-# ---- 1. where do we install? ------------------------------------------------
-if [ -z "$INSTALL_DIR" ]; then
-    if [ "$(id -u)" = "0" ]; then INSTALL_DIR=/opt/nmesh; else INSTALL_DIR="$HOME/.nmesh"; fi
-fi
-say "install dir $INSTALL_DIR"
-
-SUDO=""
-if [ "$(id -u)" != "0" ]; then
-    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then SUDO="sudo -n";
-    elif command -v doas >/dev/null 2>&1; then SUDO="doas"; fi
-fi
 
 for tool in base64 tar gzip sha256sum; do
     command -v "$tool" >/dev/null 2>&1 || {{
@@ -252,122 +282,118 @@ for tool in base64 tar gzip sha256sum; do
     }}
 done
 
-# ---- 2. unpack, after verifying the payload --------------------------------
-WORK=$(mktemp -d) || die "cannot create temp dir"
-chmod 700 "$WORK"
-cleanup() {{ rm -rf "$WORK"; }}
-trap cleanup EXIT INT TERM
+rm -rf "$STAGE"
+mkdir -p "$STAGE" || die "cannot create $STAGE"
+chmod 700 "$STAGE"
 
 say "receiving payload"
-base64 -d > "$WORK/payload.tgz" <<'NMESH_PAYLOAD_EOF'
+base64 -d > "$STAGE/payload.tgz" <<'NMESH_PAYLOAD_EOF'
 {payload_b64}
 NMESH_PAYLOAD_EOF
 
 if command -v sha256sum >/dev/null 2>&1; then
-    GOT=$(sha256sum "$WORK/payload.tgz" | cut -d' ' -f1)
+    GOT=$(sha256sum "$STAGE/payload.tgz" | cut -d' ' -f1)
 else
-    GOT=$(shasum -a 256 "$WORK/payload.tgz" | cut -d' ' -f1)
+    GOT=$(shasum -a 256 "$STAGE/payload.tgz" | cut -d' ' -f1)
 fi
-[ "$GOT" = "$WANT_SHA" ] || die "payload integrity check failed"
+[ "$GOT" = "$WANT_SHA" ] || {{ rm -rf "$STAGE"; die "payload integrity check failed"; }}
 say "payload verified"
 
-mkdir -p "$INSTALL_DIR" 2>/dev/null || $SUDO mkdir -p "$INSTALL_DIR"
-if [ ! -w "$INSTALL_DIR" ]; then
-    $SUDO chown "$(id -u):$(id -g)" "$INSTALL_DIR" || die "install dir not writable"
-fi
-tar -xzf "$WORK/payload.tgz" -C "$INSTALL_DIR" || die "unpack failed"
-chmod +x "$INSTALL_DIR/start.sh" 2>/dev/null || true
+mkdir -p "$STAGE/tree"
+tar -xzf "$STAGE/payload.tgz" -C "$STAGE/tree" || die "unpack failed"
+rm -f "$STAGE/payload.tgz"
+chmod +x "$STAGE/tree/start.sh" "$STAGE/tree/install.sh" 2>/dev/null || true
+[ -x "$STAGE/tree/install.sh" ] \
+    || die "payload has no install.sh — the node that sent this is too old"
 say "unpacked"
 
-# ---- 3. pre-authorisation (0600, consumed and deleted on first start) ------
-mkdir -p "$INSTALL_DIR/data"
-chmod 700 "$INSTALL_DIR/data"
 OLD_UMASK=$(umask); umask 077
-base64 -d > "$INSTALL_DIR/data/$PREAUTH_NAME" <<'NMESH_PREAUTH_EOF'
+base64 -d > "$STAGE/$PREAUTH_NAME" <<'NMESH_PREAUTH_EOF'
 {preauth_b64}
 NMESH_PREAUTH_EOF
 umask "$OLD_UMASK"
-chmod 600 "$INSTALL_DIR/data/$PREAUTH_NAME"
+chmod 600 "$STAGE/$PREAUTH_NAME"
 say "pre-authorisation written"
+say "staged"
+"""
 
-# ---- 4. dependencies -------------------------------------------------------
-say "installing dependencies (this can take a while)"
-cd "$INSTALL_DIR"
-NMESH_SETUP_ONLY=1 ./start.sh || die "dependency setup failed"
-say "dependencies ready"
 
-[ "$SETUP_ONLY" = "1" ] && {{ say "setup-only: not installing a service"; exit 0; }}
+# Phase two runs under a *remote* terminal so `sudo` and `su` can ask for their
+# password there — the same local pty that answers OpenSSH answers them. That is
+# the whole reason this is two invocations instead of one: embedding the
+# escalation password in the script would put a secret somewhere it has never
+# been, and this project's rule is that it lives in a terminal or nowhere.
+_INSTALL_PHASE = r"""set -eu
+say() {{ echo "::step::$1"; }}
+die() {{ echo "::error::$1" >&2; exit 1; }}
 
-# ---- 5. start at boot ------------------------------------------------------
-PYTHON="$INSTALL_DIR/.venv/bin/python"
-[ -x "$PYTHON" ] || PYTHON=$(command -v python3) || die "no python"
+STAGE="$HOME"/{stage}
+PREFIX={install_dir}
+DATA={data_dir}
+SERVICE={service}
+PREAUTH_NAME={preauth_name}
+SETUP_ONLY={setup_only}
+MODE={mode}
+SUDO_USER_NAME={sudo_user}
+CAN_SUDO={can_sudo}
 
-if command -v systemctl >/dev/null 2>&1 && [ -n "$SUDO$( [ "$(id -u)" = 0 ] && echo root )" ]; then
-    say "installing systemd unit"
-    UNIT=/etc/systemd/system/$SERVICE.service
-    {{
-        echo "[Unit]"
-        echo "Description=NMesh node"
-        echo "After=network-online.target"
-        echo "Wants=network-online.target"
-        echo ""
-        echo "[Service]"
-        echo "Type=simple"
-        echo "User=$(id -un)"
-        echo "WorkingDirectory=$INSTALL_DIR"
-        echo "ExecStart=$PYTHON $INSTALL_DIR/scripts/nmesh_node.py --data $INSTALL_DIR/data"
-        echo "Restart=always"
-        echo "RestartSec=5"
-        echo "NoNewPrivileges=yes"
-        echo "PrivateTmp=yes"
-        echo ""
-        echo "[Install]"
-        echo "WantedBy=multi-user.target"
-    }} > "$WORK/unit"
-    $SUDO cp "$WORK/unit" "$UNIT"
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-    $SUDO systemctl restart "$SERVICE"
-    say "systemd service $SERVICE started"
-elif command -v rc-update >/dev/null 2>&1; then
-    say "installing OpenRC service"
-    {{
-        echo "#!/sbin/openrc-run"
-        echo "command=$PYTHON"
-        echo "command_args=\"$INSTALL_DIR/scripts/nmesh_node.py --data $INSTALL_DIR/data\""
-        echo "command_background=true"
-        echo "pidfile=/run/$SERVICE.pid"
-        echo "name=$SERVICE"
-    }} > "$WORK/rc"
-    $SUDO cp "$WORK/rc" "/etc/init.d/$SERVICE"
-    $SUDO chmod +x "/etc/init.d/$SERVICE"
-    $SUDO rc-update add "$SERVICE" default >/dev/null 2>&1 || true
-    $SUDO rc-service "$SERVICE" restart || $SUDO rc-service "$SERVICE" start
-    say "openrc service $SERVICE started"
-elif command -v launchctl >/dev/null 2>&1; then
-    say "installing launchd agent"
-    PLIST="$HOME/Library/LaunchAgents/org.nmesh.$SERVICE.plist"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    {{
-        echo '<?xml version="1.0" encoding="UTF-8"?>'
-        echo '<plist version="1.0"><dict>'
-        echo "<key>Label</key><string>org.nmesh.$SERVICE</string>"
-        echo "<key>ProgramArguments</key><array>"
-        echo "<string>$PYTHON</string>"
-        echo "<string>$INSTALL_DIR/scripts/nmesh_node.py</string>"
-        echo "<string>--data</string><string>$INSTALL_DIR/data</string>"
-        echo "</array>"
-        echo "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
-        echo '</dict></plist>'
-    }} > "$PLIST"
-    launchctl unload "$PLIST" >/dev/null 2>&1 || true
-    launchctl load "$PLIST"
-    say "launchd agent started"
-else
-    say "no known init system — starting in the background (no boot persistence)"
-    nohup "$PYTHON" "$INSTALL_DIR/scripts/nmesh_node.py" --data "$INSTALL_DIR/data" \
-        >"$INSTALL_DIR/data/node.log" 2>&1 &
+[ -d "$STAGE/tree" ] || die "staging directory is gone"
+cleanup() {{ rm -rf "$STAGE"; }}
+trap cleanup EXIT INT TERM
+
+# ---- how do we reach root? --------------------------------------------------
+# Escalation is never guessed: the operator said whether this login can sudo and
+# named another account if it cannot. Probing would mean failed sudo attempts in
+# the target's own auth log.
+ELEVATE=""
+if [ "$MODE" = "system" ] && [ "$(id -u)" != "0" ]; then
+    if [ -n "$SUDO_USER_NAME" ]; then
+        command -v su >/dev/null 2>&1 || die "no su on this machine"
+        ELEVATE="su_other"
+    elif [ "$CAN_SUDO" = "1" ]; then
+        command -v sudo >/dev/null 2>&1 || die "no sudo on this machine"
+        if sudo -n true >/dev/null 2>&1; then ELEVATE="sudo_n"; else ELEVATE="sudo_pw"; fi
+    else
+        die "a system install needs root: tick 'can sudo', name a sudo account, or install under the login user"
+    fi
 fi
+
+elevated() {{
+    case "$ELEVATE" in
+        "")        sh -c "$1";;
+        sudo_n)    sudo -n sh -c "$1";;
+        sudo_pw)   sudo sh -c "$1";;
+        su_other)  su - "$SUDO_USER_NAME" -c "$1";;
+    esac
+}}
+
+# ---- where does it go? ------------------------------------------------------
+if [ -z "$PREFIX" ]; then
+    if [ "$MODE" = "system" ]; then PREFIX=/opt/nmesh; else PREFIX="$HOME/.nmesh"; fi
+fi
+if [ -z "$DATA" ]; then
+    if [ "$MODE" = "system" ]; then DATA=/var/lib/nmesh; else DATA="$PREFIX/data"; fi
+fi
+say "install dir $PREFIX (state in $DATA)"
+
+# The pre-authorisation goes in before install.sh runs, so its lock-down hands
+# it to the node's own account with the rest of the state directory.
+elevated "mkdir -p '$DATA' && chmod 700 '$DATA' && cp '$STAGE/$PREAUTH_NAME' '$DATA/$PREAUTH_NAME' && chmod 600 '$DATA/$PREAUTH_NAME'" \
+    || die "cannot write the pre-authorisation into $DATA"
+
+# ---- hand over to install.sh ------------------------------------------------
+# Dependencies, the dedicated service account, file modes, the boot service, the
+# liboqs cache: all install.sh's job. Nothing here reimplements any of it — a
+# second, weaker installer is exactly how a remote deploy ends up less solid
+# than a local one.
+ARGS="--prefix '$PREFIX' --data '$DATA' --service '$SERVICE'"
+[ "$MODE" = "user" ] && ARGS="$ARGS --run-as '$(id -un)'"
+[ "$SETUP_ONLY" = "1" ] && ARGS="$ARGS --no-start"
+
+say "running install.sh (dependencies can take a while)"
+# Streamed, not swallowed: "dependency setup failed" with nothing behind it is a
+# dead end for whoever has to fix it.
+elevated "cd '$STAGE/tree' && ./install.sh $ARGS 2>&1" || die "install.sh failed — see the output above"
 
 say "done"
 """
@@ -381,7 +407,10 @@ async def provision_host(host: str, creds: SshCredentials, *,
                          payload: bytes, preauth: dict, port: int = 22,
                          known_hosts_lines: list[str] | None = None,
                          install_dir: str | None = None,
+                         data_dir: str | None = None,
                          setup_only: bool = False,
+                         mode: str = "system",
+                         run_as: str | None = None,
                          timeout: float = PROVISION_TIMEOUT,
                          on_progress=None) -> dict:
     """Install NMesh on one machine and report what happened.
@@ -389,9 +418,17 @@ async def provision_host(host: str, creds: SshCredentials, *,
     Returns ``{"host", "ok", "steps", "status", "error"}``. Never raises for a
     remote failure — a machine that refuses to be provisioned is a result, not
     an exception, so a batch run keeps going."""
-    script = build_bootstrap(payload, preauth, install_dir=install_dir,
-                             setup_only=setup_only)
+    stage = staging_name()
+    delivery = build_bootstrap(payload, preauth, stage=stage)
+    install = build_install_phase(
+        stage=stage, install_dir=install_dir, data_dir=data_dir,
+        setup_only=setup_only, mode=mode,
+        sudo_user=creds.sudo_user, can_sudo=creds.can_sudo)
     steps: list[str] = []
+    # The last lines the remote actually printed. Markers alone say *that*
+    # something failed; this says what — "dependency setup failed" with no
+    # output behind it leaves whoever has to fix it with nowhere to start.
+    tail: deque = deque(maxlen=_TAIL_LINES)
 
     def on_output(text: str) -> None:
         for line in text.splitlines():
@@ -404,20 +441,37 @@ async def provision_host(host: str, creds: SshCredentials, *,
                         on_progress(host, steps[-1])
                     except Exception:
                         pass
+            elif marker:
+                tail.append(marker[:_TAIL_LINE_CHARS])
 
     result = {"host": host, "ok": False, "steps": steps, "status": None,
-              "error": None, "pinned": bool(known_hosts_lines)}
+              "error": None, "pinned": bool(known_hosts_lines), "output": []}
     if not known_hosts_lines:
         # No confirmed host key to pin, so this run falls back to accept-on-first
         # use. That is a real weakening (a machine in the middle would be
         # accepted once), so it is announced rather than done quietly.
         on_output("::step::warning: no host key to pin — trusting on first use\n")
+    # Two invocations, deliberately. The payload is piped into the first, which
+    # needs no privilege and must not want a terminal; the second asks for one so
+    # `sudo`/`su` can prompt there and the local pty can answer — the escalation
+    # secret never enters a script, which is the same rule the SSH password
+    # follows.
     try:
         status, _output = await fleet_ssh.run(
             host, creds, ["/bin/sh", "-s"], port=port,
             known_hosts_lines=known_hosts_lines,
-            stdin_data=script.encode("utf-8"), timeout=timeout,
+            stdin_data=delivery.encode("utf-8"), timeout=timeout,
             on_output=on_output)
+        if status != 0 or not any(s == "staged" for s in steps):
+            result["status"] = status
+            result["output"] = list(tail)
+            failed = next((s for s in steps if s.startswith("error: ")), None)
+            result["error"] = failed or f"delivery exited with status {status}"
+            return result
+        status, _output = await fleet_ssh.run(
+            host, creds, ["/bin/sh", "-c", install], port=port,
+            known_hosts_lines=known_hosts_lines,
+            request_tty=True, timeout=timeout, on_output=on_output)
     except SshError as exc:
         result["error"] = str(exc)
         return result
@@ -426,7 +480,12 @@ async def provision_host(host: str, creds: SshCredentials, *,
         return result
     result["status"] = status
     result["ok"] = status == 0 and any(s == "done" for s in steps)
-    if not result["ok"] and result["error"] is None:
-        failed = next((s for s in steps if s.startswith("error: ")), None)
-        result["error"] = failed or f"bootstrap exited with status {status}"
+    if not result["ok"]:
+        # Only on failure: a successful run's output is noise, and it is the
+        # target machine's output — bounded before it is kept, like anything
+        # else that arrives from outside this process.
+        result["output"] = list(tail)
+        if result["error"] is None:
+            failed = next((s for s in steps if s.startswith("error: ")), None)
+            result["error"] = failed or f"bootstrap exited with status {status}"
     return result

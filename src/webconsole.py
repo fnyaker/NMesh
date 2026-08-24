@@ -1344,6 +1344,12 @@ def _make_handler(console: WebConsole):
                 key_path=data.get("key_path") or None,
                 key_id=data.get("key_id") or None,
                 key_passphrase=data.get("key_passphrase") or None,
+                # Escalation is stated, never guessed: probing for sudo means
+                # failed attempts in the target's auth log.
+                can_sudo=bool(data.get("can_sudo", True)),
+                sudo_user=data.get("sudo_user") or None,
+                sudo_password=data.get("sudo_password") or None,
+                mode="user" if data.get("mode") == "user" else "system",
                 caps=data.get("caps"),
                 join_uris=data.get("join_uris"),
                 join_code=data.get("join_code"),

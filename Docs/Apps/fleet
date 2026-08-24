@@ -234,22 +234,57 @@ L'image Docker embarque `openssh-client` : sans lui la capability `provision` se
 déclare indisponible, ce qui est correct mais inutile pour une image dont c'est
 justement le rôle.
 
-Puis, en **une seule session SSH** :
+#### Élévation : dite, jamais devinée
 
-1. un **bootstrap auto-extractible** (`/bin/sh`, POSIX pur) est poussé sur
-   l'entrée standard de `sh -s` ;
-2. il vérifie le **SHA-256** de la charge utile **avant d'écrire un seul
-   fichier** ;
-3. il déballe NMesh dans `/opt/nmesh` (root) ou `~/.nmesh` ;
-4. il écrit la **pré-autorisation** en 0600 ;
-5. il lance `start.sh` en mode setup, qui sait déjà installer les dépendances sur
-   chaque distribution supportée ;
-6. il installe un service de démarrage (systemd, OpenRC, launchd, sinon un
-   lancement en arrière-plan **sans persistance**, annoncé comme tel) et démarre.
+L'interface demande explicitement :
+
+- l'utilisateur de connexion, et **mot de passe, clé, ou les deux** ;
+- une case **« cet utilisateur peut faire `sudo` »** ;
+- si elle est décochée, **un compte qui le peut** et son mot de passe ;
+- **où va NMesh** : *système* (`/opt/nmesh`, compte de service dédié —
+  recommandé) ou *utilisateur* (le home du compte de connexion, sans root).
+
+Rien n'est sondé : tester si un compte peut `sudo` laisse des échecs `sudo` dans
+le journal d'authentification de la cible, et une machine qui les journalise a
+raison de le faire. Un install *système* sans moyen d'atteindre root est refusé
+**avant** d'ouvrir une session, pas après que l'opérateur ait tout tapé.
+
+Un install *utilisateur* fait tourner le nœud sous le compte de connexion : tout
+ce que ce compte lance peut alors lire sa clé d'identité. C'est le compromis à
+prendre quand root n'est pas disponible, et l'interface le dit.
+
+#### Deux sessions SSH, pour une raison précise
+
+1. **Livraison** — un **bootstrap auto-extractible** (`/bin/sh`, POSIX pur) est
+   poussé sur l'entrée standard de `sh -s`. Il ne demande aucun privilège, donc
+   il ne peut pas vouloir de terminal. Il vérifie le **SHA-256** de la charge
+   utile **avant d'écrire un seul fichier**, déballe dans un répertoire de
+   transit **au nom imprévisible** sous le home du compte de connexion (pour
+   qu'un utilisateur local hostile ne puisse pas le pré-créer), et y écrit la
+   **pré-autorisation** en 0600.
+2. **Installation** — une seconde session **avec terminal distant** (`ssh -tt`).
+   C'est ce qui permet à `sudo` et `su` de demander leur mot de passe *là*, sur
+   un terminal, et au pty local d'y répondre — la même mécanique qui répond à
+   OpenSSH. Autrement dit : **le secret d'élévation n'entre jamais dans un
+   script**, exactement comme le mot de passe SSH. C'est toute la raison d'être
+   de la découpe en deux.
+
+Puis cette seconde phase **appelle `./install.sh`** de l'arbre livré, et
+n'installe rien elle-même. Dépendances, compte de service dédié, modes de
+fichiers, service de démarrage, cache liboqs, fichier de configuration : tout
+vient d'`install.sh`. **Un second installeur, plus faible, est exactement la
+façon dont un déploiement distant finit moins solide qu'un local** — c'était le
+cas, ça ne l'est plus.
+
+Conséquence : `install.sh` voyage dans la charge utile, et un arbre sans lui est
+refusé à la construction du payload.
 
 Chaque étape émet un marqueur `::step::` que la console transforme en progression
-dans l'onglet **Activity**. Une machine qui refuse d'être provisionnée est un
-**résultat**, pas une exception : le lot continue.
+dans l'onglet **Activity**. En cas d'échec, les **dernières lignes que la machine
+a réellement écrites** (bornées) partent aussi dans le journal : « dependency
+setup failed » sans rien derrière ne mène nulle part pour qui doit réparer. Une
+machine qui refuse d'être provisionnée est un **résultat**, pas une exception :
+le lot continue.
 
 ### Phase 3 — la reprise de confiance
 
