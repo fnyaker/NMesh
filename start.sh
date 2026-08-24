@@ -5,7 +5,7 @@
 # Detects the OS, installs system build tools, creates a venv, installs Python
 # dependencies, verifies everything, then launches the node with the web console.
 #
-#   ./start.sh                                  # node + console, UDP + STUN auto
+#   ./start.sh                                  # node + console (options: nmesh.conf)
 #   ./start.sh --no-udp                         # disable UDP hole punching
 #   ./start.sh --connector-port 8790            # also expose the data connector
 #   ./start.sh --spool /mnt/usb/mesh            # add a store-and-forward link
@@ -17,6 +17,7 @@
 #   NMESH_SETUP_ONLY=1   install and verify everything, then stop (no node)
 #   NMESH_VENV=path      virtualenv location (default .venv)
 #   NMESH_DATA=path      node state directory (default ./data)
+#   NMESH_CONFIG=path    node options file (default nmesh.conf next to this script)
 #   OQS_INSTALL_PATH     where liboqs is installed (default ~/_oqs)
 #
 # Everything above the "MAIN" banner is definitions only: the test-suite sources
@@ -740,17 +741,18 @@ fi
 DATA="${NMESH_DATA:-./data}"
 mkdir -p "$DATA"
 
-# Default flags: enable UDP hole punching + STUN unless --no-udp is passed
+# Defaults are NOT injected here any more. This script used to prepend
+# `--udp 9001 --stun` on every launch, and a command-line flag beats the
+# configuration file by design — so `udp`, `no_udp` and `stun` could be set in
+# nmesh.conf and were then silently ignored, the file describing a node that
+# behaved differently. The defaults now live in src/config.py, in one place,
+# where they can actually be changed.
 EXTRA_ARGS=("$@")
-HAS_UDP=false
-for arg in "$@"; do
-    case "$arg" in --udp|--no-udp) HAS_UDP=true;; esac
-done
 
-DEFAULT_UDP_PORT="${NMESH_UDP_PORT:-9001}"
-
-if [ "$HAS_UDP" = false ]; then
-    EXTRA_ARGS=(--udp "$DEFAULT_UDP_PORT" --stun "${EXTRA_ARGS[@]}")
+# NMESH_UDP_PORT stays honoured: asking for a port through the environment is an
+# explicit request, like passing the flag.
+if [ -n "${NMESH_UDP_PORT:-}" ]; then
+    EXTRA_ARGS=(--udp "$NMESH_UDP_PORT" "${EXTRA_ARGS[@]}")
 fi
 
 echo ""

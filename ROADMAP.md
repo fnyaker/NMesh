@@ -291,6 +291,8 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   écarté, jamais fatal. Une valeur refusée par la console n'écrit rien.
 - `launch` et `data` affichés mais non éditables depuis le web ; le mot de passe
   console n'est pas un réglage.
+- Les défauts vivent uniquement dans `src/config.py` : `start.sh` n'injecte plus
+  `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
 ### Long terme
