@@ -40,6 +40,7 @@ from urllib.parse import parse_qs
 
 from . import updater
 from . import config as node_config
+from .node import MESSAGE_NAMES
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 
@@ -452,6 +453,14 @@ def _parse_list_query(path: str, *, nodes: bool = False) -> tuple[str | None, st
     return scope, query.casefold(), limit, offset
 
 
+def _number(raw, default: int = 0) -> int:
+    """A JSON scalar as an int, without trusting it to be one."""
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def _matches_list_query(item: dict, query: str) -> bool:
     if not query:
         return True
@@ -638,6 +647,29 @@ def _make_handler(console: WebConsole):
                     self._json(401, {"error": "unauthorized"})
                     return
                 self._json(200, console._config_snapshot())
+                return
+            if path == "/api/trace":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                trace = console._node.trace
+                payload = {"status": trace.status(), "summary": trace.summary()}
+                from urllib.parse import parse_qs
+                query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                if query.get("events", ["0"])[0] == "1":
+                    payload["events"] = trace.events(limit=400)
+                self._json(200, payload)
+                return
+            if path == "/api/trace/export":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                import json as _json_mod
+                # Served as an opaque download: a trace is routing metadata and
+                # has no business being rendered inline by the browser.
+                self._send_binary(
+                    _json_mod.dumps(console._node.trace.export(), indent=1).encode(),
+                    "nmesh-trace.json")
                 return
             if path == "/api/rootcert":
                 if not self._authed():
@@ -968,6 +1000,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/config":
                 self._handle_config_save(_parse_json(body))
                 return
+            if path == "/api/trace":
+                self._handle_trace(_parse_json(body))
+                return
             if path == "/api/app/publish":
                 self._handle_app_publish(body)
                 return
@@ -982,6 +1017,32 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_trace(self, data) -> None:
+            """Start or stop the protocol trace.
+
+            Bounded on the way in as well as inside: an operator asking for a
+            week-long trace of a million packets gets the largest one the node
+            is willing to hold, not the one they typed."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data or {}
+            action = data.get("action")
+            trace = console._node.trace
+            if action == "start":
+                self._json(200, trace.start(seconds=_number(data.get("seconds")),
+                                            events=_number(data.get("events")),
+                                            names=MESSAGE_NAMES))
+                return
+            if action == "stop":
+                self._json(200, trace.stop())
+                return
+            if action == "clear":
+                trace.clear()
+                self._json(200, trace.status())
+                return
+            self._json(400, {"error": "action must be start, stop or clear"})
 
         def _handle_config_save(self, data) -> None:
             """Write the node's configuration file.

@@ -1212,6 +1212,22 @@ INDEX_HTML = """<!doctype html>
         <pre id="update-notes" class="notes" hidden></pre>
       </article>
       <article class="surface">
+        <div class="surface-head"><div><p class="eyebrow">Diagnostics</p><h2>Protocol trace</h2></div><span id="trace-pill" class="state-pill"></span></div>
+        <p class="subtle">Records what this node actually sends and receives, by message type — for questions the
+          throughput graph cannot answer, like "why are two idle nodes talking at all?".
+          <strong>No payload is ever recorded</strong>, only routing metadata: type, size, TTL and node ids.
+          It lives in memory, is bounded, and stops on its own.</p>
+        <div class="action-row wrap">
+          <button id="trace-start" class="primary">Start recording</button>
+          <button id="trace-stop" class="secondary">Stop</button>
+          <input id="trace-seconds" class="compact" type="number" min="1" max="3600" value="120" aria-label="Seconds">
+          <button id="trace-export" class="secondary">Download trace</button>
+          <button id="trace-clear" class="secondary">Clear</button>
+        </div>
+        <p id="trace-status" class="message"></p>
+        <div id="trace-summary" class="transport-grid"></div>
+      </article>
+      <article class="surface">
         <div class="surface-head"><div><p class="eyebrow">Startup options</p><h2>Configuration</h2></div><span id="config-pill" class="state-pill"></span></div>
         <p class="subtle">Everything the node takes as a launch option, kept in a file next to the install.
           Changes are written to that file and take effect when the node restarts — nothing here changes a running node.
@@ -1352,7 +1368,7 @@ function selectTab(name, updateHash = true) {
   if (name === "connectivity") refreshConnectivity(); if (name === "apps") refreshApps();
   // Read on entry rather than on a timer: the file can be edited by hand, and a
   // stale form would offer to save values the file no longer holds.
-  if (name === "settings") loadConfig();
+  if (name === "settings") { loadConfig(); loadTrace(); }
 }
 $("tabs").addEventListener("click", (event) => { const button=event.target.closest("[data-tab]");if(button)selectTab(button.dataset.tab); });
 $("tabs").addEventListener("keydown", (event) => {
@@ -1652,6 +1668,57 @@ async function saveConfig(){
 }
 $("config-save").addEventListener("click",saveConfig);
 $("config-reload").addEventListener("click",loadConfig);
+
+// ── protocol trace ──────────────────────────────────────────────────────────
+// Polled only while it is recording: a diagnostic that keeps asking questions
+// when nobody is looking is just more traffic to explain.
+let TRACE_POLL=null;
+
+function renderTrace(data){
+  const status=data.status||{},summary=data.summary||{};
+  const pill=$("trace-pill");
+  pill.textContent=status.running?"recording":(status.events?"stopped":"off");
+  pill.className="state-pill"+(status.running?" up":"");
+  const bits=summary.bits_per_second||0;
+  const rate=bits>=1000?(bits/1000).toFixed(1)+" kbit/s":bits.toFixed(0)+" bit/s";
+  setMessage("trace-status",status.events
+    ? status.events+" packets over "+summary.window_seconds+"s — "+rate
+      +(status.dropped?" ("+status.dropped+" dropped, buffer full)":"")
+      +(status.running?" · "+Math.round(status.seconds_left)+"s left":"")
+    : (status.running?"Recording — nothing seen yet.":"Not recording."));
+  // Same card idiom as the transport list next to it — the console has no
+  // tables, and a diagnostic panel is not the place to introduce one.
+  const rows=summary.rows||[];
+  $("trace-summary").innerHTML=rows.map((row)=>'<div class="transport-card"><strong>'
+    +esc(row.direction==="in"?"← ":"→ ")+esc(row.type)+"</strong><span>"
+    +row.packets+" packet(s)</span><span>"+fmtBytes(row.bytes)+"</span><span>"
+    +fmtBytes(row.bytes_per_second)+"/s</span></div>").join("");
+}
+
+async function loadTrace(){
+  try{
+    const data=await(await api("/api/trace")).json();
+    renderTrace(data);
+    if(!data.status||!data.status.running)stopTracePolling();
+  }catch(_){stopTracePolling();}
+}
+function startTracePolling(){if(!TRACE_POLL)TRACE_POLL=setInterval(loadTrace,2000);}
+function stopTracePolling(){if(TRACE_POLL){clearInterval(TRACE_POLL);TRACE_POLL=null;}}
+
+async function traceAction(action,extra){
+  try{
+    const response=await api("/api/trace","POST",Object.assign({action},extra||{}));
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok){setMessage("trace-status",data.error||"Trace command failed",true);return;}
+    await loadTrace();
+    if(action==="start")startTracePolling();else stopTracePolling();
+  }catch(_){setMessage("trace-status","Trace command failed",true);}
+}
+$("trace-start").addEventListener("click",()=>traceAction("start",
+  {seconds:Number($("trace-seconds").value)||120}));
+$("trace-stop").addEventListener("click",()=>traceAction("stop"));
+$("trace-clear").addEventListener("click",()=>traceAction("clear"));
+$("trace-export").addEventListener("click",()=>{window.location="/api/trace/export";});
 
 function renderSettings(state) {
   renderVersion(state);
