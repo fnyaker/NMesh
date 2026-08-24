@@ -41,6 +41,8 @@ s'en sert pour autoriser de l'exécution à distance).
 | `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
 | `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), pont console (`fleet_web.py`). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
+| `join_ticket.py` | **Ticket de join compact** : adresse + port + graine du code + expiration + checksum, en base32 non paddé (34 caractères en IPv4). Décodage défensif : borné, tout validé, jamais autre chose qu'une `TicketError`. |
+| `qr.py` | Encodeur QR (ISO/IEC 18004) en stdlib pure : versions 1–10, niveaux M/L, modes alphanumérique et octet, Reed-Solomon et choix de masque. Vérifié contre un encodeur indépendant et un vrai décodeur. |
 | `console_auth.py` | Credential de la console : hachage scrypt + sel, écriture atomique en 0600, comparaison en temps constant, bornes sur le mot de passe. Partagé par la console et par le reset de l'installeur — une seule implémentation. |
 | `trace.py` | **Trace protocolaire** : anneau borné d'événements paquet (type, taille, TTL, ids) + totaux par type de message. Jamais de payload. Éteinte par défaut, bornée en mémoire *et* en durée, s'arrête seule. Voir [`../WebConsole/guide`](../WebConsole/guide). |
 | `config.py` | Fichier de configuration du nœud (`nmesh.conf`) : analyse bornée et défensive, validation par réglage, rendu commenté, écriture atomique en 0600. Priorité ligne de commande > fichier > défaut. Voir [`../Setup/guide`](../Setup/guide). |

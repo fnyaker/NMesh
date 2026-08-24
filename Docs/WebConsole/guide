@@ -56,7 +56,8 @@ Options :
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — liste paginée des pairs actifs / nœuds connus |
 | POST    | `/api/nodes/forget` | `{id}` — oublie un nœud connu (retire l'entrée de la table de routage, coupe une session live éventuelle) |
 | POST    | `/api/invite`    | génère un code d'invitation                    |
-| POST    | `/api/join`      | `{uri, code}` — rejoint un réseau              |
+| POST    | `/api/join`      | `{uri, code}` ou `{ticket}` — rejoint un réseau |
+| POST    | `/api/ticket`    | `{ttl}` → ticket compact + SVG du QR ; **409** si le nœud n'a pas d'adresse publique confirmée |
 | GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
 | POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
@@ -202,6 +203,41 @@ non éditables ici** : le premier appartient à qui détient le fichier, le seco
 
 Détail du format, des bornes et de la priorité ligne de commande > fichier >
 défaut : [`../Setup/guide`](../Setup/guide).
+
+## Join rapide : ticket et QR code (Connectivité)
+
+Le join complet demande de déplacer deux choses à la main : une adresse et un
+code. Un **ticket** compacte les deux en une seule chaîne de **34 caractères**
+pour de l'IPv4 — dictable, tapable sur un téléphone, scannable depuis un écran.
+
+```
+CTFQA4IHEMUHTNEHTMEQGWR7AHDJXX3KLQ
+```
+
+**Le ticket est le secret.** Qui peut le lire peut rejoindre le réseau jusqu'à
+son expiration ou son unique usage — exactement aussi sensible que le code
+d'invitation qu'il contient. Photographier un QR code sur un écran ne demande
+aucune ingéniosité, et l'interface le dit à côté de chaque ticket émis.
+
+- **Uniquement depuis un nœud joignable publiquement.** L'émission exige une
+  adresse `world` **confirmée** (une connexion entrante est réellement arrivée
+  dessus), pas une adresse qu'on croit publique. Sinon : 409, avec l'explication
+  — un ticket qui pointe vers une adresse injoignable est pire que pas de
+  ticket, il échoue après avoir été partagé.
+- **Durée choisie par l'opérateur** (1 minute à 6 heures), bornée côté nœud :
+  une valeur absurde est ramenée dans les clous, jamais obéie.
+- **Usage unique**, comme tout code d'invitation : un ticket photographié par
+  deux personnes n'en fait pas entrer deux.
+- Le QR est rendu par le nœud, en SVG, à partir du ticket qu'il vient d'émettre.
+  Il n'existe **pas** d'endpoint qui transforme un texte quelconque en QR code.
+
+### Scanner avec la caméra
+
+Le bouton *Scan with camera* utilise le `BarcodeDetector` du navigateur —
+aucune bibliothèque, comme partout ailleurs dans ce projet. Là où il manque
+(Firefox aujourd'hui), la page le dit clairement et le collage reste
+disponible. La caméra exige la permission de l'utilisateur **et** une page en
+contexte sécurisé (HTTPS ou localhost).
 
 ## Changer le mot de passe (Settings → Console password)
 

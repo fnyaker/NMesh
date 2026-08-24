@@ -45,6 +45,20 @@ class InviteManager:
         self._codes[code] = (time(), window)
         return code
 
+    def generate_seeded_code(self, ttl: float | None = None) -> tuple[str, bytes]:
+        """Émet un code dérivé de 8 octets aléatoires, et rend les deux.
+
+        Exactement le même code que ``generate_code`` du point de vue du
+        protocole — usage unique, même lockout, jamais transmis en clair. La
+        seule différence est qu'un ticket de join peut le porter en 8 octets au
+        lieu de ses caractères, ce qui décide de la taille du QR code."""
+        from .join_ticket import SEED_BYTES, code_from_seed
+        window = _CODE_TTL if ttl is None else max(1.0, min(float(ttl), _MAX_TTL))
+        seed = secrets.token_bytes(SEED_BYTES)
+        code = code_from_seed(seed)
+        self._codes[code] = (time(), window)
+        return code, seed
+
     def generate_challenge(self) -> bytes:
         return os.urandom(32)
 

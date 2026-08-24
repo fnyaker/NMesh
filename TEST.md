@@ -86,6 +86,12 @@ tests/
 │     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
 │     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
+├── test_join_ticket.py / test_qr.py                   — ticket compact et QR :
+│     aller-retour, casse et espaces indifférents, faute de frappe attrapée,
+│     octets aléatoires qui ne lèvent que TicketError, nom d'hôte refusé ;
+│     pour le QR, structure et bornes, plus — si l'outillage optionnel est
+│     installé — égalité module par module avec un encodeur indépendant et
+│     décodage réel du SVG rendu
 ├── test_console_auth.py                               — credential console :
 │     mot de passe jamais stocké, sel par credential, fichier corrompu ou
 │     algorithme inconnu refusés, entrée démesurée rejetée avant le hachage,
@@ -117,6 +123,7 @@ tests/
       dont test_idle_chatter.py : deux nœuds joints et inactifs restent
       silencieux (la boucle FIND_NODE/FOUND_NODE qui saturait le lien), et la
       découverte fonctionne toujours quand il y a vraiment quelque chose à
-      trouver
+      trouver ; et test_join_ticket.py : join réel avec le seul ticket, usage
+      unique, ticket expiré, code forgé, porte « adresse publique confirmée »
 ```
 </content>

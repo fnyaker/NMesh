@@ -295,6 +295,16 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### Join rapide par ticket + QR (`src/join_ticket.py`, `src/qr.py`) — fait
+- Une chaîne de 34 caractères (IPv4) portant adresse et code à usage unique ;
+  durée choisie par l'opérateur, bornée à 6 h.
+- Émission réservée aux nœuds ayant une adresse `world` **confirmée**.
+- QR rendu en SVG par le nœud, encodeur écrit en stdlib pure (pas de nouvelle
+  dépendance), vérifié contre un encodeur indépendant et un vrai décodeur.
+- Scan par la caméra via le `BarcodeDetector` du navigateur, sans bibliothèque ;
+  repli sur le collage là où il n'existe pas.
+- Doc : `Docs/WebConsole/guide`, `Docs/Architecture/security.md`.
+
 ### Mot de passe de la console (`src/console_auth.py`) — fait
 - Changement depuis la console (`POST /api/password`) : le mot de passe
   **courant est exigé** même avec une session valide — sinon un vol de session

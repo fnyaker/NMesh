@@ -41,6 +41,8 @@ from urllib.parse import parse_qs
 from . import updater
 from . import config as node_config
 from . import console_auth
+from . import join_ticket
+from . import qr
 from .node import MESSAGE_NAMES
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
@@ -793,9 +795,21 @@ def _make_handler(console: WebConsole):
                 ok = console._call(_wrap(console._node.console_add_root, cert_hex))
                 self._json(200 if ok else 400, {"ok": bool(ok)})
                 return
+            if path == "/api/ticket":
+                self._handle_ticket(_parse_json(body))
+                return
             if path == "/api/join":
-                data = _parse_json(body)
-                if not data or "uri" not in data or "code" not in data:
+                data = _parse_json(body) or {}
+                # A ticket is the same join, with the address and the code
+                # travelling together instead of separately.
+                if data.get("ticket"):
+                    try:
+                        parsed = join_ticket.decode(data["ticket"])
+                    except join_ticket.TicketError as exc:
+                        self._json(400, {"error": str(exc)[:200]})
+                        return
+                    data = {"uri": parsed["uri"], "code": parsed["code"]}
+                if "uri" not in data or "code" not in data:
                     self._json(400, {"error": "uri and code required"})
                     return
                 try:
@@ -1036,6 +1050,35 @@ def _make_handler(console: WebConsole):
                 self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_ticket(self, data) -> None:
+            """Mint a compact join ticket, with its QR code.
+
+            The QR is rendered here, from the string we just made — there is no
+            endpoint that turns arbitrary text into a QR code, because nothing
+            would need one."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            ttl = join_ticket.clamp_ttl((data or {}).get("ttl"))
+            try:
+                ticket = console._call(_wrap(console._node.issue_join_ticket, ttl))
+            except ValueError as exc:
+                # Not reachable from the open internet: say why, rather than
+                # handing over a ticket that cannot work.
+                self._json(409, {"error": str(exc)[:300]})
+                return
+            except Exception:
+                self._json(500, {"error": "could not issue a ticket"})
+                return
+            # The code travels inside the ticket; repeating it in the response
+            # would only put the same secret in one more place.
+            ticket.pop("code", None)
+            try:
+                ticket["qr_svg"] = qr.svg_for(ticket["ticket"])
+            except qr.QRError:
+                ticket["qr_svg"] = ""
+            self._json(200, ticket)
 
         def _handle_password(self, data) -> None:
             """Change the console password.

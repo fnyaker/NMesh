@@ -69,6 +69,32 @@ Rejoindre = prouver la connaissance d'un code **sans l'envoyer en clair**.
   5 minutes par défaut. Usage unique et lockout s'appliquent inchangés ; seule
   la fenêtre bouge, et c'est un choix explicite de l'appelant.
 
+## Ticket de join (`join_ticket.py`)
+
+Même invitation, transportée autrement : une seule chaîne courte qui porte
+l'adresse **et** le code, pour un QR code ou une dictée.
+
+- `generate_seeded_code(ttl)` émet un code ordinaire — usage unique, même
+  lockout, jamais transmis en clair — mais dérivé de 8 octets aléatoires, pour
+  qu'un ticket le porte en 8 octets plutôt qu'en caractères. Les deux côtés
+  dérivent la chaîne du code de la même façon (`code_from_seed`).
+- **Le ticket est le secret.** Il vaut exactement le code qu'il contient : qui
+  le lit peut rejoindre jusqu'à expiration ou usage unique. 64 bits d'entropie
+  derrière un code à usage unique et un lockout à 3 échecs.
+- **Émis seulement depuis une adresse `world` confirmée** (`public_endpoints`) :
+  pas « on croit que cette adresse est publique », mais « une connexion entrante
+  authentifiée est arrivée dessus ». Un ticket vers une adresse injoignable
+  échouerait après avoir été partagé.
+- L'expiration inscrite dans le ticket est un **indice** pour le lecteur, jamais
+  une autorité : seul le nœud émetteur décide si le code marche encore.
+- Le checksum (2 octets) attrape une faute de frappe avant de composer quoi que
+  ce soit. Ce n'est **pas** de l'intégrité contre un attaquant — il le
+  recalculerait.
+- Un ticket porte une **adresse numérique**, jamais un nom d'hôte : un nom
+  demanderait un résolveur côté scanner et pourrait pointer ailleurs plus tard.
+- Décodage traité comme une entrée hostile : longueur bornée, chaque champ
+  validé avant usage, et rien d'autre qu'une `TicketError` ne peut sortir.
+
 ## Handshake par-saut (établissement d'une session entre 2 pairs directs)
 
 Flux (voir `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
