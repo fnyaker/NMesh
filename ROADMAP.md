@@ -295,6 +295,20 @@ Priorités directrices : voir `CLAUDE.md`. Ordre non-négociable :
   `--udp/--stun`, qui annulaient les réglages correspondants du fichier.
 - Doc : `Docs/Setup/guide`, `Docs/WebConsole/guide`.
 
+### Déploiement distant aligné sur `install.sh` — fait
+- Le bootstrap ne pose plus rien lui-même : il livre l'arbre et appelle son
+  `install.sh`. Compte de service dédié, modes 700, service pointant sur
+  `start.sh`, cache liboqs, fichier de config — tout vient de là.
+- Deux sessions SSH : livraison (pipée, sans privilège) puis installation **avec
+  terminal distant**, pour que `sudo`/`su` demandent leur mot de passe sur un
+  terminal et que le pty local y réponde. Le secret d'élévation n'entre jamais
+  dans un script.
+- L'interface demande : compte de connexion, « peut sudo » (case), sinon un
+  compte qui le peut, et où va NMesh (système `/opt` recommandé, ou utilisateur).
+- En cas d'échec, les dernières lignes réellement écrites par la machine partent
+  dans le journal.
+- Doc : `Docs/Apps/fleet`, `Docs/Architecture/gotchas.md`.
+
 ### Join rapide par ticket + QR (`src/join_ticket.py`, `src/qr.py`) — fait
 - Une chaîne de 34 caractères (IPv4) portant adresse et code à usage unique ;
   durée choisie par l'opérateur, bornée à 6 h.

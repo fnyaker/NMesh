@@ -974,6 +974,10 @@ class FleetApp:
                                 key_path: str | None = None,
                                 key_data: str | None = None,
                                 key_passphrase: str | None = None,
+                                can_sudo: bool = True,
+                                sudo_user: str | None = None,
+                                sudo_password: str | None = None,
+                                mode: str = "system",
                                 caps: list[str] | None = None,
                                 join_uris: list[str] | None = None,
                                 join_code: str | None = None) -> str:
@@ -992,7 +996,15 @@ class FleetApp:
             "caps": clean_caps(caps) if caps else ["status", "update"],
             "join_uris": [str(u)[:256] for u in (join_uris or [])][:8],
             "join_code": str(join_code or "")[:64],
+            "mode": "user" if str(mode) == "user" else "system",
+            "can_sudo": bool(can_sudo),
         }
+        if sudo_user:
+            document["sudo_user"] = str(sudo_user)[:64]
+        if sudo_password:
+            # Same channel and same reasoning as the SSH password below: E2E
+            # encrypted, to a node already trusted with `provision`, wiped there.
+            document["sudo_password"] = str(sudo_password)
         if password:
             document["password"] = str(password)
         if key_path:
@@ -1031,9 +1043,18 @@ class FleetApp:
                 password=document.get("password"),
                 key_path=document.get("key_path"),
                 key_data=_key_material(document.get("key_data")),
-                key_passphrase=document.get("key_passphrase"))
+                key_passphrase=document.get("key_passphrase"),
+                can_sudo=bool(document.get("can_sudo", True)),
+                sudo_user=document.get("sudo_user"),
+                sudo_password=document.get("sudo_password"))
         except fleet_ssh.SshError as exc:
             self._fail(src, rid, str(exc))
+            return
+        mode = "user" if document.get("mode") == "user" else "system"
+        if mode == "system" and not creds.has_elevation:
+            self._fail(src, rid, "a system install needs root on the target: "
+                                 "the login account must be able to sudo, or "
+                                 "another account must be named")
             return
         try:
             payload = fleet_provision.build_payload(self._repo_root)
@@ -1050,7 +1071,7 @@ class FleetApp:
             for target in targets:
                 results.append(await self._provision_one(
                     src, rid, target, creds, payload, caps, join_uris,
-                    str(document.get("join_code") or "")))
+                    str(document.get("join_code") or ""), mode))
         finally:
             creds.wipe()          # the secret does not outlive the run
         self._reply(src, PROVISION_RESULT, {"rid": rid, "results": results},
@@ -1058,7 +1079,8 @@ class FleetApp:
 
     async def _provision_one(self, src: NodeID, rid: str, target: dict,
                              creds, payload: bytes, caps: list[str],
-                             join_uris: list[str], join_code: str) -> dict:
+                             join_uris: list[str], join_code: str,
+                             mode: str = "system") -> dict:
         """Provision one machine, reporting each step as it happens.
 
         The pre-authorisation is minted *here*, on the node doing the SSH, but
@@ -1089,7 +1111,7 @@ class FleetApp:
             host, creds, payload=payload, preauth=preauth,
             port=int(target.get("port") or 22),
             known_hosts_lines=target.get("known_hosts"),
-            on_progress=on_progress)
+            mode=mode, on_progress=on_progress)
         result["token_digest"] = fleet_provision.token_digest(token)
         result["label"] = target.get("label", host)
         # Installed but with nowhere to join is a half-success worth naming: the
@@ -1183,17 +1205,34 @@ class FleetApp:
                               key_path: str | None = None,
                               key_data: str | None = None,
                               key_passphrase: str | None = None,
+                              can_sudo: bool = True,
+                              sudo_user: str | None = None,
+                              sudo_password: str | None = None,
+                              mode: str = "system",
                               caps: list[str] | None = None,
                               join_uris: list[str] | None = None,
                               join_code: str | None = None,
                               on_progress=None) -> list[dict]:
-        """Provision machines on *our* LAN, from this node, for ourselves."""
+        """Provision machines on *our* LAN, from this node, for ourselves.
+
+        ``mode`` decides where the node lands: ``"system"`` gives it the
+        dedicated service account under ``/opt`` that a host machine should
+        have, ``"user"`` installs under the login account for a machine where
+        root is not available."""
         if self._repo_root is None:
             raise fleet_provision.ProvisionError("no NMesh tree to push")
         targets = _clean_targets(targets)
         creds = fleet_ssh.SshCredentials(username, password=password,
                                          key_path=key_path, key_data=key_data,
-                                         key_passphrase=key_passphrase)
+                                         key_passphrase=key_passphrase,
+                                         can_sudo=can_sudo,
+                                         sudo_user=sudo_user,
+                                         sudo_password=sudo_password)
+        if mode == "system" and not creds.has_elevation:
+            raise fleet_provision.ProvisionError(
+                "a system install needs root on the target: either the login "
+                "account can sudo, or name one that can — or install under the "
+                "login account instead")
         payload = fleet_provision.build_payload(self._repo_root)
         caps = clean_caps(caps) or ["status", "update"]
         results = []
@@ -1212,7 +1251,7 @@ class FleetApp:
                     target["ip"], creds, payload=payload, preauth=preauth,
                     port=int(target.get("port") or 22),
                     known_hosts_lines=target.get("known_hosts"),
-                    on_progress=on_progress)
+                    mode=mode, on_progress=on_progress)
                 result["token_digest"] = digest
                 result["joins"] = bool(uris and code)
                 results.append(result)

@@ -331,6 +331,21 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   **Un défaut n'a le droit d'exister qu'à un seul endroit** — ici
   `src/config.py`. Corollaire : le nœud annonce au démarrage les réglages du
   fichier écrasés par la ligne de commande.
+- `sudo` et `su` refusent de demander un mot de passe sans terminal. Un `ssh`
+  sans `-tt` ne donne pas de tty au shell distant : « sudo: a terminal is
+  required ». Et avec `-tt`, le prompt distant revient sur **stdout** de ssh et
+  la réponse doit partir dans son **stdin** — pas sur le pty local, qui ne sert
+  qu'aux prompts d'OpenSSH lui-même. D'où, pour la phase qui escalade : stdin,
+  stdout et stderr tous branchés sur le pty, **écho du tty coupé** (sinon le mot
+  de passe tapé ressort dans la sortie collectée, qui part dans le journal de
+  l'opérateur), et aucune donnée pipée — avec un terminal distant, stdin *est*
+  le terminal.
+- Un prompt de mot de passe ne se distingue pas au libellé : `sudo` écrit
+  « password for », `su` un « password: » nu, OpenSSH les deux. Ce qui les
+  sépare est le **moment** : le premier est la connexion, les suivants une
+  élévation — et seuls les runs qui ont demandé un terminal distant peuvent en
+  faire face. Ailleurs, un second prompt est OpenSSH qui redemande, et y
+  répondre brûle une tentative contre le verrouillage de la cible.
 - `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
   de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
   sort en erreur tuait tout le script après que l'arbre eut été copié. C'est

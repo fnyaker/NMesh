@@ -2722,6 +2722,21 @@ FLEET_HTML = """<!doctype html>
         An uploaded key is kept in this node's <b>encrypted</b> app store and written to a
         private temporary file only while a command runs — useful in a container, where
         there is no <code>~/.ssh</code> to read.</p>
+      <div class="row wrap gap">
+        <label class="fld chk"><input id="ssh-sudo" type="checkbox" checked> This user can run <code>sudo</code></label>
+        <label class="fld">Otherwise, an account that can<input id="sudo-user" autocomplete="off" placeholder="(sudo account)" disabled></label>
+        <label class="fld">Its password<input id="sudo-pass" type="password" autocomplete="new-password" placeholder="(optional)" disabled></label>
+      </div>
+      <div class="fld">Where NMesh goes on each machine</div>
+      <div class="row wrap gap">
+        <label class="fld chk"><input type="radio" name="dep-mode" value="system" checked> <b>System</b> — <code>/opt/nmesh</code>, its own service account (recommended)</label>
+        <label class="fld chk"><input type="radio" name="dep-mode" value="user"> <b>User</b> — the login account's home, no root needed</label>
+      </div>
+      <p class="muted small">A system install is what a machine hosting a node should get: a dedicated
+        account owning the install and the state in mode 700, a boot service, and the same
+        <code>install.sh</code> a local install runs — the remote deploy installs nothing of its own.
+        It needs root on the target. Choose the user install where root is not available; the node then
+        runs as the login account and everything that account runs can read its identity key.</p>
       <div class="fld">Capabilities the new machines grant you</div>
       <div id="deploy-caps" class="caps"></div>
       <div class="row gap">
@@ -2877,6 +2892,8 @@ a.btn{text-decoration:none;border:1px solid var(--line);border-radius:9px;
   padding:14px 16px;border-bottom:1px solid var(--line)}
 .sheet-body{padding:16px;display:grid;gap:12px}
 @media (max-width:640px){.stats{grid-template-columns:1fr}.tabbody{padding:12px}}
+.fld.chk{flex-direction:row;align-items:center;gap:.45rem;font-weight:400}
+.fld.chk input{width:auto;margin:0}
 """
 
 FLEET_JS = r"""
@@ -3185,6 +3202,13 @@ function updateCount(){
   $("deploy-count").textContent=n;
   $("deploy-btn").disabled=n===0;
 }
+function syncSudoFields(){
+  const own=$("ssh-sudo").checked;
+  $("sudo-user").disabled=own; $("sudo-pass").disabled=own;
+  if(own){$("sudo-user").value="";$("sudo-pass").value="";}
+}
+$("ssh-sudo").addEventListener("change",syncSudoFields);
+
 async function deploy(){
   const targets=Object.keys(PICKED).map(i=>{
     const h=HOSTS[i];
@@ -3197,10 +3221,20 @@ async function deploy(){
     password:$("ssh-pass").value||null,
     key_id:$("ssh-key").value||null,
     key_passphrase:$("ssh-kpass").value||null,
+    can_sudo:$("ssh-sudo").checked,
+    sudo_user:$("ssh-sudo").checked?null:($("sudo-user").value.trim()||null),
+    sudo_password:$("ssh-sudo").checked?null:($("sudo-pass").value||null),
+    mode:(document.querySelector('input[name="dep-mode"]:checked')||{}).value||"system",
     caps:capsOf($("deploy-caps"))};
   if(!body.username){$("deploy-state").textContent="An SSH user is required.";return;}
   if(!body.password&&!body.key_id){
     $("deploy-state").textContent="Give a password, a key, or both.";return;}
+  // Said here as well as on the node: a system install with no way to reach
+  // root fails after the operator has already typed everything.
+  if(body.mode==="system"&&!body.can_sudo&&!body.sudo_user){
+    $("deploy-state").textContent=
+      "A system install needs root: tick sudo, name a sudo account, or install under the user.";
+    return;}
   $("deploy-btn").disabled=true;
   $("deploy-state").textContent="Deploying… watch the Activity tab.";
   try{

@@ -26,9 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 # The fleet app pushes this tree to machines it provisions, and the bootstrap it
-# sends runs `start.sh` there to install dependencies (see Docs/Apps/fleet).
-# Without these the payload cannot be built at all — "no NMesh tree at /app".
-COPY start.sh pyproject.toml ./
+# sends runs `install.sh` there (which in turn runs `start.sh`) — see
+# Docs/Apps/fleet. Without these the payload cannot be built at all: "no NMesh
+# tree at /app".
+COPY start.sh install.sh pyproject.toml ./
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

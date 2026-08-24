@@ -35,6 +35,10 @@ MAX_LOG = 500                 # activity lines kept for the UI
 MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
 MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
+# How much of a failed machine's own output reaches the activity log. Bounded
+# because it comes from a machine we do not control, and because a log nobody
+# can scroll is a log nobody reads.
+_FAIL_LOG_LINES = 20
 MAX_JOBS = 64                 # tracked operations (bounded, oldest evicted)
 _CALL_TIMEOUT = 30.0
 
@@ -327,7 +331,10 @@ class FleetBridge:
     def provision(self, node_hex: str, targets, *, username: str,
                   password: str | None = None, key_path: str | None = None,
                   key_id: str | None = None,
-                  key_passphrase: str | None = None, caps=None,
+                  key_passphrase: str | None = None,
+                  can_sudo: bool = True, sudo_user: str | None = None,
+                  sudo_password: str | None = None, mode: str = "system",
+                  caps=None,
                   join_uris=None, join_code: str | None = None) -> str:
         """Kick off a provisioning run on a managed node.
 
@@ -338,7 +345,9 @@ class FleetBridge:
         return self._job(self._call(self._app.request_provision(
             self._node(node_hex), targets=targets, username=username,
             password=password, key_path=path, key_data=material,
-            key_passphrase=key_passphrase, caps=clean_caps(caps) if caps else None,
+            key_passphrase=key_passphrase, can_sudo=can_sudo,
+            sudo_user=sudo_user, sudo_password=sudo_password, mode=mode,
+            caps=clean_caps(caps) if caps else None,
             join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
     # -- local (this node's own LAN) --------------------------------------
@@ -362,7 +371,10 @@ class FleetBridge:
     def provision_local(self, targets, *, username: str,
                         password: str | None = None, key_path: str | None = None,
                         key_id: str | None = None,
-                        key_passphrase: str | None = None, caps=None,
+                        key_passphrase: str | None = None,
+                        can_sudo: bool = True, sudo_user: str | None = None,
+                        sudo_password: str | None = None,
+                        mode: str = "system", caps=None,
                         join_uris=None, join_code: str | None = None) -> list:
         def on_progress(host: str, step: str) -> None:
             self._say("out", f"{host}: {step}", self.me)
@@ -370,10 +382,21 @@ class FleetBridge:
         path, material = self._resolve_key(key_id, key_path)
         results = self._call(self._app.provision_local(
             targets, username=username, password=password, key_path=path,
-            key_data=material, key_passphrase=key_passphrase, caps=caps,
+            key_data=material, key_passphrase=key_passphrase,
+            can_sudo=can_sudo, sudo_user=sudo_user, sudo_password=sudo_password,
+            mode=mode, caps=caps,
             join_uris=join_uris, join_code=join_code,
             on_progress=on_progress), timeout=3600.0)
         ok = sum(1 for entry in results if entry.get("ok"))
+        for entry in results:
+            if entry.get("ok"):
+                continue
+            # The target's own words about why it failed. Without these the log
+            # says only that something went wrong, which is where this whole
+            # feature used to leave the operator.
+            self._say("err", f"{entry.get('host')}: {entry.get('error')}", self.me)
+            for line in (entry.get("output") or [])[-_FAIL_LOG_LINES:]:
+                self._say("out", f"{entry.get('host')}: {line}", self.me)
         self._say("ok" if ok == len(results) else "err",
                   f"provisioned {ok}/{len(results)} machine(s)", self.me)
         return results

@@ -100,12 +100,15 @@ class TestSshOptions:
 
 class TestPromptAnswering:
     def _answer(self, tail, creds, answered=None):
-        return fleet_ssh._prompt_answer(tail, creds,
-                                        answered or {"password": 0, "passphrase": 0})
+        return fleet_ssh._prompt_answer(
+            tail, creds,
+            answered or {"password": 0, "passphrase": 0, "elevate": 0,
+                         "may_elevate": 0})
 
     def test_password_prompt_is_answered_once(self):
         creds = SshCredentials("root", password="pw")
-        answered = {"password": 0, "passphrase": 0}
+        answered = {"password": 0, "passphrase": 0, "elevate": 0,
+                    "may_elevate": 0}
         assert self._answer(b"root@host's password:", creds, answered) == b"pw\n"
         # A re-prompt means the secret was wrong; replaying it just burns
         # attempts against a lockout.
@@ -113,7 +116,8 @@ class TestPromptAnswering:
 
     def test_passphrase_prompt_is_answered_once(self):
         creds = SshCredentials("root", key_path="/k", key_passphrase="pp")
-        answered = {"password": 0, "passphrase": 0}
+        answered = {"password": 0, "passphrase": 0, "elevate": 0,
+                    "may_elevate": 0}
         assert self._answer(b"enter passphrase for key '/k':", creds,
                             answered) == b"pp\n"
         assert self._answer(b"enter passphrase for key '/k':", creds,
@@ -519,8 +523,15 @@ class TestBootstrap:
         document, _token = fleet_provision.make_preauth(
             b"\x01" * 20, b"\x02" * 32, capabilities=["status"],
             join_uris=[], join_code=None)
+        stage = kwargs.pop("stage", "stagedir")
+        if kwargs:
+            # Phase two carries the installation options; phase one only ever
+            # delivers. Return them joined so a test can assert about either.
+            return (fleet_provision.build_bootstrap(b"payload-bytes", document,
+                                                    stage=stage)
+                    + fleet_provision.build_install_phase(stage=stage, **kwargs))
         return fleet_provision.build_bootstrap(b"payload-bytes", document,
-                                               **kwargs)
+                                               stage=stage)
 
     def test_script_verifies_before_writing(self):
         script = self._script()
@@ -530,7 +541,12 @@ class TestBootstrap:
         assert script.index("integrity check failed") < script.index("tar -xzf")
 
     def test_script_fails_fast(self):
-        assert self._script().startswith("#!/bin/sh\nset -eu")
+        """Les deux phases s'arrêtent à la première erreur plutôt que de laisser
+        un nœud à moitié installé."""
+        assert self._script().startswith("#!/bin/sh")
+        assert "\nset -eu\n" in self._script()
+        assert fleet_provision.build_install_phase(
+            stage="stagedir").startswith("set -eu")
 
     def test_preauth_is_written_private(self):
         script = self._script()
@@ -552,7 +568,8 @@ class TestBootstrap:
             b"the-real-payload",
             fleet_provision.make_preauth(b"\x01" * 20, b"\x02" * 32,
                                          capabilities=["status"], join_uris=[],
-                                         join_code=None)[0])
+                                         join_code=None)[0],
+            stage="stagedir")
         body = script.split("<<'NMESH_PAYLOAD_EOF'\n", 1)[1]
         body = body.split("\nNMESH_PAYLOAD_EOF", 1)[0]
         assert base64.b64decode(body.replace("\n", "")) == b"the-real-payload"
@@ -579,9 +596,13 @@ class TestProvisionRun:
         assert result["error"] == "authentication failed"
 
     async def test_steps_are_reported(self, monkeypatch):
+        # Deux invocations : la livraison, puis l'installation sous terminal.
         async def fake_run(host, creds, command, **kwargs):
             on_output = kwargs.get("on_output")
-            on_output("::step::unpacked\n::step::done\n")
+            if kwargs.get("request_tty"):
+                on_output("::step::done\n")
+            else:
+                on_output("::step::unpacked\n::step::staged\n")
             return 0, ""
 
         monkeypatch.setattr(fleet_ssh, "run", fake_run)
@@ -595,7 +616,7 @@ class TestProvisionRun:
             known_hosts_lines=["10.0.0.1 ssh-ed25519 AAAA"],
             on_progress=lambda h, s: seen.append(s))
         assert result["ok"] is True
-        assert seen == ["unpacked", "done"]
+        assert seen == ["unpacked", "staged", "done"]
 
     async def test_missing_done_marker_is_a_failure(self, monkeypatch):
         """Exit status 0 without reaching the end is still not a success."""
