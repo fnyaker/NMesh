@@ -201,6 +201,75 @@ class TestOnDisk:
             assert help_text in text, name
 
 
+class TestUnreadableFile:
+    """Un fichier présent mais illisible n'est pas la même chose qu'un fichier
+    absent : le second est normal, le premier est une installation cassée qui
+    ferait tourner le nœud sur des réglages que personne n'a choisis."""
+
+    def test_it_is_reported_not_silently_empty(self, tmp_path, monkeypatch):
+        path = tmp_path / "nmesh.conf"
+        path.write_text("fleet = true\n")
+
+        def refuse(*args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("builtins.open", refuse)
+        values, problems = config.load(str(path))
+        assert values == {}
+        assert problems and "Permission denied" in problems[0]
+
+    def test_an_absent_file_stays_silent(self, tmp_path):
+        values, problems = config.load(str(tmp_path / "nope.conf"))
+        assert values == {} and problems == []
+
+
+class TestLauncherPrecedence:
+    """`scripts/nmesh_node.py` applique ligne de commande > fichier > défaut, et
+    dit lesquels ont été écrasés — un fichier ignoré en silence est exactement
+    la panne qu'on veut rendre visible."""
+
+    def settle(self, path, argv):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "nmesh_node_module", os.path.join(ROOT, "scripts", "nmesh_node.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import argparse
+
+        class Args:
+            pass
+
+        args = Args()
+        for name in config.SETTINGS:
+            setattr(args, name, None)
+        args.launch = []
+        args.config = str(path)
+        for name, value in argv.items():
+            setattr(args, name, value)
+        return module._settle(args), args
+
+    def test_the_file_is_applied_when_no_flag_is_given(self, tmp_path):
+        path = tmp_path / "nmesh.conf"
+        path.write_text("fleet = true\nconsole_host = 0.0.0.0\n")
+        (_path, problems, overridden), args = self.settle(path, {})
+        assert problems == [] and overridden == []
+        assert args.fleet is True and args.console_host == "0.0.0.0"
+
+    def test_a_flag_wins_and_says_so(self, tmp_path):
+        path = tmp_path / "nmesh.conf"
+        path.write_text("console_port = 9000\n")
+        (_path, _problems, overridden), args = self.settle(
+            path, {"console_port": 9443})
+        assert args.console_port == 9443
+        assert overridden == ["console_port"]
+
+    def test_defaults_fill_what_neither_says(self, tmp_path):
+        path = tmp_path / "nmesh.conf"
+        path.write_text("fleet = true\n")
+        (_path, _problems, _overridden), args = self.settle(path, {})
+        assert args.console_port == 8787 and args.listen == "0.0.0.0:9000"
+
+
 class TestInstallerMerge:
     """`install.sh` passe ses options au fichier via scripts/nmesh_config.py."""
 

@@ -160,6 +160,24 @@ Le mot de passe de la console n'y figure pas non plus : ce serait un
 identifiant en clair dans un fichier fait pour être lu et édité. Il reste dans
 `$NMESH_CONSOLE_PASSWORD`, ou généré et affiché une fois.
 
+Deux choses que le lanceur ne fait **plus** :
+
+- `start.sh` n'injecte plus `--udp 9001 --stun` à chaque lancement. Comme un
+  drapeau bat le fichier par construction, `udp`, `no_udp` et `stun` pouvaient
+  être réglés dans `nmesh.conf` et étaient ignorés en silence — le fichier
+  décrivait un nœud qui se comportait autrement. Ces défauts vivent maintenant
+  dans `src/config.py`, à un seul endroit. `NMESH_UDP_PORT` reste honoré :
+  demander un port par l'environnement est une demande explicite.
+- Conséquence assumée : `stun` vaut **`true`** par défaut, parce que c'est ce
+  que tout nœud lancé par `start.sh` a toujours fait. Lancer
+  `scripts/nmesh_node.py` directement active donc STUN aussi désormais, là où il
+  était éteint — un seul défaut, visible et modifiable, au lieu de deux qui se
+  contredisaient.
+
+Le nœud affiche au démarrage les problèmes du fichier **et** les réglages
+écrasés par la ligne de commande (`Config ⚠`). Un fichier ignoré en silence est
+exactement la panne qu'on veut voir.
+
 Lecture défensive, comme toute entrée du processus : taille et nombre de lignes
 bornés, valeurs validées une par une, clés inconnues signalées et ignorées.
 **Un fichier incompréhensible est signalé puis écarté, jamais fatal** — un nœud

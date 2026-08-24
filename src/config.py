@@ -111,7 +111,10 @@ SETTINGS = {
                         "UDP port used for NAT hole punching"),
     "no_udp":          (_as_bool, False, True,
                         "Disable the UDP listener entirely"),
-    "stun":            (_as_bool, False, True,
+    # On by default because that is what every node started by start.sh has
+    # always done (it used to prepend `--stun` itself). Keeping the behaviour
+    # and making it visible beats a file that quietly disagrees with reality.
+    "stun":            (_as_bool, True, True,
                         "Discover the public UDP address through STUN"),
     "punch_keepalive": (_as_bool, False, True,
                         "Keep the NAT mapping open so the node stays reachable"),

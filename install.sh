@@ -549,6 +549,30 @@ ok "Dependencies ready"
 # directory: the built library stays, its build tree has no reason to.
 rm -rf "$PREFIX/_oqs_build" 2>/dev/null || true
 
+# ── configuration file ───────────────────────────────────────────────────────
+# Node options belong in a file the operator (and the console) can edit, not
+# baked into a service unit. Anything the file cannot express stays on the
+# command line, so nothing is silently dropped. The merge is done by the node's
+# own code rather than reimplemented here in shell: one parser, one validator.
+#
+# Written *before* the lock-down below, deliberately: this file is created 0600
+# as whoever runs the installer, so a lock-down that has already happened would
+# leave it owned by root and unreadable to the node's own account — the node
+# then starts on its defaults and every setting here is silently ignored.
+CONFIG_FILE="$PREFIX/${NMESH_CONFIG_NAME:-nmesh.conf}"
+LEFTOVER=()
+if [ -x "$PREFIX/.venv/bin/python" ]; then
+    info "Writing $CONFIG_FILE"
+    while IFS= read -r leftover; do
+        [ -n "$leftover" ] && LEFTOVER+=("$leftover")
+    done < <( cd "$PREFIX" && ./.venv/bin/python scripts/nmesh_config.py \
+              "$CONFIG_FILE" "${NODE_ARGS[@]+"${NODE_ARGS[@]}"}" || true )
+    [ -f "$CONFIG_FILE" ] && ok "Options stored in $CONFIG_FILE" \
+        || warn "Could not write $CONFIG_FILE — options stay on the command line"
+else
+    LEFTOVER=("${NODE_ARGS[@]+"${NODE_ARGS[@]}"}")
+fi
+
 # ── lock it down ─────────────────────────────────────────────────────────────
 # Only now: the venv and liboqs were just built as the invoking user, and they
 # live inside the install directory. Both trees go to the node's account, mode
@@ -569,25 +593,6 @@ if [ -n "$RUN_USER" ]; then
     ok "Install and state belong to $RUN_USER alone (mode 700)"
 else
     warn "The node runs as $(id -un): every process of that user can read its identity key"
-fi
-
-# ── configuration file ───────────────────────────────────────────────────────
-# Node options belong in a file the operator (and the console) can edit, not
-# baked into a service unit. Anything the file cannot express stays on the
-# command line, so nothing is silently dropped. The merge is done by the node's
-# own code rather than reimplemented here in shell: one parser, one validator.
-CONFIG_FILE="$PREFIX/${NMESH_CONFIG_NAME:-nmesh.conf}"
-LEFTOVER=()
-if [ -x "$PREFIX/.venv/bin/python" ]; then
-    info "Writing $CONFIG_FILE"
-    while IFS= read -r leftover; do
-        [ -n "$leftover" ] && LEFTOVER+=("$leftover")
-    done < <( cd "$PREFIX" && ./.venv/bin/python scripts/nmesh_config.py \
-              "$CONFIG_FILE" "${NODE_ARGS[@]+"${NODE_ARGS[@]}"}" || true )
-    [ -f "$CONFIG_FILE" ] && ok "Options stored in $CONFIG_FILE" \
-        || warn "Could not write $CONFIG_FILE — options stay on the command line"
-else
-    LEFTOVER=("${NODE_ARGS[@]+"${NODE_ARGS[@]}"}")
 fi
 
 # ── service ──────────────────────────────────────────────────────────────────

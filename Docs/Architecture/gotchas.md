@@ -287,6 +287,19 @@ La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
   décidée **fonctionnellement** — le wrapper charge la bibliothèque candidate et
   ML-KEM-768 / ML-DSA-65 répondent — jamais sur un nom de fichier ou un numéro
   de version, et la vérification est refaite à destination après la copie.
+- `install.sh` écrit `nmesh.conf` **avant** le verrouillage des droits, pas
+  après. Le fichier est créé en 0600 par qui lance l'installeur : écrit après le
+  `chown -R` vers le compte du nœud, il restait `root:root` et le nœud ne
+  pouvait pas le lire du tout. Symptôme : un nœud qui repart sur **toutes** ses
+  valeurs par défaut alors que le fichier dit autre chose (console sur
+  127.0.0.1, app fleet absente). `tests/test_install_script.py` verrouille
+  l'ordre.
+- Un défaut injecté par le lanceur bat le fichier de config, donc l'annule.
+  `start.sh` préfixait `--udp 9001 --stun` à chaque lancement : `udp`, `no_udp`
+  et `stun` étaient réglables dans `nmesh.conf` et silencieusement sans effet.
+  **Un défaut n'a le droit d'exister qu'à un seul endroit** — ici
+  `src/config.py`. Corollaire : le nœud annonce au démarrage les réglages du
+  fichier écrasés par la ligne de commande.
 - `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
   de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
   sort en erreur tuait tout le script après que l'arbre eut été copié. C'est

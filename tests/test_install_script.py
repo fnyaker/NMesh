@@ -270,6 +270,24 @@ class TestTreeCopy:
         assert "REFUSED" in result.stdout
 
 
+class TestOrdering:
+    """Le fichier de config est écrit en 0600 par qui lance l'installeur. Écrit
+    *après* le verrouillage, il restait root:root et le compte du nœud ne
+    pouvait pas le lire du tout — le nœud repartait sur ses valeurs par défaut
+    et chaque réglage du fichier était ignoré en silence."""
+
+    def test_the_config_is_written_before_the_lock_down(self):
+        text = INSTALL.read_text()
+        config_write = text.index('CONFIG_FILE="$PREFIX/')
+        lock = text.index('lock_down "$PREFIX"')
+        assert config_write < lock
+
+    def test_the_lock_down_covers_the_install_directory(self):
+        """C'est ce `chown -R` qui rattrape le fichier de config."""
+        text = INSTALL.read_text()
+        assert 'chown -R "$OWNER"' in text
+
+
 class TestHelp:
     def test_help_mentions_the_essentials(self):
         result = subprocess.run([BASH, str(INSTALL), "--help"],

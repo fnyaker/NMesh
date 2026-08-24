@@ -529,3 +529,25 @@ def test_an_unwritable_cache_does_not_break_the_install(tmp_path):
     finally:
         blocked.chmod(0o700)
     assert out == "SURVIVED"
+
+
+# ── les défauts ne sont plus injectés par le lanceur ─────────────────────────
+# start.sh préfixait `--udp 9001 --stun` à chaque lancement. Comme un drapeau de
+# ligne de commande bat le fichier par construction, `udp`, `no_udp` et `stun`
+# pouvaient être réglés dans nmesh.conf et étaient ignorés en silence : le
+# fichier décrivait un nœud qui se comportait autrement.
+
+def test_the_launcher_injects_no_default_flags():
+    main = START.read_text().split("MAIN", 1)[1]
+    code = [line for line in main.splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+    assert not [line for line in code if "--stun" in line]
+    assert not [line for line in code if "DEFAULT_UDP_PORT" in line]
+
+
+def test_an_explicit_udp_port_from_the_environment_is_still_honoured():
+    """Demander un port par l'environnement reste une demande explicite, au même
+    titre que passer le drapeau."""
+    source = START.read_text()
+    assert 'NMESH_UDP_PORT' in source
+    assert '--udp "$NMESH_UDP_PORT"' in source

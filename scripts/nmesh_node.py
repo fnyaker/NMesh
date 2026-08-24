@@ -137,7 +137,7 @@ async def _adopt_operator(node, host, preauth, path) -> None:
             pass
 
 
-def _settle(args) -> str:
+def _settle(args) -> tuple:
     """Fill in everything the command line did not say, from the config file.
 
     Every option below defaults to ``None`` in the parser precisely so "absent"
@@ -145,22 +145,25 @@ def _settle(args) -> str:
     command line > file > built-in default, so a unit or a script that passes
     flags keeps behaving exactly as it did before the file existed.
 
-    Returns the path of the file it read, for the console to edit."""
+    Returns ``(path, problems, overridden)`` for the banner: a configuration
+    that is silently ignored is how a node ends up running settings nobody
+    chose, so both the problems and the flags that won are said out loud."""
     path = config.path_for(ROOT, args.config)
     values, problems = config.load(path)
-    for problem in problems:
-        # A configuration we cannot understand is reported and skipped: a node
-        # that refuses to boot is worse than one running on its defaults.
-        print(f"  Config        : {problem}")
     settled = config.defaults()
     settled.update(values)
+    overridden = []
     for name in config.SETTINGS:
         given = getattr(args, name, None)
         if given is not None and given != []:
+            # `data` comes from start.sh on every launch; saying it is overriding
+            # the file every time would be noise, not information.
+            if name in values and name != "data":
+                overridden.append(name)
             settled[name] = given
     for name, value in settled.items():
         setattr(args, name, value)
-    return path
+    return path, problems, overridden
 
 
 async def main() -> None:
@@ -206,7 +209,7 @@ async def main() -> None:
                     help="console password (default: $NMESH_CONSOLE_PASSWORD, "
                          "else a strong one is generated and printed once)")
     args = ap.parse_args()
-    config_path = _settle(args)
+    config_path, config_problems, config_overridden = _settle(args)
 
     if args.data:
         os.makedirs(args.data, exist_ok=True)
@@ -298,6 +301,14 @@ async def main() -> None:
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{listen_addr}")
     print(f"  Config        : {config_path}")
+    # An ignored configuration file is how a node ends up running settings
+    # nobody chose. Say it here, where the operator is already looking, not in a
+    # line scrolled past twenty seconds earlier.
+    for problem in config_problems:
+        print(f"  Config ⚠      : {problem}")
+    if config_overridden:
+        print(f"  Config ⚠      : overridden on the command line: "
+              f"{', '.join(config_overridden)}")
     if pub_ip:
         print(f"  Public IP     : {pub_ip}   (self-discovered)")
     for uri in node.advertised_uris():
