@@ -141,3 +141,23 @@ def test_the_console_still_forbids_inline_anything():
     policy = _SECURITY_HEADERS["Content-Security-Policy"]
     assert "default-src 'self'" in policy
     assert "unsafe-inline" not in policy
+
+
+def test_every_page_offers_a_skip_link_and_a_focus_ring():
+    """Deux garanties clavier qu'on perd sans s'en rendre compte : sauter le
+    rail pour atteindre le contenu, et voir où est le focus."""
+    for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
+        assert 'class="skip"' in html
+        assert 'id="main"' in html
+    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS):
+        assert ":focus-visible{outline:2px solid var(--ring)" in css
+
+
+def test_the_three_pages_share_one_design_system():
+    """Le contrat du paquet : une seule source pour les jetons, les composants
+    et le runtime. Si une page cessait de la charger, elle divergerait en
+    silence."""
+    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS):
+        assert css.startswith(webassets.ui.CSS)
+    for script in (webassets.APP_JS, webassets.CHAT_JS, webassets.FLEET_JS):
+        assert script.startswith(webassets.ui.JS)
