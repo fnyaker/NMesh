@@ -82,6 +82,8 @@ Options :
 | GET     | `/api/fleet/keys`  | clés SSH disponibles (disque + importées) — **métadonnées seulement** |
 | POST    | `/api/fleet/keys` / `keys-remove` | importe / retire une clé privée (tiroir chiffré) |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
+| POST    | `/api/fleet/caps-set` | `{node, caps}` → droits d'un opérateur **sur cette node**. Seul endroit où un droit s'ajoute : décidé par un humain ici |
+| POST    | `/api/fleet/caps-request` / `caps-drop` | `{node, caps}` → demander (la cible doit approuver) / rendre (immédiat) un droit sur une node gérée |
 | POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée. `scan` prend `targets` (sous-réseaux **et/ou** machines précises : `10.0.0.5`, `nas.lan:2222`) ; vide → **tous** les réseaux attachés |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |
 | POST    | `/api/fleet/provision` | déploiement SSH : `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |

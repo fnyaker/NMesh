@@ -84,6 +84,55 @@ noyer la notification.
 `Revoke` coupe la relation dans les deux sens, prévient l'autre bout, et ferme
 les shells ouverts par ce pair.
 
+## Changer les droits d'une relation existante
+
+Les droits ne sont pas figés à l'enrôlement. Deux mouvements, **volontairement
+asymétriques** : rendre un droit ne concerne que celui qui le détient, en
+accorder un engage la machine qui le subit.
+
+### Vue « Who controls this node »
+
+Onglet **Who controls this node** sur `/fleet` : la liste des nœuds qui peuvent
+agir sur cette machine, avec leurs capabilities cochables. **Apply rights**
+applique la case cochée immédiatement — ajout compris. C'est légitime et c'est
+le seul endroit où un droit s'ajoute : la personne qui coche est sur la machine
+qui en porte la conséquence, et détient déjà l'autorité que le droit délègue.
+Décocher tout revient à `Cut off` (révocation complète).
+
+L'opérateur est prévenu par un `ENROL_GRANT` qui restate le grant, pour que sa
+propre liste cesse d'afficher des boutons qui seraient désormais refusés — et en
+affiche un qui ne le serait plus. Ce grant n'est accepté chez lui que pour
+l'entrée du nœud qui l'a signé.
+
+### Demander un droit en plus (bouton **Rights**, côté opérateur)
+
+Cocher une capability qu'on n'a pas envoie un `ENROL_REQUEST` portant
+**l'ensemble complet** souhaité. Côté cible c'est exactement la notification
+d'enrôlement : parquée pour un humain, jamais auto-acceptée, et l'approbation ne
+peut que **restreindre** ce qui a été demandé. La bande affiche « More rights
+requested » avec ce que le demandeur détient déjà, pour que le delta soit
+lisible.
+
+Il n'existe **aucun chemin** qui élargit un grant sans un humain sur la machine
+cible. C'est la propriété qui empêche l'échelle : sinon la capability la plus
+faible suffirait à atteindre les autres.
+
+### Se délester d'un droit (`ENROL_NARROW`, 0x06)
+
+Décocher une capability qu'on détient la retire **tout de suite**, sans demander
+la permission de personne : personne n'a besoin d'approuver qu'on en détienne
+*moins*. L'effet est d'abord local (un nœud qui ne nous entend jamais nous laisse
+quand même avec moins), puis annoncé par un `ENROL_NARROW` signé.
+
+Côté cible, ce frame est le seul accepté sans humain, et il l'est parce qu'il est
+**intersecté** avec ce que l'émetteur détient déjà : au pire, un frame forgé ou
+rejoué retire des droits à son propre émetteur. Rendre le dernier droit termine
+la relation. Perdre `shell` ferme les shells déjà ouverts — sinon révoquer
+n'empêcherait que le *prochain*.
+
+Un nom de capability inconnu n'est **pas** lu comme « aucun droit » : la
+demande est refusée. Sans quoi une faute de frappe deviendrait une coupure.
+
 ## `update` et `shell` : deux routes vers root, volontairement différentes
 
 Il n'y a **pas** de capability « root ». Il y a deux capabilities dont les
@@ -483,6 +532,7 @@ flux shell     : type(1) ‖ sid(16) ‖ octets bruts
 | `ENROL_REQUEST` | 0x01 | opérateur → node | ✅ `fleet.enrol` |
 | `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | ✅ `fleet.grant` |
 | `PREAUTH_CLAIM` | 0x05 | nouvelle node → opérateur | ✅ `fleet.preauth` |
+| `ENROL_NARROW` | 0x06 | opérateur → node (rendre un droit) | ✅ `fleet.narrow` |
 | `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | requête seulement |
 | `ERROR` | 0x12 | ← | — |
 | `UPDATE_REQUEST` / `_OUTPUT` / `_RESULT` | 0x20–0x22 | → / ← / ← | requête seulement |
@@ -559,6 +609,8 @@ Toutes derrière la session console (Bearer ou cookie). Détails :
 | GET | `/api/fleet/shell?sid=&offset=` | octets du terminal (base64) |
 | GET | `/api/fleet/keys` | clés SSH locales — **métadonnées seulement** |
 | POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
+| POST | `/api/fleet/caps-set` | droits d'un opérateur **sur cette node** (humain local) |
+| POST | `/api/fleet/caps-request` / `caps-drop` | demander / rendre un droit sur une node gérée |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | shell |
 | POST | `/api/fleet/provision` | déploiement |
@@ -569,9 +621,11 @@ Toutes derrière la session console (Bearer ou cookie). Détails :
 - [`tests/test_fleet.py`](../../tests/test_fleet.py) — les trois portes, en
   isolation : commande non signée, corps modifié, signature rejouée, signature
   pour un autre nœud ou un autre `purpose`, émetteur non enrôlé, capability
-  absente, réponse non sollicitée, shell adressé par un tiers, fuzzing.
+  absente, réponse non sollicitée, shell adressé par un tiers, fuzzing, et le
+  changement de droits : demander n'accorde rien, `ENROL_NARROW` ne peut
+  qu'ôter, perdre `shell` ferme le shell déjà ouvert.
 - [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — ledger (échec
-  fermé, bornes) et faits machine.
+  fermé, bornes, `narrow_only` qui ne peut qu'ôter) et faits machine.
 - [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — le
   secret ne fuit nulle part, le bootstrap n'est pas une surface d'injection.
 - [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes et

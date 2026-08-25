@@ -18,8 +18,8 @@ import pytest
 from src.app_auth import AppAuth, ctx_hash, make_assertion
 from src.apps import fleet
 from src.apps.fleet import (
-    CommandResult, EnrolAnswered, EnrolRequested, FleetApp, Failure,
-    NodeAdopted, Revoked, ScanReceived, StatusReceived,
+    CapsChanged, CommandResult, EnrolAnswered, EnrolRequested, FleetApp,
+    Failure, NodeAdopted, Revoked, ScanReceived, StatusReceived,
 )
 from src.apps.fleet_state import CAPABILITIES, FleetState
 from src.apps import fleet_provision
@@ -166,6 +166,160 @@ class TestEnrolment:
         assert agent.app.state.operator(operator.id.raw.hex()) is None
         assert agent.app.state.allows(operator.id.raw.hex(), "status") is False
         assert any(isinstance(e, Revoked) for e in agent.drain_events())
+
+
+# ---------------------------------------------------------------------------
+# Changing the rights on a standing relationship
+# ---------------------------------------------------------------------------
+
+class TestCapabilityChanges:
+    """The asymmetry is the whole point: a right can be handed back by whoever
+    holds it, but only ever handed *out* by a human on the machine that pays
+    for it. Every test here exists to keep one half from drifting into the
+    other."""
+
+    async def test_asking_for_more_grants_nothing_on_its_own(self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        assert await operator.app.request_capabilities(agent.id, ["shell"]) is True
+        await deliver(operator, agent)
+        # Parked for a human, and the ledger is untouched until they answer.
+        assert agent.app.state.allows(operator.id.raw.hex(), "shell") is False
+        assert set(agent.app.state.operator(operator.id.raw.hex())["caps"]) == {"status"}
+        pending = agent.app.state.pending_in()
+        assert len(pending) == 1
+        assert set(pending[0]["caps"]) == {"status", "shell"}
+        # The human is told what they already hold, so the delta is visible.
+        assert pending[0]["have"] == ["status"]
+
+    async def test_approving_the_request_widens_both_sides(self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        await operator.app.request_capabilities(agent.id, ["update"])
+        await deliver(operator, agent)
+        assert await agent.app.approve_enrolment(operator.id.raw.hex()) is True
+        await deliver(agent, operator)
+        assert agent.app.state.allows(operator.id.raw.hex(), "update") is True
+        managed = operator.app.state.managed_one(agent.id.raw.hex())
+        assert set(managed["caps"]) == {"status", "update"}
+
+    async def test_the_approver_still_cannot_be_talked_into_more(self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        await operator.app.request_capabilities(agent.id, ["update"])
+        await deliver(operator, agent)
+        # A human ticking a box that was never asked for changes nothing:
+        # approval intersects with the request.
+        await agent.app.approve_enrolment(operator.id.raw.hex(),
+                                          ["status", "update", "shell"])
+        assert agent.app.state.allows(operator.id.raw.hex(), "shell") is False
+
+    async def test_asking_for_a_node_we_do_not_manage_is_refused(self, operator, agent):
+        assert await operator.app.request_capabilities(agent.id, ["shell"]) is False
+        assert operator.take_sent() == []
+
+    async def test_asking_for_what_we_hold_sends_nothing(self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        operator.take_sent()
+        assert await operator.app.request_capabilities(agent.id, ["status"]) is False
+        assert operator.take_sent() == []
+
+    async def test_dropping_a_right_needs_nobody(self, operator, agent):
+        await enrol(operator, agent, caps=["status", "shell"])
+        assert await operator.app.drop_capabilities(
+            agent.id.raw.hex(), ["shell"]) is True
+        await deliver(operator, agent)
+        assert agent.app.state.allows(operator.id.raw.hex(), "shell") is False
+        assert agent.app.state.allows(operator.id.raw.hex(), "status") is True
+        assert set(operator.app.state.managed_one(
+            agent.id.raw.hex())["caps"]) == {"status"}
+        assert any(isinstance(e, CapsChanged) for e in agent.drain_events())
+
+    async def test_dropping_the_last_right_ends_the_relationship(self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        assert await operator.app.drop_capabilities(
+            agent.id.raw.hex(), ["status"]) is True
+        await deliver(operator, agent)
+        assert agent.app.state.operator(operator.id.raw.hex()) is None
+        assert operator.app.state.managed_one(agent.id.raw.hex()) is None
+
+    async def test_a_narrow_frame_can_only_narrow(self, operator, agent):
+        """The one frame accepted without a human. Even minted correctly by the
+        operator, asking for more through it must widen nothing."""
+        await enrol(operator, agent, caps=["status"])
+        await operator.app._send(agent.id, operator.app._signed_frame(
+            fleet.ENROL_NARROW, agent.id, fleet.PURPOSE_NARROW,
+            {"caps": ["status", "shell", "provision"]}))
+        await deliver(operator, agent)
+        assert set(agent.app.state.operator(
+            operator.id.raw.hex())["caps"]) == {"status"}
+        assert agent.app.state.allows(operator.id.raw.hex(), "shell") is False
+
+    async def test_a_narrow_frame_from_a_stranger_does_nothing(self, operator, agent):
+        stranger = Peer()
+        await enrol(operator, agent, caps=["status"])
+        await stranger.app._send(agent.id, stranger.app._signed_frame(
+            fleet.ENROL_NARROW, agent.id, fleet.PURPOSE_NARROW, {"caps": []}))
+        await deliver(stranger, agent)
+        assert agent.app.state.allows(operator.id.raw.hex(), "status") is True
+
+    async def test_local_human_can_widen_and_the_operator_learns_of_it(
+            self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        assert await agent.app.set_operator_capabilities(
+            operator.id.raw.hex(), ["status", "update"]) is True
+        await deliver(agent, operator)
+        assert agent.app.state.allows(operator.id.raw.hex(), "update") is True
+        assert set(operator.app.state.managed_one(
+            agent.id.raw.hex())["caps"]) == {"status", "update"}
+
+    async def test_local_human_can_narrow(self, operator, agent):
+        await enrol(operator, agent, caps=["status", "update"])
+        await agent.app.set_operator_capabilities(operator.id.raw.hex(), ["status"])
+        await deliver(agent, operator)
+        assert agent.app.state.allows(operator.id.raw.hex(), "update") is False
+        assert set(operator.app.state.managed_one(
+            agent.id.raw.hex())["caps"]) == {"status"}
+
+    async def test_local_human_emptying_the_list_cuts_the_node_off(
+            self, operator, agent):
+        await enrol(operator, agent, caps=["status"])
+        assert await agent.app.set_operator_capabilities(
+            operator.id.raw.hex(), []) is True
+        await deliver(agent, operator)
+        assert agent.app.state.operator(operator.id.raw.hex()) is None
+        assert operator.app.state.managed_one(agent.id.raw.hex()) is None
+
+    async def test_an_unknown_name_is_not_read_as_no_rights(self, operator, agent):
+        """Fail-safe would be to cut them off; that turns a typo into an outage.
+        A list we did not understand is refused instead."""
+        await enrol(operator, agent, caps=["status"])
+        assert await agent.app.set_operator_capabilities(
+            operator.id.raw.hex(), ["root"]) is False
+        assert agent.app.state.allows(operator.id.raw.hex(), "status") is True
+
+    async def test_setting_rights_on_a_stranger_does_nothing(self, operator, agent):
+        assert await agent.app.set_operator_capabilities(
+            operator.id.raw.hex(), ["shell"]) is False
+        assert agent.app.state.operator(operator.id.raw.hex()) is None
+
+    async def test_losing_shell_kills_the_shell_already_open(self, operator, agent):
+        await enrol(operator, agent, caps=["shell"])
+        await operator.app.open_shell(agent.id, cols=80, rows=24)
+        await deliver(operator, agent)
+        assert agent.app._shells, "the agent should be hosting a shell"
+        await agent.app.set_operator_capabilities(operator.id.raw.hex(), ["status"])
+        assert agent.app._shells == {}
+
+    async def test_a_still_managed_node_may_restate_its_grant(self, operator, agent):
+        """How a human on the far side reaches our list — and only for their own
+        entry: it is their own signed frame that carries it."""
+        await enrol(operator, agent, caps=["status"])
+        await agent.app._send(operator.id, agent.app._signed_frame(
+            fleet.ENROL_GRANT, operator.id, fleet.PURPOSE_GRANT,
+            {"caps": ["status", "scan"], "label": "lab"}))
+        await deliver(agent, operator)
+        assert set(operator.app.state.managed_one(
+            agent.id.raw.hex())["caps"]) == {"status", "scan"}
+        assert any(isinstance(e, CapsChanged) and e.direction == "managed"
+                   for e in operator.drain_events())
 
 
 # ---------------------------------------------------------------------------

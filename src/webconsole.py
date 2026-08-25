@@ -1270,6 +1270,18 @@ def _make_handler(console: WebConsole):
                 elif action == "revoke":
                     ok = fleet.revoke(node)
                     self._json(200 if ok else 404, {"ok": bool(ok)})
+                elif action == "caps-request":
+                    # Asking a node we manage for more: it parks the request
+                    # for a human over there, exactly like a first enrolment.
+                    ok = fleet.request_caps(node, data.get("caps"))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "caps-drop":
+                    ok = fleet.drop_caps(node, data.get("caps"))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
+                elif action == "caps-set":
+                    # What an operator may do to *this* node, decided here.
+                    ok = fleet.set_operator_caps(node, data.get("caps"))
+                    self._json(200 if ok else 400, {"ok": bool(ok)})
                 elif action == "status":
                     self._json(200, {"rid": fleet.status(node)})
                 elif action == "update":

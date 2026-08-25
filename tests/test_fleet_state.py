@@ -95,6 +95,36 @@ class TestOperators:
             state.add_operator(f"{i:040x}", PUB, caps=["status"])
         assert len(state.operators()) <= MAX_OPERATORS
 
+    def test_set_caps_replaces_the_grant(self):
+        state = FleetState()
+        state.add_operator(A, PUB, caps=["status"])
+        assert state.set_operator_caps(A, ["status", "update"]) == ["status", "update"]
+        assert state.allows(A, "update") is True
+
+    def test_set_caps_narrow_only_can_never_widen(self):
+        state = FleetState()
+        state.add_operator(A, PUB, caps=["status"])
+        assert state.set_operator_caps(A, ["status", "shell"],
+                                       narrow_only=True) == ["status"]
+        assert state.allows(A, "shell") is False
+
+    def test_set_caps_to_nothing_drops_the_operator(self):
+        state = FleetState()
+        state.add_operator(A, PUB, caps=["status"])
+        assert state.set_operator_caps(A, []) == []
+        assert state.operator(A) is None
+
+    def test_set_caps_on_a_stranger_is_none_not_a_grant(self):
+        state = FleetState()
+        assert state.set_operator_caps(A, ["shell"]) is None
+        assert state.operator(A) is None
+        assert state.allows(A, "shell") is False
+
+    def test_set_caps_drops_names_it_does_not_know(self):
+        state = FleetState()
+        state.add_operator(A, PUB, caps=["status"])
+        assert state.set_operator_caps(A, ["status", "root"]) == ["status"]
+
     def test_proof_is_kept_for_audit(self):
         state = FleetState()
         state.add_operator(A, PUB, caps=["status"], proof=b"signed-blob")

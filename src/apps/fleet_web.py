@@ -25,9 +25,9 @@ from collections import OrderedDict, deque
 
 from ..node_id import NodeID
 from .fleet import (
-    CommandOutput, CommandResult, EnrolAnswered, EnrolRequested, Failure,
-    NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput,
-    StatusReceived,
+    CapsChanged, CommandOutput, CommandResult, EnrolAnswered, EnrolRequested,
+    Failure, NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened,
+    ShellOutput, StatusReceived,
 )
 from .fleet_state import CAP_DESCRIPTIONS, CAPABILITIES, clean_caps
 
@@ -118,6 +118,11 @@ class FleetBridge:
                             f"the fleet", node_hex)
         elif isinstance(event, Revoked):
             self._say("warn", f"{short}… revoked the relationship", node_hex)
+        elif isinstance(event, CapsChanged):
+            what = ("may now" if event.direction == "operator"
+                    else "now lets us")
+            self._say("warn", f"{short}… {what} {', '.join(event.caps)}",
+                      node_hex)
         elif isinstance(event, StatusReceived):
             self._finish(event.rid, "ok")
             with self._lock:
@@ -307,6 +312,28 @@ class FleetBridge:
 
     def revoke(self, node_hex: str) -> bool:
         return self._call(self._app.revoke(str(node_hex)))
+
+    def request_caps(self, node_hex: str, caps) -> bool:
+        """Ask a node we manage for extra rights — a human there answers."""
+        caps = clean_caps(caps)
+        if not caps:
+            return False
+        return self._call(self._app.request_capabilities(
+            self._node(node_hex), caps))
+
+    def drop_caps(self, node_hex: str, caps) -> bool:
+        caps = clean_caps(caps)
+        if not caps:
+            return False
+        return self._call(self._app.drop_capabilities(str(node_hex), caps))
+
+    def set_operator_caps(self, node_hex: str, caps) -> bool:
+        """Set what an operator may do to this node. The local human decides;
+        an empty list ends the relationship."""
+        if caps and not clean_caps(caps):
+            return False          # a name we do not know is not "no rights"
+        return self._call(self._app.set_operator_capabilities(
+            str(node_hex), clean_caps(caps)))
 
     def status(self, node_hex: str) -> str:
         return self._job(self._call(self._app.request_status(
