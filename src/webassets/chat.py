@@ -37,6 +37,7 @@ CHAT_HTML = """<!doctype html>
   </form>
 </div>
 
+<a class="skip" href="#main">Skip to the conversation</a>
 <div id="app" class="chat hidden">
   <aside class="side">
     <header class="side-head">
@@ -58,7 +59,7 @@ CHAT_HTML = """<!doctype html>
     <div class="side-foot"><a class="btn ghost wide" href="/">Back to console</a></div>
   </aside>
 
-  <main class="thread">
+  <main id="main" class="thread">
     <div id="empty" class="empty">
       <div class="mark" aria-hidden="true">NM</div>
       <div class="t">No conversation open</div>
@@ -386,9 +387,11 @@ function renderList(){
   $("me-name").textContent=ST.pseudo||"Set your name";
   $("me-sub").textContent=ST.me?shortId(ST.me):"";
   $("me-av").outerHTML='<span id="me-av">'+avatarHTML(ST.me,ST.pseudo)+'</span>';
+  let shown=0;
   for(const it of convList()){
     const name=convName(it.conv);
     if(q&&!name.toLowerCase().includes(q))continue;
+    shown++;
     const row=document.createElement("div"); row.className="row-chat"+(it.conv===sel?" active":"");
     row.dataset.conv=it.conv;
     const typing=TYPING[it.conv];
@@ -401,6 +404,11 @@ function renderList(){
       (un?'<span class="badge">'+un+'</span>':'')+'</div></div>';
     el.appendChild(row);
   }
+  if(!shown)
+    el.innerHTML=q
+      ? emptyHTML("Nothing matches that","Try a shorter name, or paste a node id.")
+      : emptyHTML("No conversation yet",
+                  "Start one with the pencil above, or by pasting someone's node id.");
 }
 
 // ---- conversation ----

@@ -36,6 +36,7 @@ FLEET_HTML = """<!doctype html>
   </form>
 </div>
 
+<a class="skip" href="#main">Skip to content</a>
 <div id="shell" class="shell hidden">
   <aside class="rail">
     <a class="brand" href="/fleet"><span class="mark" aria-hidden="true">NM</span>
@@ -53,7 +54,7 @@ FLEET_HTML = """<!doctype html>
     </div>
   </aside>
 
-  <main>
+  <main id="main">
     <header class="topbar">
       <button id="rail-toggle" class="icon rail-toggle" aria-label="Show sections">☰</button>
       <div class="who"><span class="badge">This node</span>

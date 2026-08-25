@@ -115,9 +115,11 @@ Ce que les trois pages résolvaient chacune de leur côté :
   `test_no_inline_style_attribute_anywhere`.
 - **Tout est échappé.** Ce qui vient du réseau (id, labels, bannières SSH,
   sortie de commande) passe par `esc()` avant d'entrer dans `innerHTML`.
-- `prefers-reduced-motion` respecté ; anneau de focus visible partout ; cibles
-  ≥ 24 px ; champs à 16 px sur mobile (sinon iOS zoome) ; `tabular-nums` sur les
-  chiffres qu'on compare.
+- `prefers-reduced-motion` respecté ; anneau de focus visible partout ; lien
+  **Skip to content** en tête de chaque page ; cibles ≥ 24 px ; champs à 16 px
+  sur mobile (sinon iOS zoome) ; `tabular-nums` sur les chiffres qu'on compare.
+- **La couleur n'est jamais le seul signal** : chaque pastille d'état porte son
+  mot (`managed`, `no key`, `waiting on you`).
 
 ## Ajouter quelque chose
 

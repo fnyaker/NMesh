@@ -139,6 +139,13 @@ hr{border:0;border-top:1px solid var(--border);margin:var(--s-5) 0}
 .hidden{display:none!important}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
   clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* Visible only once tabbed to: a keyboard user should not walk the whole rail
+   to reach the page they opened. */
+.skip{position:absolute;left:var(--s-3);top:-60px;z-index:90;background:var(--surface);
+  border:1px solid var(--border-strong);border-radius:var(--r-md);padding:var(--s-2) var(--s-3);
+  font-size:var(--fs-sm);font-weight:600;transition:top var(--speed) var(--ease)}
+.skip:focus{top:var(--s-3);text-decoration:none}
+:where(h1,h2,h3,[id]){scroll-margin-top:calc(var(--topbar-h) + var(--s-4))}
 
 /* One focus treatment for the whole product. Never removed without a
    replacement: a keyboard user who loses the ring is lost on the page. */
@@ -511,8 +518,11 @@ SHELL = """
 
 /* -- topbar -------------------------------------------------------------- */
 .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--s-3);
-  min-height:var(--topbar-h);padding:0 var(--s-5);background:color-mix(in srgb,var(--canvas) 88%,transparent);
-  backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+  min-height:var(--topbar-h);background:color-mix(in srgb,var(--canvas) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--border);
+  /* Lines up with the content column on a wide screen, instead of drifting to
+     the far edge while the page sits in the middle. */
+  padding-inline:max(var(--s-5),(100% - var(--content-max))/2)}
 .topbar .who{display:flex;align-items:center;gap:var(--s-2);min-width:0;overflow:hidden}
 .topbar .who>*{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .topbar .who button{font-family:var(--mono);font-size:var(--fs-xs);min-height:var(--ctl-h-sm);
