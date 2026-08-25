@@ -74,12 +74,14 @@ async def _make(enabled=False, state_dir=None):
     return node, console, host, built
 
 
-async def _post(console, path, token, body):
-    return await asyncio.to_thread(_request, console, "POST", path, token, body)
+async def _post(console, path, token, body, headers=None):
+    return await asyncio.to_thread(_request, console, "POST", path, token, body,
+                                   None, False, None, headers)
 
 
-async def _get(console, path, token=None):
-    return await asyncio.to_thread(_request, console, "GET", path, token)
+async def _get(console, path, token=None, headers=None):
+    return await asyncio.to_thread(_request, console, "GET", path, token, None,
+                                   None, False, None, headers)
 
 
 class TestDisabledApp:
@@ -293,6 +295,83 @@ class TestFleetRoutes:
                 assert status in (400, 503), (route, body)
             # An unknown capability must not have quietly become a grant.
             assert set(built["app"].state.operator(peer)["caps"]) == {"status"}
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_remote_targets_lists_only_manage_grants(self):
+        """Le sélecteur de contexte ne propose que ce qui a été accordé."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            state = built["app"].state
+            managed = "ee" * 20
+            other = "ff" * 20
+            state.add_managed(managed, caps=["status", "manage"], label="edge")
+            state.add_managed(other, caps=["status"], label="sensor")
+            _s, _h, _b, data = await _get(console, "/api/remote/targets", token)
+            assert data["available"] is True
+            ids = [entry["id"] for entry in data["targets"]]
+            assert ids == [managed]
+            assert data["targets"][0]["connected"] is False
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_remote_routes_need_a_session_and_a_grant(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            # No session at all.
+            status, _, _, _ = await _get(console, "/api/remote/targets", None)
+            assert status == 401
+            _status, token = await _login(console)
+            # A node we do not manage cannot be connected to.
+            status, _, _, data = await _post(console, "/api/remote/connect", token,
+                                             {"node": "ee" * 20, "password": "x" * 12})
+            assert status == 403 and "granted" in data["error"]
+            # A password is not optional.
+            built["app"].state.add_managed("ee" * 20, caps=["manage"])
+            status, _, _, data = await _post(console, "/api/remote/connect", token,
+                                             {"node": "ee" * 20})
+            assert status == 400
+            # Nor is a real node id.
+            status, _, _, _ = await _post(console, "/api/remote/connect", token,
+                                          {"node": "nothex", "password": "x" * 12})
+            assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_context_header_without_a_session_is_refused(self):
+        """Sans session distante, la requête est refusée — jamais exécutée en
+        local. Un en-tête ignoré ferait agir sur la mauvaise machine."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            built["app"].state.add_managed("ee" * 20, caps=["manage"])
+            status, _, _, data = await _get(console, "/api/state", token,
+                                            headers={"X-NMesh-Node": "ee" * 20})
+            assert status == 409
+            assert "connect" in data["error"]
+            status, _, _, _ = await _get(console, "/api/state", token,
+                                         headers={"X-NMesh-Node": "nothex"})
+            assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_our_own_id_in_the_header_stays_local(self):
+        """Se désigner soi-même n'est pas un aller-retour par le mesh."""
+        node, console, host, _built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _get(console, "/api/state", token,
+                                            headers={"X-NMesh-Node": node.id.raw.hex()})
+            assert status == 200 and data["id"] == node.id.raw.hex()
         finally:
             console.stop()
             await host.stop_all()

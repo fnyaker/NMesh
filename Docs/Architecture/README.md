@@ -39,7 +39,7 @@ s'en sert pour autoriser de l'exécution à distance).
 | `app_storage.py` | Store local par app (« tiroir ») : clé→valeur chiffré au repos (AES-256-GCM, clé par app dérivée de l'identité), isolé par `app_id`, borné. |
 | `app_auth.py` | **Identité applicative** (SSO) : assertions signées ML-DSA scopées `(app, audience, purpose, ctx)`, fraîcheur, anti-rejeu, login mutuel. Domaine de signature séparé — jamais un oracle. |
 | `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
-| `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), pont console (`fleet_web.py`). |
+| `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), relais vers la console locale (`fleet_console.py`), pont console (`fleet_web.py`). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
 | `join_ticket.py` | **Ticket de join compact** : adresse + port + graine du code + expiration + checksum, en base32 non paddé (34 caractères en IPv4). Décodage défensif : borné, tout validé, jamais autre chose qu'une `TicketError`. |
 | `qr.py` | Encodeur QR (ISO/IEC 18004) en stdlib pure : versions 1–10, niveaux M/L, modes alphanumérique et octet, Reed-Solomon et choix de masque. Vérifié contre un encodeur indépendant et un vrai décodeur. |

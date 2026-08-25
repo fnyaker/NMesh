@@ -47,6 +47,16 @@ from .node import MESSAGE_NAMES
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
+from .apps.fleet import console_path_refusal as fleet_console_refusal
+
+# The page names the node it is driving with this header. Absent (or naming us)
+# means "this node", which is what a page that has never heard of contexts does.
+_REMOTE_HEADER = "X-NMesh-Node"
+
+
+def _is_node_hex(value) -> bool:
+    return (isinstance(value, str) and len(value) == 40
+            and all(c in "0123456789abcdef" for c in value))
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
@@ -569,10 +579,51 @@ def _make_handler(console: WebConsole):
         def _authed(self) -> bool:
             return console._valid_token(self._session_token())
 
+        # -- remote context ----------------------------------------------
+        # The page sends `X-NMesh-Node: <id>` when the operator has switched
+        # context. Everything else about the request is unchanged, so the whole
+        # console works against another node without a second front-end — and a
+        # page that forgets the header simply drives the local node, which is
+        # the safe way round.
+
+        def _remote_node(self) -> str | None:
+            raw = (self.headers.get(_REMOTE_HEADER) or "").strip().lower()
+            if not raw or raw == console._node.id.raw.hex():
+                return None
+            return raw if _is_node_hex(raw) else ""
+
+        def _proxy_remote(self, node_hex: str, path: str,
+                          body: bytes | None) -> None:
+            """Relay this request to ``node_hex`` and answer with what it said."""
+            fleet = console._fleet
+            if fleet is None:
+                self._json(409, {"error": "the fleet app is not running"})
+                return
+            refusal = fleet_console_refusal(path)
+            if refusal:
+                self._json(403, {"error": refusal})
+                return
+            status, ctype, payload = fleet.remote_call(
+                self._session_token() or "", node_hex, self.command, path, body)
+            self._send(status, str(ctype)[:128], payload)
+
         # -- routing --
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
+            remote = self._remote_node()
+            if remote is not None:
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                if not remote:
+                    self._json(400, {"error": "bad node id"})
+                    return
+                self._proxy_remote(remote, self.path, None)
+                return
+            if path == "/api/remote/targets":
+                self._handle_remote_targets()
+                return
             if path in _STATIC:
                 ctype, text = _STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
@@ -776,17 +827,31 @@ def _make_handler(console: WebConsole):
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
                 return
-            if path == "/api/login":
+            remote = self._remote_node()
+            if path == "/api/login" and remote is None:
                 self._handle_login(body)
                 return
             # everything below requires auth
             if not self._authed():
                 self._json(401, {"error": "unauthorized"})
                 return
+            if remote is not None:
+                if not remote:
+                    self._json(400, {"error": "bad node id"})
+                    return
+                self._proxy_remote(remote, self.path, body)
+                return
+            if path.startswith("/api/remote/"):
+                self._handle_remote_post(path, _parse_json(body))
+                return
             if path == "/api/logout":
                 tok = self._session_token()
                 if tok:
                     console._revoke_token(tok)
+                    # A local session ending takes every remote console it held
+                    # with it: nothing survives the sign-out that opened it.
+                    if console._fleet is not None:
+                        console._fleet.remote_drop_session(tok)
                 self._json(200, {"ok": True},
                            extra_headers=[_clear_cookie_header(console._use_tls)])
                 return
@@ -1254,6 +1319,44 @@ def _make_handler(console: WebConsole):
             if path == "/api/fleet/keys":
                 # Paths and comments of local SSH keys — never key material.
                 self._json(200, {"keys": console._fleet.local_keys()})
+                return
+            self._json(404, {"error": "not found"})
+
+        # -- remote consoles ---------------------------------------------
+
+        def _handle_remote_targets(self) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            fleet = console._fleet
+            self._json(200, {
+                "me": console._node.id.raw.hex(),
+                "available": fleet is not None,
+                "targets": fleet.remote_targets() if fleet is not None else [],
+            })
+
+        def _handle_remote_post(self, path: str, data) -> None:
+            fleet = console._fleet
+            if fleet is None:
+                self._json(409, {"error": "the fleet app is not running"})
+                return
+            data = data or {}
+            node = str(data.get("node") or "")
+            session = self._session_token() or ""
+            action = path.rsplit("/", 1)[1]
+            if not _is_node_hex(node):
+                self._json(400, {"error": "bad node id"})
+                return
+            if action == "connect":
+                password = data.get("password")
+                if not isinstance(password, str) or not password:
+                    self._json(400, {"error": "the remote console password is required"})
+                    return
+                ok, detail = fleet.remote_connect(session, node, password)
+                self._json(200 if ok else 403, {"ok": ok, "error": detail})
+                return
+            if action == "disconnect":
+                self._json(200, {"ok": fleet.remote_disconnect(session, node)})
                 return
             self._json(404, {"error": "not found"})
 

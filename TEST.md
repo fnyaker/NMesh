@@ -85,7 +85,10 @@ tests/
 ├── test_fleet*.py / test_console_fleet.py            — app de gestion : les trois
 │     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
 │     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
-│     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé
+│     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé,
+│     et le relais console `manage` : chemins refusés (fleet, remote, chat, hors
+│     API), découpage/réassemblage d'une réponse, réponse trop grande expliquée
+│     plutôt que tronquée, réponse forgée par un tiers ignorée, appels bornés
 ├── test_fleet_deploy.py                               — déploiement distant et
 │     droit d'update : le script autorisé n'est pas dans le préfixe du nœud, la
 │     règle ne nomme qu'un chemin sans joker, le wrapper refuse tout argument,
@@ -141,6 +144,9 @@ tests/
       silencieux (la boucle FIND_NODE/FOUND_NODE qui saturait le lien), et la
       découverte fonctionne toujours quand il y a vraiment quelque chose à
       trouver ; et test_join_ticket.py : join réel avec le seul ticket, usage
-      unique, ticket expiré, code forgé, porte « adresse publique confirmée »
+      unique, ticket expiré, code forgé, porte « adresse publique confirmée » ;
+      et test_fleet.py qui fait traverser un vrai mesh à un appel console relayé
+      (réponse de 90 Ko, donc plusieurs frames) et vérifie qu'il est refusé sans
+      le grant `manage`
 ```
 </content>

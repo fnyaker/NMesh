@@ -37,13 +37,17 @@ import threading
 import time
 
 # What an operator may be granted. Ordered from harmless to total.
-CAPABILITIES = ("status", "update", "scan", "provision", "shell")
+CAPABILITIES = ("status", "update", "scan", "provision", "shell", "manage")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     "update": "run the system package manager's upgrade",
     "scan": "sweep this machine's LAN for SSH hosts",
     "provision": "install NMesh on machines on this LAN",
     "shell": "open an interactive shell as this node's user",
+    # Not a second way in: the operator still has to type this node's console
+    # password. The grant opens the channel; the password opens the session.
+    "manage": "drive this node's web console remotely (its console password is "
+              "still required)",
 }
 
 MAX_OPERATORS = 64
@@ -269,6 +273,16 @@ class FleetState:
             self._pending_out.pop(node_hex, None)
             self._save()
             return dict(entry, id=node_hex)
+
+    def may_use(self, node_hex: str, capability: str) -> bool:
+        """Whether *that* node granted *us* this capability.
+
+        The mirror of :meth:`allows`, and just as much a gate: an action we were
+        never granted must not leave this node either — a request that can only
+        be refused is noise the operator has to interpret."""
+        with self._lock:
+            entry = self._managed.get(node_hex)
+            return bool(entry) and capability in (entry.get("caps") or [])
 
     def remove_managed(self, node_hex: str) -> bool:
         with self._lock:
