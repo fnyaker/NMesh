@@ -13,6 +13,7 @@ import tempfile
 import pytest
 
 from src import webassets
+from src.webassets import ui
 
 NODE = shutil.which("node")
 
@@ -180,3 +181,64 @@ def test_the_console_renders_whatever_a_transport_reports():
     source = webassets.APP_JS
     assert "function linkStatsHTML" in source
     assert "Object.entries(stats)" in source
+
+
+# ── la navigation étroite et les menus ───────────────────────────────────────
+# Chacun de ces tests correspond à un bug réellement rencontré dans un vrai
+# navigateur : ils sont ici pour qu'il ne revienne pas.
+
+PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS"}
+
+
+@pytest.mark.parametrize("html_name", list(PAGES))
+def test_every_menu_starts_closed(html_name):
+    """Un panneau `.menu` sans attribut `hidden` s'affiche au chargement et
+    intercepte les clics du bouton censé l'ouvrir."""
+    html = getattr(webassets, html_name)
+    for match in re.finditer(r'<div id="([a-z-]+)" class="menu"([^>]*)>', html):
+        assert "hidden" in match.group(2), match.group(1)
+
+
+@pytest.mark.parametrize("html_name", list(PAGES))
+def test_every_menu_button_points_at_a_panel(html_name):
+    html = getattr(webassets, html_name)
+    for match in re.finditer(r'data-menu="([a-z-]+)"', html):
+        assert f'id="{match.group(1)}" class="menu"' in html, match.group(1)
+
+
+@pytest.mark.parametrize("html_name", ["INDEX_HTML", "FLEET_HTML"])
+def test_every_tab_has_a_short_name_for_the_tab_bar(html_name):
+    """En barre d'onglets, le libellé long est masqué et `data-label` prend sa
+    place via `::before` : sans lui, l'onglet est vide."""
+    html = getattr(webassets, html_name)
+    # Seulement la navigation principale : les sous-onglets d'une section ne
+    # descendent pas dans la barre du bas.
+    tabs = re.findall(r'<button role="tab"[^>]*data-tab="[^"]+".*?</button>', html, re.S)
+    assert tabs
+    for tab in tabs:
+        assert 'data-label="' in tab, tab
+        # Le libellé long doit être enveloppé, sinon il n'y a rien à masquer.
+        assert '<span class="lbl">' in tab, tab[:90]
+
+
+def test_the_topbar_does_not_capture_its_own_menus():
+    """`backdrop-filter` sur un élément en fait le bloc conteneur de tous ses
+    descendants `position:fixed` : la feuille de notifications s'ancrait alors
+    sous la barre au lieu du bas de l'écran. Le flou vit sur un pseudo-élément."""
+    block = ui.SHELL.split(".topbar{", 1)[1].split("}", 1)[0]
+    assert "backdrop-filter" not in block
+    assert "backdrop-filter" in ui.SHELL.split(".topbar::before{", 1)[1].split("}", 1)[0]
+
+
+def test_the_overflow_button_defaults_to_hidden_before_the_query_shows_it():
+    """À spécificité égale, la dernière règle gagne — media query ou pas. Le
+    défaut doit donc être déclaré avant la requête qui l'active."""
+    default = ui.SHELL.index(".more-wrap{display:none}")
+    shown = ui.SHELL.index(".more-wrap{display:inline-flex}")
+    assert default < shown
+
+
+def test_the_tab_bar_hides_what_cannot_fit_and_the_page_ends_above_it():
+    narrow = ui.SHELL.split("@media (max-width:900px){", 1)[1]
+    assert ".rail .brand,.rail .rail-foot" in narrow
+    assert "--tabbar-h" in narrow

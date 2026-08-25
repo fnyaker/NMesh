@@ -82,9 +82,49 @@ de ce qui arrive, pour que rien ne saute), *en erreur* (ce qui a échoué).
 ## Châssis (`SHELL`)
 
 Un rail à gauche qui dit **où on est**, une barre du haut qui dit **ce que fait
-le nœud**, une colonne de contenu. Sous 900 px le rail devient un tiroir.
-`/chat` prend la place du rail pour sa liste de conversations : la liste **est**
-la navigation, un deuxième niveau de chrome serait du bruit.
+le nœud**, une colonne de contenu. `/chat` prend la place du rail pour sa liste
+de conversations : la liste **est** la navigation, un deuxième niveau de chrome
+serait du bruit.
+
+### Sous 900 px : le rail devient une barre d'onglets en bas
+
+Pas un tiroir hamburger. Une navigation qui coûte deux tapes et cache où l'on se
+trouve est précisément ce qu'on reproche aux interfaces sur téléphone ; une barre
+d'onglets est toujours visible, dit toujours quelle section est ouverte, et se
+trouve sous le pouce. **C'est le même balisage** — seul l'axe change, donc il n'y
+a pas de deuxième navigation à tenir synchronisée :
+
+- le libellé long (`<span class="lbl">`) est masqué et `data-label` — le nom
+  court que la palette utilisait déjà — est repris par un `::before` ;
+- l'onglet actif porte un liseré **et** la couleur d'accent (jamais la couleur
+  seule) ; le compteur `.tail` devient une pastille ;
+- la marque et le pied du rail n'ont pas leur place dans une bande de 58 px :
+  ils passent dans le menu **⋯** de la barre du haut (état du nœud, liens vers
+  les apps, recherche, déconnexion). Ce bouton est `display:none` au-dessus de
+  900 px — le déclarer **avant** la media query est obligatoire : à spécificité
+  égale, c'est la dernière règle qui gagne, requête ou pas ;
+- le contenu réserve `--tabbar-h` + `env(safe-area-inset-bottom)` en bas, et les
+  toasts remontent d'autant : rien ne se cache derrière la barre.
+
+### Menus (`.menu` + `MENU`)
+
+Tout ce qui ferait **grandir une barre** vit dans un menu déroulant : un bouton
+`data-menu="id"` ouvre le panneau de cet id, un seul à la fois, fermé par
+Échap, par un clic ailleurs, ou par son propre voile. Sous 640 px le même
+balisage devient une **feuille** ancrée en bas de l'écran, là où le pouce est
+déjà. Un compteur (`.count`) flotte **par-dessus** son bouton, jamais à côté :
+un nombre à deux chiffres ne doit pas pouvoir élargir la barre.
+
+> **Piège.** Un `backdrop-filter` fait de son élément le bloc conteneur de tous
+> ses descendants `position:fixed`. Le flou de la barre du haut vit donc sur un
+> `::before`, sinon la feuille s'ancre sous la barre au lieu du bas de l'écran.
+> Test : `test_the_topbar_does_not_capture_its_own_menus`.
+
+### Boîtes de dialogue
+
+Au-dessus de 640 px, une carte centrée. En dessous, une feuille qui monte du bas
+(`inset:auto 0 0 0`), et un `dialog.full` prend tout l'écran en `dvh` — pas en
+`vh`, sinon la barre du navigateur mobile rogne la dernière ligne.
 
 ## Runtime partagé (`ui.JS`)
 
@@ -100,6 +140,8 @@ Ce que les trois pages résolvaient chacune de leur côté :
 - `ROUTER` — `#section/sous-section` : linkable, marque-pageable, **Back**
   fonctionne ;
 - `PALETTE` — `⌘K` / `Ctrl-K`, chaque section et les actions courantes ;
+- `MENU` — les menus déroulants du châssis ; `MENU.onShow[id]` laisse une page
+  peindre son contenu au moment où on le regarde, pas à chaque sondage ;
 - `mountShell()` — câble tout ça une fois pour la page.
 
 ## Contraintes qui ne se voient pas
@@ -123,9 +165,15 @@ Ce que les trois pages résolvaient chacune de leur côté :
 
 ## Ajouter quelque chose
 
-- **Une section** dans une page : un `<button role="tab" data-tab="x">` dans le
+- **Une section** dans une page : un `<button role="tab" data-tab="x"
+  data-label="Court"><span class="lbl">Le libellé long</span></button>` dans le
   rail, une `<section data-panel="x">`, et `ROUTER` fait le reste (URL, titre,
-  Back, focus). Une sous-section : `data-subtab` / `data-sub`.
+  Back, focus). Les deux libellés ne sont pas facultatifs : le court est celui de
+  la barre d'onglets et de la palette. Une sous-section : `data-subtab` /
+  `data-sub`.
+- **Un menu** : un bouton `data-menu="x"` et un `<div id="x" class="menu" hidden>`.
+  L'attribut `hidden` non plus n'est pas facultatif — sans lui le panneau
+  s'affiche au chargement et intercepte le clic du bouton censé l'ouvrir.
 - **Un composant** : dans `ui.py`, avec les jetons sémantiques — jamais une
   couleur en dur. S'il porte du texte, ajouter la paire dans le test de
   contraste.
