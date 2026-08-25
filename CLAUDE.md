@@ -1,132 +1,134 @@
-# NMesh — Charte d'ingénierie
+# NMesh — engineering charter
 
-Réseau mesh décentralisé, agnostique du transport, conçu pour faire transiter
-des données sensibles dans un environnement **hostile**. Ce fichier fixe les
-principes non-négociables. Toute contribution doit les respecter.
+A decentralised, transport-agnostic mesh network, built to carry sensitive data
+through a **hostile** environment. This file sets the non-negotiable
+principles. Every contribution must respect them.
 
-## ⚑ Documentation d'architecture — OBLIGATOIRE
+## ⚑ Architecture documentation — MANDATORY
 
-`Docs/Architecture/` décrit **comment le code fonctionne réellement** (protocole,
-sécurité, routage, transports, et surtout `gotchas.md` : les pièges de blocage /
-flakiness durement appris).
+`Docs/Architecture/` describes **how the code actually works** (protocol,
+security, routing, transports, and above all `gotchas.md`: the hard-won traps
+around hangs and flakiness).
 
-- **AVANT toute modification ou débogage**, lis les documents pertinents. Pour un
-  blocage ou une flakiness, **commence par `Docs/Architecture/gotchas.md`**.
-- **APRÈS tout changement de comportement décrit là**, mets le document à jour
-  **dans le même commit**. Une doc fausse est pire qu'absente.
-- Un nouveau mécanisme non trivial → une entrée dans le bon document (ou un
-  nouveau fichier + lien dans `Docs/Architecture/README.md`).
+- **BEFORE any change or debugging session**, read the relevant documents. For a
+  hang or a flaky test, **start with `Docs/Architecture/gotchas.md`**.
+- **AFTER any change to behaviour described there**, update the document **in
+  the same commit**. Documentation that lies is worse than none.
+- A new non-trivial mechanism → an entry in the right document (or a new file
+  plus a link in `Docs/Architecture/README.md`).
 
-Index : [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
+Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
 
-## Modèle de menace (l'hypothèse de base)
+## Threat model (the founding assumption)
 
-> Dès qu'une donnée quitte le nœud, elle entre en **territoire hostile**.
-> On ne fait confiance ni au réseau, ni aux pairs, ni au transport, ni même —
-> autant que possible — à la machine locale.
+> The moment data leaves the node, it enters **hostile territory**.
+> We trust neither the network, nor the peers, nor the transport, nor — as far
+> as possible — the local machine.
 
-- Tout ce qui arrive d'un pair est **présumé malveillant** jusqu'à validation.
-- Un pair authentifié peut se comporter en adversaire (relais qui altère,
-  rejoue, amplifie, ou inonde). L'authentification n'est pas de la confiance.
-- On se protège de l'appareil : clés sensibles gardées en mémoire quand
-  possible, surface d'attaque minimale, aucun secret en clair sur disque sans
-  raison.
-- On imagine un adversaire à ressources d'État qui veut casser le réseau.
-  La question à se poser à chaque ligne : « qu'est-ce qu'il en ferait ? ».
+- Anything arriving from a peer is **presumed malicious** until validated.
+- An authenticated peer may behave as an adversary (a relay that alters,
+  replays, amplifies or floods). Authentication is not trust.
+- We defend against the device itself: sensitive keys kept in memory where
+  possible, minimal attack surface, no secret in the clear on disk without a
+  reason.
+- We assume a state-resourced adversary who wants to break the network. The
+  question to ask on every line: "what would they do with this?".
 
-## Les principes, par ordre de priorité
+## The principles, in priority order
 
-### 1. Sécurité — jamais négociable
-- Cryptographie **post-quantique** de bout en bout : ML-KEM-768 (échange de
-  clés), ML-DSA-65 (signatures), AES-256-GCM (chiffrement authentifié).
-- **Rejeter par défaut.** Tout paquet mal formé, non autorisé, non
-  authentifié, ou de type inattendu est jeté sans effet de bord. Une entrée
-  valide doit prouver sa validité ; ce n'est pas au récepteur de prouver
-  l'invalidité.
-- Toute donnée applicative est chiffrée E2E : les relais ne voient que des
-  métadonnées de routage, jamais le contenu.
-- L'identité d'un nœud = hash de sa clé publique DSA. Un `NodeID` non dérivable
-  de la clé présentée est un mensonge → rejet.
-- Comparaisons de secrets en temps constant (`hmac.compare_digest`).
+### 1. Security — never negotiable
+- **Post-quantum** cryptography end to end: ML-KEM-768 (key exchange), ML-DSA-65
+  (signatures), AES-256-GCM (authenticated encryption).
+- **Reject by default.** Any packet that is malformed, unauthorised,
+  unauthenticated or of an unexpected type is dropped with no side effect. A
+  valid input must prove its validity; it is not the receiver's job to prove
+  invalidity.
+- All application data is E2E encrypted: relays see routing metadata only, never
+  the content.
+- A node's identity = the hash of its DSA public key. A `NodeID` that cannot be
+  derived from the key presented is a lie → reject.
+- Secrets compared in constant time (`hmac.compare_digest`).
 
-### 2. Solidité — le réseau ne tombe jamais
-- **Zéro crash. Un crash est un bug de sécurité.** Aucune entrée réseau, aussi
-  hostile soit-elle, ne doit faire tomber un nœud ni tuer une boucle de
-  réception. Si l'impensable arrive, le nœud doit **se réparer seul**
-  (auto-recovery) : purge de l'état corrompu, reconnexion à la demande,
-  reprise du service.
-- **Rejet de nœud actif.** Un pair qui envoie du bruit, des paquets invalides
-  ou abuse du protocole est compté puis déconnecté. On ne subit pas un
-  adversaire ; on le coupe.
-- **Bornes partout.** Toute file, tout cache, tout buffer, tout compteur a une
-  limite dure. Rien qui puisse grandir sans fin sous la pression d'un attaquant
-  (pas d'épuisement mémoire, pas d'amplification).
-- Fonctionne en **conditions dégradées** : pertes, latences énormes,
-  partitions, transports asynchrones (store-and-forward type « clé USB portée
-  à pied »). Correction d'erreur, retry, tolérance au délai.
+### 2. Solidity — the network never goes down
+- **Zero crash. A crash is a security bug.** No network input, however hostile,
+  may bring a node down or kill a receive loop. If the unthinkable happens, the
+  node must **repair itself** (auto-recovery): purge the corrupted state,
+  reconnect on demand, resume service.
+- **Active peer rejection.** A peer that sends noise, invalid packets or abuses
+  the protocol is counted and then disconnected. We do not endure an adversary;
+  we cut them off.
+- **Bounds everywhere.** Every queue, cache, buffer and counter has a hard
+  limit. Nothing that can grow without end under an attacker's pressure (no
+  memory exhaustion, no amplification).
+- Works in **degraded conditions**: loss, enormous latency, partitions,
+  asynchronous transports (store-and-forward of the "USB stick carried on foot"
+  kind). Error correction, retry, delay tolerance.
 
-### 3. Flexibilité — agnostique du transport
-- Le cœur ne connaît **aucun** transport concret. N'importe qui implémente
-  `BaseTransport` + `BaseServer` et l'enregistre par schéma d'URL
-  (`tcp://`, `ble://`, `lora://`, `usb://`…). Objectif « Jarvis » : passer sur
-  n'importe quel medium capable de transporter des octets.
-- Le routage est agnostique du medium : si A↔B est en Bluetooth et B↔C en
-  Wi-Fi, A parle à C en routant par B, en choisissant le meilleur lien.
-- Les nœuds s'annoncent par des URL listant leurs transports ; chaque nœud
-  n'utilise que les schémas qu'il connaît.
+### 3. Flexibility — transport-agnostic
+- The core knows **no** concrete transport. Anyone implements `BaseTransport` +
+  `BaseServer` and registers it by URL scheme (`tcp://`, `ble://`, `lora://`,
+  `usb://`…). The "Jarvis" goal: run over any medium capable of carrying bytes.
+- Routing is medium-agnostic: if A↔B is Bluetooth and B↔C is Wi-Fi, A talks to
+  C by routing through B, choosing the best link.
+- Nodes announce themselves with URLs listing their transports; each node only
+  uses the schemes it knows.
 
-### 4. Rapidité — proche du temps réel
-- Objectif : dépasser largement les ~4 Mo/s déjà atteints (TCP + routage).
-- Optimiser **sans jamais rien perdre** en sécurité, solidité ou flexibilité.
-  Un gain de perf qui affaiblit un des trois points précédents est refusé.
-- Chemins chauds sans allocation superflue, sans copie inutile, sans
-  crypto redondante.
+### 4. Speed — close to real time
+- Goal: comfortably beat the ~4 MB/s already reached (TCP + routing).
+- Optimise **without ever losing** security, solidity or flexibility. A
+  performance gain that weakens any of the three above is refused.
+- Hot paths with no superfluous allocation, no needless copy, no redundant
+  crypto.
 
-## Chaîne d'approvisionnement (supply chain)
+## Supply chain
 
-- **Dépendances externes minimales.** Chaque dépendance est une surface
-  d'attaque (cf. paquets NPM/PyPI vérolés). Par défaut : **stdlib Python**.
-- Une dépendance externe n'est admise que si elle est indispensable, très
-  répandue et auditée. Aujourd'hui, strictement :
-  - `liboqs-python` — crypto post-quantique (pas d'équivalent stdlib).
-  - `cryptography` — AES-GCM/HKDF (référence de l'écosystème Python).
+- **Minimal external dependencies.** Every dependency is an attack surface (see
+  the poisoned NPM/PyPI packages). By default: **the Python stdlib**.
+- An external dependency is admitted only if it is indispensable, very widely
+  used and audited. Today, strictly:
+  - `liboqs-python` — post-quantum crypto (no stdlib equivalent).
+  - `cryptography` — AES-GCM/HKDF (the Python ecosystem's reference).
   - `pytest` / `pytest-asyncio` / `pytest-xdist` / `pytest-timeout` — tests
-    uniquement, hors runtime (`pytest-xdist` parallélise la suite sur tous les
-    cœurs ; `pytest-timeout` borne chaque test pour qu'un blocage échoue vite
-    au lieu de faire tourner le job des heures).
-- Ajouter une dépendance runtime = justification explicite dans la PR + mise à
-  jour de cette liste. Dans le doute : réimplémenter sur stdlib.
+    only, outside the runtime (`pytest-xdist` spreads the suite over every core;
+    `pytest-timeout` bounds each test so a hang fails fast instead of running
+    the job for hours).
+- Adding a runtime dependency = an explicit justification in the PR + an update
+  to this list. When in doubt: reimplement on the stdlib.
 
-## Discipline de contribution
+## Contribution discipline
 
-- **La doc suit le code, dans le même commit — toujours, sans exception.**
-  Cette règle généralise la section ⚑ ci-dessus à **toute** la documentation, pas
-  seulement `Docs/Architecture/`.
-  - **AVANT de coder : lis les docs concernées.** `Docs/Architecture/` en premier
-    (mécanique interne), puis les guides d'usage touchés (`Docs/DataConnector/`,
-    `Docs/Apps/`, `Docs/WebConsole/`, `Docs/AppSharing/`…), et `TEST.md` /
-    `README.md` si le changement les concerne. Ne code jamais « à l'aveugle » un
-    mécanisme déjà documenté.
-  - **APRÈS avoir codé : mets à jour TOUS les documents que le changement touche,
-    dans le même commit** — protocole, guide d'app, table d'API de la console, CI,
-    carte du code, table des messages… Une feature livrée sans sa doc est
-    **incomplète**, jamais « à documenter plus tard ». Une doc fausse ou absente
-    est un bug au même titre qu'un test rouge.
-- **Tout changement est prouvé par des tests**, y compris des tests d'entrée
-  hostile (fuzzing, paquets aléatoires/mal formés). « Ça marche » ne suffit
-  pas : il faut « ça résiste ».
-- On ne merge jamais avec la suite rouge.
-- Le code lisible prime sur le code malin. On code comme le voisin :
-  mêmes idiomes, même densité de commentaires.
-- Un commentaire n'explique qu'une **contrainte** que le code ne peut pas
-  montrer, jamais le « quoi » ni le « d'où ça vient ».
+- **Documentation follows the code, in the same commit — always, no
+  exception.** This rule generalises the ⚑ section above to **all** the
+  documentation, not only `Docs/Architecture/`.
+  - **BEFORE coding: read the documents concerned.** `Docs/Architecture/` first
+    (internal mechanics), then the usage guides affected
+    (`Docs/DataConnector/`, `Docs/Apps/`, `Docs/WebConsole/`,
+    `Docs/AppSharing/`…), and `TEST.md` / `README.md` if the change touches
+    them. Never code a documented mechanism blind.
+  - **AFTER coding: update EVERY document the change touches, in the same
+    commit** — the protocol, an app's guide, the console's API table, CI, the
+    map of the code, the message table… A feature shipped without its
+    documentation is **incomplete**, never "to be documented later".
+    Documentation that is wrong or missing is a bug exactly like a red test.
+- **Every change is proved by tests**, including hostile-input tests (fuzzing,
+  random/malformed packets). "It works" is not enough: it has to "hold up".
+- We never merge with the suite red.
+- Readable code beats clever code. Write like the neighbour: same idioms, same
+  comment density.
+- A comment explains only a **constraint** the code cannot show, never the
+  "what" nor where it came from.
 
-## Invariants réseau (rappels rapides)
+## Network invariants (quick reminders)
 
-- Header en clair mais **authentifié** (AAD du GCM) ; payload chiffré.
-- `msg_id` lie le contenu du paquet (anti-rejeu, anti-amplification) ; il est
-  vérifié à la réception, pas seulement à l'émission.
-- TTL décrémenté à chaque hop, exclu de l'authentification et du `msg_id`.
-- Déduplication bornée des messages routés (anti-boucle, anti-flood).
-</content>
-</invoke>
+- The header is in the clear but **authenticated** (as the GCM AAD); the payload
+  is encrypted.
+- `msg_id` binds the packet's content (anti-replay, anti-amplification); it is
+  verified on receipt, not only when sending.
+- TTL is decremented at every hop, excluded from authentication and from
+  `msg_id`.
+- Bounded deduplication of routed messages (anti-loop, anti-flood).
+
+## Language
+
+The project — code, comments, documentation, commit messages — is written in
+**English**.

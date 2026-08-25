@@ -1,37 +1,37 @@
-# FAQ — les pannes qu'on rencontre vraiment
+# FAQ — the failures people actually hit
 
-Les symptômes exacts, ce qu'ils veulent dire, et la commande qui les répare.
-Chaque entrée part du message que vous avez sous les yeux.
+The exact symptoms, what they mean, and the command that fixes them. Every
+entry starts from the message you have in front of you.
 
-Pour le reste : [`Docs/Setup/guide`](Docs/Setup/guide) (installation),
+For everything else: [`Docs/Setup/guide`](Docs/Setup/guide) (installation),
 [`Docs/WebConsole/guide`](Docs/WebConsole/guide) (console),
-[`Docs/Apps/fleet`](Docs/Apps/fleet) (gestion à distance),
-[`Docs/Architecture/gotchas.md`](Docs/Architecture/gotchas.md) (pièges internes).
+[`Docs/Apps/fleet`](Docs/Apps/fleet) (remote management),
+[`Docs/Architecture/gotchas.md`](Docs/Architecture/gotchas.md) (internal traps).
 
 ---
 
-## Mises à jour
+## Updates
 
 ### `sudo: The "no new privileges" flag is set, which prevents sudo from running as root`
 
-**Quand :** vous cliquez **Update** sur une node gérée (capability `update`).
+**When:** you click **Update** on a managed node (the `update` capability).
 
-**Ce qui se passe.** L'unité systemd que `install.sh` écrit est durcie, et une
-des directives est `NoNewPrivileges=yes`. Le noyau refuse alors **tout binaire
-setuid** pour ce processus et tous ses enfants, pour toujours — `sudo` en fait
-partie. Le droit d'update existe bien (le wrapper root, la règle sudoers), il
-est simplement inutilisable depuis ce processus-là. Deux durcissements du même
-projet se contredisaient.
+**What is happening.** The systemd unit `install.sh` writes is hardened, and one
+of its directives is `NoNewPrivileges=yes`. The kernel then refuses **every
+setuid binary** for that process and all its children, permanently — and `sudo`
+is one of them. The right to update does exist (the root wrapper, the sudoers
+rule); it is simply unusable from that process. Two hardening decisions in the
+same project were contradicting each other.
 
-**Le correctif.** Sur la machine concernée :
+**The fix.** On the machine concerned:
 
 ```bash
-cd /opt/nmesh            # ou votre préfixe d'installation
+cd /opt/nmesh            # or your installation prefix
 sudo ./install.sh --allow-update
 ```
 
-L'unité est réécrite avec une confinement compatible avec le droit accordé, et
-le service redémarre. Vérifier :
+The unit is rewritten with confinement compatible with the right that was
+granted, and the service restarts. Check it:
 
 ```bash
 systemctl cat nmesh | grep -E 'NoNewPrivileges|ProtectSystem'
@@ -39,187 +39,183 @@ systemctl cat nmesh | grep -E 'NoNewPrivileges|ProtectSystem'
 #   ProtectSystem=no
 ```
 
-Depuis ce correctif, la confinement **suit le droit** : durcissement complet par
-défaut, relâché uniquement pour une node dont l'opérateur a explicitement demandé
-les mises à jour système. Repasser `./install.sh` **sans** `--allow-update`
-retire la règle sudoers *et* remet l'unité durcie — les deux choix ne peuvent
-plus être faits séparément.
+Since that fix, confinement **follows the grant**: hardened in full by default,
+relaxed only for a node whose operator explicitly asked for system updates.
+Running `./install.sh` again **without** `--allow-update` removes the sudoers
+rule *and* re-hardens the unit — the two choices can no longer be made
+separately.
 
-**Pourquoi trois directives et pas une.** `NoNewPrivileges=yes` bloque `sudo` ;
-`ProtectSystem=full` monte `/usr` en lecture seule, donc un gestionnaire de
-paquets ne pourrait rien écrire même si `sudo` marchait ; `PrivateDevices=yes`
-cache des périphériques dont certains scripts post-installation ont besoin.
-`PrivateTmp=yes` reste, il ne gêne rien.
+**Why three directives and not one.** `NoNewPrivileges=yes` blocks `sudo`;
+`ProtectSystem=full` mounts `/usr` read-only, so a package manager could write
+nothing even if `sudo` worked; `PrivateDevices=yes` hides devices some
+post-install scripts need. `PrivateTmp=yes` stays — it gets in nobody's way.
 
-**Sans redémarrer maintenant ?** Il n'y a pas de contournement : le drapeau est
-posé au démarrage du processus et le noyau ne le retire jamais. Une mise à jour
-lancée à la main sur la machine (`sudo apt update && sudo apt dist-upgrade`)
-marche toujours — c'est votre shell, pas le processus du nœud.
+**Without restarting right now?** There is no workaround: the flag is set when
+the process starts and the kernel never removes it. An update run by hand on the
+machine (`sudo apt update && sudo apt dist-upgrade`) still works — that is your
+shell, not the node's process.
 
-**En conteneur.** Le même message apparaît avec
-`--security-opt no-new-privileges` (parfois posé par défaut). Retirez-le, ou
-mettez à jour l'image plutôt que le conteneur : un nœud qui tourne depuis une
-image se met à jour en tirant une image plus récente, et la console le dit.
+**In a container.** The same message appears with
+`--security-opt no-new-privileges` (sometimes set by default). Remove it, or
+update the image rather than the container: a node running from an image updates
+by pulling a newer image, and the console says so.
 
-### « cannot self-update » sur la carte d'une node
+### "cannot self-update" on a node's card
 
-La node a répondu qu'elle ne peut pas se mettre à jour. La raison exacte est
-dans le refus affiché quand vous cliquez Update. Les trois cas :
+The node answered that it cannot update itself. The exact reason is in the
+refusal shown when you click Update. The three cases:
 
-| Message | Cause | Correctif |
+| Message | Cause | Fix |
 |---|---|---|
-| `no package manager this node knows how to drive` | distribution non reconnue (ou image minimale sans `apt`/`dnf`/`apk`…) | mettre à jour la machine autrement ; NMesh ne devine pas un gestionnaire |
-| `no sudo or doas on this machine, and the node is not root` | le nœud tourne sous un compte non privilégié et rien ne permet d'élever | `sudo ./install.sh --allow-update` sur la machine |
-| `NoNewPrivileges` | voir l'entrée ci-dessus | `sudo ./install.sh --allow-update` |
+| `no package manager this node knows how to drive` | unrecognised distribution (or a minimal image with no `apt`/`dnf`/`apk`…) | update the machine some other way; NMesh does not guess a package manager |
+| `no sudo or doas on this machine, and the node is not root` | the node runs under an unprivileged account and nothing allows escalation | `sudo ./install.sh --allow-update` on the machine |
+| `NoNewPrivileges` | see the entry above | `sudo ./install.sh --allow-update` |
 
-### La node se met à jour, puis ne revient pas
+### The node updates, then does not come back
 
-Après une mise à jour **de NMesh** (Settings → Updates), le nœud remplace ses
-propres fichiers et redémarre. S'il est géré par un service (`systemd`, OpenRC,
-launchd), il revient tout seul et la console le dit. Sinon, l'ancienne version
-est conservée : le message d'après-mise-à-jour donne le chemin de sauvegarde.
+After an update **of NMesh** (Settings → Updates) the node replaces its own
+files and restarts. If it is managed by a service (`systemd`, OpenRC, launchd)
+it comes back on its own and the console says so. Otherwise the old version is
+kept: the post-update message gives the backup path.
 
 ---
 
-## Installation & démarrage
+## Installation & startup
 
 ### `PermissionError: [Errno 13] … '/…/node.key.tmp'`
 
-Le répertoire d'état appartient à root alors que le nœud tourne sous un autre
-compte — typiquement une installation faite en `sudo` avant que le nœud n'ait son
-propre compte de service. Relancer `./install.sh` : il répare les
-appartenances au passage.
+The state directory belongs to root while the node runs under another account —
+typically an installation done with `sudo` before the node had its own service
+account. Run `./install.sh` again: it repairs ownership as it goes.
 
-### `start.sh: ligne …: HOME : variable sans liaison`
+### `start.sh: line …: HOME: unbound variable`
 
-Un service systemd démarre sans `HOME`. Corrigé : `start.sh` déduit désormais le
-répertoire personnel de l'entrée passwd du compte. Si vous voyez encore ce
-message, votre arbre est antérieur au correctif — mettez à jour, ou ajoutez
-`Environment=HOME=<préfixe>` à l'unité.
+A systemd service starts with no `HOME`. Fixed: `start.sh` now derives the home
+directory from the account's passwd entry. If you still see this message your
+tree predates the fix — update, or add `Environment=HOME=<prefix>` to the unit.
 
-### liboqs se recompile à chaque installation
+### liboqs rebuilds on every installation
 
-Il ne devrait plus : le résultat est mis en cache par version d'enveloppe
-(`/var/cache/nmesh/liboqs-<v>` en root). Si la compilation recommence,
-c'est que le cache n'est pas accessible en écriture ou que la version du
-wrapper a changé. Le message de `start.sh` le dit.
+It should not any more: the result is cached per wrapper version
+(`/var/cache/nmesh/liboqs-<v>` as root). If the build starts again, either the
+cache is not writable or the wrapper version changed. The message from
+`start.sh` says which.
 
-### J'ai perdu le mot de passe de la console
+### I lost the console password
 
-Sur la machine :
+On the machine:
 
 ```bash
 cd /opt/nmesh && sudo ./install.sh --reset-password
 ```
 
-Un nouveau mot de passe est généré et affiché **une seule fois**. C'est
-volontairement le seul chemin : il exige un accès au répertoire d'état, c'est-à-dire
-exactement le niveau de privilège qu'un tel pouvoir mérite.
+A new password is generated and printed **once**. This is deliberately the only
+route: it requires access to the state directory, which is exactly the level of
+privilege such a power deserves.
 
 ---
 
-## Réseau & joignabilité
+## Network & reachability
 
-### `this node has no confirmed public address` en créant un ticket de join
+### `this node has no confirmed public address` when creating a join ticket
 
-Un ticket ne contient qu'une adresse et un code : le scanner n'a rien d'autre.
-Émettre exige donc une adresse **`world` confirmée** — une connexion entrante y
-est réellement arrivée —, pas une adresse qu'on croit publique. Sur une node
-derrière un NAT sans redirection, utilisez le join complet (échange de blocs) ou
-un relais.
+A ticket carries only an address and a code: the scanner has nothing else to go
+on. Issuing one therefore requires a **confirmed `world` address** — an inbound
+connection has actually arrived on it — not an address believed to be public. On
+a node behind NAT with no port forwarding, use the full join (block exchange) or
+a relay.
 
-### Deux nodes ne se voient pas alors que les adresses sont bonnes
+### Two nodes cannot see each other although the addresses look right
 
-Ouvrez la fiche du pair (**Network → Peers → Details**) : la table
-**Addresses** dit ce qu'a fait chaque adresse — `in-use`, `timeout`, `refused`,
-`untried` — avec le motif et la durée. C'est presque toujours suffisant pour
-trancher entre « pare-feu », « mauvaise adresse » et « jamais essayée ».
+Open the peer's details (**Network → Peers → Details**): the **Addresses** table
+says what each address did — `in-use`, `timeout`, `refused`, `untried` — with
+the reason and the duration. That is nearly always enough to tell "firewall"
+from "wrong address" from "never tried".
 
-### Un lien a une bonne latence mais le trafic est mauvais
+### A link has good latency but the traffic is bad
 
-Regardez **gigue** et **perte** dans la même fiche, et les compteurs du
-transport en dessous : sur UDP, des *retransmits* qui montent alors que le RTT
-a l'air bon est la signature d'un chemin qui perd des paquets. La carte étendue
-(clic sur la carte de l'Overview) passe ces liens en ambre.
+Look at **jitter** and **loss** in the same view, and the transport's own
+counters below them: on UDP, *retransmits* climbing while the RTT looks fine is
+the signature of a path losing packets. The expanded map (click the map on
+Overview) turns those links amber.
 
-### La console dit « Offline » alors que la machine a internet
+### The console says "Offline" although the machine has internet
 
-`internet` vient d'une sonde sortante bornée. Sur un réseau qui filtre les
-sondes, elle échoue sans que le mesh soit en cause. **Re-check network** la
-relance ; la joignabilité réelle est l'affaire de la ligne
-**Reachability** juste au-dessus.
+`internet` comes from a bounded outbound probe. On a network that filters
+probes it fails with the mesh entirely unaffected. **Re-check network** runs it
+again; actual reachability is the business of the **Reachability** line just
+above it.
 
 ---
 
 ## Console
 
-### Le sélecteur de contexte n'apparaît pas
+### The context picker does not appear
 
-Il n'apparaît que si l'app **fleet** tourne **et** qu'au moins une node vous a
-accordé la capability `manage`. Sinon il n'y a rien à sélectionner. Voir
+It appears only if the **fleet** app is running **and** at least one node has
+granted you the `manage` capability. Otherwise there is nothing to pick. See
 [`Docs/Apps/fleet`](Docs/Apps/fleet).
 
-### « no session on that node — connect to it again »
+### "no session on that node — connect to it again"
 
-La session distante a expiré (une heure d'inactivité), la node distante a
-redémarré, ou son mot de passe console a changé. Re-sélectionnez-la : elle
-redemandera le mot de passe. C'est volontaire — le grant ouvre le canal, le mot
-de passe ouvre la session.
+The remote session expired (an hour of inactivity), the remote node restarted,
+or its console password changed. Select it again: it will ask for the password.
+That is deliberate — the grant opens the channel, the password opens the
+session.
 
-### Une barre de progression ou de mémoire reste vide
+### A progress or memory bar stays empty
 
-Corrigé. La CSP de la console (`default-src 'self'`, sans `unsafe-inline`) fait
-ignorer **en silence** tout attribut `style=`, donc les barres écrites ainsi ne
-se remplissaient jamais. Elles sont désormais des `<progress>`. Si vous le voyez
-encore, votre arbre est antérieur au correctif.
+Fixed. The console's CSP (`default-src 'self'`, without `unsafe-inline`) makes
+the browser ignore **silently** any `style=` attribute, so bars written that way
+never filled. They are `<progress>` elements now. If you still see it, your tree
+predates the fix.
 
-### Le navigateur refuse le certificat de la console
+### The browser refuses the console's certificate
 
-Il est auto-signé, c'est attendu. Son empreinte SHA-256 est affichée au
-démarrage du nœud : comparez-la, puis acceptez-la. En loopback, `--no-tls` est
-une option raisonnable.
+It is self-signed, which is expected. Its SHA-256 fingerprint is printed when
+the node starts: compare it, then accept it. Over loopback, `--no-tls` is a
+reasonable option.
 
 ---
 
-## Fleet & déploiement
+## Fleet & deployment
 
-### `dependency setup failed` en déployant sur une machine
+### `dependency setup failed` when deploying to a machine
 
-Le déploiement distant ne pose rien lui-même : il livre l'arbre et appelle son
-`install.sh`. En cas d'échec, la console garde les **dernières lignes de sortie
-de la machine cible** — la vraie cause y est presque toujours (paquet manquant,
-disque plein, pas de compilateur pour liboqs).
+Remote deployment installs nothing itself: it delivers the tree and calls its
+`install.sh`. On failure the console keeps the **last lines of output from the
+target machine** — the real cause is nearly always in there (a missing package,
+a full disk, no compiler for liboqs).
 
 ### `sudo: a terminal is required`
 
-Corrigé : le déploiement alloue un pty et répond aux invites sans jamais écrire
-le secret sur disque ni sur une ligne de commande. Si vous le voyez encore,
-mettez à jour la node **opératrice** (c'est elle qui pilote le SSH).
+Fixed: deployment allocates a pty and answers the prompts without ever writing
+the secret to disk or onto a command line. If you still see it, update the
+**operating** node — that is the one driving SSH.
 
-### Une machine déployée n'apparaît pas dans la liste
+### A deployed machine does not appear in the list
 
-Elle rejoint après avoir installé ses dépendances, ce qui peut prendre plusieurs
-minutes sur une petite machine (compilation de liboqs). Son invitation est
-valable bien plus longtemps qu'un code tapé à la main, précisément pour ça.
-L'onglet **Activity** montre où en est le déploiement.
+It joins after installing its dependencies, which can take several minutes on a
+small machine (building liboqs). Its invitation lives far longer than a
+hand-typed code, precisely for that. The **Activity** tab shows where the
+deployment has got to.
 
 ---
 
-## Divers
+## Miscellaneous
 
-### Deux nodes inactives échangeaient des mégaoctets
+### Two idle nodes were exchanging megabytes
 
-Corrigé (boucle `FIND_NODE`/`FOUND_NODE`) : ~3 Mbit/s au repos sont devenus
-~2 kbit/s. Pour vérifier chez vous : **Settings → Diagnostics → Protocol
-trace**, qui donne le volume par type de message sans jamais enregistrer de
-contenu.
+Fixed (a `FIND_NODE`/`FOUND_NODE` loop): ~3 Mbit/s at rest became ~2 kbit/s. To
+check on your own machine: **Settings → Diagnostics → Protocol trace**, which
+gives the volume per message type without ever recording any content.
 
-### Où sont les fichiers ?
+### Where are the files?
 
-| Quoi | Où (installation système) |
+| What | Where (system installation) |
 |---|---|
-| l'arbre | `/opt/nmesh` |
-| l'état (identité, sessions, certificats) | `/var/lib/nmesh`, mode 700 |
-| la configuration | `<préfixe>/nmesh.conf` |
-| le wrapper d'update | `/usr/local/lib/nmesh/nmesh-update` (root) |
-| la règle sudoers | `/etc/sudoers.d/nmesh` |
+| the tree | `/opt/nmesh` |
+| the state (identity, sessions, certificates) | `/var/lib/nmesh`, mode 700 |
+| the configuration | `<prefix>/nmesh.conf` |
+| the update wrapper | `/usr/local/lib/nmesh/nmesh-update` (root) |
+| the sudoers rule | `/etc/sudoers.d/nmesh` |

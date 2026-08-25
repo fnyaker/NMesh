@@ -1,76 +1,74 @@
 # NMesh
 
-**Réseau mesh décentralisé, agnostique du transport, chiffré de bout en bout —
-conçu pour fonctionner en territoire hostile.**
+**A decentralised, transport-agnostic, end-to-end encrypted mesh network —
+built to work in hostile territory.**
 
-NMesh fait transiter des données entre nœuds sur *n'importe quel medium capable
-de porter des octets* — TCP/IP, et aussi un répertoire partagé sur clé USB
-(store-and-forward). Le routage est agnostique du transport : si A parle à B en
-Bluetooth et B à C en Wi-Fi, A atteint C en passant par B. Tout est chiffré de
-bout en bout avec de la cryptographie **post-quantique** ; les relais ne voient
-jamais le contenu.
+NMesh moves data between nodes over *any medium that can carry bytes* — TCP/IP,
+and equally a shared directory on a USB stick (store-and-forward). Routing is
+transport-agnostic: if A talks to B over Bluetooth and B to C over Wi-Fi, A
+reaches C through B. Everything is encrypted end to end with **post-quantum**
+cryptography; relays never see the content.
 
-> Les principes directeurs (sécurité > solidité > flexibilité > rapidité,
-> dépendances minimales) sont dans [`CLAUDE.md`](CLAUDE.md). L'état d'avancement
-> est dans [`ROADMAP.md`](ROADMAP.md).
+> The guiding principles (security > solidity > flexibility > speed, minimal
+> dependencies) are in [`CLAUDE.md`](CLAUDE.md). Progress is tracked in
+> [`ROADMAP.md`](ROADMAP.md).
 
-## Points clés
+## Highlights
 
-- **Post-quantique de bout en bout** — ML-KEM-768, ML-DSA-65, AES-256-GCM.
-- **Agnostique du transport** — n'importe qui implémente un transport
-  (`BaseTransport` / `BaseServer`) et l'enregistre par schéma d'URL.
-- **Store-and-forward** — le mesh tourne aussi sur un répertoire/fichier
-  (`spool://`), pour les liens hors-ligne ou à très forte latence.
-- **Zéro crash / auto-réparation** — aucun paquet hostile ne fait tomber un
-  nœud ; les pairs abusifs sont coupés, les liens morts purgés, les liens
-  reconstruits à la demande.
-- **PKI P2P auto-racinée** — invitations, chaînes de certificats, racines de
-  confiance ; pas d'autorité centrale.
-- **Persistance opt-in** — sessions et pairs survivent au redémarrage
-  (chiffrés au repos).
-- **Join rapide** — une chaîne de 34 caractères (ou un QR code scannable à la
-  caméra) qui porte l'adresse et un code à usage unique, depuis un nœud
-  publiquement joignable.
-- **Console web de gestion** + **connecteur de données** pour brancher des apps.
-- **Identité applicative (SSO)** — une app se sert de l'identité mesh du nœud pour
-  authentifier ses pairs : assertions signées, scopées, fraîches, à usage unique.
-- **Gestion de parc & déploiement** — app *Fleet* : enrôler des nodes avec
-  capabilities, lire leur status, les mettre à jour, ouvrir un shell, découvrir
-  le LAN et y installer NMesh par SSH.
-- **Dépendances minimales** — stdlib Python + `liboqs-python` + `cryptography`.
+- **Post-quantum end to end** — ML-KEM-768, ML-DSA-65, AES-256-GCM.
+- **Transport-agnostic** — anyone can implement a transport
+  (`BaseTransport` / `BaseServer`) and register it by URL scheme.
+- **Store-and-forward** — the mesh also runs over a directory or a file
+  (`spool://`), for offline or very high-latency links.
+- **Zero crash / self-repair** — no hostile packet brings a node down; abusive
+  peers are cut off, dead links purged, links rebuilt on demand.
+- **Self-rooted P2P PKI** — invitations, certificate chains, trust roots; no
+  central authority.
+- **Opt-in persistence** — sessions and peers survive a restart (encrypted at
+  rest).
+- **Quick join** — a 34-character string (or a QR code you can scan with a
+  camera) carrying the address and a single-use code, issued by a publicly
+  reachable node.
+- **Web management console** + **data connector** for plugging apps in.
+- **Application identity (SSO)** — an app uses the node's mesh identity to
+  authenticate its peers: signed assertions, scoped, fresh, single-use.
+- **Fleet management & deployment** — the *Fleet* app: enrol nodes with
+  capabilities, read their status, update them, open a shell, discover the LAN
+  and install NMesh over SSH.
+- **Minimal dependencies** — Python stdlib + `liboqs-python` + `cryptography`.
 
-## Démarrage rapide
+## Quick start
 
 ```bash
-./start.sh                         # crée un venv, installe les deps, lance un nœud + console
+./start.sh                         # creates a venv, installs deps, runs a node + console
 ```
 
-Sur une machine neuve, le script se débrouille seul : il détecte la distribution
-(apt, dnf/yum, pacman, zypper, apk, xbps, Homebrew, FreeBSD, Termux), installe
-ce qui manque — **y compris `pip`/`venv` quand la distro les livre à part
-(Ubuntu, Debian, Alpine, Arch)** — et compile liboqs. La liste complète des cas
-traités est dans [`Docs/Setup/guide`](Docs/Setup/guide).
+On a fresh machine the script copes on its own: it detects the distribution
+(apt, dnf/yum, pacman, zypper, apk, xbps, Homebrew, FreeBSD, Termux), installs
+what is missing — **including `pip`/`venv` where the distro ships them
+separately (Ubuntu, Debian, Alpine, Arch)** — and builds liboqs. The full list
+of cases it handles is in [`Docs/Setup/guide`](Docs/Setup/guide).
 
-Au premier lancement, le mot de passe de la console est **généré et affiché une
-fois** — notez-le. Puis ouvrez l'URL affichée (console web en HTTPS).
+On the first run the console password is **generated and printed once** — write
+it down. Then open the URL it prints (the web console, over HTTPS).
 
-Options utiles (tout argument est transmis au lanceur) :
+Useful options (every argument is passed through to the launcher):
 
 ```bash
-./start.sh --connector-port 8790          # expose un connecteur pour brancher des apps
-./start.sh --spool /mnt/usb/mesh          # ajoute un lien store-and-forward (clé USB)
-./start.sh --console-host 0.0.0.0         # console accessible depuis le LAN
-./start.sh --fleet                        # active l'app de gestion de parc (/fleet)
+./start.sh --connector-port 8790          # expose a connector for plugging apps in
+./start.sh --spool /mnt/usb/mesh          # add a store-and-forward link (USB stick)
+./start.sh --console-host 0.0.0.0         # console reachable from the LAN
+./start.sh --fleet                        # enable the fleet management app (/fleet)
 ```
 
-Vérifier une installation sans démarrer de nœud (utile en CI) :
+Check an installation without starting a node (useful in CI):
 
 ```bash
 NMESH_SETUP_ONLY=1 ./start.sh
 ```
 
-Sans le script, à la main (dans un venv — depuis PEP 668, la plupart des distros
-refusent d'installer dans le Python système) :
+Without the script, by hand (in a venv — since PEP 668 most distributions
+refuse installs into the system Python):
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
@@ -78,159 +76,164 @@ pip install -r requirements.txt
 python scripts/nmesh_node.py --data ./data
 ```
 
-## Installer durablement (méthode recommandée)
+## Installing for good (the recommended way)
 
-Pour une machine qui doit **héberger** un nœud, `install.sh` copie l'arbre dans
-un emplacement durable, active le démarrage au boot (systemd, OpenRC ou
-launchd) puis lance le nœud :
+For a machine that is meant to **host** a node, `install.sh` copies the tree to
+a durable location, enables start-at-boot (systemd, OpenRC or launchd) and then
+starts the node:
 
 ```bash
-./install.sh                       # installe, active au boot, lance
-./install.sh --fleet               # …et active l'app de gestion de parc
-./install.sh --uninstall           # retire le service et les fichiers
+./install.sh                       # install, enable at boot, start
+./install.sh --fleet               # …and enable the fleet management app
+./install.sh --uninstall           # remove the service and the files
 ```
 
-Il ne réimplémente rien de `start.sh` : il lui délègue les dépendances et le
-service qu'il écrit pointe sur `start.sh`, si bien qu'un nœud qui redémarre
-revérifie et répare son installation. Relancer `install.sh` met à jour sur
-place — **l'état du nœud n'est jamais touché**.
+It reimplements nothing from `start.sh`: it delegates dependencies to it, and
+the service it writes points at `start.sh`, so a node that restarts re-checks
+and repairs its own installation. Running `install.sh` again updates in place —
+**the node's state is never touched**.
 
-En root, le nœud reçoit un **compte système à lui** (`nmesh`, sans shell ni mot
-de passe) qui possède seul l'installation et l'état, en mode 700 : la clé
-d'identité n'est lisible par aucun autre compte de la machine. `--run-as root`
-ou `--run-as quelquun` pour en décider autrement.
+As root, the node gets **a system account of its own** (`nmesh`, no shell, no
+password) which alone owns the installation and the state, mode 700: the
+identity key is unreadable by any other account on the machine. Use
+`--run-as root` or `--run-as someone` to decide otherwise.
 
-### Où sont les fichiers
+### Where the files live
 
-| | Installation | Configuration | État (identité, certs, sessions) |
+| | Installation | Configuration | State (identity, certs, sessions) |
 |---|---|---|---|
 | root | `/opt/nmesh` | `/opt/nmesh/nmesh.conf` | `/var/lib/nmesh` |
-| utilisateur | `~/.local/share/nmesh` | `~/.local/share/nmesh/nmesh.conf` | `~/.local/share/nmesh/data` |
-| depuis un checkout (`./start.sh`) | le dossier courant | `./nmesh.conf` | `./data` |
+| user | `~/.local/share/nmesh` | `~/.local/share/nmesh/nmesh.conf` | `~/.local/share/nmesh/data` |
+| from a checkout (`./start.sh`) | the current directory | `./nmesh.conf` | `./data` |
 
-Le fichier de configuration porte **toutes les options de lancement**. Il est
-écrit par l'installeur et éditable depuis la console (**Settings →
-Configuration**) — plus besoin d'ouvrir une unité systemd pour changer un port.
-Il survit aux mises à jour et aux réinstallations.
+The configuration file carries **every launch option**. The installer writes it
+and the console edits it (**Settings → Configuration**) — no more opening a
+systemd unit to change a port. It survives updates and reinstalls.
 
 ```bash
-./install.sh --prefix /srv/nmesh          # déplace l'installation, donc la config avec
-NMESH_CONFIG=/etc/nmesh.conf ./start.sh   # ou nommer le fichier directement
-./start.sh --config /etc/nmesh.conf       # idem, en argument
+./install.sh --prefix /srv/nmesh          # move the installation, and the config with it
+NMESH_CONFIG=/etc/nmesh.conf ./start.sh   # or name the file directly
+./start.sh --config /etc/nmesh.conf       # same, as an argument
 ```
 
-Priorité : **ligne de commande > fichier > défaut**. Un drapeau passé
-explicitement l'emporte toujours, et le nœud annonce au démarrage les réglages
-du fichier qu'une option de la ligne de commande a écrasés. Détail des réglages
-et des bornes : [`Docs/Setup/guide`](Docs/Setup/guide).
+Precedence: **command line > file > default**. A flag passed explicitly always
+wins, and at startup the node announces which settings from the file a
+command-line option overrode. Settings and their bounds:
+[`Docs/Setup/guide`](Docs/Setup/guide).
 
-Mot de passe de la console : modifiable depuis la console (**Settings → Console
-password**, le mot de passe courant est exigé), ou réinitialisable sur la
-machine avec `./install.sh --reset-password` si tu l'as perdu.
+Console password: changeable from the console (**Settings → Console password**,
+the current one is required), or resettable on the machine itself with
+`./install.sh --reset-password` if you have lost it.
 
-Le nœud sait aussi se mettre à jour depuis GitHub : console web →
-**Settings → Updates**. La vérification est manuelle, l'installation demande
-une confirmation qui nomme la version, et rien n'est jamais installé sans ce
-clic. Détails : [`Docs/Setup/guide`](Docs/Setup/guide).
+The node can also update itself from GitHub: web console →
+**Settings → Updates**. Checking is manual, installing asks for a confirmation
+that names the version, and nothing is ever installed without that click.
+Details: [`Docs/Setup/guide`](Docs/Setup/guide).
 
-Docker reste possible (`docker/`), mais ce n'est plus la voie conseillée pour
-une machine dédiée.
+Docker is still possible (`docker/`), but it is no longer the recommended route
+for a dedicated machine.
 
-## Console web
+## Web console
 
-Interface de gestion **responsive** (4 onglets : Vue d'ensemble, Apps, Connectivité,
-Paramètres) :
+A **responsive** management interface (four sections: Overview, Network, Apps,
+Settings):
 
-- Vue d'ensemble : statut local, débit temps réel (graphique), **carte réseau
-  cliquable** (cliquer sur un nœud ouvre une pop-up avec son ID complète),
-  tableau des pairs actifs (direction, session, RTT, octets), topologie.
-- Apps : apps installées + **store scalable** (catalogue paginé côté serveur,
-  recherche, actions d'installation/désinstallation).
-- Connectivité : nœuds actifs + connus/recherchables, affichage par défaut des
-  20 plus récents (jusqu'à 100), clic pour détails.
-- Paramètres : écouteurs, punch NAT, keepalive, AutoNAT, vérification réseau.
+- Overview: local status, live throughput (chart), a **clickable mesh map**
+  (click a node to open its details; click the map itself for a bigger one you
+  can pan and zoom), the table of active peers (direction, session, RTT, bytes).
+- Network: peers and known nodes, reachability, one block per transport (what
+  is bound, what it carries, what it takes), and how to add a node.
+- Apps: installed apps + a **scalable store** (server-paginated catalogue,
+  search, install/uninstall actions).
+- Settings: updates, console password, this browser's preferences, the startup
+  configuration file, diagnostics.
 
 → [`Docs/WebConsole/guide`](Docs/WebConsole/guide)
 
-## Brancher une application
+## Plugging an application in
 
-Plan de **données** : une app (même hôte ou conteneur) se connecte au connecteur
-et envoie/reçoit des messages E2E du mesh. Le nœud devient son pont réseau.
+The **data** plane: an app (same host or a container) connects to the connector
+and sends/receives E2E messages over the mesh. The node becomes its network
+bridge.
 → [`Docs/DataConnector/guide`](Docs/DataConnector/guide)
+
+An app can also expose named operations that other apps, the core and the
+console can call — one door, declared by the app itself, rejecting by default.
+→ [`Docs/AppAPI/guide`](Docs/AppAPI/guide)
 
 ## Transports
 
-Un transport = tout ce qui déplace des octets. Fournis :
+A transport is anything that moves bytes. Shipped:
 
-| Schéma     | Medium                         | Usage                         |
-|------------|--------------------------------|-------------------------------|
-| `tcp://`   | TCP/IP                         | liens réseau classiques       |
-| `udp://`   | UDP/IP (fiabilité + hole punch NAT) | liens directs derrière NAT |
-| `spool://` | répertoire partagé / fichier   | store-and-forward, clé USB    |
+| Scheme     | Medium                              | Use                            |
+|------------|-------------------------------------|--------------------------------|
+| `tcp://`   | TCP/IP                              | ordinary network links         |
+| `udp://`   | UDP/IP (reliability + NAT hole punching) | direct links behind NAT   |
+| `spool://` | shared directory / file             | store-and-forward, USB stick   |
 
-Écrire le vôtre : [`Docs/Transports/guide`](Docs/Transports/guide) +
-[`template.py`](Docs/Transports/template.py). Spool :
+Writing your own: [`Docs/Transports/guide`](Docs/Transports/guide) +
+[`template.py`](Docs/Transports/template.py). Spool:
 [`Docs/Transports/spool`](Docs/Transports/spool).
 
-## Déploiements
+## Deployments
 
-### Service système (recommandé)
+### System service (recommended)
 
-`./install.sh` — voir [Installer durablement](#installer-durablement-méthode-recommandée)
-ci-dessus.
+`./install.sh` — see [Installing for good](#installing-for-good-the-recommended-way)
+above.
 
-### Docker (héberger un nœud-relais)
+### Docker (hosting a relay node)
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-Ouvre le port mesh `9000` (relais) ; la console reste sur le loopback de l'hôte
-par défaut (voir les commentaires du compose pour l'exposer). L'état (identité,
-certificats, sessions, mot de passe console) persiste dans le volume `/data`.
-Image publiée sur GHCR à chaque tag (`ghcr.io/<owner>/nmesh`).
+Opens mesh port `9000` (relay); the console stays on the host's loopback by
+default (see the compose comments to expose it). State (identity, certificates,
+sessions, console password) persists in the `/data` volume. The image is
+published to GHCR on every tag (`ghcr.io/<owner>/nmesh`).
 
 ### Zipapp (`.pyz`)
 
 ```bash
-python scripts/build_pyz.py          # produit nmesh.pyz
-python nmesh.pyz --data ./data       # nécessite liboqs-python + cryptography installés
+python scripts/build_pyz.py          # produces nmesh.pyz
+python nmesh.pyz --data ./data       # needs liboqs-python + cryptography installed
 ```
 
-Un fichier unique embarquant le code NMesh. Note : la crypto native
-(`liboqs-python`, `cryptography`) doit être installée dans l'interpréteur —
-pour un artefact totalement autonome, préférez l'image Docker.
+A single file carrying the NMesh code. Note: the native crypto
+(`liboqs-python`, `cryptography`) must be installed in the interpreter — for a
+fully self-contained artefact, prefer the Docker image.
 
 ## FAQ
 
-Les pannes qu'on rencontre vraiment, avec le message exact et la commande qui
-les répare : [`FAQ.md`](FAQ.md).
+The failures people actually hit, with the exact message and the command that
+fixes them: [`FAQ.md`](FAQ.md).
 
 ## Tests
 
 ```bash
-pytest                     # tests unitaires (rapides, sans réseau)
-pytest tests/integration   # intégration : nœuds réels (TCP + spool), crypto réelle
+pytest                     # unit tests (fast, no network)
+pytest tests/integration   # integration: real nodes (TCP + spool), real crypto
 ```
 
-La CI GitHub lance les deux à chaque push/PR. Voir [`TEST.md`](TEST.md).
+GitHub CI runs both on every push and PR. See [`TEST.md`](TEST.md).
 
-## Sécurité
+## Security
 
-Le modèle de menace : *dès qu'une donnée quitte le nœud, elle est en territoire
-hostile*. Rien de ce qui arrive du réseau ou du disque n'est présumé fiable ;
-tout est validé, borné, et rejeté par défaut. Le fuzzing prouve qu'aucun octet
-hostile ne crashe un parseur. Détails et priorités : [`CLAUDE.md`](CLAUDE.md).
+The threat model: *the moment data leaves the node, it is in hostile
+territory*. Nothing arriving from the network or from disk is presumed sound;
+everything is validated, bounded, and rejected by default. Fuzzing proves that
+no hostile byte crashes a parser. Details and priorities:
+[`CLAUDE.md`](CLAUDE.md).
 
-## Structure du projet
+## Project layout
 
 ```
-src/              cœur : nœud, crypto, paquets, routage, transports, console, connecteur
-scripts/          nmesh_node.py (lanceur), nmesh_config.py, nmesh_password.py, build_pyz.py
-start.sh          installe les dépendances et lance un nœud depuis l'arbre courant
-install.sh        installe l'arbre à demeure + service de démarrage, puis lance
-docker/           image et compose du nœud-relais
-Docs/             guides (installation, transports, console, connecteur, paquets)
-tests/            unitaires + tests/integration (nœuds réels)
+src/              the core: node, crypto, packets, routing, transports, console, connector
+scripts/          nmesh_node.py (launcher), nmesh_config.py, nmesh_password.py, build_pyz.py
+start.sh          installs dependencies and runs a node from the current tree
+install.sh        installs the tree for good + a start-at-boot service, then runs it
+docker/           relay-node image and compose file
+Docs/             guides (setup, transports, console, connector, packets)
+tests/            unit tests + tests/integration (real nodes)
 ```
-</content>
