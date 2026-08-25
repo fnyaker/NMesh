@@ -48,10 +48,19 @@ from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import console_path_refusal as fleet_console_refusal
+from . import transport as transport_option
 
 # The page names the node it is driving with this header. Absent (or naming us)
 # means "this node", which is what a page that has never heard of contexts does.
 _REMOTE_HEADER = "X-NMesh-Node"
+
+
+def _field(manager, scheme: str, name: str) -> dict:
+    """The declaration of one field, for writing its value back as text."""
+    for entry in manager.options().get(scheme, []):
+        if entry["name"] == name:
+            return entry
+    return {"kind": "text"}
 
 
 def _is_node_hex(value) -> bool:
@@ -325,6 +334,43 @@ class WebConsole:
                 "problems": problems[:16],
                 "restart_required": False,
                 "service_managed": updater.service_managed()}
+
+    def _transport_options(self) -> dict:
+        """What every registered transport says it takes.
+
+        The console renders this without knowing a single transport: a medium
+        added tomorrow gets a form for free, and one that declares nothing
+        simply does not appear."""
+        manager = self._node._transport_manager
+        try:
+            declared = manager.options()
+        except Exception:
+            declared = {}
+        return {"transports": [{"scheme": scheme, "options": fields}
+                               for scheme, fields in declared.items()],
+                "persisted": bool(self._config_path)}
+
+    def _persist_transports(self) -> tuple:
+        """Write what is not at its default into the configuration file.
+
+        Best effort by design: a node with no file still applies the change to
+        the running process, it just will not remember it."""
+        if not self._config_path:
+            return False, "not stored — this node has no configuration file"
+        try:
+            values, _problems = node_config.load(self._config_path)
+            merged = node_config.defaults()
+            merged.update(values)
+            manager = self._node._transport_manager
+            merged["transports"] = {
+                scheme: {name: transport_option.as_text(
+                    _field(manager, scheme, name), value)
+                    for name, value in fields.items()}
+                for scheme, fields in manager.settings().items()}
+            node_config.save(self._config_path, merged)
+        except Exception as exc:
+            return False, f"could not write the file: {type(exc).__name__}"
+        return True, ""
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
@@ -722,6 +768,12 @@ def _make_handler(console: WebConsole):
                     return
                 self._json(200, console._config_snapshot())
                 return
+            if path == "/api/transports":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                self._json(200, console._transport_options())
+                return
             if path == "/api/trace":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -1100,6 +1152,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/config":
                 self._handle_config_save(_parse_json(body))
                 return
+            if path == "/api/transports":
+                self._handle_transport_save(_parse_json(body))
+                return
             if path == "/api/trace":
                 self._handle_trace(_parse_json(body))
                 return
@@ -1323,6 +1378,31 @@ def _make_handler(console: WebConsole):
             self._json(404, {"error": "not found"})
 
         # -- remote consoles ---------------------------------------------
+
+        def _handle_transport_save(self, data) -> None:
+            """Apply one transport's settings, then write them to the file.
+
+            Applied first, stored second: a value the transport refuses must
+            never reach the file, or the next start would refuse it too — with
+            nobody at the keyboard to read why."""
+            data = data or {}
+            scheme = str(data.get("scheme") or "")[:32]
+            values = data.get("values")
+            if not isinstance(values, dict):
+                self._json(400, {"error": "no settings given"})
+                return
+            manager = console._node._transport_manager
+            try:
+                result = console._call(_wrap(manager.configure, scheme, values))
+            except Exception as exc:
+                self._json(400, {"error": str(exc)[:200]})
+                return
+            saved, note = console._persist_transports()
+            self._json(200, {"ok": not result["rejected"],
+                             "applied": {name: value for name, value
+                                         in result["applied"].items()},
+                             "rejected": result["rejected"],
+                             "persisted": saved, "note": note})
 
         def _handle_remote_targets(self) -> None:
             if not self._authed():

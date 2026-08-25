@@ -13,6 +13,57 @@ Source : `transport.py`, `transport_manager.py`, `tcp_transport.py`,
   Le cœur ne connaît aucun transport concret. Écoute clée par URI exacte (un
   nœud peut écouter sur plusieurs adresses ; refuse un doublon d'URI).
 
+## Se configurer : `OPTIONS` / `configure()`
+
+Même principe que l'observabilité : **le medium déclare, le reste est écrit une
+fois.** Un transport pose deux attributs de classe et n'écrit aucune validation :
+
+```python
+class TCPTransport(BaseTransport):
+    OPTIONS = (
+        option("connect_timeout", "float", 4.0, "…", minimum=0.5, maximum=60.0, unit="s"),
+        option("families", "multi", ["ipv4", "ipv6"], "…",
+               choices=[{"value": "ipv4", "label": "IPv4"},
+                        {"value": "ipv6", "label": "IPv6"}]),
+        option("source_address", "text", "", "…", placeholder="192.168.1.20"),
+    )
+    SETTINGS: dict = {}          # valeurs en vigueur, au niveau de la classe
+```
+
+Types : `bool`, `int`, `float`, `text`, `choice`, `multi` — soit exactement les
+cases à cocher, listes multi-choix et champs libres qu'une interface sait
+rendre. `restart=True` marque une valeur que le processus vivant ne peut pas
+reprendre : le dire est la différence entre un réglage cassé et un réglage pas
+encore actif.
+
+- `coerce()` traduit et **borne** (min/max, longueur, valeur d'une liste de
+  choix, ligne unique) avec un message qu'un humain peut suivre. Écrit une fois :
+  un medium qui validerait lui-même validerait légèrement différemment.
+- `configure()` applique **partiellement** : un champ mauvais ne jette pas les
+  quatre bons tapés avec lui, et rend `{"applied": …, "rejected": {nom: raison}}`.
+  `SETTINGS` est **remplacé**, jamais muté — un dictionnaire de classe partagé
+  n'est pas un endroit qu'on édite sous un lien vivant.
+- `TransportManager.options() / configure() / settings()` ne fait que passer les
+  choses : il sait quelle classe répond pour un schéma, rien de plus.
+
+### Persistance
+
+Le fichier de configuration accepte des clés **namespacées** `schéma.option` et
+les porte **en texte, sans les valider** : c'est le medium qui sait. Au
+démarrage, `_apply_transport_settings()` les distribue avant que quoi que ce
+soit n'écoute ou ne compose ; une valeur refusée est signalée sur la bannière et
+laissée à son défaut — un nœud qui refuse de démarrer parce qu'un délai est mal
+tapé est un pire résultat qu'un nœud qui tourne sur son défaut.
+
+La console (Network → Reachability) rend le formulaire **à partir de la
+déclaration**, applique d'abord et écrit ensuite : une valeur que le transport
+refuse n'atteint jamais le fichier, sinon le prochain démarrage la refuserait à
+son tour avec personne devant le clavier pour lire pourquoi.
+
+Réglages actuels : TCP (délai de connexion, délai de lecture, `TCP_NODELAY`,
+familles d'adresses, adresse source), UDP (intervalle et délai de keepalive,
+profondeur du buffer de réordonnancement), spool (intervalle de scrutation).
+
 ## S'observer soi-même : `endpoints()` et `stats()`
 
 Deux crochets optionnels sur `BaseTransport`, de la même forme que

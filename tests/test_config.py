@@ -251,14 +251,14 @@ class TestLauncherPrecedence:
     def test_the_file_is_applied_when_no_flag_is_given(self, tmp_path):
         path = tmp_path / "nmesh.conf"
         path.write_text("fleet = true\nconsole_host = 0.0.0.0\n")
-        (_path, problems, overridden), args = self.settle(path, {})
+        (_path, problems, overridden, _transports), args = self.settle(path, {})
         assert problems == [] and overridden == []
         assert args.fleet is True and args.console_host == "0.0.0.0"
 
     def test_a_flag_wins_and_says_so(self, tmp_path):
         path = tmp_path / "nmesh.conf"
         path.write_text("console_port = 9000\n")
-        (_path, _problems, overridden), args = self.settle(
+        (_path, _problems, overridden, _transports), args = self.settle(
             path, {"console_port": 9443})
         assert args.console_port == 9443
         assert overridden == ["console_port"]
@@ -266,7 +266,7 @@ class TestLauncherPrecedence:
     def test_defaults_fill_what_neither_says(self, tmp_path):
         path = tmp_path / "nmesh.conf"
         path.write_text("fleet = true\n")
-        (_path, _problems, _overridden), args = self.settle(path, {})
+        (_path, _problems, _overridden, _transports), args = self.settle(path, {})
         assert args.console_port == 8787 and args.listen == "0.0.0.0:9000"
 
 

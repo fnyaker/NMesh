@@ -136,6 +136,12 @@ tests/
 │     externe, aucun attribut `style=` (la CSP l'ignore en silence), et
 │     l'émulateur de terminal relit ce qu'un vrai shell écrit
 │     (`term_emulator_test.js`, exécuté sous node)
+├── test_transport_options.py                          — configurer un transport
+│     sans savoir ce qu'est un transport : coercition et bornes de chaque type
+│     (bool/int/float/text/choice/multi), application partielle (un champ mauvais
+│     ne jette pas les bons), SETTINGS remplacé et non muté, le fichier porte les
+│     clés `schéma.option` sans les valider, section bornée, aller-retour
+│     render/parse, et un réglage mal tapé est signalé au démarrage, jamais fatal
 ├── test_link_stats.py                                 — ce que le mesh donne à
 │     voir : gigue qui distingue un lien stable d'un lien qui oscille, perte non
 │     déduite d'une seule sonde, historique borné, statut par adresse (en service

@@ -78,7 +78,11 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
   échantillons), les compteurs propres au transport, et **l'état de chaque
   adresse connue** — en service, injoignable, jamais essayée.
 - **Network → Reachability** agrège par medium : liens, latence moyenne, volume
-  transporté, écouteurs, ports.
+  transporté, écouteurs, ports — et **configure chaque transport** : un panneau
+  par medium, rendu à partir de ce que le medium déclare (cases à cocher, listes
+  multi-choix, nombres bornés, champs libres). Appliqué au nœud vivant puis écrit
+  dans le fichier de configuration ; une valeur refusée reste à l'écran avec sa
+  raison et n'atteint jamais le fichier.
 
 Ces chiffres viennent du transport lui-même (`endpoints()` / `stats()`), donc un
 nouveau medium apparaît ici sans modification de la console. Voir
@@ -153,6 +157,8 @@ fonctionne sur une machine sans internet.
 | POST    | `/api/chat/search` | `{pseudo}` → local + annuaire DHT réseau + requête 1-saut |
 | GET     | `/api/fleet/state` | `?since=N` → nodes gérées, notifications d'enrôlement, journal, capabilities, faits machine |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → octets du terminal (base64) |
+| GET     | `/api/transports` | ce que chaque transport déclare prendre, avec les valeurs en vigueur |
+| POST    | `/api/transports` | `{scheme, values}` → applique puis persiste ; rend `applied` / `rejected` |
 | GET     | `/api/fleet/keys`  | clés SSH disponibles (disque + importées) — **métadonnées seulement** |
 | POST    | `/api/fleet/keys` / `keys-remove` | importe / retire une clé privée (tiroir chiffré) |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |

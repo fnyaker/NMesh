@@ -139,6 +139,28 @@ async def _adopt_operator(node, host, preauth, path) -> None:
             pass
 
 
+def _apply_transport_settings(manager, values: dict) -> list:
+    """Hand each transport its own section of the file, before anything runs.
+
+    The file carries these as text and never validates them: the medium is the
+    only thing that knows what it takes. A value it refuses is reported and
+    dropped — a node that will not start because one timeout was mistyped is a
+    worse outcome than one running that setting at its default."""
+    problems = []
+    for scheme, fields in (values or {}).items():
+        if not manager.is_supported(scheme):
+            problems.append(f"config: no transport named '{scheme}' — ignored")
+            continue
+        try:
+            result = manager.configure(scheme, fields)
+        except Exception as exc:
+            problems.append(f"config: {scheme} — {type(exc).__name__}")
+            continue
+        for name, reason in result["rejected"].items():
+            problems.append(f"config: {scheme}.{name} — {reason}")
+    return problems
+
+
 def _settle(args) -> tuple:
     """Fill in everything the command line did not say, from the config file.
 
@@ -164,8 +186,9 @@ def _settle(args) -> tuple:
                 overridden.append(name)
             settled[name] = given
     for name, value in settled.items():
-        setattr(args, name, value)
-    return path, problems, overridden
+        if name != "transports":
+            setattr(args, name, value)
+    return path, problems, overridden, values.get("transports") or {}
 
 
 async def main() -> None:
@@ -211,7 +234,7 @@ async def main() -> None:
                     help="console password (default: $NMESH_CONSOLE_PASSWORD, "
                          "else a strong one is generated and printed once)")
     args = ap.parse_args()
-    config_path, config_problems, config_overridden = _settle(args)
+    config_path, config_problems, config_overridden, transport_values = _settle(args)
 
     if args.data:
         os.makedirs(args.data, exist_ok=True)
@@ -220,6 +243,7 @@ async def main() -> None:
     mgr.register("tcp", TCPTransport, TCPServer)
     mgr.register("spool", SpoolTransport, SpoolServer)
     mgr.register("udp", UDPTransport, UDPServer)
+    transport_problems = _apply_transport_settings(mgr, transport_values)
     node = MeshNode(
         mgr,
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
@@ -313,7 +337,7 @@ async def main() -> None:
     # An ignored configuration file is how a node ends up running settings
     # nobody chose. Say it here, where the operator is already looking, not in a
     # line scrolled past twenty seconds earlier.
-    for problem in config_problems:
+    for problem in config_problems + transport_problems:
         print(f"  Config ⚠      : {problem}")
     if config_overridden:
         print(f"  Config ⚠      : overridden on the command line: "
