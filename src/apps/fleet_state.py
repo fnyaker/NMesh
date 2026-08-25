@@ -12,6 +12,11 @@ Two directions, deliberately kept apart, because they carry very different risk:
   - **managed**: nodes that have agreed to obey *us*. Losing this list costs
     convenience, not safety.
 
+A grant is not frozen at enrolment, but the two directions of change are not
+symmetric: :meth:`set_operator_caps` widens only for a caller that already holds
+the authority locally, and offers ``narrow_only`` for the one case a remote peer
+may drive — handing a right back.
+
 Each entry keeps the **signed assertion** that created it (see
 :mod:`src.app_auth`). That is what makes the ledger auditable rather than merely
 stateful: months later, offline, one can still verify that the node holding a
@@ -196,6 +201,35 @@ class FleetState:
             self._save()
             return dict(entry, id=node_hex)
 
+    def set_operator_caps(self, node_hex: str, caps,
+                          *, narrow_only: bool = False) -> list[str] | None:
+        """Change what an existing operator may do, without re-enrolling them.
+
+        Two callers, with deliberately different powers. A human on *this*
+        machine may set any capability set: they already hold the authority the
+        grant delegates, so there is nothing to escalate. A remote operator may
+        only ever *narrow* (``narrow_only``) — giving a right up needs nobody's
+        permission, taking one needs the human above.
+
+        Returns the resulting list — empty when the last capability went and the
+        operator was dropped — or ``None`` when there is no such operator."""
+        caps = clean_caps(caps)
+        with self._lock:
+            entry = self._operators.get(node_hex)
+            if entry is None:
+                return None
+            if narrow_only:
+                held = entry.get("caps") or []
+                caps = [cap for cap in caps if cap in held]
+            if not caps:
+                self._operators.pop(node_hex, None)
+                self._save()
+                return []
+            entry["caps"] = caps
+            entry["changed_at"] = time.time()
+            self._save()
+            return list(caps)
+
     def remove_operator(self, node_hex: str) -> bool:
         with self._lock:
             gone = self._operators.pop(node_hex, None) is not None
@@ -269,7 +303,8 @@ class FleetState:
             return [dict(entry, id=key) for key, entry in self._pending_out.items()]
 
     def add_pending_in(self, node_hex: str, public_key: bytes, *,
-                       caps: list[str], label: str, proof: bytes) -> dict | None:
+                       caps: list[str], label: str, proof: bytes,
+                       have: list[str] | None = None) -> dict | None:
         """Park an incoming enrolment request until a human decides.
 
         Re-requesting only refreshes the existing entry: a peer cannot fill the
@@ -285,6 +320,9 @@ class FleetState:
             entry = {
                 "pub": public_key.hex(),
                 "caps": caps,
+                # What they hold already, so a human sees "asks for shell on
+                # top of status" rather than an undifferentiated list.
+                "have": clean_caps(have),
                 "label": clean_label(label),
                 "at": time.time(),
                 "proof": _b64(proof),

@@ -2666,6 +2666,7 @@ FLEET_HTML = """<!doctype html>
 
   <nav class="tabs">
     <button class="tab active" data-tab="nodes">Nodes</button>
+    <button class="tab" data-tab="access">Who controls this node</button>
     <button class="tab" data-tab="discover">Discover &amp; deploy</button>
     <button class="tab" data-tab="shell">Shell</button>
     <button class="tab" data-tab="activity">Activity</button>
@@ -2682,6 +2683,13 @@ FLEET_HTML = """<!doctype html>
     <div id="add-caps" class="caps"></div>
     <p class="muted small">The target node raises a notification; someone there must accept before anything runs.</p>
     <div id="nodes" class="cards"></div>
+  </section>
+
+  <section id="tab-access" class="tabbody hidden">
+    <p class="muted small">Every node listed here can act on this machine. Changing
+      a right takes effect immediately — you are standing on the machine that bears it.
+      A node can never take a right for itself: it has to ask, and someone here has to accept.</p>
+    <div id="operators" class="cards"></div>
   </section>
 
   <section id="tab-discover" class="tabbody hidden">
@@ -2967,7 +2975,8 @@ async function poll(){
   $("me").textContent=short(j.me);
   if(first){capBoxes($("add-caps"),["status","update"]);
             capBoxes($("deploy-caps"),["status","update"]);}
-  renderPending(); renderNodes(); renderNodePickers(); renderLog(); renderJobs();
+  renderPending(); renderNodes(); renderOperators(); renderNodePickers();
+  renderLog(); renderJobs();
   // A scan asked of a remote node answers asynchronously: its result lands in
   // ST.scans on a later poll, so the discover tab has to redraw here. Without
   // this the results arrived and were never shown — "nothing happens".
@@ -2988,13 +2997,17 @@ async function poll(){
 function renderPending(){
   const list=ST.pending_in||[];
   $("inbox").classList.toggle("hidden",list.length===0);
-  $("pending").innerHTML=list.map(p=>
-    '<div class="node"><h3>Access request</h3>'+
+  $("pending").innerHTML=list.map(p=>{
+    const have=p.have||[];
+    return '<div class="node"><h3>'+(have.length?"More rights requested":"Access request")+'</h3>'+
     '<div class="muted mono id">'+esc(short(p.id))+'</div>'+
     (p.label?'<div>'+esc(p.label)+'</div>':'')+
-    '<div>Wants: '+(p.caps||[]).map(c=>'<span class="pill">'+esc(c)+'</span>').join(" ")+'</div>'+
+    (have.length?'<div class="muted small">Already has: '+
+      have.map(c=>esc(c)).join(", ")+'</div>':'')+
+    '<div>Wants: '+(p.caps||[]).map(c=>'<span class="pill'+
+      (have.length&&have.indexOf(c)<0?" warn":"")+'">'+esc(c)+'</span>').join(" ")+'</div>'+
     '<div class="acts"><button class="primary" data-approve="'+esc(p.id)+'">Review &amp; accept</button>'+
-    '<button class="danger" data-deny="'+esc(p.id)+'">Deny</button></div></div>').join("");
+    '<button class="danger" data-deny="'+esc(p.id)+'">Deny</button></div></div>';}).join("");
 }
 
 function approveDialog(id){
@@ -3002,7 +3015,9 @@ function approveDialog(id){
   $("modal-title").textContent="Accept "+short(id)+"?";
   $("modal-body").innerHTML=
     '<p class="muted small">Each capability you grant lets that node act on this one. '+
-    'You can narrow the list; you cannot grant more than was asked.</p>'+
+    'You can narrow the list; you cannot grant more than was asked. '+
+    'What you leave ticked is exactly what it will hold afterwards'+
+    ((p.have||[]).length?" — including rights it has now.":".")+'</p>'+
     '<div id="ap-caps" class="caps"></div>'+
     '<div class="row gap"><button id="ap-ok" class="primary">Grant access</button>'+
     '<button id="ap-no" class="ghost">Cancel</button></div>';
@@ -3077,9 +3092,55 @@ function renderNodes(){
       (can("update")?'<button data-update="'+esc(n.id)+'">Update</button>':'')+
       (can("shell")?'<button data-shell="'+esc(n.id)+'">Shell</button>':'')+
       (can("scan")?'<button data-scan="'+esc(n.id)+'">Scan LAN</button>':'')+
+      '<button data-rights="'+esc(n.id)+'">Rights</button>'+
       '<button class="danger" data-revoke="'+esc(n.id)+'">Revoke</button>'+
       '</div></div>';}).join("");
   $("nodes").innerHTML=html||'<div class="muted">No nodes yet. Ask one to let you manage it.</div>';
+}
+
+// ---- who can control this node ----
+function renderOperators(){
+  const list=ST.operators||[], caps=ST.capabilities||[];
+  $("operators").innerHTML=list.map(o=>{
+    const held=o.caps||[];
+    return '<div class="node"><h3>'+esc(o.label||short(o.id))+
+      ' <span class="pill warn">controls this node</span></h3>'+
+      '<div class="muted mono id">'+esc(short(o.id))+'</div>'+
+      '<div class="caps" data-ops="'+esc(o.id)+'">'+caps.map(c=>
+        '<label class="cap" title="'+esc(c.description)+'">'+
+        '<input type="checkbox" value="'+esc(c.name)+'"'+
+        (held.indexOf(c.name)>=0?" checked":"")+'> '+esc(c.name)+'</label>').join("")+
+      '</div>'+
+      '<div class="acts"><button class="primary" data-caps-set="'+esc(o.id)+'">Apply rights</button>'+
+      '<button class="danger" data-revoke="'+esc(o.id)+'">Cut off</button></div></div>';
+  }).join("")||'<div class="muted">No node can control this one.</div>';
+}
+
+// Changing what *we* hold on a node we manage. The two halves are not
+// symmetric, and the dialog says so: dropping is ours to do, asking is theirs
+// to answer.
+function rightsDialog(id){
+  const node=(ST.managed||[]).find(x=>x.id===id); if(!node)return;
+  const held=node.caps||[];
+  $("modal-title").textContent="Rights on "+short(id);
+  $("modal-body").innerHTML=
+    '<p class="muted small">Untick a right and it is gone at once — giving one up '+
+    'needs nobody\'s permission. Tick one and that node raises a request; someone '+
+    'there has to accept before it works.</p>'+
+    '<div id="rt-caps" class="caps"></div>'+
+    '<div class="row gap"><button id="rt-ok" class="primary">Apply</button>'+
+    '<button id="rt-no" class="ghost">Cancel</button></div>';
+  capBoxes($("rt-caps"),held);
+  $("rt-ok").addEventListener("click",async()=>{
+    const want=capsOf($("rt-caps"));
+    const drop=held.filter(c=>want.indexOf(c)<0);
+    const ask=want.filter(c=>held.indexOf(c)<0);
+    if(drop.length)await api("/api/fleet/caps-drop","POST",{node:id,caps:drop});
+    if(ask.length)await api("/api/fleet/caps-request","POST",{node:id,caps:ask});
+    closeModal(); poll();
+  });
+  $("rt-no").addEventListener("click",closeModal);
+  $("modal").classList.remove("hidden");
 }
 
 function renderNodePickers(){
@@ -3537,6 +3598,13 @@ function bind(){
     const t=e.target.closest("button"); if(!t)return;
     const d=t.dataset;
     if(d.approve)return approveDialog(d.approve);
+    if(d.rights)return rightsDialog(d.rights);
+    if(d.capsSet){
+      const box=document.querySelector('[data-ops="'+d.capsSet+'"]');
+      if(!box)return;
+      await api("/api/fleet/caps-set","POST",{node:d.capsSet,caps:capsOf(box)});
+      return poll();
+    }
     if(d.deny){await api("/api/fleet/deny","POST",{node:d.deny});return poll();}
     if(d.revoke){await api("/api/fleet/revoke","POST",{node:d.revoke});return poll();}
     if(d.status){await api("/api/fleet/status","POST",{node:d.status});return;}

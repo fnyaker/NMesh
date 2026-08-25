@@ -101,3 +101,14 @@ def test_the_terminal_pane_takes_real_keystrokes():
     assert 'addEventListener("keydown"' in webassets.FLEET_JS
     assert "function keyBytes" in webassets.FLEET_JS
     assert 'tabindex="0"' in webassets.FLEET_HTML
+
+
+def test_the_rights_panel_is_wired_to_a_real_element():
+    """La vue « qui peut contrôler cette node » est le seul endroit où un droit
+    s'ajoute : si son conteneur manque, elle disparaît en silence."""
+    assert 'id="operators"' in webassets.FLEET_HTML
+    assert 'data-tab="access"' in webassets.FLEET_HTML
+    assert "function renderOperators" in webassets.FLEET_JS
+    for route in ("/api/fleet/caps-set", "/api/fleet/caps-request",
+                  "/api/fleet/caps-drop"):
+        assert route in webassets.FLEET_JS, route

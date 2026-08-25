@@ -249,6 +249,55 @@ class TestFleetRoutes:
             await host.stop_all()
             await node.stop()
 
+    async def test_caps_routes_reach_the_ledger(self):
+        """The three rights routes, over HTTP: what a human here may set, and
+        what a node we manage may only ask for."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            peer = "cc" * 20
+            app.state.add_operator(peer, b"\x01" * 32, caps=["status"],
+                                   label="boss")
+            status, _, _, _ = await _post(console, "/api/fleet/caps-set", token,
+                                          {"node": peer,
+                                           "caps": ["status", "update"]})
+            assert status == 200
+            assert app.state.allows(peer, "update") is True
+
+            # Nothing to change on a node we do not manage.
+            status, _, _, _ = await _post(console, "/api/fleet/caps-request",
+                                          token, {"node": "dd" * 20,
+                                                  "caps": ["shell"]})
+            assert status == 400
+            status, _, _, _ = await _post(console, "/api/fleet/caps-drop", token,
+                                          {"node": "dd" * 20, "caps": ["shell"]})
+            assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_caps_routes_refuse_junk(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            peer = "cc" * 20
+            built["app"].state.add_operator(peer, b"\x01" * 32, caps=["status"])
+            for route, body in (("caps-set", {"node": "nothex", "caps": ["status"]}),
+                                ("caps-set", {"node": peer, "caps": ["root"]}),
+                                ("caps-request", {"node": peer, "caps": []}),
+                                ("caps-drop", {"node": peer, "caps": "shell"})):
+                status, _, _, _ = await _post(console, "/api/fleet/" + route,
+                                              token, body)
+                assert status in (400, 503), (route, body)
+            # An unknown capability must not have quietly become a grant.
+            assert set(built["app"].state.operator(peer)["caps"]) == {"status"}
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_shell_input_requires_valid_base64(self):
         node, console, host, _ = await _make(enabled=True)
         try:

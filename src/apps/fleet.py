@@ -73,6 +73,7 @@ ENROL_GRANT = 0x02
 ENROL_DENY = 0x03
 ENROL_REVOKE = 0x04
 PREAUTH_CLAIM = 0x05
+ENROL_NARROW = 0x06               # an operator giving a right up, unilaterally
 
 STATUS_REQUEST = 0x10
 STATUS_REPORT = 0x11
@@ -100,6 +101,7 @@ PROVISION_RESULT = 0x44
 PURPOSE_ENROL = "fleet.enrol"
 PURPOSE_GRANT = "fleet.grant"
 PURPOSE_PREAUTH = "fleet.preauth"
+PURPOSE_NARROW = "fleet.narrow"
 PURPOSE_BY_CAP = {cap: f"fleet.{cap}" for cap in CAPABILITIES}
 
 # -- bounds -----------------------------------------------------------------
@@ -154,6 +156,17 @@ class NodeAdopted:
 @dataclass
 class Revoked:
     src: NodeID
+
+
+@dataclass
+class CapsChanged:
+    """The capability set on an existing relationship moved.
+
+    ``direction`` says whose rights: ``"operator"`` is what that node may do to
+    us, ``"managed"`` is what we may do to it."""
+    src: NodeID
+    caps: list
+    direction: str
 
 
 @dataclass
@@ -535,10 +548,16 @@ class FleetApp:
         caps = clean_caps(document.get("caps"))
         if not caps:
             return
+        node_hex = src.raw.hex()
+        # An operator we already trust asking for more is the same decision as a
+        # stranger asking for the first time: a human here answers it. There is
+        # no path that widens a grant without one, or the whole ladder collapses
+        # to whatever the least capability lets an attacker reach.
+        held = clean_caps((self.state.operator(node_hex) or {}).get("caps"))
         entry = self.state.add_pending_in(
-            src.raw.hex(), principal.public_key, caps=caps,
+            node_hex, principal.public_key, caps=caps,
             label=clean_label(document.get("label")),
-            proof=document.get("_proof", b""))
+            proof=document.get("_proof", b""), have=held)
         if entry is not None:
             self._emit(EnrolRequested(src, caps, entry["label"]))
 
@@ -589,11 +608,19 @@ class FleetApp:
         node_hex = src.raw.hex()
         # Only a node we actually asked can grant us anything: an unsolicited
         # grant is either noise or an attempt to plant an entry in our list.
-        if not caps or not self.state.drop_pending_out(node_hex):
+        # A node we already manage may restate its grant, which is how a human
+        # over there adding or removing one of our rights reaches us.
+        asked = self.state.drop_pending_out(node_hex)
+        known = self.state.managed_one(node_hex) is not None
+        if not caps or not (asked or known):
             return
         self.state.add_managed(node_hex, caps=caps,
                                label=clean_label(document.get("label")),
-                               grant=document.get("_proof", b""))
+                               grant=document.get("_proof", b"")
+                               or self.state.grant_proof(node_hex))
+        if not asked:
+            self._emit(CapsChanged(src, caps, "managed"))
+            return
         self._emit(EnrolAnswered(src, True, caps))
         if self._auto_status:
             self._spawn(self.request_status(src))
@@ -621,15 +648,119 @@ class FleetApp:
 
     def _on_revoke(self, src: NodeID, principal, document: dict) -> None:
         node_hex = src.raw.hex()
+        self._drop_shells_of(src)
+        self.state.remove_operator(node_hex)
+        self.state.remove_managed(node_hex)
+        self._emit(Revoked(src))
+
+    def _drop_shells_of(self, src: NodeID) -> None:
+        """Tear down every shell this peer holds, in both roles.
+
+        A right that has just been taken away must not survive in a session
+        opened while it still held — otherwise revoking ``shell`` only stops
+        the *next* one."""
         for sid, owner in list(self._open_shells.items()):
             if owner == src:
                 self._open_shells.pop(sid, None)
         for sid, shell in list(self._shells.items()):
             if shell.owner == src:
                 self._close_shell(sid, status=-1)
-        self.state.remove_operator(node_hex)
-        self.state.remove_managed(node_hex)
-        self._emit(Revoked(src))
+
+    # -- changing the rights on a standing relationship -------------------
+
+    async def request_capabilities(self, target: NodeID, caps: list[str]) -> bool:
+        """Operator side: ask a node we already manage for extra rights.
+
+        It is the ordinary enrolment request carrying the *whole* set we want,
+        so the human over there sees one list to accept or narrow — and so this
+        cannot become a second, quieter way in."""
+        entry = self.state.managed_one(target.raw.hex())
+        if entry is None:
+            return False
+        held = clean_caps(entry.get("caps"))
+        want = clean_caps(held + clean_caps(caps))
+        if want == held:
+            return False
+        return await self.request_enrolment(target, caps=want,
+                                            label=clean_label(entry.get("label")))
+
+    async def drop_capabilities(self, node_hex: str, caps: list[str]) -> bool:
+        """Operator side: give rights up on a node we manage.
+
+        Unilateral by design — nobody needs to approve holding *less* — and it
+        takes effect here first, so a node that never hears us still ends up
+        with less than we could use."""
+        entry = self.state.managed_one(node_hex)
+        if entry is None:
+            return False
+        giving = set(clean_caps(caps))
+        keep = [cap for cap in clean_caps(entry.get("caps")) if cap not in giving]
+        if len(keep) == len(entry.get("caps") or []):
+            return False
+        if not keep:
+            return await self.revoke(node_hex)
+        try:
+            target = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        self.state.add_managed(node_hex, caps=keep,
+                               label=clean_label(entry.get("label")),
+                               grant=self.state.grant_proof(node_hex))
+        self._emit(CapsChanged(target, keep, "managed"))
+        await self._send(target, self._signed_frame(
+            ENROL_NARROW, target, PURPOSE_NARROW, {"caps": keep}))
+        return True
+
+    def _on_cap_narrow(self, src: NodeID, principal, document: dict) -> None:
+        """Agent side: an operator handing a right back.
+
+        ``narrow_only`` is what makes this safe to accept without a human: the
+        set is intersected with what they already hold, so the worst a forged or
+        replayed frame can do is take rights away from its own sender."""
+        caps = clean_caps(document.get("caps"))
+        node_hex = src.raw.hex()
+        result = self.state.set_operator_caps(node_hex, caps, narrow_only=True)
+        if result is None:
+            return
+        if "shell" not in result:
+            self._drop_shells_of(src)
+        if not result:
+            self._emit(Revoked(src))
+            return
+        self._emit(CapsChanged(src, result, "operator"))
+
+    async def set_operator_capabilities(self, node_hex: str,
+                                        caps: list[str]) -> bool:
+        """Agent side, driven by a human here: set what an operator may do.
+
+        This is the only way a grant grows, and it is deliberately local: the
+        person changing it is on the machine that bears the consequence."""
+        wanted = clean_caps(caps)
+        if self.state.operator(node_hex) is None:
+            return False
+        if not wanted:
+            # An empty list means "cut them off"; a list that *cleaned* to empty
+            # means we did not understand it, and must not be read as one.
+            if caps:
+                return False
+            return await self.revoke(node_hex)
+        caps = wanted
+        result = self.state.set_operator_caps(node_hex, caps)
+        if not result:
+            return False
+        try:
+            target = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if "shell" not in result:
+            self._drop_shells_of(target)
+        self._emit(CapsChanged(target, result, "operator"))
+        # Tell them, so their own list stops offering buttons that would now be
+        # refused — and starts offering one that would not.
+        await self._send(target, self._signed_frame(
+            ENROL_GRANT, target, PURPOSE_GRANT,
+            {"caps": result, "label": self.facts.hostname or ""}))
+        return True
 
     # -- pre-authorisation (a machine we provisioned coming online) --------
 
@@ -1517,6 +1648,7 @@ _SIGNED_INBOUND = {
     ENROL_GRANT: FleetApp._on_enrol_grant,
     ENROL_DENY: FleetApp._on_enrol_deny,
     ENROL_REVOKE: FleetApp._on_revoke,
+    ENROL_NARROW: FleetApp._on_cap_narrow,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
@@ -1530,6 +1662,7 @@ _PURPOSE_FOR = {
     ENROL_GRANT: PURPOSE_GRANT,
     ENROL_DENY: PURPOSE_GRANT,
     ENROL_REVOKE: PURPOSE_GRANT,
+    ENROL_NARROW: PURPOSE_NARROW,
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],

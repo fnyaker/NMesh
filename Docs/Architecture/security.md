@@ -186,3 +186,9 @@ quoi » ; décider si ce « qui » a le droit reste à l'app. L'app Fleet
 (`Docs/Apps/fleet`) tient pour ça un ledger de capabilities local et persistant,
 et exige les **trois** portes : mesh authentifié, enrôlé avec la capability, et
 signature fraîche sur les octets exacts de la commande.
+
+Ce ledger n'est jamais élargi par le réseau. Un droit ne s'ajoute que par une
+décision locale sur la machine qui le subit ; le seul message qui touche aux
+capabilities sans humain (`ENROL_NARROW`) est **intersecté** avec ce que son
+émetteur détient déjà, donc ne peut que lui en retirer. Sans cette asymétrie, la
+capability la plus faible suffirait à atteindre toutes les autres.

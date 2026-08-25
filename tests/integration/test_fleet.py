@@ -176,6 +176,64 @@ class TestEnrolmentOverRealMesh:
             await agent.close()
 
 
+class TestRightsOverRealMesh:
+    async def test_asking_for_more_waits_for_a_human(self):
+        """La demande de droit supplémentaire traverse un mesh réel sans rien
+        accorder : c'est l'approbation locale qui ouvre la porte, pas la
+        demande."""
+        operator, agent = await _linked_pair(19318)
+        try:
+            await operator.app.request_enrolment(agent.id, caps=["status"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            assert await operator.app.request_capabilities(
+                agent.id, ["update"]) is True
+            await agent.wait_for(EnrolRequested)
+            assert agent.app.state.allows(operator.hex, "update") is False
+            await operator.app.request_update(agent.id)
+            failure = await operator.wait_for(Failure)
+            assert "not authorised for update" in failure.error
+
+            # Un humain accepte : la porte s'ouvre, et l'opérateur l'apprend.
+            assert await agent.app.approve_enrolment(operator.hex) is True
+            assert agent.app.state.allows(operator.hex, "update") is True
+            async with asyncio.timeout(20.0):
+                while "update" not in (operator.app.state.managed_one(
+                        agent.hex) or {}).get("caps", []):
+                    await asyncio.sleep(0.05)
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_giving_a_right_back_needs_no_approval(self):
+        operator, agent = await _linked_pair(19319)
+        try:
+            await operator.app.request_enrolment(agent.id,
+                                                 caps=["status", "update"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            assert await operator.app.drop_capabilities(
+                agent.hex, ["update"]) is True
+            async with asyncio.timeout(20.0):
+                while agent.app.state.allows(operator.hex, "update"):
+                    await asyncio.sleep(0.05)
+            assert agent.app.state.allows(operator.hex, "status") is True
+            await operator.app.request_update(agent.id)
+            failure = await operator.wait_for(Failure)
+            assert "not authorised for update" in failure.error
+        finally:
+            await operator.close()
+            await agent.close()
+
+
 class TestSectionIsolation:
     async def test_fleet_traffic_stays_in_its_section(self):
         """Une app branchée sur une autre section ne voit rien du trafic Fleet
