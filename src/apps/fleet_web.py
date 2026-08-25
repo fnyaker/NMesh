@@ -24,6 +24,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 
+from .. import app_api
 from ..node_id import NodeID
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, EnrolAnswered,
@@ -311,6 +312,56 @@ class FleetBridge:
     @staticmethod
     def _node(node_hex: str) -> NodeID:
         return NodeID.from_hex(str(node_hex))
+
+    # -- the app API (see `src/app_api.py`) --------------------------------
+    # Reaching fleet from another page changes nothing about who may do what:
+    # `enrol` and `request` still end in a human on the *other* machine saying
+    # yes. What this removes is the walk to the fleet page to ask.
+
+    API = (
+        app_api.operation(
+            "relation", "How this node and that one stand: rights held, rights given",
+            [app_api.param("node", "node")]),
+        app_api.operation(
+            "enrol", "Ask a node for the right to manage it",
+            [app_api.param("node", "node"),
+             app_api.param("caps", "tokens"),
+             app_api.param("label", "text", required=False, default="")],
+            changes=True),
+        app_api.operation(
+            "request", "Ask a node we already manage for extra rights",
+            [app_api.param("node", "node"), app_api.param("caps", "tokens")],
+            changes=True),
+    )
+
+    def api_relation(self, node: str) -> dict:
+        """Both directions at once, because they are independent and confusing
+        apart: what this node may do *to* that one, and what that one may do
+        here. Read-only — it reports the ledger, it does not touch it."""
+        state = self._app.state
+        managed = state.managed_one(node) or {}
+        operator = next((row for row in state.operators() if row["id"] == node), None)
+        asked = next((row for row in state.pending_out() if row["id"] == node), None)
+        inbound = next((row for row in state.pending_in() if row["id"] == node), None)
+        return {
+            "node": node,
+            "managed": bool(managed),
+            "caps": list(managed.get("caps") or []),
+            "label": managed.get("label", ""),
+            "operator": operator is not None,
+            "operator_caps": list((operator or {}).get("caps") or []),
+            "waiting_on_them": asked is not None,
+            "asked_caps": list((asked or {}).get("caps") or []),
+            "waiting_on_us": inbound is not None,
+            "capabilities": list(CAPABILITIES),
+            "page": "/fleet#nodes",
+        }
+
+    def api_enrol(self, node: str, caps, label: str = "") -> dict:
+        return {"sent": bool(self.enrol(node, caps, label))}
+
+    def api_request(self, node: str, caps) -> dict:
+        return {"sent": bool(self.request_caps(node, caps))}
 
     def enrol(self, node_hex: str, caps, label: str = "") -> bool:
         caps = clean_caps(caps)

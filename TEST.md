@@ -149,6 +149,12 @@ tests/
 │     déduite d'une seule sonde, historique borné, statut par adresse (en service
 │     > journal, « jamais essayée » ≠ « en panne »), journal borné sur deux axes,
 │     et un transport qui lève ou rend n'importe quoi ne casse pas le snapshot
+├── test_app_api.py                                    — la surface d'API des apps :
+│     une opération non déclarée n'existe pas (même si la méthode est là), un
+│     argument non déclaré est refusé et non ignoré, chaque valeur est coercée et
+│     bornée, une app arrêtée n'est plus joignable, une app qui lève ne rend pas
+│     ses internes — et ce que chat et fleet exposent est épinglé (élargir est un
+│     changement de sécurité)
 ├── test_address_retry.py                              — redialer une adresse : à
 │     la main (un `proto://addr` ou toutes, et on dit ce que chacune a fait ; une
 │     adresse qui n'est pas celle de cette node est refusée sans composer), la

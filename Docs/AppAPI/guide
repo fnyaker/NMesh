@@ -1,0 +1,129 @@
+# The app API — what an app lets the rest of the product ask of it
+
+`src/app_api.py`
+
+## Why it exists
+
+The console used to reach chat and fleet through routes written by hand: one
+`elif` per action, in a file with no business knowing what a capability or a
+conversation is. That holds while there are two apps and one caller.
+
+It stops holding the moment a *page* wants something from an app it does not
+own. The node details view wants to know whether chat has a conversation with
+this node, and whether fleet manages it. Neither belongs in the console's
+routing table, and neither should mean editing `webconsole.py` every time an app
+learns a new trick.
+
+So an app declares what it exposes, once, next to itself — and everything else
+reaches it the same way.
+
+## Declaring
+
+A bridge carries an `API` tuple and one `api_<name>` method per entry:
+
+```python
+from .. import app_api
+
+class ChatBridge:
+    API = (
+        app_api.operation(
+            "peer", "What chat knows about a node",
+            [app_api.param("node", "node")]),
+        app_api.operation(
+            "contact", "Add a node to the address book",
+            [app_api.param("node", "node"),
+             app_api.param("pseudo", "text", required=False, default="")],
+            changes=True),
+    )
+
+    def api_peer(self, node):
+        ...
+```
+
+`changes=True` marks an operation that alters state. It is not a permission —
+the app still decides — but it lets a caller present a confirmation, and it
+keeps read-only calls distinguishable at a glance.
+
+### Parameter kinds
+
+A short, closed list. A general type system was the other option and it would
+have been the wrong one: what actually crosses this boundary is identities,
+short strings, flags, counts and capability tokens.
+
+| kind | accepts | bounded by |
+|---|---|---|
+| `node` | a NodeID as 40 hex characters (case and surrounding whitespace forgiven) | the shape itself |
+| `text` | one short line | `MAX_TEXT` (200), no newlines |
+| `flag` | a boolean, or the spellings a form sends (`yes`/`on`/`1`…) | — |
+| `count` | a whole number | `0 … MAX_COUNT` |
+| `tokens` | a list of short lowercase tokens, de-duplicated | `MAX_TOKENS` × `MAX_TOKEN` |
+
+Giving `node` its own kind means the shape of an identity is checked **once**,
+here, instead of in every operation that takes one.
+
+## Calling
+
+```python
+api = AppAPI(app_host)
+api.catalogue()                                   # what exists right now
+api.call("fleet", "relation", {"node": node_hex})  # invoke
+```
+
+From a browser, the console exposes exactly those two:
+
+| method | path | what it does |
+|---|---|---|
+| GET | `/api/app-api` | the catalogue — apps running, operations, parameters |
+| POST | `/api/app-call` | `{app, op, args}` → `{ok, result}` or `{ok:false, error}` |
+
+Both require a console session, like everything else the console serves.
+
+A page reads the catalogue to decide what to **offer**: a button that calls an
+app which is not installed should not be drawn at all, rather than drawn and
+then failing when pressed.
+
+## The rules
+
+**Reject by default, everywhere.** An operation that is not declared does not
+exist, whatever the bridge happens to have as an attribute — dispatch never
+looks up a name the caller supplied, only a name the app itself wrote down. An
+argument that is not declared is refused rather than passed through. Every
+declared argument is coerced and bounded before the app sees it.
+
+**No new authority.** This is a way to *reach* what an app already does, not a
+way around the checks it already makes. `fleet.enrol` reached from a details
+page is the same `enrol` the fleet page calls: it sends a request, and a human
+on the *other* machine answers. The ledger is the authority; the caller is not.
+What this adds is one door instead of five, with the lock in one place.
+
+**Nothing is held.** The surface is built per access, over whatever is running
+at that instant. An app stopped a second ago is not reachable through a
+reference someone kept, and a call to it is refused — the honest answer, not an
+error to work around.
+
+**An app that throws keeps its internals.** The exception type is reported, the
+message is not.
+
+## What ships today
+
+| app | operation | changes | what it answers |
+|---|---|---|---|
+| `chat` | `peer` | no | pseudo, whether it is a contact, unread count, where the conversation lives |
+| `chat` | `contact` | yes | add a node to the address book (a name for an identity, not a grant) |
+| `fleet` | `relation` | no | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
+| `fleet` | `enrol` | yes | ask a node for the right to manage it |
+| `fleet` | `request` | yes | ask a node already managed for extra rights |
+
+`tests/test_app_api.py` pins these: renaming one breaks a page, and *widening*
+one is a security change.
+
+## Adding an operation
+
+1. Declare it in the bridge's `API`, with the narrowest parameter kinds that fit.
+2. Write `api_<name>` on the same bridge. Return a mapping.
+3. Add the pair to the table above.
+4. Test the refusals, not only the success: an undeclared argument, a value of
+   the wrong shape, the app not running.
+
+If an operation would need to carry arbitrary bytes, that is a decision to take
+on purpose — and to write down here — not something to slip in behind a `text`.
