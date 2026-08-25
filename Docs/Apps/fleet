@@ -647,8 +647,20 @@ Une action envoyée à une node distante répond **de façon asynchrone** : la
 requête HTTP rend la main tout de suite, la réponse arrive plus tard par le
 mesh. Le pont console tient donc un registre d'opérations (`jobs` dans le
 snapshot) : `rid`, type, node visée, état (`running` / `ok` / `failed`) et un
-détail. L'interface l'affiche en bandeau, et le panneau de déploiement suit le
-sien au lieu de rester figé sur « en cours ».
+détail. Le panneau de déploiement suit le sien au lieu de rester figé sur
+« en cours ».
+
+L'interface les présente dans le **centre de notifications** — la cloche de la
+barre du haut, avec un compteur de non-lus. Les demandes d'accès en attente y
+figurent aussi : ce sont les deux choses qui réclament l'attention de quelqu'un.
+Un élément est « non lu » selon son `rid` **et** son état, donc une opération qui
+se termine est une nouvelle même si son démarrage en était déjà une ; ouvrir le
+menu marque ce qui est affiché. Un clic sur une ligne va à la section concernée.
+
+> Ces éléments étaient auparavant des pastilles posées directement dans la barre
+> du haut, qui **grandissait** à chaque opération — le seul endroit de la page
+> dont la hauteur ne doit pas bouger. La liste est bornée (`NOTIF_MAX`), et
+> l'ensemble des clés lues aussi (`NOTIF_SEEN_MAX`).
 
 Deux propriétés à ne pas casser :
 

@@ -42,11 +42,11 @@ FLEET_HTML = """<!doctype html>
     <a class="brand" href="/fleet"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Fleet</span></span></a>
     <nav id="nav" class="nav" role="tablist" aria-label="Fleet sections">
-      <button role="tab" data-tab="nodes" data-label="Nodes" aria-selected="true">Nodes<span id="nav-managed" class="tail"></span></button>
-      <button role="tab" data-tab="access" data-label="Access" aria-selected="false">Who controls this node<span id="nav-pending" class="tail"></span></button>
-      <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false">Discover &amp; deploy</button>
-      <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false">Shell</button>
-      <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false">Activity</button>
+      <button role="tab" data-tab="nodes" data-label="Nodes" aria-selected="true"><span class="lbl">Nodes</span><span id="nav-managed" class="tail"></span></button>
+      <button role="tab" data-tab="access" data-label="Access" aria-selected="false"><span class="lbl">Who controls this node</span><span id="nav-pending" class="tail"></span></button>
+      <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false"><span class="lbl">Discover &amp; deploy</span></button>
+      <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false"><span class="lbl">Shell</span></button>
+      <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false"><span class="lbl">Activity</span></button>
     </nav>
     <div class="rail-foot">
       <div class="rail-state"><span id="rail-dot" class="dot ok"></span><span id="rail-text">Fleet</span></div>
@@ -56,13 +56,35 @@ FLEET_HTML = """<!doctype html>
 
   <main id="main">
     <header class="topbar">
-      <button id="rail-toggle" class="icon rail-toggle" aria-label="Show sections">☰</button>
       <div class="who"><span class="badge">This node</span>
         <button id="me" class="ghost sm mono" title="This node's id"></button></div>
       <span class="grow"></span>
-      <div id="jobs" class="chips"></div>
+      <div class="menu-wrap">
+        <button id="notif-open" class="icon" data-menu="notif" aria-haspopup="true"
+                aria-expanded="false" aria-label="Notifications">
+          <svg class="ic" width="17" height="17" viewBox="0 0 20 20" fill="none"
+               stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <path d="M5 8a5 5 0 0 1 10 0c0 4 1.4 5.2 1.4 5.2H3.6S5 12 5 8Z"
+                  stroke-linejoin="round"/><path d="M8.2 16a2 2 0 0 0 3.6 0"/></svg>
+          <span id="notif-count" class="count" hidden></span></button>
+        <div id="notif" class="menu" role="region" hidden aria-label="Notifications">
+          <div class="menu-head"><span class="grow">Notifications</span>
+            <button id="notif-clear" class="ghost sm" data-menu-close>Mark all read</button></div>
+          <div id="notif-list"></div>
+        </div>
+      </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
+      <div class="menu-wrap more-wrap">
+        <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
+                aria-label="More">⋯</button>
+        <div id="more" class="menu" role="region" hidden aria-label="More">
+          <div class="menu-head"><span class="grow">Fleet</span></div>
+          <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
+          <div class="sep"></div>
+          <a href="/">Back to console</a>
+        </div>
+      </div>
     </header>
 
     <!-- ── Nodes we manage ──────────────────────────────────────────────── -->
@@ -272,10 +294,14 @@ FLEET_PAGE_CSS = """
   cursor:pointer;font-size:var(--fs-sm)}
 .host:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
 .host .fp{font-size:var(--fs-2xs);color:var(--text-faint)}
-.job{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:var(--r-full);
-  font-size:var(--fs-xs);background:var(--surface-2);border:1px solid var(--border)}
-.job.ok{color:var(--ok)} .job.failed{color:var(--danger)} .job.running{color:var(--info)}
-.job .who{color:var(--text-muted)}
+/* A notification row: dot, two lines, time. Fixed shape whatever the text, so
+   the dropdown scrolls instead of the entries reflowing. */
+.menu .notif{align-items:flex-start;gap:var(--s-3)}
+.menu .notif>.dot{margin-top:7px}
+.menu .notif>.grow{display:flex;flex-direction:column;gap:1px;min-width:0}
+.menu .notif b{font-weight:620}
+.menu .notif .tiny{font-weight:400;line-height:1.4;overflow-wrap:anywhere}
+.menu .notif>.tiny{margin-top:2px}
 
 .node-card .caps{display:flex;flex-wrap:wrap;gap:var(--s-1)}
 .node-card .stats{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
@@ -596,16 +622,72 @@ function paintLog(){
   while(box.childElementCount > 500) box.removeChild(box.firstChild);
   if(atEnd) box.scrollTop = box.scrollHeight;
 }
-function paintJobs(){
-  const jobs = (ST.jobs || []).slice(-4).reverse();
-  $("jobs").innerHTML = jobs.map((job) => {
-    const what = job.state === "running" ? "…" :
-      (job.detail || (job.state === "ok" ? "done" : "failed"));
-    return '<span class="job ' + esc(job.state) + '" title="' + esc(job.rid) + '">' +
-      esc(job.kind) + ' <span class="who">' + esc(nodeLabel(job.node)) + "</span> " +
-      esc(what) + "</span>";
-  }).join("");
+// ---- notifications ---------------------------------------------------------
+// These used to be chips laid straight into the topbar, which grew the bar every
+// time a job or a request showed up — the one place on the page whose height
+// must not move. They live in a dropdown now: the bar carries a bell and a
+// count, and the count is a badge floating over the button, so two digits do
+// not widen anything either.
+//
+// "Unread" is keyed on rid *and* state, so a job finishing is news even though
+// its start already was. The set is bounded like everything else here.
+const NOTIF_SEEN = new Set();
+const NOTIF_MAX = 20, NOTIF_SEEN_MAX = 200;
+
+function notifications(){
+  const items = (ST.pending_in || []).map((request) => ({
+    key: "req:" + request.id,
+    kind: "warn",
+    title: (request.have || []).length ? "More rights requested" : "Access request",
+    detail: nodeLabel(request.id) + " is waiting on someone here",
+    at: request.at || 0,
+    tab: "access",
+  }));
+  (ST.jobs || []).slice(-NOTIF_MAX).forEach((job) => items.push({
+    key: job.rid + ":" + job.state,
+    kind: job.state === "running" ? "" : (job.state === "ok" ? "ok" : "danger"),
+    title: job.kind + " · " + nodeLabel(job.node),
+    detail: job.state === "running" ? "running…"
+      : (job.detail || (job.state === "ok" ? "done" : "failed")),
+    at: job.at || 0,
+    tab: "activity",
+  }));
+  // Newest first; a request waiting on a human outranks a job either way.
+  items.sort((a, b) => (b.at || 0) - (a.at || 0));
+  return items.slice(0, NOTIF_MAX);
 }
+
+function paintJobs(){
+  const items = notifications();
+  const unread = items.filter((item) => !NOTIF_SEEN.has(item.key)).length;
+  const count = $("notif-count");
+  count.textContent = unread > 9 ? "9+" : String(unread);
+  count.hidden = unread === 0;
+  $("notif-open").setAttribute("aria-label",
+    unread ? "Notifications, " + unread + " unread" : "Notifications");
+  if(MENU.open === "notif") paintNotifList(items);
+}
+
+function paintNotifList(items){
+  const list = items || notifications();
+  $("notif-list").innerHTML = list.length ? list.map((item) =>
+    '<button class="item notif" data-notif-tab="' + esc(item.tab) + '" data-menu-close>' +
+    '<i class="dot ' + esc(item.kind) + '"></i>' +
+    '<span class="grow"><b class="truncate">' + esc(item.title) + "</b>" +
+    '<span class="tiny muted">' + esc(item.detail) + "</span></span>" +
+    (item.at ? '<span class="tiny muted flex-none">' + esc(fmtTime(item.at)) + "</span>" : "") +
+    "</button>").join("")
+    : '<div class="none">Nothing waiting. Jobs and access requests show up here.</div>';
+}
+
+function markNotifRead(){
+  const items = notifications();
+  if(NOTIF_SEEN.size + items.length > NOTIF_SEEN_MAX) NOTIF_SEEN.clear();
+  items.forEach((item) => NOTIF_SEEN.add(item.key));
+  paintJobs();
+}
+
+MENU.onShow.notif = () => { paintNotifList(); markNotifRead(); };
 function nodeLabel(id){
   if(!id) return "";
   if(id === ST.me) return "this node";
@@ -1143,6 +1225,12 @@ PALETTE.add("Scan for machines", "Action", () => { ROUTER.go("deploy"); runScan(
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
 PALETTE.add("Back to the console", "Go to", () => { window.location = "/"; });
 $("palette-open").addEventListener("click", () => PALETTE.open());
+$("more-search").addEventListener("click", () => PALETTE.open());
+$("notif-clear").addEventListener("click", () => markNotifRead());
+$("notif-list").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-notif-tab]");
+  if(row) ROUTER.go(row.dataset.notifTab);
+});
 
 // ---- auth and boot ---------------------------------------------------------
 async function enter(token){

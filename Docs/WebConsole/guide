@@ -71,8 +71,21 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
   elle-même, ou sur **Expand**. La carte étendue
   étiquette chaque lien avec son medium, sa latence et sa perte, épaissit le
   trait avec le volume transporté, passe en ambre un lien qui perd des sondes, et
-  liste les liens à droite avec leur courbe de latence. Elle se redessine à
+  liste les liens à côté avec leur courbe de latence. Elle se redessine à
   chaque tick tant qu'elle est ouverte. Cliquer un nœud ouvre sa fiche.
+  - **Elle se déplace et se zoome** : glisser pour déplacer, molette ou pincement
+    pour zoomer (autour du curseur ou des deux doigts, pas du centre), `+` / `−`
+    / `⤢` en bas à droite, `+` `-` `0` au clavier, double-clic pour tout revoir.
+    Le zoom survit au rafraîchissement : la vue ne se remet pas à plat toutes les
+    deux secondes sous le doigt.
+  - Les étiquettes gardent une **taille constante à l'écran** quel que soit le
+    zoom — zoomer écarte le mesh au lieu de gonfler le texte — et la carte
+    **abandonne du détail quand elle est trop petite pour lui** : légendes des
+    liens d'abord, puis les noms. Sur un téléphone la vue d'ensemble est donc une
+    topologie propre ; les noms reviennent en zoomant, et une tape sur un nœud
+    ouvre sa fiche de toute façon.
+  - Sur écran étroit la liste des liens n'est pas supprimée : elle passe **sous**
+    le dessin.
 - **La fiche d'un nœud** (Network → Peers → Details) montre le lien réel :
   points de terminaison local et distant tels que le medium les voit, sens,
   durée, latence (dernier / meilleur / pire / gigue / perte, avec les

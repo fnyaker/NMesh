@@ -78,7 +78,7 @@ TOKENS = """
   --r-sm:6px; --r-md:9px; --r-lg:14px; --r-xl:20px; --r-full:999px;
 
   /* -- component-level -- */
-  --rail-w:236px; --topbar-h:56px; --content-max:1180px;
+  --rail-w:236px; --topbar-h:56px; --content-max:1180px; --tabbar-h:58px;
   --ctl-h:36px; --ctl-h-sm:28px; --tap:24px;
   --speed:.16s; --ease:cubic-bezier(.2,.6,.3,1);
 }
@@ -163,6 +163,7 @@ hr{border:0;border-top:1px solid var(--border);margin:var(--s-5) 0}
 .wrap{flex-wrap:wrap}
 .nowrap{white-space:nowrap}
 .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.flex-none{flex:none}
 .eyebrow{font-size:var(--fs-2xs);letter-spacing:.09em;text-transform:uppercase;
   color:var(--text-faint);font-weight:600}
 .stack{display:flex;flex-direction:column;gap:var(--s-3);align-items:stretch}
@@ -267,7 +268,8 @@ select{appearance:none;padding-right:var(--s-6);
 .check.card-like{border:1px solid var(--border);border-radius:var(--r-md);
   padding:var(--s-3);background:var(--surface)}
 .check.card-like:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
-.form-grid{display:grid;gap:var(--s-4);grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.form-grid{display:grid;gap:var(--s-4);
+  grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr))}
 .form-grid.one{grid-template-columns:1fr}
 
 /* -- cards --------------------------------------------------------------- */
@@ -283,7 +285,8 @@ select{appearance:none;padding-right:var(--s-6);
 .card>.card-foot{padding:var(--s-3) var(--s-5);border-top:1px solid var(--border);
   background:var(--surface-2);display:flex;gap:var(--s-2);align-items:center;flex-wrap:wrap}
 .card.quiet{box-shadow:none;background:var(--surface-2)}
-.cards{display:grid;gap:var(--s-4);grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.cards{display:grid;gap:var(--s-4);
+  grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr))}
 
 /* -- disclosure ---------------------------------------------------------- */
 details.card>summary{list-style:none;cursor:pointer;padding:var(--s-4) var(--s-5);
@@ -297,7 +300,8 @@ details.card>summary:hover{background:var(--surface-2)}
 details.card[open]>summary{border-bottom:1px solid var(--border)}
 
 /* -- stats --------------------------------------------------------------- */
-.stats{display:grid;gap:var(--s-3);grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.stats{display:grid;gap:var(--s-3);
+  grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr))}
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);
   padding:var(--s-3) var(--s-4);display:flex;flex-direction:column;gap:2px;min-width:0}
 .stat .k{font-size:var(--fs-xs);color:var(--text-muted);order:2}
@@ -406,10 +410,62 @@ progress.meter.crit::-moz-progress-bar{background:var(--danger)}
 .msg.error{color:var(--danger)}
 .msg:empty{min-height:0}
 
+/* -- menus (a popover that hangs off its button) ------------------------- */
+/* Anything that would otherwise grow a bar goes in one of these: a bar with a
+   fixed height cannot be pushed around by how much there is to say. */
+.menu-wrap{position:relative;display:inline-flex}
+.menu{position:absolute;top:calc(100% + 6px);right:0;z-index:50;
+  width:min(360px,calc(100vw - var(--s-5)));max-height:min(60vh,440px);overflow-y:auto;
+  overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-lg);box-shadow:var(--shadow-3);padding:var(--s-2);
+  display:flex;flex-direction:column;gap:2px;animation:nm-menu .14s var(--ease)}
+.menu[hidden]{display:none}
+@keyframes nm-menu{from{opacity:0;transform:translateY(-4px)}}
+.menu-head{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);
+  font-size:var(--fs-xs);font-weight:640;color:var(--text-muted);letter-spacing:.03em;
+  text-transform:uppercase}
+.menu-head .grow{flex:1 1 auto;min-width:0}
+/* Whatever a menu head says beside its title is a sentence, not a label. */
+.menu-head .row{text-transform:none;letter-spacing:0;font-weight:500}
+.menu a,.menu button.item{display:flex;align-items:center;gap:var(--s-3);width:100%;
+  min-height:var(--tap);padding:var(--s-2) var(--s-3);border:0;background:transparent;
+  color:var(--text);border-radius:var(--r-md);justify-content:flex-start;
+  font:560 var(--fs-sm)/1.35 var(--font);text-align:left;white-space:normal;
+  text-decoration:none}
+.menu a:hover,.menu button.item:hover{background:var(--surface-2);border-color:transparent;
+  text-decoration:none}
+.menu .sep{height:1px;background:var(--border);margin:var(--s-1) var(--s-2)}
+.menu .none{padding:var(--s-5) var(--s-3);text-align:center;color:var(--text-muted);
+  font-size:var(--fs-sm)}
+/* A count badge floats over its button instead of sitting beside it, so a
+   two-digit number cannot widen the bar it lives in. */
+.count{position:absolute;top:-1px;right:-1px;min-width:17px;height:17px;padding:0 4px;
+  border-radius:var(--r-full);background:var(--danger);color:#fff;
+  font:700 var(--fs-2xs)/17px var(--font);text-align:center;pointer-events:none;
+  border:2px solid var(--canvas);box-sizing:content-box}
+.count[hidden]{display:none}
+/* On a phone a dropdown pinned under a corner button is both unreachable and
+   too narrow. Same markup, same script: it becomes a sheet at the bottom, where
+   a thumb already is. `::before` is the scrim — a click on it lands on .menu. */
+@media (max-width:640px){
+  .menu{position:fixed;inset:auto 0 0 0;width:auto;max-height:74vh;
+    border-radius:var(--r-xl) var(--r-xl) 0 0;border-bottom:0;
+    padding:var(--s-3) var(--s-3) calc(var(--s-4) + env(safe-area-inset-bottom));
+    animation:nm-sheet .18s var(--ease)}
+  .menu::before{content:"";position:fixed;inset:0;z-index:-1;background:var(--overlay)}
+  @keyframes nm-sheet{from{transform:translateY(14px);opacity:0}}
+}
+
 /* -- toasts -------------------------------------------------------------- */
 .toasts{position:fixed;z-index:60;bottom:var(--s-4);right:var(--s-4);display:flex;
   flex-direction:column;gap:var(--s-2);width:min(380px,calc(100vw - var(--s-6)));
   pointer-events:none}
+/* The tab bar owns the bottom of a narrow screen; a toast that lands on top of
+   it hides the navigation and eats the tap meant for it. */
+@media (max-width:900px){
+  .toasts{right:var(--s-3);left:var(--s-3);width:auto;
+    bottom:calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--s-3))}
+}
 .toast{pointer-events:auto;display:flex;gap:var(--s-3);align-items:flex-start;
   background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--text-faint);
   border-radius:var(--r-md);box-shadow:var(--shadow-3);padding:var(--s-3) var(--s-4);
@@ -437,6 +493,19 @@ dialog>form,dialog>.sheet{background:var(--surface);border:1px solid var(--borde
 dialog.wide{max-width:min(880px,calc(100vw - var(--s-6)))}
 dialog.full{max-width:calc(100vw - var(--s-5));width:100%}
 dialog.full>.sheet{max-height:calc(100vh - var(--s-5));height:min(88vh,900px)}
+/* A phone has no room for a floating card with a margin all round: a modal
+   becomes a sheet rising from the bottom, and a full one takes the screen.
+   `dvh` and not `vh`, or the browser's own chrome crops the last row off. */
+@media (max-width:640px){
+  dialog{max-width:100vw;width:100vw;margin:0;position:fixed;inset:auto 0 0 0}
+  dialog>form,dialog>.sheet{border-radius:var(--r-xl) var(--r-xl) 0 0;
+    max-height:min(90dvh,900px);border-bottom:0}
+  .sheet-body{padding:var(--s-4);padding-bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
+  .sheet-head,.sheet-foot{padding-inline:var(--s-4)}
+  .sheet-foot{padding-bottom:calc(var(--s-3) + env(safe-area-inset-bottom))}
+  dialog.full{height:100dvh;max-height:100dvh}
+  dialog.full>.sheet{height:100dvh;max-height:100dvh;border-radius:0;border:0}
+}
 
 /* -- command palette ----------------------------------------------------- */
 dialog.palette{max-width:min(560px,calc(100vw - var(--s-4)));margin-top:12vh}
@@ -476,7 +545,7 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 .flush{padding:0}
 .bare{border:0;padding:0;margin:0;min-width:0}
 .stat.sm .v{font-size:var(--fs-md);font-weight:600}
-.search{position:relative;min-width:200px;flex:1 1 220px;max-width:340px}
+.search{position:relative;min-width:min(200px,100%);flex:1 1 220px;max-width:340px}
 .search input{padding-left:var(--s-7)}
 .search::before{content:"";position:absolute;left:13px;top:50%;width:11px;height:11px;
   margin-top:-7px;border:1.6px solid var(--text-faint);border-radius:50%;pointer-events:none}
@@ -524,17 +593,20 @@ SHELL = """
   font-size:var(--fs-xs);color:var(--text-muted)}
 
 /* -- topbar -------------------------------------------------------------- */
-.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--s-3);
-  min-height:var(--topbar-h);background:color-mix(in srgb,var(--canvas) 88%,transparent);
-  backdrop-filter:blur(8px);border-bottom:1px solid var(--border);
+.topbar{position:sticky;top:0;z-index:45;display:flex;align-items:center;gap:var(--s-3);
+  min-height:var(--topbar-h);border-bottom:1px solid var(--border);
   /* Lines up with the content column on a wide screen, instead of drifting to
      the far edge while the page sits in the middle. */
   padding-inline:max(var(--s-5),(100% - var(--content-max))/2)}
+/* The wash is painted by a pseudo-element and not by the bar itself: a
+   `backdrop-filter` on the bar would become the containing block of every
+   fixed-position descendant, and the menus that hang off it are exactly that. */
+.topbar::before{content:"";position:absolute;inset:0;z-index:-1;
+  background:color-mix(in srgb,var(--canvas) 88%,transparent);backdrop-filter:blur(8px)}
 .topbar .who{display:flex;align-items:center;gap:var(--s-2);min-width:0;overflow:hidden}
 .topbar .who>*{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .topbar .who button{font-family:var(--mono);font-size:var(--fs-xs);min-height:var(--ctl-h-sm);
   color:var(--text-muted)}
-.rail-toggle{display:none}
 
 /* -- driving another node ------------------------------------------------ */
 /* Impossible to miss on purpose: every destructive control on the page now
@@ -559,28 +631,65 @@ main{min-width:0;display:flex;flex-direction:column}
 .page-head .actions{display:flex;gap:var(--s-2);flex-wrap:wrap;margin-left:auto}
 .panel{display:flex;flex-direction:column;gap:var(--s-5)}
 .panel[hidden]{display:none}
-.split{display:grid;gap:var(--s-4);grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.split{display:grid;gap:var(--s-4);
+  grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))}
 .split.wide-first{grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr)}
 @media (max-width:1040px){.split.wide-first{grid-template-columns:1fr}}
 
-/* -- narrow: the rail becomes a drawer ----------------------------------- */
+/* The overflow menu carries what the rail carries on a wide screen; showing it
+   there too would be the same commands twice. Declared before the media query
+   that turns it on — at equal specificity the last rule wins, query or no. */
+.more-wrap{display:none}
+
+/* -- narrow: the rail becomes a bottom tab bar --------------------------- */
+/* Not a hamburger drawer. Navigation that costs two taps and hides where you
+   are is the thing people complain about on a phone; a tab bar is always
+   visible, always says which section is showing, and sits under the thumb.
+   Same markup as the rail — only the axis changes, so there is no second
+   navigation to keep in sync. The rail's brand and foot have no place in a
+   58px strip, so they move to the topbar's overflow menu (`.more-wrap`). */
 @media (max-width:900px){
   .shell{grid-template-columns:1fr}
-  .rail{position:fixed;z-index:40;left:0;top:0;width:min(280px,84vw);
-    transform:translateX(-102%);transition:transform var(--speed) var(--ease);
-    box-shadow:var(--shadow-3)}
-  .shell.rail-open .rail{transform:none}
-  .shell.rail-open::after{content:"";position:fixed;inset:0;z-index:30;background:var(--overlay)}
-  .rail-toggle{display:inline-flex}
-  .content{padding:var(--s-4) var(--s-4) var(--s-8)}
-  .topbar{padding:0 var(--s-4)}
+  .rail{position:fixed;z-index:40;inset:auto 0 0 0;top:auto;height:auto;width:auto;
+    flex-direction:row;align-items:stretch;gap:0;padding:0;overflow:visible;
+    border-right:0;border-top:1px solid var(--border);
+    background:color-mix(in srgb,var(--rail) 92%,transparent);backdrop-filter:blur(10px);
+    padding-bottom:env(safe-area-inset-bottom)}
+  .rail .brand,.rail .rail-foot,.rail .nav-label,.rail #app-links{display:none}
+  .nav{flex-direction:row;flex:1 1 auto;gap:0;min-width:0}
+  .nav button,.nav a{flex:1 1 0;min-width:0;flex-direction:column;justify-content:center;
+    gap:3px;min-height:var(--tabbar-h);padding:var(--s-2) 2px;border-radius:0;
+    font-size:var(--fs-2xs);font-weight:640;line-height:1.2;text-align:center;
+    position:relative}
+  /* The rail spells the section out; the strip has room for the short name the
+     markup already carries for the palette. */
+  .nav .lbl{display:none}
+  .nav button::before,.nav a::before{content:attr(data-label)}
+  .nav button:hover,.nav a:hover{background:transparent;color:var(--text)}
+  .nav button[aria-selected="true"]{background:transparent;color:var(--accent)}
+  /* Where you are, stated without relying on colour alone. */
+  .nav button[aria-selected="true"]::after{content:"";position:absolute;top:0;
+    left:22%;right:22%;height:2px;border-radius:0 0 2px 2px;background:var(--accent)}
+  .nav .tail{position:absolute;top:5px;left:50%;margin-left:8px;min-width:17px;height:17px;
+    padding:0 5px;border-radius:var(--r-full);background:var(--accent-soft);
+    color:var(--accent);font:700 var(--fs-2xs)/17px var(--font);text-align:center}
+  .nav .tail:empty{display:none}
+  .more-wrap{display:inline-flex}
+  /* The bar floats over the page, so the page has to end above it. */
+  .content{padding:var(--s-4) var(--s-4)
+           calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--s-6))}
+  .topbar{padding-inline:var(--s-4)}
 }
 @media (max-width:720px){
   /* The palette is a keyboard affordance; on a phone it is only clutter in a
-     bar that has to fit an identifier. */
+     bar that has to fit an identifier. It stays reachable from the ⋯ menu. */
   .topbar #palette-open{display:none}
   .page-head .actions{margin-left:0}
+  .page-head h1{font-size:var(--fs-xl)}
+  .card>.card-head,.card>.card-body{padding-inline:var(--s-4)}
+  .card>.card-body{padding-block:var(--s-4)}
 }
+
 
 /* -- the login gate ------------------------------------------------------ */
 .gate{min-height:100vh;display:grid;place-items:center;padding:var(--s-5);
@@ -934,6 +1043,53 @@ const PALETTE = {
   },
 };
 
+// ---- menus -----------------------------------------------------------------
+// One controller for every popover in the chrome: a button carrying
+// `data-menu="id"` opens the element with that id. Only one is ever open, it
+// closes on Escape, on a click anywhere else, and — in sheet mode on a phone —
+// on its own scrim, which is a pseudo-element and so reports the menu itself as
+// the target. Anything that would otherwise stretch a bar belongs in one.
+const MENU = {
+  open: null,
+  // id -> what to run when that menu is shown (a page registers its painter
+  // here, so a list is built when it is looked at and not on every poll).
+  onShow: {},
+  show(id){
+    const panel = $(id); if(!panel) return;
+    this.close();
+    panel.hidden = false;
+    const button = document.querySelector('[data-menu="' + id + '"]');
+    if(button) button.setAttribute("aria-expanded", "true");
+    this.open = id;
+    if(this.onShow[id]) this.onShow[id]();
+  },
+  close(){
+    if(!this.open) return;
+    const panel = $(this.open);
+    if(panel) panel.hidden = true;
+    const button = document.querySelector('[data-menu="' + this.open + '"]');
+    if(button) button.setAttribute("aria-expanded", "false");
+    this.open = null;
+  },
+  toggle(id){ if(this.open === id) this.close(); else this.show(id); },
+  mount(){
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-menu]");
+      if(button){ this.toggle(button.dataset.menu); event.preventDefault(); return; }
+      if(!this.open) return;
+      const panel = $(this.open);
+      // Inside the panel and not on the scrim, and not on something that asked
+      // to close it: leave it open.
+      if(panel && panel.contains(event.target) && event.target !== panel &&
+         !event.target.closest("[data-menu-close]")) return;
+      this.close();
+    });
+    document.addEventListener("keydown", (event) => {
+      if(event.key === "Escape" && this.open){ this.close(); event.stopPropagation(); }
+    });
+  },
+};
+
 // ---- shell wiring ----------------------------------------------------------
 // Done once here rather than per page: the chrome is the same everywhere, so it
 // should not be three near-identical copies that drift.
@@ -942,28 +1098,23 @@ function mountShell(){
   const toggle = $("theme-toggle");
   if(toggle) toggle.addEventListener("click", () => THEME.toggle());
 
-  const rail = $("rail-toggle"), shell = $("shell");
-  if(rail && shell){
-    rail.addEventListener("click", () => shell.classList.toggle("rail-open"));
-    shell.addEventListener("click", (event) => {
-      if(shell.classList.contains("rail-open") && event.target === shell)
-        shell.classList.remove("rail-open");
-    });
-  }
+  MENU.mount();
+
   const nav = $("nav");
   if(nav){
     nav.addEventListener("click", (event) => {
       const button = event.target.closest("[data-tab]");
       if(!button) return;
       ROUTER.go(button.dataset.tab);
-      if(shell) shell.classList.remove("rail-open");
     });
+    // The same list is a column in the rail and a row in the tab bar, so both
+    // pairs of arrows have to walk it.
     nav.addEventListener("keydown", (event) => {
-      if(!["ArrowUp","ArrowDown"].includes(event.key)) return;
+      const back = ["ArrowUp","ArrowLeft"].includes(event.key);
+      if(!back && !["ArrowDown","ArrowRight"].includes(event.key)) return;
       const buttons = $$("[data-tab]", nav);
       const current = buttons.findIndex((b) => b.dataset.tab === ROUTER.section);
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      const next = buttons[(current + step + buttons.length) % buttons.length];
+      const next = buttons[(current + (back ? -1 : 1) + buttons.length) % buttons.length];
       next.focus(); ROUTER.go(next.dataset.tab); event.preventDefault();
     });
   }

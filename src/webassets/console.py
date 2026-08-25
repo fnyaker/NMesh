@@ -44,10 +44,10 @@ INDEX_HTML = """<!doctype html>
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Console</span></span></a>
     <nav id="nav" class="nav" role="tablist" aria-label="Console sections">
-      <button role="tab" data-tab="overview" data-label="Overview" aria-controls="panel-overview" aria-selected="true">Overview</button>
-      <button role="tab" data-tab="network" data-label="Network" aria-controls="panel-network" aria-selected="false">Network<span id="nav-peers" class="tail"></span></button>
-      <button role="tab" data-tab="apps" data-label="Apps" aria-controls="panel-apps" aria-selected="false">Apps</button>
-      <button role="tab" data-tab="settings" data-label="Settings" aria-controls="panel-settings" aria-selected="false">Settings</button>
+      <button role="tab" data-tab="overview" data-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
+      <button role="tab" data-tab="network" data-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
+      <button role="tab" data-tab="apps" data-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
+      <button role="tab" data-tab="settings" data-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
       <p class="eyebrow nav-label">Applications</p>
       <div id="app-links"></div>
     </nav>
@@ -59,7 +59,6 @@ INDEX_HTML = """<!doctype html>
 
   <main id="main">
     <header class="topbar">
-      <button id="rail-toggle" class="icon rail-toggle" aria-label="Show sections">☰</button>
       <div class="who">
         <span class="badge" id="node-state">…</span>
         <button id="self-node" class="ghost sm mono" title="Show this node's details"></button>
@@ -69,6 +68,19 @@ INDEX_HTML = """<!doctype html>
       <span class="grow"></span>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
+      <div class="menu-wrap more-wrap">
+        <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
+                aria-label="More">⋯</button>
+        <div id="more" class="menu" role="region" hidden aria-label="More">
+          <div class="menu-head"><span class="grow">This node</span>
+            <span class="row"><i id="more-dot" class="dot"></i>
+              <span id="more-state" class="muted">Connecting…</span></span></div>
+          <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
+          <div id="more-apps"></div>
+          <div class="sep"></div>
+          <button class="item" id="more-logout" data-menu-close>Sign out</button>
+        </div>
+      </div>
     </header>
 
     <div id="ctx-bar" class="ctx-bar" role="status" hidden>
@@ -520,7 +532,16 @@ INDEX_HTML = """<!doctype html>
       <button id="map-close" class="icon" aria-label="Close">✕</button>
     </header>
     <div class="sheet-body map-body">
-      <svg id="map-svg" class="mesh-graph" viewBox="0 0 900 520" role="img" aria-label="Mesh map"></svg>
+      <div class="map-canvas">
+        <svg id="map-svg" class="mesh-graph" viewBox="0 0 900 520" role="img"
+             aria-label="Mesh map, draggable and zoomable"></svg>
+        <div class="map-zoom" role="group" aria-label="Zoom">
+          <button id="map-in" class="icon sm" aria-label="Zoom in">+</button>
+          <button id="map-out" class="icon sm" aria-label="Zoom out">−</button>
+          <button id="map-fit" class="icon sm" aria-label="Fit the whole mesh">⤢</button>
+        </div>
+        <p id="map-hint" class="map-hint muted tiny">Drag to move · pinch or scroll to zoom</p>
+      </div>
       <aside class="map-side">
         <h3>Links</h3>
         <div id="map-links" class="stack"></div>
@@ -592,9 +613,20 @@ CONSOLE_PAGE_CSS = """
 .mesh-graph .node:focus-visible{outline:none}
 .mesh-graph .node:focus-visible circle{stroke:var(--ring);stroke-width:2.5}
 
-#map-svg{width:100%;height:100%;min-height:320px}
+#map-svg{width:100%;height:100%;min-height:0;flex:1 1 auto;
+  /* The browser's own pan/zoom would fight the drag handler for the same
+     gesture, and on a phone it wins. This map does its own. */
+  touch-action:none;cursor:grab;user-select:none}
+#map-svg.grabbing{cursor:grabbing}
 .map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:var(--s-4);
   padding:var(--s-4);overflow:hidden;flex:1 1 auto}
+.map-canvas{position:relative;display:flex;min-width:0;min-height:0;overflow:hidden;
+  border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface)}
+.map-zoom{position:absolute;right:var(--s-3);bottom:var(--s-3);display:flex;
+  flex-direction:column;gap:2px;padding:2px;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--r-md);box-shadow:var(--shadow-1)}
+.map-zoom button{width:30px;min-height:30px}
+.map-hint{position:absolute;left:var(--s-3);bottom:var(--s-3);pointer-events:none}
 .map-side{overflow-y:auto;min-height:0;border-left:1px solid var(--border);
   padding-left:var(--s-4)}
 .map-legend .dot.self{background:var(--text)}
@@ -608,10 +640,39 @@ CONSOLE_PAGE_CSS = """
   overflow:hidden;text-overflow:ellipsis}
 .mesh-graph .edge.lossy{stroke:var(--warn)}
 #map-svg .edge.on{stroke:var(--accent);stroke-width:3}
-#map-svg .node text{font-size:12px}
-#map-svg .elabel{font:600 10px var(--font);fill:var(--text-muted);text-anchor:middle;
-  paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round}
-@media (max-width:900px){.map-body{grid-template-columns:1fr}.map-side{display:none}}
+/* Sized in drawing units scaled by --map-unit, which the camera keeps in step
+   with the zoom — the on-screen result is a constant 12px and 10px. */
+#map-svg .node text{font-size:calc(12px * var(--map-unit,1))}
+#map-svg .node text,#map-svg .elabel{stroke-width:calc(3px * var(--map-unit,1))}
+#map-svg .elabel{font:600 calc(10px * var(--map-unit,1)) var(--font);fill:var(--text-muted);
+  text-anchor:middle;paint-order:stroke;stroke:var(--surface);stroke-linejoin:round}
+/* A link's thickness says how much it carries; that reading should not change
+   because the operator zoomed in. */
+#map-svg .edge{vector-effect:non-scaling-stroke}
+#map-svg.lod-2 .elabel{display:none}
+#map-svg.lod-3 text{display:none}
+/* On a narrow screen the link list is not dropped — it goes under the drawing,
+   which is where the drawing sends you anyway once you tap an edge. */
+@media (max-width:900px){
+  /* The drawing is nearly twice as wide as it is tall, so a tall row is mostly
+     empty letterbox — height it to what the drawing actually uses. */
+  .map-body{grid-template-columns:1fr;grid-template-rows:minmax(200px,34vh) minmax(0,1fr);
+    padding:var(--s-3);gap:var(--s-3)}
+  .map-side{border-left:0;border-top:1px solid var(--border);padding-left:0;
+    padding-top:var(--s-3)}
+  .map-legend{display:none}
+  /* Kept on a phone: at the fitted zoom the drawing is dots, and the line is
+     what says they have names a tap away. */
+  .map-hint{right:44px}
+}
+@media (max-width:720px){
+  /* The small card's labels are in viewBox units: at phone width the drawing is
+     scaled to about three quarters, and 9px lands under 7. */
+  #graph .node text{font-size:12px}
+  /* The bar has to fit an identifier, a state and the controls; the context
+     picker gives up width first because its label is repeated underneath it. */
+  .ctx-pick select{max-width:120px}
+}
 
 .qr-holder{display:flex;justify-content:center;padding:var(--s-4);border-radius:var(--r-md);
   background:#fff;border:1px solid var(--border)}
@@ -703,8 +764,7 @@ async function tick(){
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap();
   }catch(_){
-    $("rail-dot").className = "dot danger";
-    $("rail-text").textContent = "Console unreachable";
+    railState("danger", "Console unreachable");
   }finally{ TICKING = false; }
 }
 function trackRates(state){
@@ -725,6 +785,15 @@ function trackRates(state){
   state._rates = {inbound, outbound};
 }
 
+// The rail is hidden on a phone and the same line shows in the ⋯ menu; written
+// once so the two cannot disagree about whether this node is up.
+function railState(kind, text){
+  ["rail", "more"].forEach((where) => {
+    $(where + "-dot").className = "dot " + kind;
+    $(where === "rail" ? "rail-text" : "more-state").textContent = text;
+  });
+}
+
 // ---- header and metrics ----------------------------------------------------
 function paintHeader(state){
   const peers = state.authenticated_peers || 0;
@@ -733,10 +802,9 @@ function paintHeader(state){
   const pill = $("node-state");
   pill.textContent = state.running ? "Running · up " + fmtDuration(state.uptime) : "Stopped";
   pill.className = "badge " + (state.running ? "ok" : "danger");
-  $("rail-dot").className = "dot " + (state.running ? (peers ? "live" : "ok") : "danger");
-  $("rail-text").textContent = state.running
+  railState(state.running ? (peers ? "live" : "ok") : "danger", state.running
     ? (peers ? peers + " link" + (peers === 1 ? "" : "s") + " up" : "Online, no peers")
-    : "Node stopped";
+    : "Node stopped");
   $("nav-peers").textContent = peers || "";
   $("overview-title").textContent = peers
     ? "Connected to " + peers + " node" + (peers === 1 ? "" : "s")
@@ -945,6 +1013,10 @@ function paintMap(){
   const dialog = $("map-dialog");
   if(!dialog.open || !STATE) return;
   renderGraph($("map-svg"), STATE, GRAPH_BIG);
+  // renderGraph resets the viewBox to the whole drawing; whatever the operator
+  // had zoomed into has to survive the two-second poll, or the map is unusable
+  // as soon as it refreshes under the finger.
+  applyMapView();
   const direct = (STATE.topology || {}).direct || [];
   $("map-links").innerHTML = direct.length ? direct.map((node) => {
     const quality = node.quality || {}, counters = node.counters || {};
@@ -968,7 +1040,139 @@ function highlightEdge(){
   $$("#map-svg [data-edge]").forEach((edge) =>
     edge.classList.toggle("on", edge.dataset.edge === MAP_PICK));
 }
+// ---- panning and zooming the map -------------------------------------------
+// The viewBox *is* the camera: moving it pans, shrinking it zooms, and every
+// label and stroke stays crisp because nothing is rasterised. Null means "the
+// whole drawing", which is what a fresh open and the fit button both give.
+let MAP_VIEW = null;
+// Fitted with a margin: labels are drawn outside their circle, and a box that
+// ends exactly at the outermost node cuts the captions on the rim in half.
+const MAP_FIT = {x:-60, y:-24, w:GRAPH_BIG.w + 120, h:GRAPH_BIG.h + 48};
+const MAP_MIN_W = MAP_FIT.w / 10, MAP_MAX_W = MAP_FIT.w;
+const MAP_ASPECT = MAP_FIT.h / MAP_FIT.w;
+
+function mapView(){
+  return MAP_VIEW || MAP_FIT;
+}
+function applyMapView(){
+  const svg = $("map-svg"), view = mapView();
+  svg.setAttribute("viewBox", view.x + " " + view.y + " " + view.w + " " + view.h);
+  $("map-fit").disabled = MAP_VIEW === null;
+  // How many drawing units one screen pixel is worth right now. Labels are
+  // sized from it, so a name stays the same size on screen whatever the zoom
+  // and whatever the screen: zooming in spreads the mesh out instead of
+  // inflating the text, and a phone gets readable labels at the fitted view
+  // rather than the 4px it would get from a fixed size in a 1020-wide box.
+  const rect = svg.getBoundingClientRect();
+  const unit = rect.width ? Math.max(view.w / rect.width, view.h / rect.height) : 1;
+  svg.style.setProperty("--map-unit", unit.toFixed(3));
+  // Level of detail. Readable labels and a whole mesh on a 344px-wide phone are
+  // not both possible, and shrinking the text until it fits produces neither.
+  // So the drawing drops detail as it zooms out — captions first, then names —
+  // and gives it back on the way in, which is what a map does.
+  svg.classList.toggle("lod-2", unit > 1.6);
+  svg.classList.toggle("lod-3", unit > 2.6);
+  $("map-hint").textContent = unit > 2.6
+    ? "Zoom in for names · tap a node for its details"
+    : "Drag to move · pinch or scroll to zoom";
+}
+// The SVG letterboxes itself inside its box (xMidYMid meet), so screen-to-user
+// has to account for the bars as well as the scale.
+function mapFrame(view){
+  const rect = $("map-svg").getBoundingClientRect();
+  const scale = Math.min(rect.width / view.w, rect.height / view.h) || 1;
+  return {rect, scale,
+          padX:(rect.width - view.w * scale) / 2,
+          padY:(rect.height - view.h * scale) / 2};
+}
+function mapPoint(clientX, clientY){
+  const view = mapView(), frame = mapFrame(view);
+  return {x:view.x + (clientX - frame.rect.left - frame.padX) / frame.scale,
+          y:view.y + (clientY - frame.rect.top - frame.padY) / frame.scale};
+}
+// Zoom about a fixed point: whatever was under the cursor (or between the two
+// fingers) stays under it, which is the only zoom that does not feel random.
+function zoomMapTo(width, anchor, clientX, clientY){
+  const w = Math.min(MAP_MAX_W, Math.max(MAP_MIN_W, width));
+  const h = w * MAP_ASPECT;
+  const frame = mapFrame({x:0, y:0, w, h});
+  // All the way out is the fitted view, not a camera that happens to be that
+  // wide: zooming out fully is how you ask for "show me everything again".
+  MAP_VIEW = w >= MAP_MAX_W ? null
+    : {x:anchor.x - (clientX - frame.rect.left - frame.padX) / frame.scale,
+       y:anchor.y - (clientY - frame.rect.top - frame.padY) / frame.scale, w, h};
+  applyMapView();
+}
+function zoomMapBy(factor){
+  const view = mapView(), rect = $("map-svg").getBoundingClientRect();
+  const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+  zoomMapTo(view.w / factor, mapPoint(cx, cy), cx, cy);
+}
+
+const MAP_PTR = new Map();       // live pointers, so a pinch can be told from a drag
+let MAP_PINCH = null, MAP_MOVED = 0;
+
+function mapPointerDown(event){
+  MAP_PTR.set(event.pointerId, {x:event.clientX, y:event.clientY});
+  $("map-svg").setPointerCapture(event.pointerId);
+  MAP_MOVED = 0;
+  if(MAP_PTR.size === 2){
+    const [a, b] = [...MAP_PTR.values()];
+    MAP_PINCH = {span:Math.hypot(a.x - b.x, a.y - b.y) || 1,
+                 width:mapView().w,
+                 anchor:mapPoint((a.x + b.x) / 2, (a.y + b.y) / 2)};
+  }
+  $("map-svg").classList.add("grabbing");
+}
+function mapPointerMove(event){
+  const last = MAP_PTR.get(event.pointerId);
+  if(!last) return;
+  const dx = event.clientX - last.x, dy = event.clientY - last.y;
+  MAP_PTR.set(event.pointerId, {x:event.clientX, y:event.clientY});
+  MAP_MOVED += Math.abs(dx) + Math.abs(dy);
+  if(MAP_PTR.size >= 2 && MAP_PINCH){
+    const [a, b] = [...MAP_PTR.values()];
+    const span = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    zoomMapTo(MAP_PINCH.width * (MAP_PINCH.span / span), MAP_PINCH.anchor,
+              (a.x + b.x) / 2, (a.y + b.y) / 2);
+    return;
+  }
+  const view = mapView(), frame = mapFrame(view);
+  MAP_VIEW = {x:view.x - dx / frame.scale, y:view.y - dy / frame.scale,
+              w:view.w, h:view.h};
+  applyMapView();
+}
+function mapPointerUp(event){
+  MAP_PTR.delete(event.pointerId);
+  if(MAP_PTR.size < 2) MAP_PINCH = null;
+  if(!MAP_PTR.size) $("map-svg").classList.remove("grabbing");
+}
+
+$("map-svg").addEventListener("pointerdown", mapPointerDown);
+$("map-svg").addEventListener("pointermove", mapPointerMove);
+$("map-svg").addEventListener("pointerup", mapPointerUp);
+$("map-svg").addEventListener("pointercancel", mapPointerUp);
+// Not passive: a scroll over the map has to zoom the map, not the sheet.
+$("map-svg").addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const factor = Math.exp(-event.deltaY * (event.deltaMode === 1 ? .03 : .0015));
+  zoomMapTo(mapView().w / factor, mapPoint(event.clientX, event.clientY),
+            event.clientX, event.clientY);
+}, {passive:false});
+$("map-svg").addEventListener("dblclick", () => { MAP_VIEW = null; applyMapView(); });
+$("map-in").addEventListener("click", () => zoomMapBy(1.5));
+$("map-out").addEventListener("click", () => zoomMapBy(1 / 1.5));
+$("map-fit").addEventListener("click", () => { MAP_VIEW = null; applyMapView(); });
+$("map-dialog").addEventListener("keydown", (event) => {
+  if(event.key === "+" || event.key === "=") zoomMapBy(1.5);
+  else if(event.key === "-") zoomMapBy(1 / 1.5);
+  else if(event.key === "0"){ MAP_VIEW = null; applyMapView(); }
+  else return;
+  event.preventDefault();
+});
+
 $("map-open").addEventListener("click", () => {
+  MAP_VIEW = null;
   $("map-dialog").showModal();
   paintMap();
 });
@@ -980,6 +1184,8 @@ $("map-links").addEventListener("click", (event) => {
   paintMap();
 });
 $("map-svg").addEventListener("click", (event) => {
+  // A pan that happens to end on a node is not a click on it.
+  if(MAP_MOVED > 6) return;
   const node = event.target.closest && event.target.closest("[data-node-id]");
   if(node) openNode(node.dataset.nodeId);
 });
@@ -1467,8 +1673,10 @@ function paintApps(state){
   const apps = state.apps || [];
   $("builtin-apps").innerHTML = apps.length ? apps.map(appTile).join("")
     : emptyHTML("No built-in app", "This build ships without optional applications.");
-  $("app-links").innerHTML = apps.filter((app) => app.running !== false && app.installed)
+  const links = apps.filter((app) => app.running !== false && app.installed)
     .map((app) => '<a href="' + esc(app.path) + '">' + esc(app.name) + "</a>").join("");
+  $("app-links").innerHTML = links;
+  $("more-apps").innerHTML = links ? '<div class="sep"></div>' + links : "";
 }
 function appTile(app){
   const known = typeof app.enabled === "boolean";
@@ -2127,6 +2335,8 @@ PALETTE.add("Back to this node", "Action", leaveContext);
 PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
 PALETTE.add("Transport settings", "Go to", () => ROUTER.go("network", "reach"));
 $("palette-open").addEventListener("click", () => PALETTE.open());
+$("more-search").addEventListener("click", () => PALETTE.open());
+$("more-logout").addEventListener("click", () => $("logout").click());
 $("modal-close").addEventListener("click", () => $("modal").close());
 
 mountShell();

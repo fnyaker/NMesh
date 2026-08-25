@@ -178,7 +178,9 @@ CHAT_HTML = """<!doctype html>
 
 
 CHAT_PAGE_CSS = """
-.chat{display:grid;grid-template-columns:320px minmax(0,1fr);height:100vh;
+/* dvh, not vh: on a phone `100vh` is the viewport *without* the browser's
+   own bars, so the composer sits under them and the last message is cut. */
+.chat{display:grid;grid-template-columns:320px minmax(0,1fr);height:100dvh;
   background:var(--canvas)}
 .side{display:flex;flex-direction:column;min-height:0;background:var(--rail);
   border-right:1px solid var(--border)}
@@ -308,6 +310,11 @@ CHAT_PAGE_CSS = """
   .chat.show-conv .thread{display:flex}
   .only-mobile{display:inline-flex}
   .msg{max-width:94%}
+  /* The home indicator on a phone sits exactly where the composer and the last
+     row of the list are. */
+  .composer{padding-bottom:calc(var(--s-2) + env(safe-area-inset-bottom))}
+  .side-foot{padding-bottom:calc(var(--s-3) + env(safe-area-inset-bottom))}
+  .log{padding:var(--s-3)}
 }
 """
 
