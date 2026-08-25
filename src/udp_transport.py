@@ -305,6 +305,18 @@ class UDPTransport(BaseTransport):
                "Keep it well above the interval — three missed keepalives is "
                "the usual rule.",
                minimum=15.0, maximum=600.0, unit="s"),
+        option("priority", "int", 10,
+               "How much this node prefers UDP over another medium, from "
+               "-254 to 254. Weighed against measured latency; the balance "
+               "between the two is set once for the node, under Reachability.",
+               minimum=-254, maximum=254),
+        option("retry_interval", "float", 0.0,
+               "How often to re-dial a known node this one has no link to, on "
+               "each of its UDP addresses. Zero switches it off: nothing "
+               "is retried until something needs a route. Raise it on a link "
+               "that drops and comes back on its own; leave it off where a dial "
+               "costs more than waiting.",
+               minimum=0.0, maximum=3600.0, unit="s", label="retry interval"),
         option("max_reorder", "int", _MAX_REORDER,
                "Out-of-order frames held while waiting for the gap to fill. "
                "Bigger tolerates more reordering and costs more memory per link.",

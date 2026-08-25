@@ -208,6 +208,12 @@ async def main() -> None:
     ap.add_argument("--punch-keepalive", action="store_true", default=None,
                     help="keep the UDP NAT mapping open continuously (stay "
                          "reachable / relay behind NAT)")
+    ap.add_argument("--transport-balance", type=int, default=None,
+                    help="how addresses are chosen: 0 weighs measured latency "
+                         "alone, 100 the transport priority alone (default 50)")
+    ap.add_argument("--dynamic-address", action="store_true", default=None,
+                    help="move a live link onto a lower-latency address of the "
+                         "same node when one measures better")
     ap.add_argument("--lan-discovery", action="store_true", default=None,
                     help="answer LAN relay-discovery beacons (be findable as a "
                          "relay by joiners on the same network)")
@@ -267,6 +273,13 @@ async def main() -> None:
         await node.start_udp(args.udp)
         if args.punch_keepalive:
             node.console_set_punch_keepalive(True)
+    if args.transport_balance is not None:
+        try:
+            node.set_transport_balance(args.transport_balance)
+        except ValueError as exc:
+            print(f"  transport-balance: {exc} — keeping the default")
+    if args.dynamic_address:
+        node.set_dynamic_address(True)
     if args.lan_discovery:
         await node.start_lan_discovery()
         if args.stun:

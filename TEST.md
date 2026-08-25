@@ -149,6 +149,19 @@ tests/
 │     déduite d'une seule sonde, historique borné, statut par adresse (en service
 │     > journal, « jamais essayée » ≠ « en panne »), journal borné sur deux axes,
 │     et un transport qui lève ou rend n'importe quoi ne casse pas le snapshot
+├── test_address_retry.py                              — redialer une adresse : à
+│     la main (un `proto://addr` ou toutes, et on dit ce que chacune a fait ; une
+│     adresse qui n'est pas celle de cette node est refusée sans composer), la
+│     boucle périodique (la cadence appartient au medium, la passe est plafonnée
+│     quel que soit le nombre de nodes en attente, une node déjà liée n'est jamais
+│     redialée, et la boucle survit à un medium qui lève), et le pilotage par
+│     latence (off tant qu'on ne l'a pas demandé, un gain marginal ne déplace
+│     rien, un vrai gain déplace et ferme l'ancien lien, jamais deux liens vers
+│     une même node après la mesure), et le système de priorités : bornes d'une
+│     priorité, curseur latence↔priorité aux deux extrêmes, une adresse jamais
+│     mesurée vaut le milieu, la latence courbe (une mesure absurde n'écrase pas
+│     les écarts réels), l'ordre montré à l'opérateur est celui qui compose, et
+│     un gestionnaire de transports qui ne sait pas répondre n'arrête rien
 ├── test_ui_contrast.py                                — jetons de couleur : ratio
 │     WCAG de chaque paire texte/fond dans les deux thèmes, et aucune page ne
 │     redéfinit un jeton du système

@@ -57,6 +57,18 @@ class TCPTransport(BaseTransport):
                "not route it.",
                choices=[{"value": "ipv4", "label": "IPv4"},
                         {"value": "ipv6", "label": "IPv6"}]),
+        option("priority", "int", 0,
+               "How much this node prefers TCP over another medium, from "
+               "-254 to 254. Weighed against measured latency; the balance "
+               "between the two is set once for the node, under Reachability.",
+               minimum=-254, maximum=254),
+        option("retry_interval", "float", 0.0,
+               "How often to re-dial a known node this one has no link to, on "
+               "each of its TCP addresses. Zero switches it off: nothing "
+               "is retried until something needs a route. Raise it on a link "
+               "that drops and comes back on its own; leave it off where a dial "
+               "costs more than waiting.",
+               minimum=0.0, maximum=3600.0, unit="s", label="retry interval"),
         option("source_address", "text", "",
                "Local address outgoing connections bind to. Empty lets the "
                "kernel choose; set it to pin traffic to one interface.",

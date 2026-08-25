@@ -64,6 +64,16 @@ def _as_port(raw: str) -> int:
     return port
 
 
+def _as_balance(raw: str) -> int:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ConfigError("expected a whole number between 0 and 100") from None
+    if not 0 <= value <= 100:
+        raise ConfigError("balance must be between 0 and 100")
+    return value
+
+
 def _as_optional_port(raw: str):
     if not raw.strip():
         return None
@@ -121,6 +131,12 @@ SETTINGS = {
                         "Keep the NAT mapping open so the node stays reachable"),
     "lan_discovery":   (_as_bool, False, True,
                         "Answer LAN relay-discovery beacons"),
+    "transport_balance": (_as_balance, 50, True,
+                        "How addresses are chosen: 0 weighs measured latency "
+                        "alone, 100 the transport priority alone"),
+    "dynamic_address": (_as_bool, False, True,
+                        "Move a live link onto a lower-latency address of the "
+                        "same node when one measures better"),
     "spool":           (_as_path, None, True,
                         "Directory used as a store-and-forward link"),
     "console_host":    (_as_host, "127.0.0.1", True,

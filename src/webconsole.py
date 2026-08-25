@@ -335,6 +335,24 @@ class WebConsole:
                 "restart_required": False,
                 "service_managed": updater.service_managed()}
 
+    def _persist_setting(self, name: str, value) -> bool:
+        """Remember one live toggle in the configuration file.
+
+        Best effort, exactly like the transport settings: a node with no file
+        still applies the change to the running process, it just will not
+        remember it. The toggle itself never depends on this working."""
+        if not self._config_path:
+            return False
+        try:
+            values, _problems = node_config.load(self._config_path)
+            merged = node_config.defaults()
+            merged.update(values)
+            merged[name] = value
+            node_config.save(self._config_path, merged)
+            return True
+        except (OSError, ValueError, KeyError):
+            return False
+
     def _transport_options(self) -> dict:
         """What every registered transport says it takes.
 
@@ -976,6 +994,51 @@ def _make_handler(console: WebConsole):
                 try:
                     ok = console._call(console._node.console_forget_node(node_id))
                     self._json(200 if ok else 404, {"ok": bool(ok)})
+                except Exception as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            if path == "/api/peers/retry":
+                data = _parse_json(body) or {}
+                node_id = data.get("id", "")
+                uri = data.get("uri", "")
+                if not isinstance(node_id, str) or not node_id:
+                    self._json(400, {"error": "id required"})
+                    return
+                if not isinstance(uri, str):
+                    self._json(400, {"error": "uri must be a string"})
+                    return
+                try:
+                    # A dial per address, each bounded by the node — the whole
+                    # walk can outlast the default call timeout on a node with
+                    # several dead addresses, which is precisely the case the
+                    # button is pressed in.
+                    result = console._call(
+                        console._node.console_retry_addresses(node_id, uri),
+                        timeout=60.0)
+                    self._json(200 if result.get("ok") else 400, result)
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/addressing/balance":
+                data = _parse_json(body) or {}
+                try:
+                    value = console._node.set_transport_balance(data.get("value"))
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)[:200]})
+                    return
+                console._persist_setting("transport_balance", value)
+                self._json(200, {"ok": True, "value": value,
+                                 "preference": console._node.transport_preference()})
+                return
+            if path == "/api/addressing/dynamic":
+                data = _parse_json(body)
+                if not data or not isinstance(data.get("enabled"), bool):
+                    self._json(400, {"error": "enabled (bool) required"})
+                    return
+                try:
+                    console._node.set_dynamic_address(data["enabled"])
+                    console._persist_setting("dynamic_address", data["enabled"])
+                    self._json(200, {"ok": True, "enabled": data["enabled"]})
                 except Exception as exc:
                     self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return

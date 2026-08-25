@@ -90,13 +90,41 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
   points de terminaison local et distant tels que le medium les voit, sens,
   durée, latence (dernier / meilleur / pire / gigue / perte, avec les
   échantillons), les compteurs propres au transport, et **l'état de chaque
-  adresse connue** — en service, injoignable, jamais essayée.
-- **Network → Reachability** agrège par medium : liens, latence moyenne, volume
-  transporté, écouteurs, ports — et **configure chaque transport** : un panneau
-  par medium, rendu à partir de ce que le medium déclare (cases à cocher, listes
-  multi-choix, nombres bornés, champs libres). Appliqué au nœud vivant puis écrit
-  dans le fichier de configuration ; une valeur refusée reste à l'écran avec sa
-  raison et n'atteint jamais le fichier.
+  adresse connue** — en service, injoignable, jamais essayée. Chaque ligne porte
+  un **Retry**, et le tableau un **Retry all** : on rejoue une adresse précise ou
+  toutes, et la réponse dit ce que chacune a fait. Seules les adresses déjà
+  connues pour cette identité sont composées.
+- **Network → Reachability** est organisé en **un bloc par medium** : ce qu'il
+  porte (liens, latence moyenne, volume, ports), **ses écouteurs** (ajout et
+  retrait), ses commandes propres, et **ses réglages** — rendus à partir de ce que
+  le medium déclare (cases à cocher, listes multi-choix, nombres bornés, champs
+  libres). Appliqué au nœud vivant puis écrit dans le fichier de configuration ;
+  une valeur refusée reste à l'écran avec sa raison et n'atteint jamais le
+  fichier.
+  - Le bloc **udp** porte donc le port, le démarrage/arrêt du socket, le hole
+    punching, le keepalive NAT et la découverte LAN : tout ça roule sur cette
+    socket-là. Ces réglages étaient auparavant dans un encart « Listeners &
+    addressing » au nom neutre, alors qu'ils sont du TCP/IP.
+  - **`retry interval`** (tcp et udp) : à quelle fréquence redialer une node
+    connue à laquelle on n'a pas de lien, sur chacune de ses adresses. `0` —
+    la valeur par défaut — désactive : rien n'est réessayé tant que personne n'a
+    besoin d'une route.
+  - **`priority`** (tous les transports) : de −254 à 254, ce que ce nœud pense de
+    ce medium. Livré à `udp` **10**, `tcp` **0**, `spool` **−50**.
+  - **Le curseur « Choosing between a node's addresses »** (carte Reachability)
+    dit comment la priorité et la latence mesurée se partagent la décision :
+    tout à gauche, seule la vitesse compte ; tout à droite, seul le medium
+    choisi. La ligne en dessous montre **l'ordre qui en résulte**, calculé par le
+    nœud — la console ne réimplémente pas la règle.
+  - **Dynamic addressing** (carte Reachability, off par défaut) déplace un lien
+    vivant vers une autre adresse de la **même** node quand elle **score** mieux
+    — une adresse LAN plutôt que la publique, IPv6 plutôt qu'IPv4, ou simplement
+    le medium qu'on préfère. Le candidat est réellement composé et sondé avant
+    qu'on bouge, et on ne bouge que si le gain est net ; le perdant est fermé
+    dans les deux cas.
+
+Ce qui n'appartient à aucun medium reste à part : la carte **Addressing** dit ce
+que ce nœud raconte de lui-même (adresses annoncées, IP locales, schémas).
 
 Ces chiffres viennent du transport lui-même (`endpoints()` / `stats()`), donc un
 nouveau medium apparaît ici sans modification de la console. Voir

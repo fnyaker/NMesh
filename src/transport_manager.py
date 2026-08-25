@@ -54,6 +54,17 @@ class TransportManager:
             raise TransportError(f"scheme not registered: {scheme!r}")
         return entry[0].configure(values or {})
 
+    def setting(self, scheme: str, name: str):
+        """One value in force for one medium, or ``None`` if it has no such
+        setting. The caller never has to know which class serves a scheme."""
+        entry = self._registry.get(scheme)
+        if entry is None:
+            return None
+        try:
+            return entry[0].setting(name)
+        except Exception:
+            return None
+
     def settings(self) -> dict:
         """``{scheme: {name: value}}`` for what is not at its default — the
         shape the configuration file stores."""
