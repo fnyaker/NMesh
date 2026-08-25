@@ -31,7 +31,7 @@ import socket
 import struct
 import time
 
-from .transport import BaseTransport, BaseServer
+from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
 from .ip_utils import split_host_port
 
@@ -252,7 +252,8 @@ class _ReliableLink:
         if dist < 0x80000000:
             # Ahead of the cursor: out-of-order. A seq already buffered is a
             # retransmit — drop it but re-ACK so the sender stops resending.
-            if seq not in self._reorder and len(self._reorder) < _MAX_REORDER:
+            if (seq not in self._reorder
+                    and len(self._reorder) < UDPTransport.setting("max_reorder")):
                 self._reorder[seq] = payload
                 self.reordered += 1
             self._schedule_ack()
@@ -274,7 +275,8 @@ class _ReliableLink:
 
     def is_alive(self) -> bool:
         """Check if the link is still alive based on keepalive timing."""
-        return (time.monotonic() - self._last_recv_time) < _KEEPALIVE_TIMEOUT
+        return ((time.monotonic() - self._last_recv_time)
+                < UDPTransport.setting("keepalive_timeout"))
 
     def pending_packets(self) -> int:
         """Number of packets queued for sending."""
@@ -292,6 +294,23 @@ class UDPTransport(BaseTransport):
     One instance = one peer connection. Uses a shared datagram socket
     (provided by UDPServer or created on connect) and a remote address.
     """
+
+    OPTIONS = (
+        option("keepalive_interval", "float", _KEEPALIVE_INTERVAL,
+               "How often an idle link refreshes its NAT mapping. Longer means "
+               "less traffic and a mapping more likely to have been dropped.",
+               minimum=5.0, maximum=120.0, unit="s"),
+        option("keepalive_timeout", "float", _KEEPALIVE_TIMEOUT,
+               "A link with nothing arriving for this long is declared dead. "
+               "Keep it well above the interval — three missed keepalives is "
+               "the usual rule.",
+               minimum=15.0, maximum=600.0, unit="s"),
+        option("max_reorder", "int", _MAX_REORDER,
+               "Out-of-order frames held while waiting for the gap to fill. "
+               "Bigger tolerates more reordering and costs more memory per link.",
+               minimum=16, maximum=1024),
+    )
+    SETTINGS: dict = {}
 
     def __init__(self, sock: asyncio.DatagramTransport | None = None,
                  remote_addr: tuple[str, int] | None = None) -> None:
@@ -476,7 +495,7 @@ class UDPTransport(BaseTransport):
     async def _keepalive_loop(self) -> None:
         """Background task: send keepalives and detect dead links."""
         while not self._closed:
-            await asyncio.sleep(_KEEPALIVE_INTERVAL)
+            await asyncio.sleep(UDPTransport.setting("keepalive_interval"))
             if self._closed:
                 break
             self._send_raw(self._link.build_keepalive())

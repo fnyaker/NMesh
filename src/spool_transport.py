@@ -24,7 +24,7 @@ import secrets
 import struct
 import zlib
 
-from .transport import BaseTransport, BaseServer
+from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
 
 _REC_MAGIC = b"NMSR"
@@ -73,6 +73,16 @@ def _parse_records(data: bytes) -> tuple[list[bytes], int]:
 
 
 class SpoolTransport(BaseTransport):
+
+    OPTIONS = (
+        option("poll_interval", "float", _POLL,
+               "How often the directory is re-read. This medium has no way to "
+               "be woken, so the interval is the whole latency of the link — "
+               "and the whole cost when nothing is moving.",
+               minimum=0.005, maximum=60.0, unit="s"),
+    )
+    SETTINGS: dict = {}
+
     def __init__(self) -> None:
         super().__init__()
         self._out_path: str | None = None
@@ -111,7 +121,7 @@ class SpoolTransport(BaseTransport):
                     self._bind_server(sd)
                     self._ensure_out()
                     return
-            await asyncio.sleep(_POLL)
+            await asyncio.sleep(SpoolTransport.setting("poll_interval"))
 
     # -- io ---------------------------------------------------------------
 
@@ -159,7 +169,7 @@ class SpoolTransport(BaseTransport):
                     except Exception:
                         pass  # medium noise — skip, keep the link alive
             if not self._decoded:
-                await asyncio.sleep(_POLL)
+                await asyncio.sleep(SpoolTransport.setting("poll_interval"))
 
     async def close(self) -> None:
         self._closed = True
@@ -210,7 +220,7 @@ class SpoolServer(BaseServer):
                         await self.on_new_connection(transport)
                     except Exception:
                         pass
-            await asyncio.sleep(_POLL)
+            await asyncio.sleep(SpoolTransport.setting("poll_interval"))
 
     async def close(self) -> None:
         self._closed = True

@@ -31,6 +31,40 @@ class TransportManager:
     def is_supported(self, scheme: str) -> bool:
         return scheme in self._registry
 
+    # -- settings ---------------------------------------------------------
+    # Pure pass-through: the manager knows which class answers for a scheme and
+    # nothing whatsoever about what it takes.
+
+    def options(self) -> dict:
+        """``{scheme: [declared field, …]}`` for every registered transport."""
+        out = {}
+        for scheme, (transport_cls, _server_cls) in sorted(self._registry.items()):
+            try:
+                fields = transport_cls.options()
+            except Exception:
+                fields = []      # a transport that cannot describe itself still runs
+            if fields:
+                out[scheme] = fields
+        return out
+
+    def configure(self, scheme: str, values: dict) -> dict:
+        """Apply settings to one transport. ``{"applied": …, "rejected": …}``."""
+        entry = self._registry.get(scheme)
+        if entry is None:
+            raise TransportError(f"scheme not registered: {scheme!r}")
+        return entry[0].configure(values or {})
+
+    def settings(self) -> dict:
+        """``{scheme: {name: value}}`` for what is not at its default — the
+        shape the configuration file stores."""
+        out = {}
+        for scheme, fields in self.options().items():
+            changed = {field["name"]: field["value"] for field in fields
+                       if field["value"] != field["default"]}
+            if changed:
+                out[scheme] = changed
+        return out
+
     async def connect(self, uri: str) -> BaseTransport:
         result = _validate_uri(uri)
         if result is None:

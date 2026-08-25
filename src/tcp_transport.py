@@ -1,6 +1,6 @@
 import asyncio
 import struct
-from .transport import BaseTransport, BaseServer
+from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
 from .ip_utils import split_host_port
 
@@ -37,6 +37,33 @@ async def _wait_closed_bounded(obj) -> None:
 
 class TCPTransport(BaseTransport):
 
+    # Everything here is read where it is used, so a change applies to the next
+    # dial or the next read — no restart, no reconnection.
+    OPTIONS = (
+        option("connect_timeout", "float", _CONNECT_TIMEOUT,
+               "How long a dial may take before the address is given up on. "
+               "Low on purpose: unreachable addresses are the normal case.",
+               minimum=0.5, maximum=60.0, unit="s"),
+        option("read_timeout", "float", _READ_TIMEOUT,
+               "A link silent for this long is treated as dead. Must stay above "
+               "the keepalive interval, or healthy links get reaped.",
+               minimum=5.0, maximum=600.0, unit="s"),
+        option("nodelay", "bool", True,
+               "Send small packets immediately instead of coalescing them "
+               "(TCP_NODELAY). Off trades latency for a few bytes."),
+        option("families", "multi", ["ipv4", "ipv6"],
+               "Which address families outgoing connections may use. Dropping "
+               "IPv6 is the usual fix on a network that advertises it and does "
+               "not route it.",
+               choices=[{"value": "ipv4", "label": "IPv4"},
+                        {"value": "ipv6", "label": "IPv6"}]),
+        option("source_address", "text", "",
+               "Local address outgoing connections bind to. Empty lets the "
+               "kernel choose; set it to pin traffic to one interface.",
+               placeholder="192.168.1.20"),
+    )
+    SETTINGS: dict = {}
+
     def __init__(self) -> None:
         super().__init__()
         self._reader: asyncio.StreamReader | None = None
@@ -49,14 +76,40 @@ class TCPTransport(BaseTransport):
         t = cls()
         t._reader = reader
         t._writer = writer
+        t._apply_nodelay()
         return t
+
+    def _apply_nodelay(self) -> None:
+        socket_object = self._writer.get_extra_info("socket") if self._writer else None
+        if socket_object is None:
+            return
+        try:
+            import socket as _socket
+            socket_object.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY,
+                                     1 if self.setting("nodelay") else 0)
+        except Exception:
+            pass          # a medium that cannot take the hint still works
+
+    @classmethod
+    def _family(cls):
+        import socket
+        chosen = cls.setting("families") or ["ipv4", "ipv6"]
+        if "ipv6" not in chosen:
+            return socket.AF_INET
+        if "ipv4" not in chosen:
+            return socket.AF_INET6
+        return socket.AF_UNSPEC
 
     async def connect(self, address: str) -> None:
         host, port = _host_port(address)
+        source = self.setting("source_address") or None
         # asyncio.timeout (not wait_for): cancellation must propagate, and a
         # hanging dial must raise TimeoutError, not linger (see gotchas 3b).
-        async with asyncio.timeout(_CONNECT_TIMEOUT):
-            self._reader, self._writer = await asyncio.open_connection(host, port)
+        async with asyncio.timeout(self.setting("connect_timeout")):
+            self._reader, self._writer = await asyncio.open_connection(
+                host, port, family=self._family(),
+                local_addr=(source, 0) if source else None)
+        self._apply_nodelay()
 
     async def listen(self, address: str) -> None:
         host, port = _host_port(address)
@@ -87,7 +140,7 @@ class TCPTransport(BaseTransport):
         # cancelled receive loop would silently re-block instead of exiting —
         # wedging peer shutdown. asyncio.timeout propagates cancellation cleanly.
         try:
-            async with asyncio.timeout(_READ_TIMEOUT):
+            async with asyncio.timeout(self.setting("read_timeout")):
                 raw_len = await self._reader.readexactly(_FRAME.size)
                 length = _FRAME.unpack(raw_len)[0]
                 data = await self._reader.readexactly(length)

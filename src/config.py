@@ -37,6 +37,7 @@ MAX_LIST = 32
 # `\Z`, not `$`: `$` also matches just before a trailing newline, which would
 # let a value carry one into the file and split into a second line on re-read.
 _HOST_RE = re.compile(r"\A[A-Za-z0-9._:\[\]-]{1,255}\Z")
+_SCHEME_KEY = re.compile(r"\A[a-z0-9_]{1,32}\Z")
 _ADDR_RE = re.compile(r"\A[A-Za-z0-9._:\[\]-]{1,255}:\d{1,5}\Z")
 
 
@@ -183,6 +184,27 @@ def parse(text: str) -> tuple[dict, list]:
         if len(raw) > MAX_VALUE:
             problems.append(f"line {number}: value too long — ignored")
             continue
+        if "." in key:
+            # `<scheme>.<option>`: a transport setting. Carried through as text
+            # and validated by the transport itself — this file has no business
+            # knowing what a medium takes, and a new transport must not require
+            # a change here.
+            scheme, _, field = key.partition(".")
+            if not _SCHEME_KEY.match(scheme) or not _SCHEME_KEY.match(field):
+                problems.append(f"line {number}: unusable transport key "
+                                f"'{key[:40]}' — ignored")
+                continue
+            table = values.setdefault("transports", {})
+            if len(table) >= MAX_LIST and scheme not in table:
+                problems.append(f"line {number}: too many transports — ignored")
+                continue
+            fields = table.setdefault(scheme, {})
+            if len(fields) >= MAX_LIST and field not in fields:
+                problems.append(f"line {number}: too many settings for "
+                                f"'{scheme}' — ignored")
+                continue
+            fields[field] = raw
+            continue
         if key not in SETTINGS:
             problems.append(f"line {number}: unknown setting '{key[:40]}' — ignored")
             continue
@@ -253,6 +275,14 @@ def render(values: dict) -> str:
             out.append(f"{name} = {'true' if value else 'false'}")
         else:
             out.append(f"{name} = {value}")
+    transports = values.get("transports") or {}
+    if transports:
+        out.append("\n# Transport settings. Each medium declares its own; the "
+                   "console\n# (Network → Reachability) renders and validates them.")
+        for scheme in sorted(transports):
+            fields = transports[scheme] or {}
+            for name in sorted(fields):
+                out.append(f"{scheme}.{name} = {fields[name]}")
     return "\n".join(out) + "\n"
 
 

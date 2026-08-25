@@ -190,6 +190,16 @@ INDEX_HTML = """<!doctype html>
             <tbody id="transport-list"></tbody></table></div></div>
         </article>
         <article class="card">
+          <div class="card-head"><div class="grow"><h2>Transport settings</h2>
+            <div class="sub">Declared by each medium — the console renders what it is told</div></div></div>
+          <div class="card-body">
+            <p class="muted small">Applied to the running node immediately unless a
+              setting says otherwise, then written to the configuration file so it
+              survives a restart. A value the transport refuses never reaches the file.</p>
+            <div id="transport-options" class="stack"></div>
+          </div>
+        </article>
+        <article class="card">
           <div class="card-head"><div class="grow"><h2>Listeners &amp; addressing</h2>
             <div class="sub">Where this node accepts connections, and what it advertises</div></div></div>
           <div class="card-body">
@@ -673,6 +683,7 @@ $("logout").addEventListener("click", async () => {
 // ---- polling ---------------------------------------------------------------
 function onRoute(section, sub){
   if(section === "network" && sub === "peers") refreshPeers();
+  if(section === "network" && sub === "reach") loadTransportOptions();
   if(section === "apps") refreshApps();
   // Read on entry rather than on a timer: both files can be edited by hand, and
   // a stale form would offer to save values they no longer hold.
@@ -1333,6 +1344,118 @@ $("listener-list").addEventListener("click", async (event) => {
   await api("/api/unlisten", "POST", {uri:uri.dataset.removeListener}).catch(() => {});
   toast("Listener removed");
   tick();
+});
+
+// ---- transport settings ----------------------------------------------------
+// Every field is rendered from what the transport declared: name, kind, bounds,
+// choices, help. The console has no idea what a "reorder buffer" is, and that is
+// the point — a medium added tomorrow gets this form for free.
+let TRANSPORT_FORM = [];
+
+function fieldId(scheme, name){ return "opt-" + scheme + "-" + name.replace(/_/g, "-"); }
+
+function optionHTML(scheme, field){
+  const id = fieldId(scheme, field.name);
+  const label = esc(field.label) + (field.unit ? ' <span class="muted">(' +
+    esc(field.unit) + ")</span>" : "") +
+    (field.restart ? " " + badge("restart", "warn") : "");
+  const help = '<span class="hint">' + esc(field.help) + "</span>";
+  if(field.kind === "bool")
+    return '<label class="check card-like"><input type="checkbox" id="' + id + '"' +
+      (field.value ? " checked" : "") + "><span><b>" + label + "</b><br>" +
+      esc(field.help) + "</span></label>";
+  if(field.kind === "multi")
+    return '<div class="field"><span>' + label + "</span>" +
+      '<div class="chips" id="' + id + '">' + (field.choices || []).map((choice) =>
+        '<label class="check"><input type="checkbox" value="' + esc(choice.value) + '"' +
+        ((field.value || []).includes(choice.value) ? " checked" : "") + "><span>" +
+        esc(choice.label || choice.value) + "</span></label>").join("") + "</div>" +
+      help + "</div>";
+  if(field.kind === "choice")
+    return '<label class="field"><span>' + label + '</span><select id="' + id + '">' +
+      (field.choices || []).map((choice) =>
+        '<option value="' + esc(choice.value) + '"' +
+        (choice.value === field.value ? " selected" : "") + ">" +
+        esc(choice.label || choice.value) + "</option>").join("") + "</select>" +
+      help + "</label>";
+  const type = (field.kind === "int" || field.kind === "float") ? "number" : "text";
+  const step = field.kind === "float" ? ' step="any"' : "";
+  return '<label class="field"><span>' + label + '</span><input id="' + id +
+    '" type="' + type + '"' + step +
+    (field.min == null ? "" : ' min="' + esc(field.min) + '"') +
+    (field.max == null ? "" : ' max="' + esc(field.max) + '"') +
+    (field.placeholder ? ' placeholder="' + esc(field.placeholder) + '"' : "") +
+    ' value="' + esc(field.value == null ? "" : field.value) + '">' + help + "</label>";
+}
+
+function readOption(scheme, field){
+  const element = $(fieldId(scheme, field.name));
+  if(!element) return null;
+  if(field.kind === "bool") return element.checked;
+  if(field.kind === "multi")
+    return $$("input:checked", element).map((input) => input.value);
+  if(field.kind === "int") return parseInt(element.value, 10);
+  if(field.kind === "float") return parseFloat(element.value);
+  return element.value;
+}
+
+async function loadTransportOptions(){
+  const holder = $("transport-options");
+  // Redrawing must not fold the panel someone is working in.
+  const open = new Set($$("#transport-options details[open]")
+    .map((element) => element.dataset.scheme));
+  try{
+    const {data} = await apiJson("/api/transports");
+    TRANSPORT_FORM = data.transports || [];
+    holder.innerHTML = TRANSPORT_FORM.length ? TRANSPORT_FORM.map((entry) =>
+      '<details class="card"' + (open.has(entry.scheme) ? " open" : "") +
+      ' data-scheme="' + esc(entry.scheme) + '"><summary>' +
+      esc(entry.scheme) + " · " + entry.options.length + " setting(s)</summary>" +
+      '<div class="card-body"><div class="form-grid">' +
+      entry.options.map((field) => optionHTML(entry.scheme, field)).join("") +
+      '</div><div class="btn-row"><button class="primary" data-apply="' +
+      esc(entry.scheme) + '">Apply to ' + esc(entry.scheme) + "</button>" +
+      '<span class="msg" id="opt-msg-' + esc(entry.scheme) + '"></span></div></div></details>')
+      .join("")
+      : emptyHTML("No transport declares any setting",
+                  "A medium exposes its own options; none of the ones loaded here does.");
+    if(!data.persisted && TRANSPORT_FORM.length)
+      holder.insertAdjacentHTML("afterbegin",
+        '<div class="notice warn"><span>This node has no configuration file, so a ' +
+        "change applies now but is forgotten on restart.</span></div>");
+  }catch(_){
+    holder.innerHTML = errorHTML("Transport settings unavailable",
+                                 "The node did not answer.");
+  }
+}
+
+$("transport-options").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-apply]");
+  if(!button) return;
+  const scheme = button.dataset.apply;
+  const entry = TRANSPORT_FORM.find((item) => item.scheme === scheme);
+  if(!entry) return;
+  const values = {};
+  for(const field of entry.options){
+    const value = readOption(scheme, field);
+    if(value !== null && value === value) values[field.name] = value;
+  }
+  await withBusy(button, async () => {
+    const {ok, data} = await apiJson("/api/transports", "POST", {scheme, values});
+    const refused = Object.entries(data.rejected || {});
+    if(!ok || refused.length){
+      // Deliberately no redraw: what was typed stays on screen next to the
+      // reason it was refused, which is the only way to fix it.
+      setMessage("opt-msg-" + scheme,
+        refused.map(([name, why]) => name + ": " + why).join(" · ") ||
+        (data.error || "refused"), true);
+      return;
+    }
+    await loadTransportOptions();
+    setMessage("opt-msg-" + scheme,
+      data.persisted ? "Applied and saved." : (data.note || "Applied."));
+    toast(scheme + " settings applied", "ok");
+  });
 });
 
 // ---- apps ------------------------------------------------------------------
@@ -1998,6 +2121,7 @@ PALETTE.add("Check for updates", "Action", () => {
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
 PALETTE.add("Back to this node", "Action", leaveContext);
 PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
+PALETTE.add("Transport settings", "Go to", () => ROUTER.go("network", "reach"));
 $("palette-open").addEventListener("click", () => PALETTE.open());
 $("modal-close").addEventListener("click", () => $("modal").close());
 

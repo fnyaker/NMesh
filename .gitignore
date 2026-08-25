@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 venv/
 
+# A node started from this tree writes its configuration next to it.
+/nmesh.conf
+
 # Runtime node state (identities, cert stores, generated ids/invites)
 *.key
 *.certs

@@ -191,6 +191,25 @@ refuse d'exposer ne peut pas être inventé depuis le navigateur. Rien n'est
 appliqué à chaud : les changements prennent effet au redémarrage du nœud, et
 l'interface le dit.
 
+#### Réglages de transport (`schéma.option`)
+
+Le fichier accepte aussi des clés **namespacées**, une section par medium :
+
+```
+tcp.connect_timeout = 6
+tcp.families = ipv4
+udp.keepalive_interval = 40
+spool.poll_interval = 0.5
+```
+
+Le fichier les porte **en texte et ne les valide pas** : le medium est la seule
+chose qui sait ce qu'il prend. Au démarrage elles sont distribuées avant que
+quoi que ce soit n'écoute ou ne compose ; une valeur refusée ou un schéma inconnu
+sort en `Config ⚠` et reste à son défaut. Côté console : **Network →
+Reachability**, un panneau par transport, rendu à partir de ce que le transport
+déclare. Voir
+[`Docs/Architecture/transports.md`](../Architecture/transports.md).
+
 ### Laisser le nœud lancer les mises à jour système
 
 ```bash
