@@ -911,6 +911,44 @@ function confirmAction(options){
   });
 }
 
+// ---- opening another part of the product -----------------------------------
+// A link from one app to another is not a navigation *away*: whoever clicked it
+// was in the middle of something. So it opens beside what they were doing —
+// except on a phone, where a 380px window is worse than useless and a tab is
+// the native answer. Stored per browser like the theme, because it is a
+// preference about this screen, not a property of the node.
+const OPEN_MODES = ["auto", "window", "tab"];
+const OPEN = {
+  read(){
+    try{
+      const stored = localStorage.getItem("nmesh_open_mode");
+      if(OPEN_MODES.includes(stored)) return stored;
+    }catch(_){}
+    return "auto";
+  },
+  set(mode){
+    if(!OPEN_MODES.includes(mode)) return;
+    try{ localStorage.setItem("nmesh_open_mode", mode); }catch(_){}
+  },
+  effective(){
+    const mode = this.read();
+    if(mode !== "auto") return mode;
+    return (window.matchMedia && window.matchMedia("(max-width: 900px)").matches)
+      ? "tab" : "window";
+  },
+};
+
+function openLinked(url, name){
+  if(OPEN.effective() === "tab"){ window.open(url, "_blank", "noopener"); return; }
+  const width = Math.min(760, Math.max(420, Math.round(screen.availWidth * 0.5)));
+  const height = Math.min(900, Math.max(480, Math.round(screen.availHeight * 0.8)));
+  const opened = window.open(url, name || "nmesh-linked",
+    "noopener,width=" + width + ",height=" + height);
+  // Popup blocked, or a browser that refuses the feature string: a tab is a
+  // worse fit but an infinitely better outcome than nothing happening.
+  if(!opened) window.open(url, "_blank", "noopener");
+}
+
 // ---- markup fragments every page needs -------------------------------------
 function emptyHTML(title, hint, action){
   return '<div class="empty"><div class="t">' + esc(title) + "</div>" +

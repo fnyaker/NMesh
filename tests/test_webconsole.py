@@ -1531,3 +1531,54 @@ class TestAddressRetryEndpoints:
             assert node.transport_balance == 50
         finally:
             console.stop(); await node.stop()
+
+
+class TestTheNodePage:
+    """`/node` is the one page meant to be framed — by chat and by fleet, which
+    this console serves itself. Everything else stays unframeable."""
+
+    async def test_it_is_served_with_its_assets(self):
+        node, console = await _make_console()
+        try:
+            for path, kind in (("/node", "text/html"),
+                               ("/node.js", "application/javascript"),
+                               ("/node.css", "text/css")):
+                status, headers, body, _ = await asyncio.to_thread(
+                    _request, console, "GET", path)
+                assert status == 200, path
+                assert headers["content-type"].startswith(kind), path
+                assert body
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_only_this_page_may_be_framed_and_only_by_us(self):
+        node, console = await _make_console()
+        try:
+            _s, headers, _b, _j = await asyncio.to_thread(
+                _request, console, "GET", "/node")
+            policy = headers["content-security-policy"]
+            assert "frame-ancestors 'self'" in policy
+            # One header, not two: a second CSP is *intersected* with the first
+            # rather than replacing it, so the relaxation would never apply.
+            assert policy.count("frame-ancestors") == 1
+            assert "default-src 'self'" in policy
+            assert "unsafe-inline" not in policy
+            for other in ("/", "/node.js", "/node.css"):
+                _s, headers, _b, _j = await asyncio.to_thread(
+                    _request, console, "GET", other)
+                assert "frame-ancestors 'none'" in headers["content-security-policy"], other
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_page_is_public_but_says_nothing_without_a_session(self):
+        """Same shape as every other page here: the markup is public, and every
+        call it makes needs the session."""
+        node, console = await _make_console()
+        try:
+            status, _, body, _ = await asyncio.to_thread(_request, console, "GET", "/node")
+            assert status == 200 and b"Sign in" in body
+            for path in ("/api/state", "/api/app-api"):
+                status, _, _, _ = await asyncio.to_thread(_request, console, "GET", path)
+                assert status == 401, path
+        finally:
+            console.stop(); await node.stop()

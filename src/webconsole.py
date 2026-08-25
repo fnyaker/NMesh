@@ -45,7 +45,8 @@ from . import console_auth
 from . import join_ticket
 from . import qr
 from .node import MESSAGE_NAMES
-from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
+from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
+                        INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import console_path_refusal as fleet_console_refusal
@@ -492,8 +493,21 @@ _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 
+# The one page meant to be framed. Everything else keeps `frame-ancestors
+# 'none'`: this view is opened *by* chat and fleet, in a panel beside what the
+# operator was doing, and those are pages this console serves itself. `'self'`
+# and not `*` — a page on another origin still cannot put this in a frame, so
+# there is no clickjacking surface, only the one this product already owns.
+_FRAMEABLE_CSP = _SECURITY_HEADERS["Content-Security-Policy"].replace(
+    "frame-ancestors 'none'", "frame-ancestors 'self'")
+
 _STATIC = {
     "/": ("text/html; charset=utf-8", INDEX_HTML),
+    # One node, described. Mounted in the console's own dialog too — this is
+    # the copy chat and fleet open.
+    "/node": ("text/html; charset=utf-8", NODE_HTML),
+    "/node.js": ("application/javascript; charset=utf-8", NODE_JS),
+    "/node.css": ("text/css; charset=utf-8", NODE_CSS),
     "/app.js": ("application/javascript; charset=utf-8", APP_JS),
     "/style.css": ("text/css; charset=utf-8", STYLE_CSS),
     # Loaded blocking in <head> on every page: a stored theme choice has to be
@@ -591,12 +605,17 @@ def _make_handler(console: WebConsole):
         # -- helpers --
 
         def _send(self, code: int, ctype: str, body: bytes,
-                  extra_headers: list | None = None) -> None:
+                  extra_headers: list | None = None,
+                  csp: str | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             for k, v in _SECURITY_HEADERS.items():
-                self.send_header(k, v)
+                # A second CSP header would be *intersected* with the first, not
+                # replace it, so a policy that differs has to be substituted
+                # here rather than appended.
+                self.send_header(k, csp if (csp and k == "Content-Security-Policy")
+                                 else v)
             for k, v in (extra_headers or []):
                 self.send_header(k, v)
             self.end_headers()
@@ -699,7 +718,8 @@ def _make_handler(console: WebConsole):
                 return
             if path in _STATIC:
                 ctype, text = _STATIC[path]
-                self._send(200, ctype, text.encode("utf-8"))
+                self._send(200, ctype, text.encode("utf-8"),
+                           csp=_FRAMEABLE_CSP if path == "/node" else None)
                 return
             if console._chat is not None and path in _CHAT_STATIC:
                 ctype, text = _CHAT_STATIC[path]

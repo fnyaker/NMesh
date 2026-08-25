@@ -500,13 +500,8 @@ INDEX_HTML = """<!doctype html>
   <div class="sheet">
     <header class="sheet-head"><h2 id="node-dialog-title">Node</h2>
       <button id="node-dialog-close" class="icon" aria-label="Close">✕</button></header>
-    <div class="sheet-body"><dl id="node-detail-body" class="kv"></dl>
-      <div id="node-detail-extra" class="stack"></div>
-      <p id="detail-status" class="msg"></p></div>
-    <footer class="sheet-foot">
-      <button id="detail-forget" class="danger">Forget node</button>
-      <button id="detail-ping" class="primary">Ping node</button>
-    </footer>
+    <!-- The whole body is the shared node view — the same one /node serves. -->
+    <div class="sheet-body"><div id="node-detail"></div></div>
   </div>
 </dialog>
 
@@ -1305,177 +1300,20 @@ $("go-join").addEventListener("click", () => ROUTER.go("network", "join"));
 
 // ---- node details ----------------------------------------------------------
 let DETAIL_ID = null;
-async function exactNode(scope, id){
-  const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
-  const response = await api("/api/nodes?" + params.toString());
-  if(!response.ok) return null;
-  return (await response.json()).items.find((item) => item.id === id) || null;
-}
+// The dialog is a frame; what is inside it is the shared view, which is also
+// what /node serves. One description of a node, wherever it is looked at.
 async function openNode(id, seed){
   DETAIL_ID = id;
   const dialog = $("node-dialog");
   if(!dialog.open) dialog.showModal();
   $("node-dialog-title").textContent = shortId(id);
-  $("node-detail-body").innerHTML = "<dt>Status</dt><dd>Loading…</dd>";
-  setMessage("detail-status", "");
-  let known = null, active = null;
-  if(STATE && id !== STATE.id)
-    [known, active] = await Promise.all([exactNode("known", id).catch(() => null),
-                                         exactNode("active", id).catch(() => null)]);
-  const node = Object.assign({}, known || {}, active || {}, seed || {}, {id});
-  const link = node.link || null;
-  const rows = [
-    ["Node id", '<span class="mono">' + esc(id) + "</span>"],
-    ["Relationship", node.self ? "This console's node" : active ? "Authenticated direct link"
-      : known ? "Known routing identity" : "Routed session endpoint"],
-    ["Session", node.has_session === false ? "Not established"
-      : active ? "Open" : node.self ? "Local" : "Not directly observed"],
-    ["Last seen", node.seen_ago == null ? "Live" : esc(fmtAgo(node.seen_ago))],
-    ["Identity key", node.has_key == null ? "Unknown" : node.has_key ? "Known" : "Missing"],
-  ];
-  if(link){
-    rows.push(["Link", esc(link.scheme || "?") + " · " + esc(link.direction) +
-      " · up " + esc(fmtDuration(link.since))]);
-    if(link.local) rows.push(["Local endpoint", '<span class="mono">' + esc(link.local) + "</span>"]);
-    if(link.remote) rows.push(["Remote endpoint", '<span class="mono">' + esc(link.remote) + "</span>"]);
-    if(link.dialled && link.dialled !== link.remote)
-      rows.push(["Dialled", '<span class="mono">' + esc(link.dialled) + "</span>"]);
-  }else{
-    rows.push(["Transport", esc(node.transport || "Unknown")]);
-  }
-  rows.push(["Traffic", node.counters
-    ? esc(fmtBytes(node.counters.bytes_in)) + " in / " +
-      esc(fmtBytes(node.counters.bytes_out)) + " out" : "—"]);
-  rows.push(["Malformed input", node.malformed == null ? "—" : esc(node.malformed)]);
-  $("node-detail-body").innerHTML = rows.map(([key, value]) =>
-    "<dt>" + key + "</dt><dd>" + value + "</dd>").join("");
-  $("node-detail-extra").innerHTML =
-    qualityHTML(link ? link.quality : null, node.rtt_ms) +
-    linkStatsHTML(link) +
-    addressHTML(node.address_status, node.addresses, !!node.self);
-  $("detail-ping").hidden = !!node.self;
-  $("detail-forget").hidden = !!node.self;
-}
-// One RTT number cannot tell a steady link from a flapping one, so the dialog
-// shows the spread and what the probes lost, with the samples behind it.
-function qualityHTML(quality, fallback){
-  if(!quality || !quality.probes){
-    return fallback == null ? "" :
-      '<div class="stats"><div class="stat sm"><span class="v">' + esc(fallback) +
-      ' ms</span><span class="k">Round trip</span></div></div>';
-  }
-  const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
-  const tone = (loss != null && loss >= 10) ? "warn" : "";
-  const cell = (label, value, extra) =>
-    '<div class="stat sm"><span class="v">' + value + '</span><span class="k">' +
-    esc(label) + "</span>" + (extra || "") + "</div>";
-  return "<h3>Latency</h3>" +
-    '<div class="stats">' +
-    cell("Round trip", quality.rtt_ms == null ? "—" : quality.rtt_ms + " ms",
-         '<div class="' + (tone ? "spark warn" : "") + '">' +
-         sparkHTML(quality.samples_ms) + "</div>") +
-    cell("Best / worst", (quality.best_ms == null ? "—" : quality.best_ms) + " / " +
-         (quality.worst_ms == null ? "—" : quality.worst_ms) + " ms") +
-    cell("Jitter", quality.jitter_ms == null ? "—" : quality.jitter_ms + " ms") +
-    cell("Probe loss", loss == null ? "—" : loss + "%") +
-    "</div>" +
-    '<p class="tiny muted">' + esc(quality.probes) + " liveness probe(s) sent on this link.</p>";
-}
-
-// Whatever the medium chose to report. The console does not know what a
-// retransmit or an SNR is — it renders the names it is given.
-function linkStatsHTML(link){
-  const stats = link && link.stats;
-  if(!stats || !Object.keys(stats).length) return "";
-  return "<h3>" + esc(link.scheme || "Transport") + " counters</h3>" +
-    '<dl class="kv">' + Object.entries(stats).map(([key, value]) =>
-      "<dt>" + esc(key) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl>";
-}
-
-const ADDRESS_TONE = {"in-use":"ok", connected:"ok", timeout:"warn",
-                      refused:"danger", "no-answer":"warn", untried:"",
-                      invalid:"danger", "no transport":"danger", "peer limit":"warn"};
-function addressHTML(status, fallback, self){
-  const rows = status && status.length ? status
-    : (fallback || []).map((uri) => ({uri, outcome:"untried"}));
-  if(!rows.length) return "<h3>Addresses</h3><p class=\"small muted\">None advertised.</p>";
-  // A node advertising four addresses of which one works is the normal case;
-  // "try that one again, now" is the question an operator has while looking at
-  // this table, so the button is in the table.
-  const action = self ? "" : '<th class="tight"></th>';
-  return '<div class="row"><h3 class="grow">Addresses</h3>' +
-    (self ? "" : '<button class="sm" id="detail-retry-all">Retry all</button>') + "</div>" +
-    '<div class="table-wrap"><table><thead><tr>' +
-    '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
-    "</tr></thead><tbody>" +
-    rows.map((row) => '<tr><td class="mono">' + esc(row.uri) + "</td><td>" +
-      badge(row.outcome, ADDRESS_TONE[row.outcome] || "") +
-      (row.detail ? ' <span class="tiny muted">' + esc(row.detail) + "</span>" : "") +
-      '</td><td class="num">' +
-      (row.ago == null ? "—" : esc(fmtAgo(row.ago)) +
-        (row.ms == null ? "" : " · " + esc(row.ms) + " ms")) +
-      "</td>" + (self ? "" : '<td class="tight"><button class="sm" data-retry-uri="' +
-        esc(row.uri) + '">Retry</button></td>') +
-      "</tr>").join("") + "</tbody></table></div>";
-}
-
-// Both the single address and the whole list come back the same way: what every
-// address did, in the words the table above already uses.
-async function retryAddresses(button, uri){
-  if(!DETAIL_ID) return;
-  await withBusy(button, async () => {
-    setMessage("detail-status", uri ? "Dialling " + uri + "…" : "Dialling every address…");
-    try{
-      const {ok, data} = await apiJson("/api/peers/retry", "POST", {id:DETAIL_ID, uri:uri || ""});
-      if(!ok){ setMessage("detail-status", data.error || "Retry refused", true); return; }
-      const words = (data.results || []).map((row) =>
-        row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""));
-      setMessage("detail-status", words.join(" · ") || "Nothing to dial",
-                 !data.connected);
-      tick();
-    }catch(_){ setMessage("detail-status", "Retry failed", true); }
+  await NODEVIEW.mount("node-detail", id, {
+    selfId: STATE ? STATE.id : null,
+    seed,
+    onGone(){ dialog.close(); Promise.all([refreshPeers(), tick()]); },
   });
 }
-
 $("node-dialog-close").addEventListener("click", () => $("node-dialog").close());
-$("node-detail-extra").addEventListener("click", (event) => {
-  const one = event.target.closest("[data-retry-uri]");
-  if(one){ retryAddresses(one, one.dataset.retryUri); return; }
-  const all = event.target.closest("#detail-retry-all");
-  if(all) retryAddresses(all, "");
-});
-$("detail-ping").addEventListener("click", (event) => withBusy(event.target, async () => {
-  if(!DETAIL_ID) return;
-  setMessage("detail-status", "Pinging through the mesh…");
-  try{
-    const {data} = await apiJson("/api/ping/node", "POST", {id:DETAIL_ID});
-    setMessage("detail-status", data.reachable
-      ? "Reachable in " + (data.rtt_ms == null ? "an unknown time" : data.rtt_ms + " ms") +
-        " via " + (data.via || "the mesh")
-      : "Node is currently unreachable", !data.reachable);
-    tick();
-  }catch(_){ setMessage("detail-status", "Ping failed", true); }
-}));
-$("detail-forget").addEventListener("click", async () => {
-  if(!DETAIL_ID) return;
-  const agreed = await confirmAction({
-    title:"Forget this node?",
-    body:'<p class="muted small">It is removed from the routing table and disconnected. ' +
-      "It can reappear on its own if it contacts this node again.</p>" +
-      '<p class="mono small">' + esc(DETAIL_ID) + "</p>",
-    confirmLabel:"Forget node", danger:true});
-  if(!agreed) return;
-  await withBusy($("detail-forget"), async () => {
-    try{
-      const {ok, data} = await apiJson("/api/nodes/forget", "POST", {id:DETAIL_ID});
-      if(ok && data.ok){
-        $("node-dialog").close();
-        toast("Node forgotten");
-        await Promise.all([refreshPeers(), tick()]);
-      }else setMessage("detail-status", data.error || "Node not found", true);
-    }catch(_){ setMessage("detail-status", "Forget failed", true); }
-  });
-});
 
 // ---- reachability ----------------------------------------------------------
 function paintReach(state){

@@ -17,7 +17,7 @@ from src.webassets import ui
 
 NODE = shutil.which("node")
 
-SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS")
+SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS")
 
 
 @pytest.mark.skipif(NODE is None, reason="node requis pour analyser le JS")
@@ -52,10 +52,14 @@ def test_every_element_the_scripts_reach_for_exists():
     """Un `$("id")` qui ne correspond à rien lève au chargement et emporte le
     reste du script avec lui."""
     import re
-    pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML", "FLEET_JS": "FLEET_HTML"}
+    pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML",
+             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML"}
     for script_name, html_name in pages.items():
         html = getattr(webassets, html_name)
-        source = getattr(webassets, script_name)
+        # Seulement la partie propre à la page : le runtime partagé garde tous
+        # ses accès derrière un `if(element)`, précisément parce que toutes les
+        # pages ne portent pas tout le châssis.
+        source = getattr(webassets, script_name)[len(webassets.ui.JS):]
         # Seulement les accès littéraux au chargement : ceux construits
         # dynamiquement visent des éléments créés par le script lui-même.
         for match in re.finditer(r'\$\("([a-z0-9-]+)"\)\.addEventListener', source):
@@ -126,8 +130,9 @@ STYLE_ATTRIBUTE = re.compile(r"""style\s*=\s*["']""")
 
 
 @pytest.mark.parametrize("name", ["INDEX_HTML", "CHAT_HTML", "FLEET_HTML",
-                                  "APP_JS", "CHAT_JS", "FLEET_JS",
-                                  "STYLE_CSS", "CHAT_CSS", "FLEET_CSS"])
+                                  "NODE_HTML", "APP_JS", "CHAT_JS", "FLEET_JS",
+                                  "NODE_JS", "STYLE_CSS", "CHAT_CSS",
+                                  "FLEET_CSS", "NODE_CSS"])
 def test_no_inline_style_attribute_anywhere(name):
     source = getattr(webassets, name)
     # Le commentaire qui explique la règle a le droit de la citer.
@@ -150,7 +155,8 @@ def test_every_page_offers_a_skip_link_and_a_focus_ring():
     for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
         assert 'class="skip"' in html
         assert 'id="main"' in html
-    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS):
+    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS,
+                webassets.NODE_CSS):
         assert ":focus-visible{outline:2px solid var(--ring)" in css
 
 
@@ -158,9 +164,11 @@ def test_the_three_pages_share_one_design_system():
     """Le contrat du paquet : une seule source pour les jetons, les composants
     et le runtime. Si une page cessait de la charger, elle divergerait en
     silence."""
-    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS):
+    for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS,
+                webassets.NODE_CSS):
         assert css.startswith(webassets.ui.CSS)
-    for script in (webassets.APP_JS, webassets.CHAT_JS, webassets.FLEET_JS):
+    for script in (webassets.APP_JS, webassets.CHAT_JS, webassets.FLEET_JS,
+                   webassets.NODE_JS):
         assert script.startswith(webassets.ui.JS)
 
 
@@ -179,7 +187,7 @@ def test_the_console_renders_whatever_a_transport_reports():
     """Les compteurs d'un transport sont affichés par leurs propres noms : la
     console ne connaît ni « retransmits » ni « SNR », et c'est le point."""
     source = webassets.APP_JS
-    assert "function linkStatsHTML" in source
+    assert "statsHTML(link)" in source
     assert "Object.entries(stats)" in source
 
 
@@ -187,7 +195,8 @@ def test_the_console_renders_whatever_a_transport_reports():
 # Chacun de ces tests correspond à un bug réellement rencontré dans un vrai
 # navigateur : ils sont ici pour qu'il ne revienne pas.
 
-PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS"}
+PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS",
+         "NODE_HTML": "NODE_JS"}
 
 
 @pytest.mark.parametrize("html_name", list(PAGES))
@@ -242,3 +251,40 @@ def test_the_tab_bar_hides_what_cannot_fit_and_the_page_ends_above_it():
     narrow = ui.SHELL.split("@media (max-width:900px){", 1)[1]
     assert ".rail .brand,.rail .rail-foot" in narrow
     assert "--tabbar-h" in narrow
+
+
+# ── la vue d'une node, partagée ──────────────────────────────────────────────
+# Elle est montée à deux endroits : le dialogue de la console et la page
+# `/node` qu'ouvrent chat et fleet. Deux copies qui divergent était l'autre
+# option ; ces tests sont là pour qu'on n'y retombe pas.
+
+def test_one_node_view_mounted_twice_and_never_copied():
+    for script in (webassets.APP_JS, webassets.NODE_JS):
+        assert "const NODEVIEW = {" in script
+        assert script.count("const NODEVIEW = {") == 1
+    assert 'NODEVIEW.mount("node-detail"' in webassets.APP_JS
+    assert 'NODEVIEW.mount("view"' in webassets.NODE_JS
+
+
+def test_the_view_only_offers_what_an_app_declares():
+    """Un bouton qui appelle une app absente ne doit pas être dessiné : la vue
+    lit le catalogue avant de décider quoi proposer."""
+    source = webassets.NODE_JS
+    assert '"/api/app-api"' in source
+    assert 'this.has("chat", "peer")' in source
+    assert 'this.has("fleet", "relation")' in source
+
+
+def test_the_view_hides_the_button_pointing_back_where_it_came_from():
+    source = webassets.NODE_JS
+    assert 'get("from")' in source
+    assert 'hide.indexOf("chat")' in source and 'hide.indexOf("fleet")' in source
+
+
+def test_the_addresses_are_folded_away_by_default():
+    """La question « quelles adresses » vient après « ce lien va bien ? ». Un
+    tableau déplié repoussait les réponses sous le pli."""
+    source = webassets.NODE_JS
+    assert 'foldHTML("Addresses"' in source
+    assert "<details class=\\\"card\\\"><summary>" in source or \
+           '<details class="card"><summary>' in source
