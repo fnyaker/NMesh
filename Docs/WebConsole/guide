@@ -23,6 +23,31 @@ Options :
   machine. Par défaut elle écoute sur `127.0.0.1` uniquement.
 - `--console-port 8787`, `--no-tls`, `--data DIR` (persiste identité + creds).
 
+## Navigation
+
+Quatre sections, dans l'ordre où on en a besoin : ce que fait la node, à qui elle
+parle, ce qui tourne dessus, ce qu'on peut changer. **Chaque section est une
+route** — `#section/sous-section` — donc linkable, marque-pageable, et le bouton
+Retour du navigateur marche.
+
+| Section | Sous-sections | Route |
+|---|---|---|
+| **Overview** | — | `#overview` |
+| **Network** | Peers · Reachability · Add a node | `#network/peers`, `#network/reach`, `#network/join` |
+| **Apps** | Installed · App store | `#apps/installed`, `#apps/store` |
+| **Settings** | Updates · Security · Configuration · Diagnostics · Advanced | `#settings/updates`, `#settings/security`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
+
+Rejoindre un réseau est une action **réseau**, pas un réglage : tickets, QR,
+échange manuel, relais et certificats vivent dans *Network → Add a node*.
+
+**⌘K / Ctrl-K** ouvre une palette de commandes : n'importe quelle section, plus
+les actions courantes (ping, créer un ticket, vérifier les mises à jour, changer
+de thème). **Le thème** suit le système par défaut ; le bouton de la barre du
+haut choisit clair ou sombre, et le choix reste dans ce navigateur.
+
+L'apparence, les jetons et les composants sont décrits dans
+[`Docs/WebConsole/design`](design) — à lire **avant** de toucher à une page.
+
 ## Modèle de sécurité
 
 - **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.
@@ -45,6 +70,19 @@ Options :
 - Le serveur HTTP tourne dans un thread dédié et **marshalle** toute
   interaction avec la node sur la boucle asyncio : l'état de la node n'est
   jamais touché hors du thread de la boucle.
+
+## Fichiers servis
+
+| Route | Rôle |
+|---|---|
+| `/`, `/style.css`, `/app.js` | la console |
+| `/chat`, `/chat.css`, `/chat.js` | l'app de chat, si activée |
+| `/fleet`, `/fleet.css`, `/fleet.js` | l'app fleet, si activée |
+| `/theme.js` | pose le thème choisi **avant la première image** (bloquant dans `<head>`) |
+| `/favicon.svg` | l'icône ; sans elle chaque chargement prend un 404 sur `/favicon.ico` |
+
+Tout est servi depuis la même origine, sans ressource externe : la console
+fonctionne sur une machine sans internet.
 
 ## API (toutes en JSON, auth Bearer ou cookie sauf login)
 
@@ -103,7 +141,7 @@ chaque IP locale), les URIs en écoute, les IP locales, et les transports
 enregistrés (● = actif). Le snapshot expose `advertised`, `listen`,
 `local_ips`, `transports`, `listening`.
 
-Dans la fiche détail d'un nœud (onglet **Connectivity**, bouton **Details**),
+Dans la fiche détail d'un nœud (**Network → Peers**, bouton **Details**),
 **Forget node** retire ce nœud de la table de routage locale et coupe sa
 session si elle est active. Ce n'est **pas un bannissement** : la fusion
 automatique dans la table de routage à réception d'un PONG authentifié (et le
@@ -127,7 +165,8 @@ Le nœud embarque une **app de chat par défaut**, branchée sur le mesh comme
 n'importe quelle app (connecteur de données, section `CHAT_APP_ID`). La console
 la surface :
 
-- la section **Apps** liste les apps intégrées avec un lien **Open**.
+- la section **Apps** liste les apps intégrées avec un lien **Open** ; le rail
+  en garde un raccourci permanent.
 - la sous-page **`/chat`** sert l'interface de chat, hébergée par **le même
   serveur console** (pas de port ni de jeton séparés). Elle **réutilise la
   session** : le cookie `nmesh_session` (même origine, `Path=/`) authentifie la
@@ -148,13 +187,13 @@ par défaut ; `--no-chat` le désactive. Voir `Docs/Apps/chat`.
 Gestion à distance et déploiement automatisé, servie par le **même serveur
 console** (même session, même cookie) comme la sous-page de chat.
 **Désactivée par défaut** : elle peut ouvrir un shell, donc on l'active
-explicitement (`--fleet`, ou le bouton **Enable** de l'onglet Apps).
+explicitement (`--fleet`, ou le bouton **Enable** de la section Apps).
 
-La page expose : la bande de **notifications** quand un opérateur demande à gérer
-cette node (avec le choix des capabilities accordées — on peut restreindre,
-jamais élargir), les cartes de status des nodes gérées (disque, RAM, charge,
-uptime, distro), les actions update / shell / scan, l'assistant de découverte LAN
-et de provisioning SSH, et un journal d'activité.
+La page a cinq sections, séparées selon la question posée : **Nodes** (celles
+qu'on contrôle, avec leur status et les actions update / shell / scan),
+**Who controls this node** (celles qui nous contrôlent, avec leurs droits et les
+demandes en attente), **Discover & deploy** (découverte LAN et provisioning SSH),
+**Shell** (terminal interactif), **Activity** (journal).
 
 Les routes `/api/fleet/*` exigent la **même session** que le reste de la console,
 et n'existent pas (404) quand l'app est désactivée. Elles ne permettent que de
@@ -163,9 +202,8 @@ console ne peut rien s'accorder à elle-même. Voir [`Docs/Apps/fleet`](../Apps/
 
 ## Apps intégrées : installer, activer, désactiver
 
-L'onglet **Apps** liste les apps livrées avec le nœud sous forme de cartes —
-icône, nom, état (point vert « Running », ambre « Stopped », éteint « Not
-installed »), description, puis les actions Install / Enable / Disable /
+La section **Apps** liste les apps livrées avec le nœud sous forme de cartes —
+icône, nom, état (pastille « Running », « Stopped » ou « Not installed »), description, puis les actions Install / Enable / Disable /
 Uninstall et le lien **Open** (`/api/apps/*`). Deux états
 distincts : **installed** (le nœud garde l'état de l'app ; désinstaller **purge
 son tiroir chiffré**) et **enabled** (l'app est branchée au mesh maintenant ;
@@ -206,7 +244,7 @@ non éditables ici** : le premier appartient à qui détient le fichier, le seco
 Détail du format, des bornes et de la priorité ligne de commande > fichier >
 défaut : [`../Setup/guide`](../Setup/guide).
 
-## Join rapide : ticket et QR code (Connectivité)
+## Join rapide : ticket et QR code (Network → Add a node)
 
 Le join complet demande de déplacer deux choses à la main : une adresse et un
 code. Un **ticket** compacte les deux en une seule chaîne de **34 caractères**

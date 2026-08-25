@@ -46,6 +46,7 @@ from . import qr
 from .node import MESSAGE_NAMES
 from .webassets import (INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
+from .webassets.ui import FAVICON_SVG, THEME_JS
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
@@ -412,6 +413,10 @@ _STATIC = {
     "/": ("text/html; charset=utf-8", INDEX_HTML),
     "/app.js": ("application/javascript; charset=utf-8", APP_JS),
     "/style.css": ("text/css; charset=utf-8", STYLE_CSS),
+    # Loaded blocking in <head> on every page: a stored theme choice has to be
+    # on the element before the first paint, and the CSP forbids inline script.
+    "/theme.js": ("application/javascript; charset=utf-8", THEME_JS),
+    "/favicon.svg": ("image/svg+xml", FAVICON_SVG),
 }
 
 # Chat sub-page assets, served only when a chat bridge is attached. Like the

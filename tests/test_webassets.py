@@ -5,6 +5,7 @@ console à l'exécution — page blanche, sans message. Ces vérifications-là s
 donc faites ici, à la construction.
 """
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -108,7 +109,35 @@ def test_the_rights_panel_is_wired_to_a_real_element():
     s'ajoute : si son conteneur manque, elle disparaît en silence."""
     assert 'id="operators"' in webassets.FLEET_HTML
     assert 'data-tab="access"' in webassets.FLEET_HTML
-    assert "function renderOperators" in webassets.FLEET_JS
+    assert "function paintOperators" in webassets.FLEET_JS
     for route in ("/api/fleet/caps-set", "/api/fleet/caps-request",
                   "/api/fleet/caps-drop"):
         assert route in webassets.FLEET_JS, route
+
+
+# ── la CSP stricte, appliquée aux assets eux-mêmes ──────────────────────────
+# `default-src 'self'` sans `unsafe-inline` : un attribut `style=` est ignoré
+# par le navigateur **en silence**. Une barre de progression écrite comme ça ne
+# se remplit jamais et personne ne voit d'erreur. Les assignations CSSOM
+# (`element.style.x = …`) ne sont pas concernées et restent permises.
+
+STYLE_ATTRIBUTE = re.compile(r"""style\s*=\s*["']""")
+
+
+@pytest.mark.parametrize("name", ["INDEX_HTML", "CHAT_HTML", "FLEET_HTML",
+                                  "APP_JS", "CHAT_JS", "FLEET_JS",
+                                  "STYLE_CSS", "CHAT_CSS", "FLEET_CSS"])
+def test_no_inline_style_attribute_anywhere(name):
+    source = getattr(webassets, name)
+    # Le commentaire qui explique la règle a le droit de la citer.
+    lines = [line for line in source.splitlines()
+             if STYLE_ATTRIBUTE.search(line) and "attribute silently" not in line]
+    assert not lines, f"{name}: attribut style inline — {lines[:2]}"
+
+
+def test_the_console_still_forbids_inline_anything():
+    """Si la CSP s'assouplissait, la règle ci-dessus perdrait son sens."""
+    from src.webconsole import _SECURITY_HEADERS
+    policy = _SECURITY_HEADERS["Content-Security-Policy"]
+    assert "default-src 'self'" in policy
+    assert "unsafe-inline" not in policy

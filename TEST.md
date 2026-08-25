@@ -127,6 +127,15 @@ tests/
 │     réglages non éditables depuis la console, mode 0600, fusion installeur
 ├── test_docker_image_tree.py                          — l'image embarque ce que
 │     le provisioning fleet exige (« no NMesh tree at /app »)
+├── test_webassets.py                                  — les assets web, vérifiés
+│     à la construction : le JS parse (une erreur de syntaxe = page blanche, pas
+│     un test rouge), aucun `$("id")` ne vise un élément absent, aucune ressource
+│     externe, aucun attribut `style=` (la CSP l'ignore en silence), et
+│     l'émulateur de terminal relit ce qu'un vrai shell écrit
+│     (`term_emulator_test.js`, exécuté sous node)
+├── test_ui_contrast.py                                — jetons de couleur : ratio
+│     WCAG de chaque paire texte/fond dans les deux thèmes, et aucune page ne
+│     redéfinit un jeton du système
 └── integration/                                       — nœuds réels (TCP + spool)
       dont test_idle_chatter.py : deux nœuds joints et inactifs restent
       silencieux (la boucle FIND_NODE/FOUND_NODE qui saturait le lien), et la
