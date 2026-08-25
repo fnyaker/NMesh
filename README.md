@@ -201,6 +201,11 @@ Un fichier unique embarquant le code NMesh. Note : la crypto native
 (`liboqs-python`, `cryptography`) doit être installée dans l'interpréteur —
 pour un artefact totalement autonome, préférez l'image Docker.
 
+## FAQ
+
+Les pannes qu'on rencontre vraiment, avec le message exact et la commande qui
+les répare : [`FAQ.md`](FAQ.md).
+
 ## Tests
 
 ```bash

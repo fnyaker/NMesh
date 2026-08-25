@@ -92,7 +92,9 @@ tests/
 ├── test_fleet_deploy.py                               — déploiement distant et
 │     droit d'update : le script autorisé n'est pas dans le préfixe du nœud, la
 │     règle ne nomme qu'un chemin sans joker, le wrapper refuse tout argument,
-│     le plan préfère le droit quand il existe ; plus, pour le déploiement :
+│     le plan préfère le droit quand il existe, `NoNewPrivileges` est vu **avant**
+│     de lancer sudo (et un nœud déjà root n'est pas concerné), et l'unité
+│     systemd suit le droit accordé au lieu de le défaire ; plus, pour le déploiement :
 │     install.sh voyage dans le payload et rien ne le réimplémente, aucun mot de
 │     passe écrit dans un script, élévation dite et non sondée, ordre des
 │     prompts (connexion puis élévation, jamais rejoué), refus d'un install

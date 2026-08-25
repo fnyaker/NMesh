@@ -252,7 +252,37 @@ owner_spec() {
 # partial upgrade or a distro package change, and there is exactly one place
 # that knows how to install anything.
 systemd_unit() {
-    local prefix="$1" data="$2" user="$3" args="$4"
+    local prefix="$1" data="$2" user="$3" args="$4" target="$5" updates="${6:-false}"
+    # A node that was granted the right to run system updates cannot be confined
+    # the same way as one that was not, and this is not a matter of taste:
+    #
+    #   NoNewPrivileges=yes makes the kernel refuse *any* setuid binary for this
+    #   process and every child of it, for ever. `sudo` then fails with a
+    #   message about a kernel flag, which is exactly the confusing failure an
+    #   operator meets after asking for the update grant.
+    #   ProtectSystem=full mounts /usr read-only, so a package manager could not
+    #   write even if sudo worked, and PrivateDevices hides the devices some
+    #   post-install scripts need.
+    #
+    # So the confinement follows the grant: full hardening by default, relaxed
+    # only for a node whose operator explicitly asked for system updates. The
+    # two must never be chosen independently, or one silently defeats the other.
+    local confinement
+    if [ "$updates" = true ]; then
+        confinement="# Relaxed because this node holds the update grant
+# (install.sh --allow-update): sudo cannot elevate under NoNewPrivileges, and a
+# package manager cannot write under ProtectSystem=full. Re-run install.sh
+# without --allow-update to get the hardened unit back.
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=no"
+    else
+        confinement="# The node needs no new privileges and no private state outside its data dir.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full"
+    fi
     cat <<EOF
 [Unit]
 Description=NMesh node
@@ -277,14 +307,10 @@ Environment=NMESH_SERVICE_MANAGED=1
 ExecStart=$prefix/start.sh $args
 Restart=always
 RestartSec=5
-# The node needs no new privileges and no private state outside its data dir.
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=full
+$confinement
 
 [Install]
-WantedBy=$5
+WantedBy=$target
 EOF
 }
 
@@ -364,6 +390,7 @@ UNINSTALL=false
 PURGE=false
 RESET_PASSWORD=false
 ALLOW_UPDATE=false
+UPDATE_GRANTED=false
 NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -660,6 +687,7 @@ if [ "$ALLOW_UPDATE" = true ]; then
                 run_priv cp "$TMP_RULE" /etc/sudoers.d/nmesh
                 run_priv chown root:root /etc/sudoers.d/nmesh 2>/dev/null || true
                 run_priv chmod 440 /etc/sudoers.d/nmesh
+                UPDATE_GRANTED=true
                 ok "$RUN_USER may run $WRAPPER as root — and nothing else"
             fi
         else
@@ -704,7 +732,8 @@ case "$INIT" in
     systemd-system)
         info "Installing systemd unit $UNIT_PATH"
         TMP_UNIT="$(mktemp)"
-        systemd_unit "$PREFIX" "$DATA" "$RUN_USER" "$ARGS" multi-user.target > "$TMP_UNIT"
+        systemd_unit "$PREFIX" "$DATA" "$RUN_USER" "$ARGS" multi-user.target \
+                     "$UPDATE_GRANTED" > "$TMP_UNIT"
         # The files are already in place: a service manager that refuses is a
         # degraded install, not a failed one. Say so and keep going.
         if run_priv cp "$TMP_UNIT" "$UNIT_PATH" \
@@ -720,7 +749,8 @@ case "$INIT" in
     systemd-user)
         info "Installing user systemd unit $UNIT_PATH"
         mkdir -p "$(dirname "$UNIT_PATH")"
-        systemd_unit "$PREFIX" "$DATA" "" "$ARGS" default.target > "$UNIT_PATH"
+        systemd_unit "$PREFIX" "$DATA" "" "$ARGS" default.target \
+                     "$UPDATE_GRANTED" > "$UNIT_PATH"
         systemctl --user daemon-reload || warn "systemctl --user daemon-reload failed"
         systemctl --user enable "$SERVICE" >/dev/null 2>&1 || warn "Could not enable $SERVICE at boot"
         # Without lingering a user service only runs while you are logged in —

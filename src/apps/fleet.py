@@ -1021,7 +1021,10 @@ class FleetApp:
             return
         commands = fleet_host.update_plan(self.facts)
         if commands is None:
-            self._fail(src, rid, "no package manager, or no path to root")
+            # The machine's own explanation, not a guess: "sudo said something
+            # about a kernel flag" is not something an operator can act on.
+            self._fail(src, rid, self.facts.update_blocked
+                       or "no package manager, or no path to root")
             return
         self._spawn(self._run_update(src, rid, commands))
 
