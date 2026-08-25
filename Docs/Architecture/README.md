@@ -38,6 +38,7 @@ s'en sert pour autoriser de l'exécution à distance).
 | `app_catalog.py` | App store : catalogue réseau (releases signées, gossipé, anti-rollback) + registre local d'apps installées. |
 | `app_storage.py` | Store local par app (« tiroir ») : clé→valeur chiffré au repos (AES-256-GCM, clé par app dérivée de l'identité), isolé par `app_id`, borné. |
 | `app_auth.py` | **Identité applicative** (SSO) : assertions signées ML-DSA scopées `(app, audience, purpose, ctx)`, fraîcheur, anti-rejeu, login mutuel. Domaine de signature séparé — jamais un oracle. |
+| `app_api.py` | **Surface d'API des apps** : une app déclare ses opérations (`API` + `api_<nom>`), tout le reste — une autre app, le cœur, une page — les appelle pareil. Refus par défaut : rien qui ne soit déclaré, chaque argument coercé et borné. Voir [`../AppAPI/guide`](../AppAPI/guide). |
 | `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
 | `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), relais vers la console locale (`fleet_console.py`), pont console (`fleet_web.py`). |
 | `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |

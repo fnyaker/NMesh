@@ -617,3 +617,121 @@ class TestKeyUpload:
             console.stop()
             await host.stop_all()
             await node.stop()
+
+
+class TestAppApiOverHttp:
+    """The single door, seen from the browser. What matters here is that it is
+    still a door: authenticated, only for what an app declared, and no wider
+    than the app's own rules."""
+
+    async def test_the_catalogue_needs_a_session(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _get(console, "/api/app-api")
+            assert status == 401
+            status, _, _, _ = await _post(console, "/api/app-call", None,
+                                          {"app": "fleet", "op": "relation",
+                                           "args": {"node": "ab" * 20}})
+            assert status == 401
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_the_catalogue_lists_the_running_apps(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await _get(console, "/api/app-api", token)
+            assert status == 200
+            apps = {entry["app"]: entry for entry in body["apps"]}
+            assert "fleet" in apps
+            names = {op["name"] for op in apps["fleet"]["operations"]}
+            assert names == {"relation", "enrol", "request"}
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_a_disabled_app_offers_nothing_and_answers_nothing(self):
+        node, console, host, _ = await _make(enabled=False)
+        try:
+            _status, token = await _login(console)
+            _s, _h, _b, body = await _get(console, "/api/app-api", token)
+            assert body["apps"] == []
+            status, _, _, body = await _post(console, "/api/app-call", token,
+                                             {"app": "fleet", "op": "relation",
+                                              "args": {"node": "ab" * 20}})
+            assert status == 400 and body["ok"] is False
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_a_declared_read_answers_with_the_ledger(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await _post(console, "/api/app-call", token,
+                                             {"app": "fleet", "op": "relation",
+                                              "args": {"node": "ab" * 20}})
+            assert status == 200 and body["ok"] is True
+            result = body["result"]
+            assert result["managed"] is False and result["operator"] is False
+            assert "status" in result["capabilities"]
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_an_undeclared_operation_is_refused(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            for op in ("revoke", "open_shell", "snapshot", "api_relation",
+                       "__init__"):
+                status, _, _, body = await _post(
+                    console, "/api/app-call", token,
+                    {"app": "fleet", "op": op, "args": {"node": "ab" * 20}})
+                assert status == 400, op
+                assert body["ok"] is False
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_a_malformed_call_is_refused_before_the_app_sees_it(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            for payload in ({}, {"app": "fleet"}, {"op": "relation"},
+                            {"app": 7, "op": "relation"},
+                            {"app": "fleet", "op": "relation", "args": {"node": "nope"}},
+                            {"app": "fleet", "op": "relation",
+                             "args": {"node": "ab" * 20, "extra": 1}}):
+                status, _, _, _ = await _post(console, "/api/app-call", token, payload)
+                assert status == 400, payload
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_asking_for_rights_still_goes_through_the_app(self):
+        """`enrol` reached this way is the same `enrol` the fleet page calls: it
+        sends a request and a human on the other machine answers. Nothing about
+        arriving through the app API grants anything."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await _post(
+                console, "/api/app-call", token,
+                {"app": "fleet", "op": "enrol",
+                 "args": {"node": "cd" * 20, "caps": ["status"], "label": "nas"}})
+            assert status == 200
+            # The ledger records a request, never a granted capability.
+            state = built["app"].state
+            assert state.managed_one("cd" * 20) is None
+            assert any(row["id"] == "cd" * 20 for row in state.pending_out())
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_a_capability_it_never_asked_for_is_refused(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await _post(
+                console, "/api/app-call", token,
+                {"app": "fleet", "op": "enrol",
+                 "args": {"node": "cd" * 20, "caps": ["root", "everything"]}})
+            # clean_caps drops what is not a capability; nothing was asked.
+            assert status == 200 and body["result"]["sent"] is False
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()

@@ -38,6 +38,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+from . import app_api
 from . import updater
 from . import config as node_config
 from . import console_auth
@@ -334,6 +335,14 @@ class WebConsole:
                 "problems": problems[:16],
                 "restart_required": False,
                 "service_managed": updater.service_managed()}
+
+    @property
+    def _api(self) -> "app_api.AppAPI":
+        """The app API surface, over whatever is running right now.
+
+        Built per access rather than held: an app stopped a second ago must not
+        still be reachable through a reference this object kept."""
+        return app_api.AppAPI(self._app_host)
 
     def _persist_setting(self, name: str, value) -> bool:
         """Remember one live toggle in the configuration file.
@@ -719,6 +728,15 @@ def _make_handler(console: WebConsole):
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/app-api":
+                # What a page may offer. Authenticated like everything else:
+                # the list of what an operator could do is itself worth
+                # knowing, and this console does not answer strangers.
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                self._json(200, {"apps": console._api.catalogue()})
                 return
             if path == "/api/chat/messages":
                 if console._chat is None:
@@ -1194,6 +1212,9 @@ def _make_handler(console: WebConsole):
                 ok = console._call(_wrap(console._node.console_recheck_net))
                 self._json(200, {"ok": bool(ok)})
                 return
+            if path == "/api/app-call":
+                self._handle_app_call(_parse_json(body))
+                return
             if path.startswith("/api/chat/"):
                 if console._chat is None:
                     self._json(404, {"error": "not found"})
@@ -1331,6 +1352,35 @@ def _make_handler(console: WebConsole):
                 self._json(200, trace.status())
                 return
             self._json(400, {"error": "action must be start, stop or clear"})
+
+        def _handle_app_call(self, data) -> None:
+            """Invoke one declared operation on one running app.
+
+            The single door: no route per action, and nothing reachable that an
+            app did not write down. Authentication is the console's own — an
+            operator signed in here — and it buys no authority beyond that: an
+            operation that asks another node for rights still ends with a human
+            over there agreeing."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            app = data.get("app")
+            name = data.get("op")
+            if not isinstance(app, str) or not isinstance(name, str):
+                self._json(400, {"error": "app and op are required"})
+                return
+            args = data.get("args")
+            try:
+                result = console._api.call(app, name,
+                                           args if isinstance(args, dict) else {})
+            except app_api.AppAPIError as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            except Exception:
+                self._json(503, {"ok": False, "error": "the app is unavailable"})
+                return
+            self._json(200, {"ok": True, "result": result})
 
         def _handle_config_save(self, data) -> None:
             """Write the node's configuration file.

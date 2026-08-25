@@ -22,6 +22,7 @@ from collections import deque, OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from .. import app_api
 from ..node_id import NodeID
 from .chat import (
     TextMessage, FileReceived, GroupMessage, DirResult, ProfileReceived,
@@ -69,6 +70,20 @@ class ChatBridge:
 
     Everything still flows through the chat app — the node and the management
     console core are untouched."""
+
+    # What the rest of the product may ask of chat. Read `src/app_api.py`
+    # before adding one: an operation here is reachable from any page an
+    # operator has open, so it says what it needs and nothing wider.
+    API = (
+        app_api.operation(
+            "peer", "What chat knows about a node: pseudo, contact, unread",
+            [app_api.param("node", "node")]),
+        app_api.operation(
+            "contact", "Add a node to the address book",
+            [app_api.param("node", "node"),
+             app_api.param("pseudo", "text", required=False, default="")],
+            changes=True),
+    )
 
     def __init__(self, chat_app, *, peer: NodeID | None = None, store=None) -> None:
         self._chat = chat_app
@@ -461,6 +476,32 @@ class ChatBridge:
         except Exception:
             pass
         return list(hits.values())
+
+    # -- the app API (declared in `API` above) -----------------------------
+
+    def api_peer(self, node: str) -> dict:
+        """What chat has on this identity. Read-only, and deliberately thin:
+        enough for another page to say "Message Ada" instead of "Message
+        6b0d54…", never the conversation itself."""
+        state = self._chat.state.snapshot()
+        entry = next((row for row in state["contacts"] if row["id"] == node), None)
+        known = entry is not None
+        if entry is None:
+            entry = next((row for row in state["known"] if row["id"] == node), None)
+        with self._lock:
+            unread = int(self._unread.get(node, 0))
+        return {"node": node,
+                "contact": known,
+                "seen": entry is not None,
+                "pseudo": (entry or {}).get("pseudo", ""),
+                "has_avatar": bool((entry or {}).get("has_avatar")),
+                "unread": unread,
+                "conversation": "/chat#c/" + node}
+
+    def api_contact(self, node: str, pseudo: str = "") -> dict:
+        """Add someone to the address book. Adding a contact grants nothing —
+        it is a name for an identity this node could already reach."""
+        return {"added": bool(self.add_contact(node, pseudo or ""))}
 
     def snapshot(self, since: int) -> dict:
         state = self._chat.state.snapshot()
