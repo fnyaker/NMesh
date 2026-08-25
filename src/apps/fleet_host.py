@@ -123,6 +123,25 @@ def detect_init_system() -> str | None:
     return None
 
 
+def _no_new_privs() -> bool:
+    """Whether this process is barred from ever gaining privileges.
+
+    ``NoNewPrivileges=yes`` in a systemd unit, or ``--security-opt
+    no-new-privileges`` on a container, sets a flag the kernel never clears: a
+    setuid binary like ``sudo`` refuses outright, for this process and every
+    child it will ever have. Worth knowing *before* running sudo, because the
+    message it prints ("the no new privileges flag is set") tells an operator
+    nothing about what to do."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("NoNewPrivs:"):
+                    return line.split(":", 1)[1].strip() == "1"
+    except OSError:
+        pass
+    return False          # not Linux, or a kernel without the flag
+
+
 def _privilege_escalation() -> str | None:
     """How this node would gain root for a package operation. ``None`` means it
     already is root; ``"none"`` means it has no way to escalate (so an update
@@ -152,6 +171,7 @@ class HostFacts:
     package_manager: str | None = None
     init_system: str | None = None
     escalation: str | None = None        # None = already root, "sudo"/"doas"/"none"
+    no_new_privs: bool = False           # kernel bars this process from setuid
     python: str | None = None
     detected_at: float = 0.0
     plan: dict = field(default_factory=dict)   # package-manager argv, see above
@@ -166,6 +186,29 @@ class HostFacts:
         return os.path.exists(UPDATE_WRAPPER)
 
     @property
+    def update_blocked(self) -> str:
+        """Why an update cannot run here, in words an operator can act on.
+
+        Empty when nothing is in the way. Said *before* trying, because the
+        alternative is surfacing a raw ``sudo`` message that names a kernel flag
+        and no remedy."""
+        if not self.package_manager:
+            return "no package manager this node knows how to drive"
+        if self.escalation is None:
+            return ""                     # already root: nothing to escalate
+        if self.escalation == "none":
+            return "no sudo or doas on this machine, and the node is not root"
+        if self.no_new_privs:
+            # The exact case an operator meets after `install.sh --allow-update`
+            # on a hardened unit written before that flag existed.
+            return ("this node runs with NoNewPrivileges, so sudo can never "
+                    "elevate — re-run ./install.sh --allow-update on that "
+                    "machine, or drop NoNewPrivileges from its service unit")
+        # A missing grant is *not* a block: the node may hold a broader sudo
+        # rule of its own, and only trying would tell. Hard blocks only here.
+        return ""
+
+    @property
     def can_update(self) -> bool:
         """True when this node has both a package manager and a way to be root.
 
@@ -175,6 +218,10 @@ class HostFacts:
         trying would tell us, and trying leaves failures in the target's auth
         log."""
         if not self.package_manager:
+            return False
+        if self.no_new_privs and self.escalation not in (None, ):
+            # A setuid binary cannot help a process the kernel has already
+            # barred; saying "yes" here only moves the failure later.
             return False
         if self.update_granted and self.escalation != "none":
             return True
@@ -207,6 +254,7 @@ def detect() -> HostFacts:
     facts.package_manager, facts.plan = detect_package_manager()
     facts.init_system = detect_init_system()
     facts.escalation = _privilege_escalation()
+    facts.no_new_privs = _no_new_privs()
     return facts
 
 
@@ -241,7 +289,11 @@ def update_plan(facts) -> list:
     When the wrapper is installed we run *that*, through sudo, and nothing else
     — a narrow grant is only narrow if it is the thing actually used. Without
     it we fall back to the package manager directly, which needs the node to
-    already be root or to have a broader sudo rule of its own."""
+    already be root or to have a broader sudo rule of its own.
+
+    ``None`` when it cannot run at all; ``facts.update_blocked`` says why."""
+    if getattr(facts, "update_blocked", ""):
+        return None
     if os.path.exists(UPDATE_WRAPPER):
         if os.geteuid() == 0 if hasattr(os, "geteuid") else False:
             return [[UPDATE_WRAPPER]]

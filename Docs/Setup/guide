@@ -64,6 +64,19 @@ compte et root ne peut lire la clé d'identité.
 L'unité systemd générée ajoute `NoNewPrivileges`, `PrivateTmp`,
 `PrivateDevices` et `ProtectSystem=full`.
 
+**Le confinement suit le droit d'update**, et ce n'est pas une préférence :
+`NoNewPrivileges=yes` fait refuser par le noyau **tout binaire setuid** pour ce
+processus et ses enfants — donc `sudo`, donc le wrapper d'update, avec un
+message qui parle d'un drapeau noyau et n'indique rien à faire. Et
+`ProtectSystem=full` monte `/usr` en lecture seule, où un gestionnaire de
+paquets ne peut rien écrire. Une node installée avec `--allow-update` reçoit
+donc une unité relâchée sur ces trois directives (`PrivateTmp` reste), avec un
+commentaire dans l'unité qui explique pourquoi. Repasser sans le drapeau retire
+la règle sudoers **et** remet l'unité durcie : les deux ne peuvent pas être
+choisis séparément, sinon l'un défait l'autre en silence.
+
+Symptôme et correctif : [`FAQ.md`](../../FAQ.md).
+
 Compromis assumé : l'arbre appartient au compte du nœud et non à root, donc le
 processus peut réécrire son propre code. C'est le prix de l'auto-réparation au
 démarrage et de la mise à jour depuis la console — deux choses qu'un arbre

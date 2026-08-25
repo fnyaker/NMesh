@@ -228,7 +228,11 @@ Deux détails qui font tout :
   l'influence, ni un nom de paquet, ni un drapeau, ni une chaîne shell.
 
 S'accorde avec `./install.sh --allow-update`, se retire en relançant sans le
-drapeau. Le fichier sudoers est **validé par `visudo` avant d'être installé** :
+drapeau — ce qui réécrit **aussi l'unité systemd**, parce qu'une unité durcie
+avec `NoNewPrivileges=yes` fait refuser `sudo` par le noyau et rend le droit
+inutilisable (voir [`FAQ.md`](../../FAQ.md)). Le nœud le détecte désormais
+**avant** de lancer `sudo` : `can_update` est faux et le refus nomme la cause et
+le correctif, au lieu de relayer un message de `sudo` sur un drapeau noyau. Le fichier sudoers est **validé par `visudo` avant d'être installé** :
 un fichier qui ne parse pas peut casser `sudo` pour toute la machine.
 
 Sans ce droit, `update` retombe sur `sudo -n <gestionnaire>` — ce qui, sur un

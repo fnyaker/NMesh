@@ -519,6 +519,23 @@ class TestRemoteConsole:
         assert "in flight" in str(failure.value)
 
 
+class TestUpdateRefusalIsUseful:
+    async def test_the_machine_explains_itself(self, operator, agent):
+        """« sudo a dit quelque chose à propos d'un drapeau noyau » n'indique
+        rien à faire. Le refus doit nommer la cause et le correctif."""
+        await enrol(operator, agent, caps=["update"])
+        agent.app.facts.package_manager = "apt"
+        agent.app.facts.escalation = "sudo"
+        agent.app.facts.no_new_privs = True
+        await operator.app.request_update(agent.id)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        failures = [event for event in operator.drain_events()
+                    if isinstance(event, Failure)]
+        assert failures and "NoNewPrivileges" in failures[0].error
+        assert "install.sh --allow-update" in failures[0].error
+
+
 # ---------------------------------------------------------------------------
 # Gate 2 — the ledger
 # ---------------------------------------------------------------------------

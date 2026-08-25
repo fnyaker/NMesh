@@ -15,6 +15,7 @@ from src.apps import fleet_ssh
 from src.apps.fleet_ssh import SshCredentials, SshError
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+INSTALL = os.path.join(ROOT, "install.sh")
 
 
 def sh_check(text: str) -> int:
@@ -312,6 +313,78 @@ class TestUpdateGrant:
         plan = fleet_host.update_plan(facts)
         assert plan and plan[0][0] == "sudo"
         assert facts.update_granted is False
+
+
+class TestNoNewPrivileges:
+    """Le durcissement de l'unité et le droit d'update se contredisaient : avec
+    `NoNewPrivileges=yes`, le noyau refuse tout binaire setuid — sudo échoue en
+    parlant d'un drapeau noyau, ce qui n'indique rien à faire."""
+
+    def facts(self, **kwargs):
+        from src.apps import fleet_host
+        base = dict(escalation="sudo", package_manager="apt",
+                    plan={"refresh": ["apt-get", "update"],
+                          "upgrade": ["apt-get", "-y", "upgrade"]})
+        base.update(kwargs)
+        return fleet_host.HostFacts(**base)
+
+    def test_it_is_seen_before_sudo_is_ever_run(self):
+        from src.apps import fleet_host
+        facts = self.facts(no_new_privs=True)
+        assert facts.can_update is False
+        assert "NoNewPrivileges" in facts.update_blocked
+        assert "install.sh --allow-update" in facts.update_blocked
+        assert fleet_host.update_plan(facts) is None
+
+    def test_a_root_node_is_not_affected(self):
+        """Rien à élever quand on est déjà root : le drapeau ne change rien."""
+        from src.apps import fleet_host
+        facts = self.facts(escalation=None, no_new_privs=True)
+        assert facts.update_blocked == ""
+        assert facts.can_update is True
+        assert fleet_host.update_plan(facts) is not None
+
+    def test_the_flag_is_read_from_the_kernel_not_guessed(self):
+        from src.apps import fleet_host
+        assert isinstance(fleet_host._no_new_privs(), bool)
+
+
+class TestServiceUnitFollowsTheGrant:
+    """L'unité ne peut pas être durcie *et* laisser passer l'update : les deux
+    choix doivent être faits ensemble, jamais indépendamment."""
+
+    def directives(self, granted):
+        """Les lignes actives seulement : le commentaire qui explique la règle
+        cite les directives qu'il désactive."""
+        return [line.strip() for line in self.unit(granted).splitlines()
+                if line.strip() and not line.startswith("#")]
+
+    def unit(self, granted):
+        import subprocess
+        script = (f'source {INSTALL} >/dev/null 2>&1; '
+                  f'systemd_unit /opt/nmesh /var/lib/nmesh nmesh "--fleet" '
+                  f'multi-user.target {granted}')
+        result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                text=True, timeout=60,
+                                env={"NMESH_INSTALL_LIB": "1", "PATH": os.environ["PATH"]})
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    def test_the_default_unit_stays_hardened(self):
+        active = self.directives("false")
+        assert "NoNewPrivileges=yes" in active
+        assert "ProtectSystem=full" in active
+        assert "PrivateDevices=yes" in active
+
+    def test_a_granted_node_can_actually_use_its_grant(self):
+        active = self.directives("true")
+        assert "NoNewPrivileges=no" in active
+        assert "ProtectSystem=full" not in active
+        # And it says why, so nobody re-hardens it and breaks updates silently.
+        assert "update grant" in self.unit("true")
+
+    def test_it_still_keeps_what_does_not_get_in_the_way(self):
+        assert "PrivateTmp=yes" in self.directives("true")
 
 
 class TestUpdateProgress:
