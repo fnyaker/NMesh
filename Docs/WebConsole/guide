@@ -48,6 +48,23 @@ haut choisit clair ou sombre, et le choix reste dans ce navigateur.
 L'apparence, les jetons et les composants sont décrits dans
 [`Docs/WebConsole/design`](design) — à lire **avant** de toucher à une page.
 
+## Gérer une autre node depuis cette console
+
+Quand l'app fleet tourne et qu'au moins une node a accordé la capability
+`manage`, un **sélecteur de contexte** apparaît dans la barre du haut. Le choisir
+demande le **mot de passe console de cette node-là** — le grant ouvre le canal,
+le mot de passe ouvre la session — puis toute la console parle de cette node :
+overview, pairs, transports, apps, configuration, trace.
+
+Techniquement, la page ajoute un en-tête `X-NMesh-Node: <id>` à chaque appel ;
+la console relaie l'appel par le mesh, et la node cible le **rejoue contre sa
+propre console** en loopback. Rien n'est réimplémenté : mêmes routes, mêmes
+plafonds, même lockout. Détail complet, bornes et chemins refusés :
+[`Docs/Apps/fleet`](../Apps/fleet).
+
+Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
+`Sign out` revient toujours à la console locale.
+
 ## Modèle de sécurité
 
 - **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.

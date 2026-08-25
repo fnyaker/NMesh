@@ -48,7 +48,7 @@ class _FakeAuthPeerTransport:
 
 
 def _request(console, method, path, token=None, body=None, raw=None, tls=False,
-             cookie=None):
+             cookie=None, headers=None):
     """Blocking HTTP request — call via asyncio.to_thread."""
     if tls:
         ctx = ssl._create_unverified_context()
@@ -56,7 +56,7 @@ def _request(console, method, path, token=None, body=None, raw=None, tls=False,
                                            timeout=8, context=ctx)
     else:
         conn = http.client.HTTPConnection(console.host, console.port, timeout=8)
-    headers = {}
+    headers = dict(headers or {})
     if token:
         headers["Authorization"] = "Bearer " + token
     if cookie:

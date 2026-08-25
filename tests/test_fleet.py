@@ -9,6 +9,7 @@ gates (mesh authentication, ledger enrolment, per-command signature) is checked
 in isolation, so none of them can quietly stop pulling its weight.
 """
 import asyncio
+import base64
 import json
 import os
 import random
@@ -18,8 +19,9 @@ import pytest
 from src.app_auth import AppAuth, ctx_hash, make_assertion
 from src.apps import fleet
 from src.apps.fleet import (
-    CapsChanged, CommandResult, EnrolAnswered, EnrolRequested, FleetApp,
-    Failure, NodeAdopted, Revoked, ScanReceived, StatusReceived,
+    CapsChanged, CommandResult, ConsoleProxyError, EnrolAnswered, EnrolRequested,
+    FleetApp, Failure, NodeAdopted, Revoked, ScanReceived, StatusReceived,
+    console_path_refusal,
 )
 from src.apps.fleet_state import CAPABILITIES, FleetState
 from src.apps import fleet_provision
@@ -320,6 +322,201 @@ class TestCapabilityChanges:
             agent.id.raw.hex())["caps"]) == {"status", "scan"}
         assert any(isinstance(e, CapsChanged) and e.direction == "managed"
                    for e in operator.drain_events())
+
+
+# ---------------------------------------------------------------------------
+# Remote console — the `manage` capability
+# ---------------------------------------------------------------------------
+
+class StubConsole:
+    """Stands in for the node's own console: records calls, answers canned."""
+
+    def __init__(self, status=200, body=b'{"ok":true}', ctype="application/json"):
+        self.calls = []
+        self.status, self.body, self.ctype = status, body, ctype
+        self.available = True
+
+    def call(self, method, path, body, token, timeout=None):
+        self.calls.append((method, path, body, token))
+        return self.status, self.ctype, self.body
+
+
+async def deliver_both(a: Peer, b: Peer, rounds: int = 6) -> None:
+    """Pump frames in both directions — a call and its answer need both."""
+    for _ in range(rounds):
+        await deliver(a, b)
+        await deliver(b, a)
+
+
+class TestRemoteConsolePaths:
+    """What may be reached through the proxy is decided by a pure function, so
+    it can be checked without a mesh in the way."""
+
+    @pytest.mark.parametrize("path", [
+        "/api/state", "/api/nodes?scope=active", "/api/config", "/api/trace",
+        "/api/password", "/api/update/check", "/api/apps/enable",
+    ])
+    def test_the_console_api_is_reachable(self, path):
+        assert console_path_refusal(path) == ""
+
+    @pytest.mark.parametrize("path", [
+        "/api/fleet/state",            # a managed node is not a jump host
+        "/api/fleet/shell",
+        "/api/remote/connect",         # the proxy driving the proxy
+        "/api/chat/messages",          # not what the grant was asked for
+        "/", "/style.css", "/fleet", "/../etc/passwd", "",
+    ])
+    def test_everything_else_is_refused(self, path):
+        assert console_path_refusal(path) != ""
+
+
+class TestRemoteConsole:
+    async def test_without_the_capability_nothing_is_relayed(self, operator, agent):
+        agent.app._local_console = StubConsole()
+        await enrol(operator, agent, caps=["status"])
+        operator.take_sent()
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "not authorised for manage" in str(failure.value)
+        assert agent.app._local_console.calls == []
+
+    async def test_a_granted_call_reaches_the_console_and_comes_back(
+            self, operator, agent):
+        console = StubConsole(body=b'{"id":"abc"}')
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(operator.app.console_call(
+            agent.id, "GET", "/api/state", token="remote-token"))
+        await deliver_both(operator, agent)
+        status, ctype, body = await task
+        assert (status, body) == (200, b'{"id":"abc"}')
+        assert ctype.startswith("application/json")
+        # The token travels with the call: the agent mints nothing of its own.
+        assert console.calls == [("GET", "/api/state", None, "remote-token")]
+
+    async def test_the_answer_is_chunked_and_reassembled(self, operator, agent):
+        """One console snapshot on a busy node does not fit a single frame."""
+        payload = bytes(range(256)) * 400            # ~100 KiB, > one frame
+        agent.app._local_console = StubConsole(body=payload)
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent, rounds=12)
+        _status, _ctype, body = await task
+        assert body == payload
+
+    async def test_an_answer_beyond_the_ceiling_is_explained_not_truncated(
+            self, operator, agent):
+        """Half a JSON document with no explanation is the worst outcome."""
+        agent.app._local_console = StubConsole(body=b"x" * (fleet.CONSOLE_RESP_MAX + 5000))
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent, rounds=8)
+        status, _ctype, body = await asyncio.wait_for(task, 2.0)
+        assert status == 502
+        assert b"too large" in body
+
+    async def test_an_agent_flooding_chunks_is_cut_off(self, operator, agent):
+        """The ceiling holds on our side too: the answer comes from a machine we
+        do not control, and it can lie about how much is left."""
+        agent.app._local_console = StubConsole()
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await settle()
+        rid = next(iter(operator.app._console_calls))
+        chunk = base64.b64encode(b"x" * 32768).decode()
+        for seq in range(fleet.CONSOLE_RESP_MAX // 32768 + 2):
+            agent.app._reply(operator.id, fleet.CONSOLE_REPLY, {
+                "rid": rid, "status": 200, "seq": seq, "more": True,
+                "body": chunk})
+        await deliver(agent, operator)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await asyncio.wait_for(task, 2.0)
+        assert "too large" in str(failure.value)
+
+    async def test_an_oversized_request_never_leaves(self, operator, agent):
+        await enrol(operator, agent, caps=["manage"])
+        operator.take_sent()
+        with pytest.raises(ConsoleProxyError):
+            await operator.app.console_call(agent.id, "POST", "/api/store/publish",
+                                            body=b"x" * (fleet.CONSOLE_REQ_MAX + 1))
+        assert operator.take_sent() == []
+
+    async def test_a_denied_path_is_refused_by_the_agent(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/fleet/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError):
+            await task
+        assert console.calls == []
+
+    async def test_only_get_and_post_are_relayed(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "DELETE", "/api/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError):
+            await task
+        assert console.calls == []
+
+    async def test_a_node_without_a_console_says_so(self, operator, agent):
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "no console" in str(failure.value)
+
+    async def test_an_unsolicited_answer_is_dropped(self, operator, agent):
+        """A reply nobody asked for must not resolve a call, nor crash."""
+        await enrol(operator, agent, caps=["manage"])
+        agent.app._reply(operator.id, fleet.CONSOLE_REPLY, {
+            "rid": "deadbeefdeadbeef", "status": 200, "seq": 0, "more": False,
+            "ctype": "application/json", "body": ""})
+        await deliver(agent, operator)
+        assert operator.app._console_calls == {}
+
+    async def test_an_answer_from_another_node_is_dropped(self, operator, agent):
+        """The rid is real, the sender is not — that is a forged answer."""
+        stranger = Peer()
+        agent.app._local_console = StubConsole()
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await settle()
+        rid = next(iter(operator.app._console_calls))
+        stranger.app._reply(operator.id, fleet.CONSOLE_REPLY, {
+            "rid": rid, "status": 200, "seq": 0, "more": False,
+            "body": base64.b64encode(b'{"id":"forged"}').decode()})
+        await deliver(stranger, operator)
+        assert not operator.app._console_calls[rid]["future"].done()
+        # The real answer still lands.
+        await deliver_both(operator, agent)
+        _status, _ctype, body = await task
+        assert b"forged" not in body
+
+    async def test_the_agent_bounds_concurrent_calls(self, operator, agent):
+        """A peer holding `manage` cannot open unbounded local sockets."""
+        agent.app._local_console = StubConsole()
+        await enrol(operator, agent, caps=["manage"])
+        agent.app._console_hosted[operator.id.raw.hex()] = fleet.MAX_CONSOLE_CALLS
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "in flight" in str(failure.value)
 
 
 # ---------------------------------------------------------------------------

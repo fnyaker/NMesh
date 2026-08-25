@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from ..app_auth import ctx_hash
 from ..app_channel import builtin_id
 from ..node_id import NodeID
-from . import fleet_host, fleet_provision, fleet_ssh
+from . import fleet_console, fleet_host, fleet_provision, fleet_ssh
 from .fleet_state import CAPABILITIES, FleetState, clean_caps, clean_label
 
 FLEET_APP_ID = builtin_id("fleet")
@@ -89,6 +89,9 @@ SHELL_INPUT = 0x32
 SHELL_OUTPUT = 0x33
 SHELL_RESIZE = 0x34
 SHELL_CLOSE = 0x35
+
+CONSOLE_REQUEST = 0x50
+CONSOLE_REPLY = 0x51
 
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
@@ -119,6 +122,14 @@ UPDATE_CHUNK = 4096
 SCAN_TIMEOUT = 300.0
 MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
+# Remote console. A request must fit one frame; an answer is chunked, because a
+# node with a hundred peers has a snapshot that does not.
+CONSOLE_REQ_MAX = 24 * 1024       # proxied request body, one frame
+CONSOLE_CHUNK = 32 * 1024         # raw bytes per reply frame (base64 fits MAX_BODY)
+CONSOLE_RESP_MAX = 512 * 1024     # reassembled answer, both sides
+CONSOLE_TIMEOUT = 25.0            # a whole call, mesh round trip included
+CONSOLE_PATH_MAX = 512
+MAX_CONSOLE_CALLS = 8             # concurrent proxied calls we host, per node
 _ASSERTION_TTL = 300              # a command signature is good for five minutes
 
 _LEN = struct.Struct("!H")
@@ -320,7 +331,7 @@ class FleetApp:
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None, mesh_invite=None,
-                 auto_status: bool = True) -> None:
+                 auto_status: bool = True, local_console=None) -> None:
         self._client = client
         self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
         self.node_id = auth.node_id
@@ -337,6 +348,11 @@ class FleetApp:
         self._open_shells: dict[bytes, NodeID] = {}     # operator side
         self._inflight: dict[str, tuple[NodeID, str, float]] = {}
         self._jobs: set[asyncio.Task] = set()
+        # Remote console. Agent side: the loopback client that replays a call
+        # against our own console. Operator side: the answers being reassembled.
+        self._local_console = local_console
+        self._console_calls: dict[str, dict] = {}       # operator side, by rid
+        self._console_hosted: dict[str, int] = {}       # agent side, per peer
 
     # -- lifecycle --------------------------------------------------------
 
@@ -803,6 +819,166 @@ class FleetApp:
         self._emit(NodeAdopted(src, str(record.get("host", ""))[:128], label))
         if self._auto_status:
             self._spawn(self.request_status(src))
+
+    # ======================================================================
+    # Remote console (capability "manage")
+    # ======================================================================
+    # The operator's browser talks to its *own* console, which relays the call
+    # here, which replays it against the console of the target node. Two keys
+    # are needed and they are held by different people: the mesh grant (given by
+    # a human on the target) and the target's console password (typed by the
+    # operator). Neither alone opens anything.
+
+    async def console_call(self, target: NodeID, method: str, path: str,
+                           body: bytes | None = None,
+                           token: str | None = None) -> tuple:
+        """Operator side: run one console call on ``target``.
+
+        Returns ``(status, content_type, body)``. Raises ``ConsoleProxyError``
+        when the call could not be delivered — which is *not* the same as the
+        remote console answering 403."""
+        if body is not None and len(body) > CONSOLE_REQ_MAX:
+            raise ConsoleProxyError(
+                "that request is too large to send over the mesh — do it from "
+                "the node itself")
+        if len(path) > CONSOLE_PATH_MAX:
+            raise ConsoleProxyError("path too long")
+        rid = self._new_rid(target, "console")
+        loop = asyncio.get_running_loop()
+        entry = {"future": loop.create_future(), "chunks": [], "size": 0,
+                 "status": 0, "ctype": "application/json"}
+        while len(self._console_calls) >= MAX_INFLIGHT:
+            stale = next(iter(self._console_calls))
+            self._fail_console(stale, "dropped: too many calls in flight")
+        self._console_calls[rid] = entry
+        document = {"rid": rid, "method": method, "path": path}
+        if token:
+            document["token"] = token
+        if body:
+            document["body"] = base64.b64encode(body).decode("ascii")
+        await self._send(target, self._signed_frame(
+            CONSOLE_REQUEST, target, PURPOSE_BY_CAP["manage"], document))
+        try:
+            return await asyncio.wait_for(entry["future"], CONSOLE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ConsoleProxyError("that node did not answer in time") from None
+        finally:
+            self._console_calls.pop(rid, None)
+            self._inflight.pop(rid, None)
+
+    def _fail_console(self, rid: str, message: str) -> None:
+        entry = self._console_calls.pop(rid, None)
+        if entry and not entry["future"].done():
+            entry["future"].set_exception(ConsoleProxyError(message))
+
+    def _on_console_request(self, src: NodeID, principal, document: dict) -> None:
+        """Agent side: replay one call against our own console."""
+        rid = _rid(document)
+        if not self._authorised(src, "manage", rid):
+            return
+        console = self._local_console
+        if console is None or not console.available:
+            self._fail(src, rid, "this node has no console to manage")
+            return
+        method = str(document.get("method", ""))[:8].upper()
+        path = str(document.get("path", ""))[:CONSOLE_PATH_MAX]
+        if method not in ("GET", "POST"):
+            self._fail(src, rid, "unsupported method")
+            return
+        refusal = console_path_refusal(path)
+        if refusal:
+            self._fail(src, rid, refusal)
+            return
+        body = None
+        raw = document.get("body")
+        if raw is not None:
+            try:
+                body = base64.b64decode(str(raw), validate=True)
+            except (ValueError, TypeError):
+                self._fail(src, rid, "malformed body")
+                return
+            if len(body) > CONSOLE_REQ_MAX:
+                self._fail(src, rid, "request too large")
+                return
+        token = document.get("token")
+        token = str(token)[:256] if isinstance(token, str) else None
+        # A peer cannot make us open an unbounded number of local sockets.
+        key = src.raw.hex()
+        if self._console_hosted.get(key, 0) >= MAX_CONSOLE_CALLS:
+            self._fail(src, rid, "too many calls in flight")
+            return
+        self._console_hosted[key] = self._console_hosted.get(key, 0) + 1
+        self._spawn(self._run_console_call(src, rid, method, path, body, token))
+
+    async def _run_console_call(self, src: NodeID, rid: str, method: str,
+                                path: str, body: bytes | None,
+                                token: str | None) -> None:
+        key = src.raw.hex()
+        try:
+            status, ctype, payload = await fleet_console.bounded(
+                lambda: self._local_console.call(method, path, body, token),
+                fleet_console.CALL_TIMEOUT)
+        except fleet_console.ConsoleError as exc:
+            status, ctype = 502, "application/json"
+            payload = fleet_console.error_body(str(exc))
+        except Exception:                       # noqa: BLE001 — never crash a handler
+            status, ctype = 502, "application/json"
+            payload = fleet_console.error_body("console call failed")
+        finally:
+            remaining = self._console_hosted.get(key, 1) - 1
+            if remaining > 0:
+                self._console_hosted[key] = remaining
+            else:
+                self._console_hosted.pop(key, None)
+        # Truncating would hand back half a JSON document and no explanation;
+        # say what happened instead.
+        if len(payload) > CONSOLE_RESP_MAX:
+            status, ctype = 502, "application/json"
+            payload = fleet_console.error_body("that answer is too large to relay")
+        # Chunked: one console snapshot on a busy node does not fit a frame.
+        seq = 0
+        while True:
+            piece = payload[seq * CONSOLE_CHUNK:(seq + 1) * CONSOLE_CHUNK]
+            more = len(payload) > (seq + 1) * CONSOLE_CHUNK
+            self._reply(src, CONSOLE_REPLY, {
+                "rid": rid, "status": status, "ctype": str(ctype)[:128],
+                "seq": seq, "more": more,
+                "body": base64.b64encode(piece).decode("ascii")})
+            if not more:
+                return
+            seq += 1
+
+    def _on_console_reply(self, src: NodeID, document: dict) -> None:
+        """Operator side: gather the chunks of one answer."""
+        rid = _rid(document)
+        entry = self._console_calls.get(rid)
+        if entry is None:
+            return
+        held = self._inflight.get(rid)
+        if held is None or held[0] != src or held[1] != "console":
+            return                      # not an answer to a call we made to them
+        try:
+            piece = base64.b64decode(str(document.get("body", "")), validate=True)
+        except (ValueError, TypeError):
+            self._fail_console(rid, "malformed answer")
+            return
+        entry["size"] += len(piece)
+        if entry["size"] > CONSOLE_RESP_MAX:
+            self._fail_console(rid, "that answer is too large to relay")
+            return
+        entry["chunks"].append(piece)
+        try:
+            entry["status"] = int(document.get("status", 502))
+        except (TypeError, ValueError):
+            entry["status"] = 502
+        entry["ctype"] = str(document.get("ctype", "application/json"))[:128]
+        if document.get("more"):
+            return
+        self._inflight.pop(rid, None)
+        future = entry["future"]
+        if not future.done():
+            future.set_result((entry["status"], entry["ctype"],
+                               b"".join(entry["chunks"])))
 
     # ======================================================================
     # Status
@@ -1460,8 +1636,44 @@ class FleetApp:
     def _on_error(self, src: NodeID, document: dict) -> None:
         rid = _rid(document)
         entry = self._inflight.pop(rid, None)
-        if entry is not None and entry[0] == src:
-            self._emit(Failure(src, rid, str(document.get("error", ""))[:256]))
+        if entry is None or entry[0] != src:
+            return
+        message = str(document.get("error", ""))[:256]
+        # A refused console call is waited on by a live request; failing the
+        # future is what turns it into an answer instead of a timeout.
+        if rid in self._console_calls:
+            self._fail_console(rid, message or "refused")
+            return
+        self._emit(Failure(src, rid, message))
+
+
+class ConsoleProxyError(Exception):
+    """A proxied console call could not be delivered.
+
+    Distinct from the remote console answering with a status: "403 from that
+    node" and "that node never answered" are different facts, and an operator
+    needs to be able to tell them apart."""
+
+
+# What a remote operator may reach through the proxy. Everything under /api/ is
+# the console's own surface and already behind its session — except three
+# families that must not be reachable this way:
+#
+#   /api/fleet/  — a managed node is not a jump host. Without this, one grant
+#                  would chain into every node *that* node manages.
+#   /api/remote/ — the proxy driving the proxy: a loop with a mesh hop in it.
+#   /api/chat/   — someone else's conversations are not part of managing their
+#                  node, and the grant was never asked for that.
+_CONSOLE_DENIED = ("/api/fleet/", "/api/remote/", "/api/chat/")
+
+
+def console_path_refusal(path: str) -> str:
+    """Empty when the path may be proxied, otherwise the reason it may not."""
+    if not path.startswith("/api/"):
+        return "only the console API can be driven remotely"
+    if any(path.startswith(prefix) for prefix in _CONSOLE_DENIED):
+        return f"{path.split('/')[2]} is not reachable through a remote console"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1649,6 +1861,7 @@ _SIGNED_INBOUND = {
     ENROL_DENY: FleetApp._on_enrol_deny,
     ENROL_REVOKE: FleetApp._on_revoke,
     ENROL_NARROW: FleetApp._on_cap_narrow,
+    CONSOLE_REQUEST: FleetApp._on_console_request,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
@@ -1663,6 +1876,7 @@ _PURPOSE_FOR = {
     ENROL_DENY: PURPOSE_GRANT,
     ENROL_REVOKE: PURPOSE_GRANT,
     ENROL_NARROW: PURPOSE_NARROW,
+    CONSOLE_REQUEST: PURPOSE_BY_CAP["manage"],
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],
@@ -1679,5 +1893,6 @@ _REPLY_INBOUND = {
     SCAN_RESULT: FleetApp._on_scan_result,
     PROVISION_PROGRESS: FleetApp._on_provision_progress,
     PROVISION_RESULT: FleetApp._on_provision_result,
+    CONSOLE_REPLY: FleetApp._on_console_reply,
     ERROR: FleetApp._on_error,
 }

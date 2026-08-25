@@ -19,8 +19,8 @@ import pytest
 from src import MeshNode
 from src.app_registry import FLEET_APP_ID
 from src.data_connector import ConnectorClient, DataConnector
-from src.apps.fleet import (FleetApp, StatusReceived, EnrolRequested,
-                            Failure, ScanReceived)
+from src.apps.fleet import (ConsoleProxyError, FleetApp, StatusReceived,
+                            EnrolRequested, Failure, ScanReceived)
 from src.apps.fleet_web import FleetBridge
 from src.apps.fleet_state import FleetState
 from src.node_id import NodeID
@@ -229,6 +229,66 @@ class TestRightsOverRealMesh:
             await operator.app.request_update(agent.id)
             failure = await operator.wait_for(Failure)
             assert "not authorised for update" in failure.error
+        finally:
+            await operator.close()
+            await agent.close()
+
+
+class StubConsole:
+    """Le vrai console loopback n'a pas sa place ici : ce qu'on veut prouver,
+    c'est que l'appel traverse un mesh réel et revient intact."""
+
+    def __init__(self):
+        self.calls = []
+        self.available = True
+
+    def call(self, method, path, body, token, timeout=None):
+        self.calls.append((method, path, body, token))
+        return 200, "application/json", b'{"id":"the-target"}' + b"." * 90_000
+
+
+class TestRemoteConsoleOverRealMesh:
+    async def test_a_console_call_crosses_the_mesh_and_comes_back(self):
+        """Réponse plus grande qu'une frame : le découpage et le réassemblage
+        passent par un vrai lien, pas par un stub de transport."""
+        operator, agent = await _linked_pair(19340)
+        console = StubConsole()
+        agent.app._local_console = console
+        try:
+            await operator.app.request_enrolment(agent.id, caps=["manage"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            status, ctype, body = await operator.app.console_call(
+                agent.id, "GET", "/api/state", token="a-remote-token")
+            assert status == 200
+            assert ctype.startswith("application/json")
+            assert body.startswith(b'{"id":"the-target"}')
+            assert len(body) == 19 + 90_000
+            assert console.calls == [("GET", "/api/state", None, "a-remote-token")]
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_without_the_grant_the_call_is_refused(self):
+        operator, agent = await _linked_pair(19341)
+        console = StubConsole()
+        agent.app._local_console = console
+        try:
+            await operator.app.request_enrolment(agent.id, caps=["status"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            with pytest.raises(ConsoleProxyError) as failure:
+                await operator.app.console_call(agent.id, "GET", "/api/state")
+            assert "not authorised for manage" in str(failure.value)
+            assert console.calls == []
         finally:
             await operator.close()
             await agent.close()

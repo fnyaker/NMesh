@@ -27,6 +27,7 @@ from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
 from src.app_registry import FLEET_APP_ID, AppHost, AppRegistry
+from src.apps import fleet_console
 from src.apps.chat import ChatApp
 from src.apps.chat_state import ChatState, DrawerStore
 from src.apps.chat_web import ChatBridge
@@ -54,7 +55,7 @@ def _chat_factory(node, connector):
     return build
 
 
-def _fleet_factory(node, connector, data_dir):
+def _fleet_factory(node, connector, data_dir, local_console=None):
     """Build the fleet app on demand.
 
     The trust ledger lives in the fleet drawer, encrypted at rest like every
@@ -68,7 +69,8 @@ def _fleet_factory(node, connector, data_dir):
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),
                        state=FleetState(store=store), repo_root=ROOT,
-                       mesh_invite=lambda: _mesh_invitation(node))
+                       mesh_invite=lambda: _mesh_invitation(node),
+                       local_console=local_console)
         return app, FleetBridge(app)
     return build
 
@@ -283,10 +285,16 @@ async def main() -> None:
     elif args.launch:
         print("  NOTE          : --launch ignored (requires --connector-port or an app)")
 
+    # The fleet app can drive this node's own console for an operator holding
+    # `manage`. It is built before the console exists, so it gets the client
+    # empty and the console binds itself into it below.
+    local_console = fleet_console.LocalConsole()
+
     if connector is not None:
         host = AppHost(registry, app_storage=node.app_storage)
         host.register("chat", _chat_factory(node, connector))
-        host.register("fleet", _fleet_factory(node, connector, args.data))
+        host.register("fleet", _fleet_factory(node, connector, args.data,
+                                              local_console))
         await host.apply()
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
@@ -294,6 +302,7 @@ async def main() -> None:
                          password=args.console_password, app_host=host,
                          config_path=config_path)
     console.start(loop=asyncio.get_running_loop())
+    local_console.bind(console)
 
     if preauth is not None and host is not None:
         await _adopt_operator(node, host, preauth, preauth_path)

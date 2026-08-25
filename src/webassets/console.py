@@ -64,10 +64,18 @@ INDEX_HTML = """<!doctype html>
         <span class="badge" id="node-state">…</span>
         <button id="self-node" class="ghost sm mono" title="Show this node's details"></button>
       </div>
+      <label class="ctx-pick" id="ctx-pick" hidden><span class="sr-only">Node being managed</span>
+        <select id="ctx-node"></select></label>
       <span class="grow"></span>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
     </header>
+
+    <div id="ctx-bar" class="ctx-bar" role="status" hidden>
+      <span>Managing <b id="ctx-label"></b></span>
+      <span id="ctx-id" class="mono tiny"></span>
+      <button id="ctx-leave" class="sm">Back to this node</button>
+    </div>
 
     <!-- ── Overview ─────────────────────────────────────────────────────── -->
     <section id="panel-overview" class="content panel" role="tabpanel" data-panel="overview">
@@ -484,6 +492,14 @@ INDEX_HTML = """<!doctype html>
   </div>
 </dialog>
 
+<dialog id="modal" aria-labelledby="modal-title">
+  <div class="sheet">
+    <header class="sheet-head"><h2 id="modal-title"></h2>
+      <button id="modal-close" class="icon" aria-label="Close">✕</button></header>
+    <div id="modal-body" class="sheet-body"></div>
+  </div>
+</dialog>
+
 <dialog id="confirm-dialog" aria-labelledby="confirm-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
@@ -574,6 +590,8 @@ function enterConsole(){
   $("login").classList.add("hidden");
   $("shell").classList.remove("hidden");
   ROUTER.start(onRoute);
+  paintContext();
+  loadTargets();
   tick();
   if(!POLL) POLL = setInterval(tick, 2000);
 }
@@ -598,6 +616,8 @@ $("login-form").addEventListener("submit", async (event) => {
   });
 });
 $("logout").addEventListener("click", async () => {
+  // Straight to the local console: signing out is never a remote action.
+  CONTEXT.node = "";
   try{ await api("/api/logout", "POST"); }catch(_){}
   SESSION.clear(); showGate();
 });
@@ -1612,6 +1632,105 @@ $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async
   }catch(_){ setMessage("app-status", "Fetch failed", true); }
 }));
 
+// ---- managing another node -------------------------------------------------
+// The fleet app knows which nodes granted us `manage`; the console lists them
+// here. Switching is not a login by itself: the target's own console password
+// is asked for, and the token it returns never reaches this page — it stays in
+// the local console's memory for as long as this session lasts.
+let TARGETS = [];
+
+async function loadTargets(){
+  let data;
+  try{ data = (await apiJson("/api/remote/targets")).data; }catch(_){ return; }
+  TARGETS = data.targets || [];
+  const pick = $("ctx-pick");
+  pick.hidden = !(data.available && TARGETS.length);
+  const select = $("ctx-node");
+  const options = [["", "This node"]].concat(TARGETS.map((target) =>
+    [target.id, (target.label || shortId(target.id)) +
+     (target.connected ? "" : " — password needed")]));
+  const keep = select.value;
+  select.innerHTML = options.map((pair) =>
+    '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
+  select.value = TARGETS.some((target) => target.id === keep) ? keep : CONTEXT.node;
+}
+
+function paintContext(){
+  const remote = !!CONTEXT.node;
+  $("shell").classList.toggle("remote", remote);
+  $("ctx-bar").hidden = !remote;
+  $("ctx-label").textContent = CONTEXT.label || shortId(CONTEXT.node);
+  $("ctx-id").textContent = CONTEXT.node;
+  $("ctx-node").value = CONTEXT.node;
+  document.body.dataset.appName = remote
+    ? "NMesh — " + (CONTEXT.label || shortId(CONTEXT.node)) : "NMesh Console";
+}
+
+function enterContext(node, label){
+  CONTEXT.node = node; CONTEXT.label = label || "";
+  // Everything on screen belongs to the node we just left.
+  STATE = null; PREVIOUS = null; RATES.length = 0;
+  ["active", "known", "catalog", "installed"].forEach((kind) => {
+    PAGES[kind].offset = 0; PAGES[kind].query = "";
+    $(kind + "-list").innerHTML = "";
+  });
+  paintContext();
+  tick();
+  onRoute(ROUTER.section, ROUTER.sub);
+}
+
+function askForContext(node){
+  const target = TARGETS.find((entry) => entry.id === node);
+  if(!target){ $("ctx-node").value = CONTEXT.node; return; }
+  if(target.connected){ enterContext(node, target.label); loadTargets(); return; }
+  const name = target.label || shortId(node);
+  $("modal-title").textContent = "Manage " + name;
+  $("modal-body").innerHTML =
+    '<p class="muted small">That node granted this one the <b>manage</b> capability. ' +
+    "It still wants its own console password — the grant opens the channel, the " +
+    "password opens the session. It is used once, over the encrypted mesh link, and " +
+    "never stored here.</p>" +
+    '<p class="mono tiny muted">' + esc(node) + "</p>" +
+    '<label class="field"><span>Console password of ' + esc(name) + "</span>" +
+    '<input id="ctx-pass" type="password" autocomplete="off"></label>' +
+    '<div class="btn-row"><button id="ctx-go" class="primary">Connect</button>' +
+    '<button id="ctx-no">Cancel</button></div><p id="ctx-msg" class="msg"></p>';
+  const finish = () => { $("modal").close(); $("ctx-node").value = CONTEXT.node; };
+  $("ctx-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+    const password = $("ctx-pass").value;
+    if(!password){ setMessage("ctx-msg", "A password is needed.", true); return; }
+    setMessage("ctx-msg", "Connecting over the mesh…");
+    const {ok, data} = await apiJson("/api/remote/connect", "POST", {node, password});
+    $("ctx-pass").value = "";
+    if(!ok || !data.ok){
+      setMessage("ctx-msg", data.error || "That node refused the password.", true);
+      return;
+    }
+    $("modal").close();
+    await loadTargets();
+    enterContext(node, target.label);
+    toast("Managing " + name, "warn");
+  }));
+  $("ctx-no").addEventListener("click", finish);
+  $("modal").addEventListener("close", () => { $("ctx-node").value = CONTEXT.node; },
+                              {once:true});
+  $("modal").showModal();
+  $("ctx-pass").focus();
+}
+
+$("ctx-node").addEventListener("change", (event) => {
+  const node = event.target.value;
+  if(!node){ leaveContext(); return; }
+  askForContext(node);
+});
+async function leaveContext(){
+  const left = CONTEXT.node;
+  if(left) await api("/api/remote/disconnect", "POST", {node:left}).catch(() => {});
+  enterContext("", "");
+  loadTargets();
+}
+$("ctx-leave").addEventListener("click", leaveContext);
+
 // ---- palette ---------------------------------------------------------------
 [["Overview", "overview", ""],
  ["Peers", "network", "peers"],
@@ -1634,7 +1753,9 @@ PALETTE.add("Check for updates", "Action", () => {
   ROUTER.go("settings", "updates"); $("update-check").click();
 });
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
+PALETTE.add("Back to this node", "Action", leaveContext);
 $("palette-open").addEventListener("click", () => PALETTE.open());
+$("modal-close").addEventListener("click", () => $("modal").close());
 
 mountShell();
 // A live cookie session means the console can be entered without re-typing the

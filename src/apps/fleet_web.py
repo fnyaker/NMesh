@@ -19,15 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import threading
 import time
 from collections import OrderedDict, deque
 
 from ..node_id import NodeID
 from .fleet import (
-    CapsChanged, CommandOutput, CommandResult, EnrolAnswered, EnrolRequested,
-    Failure, NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened,
-    ShellOutput, StatusReceived,
+    CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, EnrolAnswered,
+    EnrolRequested, Failure, NodeAdopted, Revoked, ScanReceived, ShellClosed,
+    ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import CAP_DESCRIPTIONS, CAPABILITIES, clean_caps
 
@@ -36,6 +37,18 @@ MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
 MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
 MAX_UPDATES = 64              # per-node update progress kept for the UI
+
+
+def _dump(document) -> bytes:
+    return json.dumps(document).encode("utf-8")
+
+
+def _load(body: bytes) -> dict:
+    try:
+        document = json.loads(body.decode("utf-8", "replace"))
+    except (ValueError, AttributeError):
+        return {}
+    return document if isinstance(document, dict) else {}
 
 
 def _step_line(step: dict) -> str:
@@ -49,6 +62,8 @@ def _step_line(step: dict) -> str:
 _FAIL_LOG_LINES = 20
 MAX_JOBS = 64                 # tracked operations (bounded, oldest evicted)
 _CALL_TIMEOUT = 30.0
+MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
+REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
 
 
 class FleetBridge:
@@ -58,6 +73,8 @@ class FleetBridge:
         self._app = fleet_app
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        # (local session token, node hex) -> {token, at}. Memory only.
+        self._remote: OrderedDict = OrderedDict()
         self._version = 0
         self._log: deque = deque(maxlen=MAX_LOG)
         self._log_seq = 0
@@ -326,6 +343,96 @@ class FleetBridge:
         if not caps:
             return False
         return self._call(self._app.drop_capabilities(str(node_hex), caps))
+
+    # -- remote consoles ---------------------------------------------------
+    # The browser never sees the remote node's token. It stays here, in memory,
+    # keyed by the *local* session that opened it: a stolen page cannot replay a
+    # remote session it never held, and closing the local session closes them
+    # all. Nothing about a remote console is ever written to disk.
+
+    def remote_targets(self) -> list:
+        """Nodes that granted us ``manage``, and whether a session is open."""
+        with self._lock:
+            open_now = {node for (_, node) in self._remote}
+        return [
+            {"id": entry["id"], "label": entry.get("label") or "",
+             "connected": entry["id"] in open_now}
+            for entry in sorted(self._app.state.managed(),
+                                key=lambda item: item.get("label") or item["id"])
+            if "manage" in (entry.get("caps") or [])
+        ]
+
+    def remote_connect(self, session: str, node_hex: str, password: str) -> tuple:
+        """Log in to a remote node's console. ``(ok, detail)``.
+
+        The password is used once, here, and travels only inside the E2E mesh
+        session — it is never stored, never logged, and never handed back to the
+        browser."""
+        if not self._app.state.may_use(node_hex, "manage"):
+            return False, "that node has not granted remote management"
+        status, _ctype, body = self._remote_raw(
+            node_hex, None, "POST", "/api/login",
+            _dump({"password": password}))
+        data = _load(body)
+        if status != 200 or not isinstance(data.get("token"), str):
+            return False, str(data.get("error") or "that password was refused")
+        with self._lock:
+            self._prune_remote()
+            if len(self._remote) >= MAX_REMOTE_SESSIONS:
+                self._remote.popitem(last=False)
+            self._remote[(session, node_hex)] = {"token": data["token"],
+                                                 "at": time.monotonic()}
+        return True, ""
+
+    def remote_disconnect(self, session: str, node_hex: str) -> bool:
+        with self._lock:
+            return self._remote.pop((session, node_hex), None) is not None
+
+    def remote_drop_session(self, session: str) -> None:
+        """Every remote console this local session held dies with it."""
+        with self._lock:
+            for key in [k for k in self._remote if k[0] == session]:
+                self._remote.pop(key, None)
+
+    def remote_call(self, session: str, node_hex: str, method: str, path: str,
+                    body: bytes | None) -> tuple:
+        """Relay one console call. ``(status, content_type, body)``."""
+        with self._lock:
+            self._prune_remote()
+            entry = self._remote.get((session, node_hex))
+            if entry is not None:
+                entry["at"] = time.monotonic()
+            token = entry["token"] if entry else None
+        if token is None:
+            return 409, "application/json", _dump(
+                {"error": "no session on that node — connect to it again"})
+        status, ctype, payload = self._remote_raw(node_hex, token, method,
+                                                  path, body)
+        if status == 401:
+            # Its console dropped our session (restart, password change): forget
+            # it here too, so the page asks for the password instead of looping.
+            self.remote_disconnect(session, node_hex)
+        return status, ctype, payload
+
+    def _remote_raw(self, node_hex: str, token, method: str, path: str,
+                    body: bytes | None) -> tuple:
+        try:
+            return self._call(self._app.console_call(
+                self._node(node_hex), method, path, body, token),
+                timeout=_CALL_TIMEOUT)
+        except ConsoleProxyError as exc:
+            return 502, "application/json", _dump({"error": str(exc)[:200]})
+        except ValueError:
+            return 400, "application/json", _dump({"error": "bad node id"})
+        except Exception as exc:                # noqa: BLE001 — never leak a trace
+            return 502, "application/json", _dump(
+                {"error": f"could not reach that node ({type(exc).__name__})"})
+
+    def _prune_remote(self) -> None:
+        now = time.monotonic()
+        for key, entry in list(self._remote.items()):
+            if now - entry["at"] > REMOTE_IDLE:
+                self._remote.pop(key, None)
 
     def set_operator_caps(self, node_hex: str, caps) -> bool:
         """Set what an operator may do to this node. The local human decides;

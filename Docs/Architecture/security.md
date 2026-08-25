@@ -187,6 +187,14 @@ quoi » ; décider si ce « qui » a le droit reste à l'app. L'app Fleet
 et exige les **trois** portes : mesh authentifié, enrôlé avec la capability, et
 signature fraîche sur les octets exacts de la commande.
 
+La capability `manage` ajoute une deuxième clé au lieu d'élargir la première :
+le grant mesh ouvre le canal, le **mot de passe console de la cible** ouvre la
+session, et les deux sont détenus par des personnes différentes. L'appel relayé
+est **rejoué contre la console de la cible** (loopback, certificat épinglé), donc
+la vérification de session, les plafonds et le lockout anti-bruteforce sont ceux
+de la console elle-même — un relais qui répondrait lui-même serait une seconde
+porte d'entrée avec ses propres bugs.
+
 Ce ledger n'est jamais élargi par le réseau. Un droit ne s'ajoute que par une
 décision locale sur la machine qui le subit ; le seul message qui touche aux
 capabilities sans humain (`ENROL_NARROW`) est **intersecté** avec ce que son

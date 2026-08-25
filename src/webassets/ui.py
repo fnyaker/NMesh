@@ -529,6 +529,19 @@ SHELL = """
   color:var(--text-muted)}
 .rail-toggle{display:none}
 
+/* -- driving another node ------------------------------------------------ */
+/* Impossible to miss on purpose: every destructive control on the page now
+   points somewhere else, and "which machine am I on" must never be a guess. */
+.ctx-bar{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;
+  padding:var(--s-2) var(--s-5);background:var(--warn-soft);color:var(--warn);
+  border-bottom:1px solid var(--border);font-size:var(--fs-sm);font-weight:600}
+.ctx-bar .mono{font-weight:400}
+.ctx-bar button{margin-left:auto}
+.shell.remote .mark{background:var(--warn);color:var(--warn-soft)}
+.ctx-pick{display:flex;align-items:center;gap:var(--s-2);min-width:0}
+.ctx-pick select{min-height:var(--ctl-h-sm);font-size:var(--fs-sm);max-width:220px;
+  padding-block:0}
+
 /* -- page ---------------------------------------------------------------- */
 main{min-width:0;display:flex;flex-direction:column}
 .content{width:100%;max-width:var(--content-max);margin:0 auto;padding:var(--s-6) var(--s-5) var(--s-9);
@@ -672,10 +685,16 @@ const SESSION = {
   set(token){ TOKEN = token; try{ sessionStorage.setItem("nmesh_token", token); }catch(_){} },
   clear(){ TOKEN = null; try{ sessionStorage.removeItem("nmesh_token"); }catch(_){} },
 };
+// The node this page is driving. Empty means the one serving the page; set to
+// another id, every call below carries it and the console relays the call over
+// the mesh. One place to change, so no view can forget it and quietly act on
+// the wrong machine.
+const CONTEXT = {node: "", label: ""};
 async function api(path, method, body){
   const headers = {};
   if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
   if(body !== undefined) headers["Content-Type"] = "application/json";
+  if(CONTEXT.node && !path.startsWith("/api/remote/")) headers["X-NMesh-Node"] = CONTEXT.node;
   const response = await fetch(path, {method: method || "GET", headers,
     body: body === undefined ? undefined : JSON.stringify(body)});
   if(response.status === 401){ SESSION.clear(); SESSION.onLost(); throw new Error("unauthorized"); }
