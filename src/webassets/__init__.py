@@ -11,8 +11,13 @@ Layout, and the rule that keeps it from drifting:
 
 * :mod:`.ui` is the **design system** — tokens, base, components, app shell,
   and the JS every page shares. Nothing page-specific goes in it.
-* :mod:`.console`, :mod:`.chat` and :mod:`.fleet` hold one page each: markup,
-  the page's own JS, and only the CSS that genuinely belongs to that page.
+* :mod:`.console`, :mod:`.chat`, :mod:`.fleet` and :mod:`.nodeview` hold one
+  page each: markup, the page's own JS, and only the CSS that genuinely belongs
+  to that page.
+* :mod:`.nodeview` is the exception that proves the rule: it is a *view* before
+  it is a page. The console mounts it in a dialog and it also serves itself at
+  ``/node``, so chat and fleet can open it — one description of a node, not
+  three that drift.
 
 Each page's stylesheet is ``ui.CSS`` plus its own, and each page's script is
 ``ui.JS`` plus its own. So a token changed once changes all three pages, and a
@@ -22,9 +27,13 @@ from . import ui
 from .chat import CHAT_HTML, CHAT_PAGE_CSS, CHAT_PAGE_JS
 from .console import INDEX_HTML, CONSOLE_PAGE_CSS, CONSOLE_PAGE_JS
 from .fleet import FLEET_HTML, FLEET_PAGE_CSS, FLEET_PAGE_JS
+from .nodeview import (NODE_PAGE_CSS_FULL as _NODE_PAGE_CSS,
+                       PAGE_HTML as NODE_HTML, PAGE_JS as _NODE_PAGE_JS)
+from . import nodeview
 
-STYLE_CSS = ui.CSS + CONSOLE_PAGE_CSS
-APP_JS = ui.JS + CONSOLE_PAGE_JS
+# The node view rides along with the console page: the dialog there mounts it.
+STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS
+APP_JS = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
 
 CHAT_CSS = ui.CSS + CHAT_PAGE_CSS
 CHAT_JS = ui.JS + CHAT_PAGE_JS
@@ -32,6 +41,10 @@ CHAT_JS = ui.JS + CHAT_PAGE_JS
 FLEET_CSS = ui.CSS + FLEET_PAGE_CSS
 FLEET_JS = ui.JS + FLEET_PAGE_JS
 
+NODE_CSS = ui.CSS + _NODE_PAGE_CSS
+NODE_JS = ui.JS + nodeview.JS + _NODE_PAGE_JS
+
 __all__ = ["INDEX_HTML", "STYLE_CSS", "APP_JS",
            "CHAT_HTML", "CHAT_CSS", "CHAT_JS",
-           "FLEET_HTML", "FLEET_CSS", "FLEET_JS", "ui"]
+           "FLEET_HTML", "FLEET_CSS", "FLEET_JS",
+           "NODE_HTML", "NODE_CSS", "NODE_JS", "ui"]

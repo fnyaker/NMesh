@@ -353,7 +353,10 @@ class FleetBridge:
             "waiting_on_them": asked is not None,
             "asked_caps": list((asked or {}).get("caps") or []),
             "waiting_on_us": inbound is not None,
-            "capabilities": list(CAPABILITIES),
+            # Names *and* what each one lets through: a page offering a choice
+            # of rights has to be able to say what it is asking for.
+            "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
+                             for cap in CAPABILITIES],
             "page": "/fleet#nodes",
         }
 

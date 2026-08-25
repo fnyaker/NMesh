@@ -155,6 +155,12 @@ tests/
 │     bornée, une app arrêtée n'est plus joignable, une app qui lève ne rend pas
 │     ses internes — et ce que chat et fleet exposent est épinglé (élargir est un
 │     changement de sécurité)
+├── (webassets) la vue d'une node : une seule implémentation montée deux fois
+│     (dialogue de la console et page `/node`), elle ne propose que ce qu'une app
+│     déclare, elle masque le bouton qui pointe d'où l'on vient, et les adresses
+│     sont repliées par défaut ; côté console : `/node` est la seule page cadrable
+│     (`frame-ancestors 'self'`, un seul en-tête CSP), toutes les autres restent
+│     en `'none'`
 ├── test_address_retry.py                              — redialer une adresse : à
 │     la main (un `proto://addr` ou toutes, et on dit ce que chacune a fait ; une
 │     adresse qui n'est pas celle de cette node est refusée sans composer), la

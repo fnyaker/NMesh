@@ -672,7 +672,8 @@ class TestAppApiOverHttp:
             assert status == 200 and body["ok"] is True
             result = body["result"]
             assert result["managed"] is False and result["operator"] is False
-            assert "status" in result["capabilities"]
+            assert any(cap["name"] == "status" and cap["description"]
+                       for cap in result["capabilities"])
         finally:
             console.stop(); await host.stop_all(); await node.stop()
 

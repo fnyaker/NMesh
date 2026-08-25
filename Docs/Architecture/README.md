@@ -30,7 +30,7 @@ s'en sert pour autoriser de l'exécution à distance).
 | `transport.py` / `transport_manager.py` | Interfaces `BaseTransport`/`BaseServer` + registre par schéma d'URL. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales, **énumération des réseaux attachés** (interface + masque réel, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, puis repli), résolveur DNS borné hors executor. |
-| `webconsole.py` / `webassets/` | Console web de gestion (HTTPS, stdlib). Les assets sont un paquet : `ui.py` porte le système de design, un module par page. Voir [`Docs/WebConsole/design`](../WebConsole/design). |
+| `webconsole.py` / `webassets/` | Console web de gestion (HTTPS, stdlib). Les assets sont un paquet : `ui.py` porte le système de design, un module par page, et `nodeview.py` porte la **vue d'une node** — montée par le dialogue de la console *et* servie en `/node` pour que chat et fleet l'ouvrent. Voir [`Docs/WebConsole/design`](../WebConsole/design). |
 | `app_channel.py` | Sections d'app : cadrage `app_id ‖ payload` dans la payload DATA, ids intégrés/déployés (démux du connecteur). |
 | `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
 | `apps/chat*.py` | App de chat intégrée : messages/fichiers/flux (`chat.py`), couche sociale contacts/pseudo/groupes (`chat_state.py`), UI console (`chat_web.py`). |
