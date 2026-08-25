@@ -377,7 +377,7 @@ async function poll(){
 function paintInbox(){
   const list = ST.pending_in || [];
   $("nav-pending").textContent = list.length || "";
-  $("inbox").innerHTML = list.map((request) => {
+  setHTML("inbox", list.map((request) => {
     const have = request.have || [];
     const asked = (request.caps || []).map((cap) =>
       badge(cap, have.length && !have.includes(cap) ? "warn" : "accent")).join(" ");
@@ -393,7 +393,7 @@ function paintInbox(){
       '<div class="btn-row"><button class="primary" data-approve="' + esc(request.id) +
       '">Review &amp; accept</button><button class="danger" data-deny="' + esc(request.id) +
       '">Deny</button></div></div></article>';
-  }).join("");
+  }).join(""));
 }
 function approveDialog(id){
   const request = (ST.pending_in || []).find((entry) => entry.id === id);
@@ -491,11 +491,12 @@ function paintNodes(){
       (can("shell") ? '<button data-shell="' + esc(node.id) + '">Shell</button>' : "") +
       (can("scan") ? '<button data-scan="' + esc(node.id) + '">Scan LAN</button>' : "") +
       '<button data-rights="' + esc(node.id) + '">Rights</button>' +
+      '<button data-details="' + esc(node.id) + '">Details</button>' +
       '<button class="danger" data-revoke="' + esc(node.id) + '">Revoke</button>' +
       "</div></div></article>";
   }).join("");
-  $("nodes").innerHTML = html || emptyHTML("No node yet",
-    "Ask a node to let you manage it, or install one from Discover & deploy.");
+  setHTML("nodes", html || emptyHTML("No node yet",
+    "Ask a node to let you manage it, or install one from Discover & deploy."));
 }
 function addDialog(){
   $("modal-title").textContent = "Request access to a node";
@@ -532,7 +533,7 @@ function addDialog(){
 // ---- who can control this node ---------------------------------------------
 function paintOperators(){
   const operators = ST.operators || [], caps = ST.capabilities || [];
-  $("operators").innerHTML = operators.map((operator) => {
+  setHTML("operators", operators.map((operator) => {
     const held = operator.caps || [];
     return '<article class="card"><div class="card-head"><div class="grow">' +
       "<h2>" + esc(operator.label || shortId(operator.id)) + '</h2>' +
@@ -545,10 +546,11 @@ function paintOperators(){
         (held.includes(cap.name) ? " checked" : "") + "><span><b>" + esc(cap.name) +
         "</b><br>" + esc(cap.description) + "</span></label>").join("") + "</div>" +
       '<div class="btn-row"><button class="primary" data-caps-set="' + esc(operator.id) +
-      '">Apply rights</button><button class="danger" data-revoke="' + esc(operator.id) +
+      '">Apply rights</button><button data-details="' + esc(operator.id) +
+      '">Details</button><button class="danger" data-revoke="' + esc(operator.id) +
       '">Cut off</button></div></div></article>';
   }).join("") || emptyHTML("No node can control this one",
-    "A node that asks appears here first, as a request waiting on you.");
+    "A node that asks appears here first, as a request waiting on you."));
 }
 // Changing what *we* hold on a node we manage. The two halves are not
 // symmetric, and the dialog says so: dropping is ours to do, asking is theirs
@@ -1119,6 +1121,7 @@ document.body.addEventListener("click", async (event) => {
   const data = button.dataset;
   if(data.approve) return approveDialog(data.approve);
   if(data.rights) return rightsDialog(data.rights);
+  if(data.details) return nodeDialog(data.details);
   if(data.capsSet){
     const box = document.querySelector('[data-ops="' + data.capsSet + '"]');
     if(!box) return;
@@ -1172,6 +1175,18 @@ document.body.addEventListener("click", async (event) => {
     return openShell();
   }
 });
+// The console's description of a node, in fleet's own sheet: the same view, so
+// a machine looks the same whether it is being managed or being talked to. The
+// fleet button is dropped — you are already here.
+function nodeDialog(id){
+  $("modal-title").textContent = "Node " + shortId(id);
+  $("modal-body").innerHTML = '<div id="fleet-node-view"></div>';
+  $("modal").showModal();
+  return NODEVIEW.mount("fleet-node-view", id, {
+    hide:["fleet"],
+    onGone(){ $("modal").close(); poll(); },
+  });
+}
 $("add-open").addEventListener("click", addDialog);
 $("modal-close").addEventListener("click", () => $("modal").close());
 $("scan-from").addEventListener("change", () => {

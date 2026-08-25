@@ -1534,8 +1534,9 @@ class TestAddressRetryEndpoints:
 
 
 class TestTheNodePage:
-    """`/node` is the one page meant to be framed — by chat and by fleet, which
-    this console serves itself. Everything else stays unframeable."""
+    """`/node` is the node view as a page of its own, for the window and the tab
+    a viewer may prefer. In place, chat and fleet mount the same view directly —
+    so nothing here has to be frameable, and nothing here is."""
 
     async def test_it_is_served_with_its_assets(self):
         node, console = await _make_console()
@@ -1551,22 +1552,19 @@ class TestTheNodePage:
         finally:
             console.stop(); await node.stop()
 
-    async def test_only_this_page_may_be_framed_and_only_by_us(self):
+    async def test_nothing_this_console_serves_may_be_framed(self):
+        """Showing a node inside chat is a *mount*, not a frame: the same view,
+        in the same document. So there is no reason to let anything here be
+        put in a frame, and the answer stays no for every page."""
         node, console = await _make_console()
         try:
-            _s, headers, _b, _j = await asyncio.to_thread(
-                _request, console, "GET", "/node")
-            policy = headers["content-security-policy"]
-            assert "frame-ancestors 'self'" in policy
-            # One header, not two: a second CSP is *intersected* with the first
-            # rather than replacing it, so the relaxation would never apply.
-            assert policy.count("frame-ancestors") == 1
-            assert "default-src 'self'" in policy
-            assert "unsafe-inline" not in policy
-            for other in ("/", "/node.js", "/node.css"):
+            for path in ("/", "/node", "/node.js", "/node.css"):
                 _s, headers, _b, _j = await asyncio.to_thread(
-                    _request, console, "GET", other)
-                assert "frame-ancestors 'none'" in headers["content-security-policy"], other
+                    _request, console, "GET", path)
+                policy = headers["content-security-policy"]
+                assert "frame-ancestors 'none'" in policy, path
+                assert policy.count("frame-ancestors") == 1, path
+                assert "default-src 'self'" in policy and "unsafe-inline" not in policy
         finally:
             console.stop(); await node.stop()
 

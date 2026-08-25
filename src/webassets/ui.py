@@ -949,6 +949,17 @@ function openLinked(url, name){
   if(!opened) window.open(url, "_blank", "noopener");
 }
 
+// A list painted on a timer must not be rebuilt when nothing changed. It is not
+// only waste: replacing a node under the pointer loses the click someone was
+// making, drops focus out of the page, and closes whatever was open inside it.
+// Comparing the string first is cheaper than the DOM work it avoids.
+function setHTML(target, html){
+  const element = typeof target === "string" ? $(target) : target;
+  if(!element || element.innerHTML === html) return element;
+  element.innerHTML = html;
+  return element;
+}
+
 // ---- markup fragments every page needs -------------------------------------
 function emptyHTML(title, hint, action){
   return '<div class="empty"><div class="t">' + esc(title) + "</div>" +
@@ -1006,6 +1017,9 @@ const THEME = {
     this.paint();
   },
   toggle(){ this.set(this.current() === "dark" ? "light" : "dark"); },
+  // "system" is the absence of a choice, not a third value to store: a stored
+  // "system" would stop following the system the day the default changes.
+  choose(value){ this.set(value === "system" ? "" : value); },
   paint(){
     const button = $("theme-toggle"); if(!button) return;
     const dark = this.current() === "dark";

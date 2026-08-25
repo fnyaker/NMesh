@@ -110,6 +110,23 @@ l'émetteur d'origine du message ; un `EDIT`/`DELETE` d'un pair n'altère que se
 propres messages. Le profil (nom/bio/avatar) est **appris** du pair mais le
 node_id reste l'identité réelle.
 
+## Qui est en face (panneau de détails)
+
+Le nom en haut d'une conversation ouvre **la fiche de nœud de la console** — la
+même vue partout (`src/webassets/nodeview.py`) : le lien réel, ses adresses, et
+ce que chacun des deux nœuds a le droit de faire à l'autre. Chat ne la
+redécrit pas, il la **monte** ; ce n'est pas une iframe, c'est le même code dans
+le même document, donc aucune page n'a besoin d'être cadrable.
+
+Le bouton « Message » n'y est pas : on y est déjà. Les boutons fleet, eux, y
+sont — demander des droits sur la machine d'en face se fait donc sans quitter la
+conversation.
+
+Où elle apparaît est un choix de l'utilisateur (profil → Preferences) : **à côté
+de la conversation** (par défaut), dans une **fenêtre**, ou dans un **onglet**.
+Stocké dans ce navigateur, comme le thème. Sous 1180 px le panneau prend la
+place de la conversation ; sous 860 px, celle de l'écran.
+
 ## Couche sociale (contacts, pseudo, groupes, recherche)
 
 Tout est **côté app** (la node ne connaît rien de ces notions) et persisté par

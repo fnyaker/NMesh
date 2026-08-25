@@ -15,9 +15,10 @@ Layout, and the rule that keeps it from drifting:
   page each: markup, the page's own JS, and only the CSS that genuinely belongs
   to that page.
 * :mod:`.nodeview` is the exception that proves the rule: it is a *view* before
-  it is a page. The console mounts it in a dialog and it also serves itself at
-  ``/node``, so chat and fleet can open it — one description of a node, not
-  three that drift.
+  it is a page. All three pages mount it — the console in a dialog, chat in a
+  panel, fleet in its sheet — and it also serves itself at ``/node`` for the
+  window or tab a viewer may prefer. One description of a node, not four that
+  drift.
 
 Each page's stylesheet is ``ui.CSS`` plus its own, and each page's script is
 ``ui.JS`` plus its own. So a token changed once changes all three pages, and a
@@ -35,11 +36,13 @@ from . import nodeview
 STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS
 APP_JS = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
 
-CHAT_CSS = ui.CSS + CHAT_PAGE_CSS
-CHAT_JS = ui.JS + CHAT_PAGE_JS
+# Chat and fleet mount the same view in place rather than framing the page:
+# same code, same document, nothing to let through a frame.
+CHAT_CSS = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS
+CHAT_JS = ui.JS + nodeview.JS + CHAT_PAGE_JS
 
-FLEET_CSS = ui.CSS + FLEET_PAGE_CSS
-FLEET_JS = ui.JS + FLEET_PAGE_JS
+FLEET_CSS = ui.CSS + nodeview.CSS + FLEET_PAGE_CSS
+FLEET_JS = ui.JS + nodeview.JS + FLEET_PAGE_JS
 
 NODE_CSS = ui.CSS + _NODE_PAGE_CSS
 NODE_JS = ui.JS + nodeview.JS + _NODE_PAGE_JS

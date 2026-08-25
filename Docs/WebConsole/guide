@@ -86,7 +86,12 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
     ouvre sa fiche de toute façon.
   - Sur écran étroit la liste des liens n'est pas supprimée : elle passe **sous**
     le dessin.
-- **La fiche d'un nœud** (Network → Peers → Details) montre le lien réel :
+- **La fiche d'un nœud** est la *même* partout : le dialogue de la console, un
+  panneau à côté de la conversation dans chat, la feuille de fleet, ou la page
+  `/node#<id>` dans une fenêtre ou un onglet. Elle ne propose que ce que les
+  apps installées rendent possible (`Docs/AppAPI/guide`) et masque le bouton
+  qui ramène là d'où l'on vient : depuis chat, pas de « Message » ; depuis
+  fleet, pas de bouton fleet. Elle montre le lien réel :
   points de terminaison local et distant tels que le medium les voit, sens,
   durée, latence (dernier / meilleur / pire / gigue / perte, avec les
   échantillons), les compteurs propres au transport, et **l'état de chaque
@@ -94,6 +99,19 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
   un **Retry**, et le tableau un **Retry all** : on rejoue une adresse précise ou
   toutes, et la réponse dit ce que chacune a fait. Seules les adresses déjà
   connues pour cette identité sont composées.
+  - L'ordre est celui des questions : qui c'est et où on en est, les quatre
+    chiffres qui disent si le lien va bien, ce que chacun a le droit de faire à
+    l'autre, puis les faits. **Adresses et compteurs sont repliés** (avec leur
+    nombre dans le titre) — un tableau d'adresses déplié repoussait les réponses
+    sous le pli.
+  - **Demander des droits fleet** demande *lesquels*, avec ce que chacun permet :
+    « accès » tout court n'est pas une question à laquelle quelqu'un peut
+    répondre. Rien n'est accordé en demandant — la demande arrive sur l'autre
+    machine et un humain là-bas décide, et peut accorder moins que demandé.
+- **Settings → This browser** garde ce qui appartient à cet écran et pas au
+  nœud : le thème, et la façon dont un lien vers une autre app s'ouvre (fenêtre,
+  onglet, ou selon la taille de l'écran). Deux machines connectées à la même
+  console gardent chacune les siennes ; rien n'est envoyé nulle part.
 - **Network → Reachability** est organisé en **un bloc par medium** : ce qu'il
   porte (liens, latence moyenne, volume, ports), **ses écouteurs** (ajout et
   retrait), ses commandes propres, et **ses réglages** — rendus à partir de ce que
