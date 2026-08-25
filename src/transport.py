@@ -56,6 +56,32 @@ class BaseTransport(ABC):
         address (e.g. spool files) return None."""
         return None
 
+    # -- observability ----------------------------------------------------
+    # Two optional hooks, both with the same shape as ``reachability``: the
+    # medium describes itself, the core never interprets. A new transport
+    # becomes observable in the console without a line of console code.
+
+    def endpoints(self) -> dict:
+        """Where this link actually runs: ``{"local": str|None,
+        "remote": str|None}``.
+
+        Not the URI that was dialled — the endpoint as the medium sees it now.
+        For an *accepted* link that is the only address there is, and it is what
+        tells an operator which of a peer's addresses is carrying traffic."""
+        return {"local": None, "remote": None}
+
+    def stats(self) -> dict:
+        """Live counters this medium can report about *this* link.
+
+        Free-form on purpose: a UDP link has retransmits and a reorder buffer, a
+        serial link has a baud rate, a LoRa link has an SNR. Keys are rendered
+        as-is, so pick names a human can read.
+
+        Two rules, because this is polled by the console: values must be
+        JSON-safe scalars, and reading them must never block or allocate
+        anything of significance."""
+        return {}
+
 
 class BaseServer(ABC):
     """

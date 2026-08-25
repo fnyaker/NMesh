@@ -8,6 +8,7 @@ windows in memory.
 """
 import os
 import time
+from collections import deque
 
 
 class Counters:
@@ -35,6 +36,72 @@ class Counters:
             "pkts_out": self.pkts_out,
             "bytes_in": self.bytes_in,
             "bytes_out": self.bytes_out,
+        }
+
+
+class LinkQuality:
+    """What a link *feels* like: latency, its spread, and what got lost.
+
+    One RTT number says almost nothing — a link at a steady 40 ms and one
+    flapping between 5 and 400 ms average the same. So the last few samples are
+    kept (bounded, tiny) and reduced to the four figures an operator actually
+    reads: last, best, worst, and jitter. Loss is counted separately, because a
+    probe that never comes back has no round trip to average.
+
+    Every method is O(1) and called at most once per liveness probe, never on
+    the packet path."""
+
+    __slots__ = ("_samples", "pings", "pongs", "last")
+
+    HISTORY = 32
+
+    def __init__(self) -> None:
+        self._samples: deque = deque(maxlen=self.HISTORY)
+        self.pings = 0
+        self.pongs = 0
+        self.last: float | None = None
+
+    def on_ping(self) -> None:
+        self.pings += 1
+
+    def on_pong(self, rtt: float) -> None:
+        self.pongs += 1
+        self.last = rtt
+        self._samples.append(rtt)
+
+    @property
+    def samples(self) -> list:
+        return list(self._samples)
+
+    def jitter(self) -> float | None:
+        """Mean absolute difference between consecutive samples (RFC 3550's
+        idea, without its smoothing): how *unsteady* the link is."""
+        if len(self._samples) < 2:
+            return None
+        pairs = zip(self._samples, list(self._samples)[1:])
+        gaps = [abs(after - before) for before, after in pairs]
+        return sum(gaps) / len(gaps)
+
+    def loss(self) -> float | None:
+        """Share of probes that never came back, 0..1. ``None`` until a probe
+        has had time to fail — one ping in flight is not 100% loss."""
+        if self.pings < 2:
+            return None
+        return max(0.0, min(1.0, (self.pings - self.pongs) / self.pings))
+
+    def as_dict(self) -> dict:
+        def ms(value):
+            return None if value is None else round(value * 1000, 1)
+        samples = self._samples
+        return {
+            "rtt_ms": ms(self.last),
+            "best_ms": ms(min(samples)) if samples else None,
+            "worst_ms": ms(max(samples)) if samples else None,
+            "avg_ms": ms(sum(samples) / len(samples)) if samples else None,
+            "jitter_ms": ms(self.jitter()),
+            "loss": None if self.loss() is None else round(self.loss(), 3),
+            "probes": self.pings,
+            "samples_ms": [ms(value) for value in samples],
         }
 
 

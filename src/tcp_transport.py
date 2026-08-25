@@ -103,6 +103,40 @@ class TCPTransport(BaseTransport):
             return None
         return str(peer[0]).split("%", 1)[0]   # drop IPv6 scope id
 
+    def endpoints(self) -> dict:
+        if self._writer is None:
+            return {"local": None, "remote": None}
+
+        def name(kind):
+            info = self._writer.get_extra_info(kind)
+            if not info:
+                return None
+            host = str(info[0]).split("%", 1)[0]
+            return f"tcp://[{host}]:{info[1]}" if ":" in host else f"tcp://{host}:{info[1]}"
+
+        return {"local": name("sockname"), "remote": name("peername")}
+
+    def stats(self) -> dict:
+        """What the kernel is holding for us. The write buffer is the useful
+        one: a number that stays high means this peer is not draining, which no
+        packet counter shows."""
+        if self._writer is None:
+            return {}
+        detail = {}
+        try:
+            detail["send buffer"] = self._writer.transport.get_write_buffer_size()
+        except Exception:
+            pass
+        socket_object = self._writer.get_extra_info("socket")
+        if socket_object is not None:
+            try:
+                import socket as _socket
+                detail["nodelay"] = bool(socket_object.getsockopt(
+                    _socket.IPPROTO_TCP, _socket.TCP_NODELAY))
+            except Exception:
+                pass
+        return detail
+
     async def close(self) -> None:
         if self._writer:
             self._writer.close()
