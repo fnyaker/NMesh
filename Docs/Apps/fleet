@@ -10,7 +10,7 @@ jour), [`fleet_ssh.py`](../../src/apps/fleet_ssh.py) (scan LAN + SSH),
 
 > **Désactivée par défaut.** Elle peut ouvrir un shell : on ne l'active pas
 > parce qu'elle a été livrée. `--fleet` au lancement, ou le bouton **Enable**
-> dans l'onglet Apps de la console. Voir
+> dans la section Apps de la console. Voir
 > [`Docs/AppStore/guide`](../AppStore/guide) pour les apps déployées, et
 > ci-dessous pour installer/désinstaller une app **intégrée**.
 
@@ -67,8 +67,8 @@ Du plus inoffensif au total. Une seule n'implique jamais une autre.
 
 ## Enrôlement — la notification
 
-1. Sur le PC opérateur : onglet **Nodes**, coller le node id, cocher les
-   capabilities, **Request access**.
+1. Sur le PC opérateur : section **Nodes**, bouton **Request access to a node**,
+   coller le node id et cocher les capabilities.
 2. Sur la node cible : une bande **« Requests to manage this node »** apparaît en
    haut de `/fleet`. Quelqu'un doit répondre.
 3. **Review & accept** ouvre la liste des capabilities demandées. On peut
@@ -92,7 +92,7 @@ accorder un engage la machine qui le subit.
 
 ### Vue « Who controls this node »
 
-Onglet **Who controls this node** sur `/fleet` : la liste des nœuds qui peuvent
+Section **Who controls this node** sur `/fleet` : la liste des nœuds qui peuvent
 agir sur cette machine, avec leurs capabilities cochables. **Apply rights**
 applique la case cochée immédiatement — ajout compris. C'est légitime et c'est
 le seul endroit où un droit s'ajoute : la personne qui coche est sur la machine
@@ -219,7 +219,7 @@ démarrage) et est mise en cache ; `refresh_facts()` la relance.
 
 ## Découverte LAN et provisioning
 
-Onglet **Discover & deploy**. Le scan peut tourner **localement** ou sur
+Section **Discover & deploy**. Le scan peut tourner **localement** ou sur
 n'importe quelle node gérée ayant `scan` — c'est ce qui permet de déployer sur
 le LAN d'un site distant.
 
@@ -393,7 +393,7 @@ Conséquence : `install.sh` voyage dans la charge utile, et un arbre sans lui es
 refusé à la construction du payload.
 
 Chaque étape émet un marqueur `::step::` que la console transforme en progression
-dans l'onglet **Activity**. En cas d'échec, les **dernières lignes que la machine
+dans la section **Activity**. En cas d'échec, les **dernières lignes que la machine
 a réellement écrites** (bornées) partent aussi dans le journal : « dependency
 setup failed » sans rien derrière ne mène nulle part pour qui doit réparer. Une
 machine qui refuse d'être provisionnée est un **résultat**, pas une exception :
@@ -513,7 +513,7 @@ distincts, parce qu'ils ne veulent pas dire la même chose :
 - **enabled** — l'app est branchée au mesh maintenant. Désactiver l'arrête et
   ferme sa section ; son état survit, donc réactiver reprend où on en était.
 
-Depuis la console : onglet **Apps**, boutons Install / Enable / Disable /
+Depuis la console : section **Apps**, boutons Install / Enable / Disable /
 Uninstall. En ligne de commande : `--fleet`, `--no-chat`. Le choix est persisté
 dans `<data>/apps.json` (aucun secret : des noms et deux booléens ; un fichier
 corrompu redonne les défauts, jamais une app activée que l'opérateur n'a pas

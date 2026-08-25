@@ -1,0 +1,133 @@
+# Système de design de la console
+
+Trois pages (`/`, `/chat`, `/fleet`) servies par le même serveur, qui doivent
+ressembler au même produit. Ce document décrit **le contrat** qui l'assure — ce
+qui vit où, et ce qu'on n'a pas le droit de faire.
+
+Code : [`src/webassets/`](../../src/webassets/) —
+[`ui.py`](../../src/webassets/ui.py) (le système),
+[`console.py`](../../src/webassets/console.py),
+[`chat.py`](../../src/webassets/chat.py),
+[`fleet.py`](../../src/webassets/fleet.py) (une page chacun).
+
+## La règle
+
+> `ui.py` est la **seule** source des jetons, des composants et du châssis.
+> Une page n'y ajoute rien et n'en redéfinit rien.
+
+```
+STYLE_CSS = ui.CSS  + CONSOLE_PAGE_CSS      APP_JS   = ui.JS + CONSOLE_PAGE_JS
+CHAT_CSS  = ui.CSS  + CHAT_PAGE_CSS         CHAT_JS  = ui.JS + CHAT_PAGE_JS
+FLEET_CSS = ui.CSS  + FLEET_PAGE_CSS        FLEET_JS = ui.JS + FLEET_PAGE_JS
+```
+
+Un jeton changé une fois change les trois pages. Une page ne peut pas se
+fabriquer un deuxième style de bouton en douce : il y en a un à portée de main.
+
+Ce qui a le droit d'être dans le CSS d'une page : ce qui n'existe que là — le
+graphe et le canvas de débit (console), le terminal et la liste d'hôtes (fleet),
+les bulles de conversation (chat). Si ça commence à ressembler à quelque chose de
+réutilisable, ça remonte dans `ui.py`. Les seules variables qu'une page peut
+déclarer sont préfixées `--page-` (test :
+`test_no_page_redefines_a_token`).
+
+## Jetons, en trois couches
+
+Sens unique : **primitive → sémantique → composant**.
+
+| Couche | Exemples | Utilisée par |
+|---|---|---|
+| primitive | `--n-050`, `--teal-400`, `--red-600` | rien d'autre que la couche sémantique |
+| sémantique | `--surface`, `--text-muted`, `--danger`, `--accent-soft` | les composants |
+| composant | `--rail-w`, `--ctl-h`, `--btn-bg` | un composant précis |
+
+Le thème clair est déclaré sur `:root` **sans media query** ; le sombre est une
+surcharge, écrite deux fois depuis la même chaîne Python (`_DARK_BODY`) : une
+fois derrière `prefers-color-scheme` (« suivre le système »), une fois derrière
+`[data-theme="dark"]` (« j'ai choisi »). Une couleur définie **uniquement** dans
+une media query n'existe pas quand la requête ne matche pas — d'où la règle.
+
+Le choix explicite est posé sur `<html>` par `/theme.js`, chargé **bloquant**
+dans `<head>` : sinon la page peint le mauvais thème pendant une image. La CSP
+interdisant le script inline, ce fichier minuscule ne peut pas être une balise.
+
+### Le contraste est testé, pas jugé
+
+[`tests/test_ui_contrast.py`](../../tests/test_ui_contrast.py) lit les jetons,
+résout les indirections `var()`, et mesure le ratio WCAG 2.1 de chaque paire
+texte/fond **dans les deux thèmes**. Sous 4.5 (texte) ou 3.0 (bordure de champ,
+grand texte), le test échoue. Une console qu'on lit mal à 3 h du matin est un
+défaut, pas une préférence.
+
+## Composants
+
+Stylés **sur l'élément** quand il y en a un (`button`, `input`, `table`,
+`dialog`) : un contrôle qui oublie sa classe ressemble quand même au produit. Les
+classes servent aux variantes, pas à la base.
+
+`button` (+ `.primary` `.danger` `.ghost` `.sm` `.icon` `.wide`, `aria-busy`
+pour l'attente) · `input`/`select`/`textarea` · `.field` (label + contrôle +
+`.hint`) · `.check` (case et libellé dans **une seule** cible) · `.card`
+(`.card-head` / `.card-body` / `.card-foot`) · `details.card` · `.stat` /
+`.stats` · `.badge` (tons `ok warn danger info accent`) · `.dot` · `table`
+(en-tête collant, `.table-wrap` qui scrolle) · `.kv` · `.empty` / `errorHTML` /
+`skeletonHTML` · `progress.meter` · `.notice` · `.toast` · `dialog` +
+`.sheet-head/-body/-foot` · `.segmented` / `.subnav` / `.nav` · `.chips` ·
+`.pager` · `.search` · `.kbd`.
+
+Trois états sont **toujours** dessinés, jamais laissés vides : *vide* (ce qu'il
+faut faire pour qu'il y ait quelque chose), *en cours* (un squelette de la forme
+de ce qui arrive, pour que rien ne saute), *en erreur* (ce qui a échoué).
+
+## Châssis (`SHELL`)
+
+Un rail à gauche qui dit **où on est**, une barre du haut qui dit **ce que fait
+le nœud**, une colonne de contenu. Sous 900 px le rail devient un tiroir.
+`/chat` prend la place du rail pour sa liste de conversations : la liste **est**
+la navigation, un deuxième niveau de chrome serait du bruit.
+
+## Runtime partagé (`ui.JS`)
+
+Ce que les trois pages résolvaient chacune de leur côté :
+
+- `$`, `$$`, `esc`, `shortId`, `debounce` ;
+- `api` / `apiJson` — jeton en `sessionStorage`, un 401 renvoie à la porte ;
+- formatage : `fmtBytes`, `fmtRate`, `fmtDuration`, `fmtAgo`, `fmtNum` ;
+- retour : `toast` (poli, `aria-live`), `setMessage` (à côté du contrôle),
+  `withBusy` (le libellé reste en place pendant la requête) ;
+- `confirmAction` — les actions destructrices demandent, dans la page ;
+- `THEME` — clair / sombre / système, mémorisé par navigateur ;
+- `ROUTER` — `#section/sous-section` : linkable, marque-pageable, **Back**
+  fonctionne ;
+- `PALETTE` — `⌘K` / `Ctrl-K`, chaque section et les actions courantes ;
+- `mountShell()` — câble tout ça une fois pour la page.
+
+## Contraintes qui ne se voient pas
+
+- **Aucune ressource externe.** Pas de CDN, pas de police web, pas d'image
+  distante. La console marche sur une machine sans internet.
+- **Pas d'attribut `style=`.** La CSP est `default-src 'self'` sans
+  `unsafe-inline` : un `style="width:42%"` est ignoré **en silence** par le
+  navigateur. Une barre écrite comme ça ne se remplit jamais et personne ne voit
+  d'erreur — c'est exactement ce qui arrivait avant. Les valeurs variables
+  passent par un `<progress class="meter" value max>` ou par une assignation
+  CSSOM (`element.style.width = …`, non concernée par la CSP). Test :
+  `test_no_inline_style_attribute_anywhere`.
+- **Tout est échappé.** Ce qui vient du réseau (id, labels, bannières SSH,
+  sortie de commande) passe par `esc()` avant d'entrer dans `innerHTML`.
+- `prefers-reduced-motion` respecté ; anneau de focus visible partout ; cibles
+  ≥ 24 px ; champs à 16 px sur mobile (sinon iOS zoome) ; `tabular-nums` sur les
+  chiffres qu'on compare.
+
+## Ajouter quelque chose
+
+- **Une section** dans une page : un `<button role="tab" data-tab="x">` dans le
+  rail, une `<section data-panel="x">`, et `ROUTER` fait le reste (URL, titre,
+  Back, focus). Une sous-section : `data-subtab` / `data-sub`.
+- **Un composant** : dans `ui.py`, avec les jetons sémantiques — jamais une
+  couleur en dur. S'il porte du texte, ajouter la paire dans le test de
+  contraste.
+- **Une page** : un module qui exporte `X_HTML`, `X_PAGE_CSS`, `X_PAGE_JS`,
+  assemblés dans `__init__.py`. Reprendre le châssis, le `<dialog>` de
+  confirmation, la région de toasts et la palette : le test
+  `test_every_element_the_scripts_reach_for_exists` échoue si l'un manque.
