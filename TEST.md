@@ -1,190 +1,185 @@
-# Guide de test — NMesh
+# Testing guide — NMesh
 
-## Tests unitaires
+## Unit tests
 
-Rapides, sans réseau réel. Couvrent toute la logique interne, y compris le
-fuzzing (aucun octet hostile ne crashe un parseur).
+Fast, no real network. They cover all the internal logic, including fuzzing (no
+hostile byte crashes a parser).
 
 ```bash
-NMESH_SETUP_ONLY=1 ./start.sh   # installe tout, ne lance pas de nœud
+NMESH_SETUP_ONLY=1 ./start.sh   # installs everything, starts no node
 . .venv/bin/activate
 pytest
 ```
 
-(`start.sh` installe aussi les dépendances de test ; il gère les distros qui
-livrent `pip`/`venv` à part — voir [`Docs/Setup/guide`](Docs/Setup/guide).
-À la main : `python3 -m venv .venv && . .venv/bin/activate &&
+(`start.sh` also installs the test dependencies; it handles distributions that
+ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
+hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Environ 1000 tests en ~20 secondes.
+Around 1600 tests in ~30 seconds.
 
 ---
 
-## Tests d'intégration
+## Integration tests
 
-Nœuds réels, crypto post-quantique réelle, vraie pile réseau. Exclus par défaut
-(voir `pyproject.toml`) ; à lancer explicitement :
+Real nodes, real post-quantum crypto, a real network stack. Excluded by default
+(see `pyproject.toml`); run them explicitly:
 
 ```bash
 pytest tests/integration
 ```
 
-Ils vérifient notamment :
-- Le flow complet invitation → handshake → session → data E2E, sur **TCP** et
-  sur le transport **spool** (répertoire/fichier, sans socket).
-- Le routage **multi-hop A→B→C** (les extrémités ne se parlent qu'à travers le
-  relais), y compris sur deux médias fichier distincts.
-- Le routage **au-delà de la poignée de nœuds** (`test_routing_scale.py`) : un
-  relais dont la table dépasse la falaise historique des 5 nœuds certifiés doit
-  toujours répondre aux lookups, relayer ping/données/annuaire, apprendre le
-  chemin retour sur une chaîne, et rester réactif sous des paquets adressés à
-  des ids injoignables.
-- La reprise **après redémarrage** sans ré-invitation (routage + sessions E2E
-  restaurés depuis le disque).
-- L'**auto-réparation** (purge d'un pair mort) et le trajet **app→mesh→app** via
-  les connecteurs de données.
-- L'**app de gestion sur mesh réel** (`tests/integration/test_fleet.py`) :
-  enrôlement complet avec décision humaine puis commande autorisée, opérateur non
-  enrôlé qui n'obtient rien, capability non accordée refusée, révocation qui
-  coupe l'accès, et isolation de section (une autre app ne voit rien du trafic).
+Among other things they check:
+- The full flow invitation → handshake → session → E2E data, over **TCP** and
+  over the **spool** transport (directory/file, no socket).
+- **Multi-hop A→B→C** routing (the ends only talk through the relay), including
+  over two distinct file media.
+- Routing **beyond a handful of nodes** (`test_routing_scale.py`): a relay whose
+  table exceeds the historical cliff of five certified nodes must still answer
+  lookups, relay ping/data/directory, learn the return path along a chain, and
+  stay responsive under packets addressed to unreachable ids.
+- Recovery **after a restart** without re-inviting (routing + E2E sessions
+  restored from disk).
+- **Self-repair** (purging a dead peer) and the **app→mesh→app** path through
+  the data connectors.
+- The **management app on a real mesh** (`tests/integration/test_fleet.py`):
+  a full enrolment with a human decision followed by an authorised command, an
+  un-enrolled operator who gets nothing, an ungranted capability refused,
+  revocation cutting access off, and section isolation (another app sees none of
+  the traffic).
 
 ---
 
 ## CI
 
-La CI GitHub (`.github/workflows/ci.yml`) exécute les tests unitaires puis
-d'intégration à chaque push sur `main` et à chaque pull request.
+GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
+integration tests on every push to `main` and every pull request.
 
-Les tests tournent **dans l'image de base** (`docker/Dockerfile.base`, publiée
-par `base-image.yml`), qui embarque déjà un **liboqs compilé** et toutes les
-dépendances. On ne recompile donc plus la lourde bibliothèque C à chaque run, et
-on teste sur le runtime exact que l'app embarque (Python 3.13). Si l'image de
-base n'est pas joignable (premier bootstrap, ou PR de fork sans accès aux
-paquets), la CI la construit une fois localement pour rester verte — même repli
-que le job `docker`.
+The tests run **inside the base image** (`docker/Dockerfile.base`, published by
+`base-image.yml`), which already carries a **compiled liboqs** and every
+dependency. So the heavy C library is no longer rebuilt on every run, and we
+test on the exact runtime the app ships with (Python 3.13). If the base image is
+not reachable (first bootstrap, or a fork PR with no package access), CI builds
+it once locally to stay green — the same fallback as the `docker` job.
 
 ---
 
-## Où sont les tests
+## Where the tests are
 
 ```
 tests/
-├── test_packet.py / test_crypto.py / test_cert.py   — primitives
-├── test_node.py / test_routing.py / test_handshake.py — nœud & routage
-├── test_routing_stability.py                          — régressions de routage :
-│     taille d'un FOUND_NODE, acquisition de route hors boucle de réception,
-│     chemin retour appris du trafic, démontage borné
-├── test_e2e.py / test_data.py                        — chiffrement E2E
-├── test_invite*.py / test_trust.py                   — invitations & confiance
-├── test_fuzz.py                                       — entrées hostiles
-├── test_spool.py                                      — bundle & transport fichier
-├── test_webconsole.py / test_data_connector.py       — console & connecteur
-├── test_app_auth.py                                  — identité applicative :
-│     scoping (app/audience/purpose/ctx), fraîcheur, anti-rejeu, liaison de clé,
-│     parsing hostile, login mutuel
-├── test_fleet*.py / test_console_fleet.py            — app de gestion : les trois
-│     portes d'autorisation prises isolément (signature absente/modifiée/rejouée/
-│     émise pour un autre nœud ou un autre purpose, émetteur non enrôlé,
-│     capability absente), non-fuite des identifiants SSH, ledger qui échoue fermé,
-│     et le relais console `manage` : chemins refusés (fleet, remote, chat, hors
-│     API), découpage/réassemblage d'une réponse, réponse trop grande expliquée
-│     plutôt que tronquée, réponse forgée par un tiers ignorée, appels bornés
-├── test_fleet_deploy.py                               — déploiement distant et
-│     droit d'update : le script autorisé n'est pas dans le préfixe du nœud, la
-│     règle ne nomme qu'un chemin sans joker, le wrapper refuse tout argument,
-│     le plan préfère le droit quand il existe, `NoNewPrivileges` est vu **avant**
-│     de lancer sudo (et un nœud déjà root n'est pas concerné), et l'unité
-│     systemd suit le droit accordé au lieu de le défaire ; plus, pour le déploiement :
-│     install.sh voyage dans le payload et rien ne le réimplémente, aucun mot de
-│     passe écrit dans un script, élévation dite et non sondée, ordre des
-│     prompts (connexion puis élévation, jamais rejoué), refus d'un install
-│     système sans route vers root
-├── test_join_ticket.py / test_qr.py                   — ticket compact et QR :
-│     aller-retour, casse et espaces indifférents, faute de frappe attrapée,
-│     octets aléatoires qui ne lèvent que TicketError, nom d'hôte refusé ;
-│     pour le QR, structure et bornes, plus — si l'outillage optionnel est
-│     installé — égalité module par module avec un encodeur indépendant et
-│     décodage réel du SVG rendu
-├── test_console_auth.py                               — credential console :
-│     mot de passe jamais stocké, sel par credential, fichier corrompu ou
-│     algorithme inconnu refusés, entrée démesurée rejetée avant le hachage,
-│     mode 0600 même sous umask permissif
-├── test_trace.py                                      — trace protocolaire :
-│     jamais de payload dans ce qui est gardé, anneau borné, arrêt automatique,
-│     paquet malformé qui ne lève pas, débit calculé sur la fenêtre d'
-│     enregistrement (pas sur la rafale), fichier en 0600
-├── test_session_store.py                             — persistance (chiffrée)
-├── test_start_script.py / test_install_script.py     — les deux scripts, sourcés
-│     dont : environnement nu façon systemd (HOME absent, home inexistant ou non
-│     inscriptible) et réutilisation de liboqs (cache, candidat inchargeable
-│     jamais adopté, vérification à destination)
-│     en mode bibliothèque (rien n'est installé) : distro, sudo, sonde venv pour
-│     l'un ; détection d'init (systemctl sans systemd), privilèges, chemins,
-│     création du compte système dédié, répertoires jamais donnés à root par
-│     erreur, unités générées, copie d'arbre pour l'autre
-├── test_updater.py                                    — mise à jour GitHub :
-│     comparaison de versions, champs hostiles bornés, archive piégée (chemin
-│     absolu, traversée, lien symbolique, fichier spécial), état et venv jamais
-│     touchés, restauration après échec, dépôt épinglé
-├── test_config.py                                     — fichier de configuration :
-│     analyse hostile (ligne cassée, clé inconnue, fichier géant, octets
-│     aléatoires, valeur qui tente d'ouvrir une seconde ligne), précédence,
-│     réglages non éditables depuis la console, mode 0600, fusion installeur
-├── test_docker_image_tree.py                          — l'image embarque ce que
-│     le provisioning fleet exige (« no NMesh tree at /app »)
-├── test_webassets.py                                  — les assets web, vérifiés
-│     à la construction : le JS parse (une erreur de syntaxe = page blanche, pas
-│     un test rouge), aucun `$("id")` ne vise un élément absent, aucune ressource
-│     externe, aucun attribut `style=` (la CSP l'ignore en silence), et
-│     l'émulateur de terminal relit ce qu'un vrai shell écrit
-│     (`term_emulator_test.js`, exécuté sous node)
-├── test_transport_options.py                          — configurer un transport
-│     sans savoir ce qu'est un transport : coercition et bornes de chaque type
-│     (bool/int/float/text/choice/multi), application partielle (un champ mauvais
-│     ne jette pas les bons), SETTINGS remplacé et non muté, le fichier porte les
-│     clés `schéma.option` sans les valider, section bornée, aller-retour
-│     render/parse, et un réglage mal tapé est signalé au démarrage, jamais fatal
-├── test_link_stats.py                                 — ce que le mesh donne à
-│     voir : gigue qui distingue un lien stable d'un lien qui oscille, perte non
-│     déduite d'une seule sonde, historique borné, statut par adresse (en service
-│     > journal, « jamais essayée » ≠ « en panne »), journal borné sur deux axes,
-│     et un transport qui lève ou rend n'importe quoi ne casse pas le snapshot
-├── test_app_api.py                                    — la surface d'API des apps :
-│     une opération non déclarée n'existe pas (même si la méthode est là), un
-│     argument non déclaré est refusé et non ignoré, chaque valeur est coercée et
-│     bornée, une app arrêtée n'est plus joignable, une app qui lève ne rend pas
-│     ses internes — et ce que chat et fleet exposent est épinglé (élargir est un
-│     changement de sécurité)
-├── (webassets) la vue d'une node : une seule implémentation montée deux fois
-│     (dialogue de la console et page `/node`), elle ne propose que ce qu'une app
-│     déclare, elle masque le bouton qui pointe d'où l'on vient, et les adresses
-│     sont repliées par défaut ; côté console : `/node` est la seule page cadrable
-│     (`frame-ancestors 'self'`, un seul en-tête CSP), toutes les autres restent
-│     en `'none'`
-├── test_address_retry.py                              — redialer une adresse : à
-│     la main (un `proto://addr` ou toutes, et on dit ce que chacune a fait ; une
-│     adresse qui n'est pas celle de cette node est refusée sans composer), la
-│     boucle périodique (la cadence appartient au medium, la passe est plafonnée
-│     quel que soit le nombre de nodes en attente, une node déjà liée n'est jamais
-│     redialée, et la boucle survit à un medium qui lève), et le pilotage par
-│     latence (off tant qu'on ne l'a pas demandé, un gain marginal ne déplace
-│     rien, un vrai gain déplace et ferme l'ancien lien, jamais deux liens vers
-│     une même node après la mesure), et le système de priorités : bornes d'une
-│     priorité, curseur latence↔priorité aux deux extrêmes, une adresse jamais
-│     mesurée vaut le milieu, la latence courbe (une mesure absurde n'écrase pas
-│     les écarts réels), l'ordre montré à l'opérateur est celui qui compose, et
-│     un gestionnaire de transports qui ne sait pas répondre n'arrête rien
-├── test_ui_contrast.py                                — jetons de couleur : ratio
-│     WCAG de chaque paire texte/fond dans les deux thèmes, et aucune page ne
-│     redéfinit un jeton du système
-└── integration/                                       — nœuds réels (TCP + spool)
-      dont test_idle_chatter.py : deux nœuds joints et inactifs restent
-      silencieux (la boucle FIND_NODE/FOUND_NODE qui saturait le lien), et la
-      découverte fonctionne toujours quand il y a vraiment quelque chose à
-      trouver ; et test_join_ticket.py : join réel avec le seul ticket, usage
-      unique, ticket expiré, code forgé, porte « adresse publique confirmée » ;
-      et test_fleet.py qui fait traverser un vrai mesh à un appel console relayé
-      (réponse de 90 Ko, donc plusieurs frames) et vérifie qu'il est refusé sans
-      le grant `manage`
+├── test_packet.py / test_crypto.py / test_cert.py     — primitives
+├── test_node.py / test_routing.py / test_handshake.py — node & routing
+├── test_routing_stability.py                          — routing regressions:
+│     the size of a FOUND_NODE, acquiring a route outside the receive loop,
+│     the return path learned from traffic, bounded teardown
+├── test_e2e.py / test_data.py                         — E2E encryption
+├── test_invite*.py / test_trust.py                    — invitations & trust
+├── test_fuzz.py                                       — hostile inputs
+├── test_spool.py                                      — bundle & file transport
+├── test_webconsole.py / test_data_connector.py        — console & connector
+├── test_app_auth.py                                   — application identity:
+│     scoping (app/audience/purpose/ctx), freshness, anti-replay, key binding,
+│     hostile parsing, mutual login
+├── test_fleet*.py / test_console_fleet.py             — the management app: the
+│     three authorisation gates taken one at a time (a signature missing/altered/
+│     replayed/issued for another node or another purpose, an un-enrolled sender,
+│     a missing capability), SSH credentials that never leak, a ledger that fails
+│     closed, and the `manage` console relay: refused paths (fleet, remote, chat,
+│     outside the API), splitting and reassembling a reply, an over-large reply
+│     explained rather than truncated, a reply forged by a third party ignored,
+│     bounded calls
+├── test_fleet_deploy.py                               — remote deployment and the
+│     right to update: the authorised script is not inside the node's prefix, the
+│     rule names one path with no wildcard, the wrapper refuses every argument,
+│     the plan prefers the grant when there is one, `NoNewPrivileges` is seen
+│     **before** sudo is ever run (and a node already root is unaffected), and the
+│     systemd unit follows the grant instead of undoing it; plus, for deployment:
+│     install.sh travels in the payload and nothing reimplements it, no password
+│     written into a script, escalation stated rather than probed, prompt order
+│     (login then escalation, never replayed), refusing a system install with no
+│     route to root
+├── test_join_ticket.py / test_qr.py                   — compact ticket and QR:
+│     round trip, case and spaces immaterial, a typo caught, random bytes that
+│     raise nothing but TicketError, a hostname refused; for the QR, structure and
+│     bounds, plus — if the optional tooling is installed — module-by-module
+│     equality with an independent encoder and a real decode of the rendered SVG
+├── test_console_auth.py                               — console credential:
+│     the password never stored, a salt per credential, a corrupt file or an
+│     unknown algorithm refused, an outsized input rejected before hashing,
+│     mode 0600 even under a permissive umask
+├── test_trace.py                                      — protocol trace:
+│     never a payload in what is kept, a bounded ring, automatic stop, a
+│     malformed packet that does not raise, throughput computed over the
+│     recording window (not over the burst), the file in 0600
+├── test_session_store.py                              — persistence (encrypted)
+├── test_start_script.py / test_install_script.py      — both scripts, sourced in
+│     library mode (nothing is installed): distro, sudo, venv probe for one;
+│     init detection (systemctl without systemd), privileges, paths, creating the
+│     dedicated system account, directories never handed to root by mistake,
+│     generated units, tree copying for the other. Including: a bare
+│     systemd-style environment (no HOME, a home that does not exist or is not
+│     writable) and liboqs reuse (cache, an unloadable candidate never adopted,
+│     verification at the destination)
+├── test_updater.py                                    — GitHub update:
+│     version comparison, hostile fields bounded, a booby-trapped archive
+│     (absolute path, traversal, symlink, special file), state and venv never
+│     touched, restore after a failure, the repository pinned
+├── test_config.py                                     — configuration file:
+│     hostile parsing (a broken line, an unknown key, a huge file, random bytes,
+│     a value trying to open a second line), precedence, settings not editable
+│     from the console, mode 0600, installer merge
+├── test_docker_image_tree.py                          — the image carries what
+│     fleet provisioning requires ("no NMesh tree at /app")
+├── test_webassets.py                                  — the web assets, checked
+│     at build time: the JS parses (a syntax error is a blank page, not a red
+│     test), no `$("id")` points at a missing element, no external resource, no
+│     `style=` attribute (the CSP ignores it silently), and the terminal emulator
+│     reads back what a real shell writes (`term_emulator_test.js`, run under
+│     node). Also the shared node view: one implementation mounted in four places
+│     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
+│     offers what an app declares, it hides the button pointing back where you
+│     came from, and the addresses start folded away
+├── test_transport_options.py                          — configuring a transport
+│     without knowing what a transport is: coercion and bounds for every kind
+│     (bool/int/float/text/choice/multi), partial application (one bad field does
+│     not throw away the good ones), SETTINGS replaced and not mutated, the file
+│     carrying `scheme.option` keys without validating them, a bounded section, a
+│     render/parse round trip, and a mistyped setting reported at startup, never
+│     fatal
+├── test_link_stats.py                                 — what the mesh shows of
+│     itself: jitter telling a steady link from one that oscillates, loss not
+│     inferred from a single probe, a bounded history, per-address status (in use
+│     beats the log, "never tried" ≠ "broken"), a log bounded on both axes, and a
+│     transport that raises or returns nonsense not breaking the snapshot
+├── test_app_api.py                                    — the app API surface: an
+│     operation that is not declared does not exist (even when the method is
+│     there), an undeclared argument is refused and not ignored, every value is
+│     coerced and bounded, an app that stopped is no longer reachable, an app that
+│     raises does not hand over its internals — and what chat and fleet expose is
+│     pinned (widening it is a security change)
+├── test_address_retry.py                              — re-dialling an address:
+│     by hand (one `proto://addr` or all of them, and what each one did is
+│     reported; an address that is not this node's is refused without dialling),
+│     the periodic loop (the cadence belongs to the medium, a pass is capped
+│     however many nodes are waiting, a node already linked is never re-dialled,
+│     and the loop survives a medium that raises), and latency steering (off
+│     until asked for, a marginal gain moves nothing, a real gain moves and closes
+│     the old link, never two links to one node after the measurement), plus the
+│     priority system: a priority's bounds, the latency↔priority slider at both
+│     extremes, an address never measured worth the middle, latency that curves
+│     (an absurd measurement does not flatten the real differences), the order
+│     shown to the operator being the one that dials, and a transport manager that
+│     cannot answer stopping nothing
+├── test_ui_contrast.py                                — colour tokens: the WCAG
+│     ratio of every text/background pair in both themes, and no page redefining
+│     a token of the system
+└── integration/                                       — real nodes (TCP + spool)
+      including test_idle_chatter.py: two joined, idle nodes stay quiet (the
+      FIND_NODE/FOUND_NODE loop that used to saturate the link), and discovery
+      still works when there really is something to find; test_join_ticket.py:
+      a real join from the ticket alone, single use, an expired ticket, a forged
+      code, the "confirmed public address" gate; and test_fleet.py, which sends a
+      relayed console call across a real mesh (a 90 kB reply, so several frames)
+      and checks that it is refused without the `manage` grant
 ```
-</content>
