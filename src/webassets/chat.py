@@ -94,6 +94,14 @@ CHAT_HTML = """<!doctype html>
       </form>
     </section>
   </main>
+
+  <!-- Who you are talking to, as the console describes them: the same view the
+       node page serves, mounted here rather than framed. -->
+  <aside id="peer-panel" class="peer-panel" hidden aria-label="Node details">
+    <header class="peer-panel-head"><h2>Node</h2><span class="grow"></span>
+      <button id="peer-panel-close" class="icon" aria-label="Close">✕</button></header>
+    <div id="peer-view" class="peer-panel-body"></div>
+  </aside>
 </div>
 
 <div id="ctx" class="ctx hidden"></div>
@@ -119,6 +127,17 @@ CHAT_HTML = """<!doctype html>
       <div class="field"><span>Your node id</span>
         <div class="copyable"><code id="set-id" class="mono"></code></div>
         <span class="hint">This is what someone else needs to start a chat with you.</span></div>
+      <hr>
+      <h3>Preferences</h3>
+      <label class="field" for="set-details"><span>Opening someone&rsquo;s node details</span>
+        <select id="set-details">
+          <option value="panel">Beside the conversation</option>
+          <option value="window">In a separate window</option>
+          <option value="tab">In a new tab</option>
+        </select>
+        <span class="hint">Tapping the name at the top of a conversation shows what
+          this node knows about that identity — the link, its addresses, and what
+          each of you may do to the other.</span></label>
     </div>
     <footer class="sheet-foot"><button id="save-prof" class="primary">Save profile</button></footer>
   </div>
@@ -213,6 +232,14 @@ CHAT_PAGE_CSS = """
 .avatar-btn:hover{background:transparent;border-color:transparent}
 
 .thread{display:flex;flex-direction:column;min-width:0;min-height:0}
+.peer-panel{display:flex;flex-direction:column;min-width:0;min-height:0;
+  background:var(--canvas);border-left:1px solid var(--border)}
+.peer-panel-head{display:flex;align-items:center;gap:var(--s-2);
+  padding:var(--s-2) var(--s-4);border-bottom:1px solid var(--border);
+  background:var(--surface)}
+.peer-panel-head h2{font-size:var(--fs-md)}
+.peer-panel-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--s-4);
+  padding-bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
 .thread>.empty{flex:1 1 auto;justify-content:center}
 .conv{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
 .conv-head{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-4);
@@ -316,6 +343,23 @@ CHAT_PAGE_CSS = """
   .side-foot{padding-bottom:calc(var(--s-3) + env(safe-area-inset-bottom))}
   .log{padding:var(--s-3)}
 }
+
+/* The details panel, and what has to give way to it as the screen narrows.
+   Declared after the rules above on purpose: same specificity, so it is the
+   order that decides, and "the panel is open" has to be the last word. */
+.chat.show-peer{grid-template-columns:320px minmax(0,1fr) minmax(320px,380px)}
+@media (max-width:1180px){
+  /* No room for three: the conversation steps aside, its list stays.
+     Everything in the panel is *about* the conversation anyway. */
+  .chat.show-peer{grid-template-columns:320px minmax(0,1fr)}
+  .chat.show-peer .thread{display:none}
+}
+@media (max-width:860px){
+  .chat.show-peer{grid-template-columns:1fr}
+  .chat.show-peer .side{display:none}
+  .chat.show-peer .thread{display:none}
+  .peer-panel{border-left:0}
+}
 """
 
 
@@ -390,32 +434,32 @@ function convList(){
 }
 function renderList(){
   const q=($("side-search").value||"").trim().toLowerCase();
-  const el=$("chat-list"); el.innerHTML="";
   $("me-name").textContent=ST.pseudo||"Set your name";
   $("me-sub").textContent=ST.me?shortId(ST.me):"";
   $("me-av").outerHTML='<span id="me-av">'+avatarHTML(ST.me,ST.pseudo)+'</span>';
-  let shown=0;
+  // Built as a string and written only if it differs: this runs on the poll,
+  // and replacing the row under a pointer loses the click being made on it.
+  let html="", shown=0;
   for(const it of convList()){
     const name=convName(it.conv);
     if(q&&!name.toLowerCase().includes(q))continue;
     shown++;
-    const row=document.createElement("div"); row.className="row-chat"+(it.conv===sel?" active":"");
-    row.dataset.conv=it.conv;
     const typing=TYPING[it.conv];
     const prev=typing?"<i>typing…</i>":esc(preview(it.m));
     const un=UNREAD[it.conv]||0;
-    row.innerHTML=avatarHTML(convAvatarId(it.conv),name)+
+    html+='<div class="row-chat'+(it.conv===sel?" active":"")+'" data-conv="'+esc(it.conv)+'">'+
+      avatarHTML(convAvatarId(it.conv),name)+
       '<div class="body"><div class="top"><span class="rname">'+esc(name)+'</span>'+
       '<span class="time">'+(it.m?clock(it.m.t):"")+'</span></div>'+
       '<div class="top"><span class="prev">'+prev+'</span>'+
-      (un?'<span class="badge">'+un+'</span>':'')+'</div></div>';
-    el.appendChild(row);
+      (un?'<span class="badge">'+un+'</span>':'')+'</div></div></div>';
   }
   if(!shown)
-    el.innerHTML=q
+    html=q
       ? emptyHTML("Nothing matches that","Try a shorter name, or paste a node id.")
       : emptyHTML("No conversation yet",
                   "Start one with the pencil above, or by pasting someone's node id.");
+  setHTML("chat-list",html);
 }
 
 // ---- conversation ----
@@ -571,6 +615,7 @@ function openSettings(){
   $("set-id").textContent=ST.me||"";
   $("set-av").outerHTML='<span id="set-av" class="avatar big">'+
     (ST.has_avatar?'<img alt="" src="/api/chat/avatar?id=self&v='+VER+'">':esc(initials(ST.pseudo)))+'</span>';
+  $("set-details").value=detailMode();
   pendingAvatar=undefined; $("settings").showModal();
 }
 let pendingAvatar=undefined;   // undefined=unchanged, ""=clear, string=new b64
@@ -588,6 +633,7 @@ function resizeImage(file,size){return new Promise((res,rej)=>{
   img.onerror=rej; img.src=url;});
 }
 async function saveProfile(){
+  setDetailMode($("set-details").value);
   const body={pseudo:$("set-name").value.trim(),bio:$("set-bio").value};
   if(pendingAvatar!==undefined)body.avatar=pendingAvatar;
   await api("/api/chat/profile","POST",body).catch(()=>{});
@@ -679,6 +725,38 @@ async function createGroup(){
   $("newchat").close(); await poll(); if(j.id)openConv("g:"+j.id);
 }
 
+// ---- who you are talking to ----
+// The console already describes a node better than a chat page ever would:
+// the link, its addresses, what each side may do to the other. So chat does not
+// describe it again — it mounts the same view. Where it appears is a preference
+// about this screen, so it is stored per browser like the theme.
+const DETAIL_MODES=["panel","window","tab"];
+function detailMode(){
+  try{const v=localStorage.getItem("nmesh_chat_details");
+      if(DETAIL_MODES.includes(v))return v;}catch(_){}
+  return "panel";
+}
+function setDetailMode(mode){
+  if(!DETAIL_MODES.includes(mode))return;
+  try{localStorage.setItem("nmesh_chat_details",mode);}catch(_){}
+}
+function closePeerPanel(){
+  $("peer-panel").hidden=true;
+  $("app").classList.remove("show-peer");
+  $("peer-view").innerHTML="";
+}
+async function showPeer(id){
+  if(!id)return;
+  const mode=detailMode();
+  if(mode!=="panel"){ openLinked("/node?from=chat#"+id); return; }
+  $("peer-panel").hidden=false;
+  $("app").classList.add("show-peer");
+  await NODEVIEW.mount("peer-view",id,{
+    hide:["chat"],                       // you are already in the conversation
+    onGone(){ closePeerPanel(); sel=null; poll(); },
+  });
+}
+
 // ---- events ----
 function bind(){
   $("side-search").addEventListener("input",sideSearch);
@@ -705,7 +783,8 @@ function bind(){
     $("app").classList.remove("show-conv");
     toast(group?"Group left":"Contact removed");
     poll();});
-  $("info-btn").addEventListener("click",()=>{ if(sel&&!convIsGroup(sel)){/* future: peer profile */ } });
+  $("info-btn").addEventListener("click",()=>{ if(sel&&!convIsGroup(sel))showPeer(sel); });
+  $("peer-panel-close").addEventListener("click",closePeerPanel);
   $("chat-list").addEventListener("click",(e)=>{const r=e.target.closest(".row-chat");if(r)openConv(r.dataset.conv);});
   $("send-form").addEventListener("submit",(e)=>{e.preventDefault();sendText();});
   $("msg").addEventListener("input",()=>{autoGrow();onTyping();});

@@ -288,3 +288,43 @@ def test_the_addresses_are_folded_away_by_default():
     assert 'foldHTML("Addresses"' in source
     assert "<details class=\\\"card\\\"><summary>" in source or \
            '<details class="card"><summary>' in source
+
+
+# ── les trajets d'une app à l'autre ──────────────────────────────────────────
+
+def test_every_page_mounts_the_same_view_and_hides_the_way_it_came():
+    """Le bouton qui ramène là d'où l'on vient n'est pas dessiné : depuis chat
+    on ne propose pas chat, depuis fleet on ne propose pas fleet."""
+    assert 'NODEVIEW.mount("peer-view"' in webassets.CHAT_JS
+    assert 'hide:["chat"]' in webassets.CHAT_JS
+    assert 'NODEVIEW.mount("fleet-node-view"' in webassets.FLEET_JS
+    assert 'hide:["fleet"]' in webassets.FLEET_JS
+
+
+def test_chat_can_show_a_node_beside_a_window_or_a_tab():
+    assert 'id="peer-panel"' in webassets.CHAT_HTML
+    assert 'id="set-details"' in webassets.CHAT_HTML
+    for mode in ('value="panel"', 'value="window"', 'value="tab"'):
+        assert mode in webassets.CHAT_HTML, mode
+    # Sortir de chat passe par la page, pas par un cadre.
+    assert 'openLinked("/node?from=chat#"' in webassets.CHAT_JS
+
+
+def test_the_console_keeps_its_browser_preferences_in_the_browser():
+    """Thème et mode d'ouverture ne sont pas des réglages du nœud : deux
+    machines connectées à la même console gardent chacune les siens."""
+    assert 'data-subtab="appearance"' in webassets.INDEX_HTML
+    assert 'id="pref-open"' in webassets.INDEX_HTML and 'id="pref-theme"' in webassets.INDEX_HTML
+    assert 'localStorage.getItem("nmesh_open_mode")' in webassets.ui.JS
+    assert "/api/pref" not in webassets.APP_JS
+
+
+def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
+    """Remplacer une ligne sous le pointeur perd le clic en cours. Les listes
+    qui se repeignent au sondage écrivent seulement si le contenu a changé."""
+    assert "function setHTML(" in webassets.ui.JS
+    for source, holder in ((webassets.FLEET_JS, '"nodes"'),
+                           (webassets.FLEET_JS, '"operators"'),
+                           (webassets.FLEET_JS, '"inbox"'),
+                           (webassets.CHAT_JS, '"chat-list"')):
+        assert "setHTML(" + holder in source, holder

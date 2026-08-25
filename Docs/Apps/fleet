@@ -267,6 +267,17 @@ progression) : `step 1/2 : apt-get update`, puis la sortie réelle, puis le
 résultat avec le temps écoulé. La liste des nodes montre une barre et l'étape
 courante, et garde la dernière issue une fois terminé.
 
+## Voir une node comme la console la voit
+
+Chaque carte — une node gérée, ou une node qui gère celle-ci — porte un
+**Details** qui ouvre la fiche de nœud partagée dans la feuille de fleet : le
+lien réel, ses adresses, la latence, et ce que chacun a le droit de faire à
+l'autre. C'est la même vue que dans la console et dans chat
+(`src/webassets/nodeview.py`), montée ici plutôt que recopiée.
+
+Le bouton « Message » y est ; les boutons fleet n'y sont pas, puisqu'on est
+dedans.
+
 ## Ce qu'on fait d'une node gérée
 
 - **Status** — uptime, charge, mémoire, disques, distro, gestionnaire de paquets.

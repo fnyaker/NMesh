@@ -376,6 +376,7 @@ INDEX_HTML = """<!doctype html>
       <nav class="subnav" role="tablist" aria-label="Settings sections">
         <button role="tab" data-subtab="updates" aria-selected="true">Updates</button>
         <button role="tab" data-subtab="security" aria-selected="false">Security</button>
+        <button role="tab" data-subtab="appearance" aria-selected="false">This browser</button>
         <button role="tab" data-subtab="config" aria-selected="false">Configuration</button>
         <button role="tab" data-subtab="diagnostics" aria-selected="false">Diagnostics</button>
         <button role="tab" data-subtab="advanced" aria-selected="false">Advanced</button>
@@ -418,6 +419,35 @@ INDEX_HTML = """<!doctype html>
             </div>
             <div class="btn-row"><button id="pw-save" class="primary">Change password</button></div>
             <p id="pw-status" class="msg"></p>
+          </div>
+        </article>
+      </div>
+
+      <div data-sub="appearance" class="stack" hidden>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>This browser</h2>
+            <div class="sub">Preferences about this screen, kept here and nowhere else</div></div></div>
+          <div class="card-body">
+            <p class="muted small">These are not settings of the node: they live in this
+              browser, so a different machine signed into the same console keeps its own.
+              Nothing here is sent anywhere.</p>
+            <div class="form-grid">
+              <label class="field" for="pref-theme"><span>Theme</span>
+                <select id="pref-theme">
+                  <option value="system">Follow the system</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select></label>
+              <label class="field" for="pref-open"><span>Opening another app</span>
+                <select id="pref-open">
+                  <option value="auto">Decide by screen size</option>
+                  <option value="window">In a separate window</option>
+                  <option value="tab">In a new tab</option>
+                </select>
+                <span class="hint">Following a link into Chat or Fleet — messaging a node
+                  from its details, say. A window keeps what you were doing in view;
+                  a phone gets a tab either way.</span></label>
+            </div>
           </div>
         </article>
       </div>
@@ -734,6 +764,7 @@ $("logout").addEventListener("click", async () => {
 function onRoute(section, sub){
   if(section === "network" && sub === "peers") refreshPeers();
   if(section === "network" && sub === "reach") loadTransportOptions();
+  if(section === "settings" && sub === "appearance") paintPrefs();
   if(section === "apps") refreshApps();
   // Read on entry rather than on a timer: both files can be edited by hand, and
   // a stale form would offer to save values they no longer hold.
@@ -2326,6 +2357,22 @@ PALETTE.add("Switch theme", "Action", () => THEME.toggle());
 PALETTE.add("Back to this node", "Action", leaveContext);
 PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
 PALETTE.add("Transport settings", "Go to", () => ROUTER.go("network", "reach"));
+// Per-browser preferences. They are read where they are used (THEME, OPEN), so
+// there is nothing to apply here beyond storing the choice.
+function paintPrefs(){
+  $("pref-theme").value = THEME.stored() || "system";
+  $("pref-open").value = OPEN.read();
+}
+$("pref-theme").addEventListener("change", (event) => {
+  THEME.choose(event.target.value);
+  toast("Theme updated");
+});
+$("pref-open").addEventListener("change", (event) => {
+  OPEN.set(event.target.value);
+  toast("Links will open " + (event.target.value === "tab" ? "in a new tab"
+    : event.target.value === "window" ? "in a separate window"
+    : "to suit the screen"));
+});
 $("palette-open").addEventListener("click", () => PALETTE.open());
 $("more-search").addEventListener("click", () => PALETTE.open());
 $("more-logout").addEventListener("click", () => $("logout").click());

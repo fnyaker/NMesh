@@ -117,6 +117,29 @@ message is not.
 `tests/test_app_api.py` pins these: renaming one breaks a page, and *widening*
 one is a security change.
 
+## What it built
+
+The node view (`webassets/nodeview.py`) is the first thing on top of this. It is
+one description of a node, mounted in four places, and what it *offers* comes
+from the catalogue rather than from a list in its own source:
+
+| from | mounted in | what is dropped |
+|---|---|---|
+| the console | its node dialog | nothing |
+| chat | a panel beside the conversation | Message — you are already there |
+| fleet | its sheet | the fleet buttons — likewise |
+| a window or a tab | `/node#<id>?from=…` | whatever `from` names |
+
+Mounting rather than framing is deliberate. An `<iframe>` would have needed
+`frame-ancestors 'self'`, and it would have bought nothing: this is the same
+code in the same document either way. So every page this console serves keeps
+`frame-ancestors 'none'`.
+
+Where a link *leaves* the app — Message opens chat, Open in Fleet opens fleet —
+the operator chooses a window or a tab (Settings → This browser), and chat has
+its own choice for where node details appear. Both live in `localStorage`, like
+the theme: they are preferences about one screen, not properties of the node.
+
 ## Adding an operation
 
 1. Declare it in the bridge's `API`, with the narrowest parameter kinds that fit.
