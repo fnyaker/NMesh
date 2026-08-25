@@ -67,7 +67,8 @@ Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
 
 ## Observer le mesh en direct
 
-- **La carte** (Overview → Topology) a un bouton **Expand**. La carte étendue
+- **La carte** (Overview → Topology) s'ouvre en grand d'un clic — sur la carte
+  elle-même, ou sur **Expand**. La carte étendue
   étiquette chaque lien avec son medium, sa latence et sa perte, épaissit le
   trait avec le volume transporté, passe en ambre un lien qui perd des sondes, et
   liste les liens à droite avec leur courbe de latence. Elle se redessine à

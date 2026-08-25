@@ -111,7 +111,8 @@ INDEX_HTML = """<!doctype html>
             <span id="map-count" class="badge"></span>
             <button id="map-open" class="sm">Expand</button></div>
           <div class="card-body">
-            <svg id="graph" class="mesh-graph" viewBox="0 0 420 250" role="img" aria-label="Connected nodes"></svg>
+            <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
+                 aria-label="Connected nodes — click to open the full map"></svg>
             <p class="tiny muted">Solid: authenticated direct link. Dashed: session routed
               through a first hop — anything deeper is opaque to this node by design.</p>
           </div>
@@ -574,6 +575,7 @@ CONSOLE_PAGE_CSS = """
 #panel-overview .split{align-items:start}
 #graph{width:100%;height:auto;max-height:260px}
 #map-svg{width:100%;height:100%;min-height:320px}
+#graph.clickable{cursor:zoom-in}
 .mesh-graph .edge{stroke:var(--border-strong);stroke-width:1.5}
 .mesh-graph .edge.routed{stroke-dasharray:3 4;opacity:.75}
 .mesh-graph .node circle{stroke:var(--surface);stroke-width:2;transition:r var(--speed) var(--ease)}
@@ -983,7 +985,9 @@ $("map-svg").addEventListener("click", (event) => {
 });
 $("graph").addEventListener("click", (event) => {
   const node = event.target.closest && event.target.closest("[data-node-id]");
-  if(node) openNode(node.dataset.nodeId);
+  if(node){ openNode(node.dataset.nodeId); return; }
+  // Clicking the map itself is the obvious way to ask for a bigger one.
+  $("map-open").click();
 });
 $("graph").addEventListener("keydown", (event) => {
   if(!["Enter", " "].includes(event.key)) return;
