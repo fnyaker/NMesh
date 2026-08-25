@@ -136,6 +136,11 @@ tests/
 │     externe, aucun attribut `style=` (la CSP l'ignore en silence), et
 │     l'émulateur de terminal relit ce qu'un vrai shell écrit
 │     (`term_emulator_test.js`, exécuté sous node)
+├── test_link_stats.py                                 — ce que le mesh donne à
+│     voir : gigue qui distingue un lien stable d'un lien qui oscille, perte non
+│     déduite d'une seule sonde, historique borné, statut par adresse (en service
+│     > journal, « jamais essayée » ≠ « en panne »), journal borné sur deux axes,
+│     et un transport qui lève ou rend n'importe quoi ne casse pas le snapshot
 ├── test_ui_contrast.py                                — jetons de couleur : ratio
 │     WCAG de chaque paire texte/fond dans les deux thèmes, et aucune page ne
 │     redéfinit un jeton du système

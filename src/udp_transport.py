@@ -87,6 +87,11 @@ def _fmt_addr(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def _uri(scheme: str, host: str, port: int) -> str:
+    host = str(host).split("%", 1)[0]
+    return f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
+
+
 class _ReliableLink:
     """
     Reliability state for one direction of a UDP transport.
@@ -115,6 +120,9 @@ class _ReliableLink:
         # Keepalive
         self._last_recv_time: float = time.monotonic()
         self._keepalive_misses: int = 0
+        # Observability: how much work the reliability layer had to redo.
+        self.retransmits: int = 0
+        self.reordered: int = 0
 
     # -- send side --------------------------------------------------------
 
@@ -202,6 +210,7 @@ class _ReliableLink:
                 self._unacked[seq] = (frame, now + min(self._rto * 2, _RTO_MAX))
                 self._rto = min(self._rto * 2, _RTO_MAX)
                 frames.append(frame)
+        self.retransmits += len(frames)
         return frames
 
     # -- receive side -----------------------------------------------------
@@ -245,6 +254,7 @@ class _ReliableLink:
             # retransmit — drop it but re-ACK so the sender stops resending.
             if seq not in self._reorder and len(self._reorder) < _MAX_REORDER:
                 self._reorder[seq] = payload
+                self.reordered += 1
             self._schedule_ack()
             return []
 
@@ -299,6 +309,32 @@ class UDPTransport(BaseTransport):
         self._owns_socket: bool = False
         # Callback set by the server to feed raw datagrams into this transport
         self._on_datagram = None
+
+    def endpoints(self) -> dict:
+        local = None
+        if self._sock is not None:
+            try:
+                name = self._sock.get_extra_info("sockname")
+                if name:
+                    local = _uri("udp", name[0], name[1])
+            except Exception:
+                pass
+        remote = _uri("udp", *self._remote) if self._remote else None
+        return {"local": local, "remote": remote}
+
+    def stats(self) -> dict:
+        """What the reliability layer is doing right now. Retransmits rising on
+        a link whose RTT looks fine is the signature of a lossy path — a fact no
+        packet counter shows."""
+        link = self._link
+        return {
+            "retransmits": link.retransmits,
+            "reordered": link.reordered,
+            "unacked": len(link._unacked),
+            "reorder buffer": len(link._reorder),
+            "rto ms": round(link._rto * 1000, 1),
+            "keepalive misses": link._keepalive_misses,
+        }
 
     @classmethod
     def _from_server(cls, sock: asyncio.DatagramTransport,

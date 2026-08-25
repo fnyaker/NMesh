@@ -324,6 +324,11 @@ details.card[open]>summary{border-bottom:1px solid var(--border)}
 .dot.danger{background:var(--danger)} .dot.live{background:var(--ok);
   box-shadow:0 0 0 0 var(--ok);animation:nm-pulse 2.4s var(--ease) infinite}
 @keyframes nm-pulse{70%{box-shadow:0 0 0 5px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.spark{display:block;overflow:visible}
+.spark path{fill:none;stroke:var(--accent);stroke-width:1.5;stroke-linejoin:round;
+  stroke-linecap:round;vector-effect:non-scaling-stroke}
+.spark.warn path{stroke:var(--warn)}
+
 .kbd{font:600 var(--fs-2xs)/1 var(--mono);padding:4px 6px;border-radius:var(--r-sm);
   border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text-muted)}
 
@@ -430,6 +435,8 @@ dialog>form,dialog>.sheet{background:var(--surface);border:1px solid var(--borde
 .sheet-foot{padding:var(--s-3) var(--s-5);border-top:1px solid var(--border);
   background:var(--surface-2);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap}
 dialog.wide{max-width:min(880px,calc(100vw - var(--s-6)))}
+dialog.full{max-width:calc(100vw - var(--s-5));width:100%}
+dialog.full>.sheet{max-height:calc(100vh - var(--s-5));height:min(88vh,900px)}
 
 /* -- command palette ----------------------------------------------------- */
 dialog.palette{max-width:min(560px,calc(100vw - var(--s-4)));margin-top:12vh}
@@ -784,6 +791,22 @@ function skeletonHTML(rows){
 }
 function badge(text, tone){
   return '<span class="badge ' + (tone || "") + '">' + esc(text) + "</span>";
+}
+// A shape, not a chart: thirty numbers in the space of a word. Used wherever a
+// series would otherwise be a single figure that hides how it got there.
+function sparkHTML(values, options){
+  const points = (values || []).filter((value) => value != null);
+  if(points.length < 2) return "";
+  const width = (options && options.width) || 84, height = (options && options.height) || 20;
+  const high = Math.max(...points), low = Math.min(...points);
+  const span = (high - low) || 1;
+  const step = width / (points.length - 1);
+  const path = points.map((value, index) =>
+    (index ? "L" : "M") + (index * step).toFixed(1) + " " +
+    (height - 1 - ((value - low) / span) * (height - 2)).toFixed(1)).join(" ");
+  return '<svg class="spark" viewBox="0 0 ' + width + " " + height +
+    '" width="' + width + '" height="' + height + '" aria-hidden="true">' +
+    '<path d="' + path + '"/></svg>';
 }
 
 // ---- theme -----------------------------------------------------------------

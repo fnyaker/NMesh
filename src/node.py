@@ -21,7 +21,7 @@ from .invite import InviteManager, compute_response
 from .cert import Certificate
 from .cert_store import CertStore
 from .transport_manager import TransportManager
-from .metrics import NodeMetrics, Counters
+from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
 from .ip_utils import local_ip_addresses, expand_listen_uri, split_host_port
 from .net_monitor import NetMonitor
@@ -216,6 +216,8 @@ _NEIGHBOR_RETRY_TRACKED   = 128
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
+_DIAL_LOG_NODES           = 128    # nodes whose address outcomes we remember
+_DIAL_LOG_ADDRESSES       = 8      # addresses remembered per node
 # Acquiring a route (Kademlia lookup + dial + hole punch) takes seconds. It must
 # never run inside a peer's receive loop: that link would process nothing else
 # meanwhile — and the FOUND_NODE the lookup waits for often has to come back
@@ -855,6 +857,8 @@ class _Peer:
         # Liveness / round-trip: set when we PING, cleared+measured on the PONG.
         self.ping_sent_at: float | None = None
         self.last_rtt: float | None = None
+        self.quality = LinkQuality()  # latency spread and probe loss
+        self.connected_at: float = time.monotonic()
         self.counters = Counters()   # per-link throughput
         self.total = None            # node-wide Counters, set by the node
         # Node-wide Trace, set by the node alongside `total`. None (or disabled)
@@ -1139,6 +1143,9 @@ class MeshNode:
         # path that provably carried a packet; no remote relay identities are
         # inferred from this local observation.
         self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
+        # node hex -> {uri: {outcome, detail, at, ms}} — what each address did
+        # last time it was dialled. Bounded on both axes.
+        self._dial_log: OrderedDict[str, OrderedDict] = OrderedDict()
         # Background route acquisitions started from a receive loop (bounded).
         self._deferred_routes: set = set()
         self._query_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
@@ -1646,6 +1653,7 @@ class MeshNode:
         payload = _encode_addresses(self.advertised_uris())
         packet = Packet.create(PING, self._id.raw, NodeID(b"\xff" * 20).raw, payload)
         peer.ping_sent_at = time.monotonic()   # for RTT measurement on the PONG
+        peer.quality.on_ping()
         await peer.send(packet)
 
     def _recent_authed_peers(self, limit: int) -> list['_Peer']:
@@ -2569,6 +2577,8 @@ class MeshNode:
             attempt_timeout = remaining / max(1, len(uris) - index)
             peer = None
             authenticated = False
+            started = time.monotonic()
+            node_hex = node_id.raw.hex() if node_id is not None else ""
             try:
                 async with asyncio.timeout(attempt_timeout):
                     transport = await self._transport_manager.connect(uri)
@@ -2582,9 +2592,18 @@ class MeshNode:
                     if await self._wait_for_peer_authenticated(
                             peer, node_id, attempt_timeout):
                         authenticated = True
+                        self._note_dial(node_hex, uri, "connected",
+                                        elapsed=time.monotonic() - started)
                         return peer
-            except Exception:
-                pass
+                    self._note_dial(node_hex, uri, "no-answer",
+                                    "connected but never authenticated",
+                                    time.monotonic() - started)
+            except asyncio.TimeoutError:
+                self._note_dial(node_hex, uri, "timeout", "",
+                                time.monotonic() - started)
+            except Exception as exc:
+                self._note_dial(node_hex, uri, "refused",
+                                type(exc).__name__, time.monotonic() - started)
             finally:
                 if peer is not None and not authenticated:
                     try:
@@ -2648,6 +2667,7 @@ class MeshNode:
         """A JSON-serialisable view of the node. Built on the event loop, so it
         reads live state atomically (no awaits mid-iteration)."""
         peers = []
+        link_now = time.monotonic()
         for p in self._peers:
             peers.append({
                 "authenticated_id": p.authenticated_id.raw.hex() if p.authenticated_id else None,
@@ -2658,6 +2678,7 @@ class MeshNode:
                            if p.last_rtt is not None else None),
                 "counters": p.counters.as_dict(),
                 "transport": self._peer_scheme(p),
+                "link": self._link_view(p, link_now),
             })
         # Known nodes, most recently seen first, so the console can show the
         # latest N. seen_ago is seconds since we last added/refreshed the entry.
@@ -2673,11 +2694,13 @@ class MeshNode:
             routing.append({
                 "id": hexid,
                 "addresses": list(e.addresses),
+                "address_status": self._address_status(hexid, e.addresses, p),
                 "seen_ago": max(0.0, now - e.last_seen),
                 "connected": p is not None,
                 "rtt_ms": (round(p.last_rtt * 1000, 1)
                            if p is not None and p.last_rtt is not None else None),
                 "has_key": bool(e.dsa_pub),
+                "link": self._link_view(p, now) if p is not None else None,
             })
         return {
             "id": self._id.raw.hex(),
@@ -2723,6 +2746,11 @@ class MeshNode:
                 "transport": self._peer_scheme(peer),
                 "rtt_ms": (round(peer.last_rtt * 1000, 1)
                            if peer.last_rtt is not None else None),
+                "quality": peer.quality.as_dict(),
+                "counters": peer.counters.as_dict(),
+                "since": max(0.0, now - peer.connected_at),
+                "remote": (peer.remote_addr
+                           or self._link_view(peer, now).get("remote")),
                 "evidence": "authenticated-direct-link",
             })
         routed = []
@@ -2757,12 +2785,15 @@ class MeshNode:
                 known.append({
                     "id": node_id,
                     "addresses": sorted(e.addresses),
+                    "address_status": self._address_status(
+                        node_id, sorted(e.addresses), peer),
                     "seen_ago": max(0.0, now - e.last_seen),
                     "connected": peer is not None,
                     "rtt_ms": (round(peer.last_rtt * 1000, 1)
                                if peer is not None and peer.last_rtt is not None
                                else None),
                     "has_key": bool(e.dsa_pub),
+                    "link": self._link_view(peer, now) if peer is not None else None,
                 })
             return known
         if scope != "active":
@@ -2793,6 +2824,8 @@ class MeshNode:
                            if p.last_rtt is not None else None),
                 "counters": p.counters.as_dict(),
                 "transport": self._peer_scheme(p),
+                "address_status": self._address_status(node_id, sorted(addresses), p),
+                "link": self._link_view(p, now),
             })
         return out
 
@@ -2870,6 +2903,97 @@ class MeshNode:
         serve as a rendezvous/relay for others. Any transport may qualify."""
         return any(d.get("scope") == "world" and d.get("confirmed")
                    for d in self.reachability())
+
+    def _note_dial(self, node_hex: str, uri: str, outcome: str,
+                   detail: str = "", elapsed: float | None = None) -> None:
+        """Remember how one address behaved.
+
+        A node advertising four addresses of which one works is the normal case
+        on a real network, and "which one, and why not the others" is the first
+        question an operator asks. Bounded twice over: a fixed number of nodes,
+        a fixed number of addresses each."""
+        if not node_hex:
+            return
+        book = self._dial_log.get(node_hex)
+        if book is None:
+            while len(self._dial_log) >= _DIAL_LOG_NODES:
+                self._dial_log.pop(next(iter(self._dial_log)))
+            book = self._dial_log[node_hex] = OrderedDict()
+        book.pop(uri, None)
+        while len(book) >= _DIAL_LOG_ADDRESSES:
+            book.pop(next(iter(book)))
+        book[uri] = {"outcome": outcome, "detail": detail[:80],
+                     "at": time.monotonic(),
+                     "ms": None if elapsed is None else round(elapsed * 1000, 1)}
+
+    def _address_status(self, node_hex: str, addresses, peer) -> list[dict]:
+        """Every address we know for a node, and what happened at each.
+
+        The live link wins over the log: an address carrying traffic right now
+        is "in use" whatever it did last week."""
+        now = time.monotonic()
+        in_use = None
+        if peer is not None:
+            in_use = peer.remote_addr
+            if in_use is None:
+                try:
+                    in_use = (peer.transport.endpoints() or {}).get("remote")
+                except Exception:
+                    in_use = None
+        book = self._dial_log.get(node_hex) or {}
+        rows = []
+        for uri in list(addresses)[:_DIAL_LOG_ADDRESSES]:
+            record = book.get(uri)
+            if uri == in_use:
+                outcome, detail, ago, took = "in-use", "", None, None
+            elif record is None:
+                outcome, detail, ago, took = "untried", "", None, None
+            else:
+                outcome = record["outcome"]
+                detail = record["detail"]
+                ago = max(0.0, now - record["at"])
+                took = record["ms"]
+            rows.append({"uri": uri, "outcome": outcome, "detail": detail,
+                         "ago": ago, "ms": took})
+        # An address we are connected to but never advertised (an accepted link)
+        # still belongs in the list — it is the one actually carrying traffic.
+        if in_use and all(row["uri"] != in_use for row in rows):
+            rows.insert(0, {"uri": in_use, "outcome": "in-use", "detail": "",
+                            "ago": None, "ms": None})
+        return rows
+
+    def _link_view(self, peer: '_Peer', now: float) -> dict:
+        """One link, as an operator needs to see it.
+
+        The endpoints and the extra counters come from the transport itself
+        (``BaseTransport.endpoints`` / ``stats``), so a medium this file has
+        never heard of describes itself and shows up in the console with no
+        change here."""
+        endpoints = {"local": None, "remote": None}
+        stats: dict = {}
+        transport = peer.transport
+        try:
+            endpoints = transport.endpoints() or endpoints
+        except Exception:
+            pass          # a transport that cannot describe itself is not a fault
+        try:
+            stats = {str(key)[:32]: value
+                     for key, value in (transport.stats() or {}).items()
+                     if isinstance(value, (int, float, str, bool)) or value is None}
+        except Exception:
+            stats = {}
+        return {
+            "scheme": self._peer_scheme(peer),
+            "dialled": peer.remote_addr,
+            "local": endpoints.get("local"),
+            "remote": endpoints.get("remote"),
+            "direction": "outbound" if peer.is_client_side else "inbound",
+            "since": max(0.0, now - peer.connected_at),
+            "quality": peer.quality.as_dict(),
+            "counters": peer.counters.as_dict(),
+            "malformed": peer._malformed,
+            "stats": dict(list(stats.items())[:16]),
+        }
 
     def _peer_scheme(self, peer: '_Peer') -> str | None:
         """Best-effort transport scheme of a peer's link, for the console."""
@@ -3876,6 +4000,7 @@ class MeshNode:
     async def _handle_pong(self, peer: _Peer, packet: Packet) -> None:
         if peer.ping_sent_at is not None:
             peer.last_rtt = max(0.0, time.monotonic() - peer.ping_sent_at)
+            peer.quality.on_pong(peer.last_rtt)
             peer.ping_sent_at = None
 
     def _query_allowed(self, peer: '_Peer') -> bool:

@@ -161,3 +161,22 @@ def test_the_three_pages_share_one_design_system():
         assert css.startswith(webassets.ui.CSS)
     for script in (webassets.APP_JS, webassets.CHAT_JS, webassets.FLEET_JS):
         assert script.startswith(webassets.ui.JS)
+
+
+def test_the_two_maps_share_one_drawing_routine():
+    """La petite carte et la carte étendue sont la même fonction à deux tailles.
+    Deux implémentations divergeraient au premier changement."""
+    source = webassets.APP_JS
+    assert "function renderGraph(" in source
+    assert source.count("function renderGraph(") == 1
+    assert "GRAPH_SMALL" in source and "GRAPH_BIG" in source
+    assert 'id="map-dialog"' in webassets.INDEX_HTML
+    assert 'class="mesh-graph"' in webassets.INDEX_HTML
+
+
+def test_the_console_renders_whatever_a_transport_reports():
+    """Les compteurs d'un transport sont affichés par leurs propres noms : la
+    console ne connaît ni « retransmits » ni « SNR », et c'est le point."""
+    source = webassets.APP_JS
+    assert "function linkStatsHTML" in source
+    assert "Object.entries(stats)" in source

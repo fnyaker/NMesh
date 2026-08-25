@@ -13,6 +13,56 @@ Source : `transport.py`, `transport_manager.py`, `tcp_transport.py`,
   Le cœur ne connaît aucun transport concret. Écoute clée par URI exacte (un
   nœud peut écouter sur plusieurs adresses ; refuse un doublon d'URI).
 
+## S'observer soi-même : `endpoints()` et `stats()`
+
+Deux crochets optionnels sur `BaseTransport`, de la même forme que
+`reachability()` : **le medium se décrit, le cœur n'interprète rien.**
+
+```python
+def endpoints(self) -> dict:      # {"local": uri|None, "remote": uri|None}
+def stats(self) -> dict:          # {"retransmits": 12, "rto ms": 50.0, …}
+```
+
+- `endpoints()` n'est **pas** l'URI qu'on a composée : c'est le point de
+  terminaison tel que le medium le voit maintenant. Sur un lien *accepté* c'est
+  la seule adresse qui existe, et c'est celle qui dit à l'opérateur laquelle des
+  adresses d'un pair porte réellement le trafic.
+- `stats()` est libre par construction : un lien UDP a des retransmissions et un
+  buffer de réordonnancement, un lien série a un débit, une liaison LoRa a un
+  SNR. La console **affiche les noms qu'on lui donne**, donc un transport que la
+  console n'a jamais vu devient observable sans une ligne de code côté console.
+
+Deux règles, parce que c'est *pollé* : les valeurs sont des scalaires
+JSON-compatibles, et la lecture ne bloque jamais. Le cœur se protège quand même
+— un transport qui lève, qui rend un objet imbriqué ou cinquante clés ne casse
+pas le snapshot : il est ignoré, filtré, borné à 16 entrées
+(`tests/test_link_stats.py`).
+
+Implémentations actuelles : TCP rend le remplissage du buffer d'écriture (un
+nombre qui reste haut = ce pair ne draine pas, ce qu'aucun compteur de paquets
+ne montre) et `TCP_NODELAY` ; UDP rend retransmissions, réordonnancements,
+frames non acquittées, RTO courant et keepalives manqués.
+
+## Qualité d'un lien (`metrics.LinkQuality`)
+
+Un RTT unique ne distingue pas un lien stable à 40 ms d'un lien qui oscille
+entre 5 et 400 ms. Chaque lien garde donc les **32 derniers échantillons**
+(borné, minuscule) réduits aux quatre chiffres qu'on lit vraiment : dernier,
+meilleur, pire, **gigue** (moyenne des écarts consécutifs). La **perte** est
+comptée à part — une sonde qui ne revient jamais n'a pas d'aller-retour à
+moyenner — et vaut `None` tant qu'une seule sonde est en vol : une sonde en
+attente n'est pas 100 % de perte.
+
+## Statut de chaque adresse (`node._dial_log`)
+
+Un nœud qui annonce quatre adresses dont une marche est le cas normal sur un
+vrai réseau, et « laquelle, et pourquoi pas les autres » est la première
+question qu'on se pose. Chaque tentative est donc notée : `connected`,
+`no-answer`, `timeout`, `refused`, avec le motif et la durée. Le lien vivant
+gagne sur le journal (une adresse qui porte du trafic est `in-use`, quoi qu'elle
+ait fait la semaine dernière), et une adresse jamais essayée est `untried`, pas
+en panne. Borné deux fois : 128 nœuds, 8 adresses chacun.
+
 ## TCP (`tcp_transport.py`)
 
 - Framing : préfixe **2 octets** (uint16 big-endian) = taille du `Packet` suivant.

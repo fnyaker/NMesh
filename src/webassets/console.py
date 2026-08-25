@@ -108,9 +108,10 @@ INDEX_HTML = """<!doctype html>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Topology</h2>
             <div class="sub">Direct links, and sessions routed through them</div></div>
-            <span id="map-count" class="badge"></span></div>
+            <span id="map-count" class="badge"></span>
+            <button id="map-open" class="sm">Expand</button></div>
           <div class="card-body">
-            <svg id="graph" viewBox="0 0 420 250" role="img" aria-label="Connected nodes"></svg>
+            <svg id="graph" class="mesh-graph" viewBox="0 0 420 250" role="img" aria-label="Connected nodes"></svg>
             <p class="tiny muted">Solid: authenticated direct link. Dashed: session routed
               through a first hop — anything deeper is opaque to this node by design.</p>
           </div>
@@ -184,7 +185,8 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>Transports</h2>
             <div class="sub">Every medium this node can speak, and what is bound</div></div></div>
           <div class="card-body tight"><div class="table-wrap"><table>
-            <thead><tr><th>Scheme</th><th class="num">Peers</th><th class="num">Listeners</th><th>Ports</th></tr></thead>
+            <thead><tr><th>Scheme</th><th class="num">Links</th><th class="num">Latency</th>
+              <th class="num">Carried</th><th class="num">Listeners</th><th>Ports</th></tr></thead>
             <tbody id="transport-list"></tbody></table></div></div>
         </article>
         <article class="card">
@@ -479,16 +481,40 @@ INDEX_HTML = """<!doctype html>
   </main>
 </div>
 
-<dialog id="node-dialog" aria-labelledby="node-dialog-title">
+<dialog id="node-dialog" class="wide" aria-labelledby="node-dialog-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="node-dialog-title">Node</h2>
       <button id="node-dialog-close" class="icon" aria-label="Close">✕</button></header>
     <div class="sheet-body"><dl id="node-detail-body" class="kv"></dl>
+      <div id="node-detail-extra" class="stack"></div>
       <p id="detail-status" class="msg"></p></div>
     <footer class="sheet-foot">
       <button id="detail-forget" class="danger">Forget node</button>
       <button id="detail-ping" class="primary">Ping node</button>
     </footer>
+  </div>
+</dialog>
+
+<dialog id="map-dialog" class="full" aria-labelledby="map-title">
+  <div class="sheet">
+    <header class="sheet-head">
+      <h2 id="map-title">Mesh map</h2>
+      <span class="row small muted gap-4 map-legend">
+        <span class="row"><i class="dot self"></i>this node</span>
+        <span class="row"><i class="dot direct"></i>direct link</span>
+        <span class="row"><i class="dot routed"></i>routed session</span>
+      </span>
+      <span class="grow"></span>
+      <span id="map-summary" class="badge"></span>
+      <button id="map-close" class="icon" aria-label="Close">✕</button>
+    </header>
+    <div class="sheet-body map-body">
+      <svg id="map-svg" class="mesh-graph" viewBox="0 0 900 520" role="img" aria-label="Mesh map"></svg>
+      <aside class="map-side">
+        <h3>Links</h3>
+        <div id="map-links" class="stack"></div>
+      </aside>
+    </div>
   </div>
 </dialog>
 
@@ -537,21 +563,43 @@ CONSOLE_PAGE_CSS = """
    the graph, and growing the canvas to fill it fed back into the row height. */
 #panel-overview .split{align-items:start}
 #graph{width:100%;height:auto;max-height:260px}
-#graph .edge{stroke:var(--border-strong);stroke-width:1.5}
-#graph .edge.routed{stroke-dasharray:3 4;opacity:.75}
-#graph .node circle{stroke:var(--surface);stroke-width:2;transition:r var(--speed) var(--ease)}
-#graph .node.direct circle{fill:var(--accent)}
-#graph .node.routed circle{fill:var(--warn)}
-#graph .node.self circle{fill:var(--text)}
-#graph .node.self text{fill:var(--text);font-weight:700}
+#map-svg{width:100%;height:100%;min-height:320px}
+.mesh-graph .edge{stroke:var(--border-strong);stroke-width:1.5}
+.mesh-graph .edge.routed{stroke-dasharray:3 4;opacity:.75}
+.mesh-graph .node circle{stroke:var(--surface);stroke-width:2;transition:r var(--speed) var(--ease)}
+.mesh-graph .node.direct circle{fill:var(--accent)}
+.mesh-graph .node.routed circle{fill:var(--warn)}
+.mesh-graph .node.self circle{fill:var(--text)}
+.mesh-graph .node.self text{fill:var(--text);font-weight:700}
 /* Labels sit over the edges: painting the stroke first gives each one a halo of
    the card's own background, so nothing has to be moved out of the way. */
-#graph .node text{font:600 9px var(--font);fill:var(--text-muted);text-anchor:middle;
+.mesh-graph .node text{font:600 9px var(--font);fill:var(--text-muted);text-anchor:middle;
   paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round}
-#graph .node{cursor:pointer}
-#graph .node:hover circle,#graph .node:focus-visible circle{r:13}
-#graph .node:focus-visible{outline:none}
-#graph .node:focus-visible circle{stroke:var(--ring);stroke-width:2.5}
+.mesh-graph .node{cursor:pointer}
+.mesh-graph .node:hover circle,.mesh-graph .node:focus-visible circle{r:13}
+.mesh-graph .node:focus-visible{outline:none}
+.mesh-graph .node:focus-visible circle{stroke:var(--ring);stroke-width:2.5}
+
+#map-svg{width:100%;height:100%;min-height:320px}
+.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:var(--s-4);
+  padding:var(--s-4);overflow:hidden;flex:1 1 auto}
+.map-side{overflow-y:auto;min-height:0;border-left:1px solid var(--border);
+  padding-left:var(--s-4)}
+.map-legend .dot.self{background:var(--text)}
+.map-legend .dot.direct{background:var(--accent)}
+.map-legend .dot.routed{background:var(--warn)}
+.map-link{border:1px solid var(--border);border-radius:var(--r-md);padding:var(--s-2) var(--s-3);
+  cursor:pointer;font-size:var(--fs-sm);background:var(--surface)}
+.map-link:hover,.map-link.on{border-color:var(--accent);background:var(--accent-soft)}
+.map-link .top{display:flex;gap:var(--s-2);align-items:baseline}
+.map-link .top b{font-family:var(--mono);font-size:var(--fs-xs);flex:1 1 auto;min-width:0;
+  overflow:hidden;text-overflow:ellipsis}
+.mesh-graph .edge.lossy{stroke:var(--warn)}
+#map-svg .edge.on{stroke:var(--accent);stroke-width:3}
+#map-svg .node text{font-size:12px}
+#map-svg .elabel{font:600 10px var(--font);fill:var(--text-muted);text-anchor:middle;
+  paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round}
+@media (max-width:900px){.map-body{grid-template-columns:1fr}.map-side{display:none}}
 
 .qr-holder{display:flex;justify-content:center;padding:var(--s-4);border-radius:var(--r-md);
   background:#fff;border:1px solid var(--border)}
@@ -640,7 +688,7 @@ async function tick(){
     STATE = await response.json();
     trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
-    paintApps(STATE); paintReach(STATE);
+    paintApps(STATE); paintReach(STATE); paintMap();
   }catch(_){
     $("rail-dot").className = "dot danger";
     $("rail-text").textContent = "Console unreachable";
@@ -768,53 +816,160 @@ function svgEl(name, attrs){
   Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
   return node;
 }
-function drawGraph(state){
-  const svg = $("graph");
+// One drawing routine, two sizes. The small card is a glance; the expanded one
+// is where the mesh is actually watched, so it labels every edge with the
+// medium and the latency, and thickens it with what it carries.
+const GRAPH_SMALL = {w:420, h:250, rx:96, ry:58, rx2:168, ry2:100, r:9, self:12,
+                     labels:false};
+const GRAPH_BIG = {w:900, h:520, rx:250, ry:150, rx2:390, ry2:225, r:13, self:18,
+                   labels:true};
+
+function drawGraph(state){ renderGraph($("graph"), state, GRAPH_SMALL); }
+
+// Every direct edge shares one endpoint, so labelling at the midpoint piles
+// them all around the centre. Two thirds of the way out, nudged off the line,
+// they sit next to the node they describe instead.
+function edgeLabelAt(from, to, share){
+  const t = share == null ? .66 : share;
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  return {x:from.x + dx * t - (dy / length) * 9,
+          y:from.y + dy * t + (dx / length) * 9 - 2};
+}
+
+function renderGraph(svg, state, size){
   svg.replaceChildren();
+  svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
   const topology = state.topology || {}, direct = topology.direct || [], routed = topology.routed || [];
-  const centre = {x:210, y:120}, place = new Map();
+  const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
     const step = Math.PI * 2 / Math.max(1, direct.length);
-    const angle = step * index - Math.PI / 2 + step / 2;
-    place.set(node.id, {x:centre.x + Math.cos(angle) * 96, y:centre.y + Math.sin(angle) * 58});
+    const angle = step * index - Math.PI / 2 + (direct.length > 1 ? step / 2 : Math.PI / 2);
+    place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx,
+                        y:centre.y + Math.sin(angle) * size.ry});
   });
   routed.forEach((node, index) => {
     const step = Math.PI * 2 / Math.max(1, routed.length);
     const angle = step * index - Math.PI / 2 + step / 2 + .3;
-    place.set(node.id, {x:centre.x + Math.cos(angle) * 168, y:centre.y + Math.sin(angle) * 100});
+    place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx2,
+                        y:centre.y + Math.sin(angle) * size.ry2});
   });
+  // Thickness carries volume, colour carries health: a fat pale line is a busy
+  // healthy link, a thin amber one is a link losing probes.
+  const weight = (bytes) => Math.min(5, 1.2 + Math.log10(1 + (bytes || 0) / 1024) * 0.7);
   direct.forEach((node) => {
     const point = place.get(node.id);
-    svg.appendChild(svgEl("line", {x1:centre.x, y1:centre.y, x2:point.x, y2:point.y, class:"edge"}));
+    const counters = node.counters || {};
+    const quality = node.quality || {};
+    const lossy = (quality.loss || 0) >= 0.1 || (quality.jitter_ms || 0) > 150;
+    const line = svgEl("line", {
+      x1:centre.x, y1:centre.y, x2:point.x, y2:point.y,
+      class:"edge" + (lossy ? " lossy" : ""), "data-edge":node.id,
+      "stroke-width":weight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2)});
+    svg.appendChild(line);
+    if(size.labels){
+      const label = svgEl("text", Object.assign(
+        edgeLabelAt(centre, point), {class:"elabel"}));
+      label.textContent = (node.transport || "?") +
+        (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
+        (quality.loss ? " · " + Math.round(quality.loss * 100) + "% loss" : "");
+      svg.appendChild(label);
+    }
   });
   routed.forEach((node) => {
     const from = place.get(node.via) || centre, to = place.get(node.id);
-    svg.appendChild(svgEl("line", {x1:from.x, y1:from.y, x2:to.x, y2:to.y, class:"edge routed"}));
+    svg.appendChild(svgEl("line", {x1:from.x, y1:from.y, x2:to.x, y2:to.y,
+                                   class:"edge routed"}));
+    if(size.labels){
+      const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
+                                                {class:"elabel"}));
+      label.textContent = "via " + shortId(node.via);
+      svg.appendChild(label);
+    }
   });
-  const dot = (id, point, kind, label) => {
+  const dot = (id, point, kind, label, caption) => {
     const group = svgEl("g", {class:"node " + kind, tabindex:"0", role:"button",
                               "data-node-id":id, "aria-label":label});
-    group.appendChild(svgEl("circle", {cx:point.x, cy:point.y, r:kind === "self" ? 12 : 9}));
-    const text = svgEl("text", {x:point.x, y:point.y + (kind === "self" ? 27 : 20)});
+    group.appendChild(svgEl("circle", {cx:point.x, cy:point.y,
+                                       r:kind === "self" ? size.self : size.r}));
+    const text = svgEl("text", {x:point.x,
+                                y:point.y + (kind === "self" ? size.self + 15 : size.r + 11)});
     text.textContent = kind === "self" ? "this node" : shortId(id);
     group.appendChild(text);
+    if(caption && size.labels){
+      const under = svgEl("text", {x:point.x, y:point.y + size.r + 22, class:"elabel"});
+      under.textContent = caption;
+      group.appendChild(under);
+    }
     svg.appendChild(group);
   };
-  direct.forEach((node) => dot(node.id, place.get(node.id), "direct", "Direct link to " + node.id));
+  direct.forEach((node) => dot(node.id, place.get(node.id), "direct",
+                               "Direct link to " + node.id,
+                               node.since ? "up " + fmtDuration(node.since) : ""));
   routed.forEach((node) => dot(node.id, place.get(node.id), "routed",
                                "Routed session with " + node.id + " via " + node.via));
   dot(state.id, centre, "self", "This node");
   if(!direct.length && !routed.length){
-    const text = svgEl("text", {x:centre.x, y:centre.y + 46, class:"lonely"});
+    const text = svgEl("text", {x:centre.x, y:centre.y + size.self + 34, class:"lonely"});
     text.setAttribute("fill", "var(--text-faint)");
     text.setAttribute("text-anchor", "middle");
     text.textContent = "no links yet";
     svg.appendChild(text);
   }
-  $("map-count").textContent = direct.length + " direct" +
+  const summary = direct.length + " direct" +
     (routed.length ? " · " + routed.length + " routed" : "");
+  if(size.labels) $("map-summary").textContent = summary;
+  else $("map-count").textContent = summary;
 }
+
+// ---- the expanded map ------------------------------------------------------
+// Same data, more of it: the small card answers "am I connected", this answers
+// "what is the mesh doing right now".
+let MAP_PICK = null;
+
+function paintMap(){
+  const dialog = $("map-dialog");
+  if(!dialog.open || !STATE) return;
+  renderGraph($("map-svg"), STATE, GRAPH_BIG);
+  const direct = (STATE.topology || {}).direct || [];
+  $("map-links").innerHTML = direct.length ? direct.map((node) => {
+    const quality = node.quality || {}, counters = node.counters || {};
+    const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+    return '<div class="map-link' + (MAP_PICK === node.id ? " on" : "") +
+      '" data-link="' + esc(node.id) + '">' +
+      '<div class="top"><b>' + esc(shortId(node.id)) + "</b>" +
+      badge(node.transport || "?", "") +
+      (loss ? badge(loss + "%", "warn") : "") + "</div>" +
+      '<div class="tiny muted">' +
+      (node.rtt_ms == null ? "no probe yet" : node.rtt_ms + " ms" +
+        (quality.jitter_ms ? " ±" + quality.jitter_ms : "")) +
+      " · " + fmtBytes((counters.bytes_in || 0) + (counters.bytes_out || 0)) +
+      (node.since ? " · up " + fmtDuration(node.since) : "") + "</div>" +
+      (node.remote ? '<div class="tiny muted mono truncate">' + esc(node.remote) + "</div>" : "") +
+      sparkHTML(quality.samples_ms, {width:240, height:22}) + "</div>";
+  }).join("") : emptyHTML("No direct link", "Nothing to watch until this node has a neighbour.");
+  highlightEdge();
+}
+function highlightEdge(){
+  $$("#map-svg [data-edge]").forEach((edge) =>
+    edge.classList.toggle("on", edge.dataset.edge === MAP_PICK));
+}
+$("map-open").addEventListener("click", () => {
+  $("map-dialog").showModal();
+  paintMap();
+});
+$("map-close").addEventListener("click", () => $("map-dialog").close());
+$("map-links").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-link]");
+  if(!row) return;
+  MAP_PICK = MAP_PICK === row.dataset.link ? null : row.dataset.link;
+  paintMap();
+});
+$("map-svg").addEventListener("click", (event) => {
+  const node = event.target.closest && event.target.closest("[data-node-id]");
+  if(node) openNode(node.dataset.nodeId);
+});
 $("graph").addEventListener("click", (event) => {
   const node = event.target.closest && event.target.closest("[data-node-id]");
   if(node) openNode(node.dataset.nodeId);
@@ -883,11 +1038,19 @@ async function paintNodes(kind){
         ((node.addresses || [])[0] || "").split(":", 1)[0] || "—";
       const tone = node.connected ? "ok" : (node.has_key ? "" : "warn");
       const label = node.connected ? "authenticated" : (node.has_key ? "key known" : "no key");
+      const quality = (node.link || {}).quality || {};
+      const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
       return '<tr data-clickable data-node-id="' + esc(node.id) + '">' +
         '<td class="mono">' + esc(shortId(node.id)) + "</td>" +
-        "<td>" + badge(label, tone) + "</td>" +
-        "<td>" + esc(transport) + "</td>" +
-        '<td class="num">' + (node.rtt_ms == null ? "—" : esc(node.rtt_ms) + " ms") + "</td>" +
+        "<td>" + badge(label, tone) +
+          (loss ? " " + badge(loss + "% loss", "warn") : "") + "</td>" +
+        "<td>" + esc(transport) +
+          ((node.link && node.link.remote)
+            ? '<div class="tiny muted mono truncate">' + esc(node.link.remote) + "</div>" : "") +
+        "</td>" +
+        '<td class="num">' + (node.rtt_ms == null ? "—" : esc(node.rtt_ms) + " ms") +
+          (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
+            " ms</div>" : "") + "</td>" +
         "<td>" + (node.seen_ago == null ? "live" : esc(fmtAgo(node.seen_ago))) + "</td>" +
         '<td class="tight"><button class="sm" data-node-id="' + esc(node.id) +
         '">Details</button></td></tr>';
@@ -947,31 +1110,92 @@ async function openNode(id, seed){
     [known, active] = await Promise.all([exactNode("known", id).catch(() => null),
                                          exactNode("active", id).catch(() => null)]);
   const node = Object.assign({}, known || {}, active || {}, seed || {}, {id});
-  const addresses = node.addresses || [];
+  const link = node.link || null;
   const rows = [
     ["Node id", '<span class="mono">' + esc(id) + "</span>"],
     ["Relationship", node.self ? "This console's node" : active ? "Authenticated direct link"
       : known ? "Known routing identity" : "Routed session endpoint"],
     ["Session", node.has_session === false ? "Not established"
       : active ? "Open" : node.self ? "Local" : "Not directly observed"],
-    ["Direction", node.self ? "Local" : node.is_client_side == null ? "Unknown"
-      : node.is_client_side ? "Outbound" : "Inbound"],
-    ["Transport", esc(node.transport || "Unknown")],
-    ["Round trip", node.rtt_ms == null ? "Not measured" : esc(node.rtt_ms) + " ms"],
     ["Last seen", node.seen_ago == null ? "Live" : esc(fmtAgo(node.seen_ago))],
     ["Identity key", node.has_key == null ? "Unknown" : node.has_key ? "Known" : "Missing"],
-    ["Malformed input", node.malformed == null ? "—" : esc(node.malformed)],
-    ["Traffic", node.counters ? esc(fmtBytes(node.counters.bytes_in)) + " in / " +
-      esc(fmtBytes(node.counters.bytes_out)) + " out" : "—"],
-    ["Addresses", addresses.length
-      ? addresses.map((address) => '<div class="mono">' + esc(address) + "</div>").join("")
-      : "None advertised"],
   ];
+  if(link){
+    rows.push(["Link", esc(link.scheme || "?") + " · " + esc(link.direction) +
+      " · up " + esc(fmtDuration(link.since))]);
+    if(link.local) rows.push(["Local endpoint", '<span class="mono">' + esc(link.local) + "</span>"]);
+    if(link.remote) rows.push(["Remote endpoint", '<span class="mono">' + esc(link.remote) + "</span>"]);
+    if(link.dialled && link.dialled !== link.remote)
+      rows.push(["Dialled", '<span class="mono">' + esc(link.dialled) + "</span>"]);
+  }else{
+    rows.push(["Transport", esc(node.transport || "Unknown")]);
+  }
+  rows.push(["Traffic", node.counters
+    ? esc(fmtBytes(node.counters.bytes_in)) + " in / " +
+      esc(fmtBytes(node.counters.bytes_out)) + " out" : "—"]);
+  rows.push(["Malformed input", node.malformed == null ? "—" : esc(node.malformed)]);
   $("node-detail-body").innerHTML = rows.map(([key, value]) =>
     "<dt>" + key + "</dt><dd>" + value + "</dd>").join("");
+  $("node-detail-extra").innerHTML =
+    qualityHTML(link ? link.quality : null, node.rtt_ms) +
+    linkStatsHTML(link) +
+    addressHTML(node.address_status, node.addresses);
   $("detail-ping").hidden = !!node.self;
   $("detail-forget").hidden = !!node.self;
 }
+// One RTT number cannot tell a steady link from a flapping one, so the dialog
+// shows the spread and what the probes lost, with the samples behind it.
+function qualityHTML(quality, fallback){
+  if(!quality || !quality.probes){
+    return fallback == null ? "" :
+      '<div class="stats"><div class="stat sm"><span class="v">' + esc(fallback) +
+      ' ms</span><span class="k">Round trip</span></div></div>';
+  }
+  const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+  const tone = (loss != null && loss >= 10) ? "warn" : "";
+  const cell = (label, value, extra) =>
+    '<div class="stat sm"><span class="v">' + value + '</span><span class="k">' +
+    esc(label) + "</span>" + (extra || "") + "</div>";
+  return "<h3>Latency</h3>" +
+    '<div class="stats">' +
+    cell("Round trip", quality.rtt_ms == null ? "—" : quality.rtt_ms + " ms",
+         '<div class="' + (tone ? "spark warn" : "") + '">' +
+         sparkHTML(quality.samples_ms) + "</div>") +
+    cell("Best / worst", (quality.best_ms == null ? "—" : quality.best_ms) + " / " +
+         (quality.worst_ms == null ? "—" : quality.worst_ms) + " ms") +
+    cell("Jitter", quality.jitter_ms == null ? "—" : quality.jitter_ms + " ms") +
+    cell("Probe loss", loss == null ? "—" : loss + "%") +
+    "</div>" +
+    '<p class="tiny muted">' + esc(quality.probes) + " liveness probe(s) sent on this link.</p>";
+}
+
+// Whatever the medium chose to report. The console does not know what a
+// retransmit or an SNR is — it renders the names it is given.
+function linkStatsHTML(link){
+  const stats = link && link.stats;
+  if(!stats || !Object.keys(stats).length) return "";
+  return "<h3>" + esc(link.scheme || "Transport") + " counters</h3>" +
+    '<dl class="kv">' + Object.entries(stats).map(([key, value]) =>
+      "<dt>" + esc(key) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl>";
+}
+
+const ADDRESS_TONE = {"in-use":"ok", connected:"ok", timeout:"warn",
+                      refused:"danger", "no-answer":"warn", untried:""};
+function addressHTML(status, fallback){
+  const rows = status && status.length ? status
+    : (fallback || []).map((uri) => ({uri, outcome:"untried"}));
+  if(!rows.length) return "<h3>Addresses</h3><p class=\"small muted\">None advertised.</p>";
+  return "<h3>Addresses</h3><div class=\"table-wrap\"><table><thead><tr>" +
+    "<th>Address</th><th>State</th><th class=\"num\">Tried</th></tr></thead><tbody>" +
+    rows.map((row) => "<tr><td class=\"mono\">" + esc(row.uri) + "</td><td>" +
+      badge(row.outcome, ADDRESS_TONE[row.outcome] || "") +
+      (row.detail ? ' <span class="tiny muted">' + esc(row.detail) + "</span>" : "") +
+      '</td><td class="num">' +
+      (row.ago == null ? "—" : esc(fmtAgo(row.ago)) +
+        (row.ms == null ? "" : " · " + esc(row.ms) + " ms")) +
+      "</td></tr>").join("") + "</tbody></table></div>";
+}
+
 $("node-dialog-close").addEventListener("click", () => $("node-dialog").close());
 $("detail-ping").addEventListener("click", (event) => withBusy(event.target, async () => {
   if(!DETAIL_ID) return;
@@ -1022,13 +1246,32 @@ function paintReach(state){
     '<div class="stat sm"><span class="v">' + esc(value) +
     '</span><span class="k">' + esc(key) + "</span></div>").join("");
   const transports = state.transport_details || [];
-  $("transport-list").innerHTML = transports.length ? transports.map((transport) =>
-    "<tr><td><b>" + esc(transport.scheme) + "</b></td>" +
-    '<td class="num">' + esc(transport.peers || 0) + "</td>" +
-    '<td class="num">' + (transport.listening || []).length + "</td>" +
-    "<td>" + ((transport.ports || []).length ? esc(transport.ports.join(", ")) : "—") +
-    "</td></tr>").join("")
-    : spanRow(4, emptyHTML("No transport registered",
+  // Aggregated from the live links rather than reported per scheme: the peers
+  // are where the bytes and the latency actually are.
+  const byScheme = {};
+  for(const peer of (state.peers || [])){
+    const link = peer.link || {};
+    const scheme = link.scheme || peer.transport || "?";
+    const row = byScheme[scheme] || (byScheme[scheme] = {bytes:0, rtt:[], links:0});
+    row.links++;
+    row.bytes += ((link.counters || {}).bytes_in || 0) + ((link.counters || {}).bytes_out || 0);
+    const rtt = (link.quality || {}).rtt_ms;
+    if(rtt != null) row.rtt.push(rtt);
+  }
+  $("transport-list").innerHTML = transports.length ? transports.map((transport) => {
+    const live = byScheme[transport.scheme] || {bytes:0, rtt:[], links:0};
+    const rtt = live.rtt.length
+      ? Math.round(live.rtt.reduce((a, b) => a + b, 0) / live.rtt.length * 10) / 10 : null;
+    return "<tr><td><b>" + esc(transport.scheme) + "</b>" +
+      (transport.hole_punch ? " " + badge("hole punching", "accent") : "") + "</td>" +
+      '<td class="num">' + esc(transport.peers || 0) + "</td>" +
+      '<td class="num">' + (rtt == null ? "—" : esc(rtt) + " ms") + "</td>" +
+      '<td class="num">' + esc(fmtBytes(live.bytes)) + "</td>" +
+      '<td class="num">' + (transport.listening || []).length + "</td>" +
+      "<td>" + ((transport.ports || []).length ? esc(transport.ports.join(", ")) : "—") +
+      "</td></tr>";
+  }).join("")
+    : spanRow(6, emptyHTML("No transport registered",
         "A node with no transport can neither listen nor dial."));
   const udpOn = transports.some((transport) => transport.hole_punch);
   $("punch-toggle").textContent = "Hole punching: " + (state.punch_enabled ? "on" : "off");
@@ -1754,6 +1997,7 @@ PALETTE.add("Check for updates", "Action", () => {
 });
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
 PALETTE.add("Back to this node", "Action", leaveContext);
+PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
 $("palette-open").addEventListener("click", () => PALETTE.open());
 $("modal-close").addEventListener("click", () => $("modal").close());
 

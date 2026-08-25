@@ -65,6 +65,25 @@ plafonds, même lockout. Détail complet, bornes et chemins refusés :
 Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
 `Sign out` revient toujours à la console locale.
 
+## Observer le mesh en direct
+
+- **La carte** (Overview → Topology) a un bouton **Expand**. La carte étendue
+  étiquette chaque lien avec son medium, sa latence et sa perte, épaissit le
+  trait avec le volume transporté, passe en ambre un lien qui perd des sondes, et
+  liste les liens à droite avec leur courbe de latence. Elle se redessine à
+  chaque tick tant qu'elle est ouverte. Cliquer un nœud ouvre sa fiche.
+- **La fiche d'un nœud** (Network → Peers → Details) montre le lien réel :
+  points de terminaison local et distant tels que le medium les voit, sens,
+  durée, latence (dernier / meilleur / pire / gigue / perte, avec les
+  échantillons), les compteurs propres au transport, et **l'état de chaque
+  adresse connue** — en service, injoignable, jamais essayée.
+- **Network → Reachability** agrège par medium : liens, latence moyenne, volume
+  transporté, écouteurs, ports.
+
+Ces chiffres viennent du transport lui-même (`endpoints()` / `stats()`), donc un
+nouveau medium apparaît ici sans modification de la console. Voir
+[`Docs/Architecture/transports.md`](../Architecture/transports.md).
+
 ## Modèle de sécurité
 
 - **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.
