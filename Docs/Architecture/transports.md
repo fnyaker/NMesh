@@ -43,8 +43,11 @@ encore actif.
   quatre bons tapés avec lui, et rend `{"applied": …, "rejected": {nom: raison}}`.
   `SETTINGS` est **remplacé**, jamais muté — un dictionnaire de classe partagé
   n'est pas un endroit qu'on édite sous un lien vivant.
-- `TransportManager.options() / configure() / settings()` ne fait que passer les
-  choses : il sait quelle classe répond pour un schéma, rien de plus.
+- `TransportManager.options() / configure() / setting() / settings()` ne fait que
+  passer les choses : il sait quelle classe répond pour un schéma, rien de plus.
+  `setting(scheme, name)` est ce que le cœur appelle quand il a besoin d'une
+  valeur d'un medium (la cadence de redial, par exemple) sans savoir quelle
+  classe la sert.
 
 ### Persistance
 
@@ -113,6 +116,117 @@ question qu'on se pose. Chaque tentative est donc notée : `connected`,
 gagne sur le journal (une adresse qui porte du trafic est `in-use`, quoi qu'elle
 ait fait la semaine dernière), et une adresse jamais essayée est `untried`, pas
 en panne. Borné deux fois : 128 nœuds, 8 adresses chacun.
+
+Trois issues supplémentaires n'atteignent jamais le medium et sont notées quand
+même, parce qu'une ligne vide en face d'une adresse qui ne marche pas
+n'apprend rien : `invalid` (l'URI n'en est pas une), `no transport` (aucun
+transport enregistré ne sert ce schéma — le motif porte le schéma) et
+`peer limit` (`_MAX_PEERS` atteint).
+
+**Un seul chemin de composition.** `node._dial_uri(node_id, uri, timeout)` est le
+seul endroit où un lien sortant s'ouvre : la marche de la table de routage, le
+bouton *Retry* de la console, la boucle périodique et la sonde de latence y
+passent tous. Elles appliquent donc le même timeout, démontent une tentative
+ratée de la même façon, et — ce qui compte pour l'opérateur — notent la même
+issue sur la même adresse. Elle ne lève jamais : un dial qui échoue est le cas
+normal, pas une erreur.
+
+## Redialer une adresse
+
+Trois mécanismes, une seule fonction de dial (ci-dessus).
+
+**À la main** — `console_retry_addresses(node_hex, uri="")` rejoue une adresse
+précise, ou toutes (et s'arrête à la première qui marche : « rends-moi un lien »,
+pas « ouvre-en quatre »). Il ne compose **que des adresses déjà connues pour
+cette identité** : la console est authentifiée, mais « tape une adresse et le
+nœud s'y connecte » est une autre fonctionnalité avec un autre modèle de menace.
+La réponse dit ce que chaque adresse a fait, dans les mots du tableau ci-dessus.
+
+**Périodiquement** — `_address_retry_loop`. Un nœud tombé parce que son FAI a
+bronché, que le portable a dormi ou qu'un switch a redémarré revient sur sa
+propre adresse ; sans ça, rien ne réessaie tant que personne n'a besoin d'une
+route. La **cadence appartient au medium** : `retry_interval` est une option
+déclarée par le transport (0 = jamais, valeur par défaut), parce qu'une radio qui
+coûte une pile par tentative et un Ethernet n'ont pas à partager un nombre. Ce
+qui est fixe dans le cœur, c'est la **forme** de la boucle, pour qu'un réglage
+d'opérateur ne puisse pas la transformer en inondation :
+
+| borne | valeur | ce qu'elle empêche |
+|---|---|---|
+| `_RETRY_TICK` | 5 s | une boucle qui tourne à plein régime |
+| `_RETRY_MAX_PER_PASS` | 4 dials | qu'un nœud avec 200 pairs connus compose 200 fois |
+| `_RETRY_NODES_SCANNED` | 64 | que la passe grandisse avec la table |
+| `_RETRY_DIAL_TIMEOUT` | 8 s | qu'une adresse morte tienne la passe |
+
+Un nœud déjà lié n'est jamais redialé, et la boucle ne meurt sur rien : une
+boucle de récupération qui s'arrête est une perte silencieuse de récupération.
+
+## Choisir entre les adresses d'une node : priorité × latence
+
+Deux choses décident, et ce ne sont pas des choses de même nature.
+
+- **Ce que vaut le medium** — `priority`, une option déclarée par chaque
+  transport, de −254 à 254. Défauts livrés : `udp` **10**, `tcp` **0**,
+  `spool` **−50**. Le cœur n'a pas d'avis là-dessus : seul l'opérateur sait si
+  sa liaison LoRa est la précieuse ou le dernier recours.
+- **Ce que mesure l'adresse** — la dernière durée notée pour cette URI dans
+  `_dial_log`.
+
+Le curseur `transport_balance` (0..100, défaut 50) dit combien pèse chaque
+moitié : `0` = la latence seule décide, `100` = la priorité seule.
+
+```
+score(uri) = w · (priority + 254) / 508  +  (1 − w) · 25 / (25 + ms)
+                                                          w = balance / 100
+```
+
+Deux propriétés voulues :
+
+- **Les deux moitiés sont ramenées à 0..1 dans l'absolu**, pas les unes par
+  rapport aux autres. Un score veut donc dire la même chose à chaque passe : deux
+  adresses comparées aujourd'hui et demain donnent la même réponse, et la boucle
+  de pilotage peut utiliser une marge fixe.
+- **La latence *courbe*, elle ne s'échelonne pas.** 0 ms vaut 1, 25 ms vaut 0.5,
+  4 s vaut encore quelque chose. Une échelle linéaire ferait qu'une mesure
+  absurde écrase toutes les différences réelles entre 5 et 50 ms.
+
+Une adresse **jamais mesurée** vaut le milieu : ni récompensée ni punie d'être
+neuve. Un medium qui ne sait pas répondre (pas de `setting()`) vaut neutre — ce
+n'est pas une raison d'arrêter de composer.
+
+`node._preferred(uris, node_hex)` trie par score décroissant ; une adresse
+**IPv6 globale** départage à score égal (joignable de bout en bout, elle évite le
+NAT entièrement). C'est le tri qu'utilisent *tous* les chemins qui choisissent
+une adresse : la marche de la table de routage, le redial, le bloc de join, le
+hole punch. `node.transport_preference()` rend l'ordre des schémas seuls, pour
+que la console l'affiche sans réimplémenter la règle en JavaScript.
+
+## Choisir l'adresse à la latence (`dynamic_address`, off par défaut)
+
+Un nœud joignable à plusieurs adresses est en général joignable à plusieurs
+**qualités** — une adresse LAN et l'adresse publique de la même machine, IPv4 et
+IPv6 par des chemins différents. Celle qui sert est celle qui a été composée en
+premier : choisie par l'ordre, pas par ce qu'elle vaut.
+
+`_address_steering_loop` corrige ça quand l'opérateur le demande (`--dynamic-address`,
+clé `dynamic_address`, ou le bouton de la console). **Un** candidat par passe :
+
+1. un lien vivant dont on a mesuré la latence, et une adresse de la même node qui
+   n'est pas celle en service ni mesurée récemment (`_ADDR_STEER_COOLDOWN`) ;
+2. la latence courante est mesurée par de vraies sondes (`_ADDR_STEER_PROBES`) ;
+3. le candidat est **composé** et mesuré pareil — une adresse qui a l'air rapide
+   mais ne finit pas la poignée de main n'est pas une meilleure adresse ;
+4. on ne bouge que si le **score** (ci-dessus, donc priorité *et* latence)
+   gagne au moins `_ADDR_STEER_MIN_GAIN`. C'est volontairement le même score que
+   l'ordre de composition : « ce medium est préféré » et « cette adresse est plus
+   rapide » sont tranchés par une seule règle, pas par deux qui peuvent se
+   contredire. Deux millisecondes, c'est du bruit ; à latence égale, le medium
+   préféré gagne.
+
+Le perdant est fermé dans les deux cas : le nœud ne garde jamais deux liens vers
+un même pair au-delà de la mesure. C'est off par défaut parce que c'est un
+échange — un dial et une poignée de main contre quelques millisecondes — et que
+seul l'opérateur sait s'il en vaut la peine.
 
 ## TCP (`tcp_transport.py`)
 

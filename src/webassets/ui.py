@@ -256,6 +256,37 @@ select{appearance:none;padding-right:var(--s-6);
 /* iOS zooms the page when a focused input is under 16px. */
 @media (max-width:720px){input,select,textarea{font-size:var(--fs-lg)}}
 
+/* -- range: a value with two named ends ---------------------------------- */
+/* Every part of a range has to be restyled per engine — a bare one is invisible
+   against this palette, and its thumb is under the 24px a finger needs. */
+input[type="range"]{appearance:none;-webkit-appearance:none;width:100%;padding:0;border:0;
+  background:transparent;min-height:var(--tap);cursor:pointer}
+input[type="range"]:hover,input[type="range"]:focus{border:0;box-shadow:none;background:transparent}
+input[type="range"]::-webkit-slider-runnable-track{height:6px;border-radius:var(--r-full);
+  background:var(--surface-3);border:1px solid var(--border)}
+input[type="range"]::-moz-range-track{height:6px;border-radius:var(--r-full);
+  background:var(--surface-3);border:1px solid var(--border)}
+input[type="range"]::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;
+  width:22px;height:22px;margin-top:-9px;border-radius:50%;background:var(--surface);
+  border:2px solid var(--accent);box-shadow:var(--shadow-2)}
+input[type="range"]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;
+  background:var(--surface);border:2px solid var(--accent);box-shadow:var(--shadow-2)}
+input[type="range"]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var(--accent-soft)}
+input[type="range"]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px var(--accent-soft)}
+/* The two ends of the scale, named: a number alone says nothing about which
+   way is which. */
+.scale{display:flex;align-items:baseline;gap:var(--s-3);font-size:var(--fs-xs);
+  color:var(--text-muted)}
+.scale>b{flex:1 1 auto;text-align:center;font-weight:600;color:var(--text)}
+.scale>span{flex:0 1 auto;min-width:0}
+.scale>span:last-child{text-align:right}
+/* On a phone the middle reading wraps and squeezes the two ends into columns;
+   given its own line it stays a sentence. */
+@media (max-width:560px){
+  .scale{flex-wrap:wrap}
+  .scale>b{order:-1;flex:1 1 100%;text-align:left}
+}
+
 .field{display:flex;flex-direction:column;gap:var(--s-1);min-width:0}
 .field>span:not(.hint),.field>label{font-size:var(--fs-sm);font-weight:560;color:var(--text)}
 .field .hint{font-size:var(--fs-xs);color:var(--text-muted)}

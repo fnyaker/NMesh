@@ -1398,3 +1398,136 @@ class TestJoinTicket:
             assert status == 400          # uri et code exigés, comme avant
         finally:
             console.stop(); await node.stop()
+
+
+class TestAddressRetryEndpoints:
+    """Les deux routes ajoutées pour les adresses : rejouer, et le pilotage par
+    latence. Elles rendent des mots utilisables, et refusent tout le reste."""
+
+    async def test_retry_needs_an_id(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({}, {"id": ""}, {"id": 12}, {"id": "aa", "uri": 5}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/peers/retry", token, payload)
+                assert status == 400, payload
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_retry_requires_auth(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/peers/retry", None, {"id": "aa" * 20})
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_retrying_an_unknown_node_says_so_and_dials_nothing(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/peers/retry", token,
+                {"id": "ab" * 20})
+            assert status == 400
+            assert "no known address" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_retrying_reports_what_each_address_did(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            target = NodeID(b"\x5a" * 20)
+            # Un schéma qu'aucun transport ne sert : la réponse est immédiate
+            # *et* elle nomme le problème, ce qui est le point du bouton.
+            node._routing.add(target, ["nope://nowhere:1", "nope://elsewhere:2"])
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/peers/retry", token,
+                {"id": target.raw.hex()})
+            assert status == 200 and body["ok"] is True
+            assert body["connected"] is False
+            assert {row["uri"] for row in body["results"]} == {
+                "nope://nowhere:1", "nope://elsewhere:2"}
+            assert all(row["outcome"] == "no transport" for row in body["results"])
+            # Et l'échec est enregistré là où le tableau des adresses le lit.
+            assert node._dial_log[target.raw.hex()]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_an_address_that_is_not_that_nodes_is_refused(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            target = NodeID(b"\x5b" * 20)
+            node._routing.add(target, ["nope://known:1"])
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/peers/retry", token,
+                {"id": target.raw.hex(), "uri": "tcp://169.254.169.254:80"})
+            assert status == 400
+            assert "not an address of that node" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_dynamic_addressing_toggles_and_shows_up_in_the_snapshot(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            _, _, _, state = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert state["dynamic_address"] is False
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/addressing/dynamic", token,
+                {"enabled": True})
+            assert status == 200 and body["enabled"] is True
+            assert node.dynamic_address is True
+            _, _, _, state = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert state["dynamic_address"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_dynamic_addressing_refuses_anything_but_a_boolean(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({}, {"enabled": "yes"}, {"enabled": 1}, {"enable": True}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/addressing/dynamic", token, payload)
+                assert status == 400, payload
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_balance_is_settable_and_shows_the_resulting_order(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/addressing/balance", token,
+                {"value": 100})
+            assert status == 200 and body["value"] == 100
+            assert node.transport_balance == 100
+            # La console reçoit l'ordre calculé par le nœud, pas une consigne
+            # de le recalculer elle-même.
+            assert [entry["scheme"] for entry in body["preference"]]
+            _, _, _, state = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert state["transport_balance"] == 100
+            assert state["transport_preference"] == body["preference"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_balance_refuses_anything_outside_its_range(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({}, {"value": -1}, {"value": 101}, {"value": "half"},
+                            {"value": None}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/addressing/balance", token, payload)
+                assert status == 400, payload
+            assert node.transport_balance == 50
+        finally:
+            console.stop(); await node.stop()

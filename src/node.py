@@ -218,6 +218,34 @@ _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
 _DIAL_LOG_NODES           = 128    # nodes whose address outcomes we remember
 _DIAL_LOG_ADDRESSES       = 8      # addresses remembered per node
+# Re-dialling addresses that went quiet. The *interval* is a per-transport
+# setting (`retry_interval`, 0 = off) — a medium that costs a coin cell per dial
+# and one that costs a TCP SYN have no business sharing a number. What is fixed
+# here is the shape of the loop, so an operator's setting can never turn it into
+# a flood: a slow tick, and a hard cap of dials per pass however many nodes are
+# waiting.
+_RETRY_TICK               = 5.0
+_RETRY_MAX_PER_PASS       = 4
+_RETRY_NODES_SCANNED      = 64
+_RETRY_DIAL_TIMEOUT       = 8.0
+# Moving a live link to a better address. Off by default: switching costs a
+# dial, a handshake and a moment with two links to the same node, which is only
+# worth it when the gain is real and lasting.
+_ADDR_STEER_INTERVAL      = 60.0   # one candidate examined per pass, at most
+_ADDR_STEER_COOLDOWN      = 300.0  # per address, after it has been measured
+_ADDR_STEER_PROBES        = 3      # pings averaged before believing a number
+# Steering compares *scores*, not milliseconds, so "this medium is preferred"
+# and "this address is faster" are weighed on one scale (see `_address_score`).
+_ADDR_STEER_MIN_GAIN      = 0.05   # below this, the difference is noise
+
+# Choosing between the addresses of one node. Two things matter and they are not
+# the same kind of thing: what the *medium* is worth (a priority the operator
+# sets per transport, e.g. never prefer a USB spool over Wi-Fi) and what the
+# *address* measures. The balance between them is the operator's to set, because
+# only they know whether a slow preferred link beats a fast unwanted one.
+_PRIORITY_SPAN            = 254    # a priority runs -254..254
+_LATENCY_HALF_MS          = 25.0   # the latency worth exactly half a point
+_BALANCE_DEFAULT          = 50     # 0 = latency alone, 100 = priority alone
 # Acquiring a route (Kademlia lookup + dial + hole punch) takes seconds. It must
 # never run inside a peer's receive loop: that link would process nothing else
 # meanwhile — and the FOUND_NODE the lookup waits for often has to come back
@@ -1146,6 +1174,16 @@ class MeshNode:
         # node hex -> {uri: {outcome, detail, at, ms}} — what each address did
         # last time it was dialled. Bounded on both axes.
         self._dial_log: OrderedDict[str, OrderedDict] = OrderedDict()
+        self._retry_task: asyncio.Task | None = None
+        self._steer_task: asyncio.Task | None = None
+        # Moving a link to a lower-latency address is off unless someone asks
+        # for it: it is a trade (a dial and a handshake against a few
+        # milliseconds), and only the operator knows whether it is worth it.
+        self._dynamic_address: bool = False
+        # node hex -> {uri: measured at} — so a candidate that turned out no
+        # better is not measured again on the next pass.
+        self._steer_seen: OrderedDict[str, OrderedDict] = OrderedDict()
+        self._transport_balance: int = _BALANCE_DEFAULT
         # Background route acquisitions started from a receive loop (bounded).
         self._deferred_routes: set = set()
         self._query_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
@@ -1202,6 +1240,8 @@ class MeshNode:
         self._ensure_link_keepalive()
         self._ensure_e2e_retry()
         self._ensure_neighbor_maintenance()
+        self._ensure_address_retry()
+        self._ensure_address_steering()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1600,6 +1640,8 @@ class MeshNode:
         await self._stop_link_keepalive()
         await self._stop_e2e_retry()
         await self._stop_neighbor_maintenance()
+        await self._stop_address_retry()
+        await self._stop_address_steering()
         await self._stop_deferred_routes()
         # Concurrently: each peer.stop() is individually bounded, and stopping
         # 128 links one after another would stack those bounds into minutes.
@@ -2554,64 +2596,86 @@ class MeshNode:
                                NodeID(b"\xff" * 20).raw, challenge)
         await peer.send(packet)
 
+    async def _dial_uri(self, node_id: NodeID, uri: str,
+                        timeout: float) -> _Peer | None:
+        """Dial one address of one node and require it to prove who it is.
+
+        The single place an outgoing link is opened: the routing walk, the
+        console's manual retry, the periodic retry and the latency probe all
+        come through here, so they all apply the same timeout, tear a failed
+        attempt down the same way, and — the reason it matters to an operator —
+        record the same outcome against the same address.
+
+        Returns the authenticated peer, or ``None``. Never raises: a dial that
+        fails is the normal case on a real network, not an error."""
+        node_hex = node_id.raw.hex() if node_id is not None else ""
+        # These three are answers too, and an operator staring at an address
+        # that never connects deserves to be told which one it is rather than
+        # being left with a blank row.
+        result = _validate_uri(uri)
+        if result is None:
+            self._note_dial(node_hex, uri, "invalid")
+            return None
+        scheme, _ = result
+        if not self._transport_manager.is_supported(scheme):
+            self._note_dial(node_hex, uri, "no transport", scheme)
+            return None
+        if len(self._peers) >= _MAX_PEERS:
+            self._note_dial(node_hex, uri, "peer limit")
+            return None
+        peer = None
+        authenticated = False
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(timeout):
+                transport = await self._transport_manager.connect(uri)
+                peer = _Peer(transport, is_client_side=True)
+                peer.on_dead = self._reap_peer
+                peer.total = self._metrics.total
+                peer.trace = self.trace
+                peer.remote_addr = uri
+                self._peers.append(peer)
+                await peer.start(self._handle_packet)
+                if await self._wait_for_peer_authenticated(peer, node_id, timeout):
+                    authenticated = True
+                    self._note_dial(node_hex, uri, "connected",
+                                    elapsed=time.monotonic() - started)
+                    return peer
+                self._note_dial(node_hex, uri, "no-answer",
+                                "connected but never authenticated",
+                                time.monotonic() - started)
+        except asyncio.TimeoutError:
+            self._note_dial(node_hex, uri, "timeout", "",
+                            time.monotonic() - started)
+        except Exception as exc:
+            self._note_dial(node_hex, uri, "refused",
+                            type(exc).__name__, time.monotonic() - started)
+        finally:
+            if peer is not None and not authenticated:
+                try:
+                    await peer.stop()
+                except Exception:
+                    pass
+                if peer in self._peers:
+                    self._peers.remove(peer)
+        return None
+
     async def _connect_routing(self, node_id: NodeID,
                                deadline: float) -> _Peer | None:
         entry = self._routing.get(node_id)
         if entry is None:
             return None
-        uris = _order_by_preference(list(entry.addresses))
-        for index, uri in enumerate(uris):  # prefer global IPv6
-            result = _validate_uri(uri)
-            if result is None:
-                continue
-            scheme, _ = result
-            if not self._transport_manager.is_supported(scheme):
-                continue
-            if len(self._peers) >= _MAX_PEERS:
-                return None
+        uris = self._preferred(list(entry.addresses), node_id.raw.hex())
+        for index, uri in enumerate(uris):
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 return None
             # Reserve a fair share for every remaining endpoint. A transport
             # that accepts but never authenticates cannot hide fresher URIs.
-            attempt_timeout = remaining / max(1, len(uris) - index)
-            peer = None
-            authenticated = False
-            started = time.monotonic()
-            node_hex = node_id.raw.hex() if node_id is not None else ""
-            try:
-                async with asyncio.timeout(attempt_timeout):
-                    transport = await self._transport_manager.connect(uri)
-                    peer = _Peer(transport, is_client_side=True)
-                    peer.on_dead = self._reap_peer
-                    peer.total = self._metrics.total
-                    peer.trace = self.trace
-                    peer.remote_addr = uri
-                    self._peers.append(peer)
-                    await peer.start(self._handle_packet)
-                    if await self._wait_for_peer_authenticated(
-                            peer, node_id, attempt_timeout):
-                        authenticated = True
-                        self._note_dial(node_hex, uri, "connected",
-                                        elapsed=time.monotonic() - started)
-                        return peer
-                    self._note_dial(node_hex, uri, "no-answer",
-                                    "connected but never authenticated",
-                                    time.monotonic() - started)
-            except asyncio.TimeoutError:
-                self._note_dial(node_hex, uri, "timeout", "",
-                                time.monotonic() - started)
-            except Exception as exc:
-                self._note_dial(node_hex, uri, "refused",
-                                type(exc).__name__, time.monotonic() - started)
-            finally:
-                if peer is not None and not authenticated:
-                    try:
-                        await peer.stop()
-                    except Exception:
-                        pass
-                    if peer in self._peers:
-                        self._peers.remove(peer)
+            peer = await self._dial_uri(node_id, uri,
+                                        remaining / max(1, len(uris) - index))
+            if peer is not None:
+                return peer
         return None
 
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
@@ -2731,6 +2795,9 @@ class MeshNode:
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
             "lan_discovery": self._lan_discovery is not None,
+            "dynamic_address": self._dynamic_address,
+            "transport_balance": self._transport_balance,
+            "transport_preference": self.transport_preference(),
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
@@ -2925,6 +2992,380 @@ class MeshNode:
         book[uri] = {"outcome": outcome, "detail": detail[:80],
                      "at": time.monotonic(),
                      "ms": None if elapsed is None else round(elapsed * 1000, 1)}
+
+    # -- retrying addresses ------------------------------------------------
+
+    def _known_addresses(self, node_id: NodeID) -> list[str]:
+        """Addresses we hold for a node, in the order we would try them."""
+        entry = self._routing.get(node_id)
+        if entry is None:
+            return []
+        return self._preferred(list(entry.addresses),
+                               node_id.raw.hex())[:_DIAL_LOG_ADDRESSES]
+
+    # -- choosing between a node's addresses --------------------------------
+
+    def _transport_priority(self, uri: str) -> int:
+        """What the medium behind this address is worth, as its own setting.
+
+        A number the operator sets per transport, not a ranking the core
+        invents: only the person running the node knows whether their LoRa link
+        is the precious one or the last resort."""
+        result = _validate_uri(uri)
+        if result is None:
+            return -_PRIORITY_SPAN
+        try:
+            value = int(self._transport_manager.setting(result[0], "priority") or 0)
+        except Exception:
+            # A medium that cannot answer is not a reason to stop dialling: it
+            # scores neutral, exactly like one that never declared a priority.
+            return 0
+        return max(-_PRIORITY_SPAN, min(_PRIORITY_SPAN, value))
+
+    def _address_score(self, uri: str, ms: float | None) -> float:
+        """One number, 0..1, higher is better — priority and latency weighed.
+
+        Both halves are mapped onto 0..1 *absolutely* rather than against the
+        other candidates, so a score means the same thing on every pass: two
+        addresses compared today and tomorrow give the same answer, and the
+        steering loop can use a fixed margin.
+
+        Latency curves rather than scales: 0 ms scores 1, `_LATENCY_HALF_MS`
+        scores .5, and 400 ms still scores something. A linear map would make
+        one absurd measurement flatten every real difference. An address never
+        measured scores the middle — neither rewarded nor punished for being
+        untried."""
+        priority = (self._transport_priority(uri) + _PRIORITY_SPAN) / (2 * _PRIORITY_SPAN)
+        if ms is None or ms < 0:
+            latency = _LATENCY_HALF_MS / (_LATENCY_HALF_MS + _LATENCY_HALF_MS)
+        else:
+            latency = _LATENCY_HALF_MS / (_LATENCY_HALF_MS + ms)
+        weight = max(0.0, min(100, self._transport_balance)) / 100.0
+        return weight * priority + (1.0 - weight) * latency
+
+    def _measured_ms(self, node_hex: str, uri: str) -> float | None:
+        """What this address measured last time it was dialled, if ever."""
+        record = (self._dial_log.get(node_hex) or {}).get(uri)
+        return None if record is None else record.get("ms")
+
+    def _preferred(self, uris: list[str], node_hex: str = "") -> list[str]:
+        """A node's addresses, best first.
+
+        Score decides; a global-IPv6 endpoint breaks a tie, because it is
+        reachable end-to-end and lets two IPv6 nodes skip NAT entirely. Sorting
+        is stable, so equal addresses keep the order they were learned in."""
+        scored = _order_by_preference(uris)
+        return sorted(scored,
+                      key=lambda uri: -self._address_score(
+                          uri, self._measured_ms(node_hex, uri)))
+
+    def transport_preference(self) -> list[dict]:
+        """The order the schemes themselves come in right now, for the console.
+
+        Computed here and not in the page: the balance is a single rule, and a
+        second implementation of it in JavaScript would disagree the day the
+        rule changes."""
+        out = []
+        try:
+            schemes = self._transport_manager.schemes()
+        except Exception:
+            return out
+        for scheme in schemes:
+            uri = scheme + "://placeholder:1"
+            out.append({"scheme": scheme,
+                        "priority": self._transport_priority(uri),
+                        "score": round(self._address_score(uri, None), 3)})
+        out.sort(key=lambda entry: (-entry["score"], entry["scheme"]))
+        return out
+
+    def set_transport_balance(self, value: int) -> int:
+        """0 = decide on latency alone, 100 = on priority alone."""
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("balance must be a whole number") from None
+        if not 0 <= value <= 100:
+            raise ValueError("balance must be between 0 and 100")
+        self._transport_balance = value
+        return value
+
+    @property
+    def transport_balance(self) -> int:
+        return self._transport_balance
+
+    def _retry_interval(self, uri: str) -> float:
+        """What the medium behind this address says about re-dialling it.
+
+        Zero — the default — means "never on a timer". The core has no opinion:
+        a link over a radio that costs power per attempt and one over Ethernet
+        cannot share a number, so the number belongs to the medium."""
+        result = _validate_uri(uri)
+        if result is None:
+            return 0.0
+        try:
+            value = self._transport_manager.setting(result[0], "retry_interval")
+        except Exception:
+            return 0.0
+        try:
+            return max(0.0, float(value or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _ensure_address_retry(self) -> None:
+        if self._retry_task is None or self._retry_task.done():
+            self._retry_task = asyncio.create_task(self._address_retry_loop())
+
+    async def _stop_address_retry(self) -> None:
+        task = self._retry_task
+        self._retry_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _address_retry_loop(self) -> None:
+        """Re-dial the addresses of nodes we know but are not linked to.
+
+        A node that dropped off because its ISP bounced, its laptop slept, or a
+        switch rebooted comes back on its own address; without this, nothing
+        tries again until something else needs a route. What each medium
+        considers a reasonable cadence is its own setting; what is fixed here is
+        that a pass costs at most `_RETRY_MAX_PER_PASS` dials however many nodes
+        are waiting, and that a node already linked is never dialled again.
+
+        Never raises: this loop dying would be a silent loss of recovery."""
+        while self._running:
+            await asyncio.sleep(_RETRY_TICK)
+            try:
+                await self._retry_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    async def _retry_pass(self) -> int:
+        """One bounded round of re-dialling. Returns how many dials it made."""
+        linked = {peer.authenticated_id for peer in self._peers
+                  if peer.authenticated_id is not None and peer.session is not None}
+        now = time.monotonic()
+        budget = _RETRY_MAX_PER_PASS
+        for entry in self._routing.all_entries()[:_RETRY_NODES_SCANNED]:
+            if budget <= 0:
+                break
+            node_id = entry.node_id
+            if node_id == self._id or node_id in linked:
+                continue
+            node_hex = node_id.raw.hex()
+            book = self._dial_log.get(node_hex) or {}
+            for uri in self._known_addresses(node_id):
+                if budget <= 0:
+                    break
+                interval = self._retry_interval(uri)
+                if interval <= 0:
+                    continue
+                record = book.get(uri)
+                if record is not None and now - record["at"] < interval:
+                    continue
+                budget -= 1
+                peer = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT)
+                if peer is not None:
+                    self._wake_neighbor_maintenance()
+                    break               # linked again; the other addresses can wait
+        return _RETRY_MAX_PER_PASS - budget
+
+    async def console_retry_addresses(self, node_id_hex: str,
+                                      uri: str = "") -> dict:
+        """Console action: dial a node's addresses now — one, or all of them.
+
+        Only addresses this node already knows for that identity are dialled.
+        The console is authenticated, but "type a host and the node connects to
+        it" is a different feature with a different threat model; adding a peer
+        goes through the join and listener paths, which say what they are.
+
+        Reports what every address did, in the same words the address table
+        uses, because the point of pressing the button is to find out."""
+        try:
+            node_id = NodeID(bytes.fromhex(node_id_hex))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "bad id"}
+        if node_id == self._id:
+            return {"ok": False, "error": "self"}
+        known = self._known_addresses(node_id)
+        if not known:
+            return {"ok": False, "error": "no known address for that node"}
+        if uri:
+            if uri not in known:
+                return {"ok": False, "error": "not an address of that node"}
+            targets = [uri]
+        else:
+            targets = known
+        peer = next((p for p in self._peers if p.authenticated_id == node_id
+                     and p.session is not None), None)
+        in_use = peer.remote_addr if peer is not None else None
+        results = []
+        for target in targets:
+            if target == in_use:
+                results.append({"uri": target, "outcome": "in-use", "detail": "",
+                                "ms": None})
+                continue
+            linked = await self._dial_uri(node_id, target, _RETRY_DIAL_TIMEOUT)
+            record = (self._dial_log.get(node_id.raw.hex()) or {}).get(target) or {}
+            results.append({"uri": target,
+                            "outcome": record.get("outcome", "no-answer"),
+                            "detail": record.get("detail", ""),
+                            "ms": record.get("ms")})
+            if linked is not None:
+                in_use = target
+                self._wake_neighbor_maintenance()
+                if not uri:
+                    break               # linked; stop working down the list
+        return {"ok": True, "connected": in_use is not None, "results": results}
+
+    # -- steering a link onto a better address ------------------------------
+
+    def _ensure_address_steering(self) -> None:
+        if self._steer_task is None or self._steer_task.done():
+            self._steer_task = asyncio.create_task(self._address_steering_loop())
+
+    async def _stop_address_steering(self) -> None:
+        task = self._steer_task
+        self._steer_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def set_dynamic_address(self, enabled: bool) -> None:
+        """Turn latency-based address steering on or off on a running node."""
+        self._dynamic_address = bool(enabled)
+        if not self._dynamic_address:
+            self._steer_seen.clear()
+
+    @property
+    def dynamic_address(self) -> bool:
+        return self._dynamic_address
+
+    async def _address_steering_loop(self) -> None:
+        """Move a link onto a better address of the same node, if there is one.
+
+        A node reachable at several addresses is usually reachable at several
+        *qualities* — a LAN address and the same machine's public one, IPv4 and
+        IPv6 through different paths. Whichever was dialled first is the one in
+        use, and it is chosen by order, not by how it performs.
+
+        One candidate per pass, at most, and only when the operator asked for
+        it. The measurement is a real link: the candidate is dialled and pinged,
+        because an address that looks fast and cannot complete a handshake is
+        not a better address. The loser is closed either way, so the node never
+        keeps two links to one peer beyond the measurement."""
+        while self._running:
+            await asyncio.sleep(_ADDR_STEER_INTERVAL)
+            if not self._dynamic_address:
+                continue
+            try:
+                await self._steer_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    def _steer_candidate(self) -> tuple:
+        """The one link worth examining this pass, and the address to try.
+
+        Returns ``(peer, uri)`` or ``(None, "")``. Skips anything we cannot
+        judge: a link with no measured latency, an address already in use, and
+        one measured recently enough that the answer would be the same."""
+        now = time.monotonic()
+        for peer in list(self._peers):
+            node_id = peer.authenticated_id
+            if node_id is None or peer.session is None:
+                continue
+            if peer.last_rtt is None:
+                continue        # never measured: nothing to compare against
+            node_hex = node_id.raw.hex()
+            seen = self._steer_seen.get(node_hex) or {}
+            for uri in self._known_addresses(node_id):
+                if uri == peer.remote_addr:
+                    continue
+                at = seen.get(uri)
+                if at is not None and now - at < _ADDR_STEER_COOLDOWN:
+                    continue
+                return peer, uri
+        return None, ""
+
+    def _note_steer(self, node_hex: str, uri: str) -> None:
+        """Remember that an address was measured. Bounded on both axes, like
+        every other table keyed by something a peer can influence."""
+        seen = self._steer_seen.get(node_hex)
+        if seen is None:
+            while len(self._steer_seen) >= _DIAL_LOG_NODES:
+                self._steer_seen.pop(next(iter(self._steer_seen)))
+            seen = self._steer_seen[node_hex] = OrderedDict()
+        seen.pop(uri, None)
+        while len(seen) >= _DIAL_LOG_ADDRESSES:
+            seen.pop(next(iter(seen)))
+        seen[uri] = time.monotonic()
+
+    async def _measure_peer(self, peer: '_Peer') -> float | None:
+        """Average round-trip of a few pings, in milliseconds, or None."""
+        samples = []
+        for _ in range(_ADDR_STEER_PROBES):
+            if peer.session is None:
+                break
+            try:
+                await self.ping(peer)
+            except Exception:
+                break
+            deadline = time.monotonic() + _DIRECT_PING_TIMEOUT
+            while peer.ping_sent_at is not None and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            if peer.ping_sent_at is not None or peer.last_rtt is None:
+                break
+            samples.append(peer.last_rtt * 1000.0)
+        if not samples:
+            return None
+        return round(sum(samples) / len(samples), 1)
+
+    async def _steer_pass(self) -> str:
+        """Examine one candidate address. Returns what happened, for the tests
+        and the trace — never raises, and never leaves two links standing."""
+        peer, uri = self._steer_candidate()
+        if peer is None:
+            return "nothing to examine"
+        node_id = peer.authenticated_id
+        node_hex = node_id.raw.hex()
+        self._note_steer(node_hex, uri)
+        current = await self._measure_peer(peer)
+        if current is None:
+            return "current link did not answer"
+        candidate = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT)
+        if candidate is None:
+            return "candidate did not connect"
+        better = False
+        try:
+            measured = await self._measure_peer(candidate)
+            # The same score the dial order uses, so "prefer this medium" and
+            # "this address is faster" are settled by one rule rather than two
+            # that can disagree.
+            better = (measured is not None
+                      and self._address_score(uri, measured)
+                      - self._address_score(peer.remote_addr or uri, current)
+                      >= _ADDR_STEER_MIN_GAIN)
+        finally:
+            loser = peer if better else candidate
+            try:
+                await loser.stop()
+            except Exception:
+                pass
+            if loser in self._peers:
+                self._peers.remove(loser)
+        if better:
+            return "moved to " + uri
+        return "kept the current address"
 
     def _address_status(self, node_hex: str, addresses, peer) -> list[dict]:
         """Every address we know for a node, and what happened at each.
@@ -3189,7 +3630,7 @@ class MeshNode:
                 out.append(uri)
         if not out:
             raise ValueError("no address uses a transport this node supports")
-        return _order_by_preference(out)
+        return self._preferred(out)
 
     def _open_holes_from_uris(self, uris: list[str], duration: float) -> int:
         """Open a NAT hole toward every udp:// endpoint in *uris*. No-op without
@@ -3297,7 +3738,7 @@ class MeshNode:
                     parsed = _validate_uri(uri)
                     if self._transport_manager.is_supported(parsed[0]):
                         candidates.append(uri)
-        candidates = _order_by_preference(candidates)   # prefer global IPv6
+        candidates = self._preferred(candidates)
         # No relay in the block is not fatal if we can look for one on the LAN
         # (a broadcast-capable transport is up).
         can_discover = self._udp_server is not None

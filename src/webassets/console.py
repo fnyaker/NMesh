@@ -187,48 +187,40 @@ INDEX_HTML = """<!doctype html>
             <div class="btn-row">
               <button id="reach-probe">Confirm reachability</button>
               <button id="net-recheck">Re-check network</button>
-              <button id="punch-toggle"></button>
-              <button id="keepalive-toggle"></button>
-              <button id="lan-toggle"></button>
+              <button id="dyn-toggle"></button>
             </div>
+            <p class="muted small">Dynamic addressing moves a live link onto another address
+              of the <em>same</em> node when that one scores better — a LAN address instead
+              of the public one, IPv6 instead of IPv4. It costs a dial and a handshake to find
+              out, so it is off unless you ask for it.</p>
+            <hr>
+            <label class="field" for="balance"><span>Choosing between a node&rsquo;s addresses</span>
+              <span class="hint">Nodes are often reachable more than one way. This decides
+                which one is tried first: what the link <em>measures</em>, or what you said
+                the <em>medium</em> is worth. Each transport carries its own priority, in its
+                block below.</span>
+              <input id="balance" type="range" min="0" max="100" step="5" value="50"
+                     aria-describedby="balance-order"></label>
+            <div class="scale"><span>Fastest measured</span><b id="balance-value"></b>
+              <span>Preferred medium</span></div>
+            <p id="balance-order" class="hint"></p>
             <p id="transport-status" class="msg"></p>
           </div>
         </article>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Transports</h2>
-            <div class="sub">Every medium this node can speak, and what is bound</div></div></div>
-          <div class="card-body tight"><div class="table-wrap"><table>
-            <thead><tr><th>Scheme</th><th class="num">Links</th><th class="num">Latency</th>
-              <th class="num">Carried</th><th class="num">Listeners</th><th>Ports</th></tr></thead>
-            <tbody id="transport-list"></tbody></table></div></div>
-        </article>
-        <article class="card">
-          <div class="card-head"><div class="grow"><h2>Transport settings</h2>
-            <div class="sub">Declared by each medium — the console renders what it is told</div></div></div>
+            <div class="sub">One block per medium: what is bound, what it carries, what it takes</div></div></div>
           <div class="card-body">
-            <p class="muted small">Applied to the running node immediately unless a
-              setting says otherwise, then written to the configuration file so it
-              survives a restart. A value the transport refuses never reaches the file.</p>
-            <div id="transport-options" class="stack"></div>
+            <p class="muted small">Settings apply to the running node immediately unless one
+              says otherwise, then go to the configuration file so they survive a restart.
+              A value the transport refuses never reaches the file.</p>
+            <div id="transport-blocks" class="stack"></div>
           </div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Listeners &amp; addressing</h2>
-            <div class="sub">Where this node accepts connections, and what it advertises</div></div></div>
-          <div class="card-body">
-            <dl id="addressing" class="kv"></dl>
-            <div class="toolbar">
-              <label class="field grow"><span class="sr-only">Listener URI</span>
-                <input id="listen-uri" class="mono" placeholder="tcp://0.0.0.0:9002" spellcheck="false"></label>
-              <button id="listen-btn">Add listener</button>
-            </div>
-            <div id="listener-list" class="chips"></div>
-            <div class="toolbar">
-              <label class="field"><span>UDP hole punching</span>
-                <input id="udp-port" type="number" min="1" max="65535" value="9001" aria-label="UDP port"></label>
-              <button id="udp-toggle"></button>
-            </div>
-          </div>
+          <div class="card-head"><div class="grow"><h2>Addressing</h2>
+            <div class="sub">What this node tells other nodes about itself</div></div></div>
+          <div class="card-body"><dl id="addressing" class="kv"></dl></div>
         </article>
       </div>
 
@@ -1360,7 +1352,7 @@ async function openNode(id, seed){
   $("node-detail-extra").innerHTML =
     qualityHTML(link ? link.quality : null, node.rtt_ms) +
     linkStatsHTML(link) +
-    addressHTML(node.address_status, node.addresses);
+    addressHTML(node.address_status, node.addresses, !!node.self);
   $("detail-ping").hidden = !!node.self;
   $("detail-forget").hidden = !!node.self;
 }
@@ -1401,23 +1393,57 @@ function linkStatsHTML(link){
 }
 
 const ADDRESS_TONE = {"in-use":"ok", connected:"ok", timeout:"warn",
-                      refused:"danger", "no-answer":"warn", untried:""};
-function addressHTML(status, fallback){
+                      refused:"danger", "no-answer":"warn", untried:"",
+                      invalid:"danger", "no transport":"danger", "peer limit":"warn"};
+function addressHTML(status, fallback, self){
   const rows = status && status.length ? status
     : (fallback || []).map((uri) => ({uri, outcome:"untried"}));
   if(!rows.length) return "<h3>Addresses</h3><p class=\"small muted\">None advertised.</p>";
-  return "<h3>Addresses</h3><div class=\"table-wrap\"><table><thead><tr>" +
-    "<th>Address</th><th>State</th><th class=\"num\">Tried</th></tr></thead><tbody>" +
-    rows.map((row) => "<tr><td class=\"mono\">" + esc(row.uri) + "</td><td>" +
+  // A node advertising four addresses of which one works is the normal case;
+  // "try that one again, now" is the question an operator has while looking at
+  // this table, so the button is in the table.
+  const action = self ? "" : '<th class="tight"></th>';
+  return '<div class="row"><h3 class="grow">Addresses</h3>' +
+    (self ? "" : '<button class="sm" id="detail-retry-all">Retry all</button>') + "</div>" +
+    '<div class="table-wrap"><table><thead><tr>' +
+    '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
+    "</tr></thead><tbody>" +
+    rows.map((row) => '<tr><td class="mono">' + esc(row.uri) + "</td><td>" +
       badge(row.outcome, ADDRESS_TONE[row.outcome] || "") +
       (row.detail ? ' <span class="tiny muted">' + esc(row.detail) + "</span>" : "") +
       '</td><td class="num">' +
       (row.ago == null ? "—" : esc(fmtAgo(row.ago)) +
         (row.ms == null ? "" : " · " + esc(row.ms) + " ms")) +
-      "</td></tr>").join("") + "</tbody></table></div>";
+      "</td>" + (self ? "" : '<td class="tight"><button class="sm" data-retry-uri="' +
+        esc(row.uri) + '">Retry</button></td>') +
+      "</tr>").join("") + "</tbody></table></div>";
+}
+
+// Both the single address and the whole list come back the same way: what every
+// address did, in the words the table above already uses.
+async function retryAddresses(button, uri){
+  if(!DETAIL_ID) return;
+  await withBusy(button, async () => {
+    setMessage("detail-status", uri ? "Dialling " + uri + "…" : "Dialling every address…");
+    try{
+      const {ok, data} = await apiJson("/api/peers/retry", "POST", {id:DETAIL_ID, uri:uri || ""});
+      if(!ok){ setMessage("detail-status", data.error || "Retry refused", true); return; }
+      const words = (data.results || []).map((row) =>
+        row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""));
+      setMessage("detail-status", words.join(" · ") || "Nothing to dial",
+                 !data.connected);
+      tick();
+    }catch(_){ setMessage("detail-status", "Retry failed", true); }
+  });
 }
 
 $("node-dialog-close").addEventListener("click", () => $("node-dialog").close());
+$("node-detail-extra").addEventListener("click", (event) => {
+  const one = event.target.closest("[data-retry-uri]");
+  if(one){ retryAddresses(one, one.dataset.retryUri); return; }
+  const all = event.target.closest("#detail-retry-all");
+  if(all) retryAddresses(all, "");
+});
 $("detail-ping").addEventListener("click", (event) => withBusy(event.target, async () => {
   if(!DETAIL_ID) return;
   setMessage("detail-status", "Pinging through the mesh…");
@@ -1479,37 +1505,16 @@ function paintReach(state){
     const rtt = (link.quality || {}).rtt_ms;
     if(rtt != null) row.rtt.push(rtt);
   }
-  $("transport-list").innerHTML = transports.length ? transports.map((transport) => {
-    const live = byScheme[transport.scheme] || {bytes:0, rtt:[], links:0};
-    const rtt = live.rtt.length
-      ? Math.round(live.rtt.reduce((a, b) => a + b, 0) / live.rtt.length * 10) / 10 : null;
-    return "<tr><td><b>" + esc(transport.scheme) + "</b>" +
-      (transport.hole_punch ? " " + badge("hole punching", "accent") : "") + "</td>" +
-      '<td class="num">' + esc(transport.peers || 0) + "</td>" +
-      '<td class="num">' + (rtt == null ? "—" : esc(rtt) + " ms") + "</td>" +
-      '<td class="num">' + esc(fmtBytes(live.bytes)) + "</td>" +
-      '<td class="num">' + (transport.listening || []).length + "</td>" +
-      "<td>" + ((transport.ports || []).length ? esc(transport.ports.join(", ")) : "—") +
-      "</td></tr>";
-  }).join("")
-    : spanRow(6, emptyHTML("No transport registered",
-        "A node with no transport can neither listen nor dial."));
-  const udpOn = transports.some((transport) => transport.hole_punch);
-  $("punch-toggle").textContent = "Hole punching: " + (state.punch_enabled ? "on" : "off");
-  $("keepalive-toggle").textContent = "NAT keepalive: " + (state.punch_keepalive ? "on" : "off");
-  $("lan-toggle").textContent = "LAN discovery: " + (state.lan_discovery ? "on" : "off");
-  $("udp-toggle").textContent = udpOn ? "Stop UDP" : "Start UDP";
-  $("udp-port").disabled = udpOn;
+  TRANSPORT_LIVE = byScheme;
+  $("dyn-toggle").textContent = "Dynamic addressing: " + (state.dynamic_address ? "on" : "off");
+  paintBalance(state);
   $("addressing").innerHTML = [
     ["Advertised", (state.advertised || []).join("\n") || "None"],
     ["Local IPs", (state.local_ips || []).join(", ") || "None"],
     ["Schemes", (state.transports || []).join(", ") || "None"],
   ].map(([key, value]) => "<dt>" + esc(key) + '</dt><dd class="mono pre">' +
     esc(value) + "</dd>").join("");
-  $("listener-list").innerHTML = (state.listening || []).map((uri) =>
-    '<span class="chip">' + esc(uri) + '<button class="icon sm" data-remove-listener="' +
-    esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">✕</button></span>').join("") ||
-    '<span class="small muted">No listener bound.</span>';
+  paintTransportLive(state);
 }
 async function post(path, body, message){
   try{
@@ -1520,13 +1525,46 @@ async function post(path, body, message){
     return true;
   }catch(_){ toast("Control action failed", "danger"); return false; }
 }
-$("punch-toggle").addEventListener("click", () => STATE &&
-  post("/api/punch", {enabled:!STATE.punch_enabled}, "Hole punching updated"));
-$("keepalive-toggle").addEventListener("click", () => STATE &&
-  post("/api/punch/keepalive", {enabled:!STATE.punch_keepalive}, "NAT keepalive updated"));
-$("lan-toggle").addEventListener("click", () => STATE &&
-  post("/api/lan/discovery", {enabled:!STATE.lan_discovery}, "LAN discovery updated"));
+// The slider says how the two halves of a score are weighed; the line under it
+// is the answer, computed by the node and not re-derived here — one rule, one
+// implementation.
+function paintBalance(state){
+  const slider = $("balance");
+  // Never yank the handle out from under a finger mid-drag.
+  if(document.activeElement !== slider && !BALANCE_HELD)
+    slider.value = state.transport_balance == null ? 50 : state.transport_balance;
+  showBalance(Number(slider.value));
+  const order = state.transport_preference || [];
+  $("balance-order").innerHTML = order.length
+    ? "Tried in this order, all else equal: " + order.map((entry) =>
+        '<span class="chip">' + esc(entry.scheme) +
+        '<span class="muted">' + (entry.priority > 0 ? "+" : "") +
+        esc(entry.priority) + "</span></span>").join(" ")
+    : "";
+}
+function showBalance(value){
+  $("balance-value").textContent = value === 0 ? "Latency only"
+    : value === 100 ? "Priority only"
+    : value + "% priority · " + (100 - value) + "% latency";
+}
+let BALANCE_HELD = false;
+$("balance").addEventListener("input", (event) => {
+  BALANCE_HELD = true;
+  showBalance(Number(event.target.value));
+});
+$("balance").addEventListener("change", async (event) => {
+  const value = Number(event.target.value);
+  try{
+    const {ok, data} = await apiJson("/api/addressing/balance", "POST", {value});
+    if(!ok){ toast(data.error || "Refused", "warn"); return; }
+    toast("Address preference updated", "ok");
+  }catch(_){ toast("Could not save the balance", "danger"); }
+  finally{ BALANCE_HELD = false; tick(); }
+});
 $("net-recheck").addEventListener("click", () => post("/api/net/recheck", {}, "Network check requested"));
+$("dyn-toggle").addEventListener("click", () => STATE &&
+  post("/api/addressing/dynamic", {enabled:!STATE.dynamic_address},
+       "Dynamic addressing updated"));
 $("reach-probe").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
     const {data} = await apiJson("/api/reachability/probe", "POST");
@@ -1534,33 +1572,56 @@ $("reach-probe").addEventListener("click", (event) => withBusy(event.target, asy
                     : "No active peer can probe us", data.sent ? "" : "warn");
   }catch(_){ toast("Probe failed", "danger"); }
 }));
-$("udp-toggle").addEventListener("click", () => {
-  if(!STATE) return;
-  const on = (STATE.transport_details || []).some((item) => item.hole_punch);
-  const port = parseInt($("udp-port").value, 10);
-  if(!on && !(port > 0 && port < 65536)){ toast("Enter a valid UDP port", "warn"); return; }
-  post("/api/udp", on ? {action:"stop"} : {action:"start", port}, on ? "UDP stopped" : "UDP started");
-});
-$("listen-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const uri = $("listen-uri").value.trim();
-  if(!uri){ toast("Enter a listener URI", "warn"); return; }
-  const {ok, data} = await apiJson("/api/listen", "POST", {uri});
-  if(ok){ $("listen-uri").value = ""; toast("Listener added"); tick(); }
-  else toast(data.error || "Listener failed", "danger");
-}));
-$("listener-list").addEventListener("click", async (event) => {
-  const uri = event.target.closest("[data-remove-listener]");
-  if(!uri) return;
-  await api("/api/unlisten", "POST", {uri:uri.dataset.removeListener}).catch(() => {});
-  toast("Listener removed");
-  tick();
+$("transport-blocks").addEventListener("click", async (event) => {
+  const block = event.target.closest("[data-scheme]");
+  if(!block) return;
+  const scheme = block.dataset.scheme;
+
+  const remove = event.target.closest("[data-remove-listener]");
+  if(remove){
+    await api("/api/unlisten", "POST", {uri:remove.dataset.removeListener}).catch(() => {});
+    toast("Listener removed");
+    tick();
+    return;
+  }
+  if(event.target.closest("[data-listen-add]")){
+    const input = block.querySelector("[data-listen-uri]");
+    const uri = input.value.trim();
+    if(!uri){ toast("Enter a listener URI", "warn"); return; }
+    await withBusy(event.target, async () => {
+      const {ok, data} = await apiJson("/api/listen", "POST", {uri});
+      if(ok){ input.value = ""; toast("Listener added"); tick(); }
+      else toast(data.error || "Listener failed", "danger");
+    });
+    return;
+  }
+  if(event.target.closest("[data-udp-toggle]")){
+    if(!STATE) return;
+    const on = (STATE.transport_details || []).some((item) => item.hole_punch);
+    const port = parseInt(block.querySelector("[data-udp-port]").value, 10);
+    if(!on && !(port > 0 && port < 65536)){ toast("Enter a valid UDP port", "warn"); return; }
+    post("/api/udp", on ? {action:"stop"} : {action:"start", port},
+         on ? "UDP stopped" : "UDP started");
+    return;
+  }
+  const flag = event.target.closest("[data-flag]");
+  if(flag && STATE){
+    const paths = {punch:"/api/punch", keepalive:"/api/punch/keepalive",
+                   lan:"/api/lan/discovery"};
+    const fields = {punch:"punch_enabled", keepalive:"punch_keepalive",
+                    lan:"lan_discovery"};
+    const name = flag.dataset.flag;
+    post(paths[name], {enabled:!STATE[fields[name]]}, "Setting updated");
+    return;
+  }
+  if(event.target.closest("[data-apply]")) await applyTransport(scheme, event.target);
 });
 
 // ---- transport settings ----------------------------------------------------
 // Every field is rendered from what the transport declared: name, kind, bounds,
 // choices, help. The console has no idea what a "reorder buffer" is, and that is
 // the point — a medium added tomorrow gets this form for free.
-let TRANSPORT_FORM = [];
+let TRANSPORT_FORM = [], TRANSPORT_LIVE = {};
 
 function fieldId(scheme, name){ return "opt-" + scheme + "-" + name.replace(/_/g, "-"); }
 
@@ -1609,40 +1670,133 @@ function readOption(scheme, field){
   return element.value;
 }
 
+// One block per medium. What used to be three cards — a table of live
+// transports, a form of declared settings, and a "Listeners & addressing" card
+// that was in fact TCP and UDP settings under a neutral name — is one list of
+// blocks: everything about tcp is in the tcp block, everything about udp is in
+// the udp block, and a medium nobody has written yet gets the same shape for
+// free. Only *addressing* stayed apart: what this node advertises is a fact
+// about the node, not about one medium.
+
+// Per-scheme extras the core cannot derive: controls that exist because of what
+// that medium is. Anything a transport can declare belongs in its OPTIONS
+// instead — this table is for the few things that are a node-level action on
+// one medium rather than a value.
+const SCHEME_EXTRAS = {
+  udp: () =>
+    '<div class="toolbar">' +
+    '<label class="field"><span>UDP port</span>' +
+    '<input type="number" min="1" max="65535" value="9001" data-udp-port aria-label="UDP port"></label>' +
+    "<button data-udp-toggle></button>" +
+    '<button data-flag="punch"></button>' +
+    '<button data-flag="keepalive"></button>' +
+    '<button data-flag="lan"></button></div>' +
+    '<p class="hint">Hole punching and the NAT keepalive are what make this node ' +
+    "reachable from behind a router; LAN discovery answers beacons on the local " +
+    "network. All three ride on this socket.</p>",
+};
+
+function transportBlockHTML(scheme, options, open){
+  const extras = SCHEME_EXTRAS[scheme];
+  return '<details class="card" data-scheme="' + esc(scheme) + '"' + (open ? " open" : "") +
+    "><summary>" + esc(scheme) +
+    '<span class="grow"></span><span class="row" data-summary></span></summary>' +
+    '<div class="card-body">' +
+    '<div class="stats" data-stats></div>' +
+    "<h3>Listeners</h3>" +
+    '<div class="chips" data-listeners></div>' +
+    '<div class="toolbar"><label class="field grow"><span class="sr-only">Listener URI</span>' +
+    '<input class="mono" data-listen-uri spellcheck="false" placeholder="' +
+    esc(scheme) + '://0.0.0.0:9002"></label>' +
+    "<button data-listen-add>Add listener</button></div>" +
+    (extras ? extras() : "") +
+    (options.length
+      ? '<h3>Settings</h3><div class="form-grid">' +
+        options.map((field) => optionHTML(scheme, field)).join("") +
+        '</div><div class="btn-row"><button class="primary" data-apply>Apply</button>' +
+        '<span class="msg" id="opt-msg-' + esc(scheme) + '"></span></div>'
+      : '<p class="hint">This medium declares no setting.</p>') +
+    "</div></details>";
+}
+
+// Rebuilt only when the set of transports or their declared settings changes:
+// a redraw on every tick would wipe the field someone is typing in.
 async function loadTransportOptions(){
-  const holder = $("transport-options");
-  // Redrawing must not fold the panel someone is working in.
-  const open = new Set($$("#transport-options details[open]")
+  const holder = $("transport-blocks");
+  const open = new Set($$("#transport-blocks details[open]")
     .map((element) => element.dataset.scheme));
+  const declared = {};
+  let persisted = true;
   try{
     const {data} = await apiJson("/api/transports");
     TRANSPORT_FORM = data.transports || [];
-    holder.innerHTML = TRANSPORT_FORM.length ? TRANSPORT_FORM.map((entry) =>
-      '<details class="card"' + (open.has(entry.scheme) ? " open" : "") +
-      ' data-scheme="' + esc(entry.scheme) + '"><summary>' +
-      esc(entry.scheme) + " · " + entry.options.length + " setting(s)</summary>" +
-      '<div class="card-body"><div class="form-grid">' +
-      entry.options.map((field) => optionHTML(entry.scheme, field)).join("") +
-      '</div><div class="btn-row"><button class="primary" data-apply="' +
-      esc(entry.scheme) + '">Apply to ' + esc(entry.scheme) + "</button>" +
-      '<span class="msg" id="opt-msg-' + esc(entry.scheme) + '"></span></div></div></details>')
-      .join("")
-      : emptyHTML("No transport declares any setting",
-                  "A medium exposes its own options; none of the ones loaded here does.");
-    if(!data.persisted && TRANSPORT_FORM.length)
-      holder.insertAdjacentHTML("afterbegin",
-        '<div class="notice warn"><span>This node has no configuration file, so a ' +
-        "change applies now but is forgotten on restart.</span></div>");
+    persisted = data.persisted !== false;
+    TRANSPORT_FORM.forEach((entry) => { declared[entry.scheme] = entry.options; });
   }catch(_){
-    holder.innerHTML = errorHTML("Transport settings unavailable",
-                                 "The node did not answer.");
+    holder.innerHTML = errorHTML("Transports unavailable", "The node did not answer.");
+    return;
   }
+  const schemes = [...new Set([
+    ...((STATE && STATE.transport_details) || []).map((item) => item.scheme),
+    ...Object.keys(declared),
+  ])].sort();
+  holder.innerHTML = schemes.length
+    ? schemes.map((scheme) =>
+        transportBlockHTML(scheme, declared[scheme] || [], open.has(scheme))).join("")
+    : emptyHTML("No transport registered",
+                "A node with no transport can neither listen nor dial.");
+  if(!persisted && schemes.length)
+    holder.insertAdjacentHTML("afterbegin",
+      '<div class="notice warn"><span>This node has no configuration file, so a ' +
+      "change applies now but is forgotten on restart.</span></div>");
+  if(STATE) paintTransportLive(STATE);
 }
 
-$("transport-options").addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-apply]");
-  if(!button) return;
-  const scheme = button.dataset.apply;
+// The volatile half, safe to run on every tick: counters, listeners and the
+// state of the toggles. Never touches a settings input.
+function paintTransportLive(state){
+  const details = state.transport_details || [];
+  const listening = state.listening || [];
+  $$("#transport-blocks [data-scheme]").forEach((block) => {
+    const scheme = block.dataset.scheme;
+    const info = details.find((item) => item.scheme === scheme) || {};
+    const live = TRANSPORT_LIVE[scheme] || {bytes:0, rtt:[], links:0};
+    const rtt = live.rtt.length
+      ? Math.round(live.rtt.reduce((a, b) => a + b, 0) / live.rtt.length * 10) / 10 : null;
+    const mine = listening.filter((uri) => uri.split("://")[0] === scheme);
+    const peers = info.peers || 0;
+    block.querySelector("[data-summary]").innerHTML =
+      badge(peers + " link" + (peers === 1 ? "" : "s"), peers ? "accent" : "") + " " +
+      badge(mine.length + " listener" + (mine.length === 1 ? "" : "s"), "") +
+      (info.hole_punch ? " " + badge("hole punching", "ok") : "");
+    block.querySelector("[data-stats]").innerHTML = [
+      ["Links", peers],
+      ["Latency", rtt == null ? "—" : rtt + " ms"],
+      ["Carried", fmtBytes(live.bytes)],
+      ["Ports", (info.ports || []).length ? info.ports.join(", ") : "—"],
+    ].map(([key, value]) => '<div class="stat sm"><span class="v">' + esc(value) +
+      '</span><span class="k">' + esc(key) + "</span></div>").join("");
+    block.querySelector("[data-listeners]").innerHTML = mine.length ? mine.map((uri) =>
+      '<span class="chip">' + esc(uri) + '<button class="icon sm" data-remove-listener="' +
+      esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">✕</button></span>').join("")
+      : '<span class="small muted">Nothing bound — this node cannot be dialled over ' +
+        esc(scheme) + ".</span>";
+    if(scheme !== "udp") return;
+    const on = details.some((item) => item.hole_punch);
+    const port = block.querySelector("[data-udp-port]");
+    block.querySelector("[data-udp-toggle]").textContent = on ? "Stop UDP" : "Start UDP";
+    port.disabled = on;
+    const labels = {punch:["Hole punching", state.punch_enabled],
+                    keepalive:["NAT keepalive", state.punch_keepalive],
+                    lan:["LAN discovery", state.lan_discovery]};
+    $$("[data-flag]", block).forEach((button) => {
+      const [name, value] = labels[button.dataset.flag] || ["", false];
+      button.textContent = name + ": " + (value ? "on" : "off");
+    });
+  });
+}
+
+async function applyTransport(scheme, button){
   const entry = TRANSPORT_FORM.find((item) => item.scheme === scheme);
   if(!entry) return;
   const values = {};
@@ -1666,7 +1820,7 @@ $("transport-options").addEventListener("click", async (event) => {
       data.persisted ? "Applied and saved." : (data.note || "Applied."));
     toast(scheme + " settings applied", "ok");
   });
-});
+}
 
 // ---- apps ------------------------------------------------------------------
 function paintApps(state){

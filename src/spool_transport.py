@@ -75,6 +75,11 @@ def _parse_records(data: bytes) -> tuple[list[bytes], int]:
 class SpoolTransport(BaseTransport):
 
     OPTIONS = (
+        option("priority", "int", -50,
+               "How much this node prefers a spool directory over another medium, from "
+               "-254 to 254. Weighed against measured latency; the balance "
+               "between the two is set once for the node, under Reachability.",
+               minimum=-254, maximum=254),
         option("poll_interval", "float", _POLL,
                "How often the directory is re-read. This medium has no way to "
                "be woken, so the interval is the whole latency of the link — "
