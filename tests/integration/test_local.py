@@ -1,11 +1,11 @@
 """
-Tests d'intégration locaux — nœuds réels sur TCP localhost.
+Local integration tests — real nodes over TCP on localhost.
 
-Plus lents que les tests unitaires : vraie crypto post-quantique + vraie pile
-réseau. Ils valident le chemin complet invite → handshake → session E2E → data,
-et le routage multi-hop A→B→C où A et C ne se parlent qu'à travers B.
+Slower than the unit tests: real post-quantum crypto + a real network stack.
+They validate the whole path invite → handshake → E2E session → data, and the
+multi-hop routing A→B→C where A and C only talk through B.
 
-Exclus de la suite par défaut (voir pyproject addopts) ; lancer explicitement :
+Excluded from the default suite (see the pyproject addopts); run it explicitly:
     pytest tests/integration -q
 """
 import asyncio

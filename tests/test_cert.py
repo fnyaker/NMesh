@@ -180,7 +180,7 @@ class TestNodeHandshakeCertIntegration:
 
 class TestFoundNodeChainValidation:
     async def test_invalid_chain_entry_dropped(self):
-        """FOUND_NODE avec chaîne non vérifiable → entrée ignorée."""
+        """FOUND_NODE with an unverifiable chain → the entry is ignored."""
         node, fake = await make_node()
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id
@@ -204,7 +204,7 @@ class TestFoundNodeChainValidation:
         assert node._routing.get(victim_id) is None
 
     async def test_valid_chain_entry_accepted(self):
-        """FOUND_NODE avec chaîne valide → entrée ajoutée au routing."""
+        """FOUND_NODE with a valid chain → the entry is added to routing."""
         node, fake = await make_node()
         sender_id = NodeID.generate()
         node._peers[0].authenticated_id = sender_id

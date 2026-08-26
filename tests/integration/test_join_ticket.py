@@ -1,10 +1,10 @@
-"""Rejoindre un réseau avec un ticket compact, et rien d'autre.
+"""Joining a network with a compact ticket, and nothing else.
 
-Le ticket porte l'adresse *et* le code : si le join marche en ne passant que
-cette chaîne, la fonctionnalité tient. Le reste vérifie qu'il ne marche pas
-quand il ne devrait pas — expiré, déjà utilisé, mal tapé.
+The ticket carries the address *and* the code: if a join works passing only that
+string, the feature holds. The rest checks that it does not work when it should
+not — expired, already used, mistyped.
 
-Exclu de la suite par défaut (voir pyproject addopts).
+Excluded from the default suite (see the pyproject addopts).
 """
 import asyncio
 import time
@@ -23,11 +23,11 @@ def make_node() -> MeshNode:
 
 
 async def _ticket_for(host, port: int, ttl: float = 600.0) -> str:
-    """Émet un ticket vers 127.0.0.1 sans exiger une IP publique.
+    """Issue a ticket pointing at 127.0.0.1 without requiring a public IP.
 
-    Le test valide le *transport* du ticket ; la porte « adresse publique
-    confirmée » est vérifiée séparément, sans quoi il faudrait une vraie IP
-    routable pour tester quoi que ce soit."""
+    The test validates the ticket's *carriage*; the "confirmed public address"
+    gate is checked separately, or testing anything at all would need a really
+    routable IP."""
     code, seed = host._invite.generate_seeded_code(ttl)
     return join_ticket.encode("127.0.0.1", port, seed, time.time() + ttl)
 
@@ -48,8 +48,8 @@ class TestJoinByTicket:
             await host.stop()
 
     async def test_the_same_ticket_cannot_be_used_twice(self):
-        """Le code à l'intérieur reste à usage unique : un ticket photographié
-        par deux personnes n'en fait pas entrer deux."""
+        """The code inside stays single use: a ticket photographed by two
+        people does not let two in."""
         host, first, second = make_node(), make_node(), make_node()
         await host.start(["tcp://127.0.0.1:19372"])
         try:
@@ -79,7 +79,7 @@ class TestJoinByTicket:
             await host.stop()
 
     async def test_a_ticket_for_the_wrong_code_does_not_get_in(self):
-        """Un ticket bien formé dont le code n'a jamais été émis ici."""
+        """A well-formed ticket whose code was never issued here."""
         host, guest = make_node(), make_node()
         await host.start(["tcp://127.0.0.1:19374"])
         try:
@@ -96,8 +96,8 @@ class TestJoinByTicket:
 
 class TestPublicGate:
     async def test_a_node_with_no_public_address_refuses_to_issue_one(self):
-        """Un ticket qui pointe vers une adresse que personne ne peut joindre
-        est pire que pas de ticket : il échoue après avoir été partagé."""
+        """A ticket pointing at an address nobody can reach is worse than no
+        ticket: it fails after being shared."""
         node = make_node()
         await node.start(["tcp://127.0.0.1:19375"])
         try:
@@ -123,8 +123,8 @@ class TestPublicGate:
             await node.stop()
 
     async def test_an_unconfirmed_public_address_is_not_enough(self):
-        """« On pense que cette adresse est publique » n'est pas « une
-        connexion entrante est arrivée dessus »."""
+        """"We believe this address is public" is not "an inbound connection
+        really arrived on it"."""
         node = make_node()
         await node.start(["tcp://127.0.0.1:19377"])
         try:

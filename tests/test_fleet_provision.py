@@ -223,8 +223,8 @@ class TestNetworkDetection:
 
 
 class TestPreciseTargets:
-    """« Balaie mon LAN » et « regarde exactement cette machine » passent par le
-    même champ. Ce qui n'est pas compris revient nommé, jamais jeté en silence."""
+    """"Scan my LAN" and "look at exactly this machine" go through the same
+    field. What is not understood comes back named, never silently dropped."""
 
     async def test_single_ip(self):
         targets, rejected = await fleet_ssh.parse_targets(["10.0.0.5"])
@@ -236,8 +236,8 @@ class TestPreciseTargets:
         assert targets == [("10.0.0.5", 2222)]
 
     async def test_hostname_is_resolved_here(self):
-        """Résolu en amont, pas laissé à open_connection : celui-ci résoudrait
-        sur l'executor par défaut, joint au shutdown (gotchas §2)."""
+        """Resolved up front, not left to open_connection: that one would
+        resolve on the default executor, joined at shutdown (gotchas §2)."""
         targets, rejected = await fleet_ssh.parse_targets(["localhost"])
         assert rejected == []
         assert targets and targets[0][1] == 22
@@ -261,14 +261,14 @@ class TestPreciseTargets:
         assert rejected == []
 
     async def test_explicit_public_host_is_allowed(self):
-        """Nommer une machine, ce n'est pas balayer : un hôte précis tapé à la
-        main est autorisé où qu'il soit."""
+        """Naming a machine is not scanning: a precise host typed by hand is
+        allowed wherever it is."""
         targets, rejected = await fleet_ssh.parse_targets(["93.184.216.34"])
         assert targets == [("93.184.216.34", 22)]
         assert rejected == []
 
     async def test_public_subnet_is_still_refused(self):
-        """Un préfixe public reste un balayage d'inconnus."""
+        """A public prefix is still a sweep of strangers."""
         targets, rejected = await fleet_ssh.parse_targets(["93.184.216.0/24"])
         assert targets == []
         assert rejected == ["93.184.216.0/24"]
@@ -280,7 +280,7 @@ class TestPreciseTargets:
             assert targets == [] and rejected == [bad]
 
     async def test_ipv6_literal_target(self):
-        """Un /64 ne se balaie pas, mais désigner une machine en v6 est légitime."""
+        """A /64 is not scannable, but naming a machine over v6 is legitimate."""
         targets, rejected = await fleet_ssh.parse_targets(["[::1]:2222"])
         assert targets == [("::1", 2222)]
         assert rejected == []
@@ -302,7 +302,7 @@ class TestPreciseTargets:
         assert len(targets) <= 40
 
     async def test_scan_reaches_a_named_machine(self):
-        """Bout en bout : une cible précise atteint bien un vrai listener."""
+        """End to end: a precise target really reaches a real listener."""
         async def handle(reader, writer):
             writer.write(b"SSH-2.0-OpenSSH_9.6\r\n")
             await writer.drain()
@@ -541,8 +541,8 @@ class TestBootstrap:
         assert script.index("integrity check failed") < script.index("tar -xzf")
 
     def test_script_fails_fast(self):
-        """Les deux phases s'arrêtent à la première erreur plutôt que de laisser
-        un nœud à moitié installé."""
+        """Both phases stop at the first error rather than leave a node half
+        installed."""
         assert self._script().startswith("#!/bin/sh")
         assert "\nset -eu\n" in self._script()
         assert fleet_provision.build_install_phase(
@@ -671,9 +671,9 @@ class TestHostKeyPinning:
 
 
 class TestMaterialisedKey:
-    """`ssh -i` veut un chemin, donc une clé importée doit toucher un système de
-    fichiers. La fenêtre est *une commande* : dossier 0700, fichier 0600,
-    supprimé en sortie."""
+    """`ssh -i` wants a path, so an imported key has to touch a filesystem. The
+    window is *one command*: a 0700 directory, a 0600 file, deleted on the way
+    out."""
 
     KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
 
@@ -706,7 +706,7 @@ class TestMaterialisedKey:
             assert "-i" in options
             assert options[options.index("-i") + 1] == key.path
             assert "IdentitiesOnly=yes" in options
-        # …et jamais le matériel lui-même.
+        # …and never the material itself.
         assert self.KEY not in " ".join(options)
 
     def test_wipe_drops_the_material(self):

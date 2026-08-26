@@ -521,8 +521,8 @@ class TestRemoteConsole:
 
 class TestUpdateRefusalIsUseful:
     async def test_the_machine_explains_itself(self, operator, agent):
-        """« sudo a dit quelque chose à propos d'un drapeau noyau » n'indique
-        rien à faire. Le refus doit nommer la cause et le correctif."""
+        """"sudo said something about a kernel flag" suggests nothing to do.
+        The refusal has to name the cause and the fix."""
         await enrol(operator, agent, caps=["update"])
         agent.app.facts.package_manager = "apt"
         agent.app.facts.escalation = "sudo"
@@ -878,13 +878,13 @@ class TestHostileInput:
 
 
 # ---------------------------------------------------------------------------
-# Réponses qui doivent tenir dans une trame
+# Replies that have to fit in one frame
 # ---------------------------------------------------------------------------
 
 class TestReplyFraming:
-    """Couper du JSON à un offset produit quelque chose que le destinataire ne
-    parse pas et jette en silence — la pire panne possible pour une réponse que
-    l'opérateur attend. On coupe donc des **entrées**, jamais des octets."""
+    """Cutting JSON at an offset produces something the recipient cannot parse
+    and drops silently — the worst possible failure for a reply an operator is
+    waiting on. So we cut **entries**, never bytes."""
 
     def _fat_hosts(self, count):
         return [{"ip": f"10.0.{i // 256}.{i % 256}", "port": 22,

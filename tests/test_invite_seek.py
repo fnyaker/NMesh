@@ -1,5 +1,5 @@
 """
-INVITE_SEEK — relayed invitation seek (étape 2).
+INVITE_SEEK — relayed invitation seek (step 2).
 
 A joiner routes a *signed* seek toward the inviter through the mesh. The seek
 is the only packet allowed to traverse the mesh pre-authentication, so it is

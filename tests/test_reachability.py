@@ -1,5 +1,5 @@
 """
-Transport-agnostic reachability model (étape 1).
+Transport-agnostic reachability model (step 1).
 
 Reachability is how the core learns, without knowing any concrete transport,
 whether a node can serve as a relay and by which audience. Each transport

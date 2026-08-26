@@ -1,11 +1,11 @@
-"""L'encodeur QR (stdlib pure).
+"""The QR encoder (pure stdlib).
 
-Un encodeur QR maison ne vaut rien s'il ne se décode pas. Les vérifications
-fortes — égalité module par module avec un encodeur indépendant, et décodage
-réel — tournent quand l'outillage optionnel est installé ; sinon on vérifie ce
-qui est vérifiable sans dépendance : structure, bornes, déterminisme.
+A home-grown QR encoder is worth nothing if it does not decode. The strong
+checks — module-by-module equality with an independent encoder, and a real
+decode — run when the optional tooling is installed; otherwise we check what is
+checkable with no dependency: structure, bounds, determinism.
 
-    pip install qrcode opencv-python-headless numpy   # pour les tests forts
+    pip install qrcode opencv-python-headless numpy   # for the strong tests
 """
 import pytest
 
@@ -27,7 +27,7 @@ class TestStructure:
         assert len(qr.encode("A")) == 21
 
     def test_a_ticket_fits_in_a_small_symbol(self):
-        """34 caractères alphanumériques doivent tenir en version 2."""
+        """34 alphanumeric characters have to fit in version 2."""
         assert len(qr.encode(_ticket_text())) == 25
 
     def test_the_finder_patterns_are_where_they_belong(self):
@@ -68,12 +68,12 @@ class TestBounds:
             qr.encode(None)
 
     def test_a_payload_beyond_version_10_is_refused(self):
-        """Refusé clairement plutôt que rendu un symbole illisible."""
+        """Refused plainly, rather than rendering an unreadable symbol."""
         with pytest.raises(qr.QRError):
             qr.encode("x" * 5000)
 
     def test_byte_mode_handles_what_alphanumeric_cannot(self):
-        matrix = qr.encode("tcp://203.0.113.7:9000")   # minuscules et '/'
+        matrix = qr.encode("tcp://203.0.113.7:9000")   # lowercase and '/'
         assert len(matrix) >= 21
 
 
@@ -83,19 +83,18 @@ class TestSvg:
         ET.fromstring(qr.svg_for("HELLO WORLD"))
 
     def test_the_quiet_zone_is_included(self):
-        """Sans zone de silence, un scanner ne trouve simplement pas le
-        symbole."""
+        """With no quiet zone, a scanner simply does not find the symbol."""
         matrix = qr.encode("HELLO WORLD")
         svg = qr.to_svg(matrix, scale=1, quiet=4)
-        assert 'width="29"' in svg          # 21 modules + 4 de chaque côté
+        assert 'width="29"' in svg          # 21 modules + 4 on each side
 
     def test_nothing_external_is_referenced(self):
         svg = qr.svg_for("HELLO WORLD")
-        assert "http://www.w3.org/2000/svg" in svg     # namespace, pas un lien
+        assert "http://www.w3.org/2000/svg" in svg     # a namespace, not a link
         assert "<image" not in svg and "href" not in svg
 
 
-# ── vérifications fortes, si l'outillage est là ──────────────────────────────
+# ── the strong checks, when the tooling is there ────────────────────────────
 
 def _decode(matrix, scale=8, quiet=4):
     cv2 = pytest.importorskip("cv2")
@@ -128,9 +127,9 @@ def test_a_real_decoder_reads_a_join_ticket():
 
 
 def test_the_svg_itself_decodes():
-    """Le maillon que le reste ne couvre pas : ce sont les rectangles du SVG que
-    la caméra voit, pas la matrice. On les relit pour vérifier qu'ils disent la
-    même chose."""
+    """The link the rest does not cover: what the camera sees is the SVG's
+    rectangles, not the matrix. We read them back to check they say the same
+    thing."""
     import re
     text = _ticket_text()
     scale, quiet = 4, 4
@@ -150,8 +149,8 @@ def test_the_svg_itself_decodes():
 
 @pytest.mark.parametrize("text", ["HELLO WORLD", "NMESH JOIN TICKET 123"])
 def test_identical_to_an_independent_encoder(text):
-    """Même version, même niveau, même masque : les matrices doivent être
-    identiques module par module."""
+    """Same version, same level, same mask: the matrices have to be identical
+    module by module."""
     qrcode = pytest.importorskip("qrcode")
     from qrcode.constants import ERROR_CORRECT_M, ERROR_CORRECT_L
 

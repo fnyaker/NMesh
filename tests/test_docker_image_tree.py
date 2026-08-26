@@ -1,9 +1,9 @@
-"""L'image Docker doit embarquer de quoi provisionner d'autres machines.
+"""The Docker image has to carry what it takes to provision other machines.
 
-L'app fleet pousse l'arbre NMesh du nœud vers les machines qu'elle installe. Si
-l'image ne contient pas les entrées que `build_payload` exige, un nœud
-conteneurisé échoue à l'exécution avec « no NMesh tree at /app » — un bug
-invisible à la construction, d'où ce test.
+The fleet app pushes the node's NMesh tree to the machines it installs. If the
+image does not contain the entries `build_payload` requires, a containerised node
+fails at runtime with "no NMesh tree at /app" — a bug invisible at build time,
+hence this test.
 """
 import re
 from pathlib import Path
@@ -15,7 +15,7 @@ DOCKERFILE = ROOT / "docker" / "Dockerfile"
 
 
 def copied_entries() -> set:
-    """Ce que le Dockerfile dépose dans /app, d'après ses instructions COPY."""
+    """What the Dockerfile puts in /app, according to its COPY instructions."""
     copied = set()
     for line in DOCKERFILE.read_text().splitlines():
         match = re.match(r"\s*COPY\s+(.*)$", line)
@@ -26,7 +26,7 @@ def copied_entries() -> set:
             continue
         sources, destination = parts[:-1], parts[-1]
         # Seules les copies vers le WORKDIR comptent ; /entrypoint.sh n'est pas
-        # dans l'arbre poussé.
+        # in the pushed tree.
         if not destination.startswith(("./", "/app")):
             continue
         for source in sources:
@@ -39,8 +39,8 @@ def test_image_ships_everything_build_payload_requires():
     missing = [entry for entry in fleet_provision.PAYLOAD_INCLUDE
                if entry not in copied and entry != "requirements.txt"]
     assert not missing, (
-        f"le Dockerfile ne copie pas {missing} : un nœud conteneurisé "
-        "échouerait avec « no NMesh tree at /app »")
+        f"the Dockerfile does not copy {missing}: a containerised node "
+        'would fail with "no NMesh tree at /app"')
 
 
 def test_the_mandatory_pair_is_present():
@@ -50,8 +50,8 @@ def test_the_mandatory_pair_is_present():
 
 
 def test_requirements_come_from_the_base_image():
-    """requirements.txt n'est pas recopié ici : l'image de base l'a déjà posé
-    dans /app. Si cette ligne disparaît de la base, le payload perdra le
-    fichier sans que rien ne casse à la construction."""
+    """requirements.txt is not copied again here: the base image already put it
+    in /app. If that line disappears from the base, the payload will lose the
+    file with nothing breaking at build time."""
     base = (ROOT / "docker" / "Dockerfile.base").read_text()
     assert re.search(r"COPY\s+requirements\.txt", base)
