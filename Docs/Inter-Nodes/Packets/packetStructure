@@ -1,77 +1,79 @@
-# Format des paquets inter-nœuds
+# Inter-node packet format
 
-## Contraintes générales
+## General constraints
 
-- Taille maximale du payload : **60 000 octets**
-- Le transport TCP utilise un préfixe 2 octets (uint16) pour le framing — max 65535 octets au total
-- Le payload est chiffré via AES-256-GCM
-- Le header est en clair mais authentifié (AAD du GCM)
+- Maximum payload size: **60,000 bytes**
+- The TCP transport uses a 2-byte (uint16) prefix for framing — 65535 bytes in total at most
+- The payload is encrypted with AES-256-GCM
+- The header is in the clear but authenticated (as the GCM AAD)
 
 ---
 
-## Structure du header
+## Header structure
 
-| Champ        | Taille    | Description                                              |
+| Field        | Size      | Description                                              |
 |--------------|-----------|----------------------------------------------------------|
-| version      | 1 octet   | Version du protocole                                     |
-| type         | 1 octet   | Type de paquet (voir ci-dessous)                         |
-| TTL          | 1 octet   | Décrémenté à chaque hop — exclu du AAD                   |
-| src_id       | 20 octets | ID Kademlia de l'émetteur (160 bits)                     |
-| dst_id       | 20 octets | ID Kademlia du destinataire (160 bits)                   |
-| msg_id       | 4 octets  | CRC32(header + payload) sans TTL ni msg_id               |
-| nonce        | 12 octets | Aléatoire par paquet (os.urandom), requis par AES-GCM    |
-| gcm_tag      | 16 octets | Tag d'authenticité AES-256-GCM                           |
-| **Total**    | **75 octets** |                                                      |
+| version      | 1 byte    | Protocol version                                         |
+| type         | 1 byte    | Packet type (see below)                                  |
+| TTL          | 1 byte    | Decremented at each hop — excluded from the AAD          |
+| src_id       | 20 bytes  | The sender's Kademlia ID (160 bits)                      |
+| dst_id       | 20 bytes  | The recipient's Kademlia ID (160 bits)                   |
+| msg_id       | 4 bytes   | CRC32(header + payload) without TTL or msg_id            |
+| nonce        | 12 bytes  | Random per packet (os.urandom), required by AES-GCM      |
+| gcm_tag      | 16 bytes  | The AES-256-GCM authentication tag                       |
+| **Total**    | **75 bytes** |                                                       |
 
-**Payload chiffré disponible : 437 octets**
-
----
-
-## Chiffrement AES-256-GCM
-
-- **Clé** : dérivée de la clé de session négociée au handshake (ML-KEM)
-- **Nonce** : 12 octets aléatoires générés par `os.urandom()` — unique par paquet
-- **AAD** (données authentifiées mais non chiffrées) : header complet sans TTL
-- **Payload** : chiffré
-- **GCM tag** : couvre AAD + payload → garantit intégrité et authenticité
-
-Le TTL est exclu du AAD car il est décrémenté à chaque hop par les nœuds relais.
+**Encrypted payload available: 437 bytes**
 
 ---
 
-## Calcul de msg_id
+## AES-256-GCM encryption
 
-`msg_id` = CRC32(header + payload), TTL et msg_id exclus du calcul.
+- **Key**: derived from the session key negotiated at the handshake (ML-KEM)
+- **Nonce**: 12 random bytes from `os.urandom()` — unique per packet
+- **AAD** (authenticated but not encrypted): the whole header without the TTL
+- **Payload**: encrypted
+- **GCM tag**: covers AAD + payload → guarantees integrity and authenticity
 
-Sert à la déduplication dans le mesh : un paquet qui boucle est détecté et jeté.
+The TTL is excluded from the AAD because relaying nodes decrement it at each hop.
 
 ---
 
-## Types de paquets
+## Computing msg_id
+
+`msg_id` = CRC32(header + payload), with TTL and msg_id excluded from the
+calculation.
+
+It serves deduplication across the mesh: a packet that loops is detected and
+dropped.
+
+---
+
+## Packet types
 
 ### DATA
-Données applicatives — priorité basse.
+Application data — low priority.
 
 ### CONTROL
-Messages de routage et gestion réseau — priorité haute.
+Routing and network-management messages — high priority.
 
-| Sous-type       | Valeur | Description                                        |
+| Subtype         | Value  | Description                                        |
 |-----------------|--------|----------------------------------------------------|
-| PING            | 0x01   | Vérifier qu'un nœud est vivant                     |
-| PONG            | 0x02   | Réponse au PING                                    |
-| FIND_NODE       | 0x03   | Chercher les nœuds proches d'un ID                 |
-| FOUND_NODE      | 0x04   | Réponse avec liste de nœuds proches                |
-| FIND_VALUE      | 0x05   | Chercher une valeur DHT par clé — `key(20)‖query_id(8)` |
-| FOUND_VALUE     | 0x06   | Réponse DHT — `query_id(8)‖valeur` (vide = absente)     |
-| STORE           | 0x07   | Stocker une valeur DHT — `key(20)‖valeur`              |
-| HANDSHAKE       | 0x08   | Initier une session (échange ML-KEM + ML-DSA)      |
-| HANDSHAKE_ACK   | 0x09   | Confirmation de handshake                          |
-| INVITE          | 0x0A   | Présenter un code d'invitation                     |
-| INVITE_ACK      | 0x0B   | Validation ou rejet d'une invitation               |
-| CHALLENGE       | 0x0C   | Challenge d'authentification                       |
-| E2E_HANDSHAKE     | 0x0D | Handshake E2E de bout en bout                      |
-| E2E_HANDSHAKE_ACK | 0x0E | Confirmation du handshake E2E                      |
+| PING            | 0x01   | Check that a node is alive                         |
+| PONG            | 0x02   | The answer to a PING                               |
+| FIND_NODE       | 0x03   | Look for the nodes closest to an ID                |
+| FOUND_NODE      | 0x04   | The answer, with a list of close nodes             |
+| FIND_VALUE      | 0x05   | Look for a DHT value by key — `key(20)‖query_id(8)` |
+| FOUND_VALUE     | 0x06   | The DHT answer — `query_id(8)‖value` (empty = absent) |
+| STORE           | 0x07   | Store a DHT value — `key(20)‖value`                |
+| HANDSHAKE       | 0x08   | Start a session (ML-KEM + ML-DSA exchange)         |
+| HANDSHAKE_ACK   | 0x09   | Handshake confirmation                             |
+| INVITE          | 0x0A   | Present an invitation code                         |
+| INVITE_ACK      | 0x0B   | An invitation accepted or rejected                 |
+| CHALLENGE       | 0x0C   | An authentication challenge                        |
+| E2E_HANDSHAKE     | 0x0D | The end-to-end E2E handshake                       |
+| E2E_HANDSHAKE_ACK | 0x0E | E2E handshake confirmation                         |
 
-DHT : les valeurs sont **adressées par contenu** (`key = sha256(valeur)[:20]`).
-Un nœud ne stocke une valeur que si sa clé correspond à son hash → pas
-d'empoisonnement. Voir `Docs/AppSharing/guide`.
+DHT: values are **content-addressed** (`key = sha256(value)[:20]`). A node
+stores a value only if its key matches its hash → no poisoning. See
+`Docs/AppSharing/guide`.
