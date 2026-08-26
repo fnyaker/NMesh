@@ -916,11 +916,11 @@ async def _tls_login(console, password=PW):
 
 
 class TestConfiguration:
-    """Les options de lancement sont éditables depuis la console.
+    """The launch options are editable from the console.
 
-    Deux exigences se croisent ici : la console ne doit jamais écrire une valeur
-    que le nœud refuserait au démarrage, et elle ne doit jamais devenir un moyen
-    de choisir ce que le nœud exécute."""
+    Two requirements cross here: the console must never write a value the node
+    would refuse at startup, and it must never become a way of choosing what the
+    node runs."""
 
     async def test_reading_needs_a_session(self):
         with tempfile.TemporaryDirectory() as d:
@@ -985,8 +985,8 @@ class TestConfiguration:
                 assert status == 400 and body["rejected"]
                 from src import config as node_config
                 stored, _ = node_config.load(path)
-                # Le fichier précédent est intact : un champ fautif n'emporte
-                # pas ce qui était déjà réglé.
+                # The previous file is intact: one bad field does not carry
+                # away what was already set.
                 assert stored["fleet"] is True
                 assert stored.get("console_port") == 8787
             finally:
@@ -1054,8 +1054,8 @@ class TestConfiguration:
 
 
 class TestTrace:
-    """La trace est un enregistrement de métadonnées de routage : elle exige la
-    même session que le reste, et ne doit jamais rendre de payload."""
+    """The trace is a record of routing metadata: it requires the same session
+    as everything else, and must never return a payload."""
 
     async def test_reading_needs_a_session(self):
         node, console = await _make_console()
@@ -1178,11 +1178,11 @@ class TestTrace:
 
 
 class TestPasswordChange:
-    """Changer le mot de passe depuis la console.
+    """Changing the password from the console.
 
-    La propriété qui compte : une session volée ne doit pas suffire. Sans le
-    mot de passe courant, un vol de session deviendrait une prise de contrôle
-    définitive du nœud."""
+    The property that matters: a stolen session must not be enough. Without the
+    current password, a stolen session would become permanent control of the
+    node."""
 
     async def test_a_session_alone_is_not_enough(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1193,7 +1193,7 @@ class TestPasswordChange:
                     _request, console, "POST", "/api/password", token,
                     {"current": "not-the-password", "new": "a-new-password-1"})
                 assert status == 403
-                assert console._check_password(PW)      # inchangé
+                assert console._check_password(PW)      # unchanged
             finally:
                 console.stop(); await node.stop()
 
@@ -1224,7 +1224,7 @@ class TestPasswordChange:
                 console.stop(); await node.stop()
 
     async def test_it_survives_a_restart_of_the_console(self):
-        """Le nouveau mot de passe doit être sur disque, pas seulement en RAM."""
+        """The new password has to be on disk, not only in RAM."""
         with tempfile.TemporaryDirectory() as d:
             node, console = await _make_console(state_dir=d)
             try:
@@ -1284,8 +1284,8 @@ class TestPasswordChange:
                 console.stop(); await node.stop()
 
     async def test_guessing_the_current_password_hits_the_lockout(self):
-        """Cet endpoint ne doit pas être un moyen de deviner le mot de passe
-        plus vite que la page de login."""
+        """This endpoint must not be a way of guessing the password faster than
+        the login page."""
         with tempfile.TemporaryDirectory() as d:
             node, console = await _make_console(state_dir=d)
             try:
@@ -1354,8 +1354,8 @@ class TestJoinTicket:
             parsed = join_ticket.decode(body["ticket"])
             assert parsed["uri"] == "tcp://203.0.113.7:9000"
             assert body["qr_svg"].startswith("<svg")
-            # Le code voyage dans le ticket ; le répéter le mettrait dans un
-            # endroit de plus.
+            # The code travels inside the ticket; repeating it would put it in
+            # one more place.
             assert "code" not in body
         finally:
             console.stop(); await node.stop()
@@ -1375,8 +1375,8 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
     async def test_joining_with_a_broken_ticket_is_refused_locally(self):
-        """Une faute de frappe doit échouer ici, avec un message clair, pas en
-        composant une adresse au hasard."""
+        """A typo has to fail here, with a clear message, not by dialling some
+        random address."""
         node, console = await _make_console()
         try:
             _, token = await _login(console)
@@ -1395,14 +1395,14 @@ class TestJoinTicket:
             _, token = await _login(console)
             status, _, _, _ = await asyncio.to_thread(
                 _request, console, "POST", "/api/join", token, {"uri": "tcp://"})
-            assert status == 400          # uri et code exigés, comme avant
+            assert status == 400          # uri and code required, as before
         finally:
             console.stop(); await node.stop()
 
 
 class TestAddressRetryEndpoints:
-    """Les deux routes ajoutées pour les adresses : rejouer, et le pilotage par
-    latence. Elles rendent des mots utilisables, et refusent tout le reste."""
+    """The two routes added for addresses: replaying, and steering on latency.
+    They return usable words, and refuse everything else."""
 
     async def test_retry_needs_an_id(self):
         node, console = await _make_console()
@@ -1441,8 +1441,8 @@ class TestAddressRetryEndpoints:
         try:
             _, token = await _login(console)
             target = NodeID(b"\x5a" * 20)
-            # Un schéma qu'aucun transport ne sert : la réponse est immédiate
-            # *et* elle nomme le problème, ce qui est le point du bouton.
+            # A scheme no transport serves: the answer is immediate *and* it
+            # names the problem, which is the point of the button.
             node._routing.add(target, ["nope://nowhere:1", "nope://elsewhere:2"])
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/peers/retry", token,
@@ -1452,7 +1452,7 @@ class TestAddressRetryEndpoints:
             assert {row["uri"] for row in body["results"]} == {
                 "nope://nowhere:1", "nope://elsewhere:2"}
             assert all(row["outcome"] == "no transport" for row in body["results"])
-            # Et l'échec est enregistré là où le tableau des adresses le lit.
+            # And the failure is recorded where the address table reads it.
             assert node._dial_log[target.raw.hex()]
         finally:
             console.stop(); await node.stop()
@@ -1509,8 +1509,8 @@ class TestAddressRetryEndpoints:
                 {"value": 100})
             assert status == 200 and body["value"] == 100
             assert node.transport_balance == 100
-            # La console reçoit l'ordre calculé par le nœud, pas une consigne
-            # de le recalculer elle-même.
+            # The console receives the order the node computed, not an
+            # instruction to recompute it itself.
             assert [entry["scheme"] for entry in body["preference"]]
             _, _, _, state = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)

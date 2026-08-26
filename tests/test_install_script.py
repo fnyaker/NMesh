@@ -1,13 +1,13 @@
-"""L'installeur ./install.sh doit poser NMesh proprement sur n'importe quelle machine.
+"""The ./install.sh installer has to lay NMesh down cleanly on any machine.
 
-Il ne réimplémente rien de `start.sh` : il installe une copie de l'arbre et
-pointe un service dessus. Les pièges couverts ici sont ceux qui cassent une
-installation réelle — `systemctl` présent sans systemd derrière (le cas de la
-plupart des images de conteneur), pas de root, pas de sudo, et l'état du nœud
-qui doit survivre à une mise à jour.
+It reimplements nothing from `start.sh`: it installs a copy of the tree and
+points a service at it. The traps covered here are the ones that break a real
+installation — `systemctl` present with no systemd behind it (the case for most
+container images), no root, no sudo, and the node's state that has to survive an
+update.
 
-On source install.sh en mode bibliothèque (NMESH_INSTALL_LIB=1) : rien n'est
-installé, rien n'est lancé.
+We source install.sh in library mode (NMESH_INSTALL_LIB=1): nothing is
+installed, nothing is launched.
 """
 import os
 import shutil
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(BASH is None,
 
 
 def run_snippet(tmp_path, snippet, *, fake_bins=(), env=None, isolate=False):
-    """Source install.sh en mode bibliothèque puis exécute `snippet`."""
+    """Source install.sh in library mode, then run `snippet`."""
     stub_dir = tmp_path / "stubbin"
     stub_dir.mkdir(exist_ok=True)
     base_path = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -55,8 +55,8 @@ def run_snippet(tmp_path, snippet, *, fake_bins=(), env=None, isolate=False):
 
 class TestInitDetection:
     def test_systemctl_without_systemd_is_not_systemd(self, tmp_path):
-        """Le piège des conteneurs : `systemctl` est là, systemd non. Toute
-        commande finirait par « Failed to connect to bus »."""
+        """The container trap: `systemctl` is there, systemd is not. Every
+        command would end in "Failed to connect to bus"."""
         result = run_snippet(
             tmp_path, "detect_init",
             fake_bins=[("systemctl", "#!/bin/sh\nexit 1\n")],
@@ -119,8 +119,8 @@ class TestPaths:
 
 class TestServiceUnits:
     def test_systemd_unit_runs_start_sh(self, tmp_path):
-        """Le service pointe sur start.sh, jamais sur python : un nœud qui
-        démarre revérifie ses dépendances et se répare tout seul."""
+        """The service points at start.sh, never at python: a node that starts
+        re-checks its dependencies and repairs itself."""
         out = run_snippet(
             tmp_path,
             'systemd_unit /opt/nmesh /var/lib/nmesh nm "--fleet" multi-user.target'
@@ -130,10 +130,11 @@ class TestServiceUnits:
         assert "User=nm" in out
         assert "Restart=always" in out
         assert "NoNewPrivileges=yes" in out
-        # L'updater ne redémarre le nœud que s'il sait qu'on le relancera.
+        # The updater restarts the node only when it knows something will bring
+        # it back.
         assert "Environment=NMESH_SERVICE_MANAGED=1" in out
-        # liboqs est construit *dans* le préfixe : un compte système n'a pas de
-        # home où le nœud pourrait retrouver sa bibliothèque de crypto.
+        # liboqs is built *inside* the prefix: a system account has no home
+        # where the node could find its crypto library again.
         assert "Environment=HOME=/opt/nmesh" in out
         assert "Environment=OQS_INSTALL_PATH=/opt/nmesh/_oqs" in out
         assert "ProtectSystem=full" in out
@@ -160,7 +161,7 @@ class TestServiceUnits:
             tmp_path,
             'launchd_plist /opt/nmesh /var/lib/nmesh org.nmesh.x "--fleet"').stdout
         import xml.etree.ElementTree as ET
-        ET.fromstring(out)          # lève si le plist est mal formé
+        ET.fromstring(out)          # raises if the plist is malformed
         assert "/opt/nmesh/start.sh" in out
         assert "<string>--fleet</string>" in out
         assert "NMESH_SERVICE_MANAGED" in out
@@ -168,8 +169,8 @@ class TestServiceUnits:
 
 
 class TestServiceAccount:
-    """Le nœud tourne sous un compte à lui : son identité, son store de sessions
-    et le hash du mot de passe console ne doivent être lisibles que par lui."""
+    """The node runs under an account of its own: its identity, its session
+    store and the console password's hash must be readable only by it."""
 
     def test_an_existing_account_is_not_recreated(self, tmp_path):
         result = run_snippet(
@@ -181,8 +182,8 @@ class TestServiceAccount:
         assert "CREATED" not in result.stderr
 
     def test_creation_falls_through_to_the_next_tool(self, tmp_path):
-        """Chaque distro épelle « compte système » autrement et refuse les
-        options des autres : on essaie, on ne devine pas."""
+        """Every distro spells "system account" differently and refuses the
+        others' options: we try, we do not guess."""
         result = run_snippet(
             tmp_path, 'SUDO=; create_service_user nmesh /opt/nmesh && echo CREATED',
             fake_bins=[("id", "#!/bin/sh\nexit 1\n"),
@@ -198,8 +199,8 @@ class TestServiceAccount:
         assert "NO_ACCOUNT" in result.stdout
 
     def test_owner_spec_without_a_group_is_the_bare_name(self, tmp_path):
-        """`chown nmesh:nmesh` échoue net quand la distro a mis le compte dans
-        `nogroup` — et laisserait l'arbre illisible pour le nœud."""
+        """`chown nmesh:nmesh` fails outright when the distro put the account in
+        `nogroup` — and would leave the tree unreadable for the node."""
         result = run_snippet(tmp_path, "owner_spec nmesh",
                              fake_bins=[("id", "#!/bin/sh\nexit 1\n")],
                              isolate=True)
@@ -214,9 +215,9 @@ class TestServiceAccount:
 
 class TestDirectories:
     def test_a_writable_parent_is_never_escalated(self, tmp_path):
-        """Le bug réel : `sudo mkdir -p ~/.local/share/nmesh/data` donnait le
-        répertoire à root, et le nœud mourait sur sa toute première écriture
-        (« Permission denied: …/data/node.key.tmp »)."""
+        """The real bug: `sudo mkdir -p ~/.local/share/nmesh/data` gave the
+        directory to root, and the node died on its very first write
+        ("Permission denied: …/data/node.key.tmp")."""
         marker = tmp_path / "sudo-was-called"
         target = tmp_path / "home" / "share" / "nmesh" / "data"
         result = run_snippet(
@@ -256,7 +257,7 @@ class TestTreeCopy:
 
         assert (dst / "src" / "node.py").read_text() == "code"
         assert (dst / "start.sh").exists()
-        # Ni l'historique, ni le venv, ni l'état du nœud n'ont à être copiés.
+        # Neither the history, nor the venv, nor the node's state is to be copied.
         assert not (dst / ".git").exists()
         assert not (dst / ".venv").exists()
         assert not (dst / "data").exists()
@@ -271,10 +272,10 @@ class TestTreeCopy:
 
 
 class TestOrdering:
-    """Le fichier de config est écrit en 0600 par qui lance l'installeur. Écrit
-    *après* le verrouillage, il restait root:root et le compte du nœud ne
-    pouvait pas le lire du tout — le nœud repartait sur ses valeurs par défaut
-    et chaque réglage du fichier était ignoré en silence."""
+    """The config file is written 0600 by whoever runs the installer. Written
+    *after* the lock-down, it stayed root:root and the node's account could not
+    read it at all — the node fell back on its defaults and every setting in the
+    file was silently ignored."""
 
     def test_the_config_is_written_before_the_lock_down(self):
         text = INSTALL.read_text()
@@ -283,7 +284,7 @@ class TestOrdering:
         assert config_write < lock
 
     def test_the_lock_down_covers_the_install_directory(self):
-        """C'est ce `chown -R` qui rattrape le fichier de config."""
+        """It is that `chown -R` that catches the config file."""
         text = INSTALL.read_text()
         assert 'chown -R "$OWNER"' in text
 
@@ -296,9 +297,9 @@ class TestPasswordReset:
         assert "--reset-password" in result.stdout
 
     def test_it_delegates_the_hashing_to_the_node(self):
-        """Le format du credential ne doit exister qu'à un seul endroit : une
-        seconde implémentation en shell qui divergerait serait un bug
-        d'authentification silencieux."""
+        """The credential's format must exist in one place only: a second
+        implementation in shell that diverged would be a silent authentication
+        bug."""
         text = INSTALL.read_text()
         assert "nmesh_password.py" in text
         assert "scrypt" not in text
