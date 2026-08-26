@@ -35,6 +35,13 @@ from .app_package import (
 )
 from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .app_catalog import AppCatalog, InstalledApps
+from .version import is_newer as _is_newer
+from .core_release import (ReleaseCatalog, TrustedPublishers, ReleaseError,
+                           build_release as _core_build_release,
+                           check_tree as _core_check_tree,
+                           publisher_id as _core_publisher_id,
+                           read_tree as _core_read_tree,
+                           version_of as _core_version_of)
 from .pseudo_dir import (PseudoStore, dir_key as _dir_key,
                          build_claim as _dir_build_claim,
                          parse_claim as _dir_parse_claim,
@@ -84,6 +91,7 @@ DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
 DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
 ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
 ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
+RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -136,9 +144,14 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # directory and Kademlia discovery all work when the target is only reachable
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
-                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE}
+                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
+                    RELEASE_ANNOUNCE}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
+_RELEASE_RATE_WINDOW = 10.0     # seconds
+_RELEASE_RATE_MAX    = 32       # release announces one link may push per window
+_RELEASE_TICK        = 300.0    # seconds between auto-install passes
+_RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
@@ -1045,6 +1058,16 @@ class _PunchState:
         self.peer_nonce: bytes | None = None
 
 
+
+def _running_version() -> str:
+    """The version this process is running.
+
+    Read through the module rather than captured at import: a test (and an
+    operator reading the console after an install) needs "what am I running"
+    to be one lookup, not a constant copied at startup."""
+    from .version import __version__
+    return __version__
+
 # ---------------------------------------------------------------------------
 # MeshNode
 # ---------------------------------------------------------------------------
@@ -1057,7 +1080,8 @@ class MeshNode:
                  cert_store_path: str | None = None,
                  session_store_path: str | None = None,
                  app_storage_path: str | None = None,
-                 app_store_dir: str | None = None) -> None:
+                 app_store_dir: str | None = None,
+                 release_dir: str | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1117,6 +1141,17 @@ class MeshNode:
         apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
         self._installed = InstalledApps(installed_path, apps_dir)
         self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        # Mesh-native releases: what the network offers (gossiped, in-memory)
+        # and whose signature this operator accepts (pinned, persisted). The
+        # pins are the only thing that decides what may replace this node's own
+        # code, so nothing arriving from the network writes to them.
+        self._publishers = TrustedPublishers(
+            os.path.join(release_dir, "publishers.json") if release_dir else None)
+        self._releases = ReleaseCatalog()
+        self._release_rate: OrderedDict[int, tuple] = OrderedDict()
+        self._release_task: asyncio.Task | None = None
+        self._release_tried: OrderedDict[bytes, str] = OrderedDict()
+        self._release_log: list[dict] = []
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
         # Pseudo directory: find node ids by pseudo, network-wide.
         self._pseudo_store = PseudoStore()
@@ -1242,6 +1277,7 @@ class MeshNode:
         self._ensure_neighbor_maintenance()
         self._ensure_address_retry()
         self._ensure_address_steering()
+        self._ensure_release_watch()
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -1642,6 +1678,7 @@ class MeshNode:
         await self._stop_neighbor_maintenance()
         await self._stop_address_retry()
         await self._stop_address_steering()
+        await self._stop_release_watch()
         await self._stop_deferred_routes()
         # Concurrently: each peer.stop() is individually bounded, and stopping
         # 128 links one after another would stack those bounds into minutes.
@@ -4061,6 +4098,7 @@ class MeshNode:
             REACH_PROBE:       self._handle_reach_probe,
             REACH_PROBE_ACK:   self._handle_reach_probe_ack,
             CATALOG_ANNOUNCE:  self._handle_catalog_announce,
+            RELEASE_ANNOUNCE:  self._handle_release_announce,
             DIR_STORE:         self._handle_dir_store,
             DIR_FIND:          self._handle_dir_find,
             DIR_FOUND:         self._handle_dir_found,
@@ -4675,24 +4713,29 @@ class MeshNode:
 
     # -- app store: shared catalog (gossiped) + installed set -------------
 
-    def _catalog_allowed(self, peer: '_Peer') -> bool:
-        """Per-ingress-link rate limit on catalog announces (bounded, pruned) —
-        a peer cannot make us verify signatures without end."""
+    def _gossip_allowed(self, table: 'OrderedDict[int, tuple]', peer: '_Peer',
+                        window: float, maximum: int) -> bool:
+        """Per-ingress-link rate limit for a gossip plane (bounded, pruned) — a
+        peer cannot make us verify signatures without end. One implementation:
+        a second one would be a second place to get a bound wrong."""
         now = time.monotonic()
-        for k in [k for k, (_, ws) in self._catalog_rate.items()
-                  if now - ws > _CATALOG_RATE_WINDOW]:
-            del self._catalog_rate[k]
-        while len(self._catalog_rate) > _MAX_PEERS:
-            self._catalog_rate.popitem(last=False)
+        for k in [k for k, (_, ws) in table.items() if now - ws > window]:
+            del table[k]
+        while len(table) > _MAX_PEERS:
+            table.popitem(last=False)
         key = id(peer)
-        cnt, ws = self._catalog_rate.get(key, (0, now))
-        if now - ws > _CATALOG_RATE_WINDOW:
+        cnt, ws = table.get(key, (0, now))
+        if now - ws > window:
             cnt, ws = 0, now
-        if cnt >= _CATALOG_RATE_MAX:
-            self._catalog_rate[key] = (cnt, ws)
+        if cnt >= maximum:
+            table[key] = (cnt, ws)
             return False
-        self._catalog_rate[key] = (cnt + 1, ws)
+        table[key] = (cnt + 1, ws)
         return True
+
+    def _catalog_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._catalog_rate, peer,
+                                    _CATALOG_RATE_WINDOW, _CATALOG_RATE_MAX)
 
     async def _handle_catalog_announce(self, peer: '_Peer', packet: Packet) -> None:
         from .dht import MAX_VALUE
@@ -4825,6 +4868,270 @@ class MeshNode:
         if entry is None or entry["ts"] <= inst.get("ts", 0):
             return None
         return await self.install_app(app_id_hex)
+
+    # -- mesh-native releases: the node's own code, published and signed ---
+    #
+    # Same shape as the app catalog above, and deliberately so: a signed
+    # descriptor gossiped between direct peers, kept only when it changes our
+    # view, so the epidemic terminates. What differs is what it authorises — an
+    # app is installed into its own directory, a release *replaces this node's
+    # code* — so nothing here acts on a signature its operator has not pinned.
+
+    def _release_allowed(self, peer: '_Peer') -> bool:
+        """Per-ingress-link rate limit on release announces. Verifying an
+        ML-DSA signature is work; a peer does not get to ask for it without
+        end."""
+        return self._gossip_allowed(self._release_rate, peer,
+                                    _RELEASE_RATE_WINDOW, _RELEASE_RATE_MAX)
+
+    def _trusts_publisher(self, public_key: bytes) -> bool:
+        return self._publishers.trusts(public_key)
+
+    async def _handle_release_announce(self, peer: '_Peer', packet: Packet) -> None:
+        from .dht import MAX_VALUE
+        if not self._release_allowed(peer):
+            return
+        release_bytes = packet.payload
+        if not release_bytes or len(release_bytes) > MAX_VALUE:
+            return
+        # An untrusted publisher's release is still carried and re-gossiped:
+        # refusing to relay what we would not install ourselves would break
+        # discovery for every other operator. It is flagged, never acted on.
+        outcome = self._releases.offer(release_bytes, self._identity.verify,
+                                       self._trusts_publisher)
+        if outcome:
+            await self._gossip_release(release_bytes, exclude=peer)
+
+    async def _gossip_release(self, release_bytes: bytes,
+                              exclude: '_Peer | None' = None) -> None:
+        pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
+                            release_bytes)
+        for p in list(self._peers):
+            if p is exclude or p.authenticated_id is None or p.session is None:
+                continue
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    async def _sync_releases_to(self, peer: '_Peer') -> None:
+        """Catch a freshly authenticated peer up on the releases we know."""
+        for release_bytes in self._releases.releases():
+            if peer.authenticated_id is None or peer.session is None:
+                return
+            try:
+                await peer.send(Packet.create(RELEASE_ANNOUNCE, self._id.raw,
+                                              _BROADCAST_ID, release_bytes))
+            except Exception:
+                return
+
+    def _schedule_release_sync(self, peer: '_Peer') -> None:
+        if not self._releases.releases():
+            return
+        try:
+            asyncio.create_task(self._sync_releases_to(peer))
+        except RuntimeError:
+            pass  # no running loop (e.g. teardown) — nothing to sync
+
+    async def publish_release(self, root: str | None = None, notes: str = "",
+                              ts: int | None = None) -> dict:
+        """Publish this node's own code as a signed release, and announce it.
+
+        The tree is read, content-addressed onto the DHT, and a descriptor
+        signed with **this node's identity** binds that content to us. Whoever
+        has pinned our key can then fetch and install it. Raises
+        :class:`ReleaseError` if the tree is not something we can publish."""
+        from .dht import MAX_VALUE
+        from . import updater
+        files = _core_read_tree(root or updater.install_root())
+        version = _core_version_of(files)
+        _core_check_tree(files, version)          # what we sign is what we carry
+        _, manifest, chunks = _app_build("nmesh", version, files)
+        for value in chunks.values():
+            await self.dht_put(value)
+        root_bytes, manifest_chunks = _app_pack_root(manifest)
+        if len(root_bytes) > MAX_VALUE:
+            raise ReleaseError("this tree has too many files to publish")
+        for value in manifest_chunks.values():
+            await self.dht_put(value)
+        root_key = await self.dht_put(root_bytes)
+        release_bytes = _core_build_release(
+            root_key, hashlib.sha256(root_bytes).hexdigest(), version,
+            self._identity.dsa_public_key, self._identity.sign, ts, notes)
+        if len(release_bytes) > MAX_VALUE:
+            raise ReleaseError("release descriptor too large")
+        release_id = await self.dht_put(release_bytes)
+        if self._releases.offer(release_bytes, self._identity.verify,
+                                self._trusts_publisher):
+            await self._gossip_release(release_bytes)
+        return {
+            "version": version,
+            "release_id": release_id.hex(),
+            "publisher_id": _core_publisher_id(
+                self._identity.dsa_public_key).hex(),
+            "files": len(files),
+            "bytes": sum(len(value) for value in files.values()),
+        }
+
+    async def fetch_release(self, publisher_id_hex: str):
+        """Fetch a release from the catalogue, verified end to end.
+
+        Returns ``(entry, files)`` or None. Every chunk is checked against the
+        signed root, and the version the descriptor announces is checked against
+        the one the tree carries — so what comes back is what was signed, or
+        nothing at all."""
+        entry = self._releases.get(publisher_id_hex)
+        if entry is None:
+            return None
+        result = await self.fetch_app(entry["root_key"])   # content-verified
+        if result is None:
+            return None
+        _, files = result
+        _core_check_tree(files, entry["version"])
+        return entry, files
+
+    def _release_state(self, entry: dict) -> tuple[str, str | None]:
+        """What this node can do with a release, decided here rather than in a
+        page: unpinned publisher → nothing, older or equal version → nothing."""
+        if not entry["trusted"]:
+            return "untrusted", None
+        if entry["version"] == _running_version():
+            return "running", None
+        if not _is_newer(entry["version"], _running_version()):
+            return "older", None
+        return "available", "install"
+
+    def release_overview(self) -> dict:
+        """Everything a UI needs, with every decision already made here."""
+        releases = []
+        for entry in self._releases.list():
+            state, action = self._release_state(entry)
+            releases.append({**entry, "state": state, "action": action})
+        from . import updater
+        ok, reason = updater.updatable()
+        return {
+            "current": _running_version(),
+            "publisher_id": _core_publisher_id(
+                self._identity.dsa_public_key).hex(),
+            "publisher_key": self._identity.dsa_public_key.hex(),
+            "publishers": self._publishers.list(),
+            "releases": releases,
+            "log": list(self._release_log),
+            "updatable": ok,
+            "reason": reason,
+        }
+
+    def trust_publisher(self, key_hex: str, name: str = "",
+                        auto: bool = False) -> dict:
+        """Pin a publisher key. The only way a key enters this list is here —
+        an operator acting locally, never a packet."""
+        try:
+            public_key = bytes.fromhex(key_hex)
+        except (ValueError, TypeError) as exc:
+            raise ReleaseError("that is not a public key") from exc
+        entry = self._publishers.add(public_key, name, auto)
+        self._releases.retrust(self._trusts_publisher)
+        return entry
+
+    def untrust_publisher(self, publisher_id_hex: str) -> bool:
+        removed = self._publishers.remove(publisher_id_hex)
+        if removed:
+            self._releases.retrust(self._trusts_publisher)
+        return removed
+
+    def set_publisher_auto(self, publisher_id_hex: str, auto: bool) -> bool:
+        return self._publishers.set_auto(publisher_id_hex, auto)
+
+    def _note_release(self, version: str, outcome: str, detail: str = "") -> None:
+        self._release_log.append({"ts": int(time.time()), "version": version,
+                                  "outcome": outcome, "detail": detail[:200]})
+        del self._release_log[:-16]
+
+    async def install_release(self, publisher_id_hex: str) -> dict:
+        """Install a release from a pinned publisher.
+
+        Three gates, in this order: the publisher is pinned, the version is
+        strictly newer than the one running, and every byte verifies against the
+        signed root. Only then does anything touch disk — and even then the
+        previous tree is kept and restored if the swap fails."""
+        from . import updater
+        entry = self._releases.get(publisher_id_hex)
+        if entry is None:
+            raise ReleaseError("no such release")
+        state, _action = self._release_state(entry)
+        if state == "untrusted":
+            raise ReleaseError("that publisher is not trusted here")
+        if state != "available":
+            raise ReleaseError(f"version {entry['version']} is not newer than "
+                               f"{_running_version()}")
+        fetched = await self.fetch_release(publisher_id_hex)
+        if fetched is None:
+            raise ReleaseError("the release content could not be fetched")
+        _entry, files = fetched
+        result = await updater.apply_files(files, entry["version"])
+        self._note_release(entry["version"], "installed",
+                           f"from {publisher_id_hex[:12]}")
+        return {**result, "version": entry["version"],
+                "publisher_id": publisher_id_hex}
+
+    def _ensure_release_watch(self) -> None:
+        if self._release_task is None or self._release_task.done():
+            self._release_task = asyncio.create_task(self._release_loop())
+
+    async def _stop_release_watch(self) -> None:
+        task = self._release_task
+        self._release_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _release_loop(self) -> None:
+        """Install what pinned publishers marked for automatic installation.
+
+        Installing is not restarting: the node keeps running the code it
+        started with until something restarts it. That is deliberate — a node
+        that swaps its own code and immediately exits turns one bad release
+        into a restart loop nobody is present to break.
+
+        Never raises: this loop dying would silently stop the updates an
+        operator asked for."""
+        while self._running:
+            await asyncio.sleep(_RELEASE_TICK)
+            try:
+                await self._release_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    async def _release_pass(self) -> str | None:
+        """One pass: install at most one release, and never the same failing
+        one twice. Returns the version installed, or None."""
+        for listed in self._releases.list():
+            entry = self._releases.get(listed["publisher_id"])
+            if entry is None:
+                continue
+            state, _action = self._release_state(entry)
+            if state != "available":
+                continue
+            if not self._publishers.auto_for(entry["publisher"]):
+                continue
+            release_id = entry["release_id"]
+            if release_id in self._release_tried:
+                continue        # already tried this one — don't loop on it
+            self._release_tried[release_id] = entry["version"]
+            while len(self._release_tried) > _RELEASE_TRIED_MAX:
+                self._release_tried.popitem(last=False)
+            try:
+                await self.install_release(listed["publisher_id"])
+                return entry["version"]
+            except Exception as exc:
+                self._note_release(entry["version"], "failed", str(exc))
+                return None
+        return None
 
     # -- pseudo directory (find node ids by pseudo, network-wide) ---------
     #
@@ -5280,6 +5587,7 @@ class MeshNode:
         peer.session = SessionKey(shared_secret)
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
+        self._schedule_release_sync(peer)  # …and on known releases
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zero crash).
@@ -5361,6 +5669,7 @@ class MeshNode:
         peer.pending_kem_secret = None
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
+        self._schedule_release_sync(peer)  # …and on known releases
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------
