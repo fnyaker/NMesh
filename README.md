@@ -234,6 +234,13 @@ fully self-contained artefact, prefer the Docker image.
 The failures people actually hit, with the exact message and the command that
 fixes them: [`FAQ.md`](FAQ.md).
 
+## Known defects
+
+A full audit that follows the execution order — every packet field from the
+socket to the app, then the console and the apps — with each finding written up
+next to the invariant a fix must not break:
+[`BUGSVULNS.MD`](BUGSVULNS.MD). Nothing in it is fixed yet.
+
 ## Tests
 
 ```bash
