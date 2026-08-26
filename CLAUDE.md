@@ -117,6 +117,14 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   comment density.
 - A comment explains only a **constraint** the code cannot show, never the
   "what" nor where it came from.
+- **Every finished piece of work bumps the version**, in the same commit. One
+  step on the patch number per task (or per block of tasks landing together):
+  `0.1.3` → `0.1.4`. The patch number is **not capped at 9** — it counts up
+  freely, `0.1.99` → `0.1.100`, and keeps going. A **minor** bump (`0.2.0`) is a
+  deliberate act, marking a body of work worth naming, never something a patch
+  count rolls over into.
+  Two files carry it and a test holds them together:
+  [`src/version.py`](src/version.py) and `pyproject.toml`.
 
 ## Network invariants (quick reminders)
 
