@@ -670,6 +670,23 @@ main{min-width:0;display:flex;flex-direction:column}
 /* The overflow menu carries what the rail carries on a wide screen; showing it
    there too would be the same commands twice. Declared before the media query
    that turns it on — at equal specificity the last rule wins, query or no. */
+/* -- auto-refresh -------------------------------------------------------- */
+/* Two controls, one preference. A number field is the right thing with a
+   keyboard — any value, typed — and the wrong thing on a phone, where a
+   spinner is a 12px target and the keyboard covers the page. So the phone gets
+   a short list of the intervals anybody actually picks. */
+.refresh{display:inline-flex;align-items:center;gap:4px}
+.refresh input[type="number"]{width:56px;min-height:var(--ctl-h-sm);padding:0 var(--s-2);
+  font-size:var(--fs-xs);text-align:right;font-variant-numeric:tabular-nums}
+.refresh .unit{font-size:var(--fs-xs);color:var(--text-muted)}
+.refresh select{display:none;min-height:var(--ctl-h-sm);font-size:var(--fs-xs);
+  padding-block:0;width:auto}
+.refresh.paused input[type="number"],.refresh.paused select{color:var(--text-faint)}
+@media (max-width:720px){
+  .refresh input[type="number"],.refresh .unit{display:none}
+  .refresh select{display:block}
+}
+
 .more-wrap{display:none}
 
 /* -- narrow: the rail becomes a bottom tab bar --------------------------- */
@@ -1123,6 +1140,89 @@ const PALETTE = {
     const item = this.filtered[index == null ? this.index : index];
     $("palette").close();
     if(item) item.run();
+  },
+};
+
+// ---- auto-refresh ----------------------------------------------------------
+// How often a page re-reads the node. Zero means never, and that is a real
+// answer: someone reading a table does not want it moving, and a node reached
+// over an expensive link does not want to be polled at all.
+//
+// The contract for whoever supplies the job: a refresh **updates values**. It
+// does not close what is open, does not drop a selection, and does not wipe a
+// field being typed in. Losing a selection is legitimate in exactly one case —
+// the thing selected is no longer there.
+const REFRESH = {
+  MAX: 30,
+  DEFAULT: 2,
+  timer: null,
+  job: null,
+
+  read(){
+    try{
+      const stored = parseInt(localStorage.getItem("nmesh_refresh"), 10);
+      if(Number.isFinite(stored)) return Math.min(this.MAX, Math.max(0, stored));
+    }catch(_){}
+    return this.DEFAULT;
+  },
+
+  write(seconds){
+    try{ localStorage.setItem("nmesh_refresh", String(seconds)); }catch(_){}
+  },
+
+  clean(value){
+    const seconds = parseInt(value, 10);
+    if(!Number.isFinite(seconds)) return this.read();
+    return Math.min(this.MAX, Math.max(0, seconds));
+  },
+
+  paint(seconds){
+    const field = $("refresh-secs"), pick = $("refresh-pick"), box = $("refresh");
+    if(field && String(field.value) !== String(seconds)) field.value = seconds;
+    if(pick){
+      // The phone's list is short on purpose; a value typed on a keyboard that
+      // is not in it must not silently become one that is.
+      if(![...pick.options].some((option) => option.value === String(seconds))){
+        const extra = document.createElement("option");
+        extra.value = String(seconds);
+        extra.textContent = seconds + "s";
+        pick.appendChild(extra);
+      }
+      pick.value = String(seconds);
+    }
+    if(box){
+      box.classList.toggle("paused", seconds === 0);
+      box.title = seconds === 0 ? "Auto-refresh is off"
+                                : "Refreshing every " + seconds + " seconds";
+    }
+  },
+
+  arm(seconds){
+    if(this.timer){ clearInterval(this.timer); this.timer = null; }
+    if(seconds > 0 && this.job) this.timer = setInterval(this.job, seconds * 1000);
+  },
+
+  set(value){
+    const seconds = this.clean(value);
+    this.write(seconds);
+    this.paint(seconds);
+    this.arm(seconds);
+    return seconds;
+  },
+
+  stop(){ if(this.timer){ clearInterval(this.timer); this.timer = null; } },
+
+  // Called once the page has something to refresh. Runs the job immediately —
+  // whoever mounts this wants the first paint now, whatever the interval.
+  mount(job){
+    this.job = job;
+    const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
+    if(field) field.addEventListener("change", (event) => this.set(event.target.value));
+    if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
+    // Off is a choice, not a dead end: one press still reads the node.
+    if(now) now.addEventListener("click", () => { if(this.job) this.job(); });
+    this.set(this.read());
+    if(this.job) this.job();
   },
 };
 
