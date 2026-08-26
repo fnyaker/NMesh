@@ -1,12 +1,12 @@
 """
-Ce que le mesh donne à voir de lui-même, en temps réel.
+What the mesh shows of itself, live.
 
-Deux choses sont testées ici et elles ont la même forme : **le cœur ne sait rien
-du medium**. Un transport décrit ses propres points de terminaison et ses
-propres compteurs (`endpoints`/`stats`), la console les affiche tels quels — donc
-un transport que ce fichier n'a jamais vu devient observable sans une ligne de
-plus. Le corollaire est un test : un transport qui ment, qui lève, ou qui rend
-n'importe quoi ne doit **pas** casser le snapshot.
+Two things are tested here and they have the same shape: **the core knows
+nothing of the medium**. A transport describes its own endpoints and its own
+counters (`endpoints`/`stats`), the console displays them as they are — so a
+transport this file has never seen becomes observable with no extra line. The
+corollary is a test: a transport that lies, that raises, or that returns
+anything at all must **not** break the snapshot.
 """
 import asyncio
 
@@ -19,8 +19,8 @@ from tests.conftest import FakeTransport, make_manager, make_node
 
 class TestLinkQuality:
     def test_one_number_is_not_a_measurement(self):
-        """Le point de départ : deux liens de même RTT moyen mais de gigue très
-        différente ne doivent pas se ressembler."""
+        """The starting point: two links with the same average RTT but very
+        different jitter must not look alike."""
         steady, flappy = LinkQuality(), LinkQuality()
         for value in (0.020, 0.021, 0.020, 0.019):
             steady.on_ping(); steady.on_pong(value)
@@ -45,7 +45,7 @@ class TestLinkQuality:
         assert quality.as_dict()["loss"] == 0.5
 
     def test_history_is_bounded(self):
-        """Un lien qui vit des mois ne doit pas faire grossir la mémoire."""
+        """A link that lives for months must not grow memory."""
         quality = LinkQuality()
         for index in range(LinkQuality.HISTORY * 10):
             quality.on_ping(); quality.on_pong(index / 1000)
@@ -53,14 +53,14 @@ class TestLinkQuality:
         assert len(quality.as_dict()["samples_ms"]) == LinkQuality.HISTORY
 
     def test_an_empty_link_says_nothing_rather_than_zero(self):
-        """Zéro milliseconde serait un mensonge ; « pas mesuré » est la vérité."""
+        """Zero milliseconds would be a lie; "not measured" is the truth."""
         empty = LinkQuality().as_dict()
         assert empty["rtt_ms"] is None and empty["avg_ms"] is None
         assert empty["jitter_ms"] is None and empty["probes"] == 0
 
 
 class HostileTransport(FakeTransport):
-    """Un transport qui répond n'importe quoi — parce qu'il en existera."""
+    """A transport that answers anything at all — because one will exist."""
 
     def endpoints(self):
         raise RuntimeError("boom")
@@ -71,7 +71,7 @@ class HostileTransport(FakeTransport):
 
 
 class SilentTransport(FakeTransport):
-    """Le cas normal d'un medium sans adresse : un spool, une clé USB."""
+    """The normal case of a medium with no address: a spool, a USB stick."""
 
 
 class TalkativeTransport(FakeTransport):
@@ -106,15 +106,15 @@ class TestLinkView:
             await node.stop()
 
     async def test_a_broken_transport_cannot_break_the_snapshot(self):
-        """Une console qui tombe parce qu'un transport a mal répondu serait un
-        crash provoqué par un pair. Les bornes s'appliquent aussi ici."""
+        """A console falling over because a transport answered badly would be a
+        crash caused by a peer. The bounds apply here too."""
         node, _fake = await make_node()
         try:
             peer = await node._inject_peer(HostileTransport())
             view = node._link_view(peer, 0.0)
-            assert view["local"] is None            # endpoints() a levé
-            assert len(view["stats"]) <= 16         # borné
-            assert "nested" not in view["stats"]    # non scalaire, écarté
+            assert view["local"] is None            # endpoints() raised
+            assert len(view["stats"]) <= 16         # bounded
+            assert "nested" not in view["stats"]    # not scalar, dropped
             snapshot = await node.console_snapshot()
             assert snapshot["peers"][0]["link"]["local"] is None
         finally:
@@ -142,15 +142,15 @@ class TestAddressStatus:
             by_uri = {row["uri"]: row for row in rows}
             assert by_uri["tcp://10.0.0.2:9000"]["outcome"] == "timeout"
             assert by_uri["tcp://10.0.0.2:9000"]["ms"] == 5000.0
-            # Une adresse jamais essayée n'est pas une adresse en panne.
+            # An address never tried is not a broken address.
             assert by_uri["udp://10.0.0.2:9001"]["outcome"] == "untried"
         finally:
             await node.stop()
 
     async def test_an_accepted_link_shows_the_socket_it_arrived_on(self):
-        """Côté receveur il n'y a pas d'URI composée : la seule adresse qui
-        existe est celle que le medium observe, et c'est celle qui porte le
-        trafic."""
+        """On the receiving side there is no dialled URI: the only address that
+        exists is the one the medium observes, and it is the one carrying the
+        traffic."""
         node, _fake = await make_node()
         try:
             peer = await node._inject_peer(TalkativeTransport())
@@ -162,7 +162,7 @@ class TestAddressStatus:
             await node.stop()
 
     async def test_the_log_is_bounded_on_both_axes(self):
-        """Un pair qui annonce mille adresses ne fait pas grossir la mémoire."""
+        """A peer advertising a thousand addresses does not grow memory."""
         from src.node import _DIAL_LOG_ADDRESSES, _DIAL_LOG_NODES
         node, _fake = await make_node()
         try:
@@ -178,8 +178,8 @@ class TestAddressStatus:
 
 class TestSnapshotCarriesTheLink:
     async def test_topology_carries_what_the_map_draws(self):
-        """La carte étendue dessine l'épaisseur avec les octets et la couleur
-        avec la qualité : les deux doivent être dans le snapshot."""
+        """The expanded map draws thickness from the bytes and colour from the
+        quality: both have to be in the snapshot."""
         node, _fake = await make_node()
         try:
             snapshot = await node.console_snapshot()
