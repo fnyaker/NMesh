@@ -164,7 +164,7 @@ than a node that leaks.
   the signed manifest. Otherwise we are offering a remote disk reader.
 - **Banning on accusation**: see §4 — local observations and proofs of fraud
   only.
-- **False assurance**: never display "peer verified ✅", but "known code,
+- **False assurance**: never display "peer verified", but "known code,
   attested 40 s ago" — that is, the real information.
 - **Network fingerprinting**: a `build_root` in the clear at the handshake tells
   an observer who runs what. To be considered under link encryption, or as a

@@ -127,6 +127,30 @@ Above 640 px, a centred card. Below, a sheet rising from the bottom
 (`inset:auto 0 0 0`), and a `dialog.full` takes the whole screen in `dvh` — not
 `vh`, or the mobile browser's own bar crops the last row.
 
+## Icons
+
+One set, in `ui.py`: `ICONS` holds the paths, `icon(name, title)` writes the
+wrapper. So every icon in the product shares a box, a stroke weight and a
+baseline, and a page never inlines a glyph of its own.
+
+- Painted with `currentColor` and sized in `em`, so an icon is the colour and
+  the size of the text beside it, in either theme, without a second rule.
+- `aria-hidden` by default — the button next to it already has a label. Pass a
+  `title` only when the icon is alone and *is* the label.
+- `.ic.turn` is a chevron rotated by state (`[aria-expanded="true"]`), so a
+  disclosure arrow is one drawing turned rather than two kept in step.
+
+**Never an emoji.** They render as a different picture on every platform, say
+nothing to a screen reader, and make a product look cheap. The one exception is
+content that is genuinely an emoji — chat's reaction palette, and what somebody
+types. `test_no_emoji_in_the_interface` walks every page's markup, stylesheet
+and script.
+
+The same goes outside the browser: terminal output uses aligned words
+(`[ ok ]`, `[warn]`, `[fail]`), because a dingbat is not guaranteed to render in
+a minimal console and a word always is; documentation uses a heading or a table
+where it would have used a tick.
+
 ## Shared runtime (`ui.JS`)
 
 What each of the pages used to solve on its own:

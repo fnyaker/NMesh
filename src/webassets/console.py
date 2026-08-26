@@ -82,7 +82,7 @@ INDEX_HTML = """<!doctype html>
         <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
       </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
+      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
       <div class="menu-wrap more-wrap">
         <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
                 aria-label="More">⋯</button>
@@ -134,7 +134,7 @@ INDEX_HTML = """<!doctype html>
         </article>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Topology</h2>
-            <div class="sub">Direct links, and sessions routed through them</div></div>
+            <div class="sub">Nodes linked directly, and nodes reached through them</div></div>
             <span id="map-count" class="badge"></span>
             <button id="map-open" class="sm">Expand</button></div>
           <div class="card-body">
@@ -162,8 +162,8 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="peers" class="stack">
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Active links <span id="active-count" class="badge"></span></h2>
-            <div class="sub">Authenticated, currently open</div></div>
+          <div class="card-head"><div class="grow"><h2>Connected nodes <span id="active-count" class="badge"></span></h2>
+            <div class="sub">Authenticated and open. A node holding several links unfolds onto them</div></div>
             <label class="search"><span class="sr-only">Search active nodes</span>
               <input id="active-search" type="search" placeholder="Search name, id, address, transport…" spellcheck="false"></label>
           </div>
@@ -648,7 +648,7 @@ INDEX_HTML = """<!doctype html>
 <dialog id="node-dialog" class="wide" aria-labelledby="node-dialog-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="node-dialog-title">Node</h2>
-      <button id="node-dialog-close" class="icon" aria-label="Close">✕</button></header>
+      <button id="node-dialog-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <!-- The whole body is the shared node view — the same one /node serves. -->
     <div class="sheet-body"><div id="node-detail"></div></div>
   </div>
@@ -665,7 +665,7 @@ INDEX_HTML = """<!doctype html>
       </span>
       <span class="grow"></span>
       <span id="map-summary" class="badge"></span>
-      <button id="map-close" class="icon" aria-label="Close">✕</button>
+      <button id="map-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </header>
     <div class="sheet-body map-body">
       <div class="map-canvas">
@@ -689,7 +689,7 @@ INDEX_HTML = """<!doctype html>
 <dialog id="modal" aria-labelledby="modal-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="modal-title"></h2>
-      <button id="modal-close" class="icon" aria-label="Close">✕</button></header>
+      <button id="modal-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div id="modal-body" class="sheet-body"></div>
   </div>
 </dialog>
@@ -956,28 +956,32 @@ function railState(kind, text){
 }
 
 // ---- header and metrics ----------------------------------------------------
+// Two counts, never one: a node may hold several links at once, so "3 links up"
+// and "connected to 2 nodes" are both true at the same time. Each label below
+// takes the one it actually names.
 function paintHeader(state){
-  const peers = state.authenticated_peers || 0;
+  const links = state.link_count || 0, nodes = state.node_count || 0;
   $("self-node").textContent = nodeLabel(state.id, state.pseudo);
   $("self-node").title = state.pseudo ? state.pseudo + "\n" + state.id : state.id;
   const pill = $("node-state");
   pill.textContent = state.running ? "Running · up " + fmtDuration(state.uptime) : "Stopped";
   pill.className = "badge " + (state.running ? "ok" : "danger");
-  railState(state.running ? (peers ? "live" : "ok") : "danger", state.running
-    ? (peers ? peers + " link" + (peers === 1 ? "" : "s") + " up" : "Online, no peers")
+  railState(state.running ? (links ? "live" : "ok") : "danger", state.running
+    ? (links ? plural(links, "link") + " up" : "Online, not connected")
     : "Node stopped");
-  $("nav-peers").textContent = peers || "";
-  $("overview-title").textContent = peers
-    ? "Connected to " + peers + " node" + (peers === 1 ? "" : "s")
+  $("nav-peers").textContent = nodes || "";
+  $("overview-title").textContent = nodes
+    ? "Connected to " + plural(nodes, "node")
     : "Looking for a neighbour";
-  $("overview-lede").textContent = peers
-    ? "Health, throughput, and the links this node has authenticated."
+  $("overview-lede").textContent = nodes
+    ? "Health, throughput, and the " + plural(links, "link") + " this node has authenticated."
     : "This node is running but has no authenticated link yet. Add one from Network → Add a node.";
 }
 function paintMetrics(state){
   const load = state.load || {};
   const cards = [
-    ["Active links", state.authenticated_peers || 0, "accent"],
+    ["Connected nodes", state.node_count || 0, "accent"],
+    ["Active links", state.link_count || 0, ""],
     ["Known nodes", state.routing_size || 0, ""],
     ["E2E sessions", (state.e2e_sessions || []).length, ""],
     ["Inbound", fmtRate(state._rates.inbound), ""],
@@ -1171,6 +1175,8 @@ function renderGraph(svg, state, size){
     text.textContent = "no links yet";
     svg.appendChild(text);
   }
+  // Both are node counts: the map draws one dot per identity, however many
+  // links that identity holds. The card's sub-line says so in words.
   const summary = direct.length + " direct" +
     (routed.length ? " · " + routed.length + " routed" : "");
   if(size.labels) $("map-summary").textContent = summary;
@@ -1518,9 +1524,9 @@ function groupRowHTML(group, unfolded){
     '<button class="icon sm fold" data-fold="' + esc(group.id) + '" aria-expanded="' +
     (open ? "true" : "false") + '" aria-label="' +
     (open ? "Hide" : "Show") + ' the links to ' + esc(nodeLabel(group.id, group.pseudo)) + '">' +
-    (open ? "▾" : "▸") + "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</td>" +
-    "<td>" + badge(group.links.length + " link" +
-      (group.links.length === 1 ? "" : "s"), "ok") + "</td>" +
+    '<svg class="ic turn" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5 12 15.5l6-6"/></svg>' +
+    "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</td>" +
+    "<td>" + badge(plural(group.links.length, "link"), "ok") + "</td>" +
     "<td>" + esc(schemes.join(", ")) + "</td>" +
     '<td class="num">' + (best.rtt_ms == null ? "—" : esc(best.rtt_ms) + " ms") +
       (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
@@ -1551,7 +1557,7 @@ async function paintNodes(kind){
         : linkRowHTML(group.links[0], kind, false)).join("")
       : spanRow(6, emptyHTML(
       PAGES[kind].query ? "No node matches that" :
-        kind === "active" ? "No authenticated link yet" : "No known node yet",
+        kind === "active" ? "Not connected to any node yet" : "No known node yet",
       PAGES[kind].query ? "Try a shorter prefix of the id, or an address." :
         kind === "active" ? "Add one from Network → Add a node."
                           : "Nodes appear here once this one has heard of them.")));
@@ -1700,7 +1706,7 @@ $("reach-probe").addEventListener("click", (event) => withBusy(event.target, asy
   try{
     const {data} = await apiJson("/api/reachability/probe", "POST");
     toast(data.sent ? "Sent " + data.sent + " reachability probe(s)"
-                    : "No active peer can probe us", data.sent ? "" : "warn");
+                    : "No connected node can probe us", data.sent ? "" : "warn");
   }catch(_){ toast("Probe failed", "danger"); }
 }));
 $("transport-blocks").addEventListener("click", async (event) => {
@@ -1944,13 +1950,13 @@ function paintTransportLive(state){
     const rtt = live.rtt.length
       ? Math.round(live.rtt.reduce((a, b) => a + b, 0) / live.rtt.length * 10) / 10 : null;
     const mine = listening.filter((uri) => uri.split("://")[0] === scheme);
-    const peers = info.peers || 0;
+    const links = info.links || 0;
     block.querySelector("[data-summary]").innerHTML =
-      badge(peers + " link" + (peers === 1 ? "" : "s"), peers ? "accent" : "") + " " +
-      badge(mine.length + " listener" + (mine.length === 1 ? "" : "s"), "") +
+      badge(plural(links, "link"), links ? "accent" : "") + " " +
+      badge(plural(mine.length, "listener"), "") +
       (info.hole_punch ? " " + badge("hole punching", "ok") : "");
     block.querySelector("[data-stats]").innerHTML = [
-      ["Links", peers],
+      ["Links", links],
       ["Latency", rtt == null ? "—" : rtt + " ms"],
       ["Carried", fmtBytes(live.bytes)],
       ["Ports", (info.ports || []).length ? info.ports.join(", ") : "—"],
@@ -1962,7 +1968,8 @@ function paintTransportLive(state){
           esc(value) + "</dd>").join("") : "");
     block.querySelector("[data-listeners]").innerHTML = mine.length ? mine.map((uri) =>
       '<span class="chip">' + esc(uri) + '<button class="icon sm" data-remove-listener="' +
-      esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">✕</button></span>').join("")
+      esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">' + icon("close") +
+    "</button></span>").join("")
       : '<span class="small muted">Nothing bound — this node cannot be dialled over ' +
         esc(scheme) + ".</span>";
     if(scheme !== "udp") return;

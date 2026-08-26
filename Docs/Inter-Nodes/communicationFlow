@@ -62,7 +62,7 @@
 When Bob contacts C for the first time:
 1. Bob presents his certificate (signed by Alice, carrying Alice's ID and public key)
 2. C verifies Alice's signature:
-   - If Alice is in C's k-buckets → her public key is already known and verified ✓
+   - If Alice is in C's k-buckets → her public key is already known and verified
    - If Alice is unknown → C does a `FIND_NODE(alice.id)`, verifies Alice's certificate, and walks the chain up to a node it knows
 3. C sends a random challenge to Bob
 4. Bob signs the challenge with his ML-DSA private key → C checks he really holds the certificate's private key

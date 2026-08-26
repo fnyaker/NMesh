@@ -290,7 +290,7 @@ green before merging.
   validating the block, sending to the relays + `broadcast()` on capable
   transports, A's answer, the tunnelled handshake, an E2E session through the
   relay. An end-to-end test A↔B through a relay, **with no direct link**.
-- **Step 4 — `broadcast()` over UDP (LAN) + relay discovery.** ✅ A refinement
+- **Step 4 — `broadcast()` over UDP (LAN) + relay discovery.** *Done.* A refinement
   adopted over "broadcast the raw SEEK": the return path of a fire-and-forget
   broadcast is fragile (the witness has no link to B). Instead, **LAN
   discovery** (`src/lan_discovery.py`): B broadcasts an `NDSC` beacon, any member

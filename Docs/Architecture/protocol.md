@@ -19,7 +19,7 @@ payload.
 | gcm_tag | 16 | AES-256-GCM authenticity tag |
 | payload | ≤ 60000 | in the clear for control, encrypted for DATA/E2E |
 
-> ⚠️ The old "75 bytes / CRC32" note is **wrong**: it is 79 bytes and a uint64
+> **Correction.** The old "75 bytes / CRC32" note is wrong: it is 79 bytes and a uint64
 > `msg_id` derived from sha256.
 
 ### `msg_id` (anti-replay / anti-amplification)

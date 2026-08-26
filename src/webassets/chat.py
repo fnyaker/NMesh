@@ -58,8 +58,8 @@ CHAT_HTML = """<!doctype html>
           <span id="me-sub" class="mono ch-me-sub truncate"></span>
         </span>
       </button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
-      <button id="new-btn" class="icon" title="New chat" aria-label="New chat">✎</button>
+      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
+      <button id="new-btn" class="icon" title="New chat" aria-label="New chat"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9M16.4 3.6a2.1 2.1 0 0 1 3 3L7.5 18.5 3.5 19.5l1-4Z"/></svg></button>
     </header>
 
     <div class="ch-side-search">
@@ -86,7 +86,7 @@ CHAT_HTML = """<!doctype html>
 
     <section id="conv" class="ch-conv" hidden>
       <header class="ch-head">
-        <button id="back-btn" class="icon ch-back" title="Back to the list" aria-label="Back to the list">‹</button>
+        <button id="back-btn" class="icon ch-back" title="Back to the list" aria-label="Back to the list"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6"/></svg></button>
         <button id="info-btn" class="ch-peer">
           <span id="conv-av-slot" class="ch-av-slot"></span>
           <span class="ch-peer-txt">
@@ -95,7 +95,7 @@ CHAT_HTML = """<!doctype html>
           </span>
         </button>
         <button id="del-conv" class="icon ch-head-act" title="Delete conversation"
-                aria-label="Delete conversation">🗑</button>
+                aria-label="Delete conversation"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M18.5 6l-1 14h-11l-1-14M10 10.5v6M14 10.5v6"/></svg></button>
       </header>
 
       <div class="ch-logwrap">
@@ -109,19 +109,19 @@ CHAT_HTML = """<!doctype html>
           <span id="reply-who" class="ch-reply-who"></span>
           <span id="reply-text" class="muted small truncate"></span>
         </span>
-        <button id="reply-cancel" class="icon sm" aria-label="Cancel reply">✕</button>
+        <button id="reply-cancel" class="icon sm" aria-label="Cancel reply"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
       </div>
 
       <form id="send-form" class="ch-composer">
         <button type="button" id="attach-btn" class="icon" title="Attach a file"
-                aria-label="Attach a file">📎</button>
+                aria-label="Attach a file"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.6 12.4 20a5.5 5.5 0 1 1-7.8-7.8l8.6-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.5a1.8 1.8 0 1 1-2.6-2.6l7.9-7.8"/></svg></button>
         <input id="file-input" type="file" hidden>
         <div class="ch-input">
           <textarea id="msg" rows="1" placeholder="Message" autocomplete="off"
                     aria-label="Message"></textarea>
         </div>
-        <button type="button" id="emoji-btn" class="icon" title="Emoji" aria-label="Emoji">🙂</button>
-        <button type="submit" id="send-btn" class="ch-send" title="Send" aria-label="Send">➤</button>
+        <button type="button" id="emoji-btn" class="icon" title="Emoji" aria-label="Emoji"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8.5 14.5a4.5 4.5 0 0 0 7 0"/></svg></button>
+        <button type="submit" id="send-btn" class="ch-send" title="Send" aria-label="Send"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"/></svg></button>
       </form>
     </section>
   </main>
@@ -130,9 +130,9 @@ CHAT_HTML = """<!doctype html>
        node page serves, mounted here rather than framed. -->
   <aside id="peer-panel" class="ch-aside" hidden aria-label="Node details">
     <header class="ch-aside-head">
-      <button id="peer-back" class="icon ch-back" title="Back" aria-label="Back">‹</button>
+      <button id="peer-back" class="icon ch-back" title="Back" aria-label="Back"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6"/></svg></button>
       <h2>Node</h2><span class="grow"></span>
-      <button id="peer-panel-close" class="icon" aria-label="Close">✕</button>
+      <button id="peer-panel-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </header>
     <div id="peer-view" class="ch-aside-body"></div>
   </aside>
@@ -145,7 +145,7 @@ CHAT_HTML = """<!doctype html>
 <dialog id="settings" aria-labelledby="settings-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="settings-title">Your profile</h2>
-      <button class="icon" data-close="settings" aria-label="Close">✕</button></header>
+      <button class="icon" data-close="settings" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div class="sheet-body">
       <div class="ch-prof">
         <span id="set-av" class="ch-av big"></span>
@@ -182,7 +182,7 @@ CHAT_HTML = """<!doctype html>
 <dialog id="newchat" aria-labelledby="nc-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="nc-title">New chat</h2>
-      <button class="icon" data-close="newchat" aria-label="Close">✕</button></header>
+      <button class="icon" data-close="newchat" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div class="sheet-body">
       <div class="segmented" role="tablist">
         <button id="nc-tab-dm" role="tab" aria-selected="true">Find people</button>
@@ -389,6 +389,9 @@ CHAT_PAGE_CSS = """
   white-space:nowrap;font-size:var(--fs-2xs);color:var(--text-faint);margin-top:2px}
 .ch-meta .edited{font-style:italic}
 .ch-meta .tick{color:var(--accent)}
+/* The delivery marks sit in 11px text, where the shared 1.15em would be a
+   smudge; they are the one place an icon is deliberately larger than its line. */
+.ch-meta .ic{width:1.35em;height:1.35em;stroke-width:2.4}
 
 .ch-quote{display:flex;flex-direction:column;gap:1px;padding:4px 8px;margin-bottom:4px;
   border-left:2px solid var(--accent);background:var(--surface-2);border-radius:var(--r-sm);
@@ -405,7 +408,7 @@ CHAT_PAGE_CSS = """
   border-radius:var(--r-md);background:var(--surface-2);color:inherit;
   text-decoration:none;min-width:0}
 .ch-file:hover{text-decoration:none;background:var(--surface-3)}
-.ch-file .fi{font-size:20px;flex:none}
+.ch-file .fi{flex:none;display:flex;color:var(--text-muted);font-size:20px}
 .ch-file .fm{display:flex;flex-direction:column;min-width:0}
 .ch-file .fn{font-weight:600;font-size:var(--fs-sm);overflow-wrap:break-word}
 
@@ -611,8 +614,8 @@ function lastMsg(conv){
 function preview(m){
   if(!m) return "";
   if(m.deleted) return "deleted message";
-  if(m.kind === "image") return "🖼 Photo";
-  if(m.kind === "file") return "📎 " + (m.name || "File");
+  if(m.kind === "image") return "Photo";
+  if(m.kind === "file") return m.name || "File";
   return m.text || "";
 }
 function clock(t){
@@ -710,7 +713,7 @@ function renderHead(){
   if(TYPING[sel]) sub = "typing…";
   else if(convIsGroup(sel)){
     const g = ST.groups.find((x) => "g:" + x.id === sel);
-    sub = g ? (g.members.length + " member" + (g.members.length === 1 ? "" : "s")) : "";
+    sub = g ? plural(g.members.length, "member") : "";
   }else{
     const r = findPerson(sel); sub = (r && r.bio) ? r.bio : shortId(sel);
   }
@@ -723,9 +726,9 @@ function sameDay(a, b){
   return new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
 }
 function tickHTML(status){
-  if(status === "read") return '<span class="tick">✓✓</span>';
-  if(status === "delivered") return "<span>✓✓</span>";
-  return "<span>✓</span>";
+  if(status === "read") return '<span class="tick">' + icon("checkTwice", "read") + "</span>";
+  if(status === "delivered") return "<span>" + icon("checkTwice", "delivered") + "</span>";
+  return "<span>" + icon("check", "sent") + "</span>";
 }
 function atBottom(log){ return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
 function toBottom(log, smooth){
@@ -808,7 +811,7 @@ function paintMsg(el, m, prev){
     if(m.text) html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
   }else if(m.kind === "file"){
     html += '<a class="ch-file" href="/api/chat/file?mid=' + encodeURIComponent(m.mid) +
-      '" download="' + esc(m.name || "file") + '"><span class="fi">📄</span>' +
+      '" download="' + esc(m.name || "file") + '"><span class="fi">' + icon("file") + "</span>" +
       '<span class="fm"><span class="fn">' + esc(m.name || "file") + "</span>" +
       '<span class="muted tiny">' + esc(fmtBytes(m.size)) + "</span></span></a>";
   }else{

@@ -412,6 +412,61 @@ def test_the_chat_page_does_not_redefine_the_design_system():
         assert name.startswith("ch-") or name == "ch", name
 
 
+# ── icons, not emoji ────────────────────────────────────────────────────────
+
+def _emoji_in(text: str) -> set:
+    """Pictographs and dingbats. Not arrows or box drawing: those are typography
+    the pages legitimately use (``→`` in a sentence, ``·`` between fields)."""
+    return {ch for ch in text
+            if 0x1F000 <= ord(ch) <= 0x1FAFF or 0x2600 <= ord(ch) <= 0x27BF
+            or 0x1F1E6 <= ord(ch) <= 0x1F1FF or ord(ch) in (0xFE0F, 0x2B50)}
+
+
+@pytest.mark.parametrize("name", ["INDEX_HTML", "CHAT_HTML", "FLEET_HTML", "NODE_HTML",
+                                  "STYLE_CSS", "CHAT_CSS", "FLEET_CSS", "NODE_CSS",
+                                  "APP_JS", "FLEET_JS", "NODE_JS"])
+def test_no_emoji_in_the_interface(name):
+    """An emoji is a different picture on every platform, nothing at all to a
+    screen reader, and it makes a product look cheap. Icons are SVG, from the one
+    set in `ui.py`, painted with `currentColor`."""
+    assert _emoji_in(getattr(webassets, name)) == set(), name
+
+
+def test_chat_keeps_emoji_only_where_they_are_the_content():
+    """The one exception: what a person picks. The reaction palette and the
+    character the emoji button types are the user's, not the interface's."""
+    lines = [line for line in webassets.CHAT_JS.splitlines() if _emoji_in(line)]
+    assert lines, "the reaction palette should still be emoji"
+    for line in lines:
+        assert "REACTS" in line or 'box.value += ' in line, line
+
+
+def test_every_icon_the_pages_ask_for_exists():
+    """`icon("nope")` renders nothing at all — a button that silently loses its
+    only content."""
+    names = set(re.findall(r'icon\("([A-Za-z]+)"', webassets.APP_JS + webassets.CHAT_JS +
+                           webassets.FLEET_JS + webassets.NODE_JS))
+    declared = set(re.findall(r"^\s{2}([A-Za-z]+):\s*'<", webassets.ui.JS, re.M))
+    assert names, "no icon is used at all — did the set get bypassed?"
+    assert names <= declared, names - declared
+
+
+def test_every_count_on_screen_uses_the_field_that_names_it():
+    """A label and its value are one claim, and the claim has to be true. The
+    console printed "Connected to N nodes" from the *link* count for months
+    because one field served four labels."""
+    js = webassets.APP_JS
+    # The ambiguous field is gone from the page as well as from the node.
+    assert "authenticated_peers" not in js
+    # Nodes where it says nodes…
+    assert '"Connected to " + plural(nodes, "node")' in js
+    assert '$("nav-peers").textContent = nodes' in js
+    assert '["Connected nodes", state.node_count' in js
+    # …links where it says links.
+    assert 'plural(links, "link") + " up"' in js
+    assert '["Active links", state.link_count' in js
+
+
 def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
     """Replacing a row under the pointer loses the click in progress, and resets
     the scroll under the reader. Lists repainted on the poll write only what

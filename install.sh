@@ -49,10 +49,10 @@ else
     G=''; R=''; Y=''; B=''; N=''
 fi
 
-ok()   { echo -e "${G}[✓]${N} $*"; }
-fail() { echo -e "${R}[✗]${N} $*"; exit 1; }
-info() { echo -e "${B}[i]${N} $*"; }
-warn() { echo -e "${Y}[!]${N} $*"; }
+ok()   { echo -e "${G}[ ok ]${N} $*"; }
+fail() { echo -e "${R}[fail]${N} $*"; exit 1; }
+info() { echo -e "${B}[ .. ]${N} $*"; }
+warn() { echo -e "${Y}[warn]${N} $*"; }
 
 # ── privileges ───────────────────────────────────────────────────────────────
 # Same reasoning as start.sh: containers run as root and have no sudo, Termux
