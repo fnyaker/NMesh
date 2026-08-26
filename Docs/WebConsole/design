@@ -1,183 +1,189 @@
-# Système de design de la console
+# The console's design system
 
-Trois pages (`/`, `/chat`, `/fleet`) servies par le même serveur, qui doivent
-ressembler au même produit. Ce document décrit **le contrat** qui l'assure — ce
-qui vit où, et ce qu'on n'a pas le droit de faire.
+Four pages (`/`, `/chat`, `/fleet`, `/node`) served by the same server, which
+have to look like the same product. This document describes **the contract**
+that keeps them that way — what lives where, and what is not allowed.
 
-Code : [`src/webassets/`](../../src/webassets/) —
-[`ui.py`](../../src/webassets/ui.py) (le système),
+Code: [`src/webassets/`](../../src/webassets/) —
+[`ui.py`](../../src/webassets/ui.py) (the system),
 [`console.py`](../../src/webassets/console.py),
 [`chat.py`](../../src/webassets/chat.py),
-[`fleet.py`](../../src/webassets/fleet.py) (une page chacun).
+[`fleet.py`](../../src/webassets/fleet.py) (one page each), and
+[`nodeview.py`](../../src/webassets/nodeview.py) (a *view* before it is a page:
+the console, chat and fleet all mount it, and it also serves itself at `/node`).
 
-## La règle
+## The rule
 
-> `ui.py` est la **seule** source des jetons, des composants et du châssis.
-> Une page n'y ajoute rien et n'en redéfinit rien.
+> `ui.py` is the **only** source of tokens, components and the app shell.
+> A page adds nothing to it and redefines nothing from it.
 
 ```
-STYLE_CSS = ui.CSS  + CONSOLE_PAGE_CSS      APP_JS   = ui.JS + CONSOLE_PAGE_JS
-CHAT_CSS  = ui.CSS  + CHAT_PAGE_CSS         CHAT_JS  = ui.JS + CHAT_PAGE_JS
-FLEET_CSS = ui.CSS  + FLEET_PAGE_CSS        FLEET_JS = ui.JS + FLEET_PAGE_JS
+STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS   APP_JS   = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
+CHAT_CSS  = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS      CHAT_JS  = ui.JS + nodeview.JS + CHAT_PAGE_JS
+FLEET_CSS = ui.CSS + nodeview.CSS + FLEET_PAGE_CSS     FLEET_JS = ui.JS + nodeview.JS + FLEET_PAGE_JS
+NODE_CSS  = ui.CSS + nodeview.CSS + NODE_PAGE_CSS      NODE_JS  = ui.JS + nodeview.JS + NODE_PAGE_JS
 ```
 
-Un jeton changé une fois change les trois pages. Une page ne peut pas se
-fabriquer un deuxième style de bouton en douce : il y en a un à portée de main.
+A token changed once changes every page. A page cannot quietly grow a second
+button style: there is one within reach.
 
-Ce qui a le droit d'être dans le CSS d'une page : ce qui n'existe que là — le
-graphe et le canvas de débit (console), le terminal et la liste d'hôtes (fleet),
-les bulles de conversation (chat). Si ça commence à ressembler à quelque chose de
-réutilisable, ça remonte dans `ui.py`. Les seules variables qu'une page peut
-déclarer sont préfixées `--page-` (test :
+What is allowed in a page's own CSS: what exists only there — the graph and the
+throughput canvas (console), the terminal and the host list (fleet), the
+conversation bubbles (chat). If it starts to look reusable, it moves up into
+`ui.py`. The only variables a page may declare are prefixed `--page-` (test:
 `test_no_page_redefines_a_token`).
 
-## Jetons, en trois couches
+## Tokens, in three layers
 
-Sens unique : **primitive → sémantique → composant**.
+One-way: **primitive → semantic → component**.
 
-| Couche | Exemples | Utilisée par |
+| Layer | Examples | Used by |
 |---|---|---|
-| primitive | `--n-050`, `--teal-400`, `--red-600` | rien d'autre que la couche sémantique |
-| sémantique | `--surface`, `--text-muted`, `--danger`, `--accent-soft` | les composants |
-| composant | `--rail-w`, `--ctl-h`, `--btn-bg` | un composant précis |
+| primitive | `--n-050`, `--teal-400`, `--red-600` | nothing but the semantic layer |
+| semantic | `--surface`, `--text-muted`, `--danger`, `--accent-soft` | the components |
+| component | `--rail-w`, `--ctl-h`, `--btn-bg` | one specific component |
 
-Le thème clair est déclaré sur `:root` **sans media query** ; le sombre est une
-surcharge, écrite deux fois depuis la même chaîne Python (`_DARK_BODY`) : une
-fois derrière `prefers-color-scheme` (« suivre le système »), une fois derrière
-`[data-theme="dark"]` (« j'ai choisi »). Une couleur définie **uniquement** dans
-une media query n'existe pas quand la requête ne matche pas — d'où la règle.
+The light theme is declared on `:root` **with no media query**; dark is an
+override, written twice from the same Python string (`_DARK_BODY`): once behind
+`prefers-color-scheme` ("follow the system"), once behind `[data-theme="dark"]`
+("I chose"). A colour defined **only** inside a media query does not exist when
+the query does not match — hence the rule.
 
-Le choix explicite est posé sur `<html>` par `/theme.js`, chargé **bloquant**
-dans `<head>` : sinon la page peint le mauvais thème pendant une image. La CSP
-interdisant le script inline, ce fichier minuscule ne peut pas être une balise.
+The explicit choice is set on `<html>` by `/theme.js`, loaded **blocking** in
+`<head>`: otherwise the page paints the wrong theme for a frame. Since the CSP
+forbids inline script, that tiny file cannot be a tag.
 
-### Le contraste est testé, pas jugé
+### Contrast is tested, not judged
 
-[`tests/test_ui_contrast.py`](../../tests/test_ui_contrast.py) lit les jetons,
-résout les indirections `var()`, et mesure le ratio WCAG 2.1 de chaque paire
-texte/fond **dans les deux thèmes**. Sous 4.5 (texte) ou 3.0 (bordure de champ,
-grand texte), le test échoue. Une console qu'on lit mal à 3 h du matin est un
-défaut, pas une préférence.
+[`tests/test_ui_contrast.py`](../../tests/test_ui_contrast.py) reads the tokens,
+resolves the `var()` indirections, and measures the WCAG 2.1 ratio of every
+text/background pair **in both themes**. Below 4.5 (text) or 3.0 (a field
+border, large text), the test fails. A console that is hard to read at 3 a.m. is
+a defect, not a preference.
 
-## Composants
+## Components
 
-Stylés **sur l'élément** quand il y en a un (`button`, `input`, `table`,
-`dialog`) : un contrôle qui oublie sa classe ressemble quand même au produit. Les
-classes servent aux variantes, pas à la base.
+Styled **on the element** where there is one (`button`, `input`, `table`,
+`dialog`): a control that forgets its class still looks like the product.
+Classes are for variants, not for the baseline.
 
-`button` (+ `.primary` `.danger` `.ghost` `.sm` `.icon` `.wide`, `aria-busy`
-pour l'attente) · `input`/`select`/`textarea` · `.field` (label + contrôle +
-`.hint`) · `.check` (case et libellé dans **une seule** cible) · `.card`
-(`.card-head` / `.card-body` / `.card-foot`) · `details.card` · `.stat` /
-`.stats` · `.badge` (tons `ok warn danger info accent`) · `.dot` · `table`
-(en-tête collant, `.table-wrap` qui scrolle) · `.kv` · `.empty` / `errorHTML` /
+`button` (+ `.primary` `.danger` `.ghost` `.sm` `.icon` `.wide`, `aria-busy` for
+waiting) · `input`/`select`/`textarea` · `input[type=range]` + `.scale` · `.field`
+(label + control + `.hint`) · `.check` (box and label in **one** target) ·
+`.card` (`.card-head` / `.card-body` / `.card-foot`) · `details.card` · `.stat` /
+`.stats` · `.badge` (tones `ok warn danger info accent`) · `.dot` · `table`
+(sticky header, a `.table-wrap` that scrolls) · `.kv` · `.empty` / `errorHTML` /
 `skeletonHTML` · `progress.meter` · `.notice` · `.toast` · `dialog` +
-`.sheet-head/-body/-foot` · `.segmented` / `.subnav` / `.nav` · `.chips` ·
-`.pager` · `.search` · `.kbd`.
+`.sheet-head/-body/-foot` · `.segmented` / `.subnav` / `.nav` · `.menu` ·
+`.chips` · `.pager` · `.search` · `.kbd`.
 
-Trois états sont **toujours** dessinés, jamais laissés vides : *vide* (ce qu'il
-faut faire pour qu'il y ait quelque chose), *en cours* (un squelette de la forme
-de ce qui arrive, pour que rien ne saute), *en erreur* (ce qui a échoué).
+Three states are **always** drawn, never left blank: *empty* (what to do so that
+there is something), *loading* (a skeleton shaped like what is coming, so
+nothing jumps), *error* (what failed).
 
-## Châssis (`SHELL`)
+## App shell (`SHELL`)
 
-Un rail à gauche qui dit **où on est**, une barre du haut qui dit **ce que fait
-le nœud**, une colonne de contenu. `/chat` prend la place du rail pour sa liste
-de conversations : la liste **est** la navigation, un deuxième niveau de chrome
-serait du bruit.
+A rail on the left saying **where you are**, a top bar saying **what the node is
+doing**, and one content column. `/chat` takes the rail's place for its
+conversation list: the list **is** the navigation, and a second level of chrome
+would be noise.
 
-### Sous 900 px : le rail devient une barre d'onglets en bas
+### Under 900 px: the rail becomes a bottom tab bar
 
-Pas un tiroir hamburger. Une navigation qui coûte deux tapes et cache où l'on se
-trouve est précisément ce qu'on reproche aux interfaces sur téléphone ; une barre
-d'onglets est toujours visible, dit toujours quelle section est ouverte, et se
-trouve sous le pouce. **C'est le même balisage** — seul l'axe change, donc il n'y
-a pas de deuxième navigation à tenir synchronisée :
+Not a hamburger drawer. Navigation that costs two taps and hides where you are
+is exactly what people complain about on a phone; a tab bar is always visible,
+always says which section is open, and sits under the thumb. **It is the same
+markup** — only the axis changes, so there is no second navigation to keep in
+sync:
 
-- le libellé long (`<span class="lbl">`) est masqué et `data-label` — le nom
-  court que la palette utilisait déjà — est repris par un `::before` ;
-- l'onglet actif porte un liseré **et** la couleur d'accent (jamais la couleur
-  seule) ; le compteur `.tail` devient une pastille ;
-- la marque et le pied du rail n'ont pas leur place dans une bande de 58 px :
-  ils passent dans le menu **⋯** de la barre du haut (état du nœud, liens vers
-  les apps, recherche, déconnexion). Ce bouton est `display:none` au-dessus de
-  900 px — le déclarer **avant** la media query est obligatoire : à spécificité
-  égale, c'est la dernière règle qui gagne, requête ou pas ;
-- le contenu réserve `--tabbar-h` + `env(safe-area-inset-bottom)` en bas, et les
-  toasts remontent d'autant : rien ne se cache derrière la barre.
+- the long label (`<span class="lbl">`) is hidden and `data-label` — the short
+  name the palette already used — is picked up by a `::before`;
+- the active tab carries a rule **and** the accent colour (never colour alone);
+  the `.tail` counter becomes a badge;
+- the brand and the rail's foot have no place in a 58 px strip: they move into
+  the top bar's **⋯** menu (node state, links to the apps, search, sign out).
+  That button is `display:none` above 900 px — declaring it **before** the media
+  query is mandatory: at equal specificity the last rule wins, query or no;
+- the content reserves `--tabbar-h` + `env(safe-area-inset-bottom)` at the
+  bottom, and the toasts rise by as much: nothing hides behind the bar.
 
 ### Menus (`.menu` + `MENU`)
 
-Tout ce qui ferait **grandir une barre** vit dans un menu déroulant : un bouton
-`data-menu="id"` ouvre le panneau de cet id, un seul à la fois, fermé par
-Échap, par un clic ailleurs, ou par son propre voile. Sous 640 px le même
-balisage devient une **feuille** ancrée en bas de l'écran, là où le pouce est
-déjà. Un compteur (`.count`) flotte **par-dessus** son bouton, jamais à côté :
-un nombre à deux chiffres ne doit pas pouvoir élargir la barre.
+Anything that would **grow a bar** lives in a dropdown: a button
+`data-menu="id"` opens the panel with that id, one at a time, closed by Escape,
+by a click elsewhere, or by its own scrim. Under 640 px the same markup becomes
+a **sheet** anchored to the bottom of the screen, where the thumb already is. A
+counter (`.count`) floats **over** its button, never beside it: a two-digit
+number must not be able to widen the bar.
 
-> **Piège.** Un `backdrop-filter` fait de son élément le bloc conteneur de tous
-> ses descendants `position:fixed`. Le flou de la barre du haut vit donc sur un
-> `::before`, sinon la feuille s'ancre sous la barre au lieu du bas de l'écran.
-> Test : `test_the_topbar_does_not_capture_its_own_menus`.
+> **Trap.** A `backdrop-filter` makes its element the containing block for every
+> `position:fixed` descendant. The top bar's blur therefore lives on a
+> `::before`, or the sheet anchors under the bar instead of the bottom of the
+> screen. Test: `test_the_topbar_does_not_capture_its_own_menus`.
 
-### Boîtes de dialogue
+### Dialogs
 
-Au-dessus de 640 px, une carte centrée. En dessous, une feuille qui monte du bas
-(`inset:auto 0 0 0`), et un `dialog.full` prend tout l'écran en `dvh` — pas en
-`vh`, sinon la barre du navigateur mobile rogne la dernière ligne.
+Above 640 px, a centred card. Below, a sheet rising from the bottom
+(`inset:auto 0 0 0`), and a `dialog.full` takes the whole screen in `dvh` — not
+`vh`, or the mobile browser's own bar crops the last row.
 
-## Runtime partagé (`ui.JS`)
+## Shared runtime (`ui.JS`)
 
-Ce que les trois pages résolvaient chacune de leur côté :
+What each of the pages used to solve on its own:
 
-- `$`, `$$`, `esc`, `shortId`, `debounce` ;
-- `api` / `apiJson` — jeton en `sessionStorage`, un 401 renvoie à la porte ;
-- formatage : `fmtBytes`, `fmtRate`, `fmtDuration`, `fmtAgo`, `fmtNum` ;
-- retour : `toast` (poli, `aria-live`), `setMessage` (à côté du contrôle),
-  `withBusy` (le libellé reste en place pendant la requête) ;
-- `confirmAction` — les actions destructrices demandent, dans la page ;
-- `THEME` — clair / sombre / système, mémorisé par navigateur ;
-- `ROUTER` — `#section/sous-section` : linkable, marque-pageable, **Back**
-  fonctionne ;
-- `PALETTE` — `⌘K` / `Ctrl-K`, chaque section et les actions courantes ;
-- `MENU` — les menus déroulants du châssis ; `MENU.onShow[id]` laisse une page
-  peindre son contenu au moment où on le regarde, pas à chaque sondage ;
-- `mountShell()` — câble tout ça une fois pour la page.
+- `$`, `$$`, `esc`, `shortId`, `debounce`;
+- `api` / `apiJson` — the token in `sessionStorage`, a 401 sends you back to the
+  gate;
+- formatting: `fmtBytes`, `fmtRate`, `fmtDuration`, `fmtAgo`, `fmtNum`;
+- feedback: `toast` (polite, `aria-live`), `setMessage` (next to the control),
+  `withBusy` (the label stays put during the request);
+- `setHTML` — writes only when the markup actually changed, so a list painted on
+  a timer does not replace a node under the pointer and swallow the click;
+- `confirmAction` — destructive actions ask, in the page;
+- `THEME` — light / dark / system, remembered per browser;
+- `OPEN` / `openLinked` — how a link into another app opens (a window, a tab, or
+  by screen size), also per browser;
+- `ROUTER` — `#section/subsection`: linkable, bookmarkable, **Back** works;
+- `PALETTE` — `⌘K` / `Ctrl-K`, every section and the common actions;
+- `MENU` — the shell's dropdowns; `MENU.onShow[id]` lets a page paint its
+  contents when it is looked at, not on every poll;
+- `mountShell()` — wires all of that once per page.
 
-## Contraintes qui ne se voient pas
+## Constraints you cannot see
 
-- **Aucune ressource externe.** Pas de CDN, pas de police web, pas d'image
-  distante. La console marche sur une machine sans internet.
-- **Pas d'attribut `style=`.** La CSP est `default-src 'self'` sans
-  `unsafe-inline` : un `style="width:42%"` est ignoré **en silence** par le
-  navigateur. Une barre écrite comme ça ne se remplit jamais et personne ne voit
-  d'erreur — c'est exactement ce qui arrivait avant. Les valeurs variables
-  passent par un `<progress class="meter" value max>` ou par une assignation
-  CSSOM (`element.style.width = …`, non concernée par la CSP). Test :
+- **No external resource.** No CDN, no web font, no remote image. The console
+  works on a machine with no internet.
+- **No `style=` attribute.** The CSP is `default-src 'self'` without
+  `unsafe-inline`: a `style="width:42%"` is ignored **silently** by the browser.
+  A bar written that way never fills and nobody sees an error — which is exactly
+  what used to happen. Variable values go through a
+  `<progress class="meter" value max>` or a CSSOM assignment
+  (`element.style.width = …`, which the CSP does not cover). Test:
   `test_no_inline_style_attribute_anywhere`.
-- **Tout est échappé.** Ce qui vient du réseau (id, labels, bannières SSH,
-  sortie de commande) passe par `esc()` avant d'entrer dans `innerHTML`.
-- `prefers-reduced-motion` respecté ; anneau de focus visible partout ; lien
-  **Skip to content** en tête de chaque page ; cibles ≥ 24 px ; champs à 16 px
-  sur mobile (sinon iOS zoome) ; `tabular-nums` sur les chiffres qu'on compare.
-- **La couleur n'est jamais le seul signal** : chaque pastille d'état porte son
-  mot (`managed`, `no key`, `waiting on you`).
+- **Everything is escaped.** Anything from the network (ids, labels, SSH
+  banners, command output) goes through `esc()` before entering `innerHTML`.
+- **Nothing is frameable.** Every page keeps `frame-ancestors 'none'`. Showing a
+  node inside chat is a *mount*, not a frame: the same view, in the same
+  document.
+- `prefers-reduced-motion` respected; a visible focus ring everywhere; a **Skip
+  to content** link at the head of every page; targets ≥ 24 px; fields at 16 px
+  on mobile (or iOS zooms); `tabular-nums` on numbers people compare.
+- **Colour is never the only signal**: every status badge carries its own word
+  (`managed`, `no key`, `waiting on you`).
 
-## Ajouter quelque chose
+## Adding something
 
-- **Une section** dans une page : un `<button role="tab" data-tab="x"
-  data-label="Court"><span class="lbl">Le libellé long</span></button>` dans le
-  rail, une `<section data-panel="x">`, et `ROUTER` fait le reste (URL, titre,
-  Back, focus). Les deux libellés ne sont pas facultatifs : le court est celui de
-  la barre d'onglets et de la palette. Une sous-section : `data-subtab` /
-  `data-sub`.
-- **Un menu** : un bouton `data-menu="x"` et un `<div id="x" class="menu" hidden>`.
-  L'attribut `hidden` non plus n'est pas facultatif — sans lui le panneau
-  s'affiche au chargement et intercepte le clic du bouton censé l'ouvrir.
-- **Un composant** : dans `ui.py`, avec les jetons sémantiques — jamais une
-  couleur en dur. S'il porte du texte, ajouter la paire dans le test de
-  contraste.
-- **Une page** : un module qui exporte `X_HTML`, `X_PAGE_CSS`, `X_PAGE_JS`,
-  assemblés dans `__init__.py`. Reprendre le châssis, le `<dialog>` de
-  confirmation, la région de toasts et la palette : le test
-  `test_every_element_the_scripts_reach_for_exists` échoue si l'un manque.
+- **A section** in a page: a `<button role="tab" data-tab="x"
+  data-label="Short"><span class="lbl">The long label</span></button>` in the
+  rail, a `<section data-panel="x">`, and `ROUTER` does the rest (URL, title,
+  Back, focus). Both labels are mandatory: the short one is what the tab bar and
+  the palette use. A subsection: `data-subtab` / `data-sub`.
+- **A menu**: a `data-menu="x"` button and a `<div id="x" class="menu" hidden>`.
+  The `hidden` attribute is not optional either — without it the panel shows on
+  load and intercepts the click of the button meant to open it.
+- **A component**: in `ui.py`, with the semantic tokens — never a hard-coded
+  colour. If it carries text, add the pair to the contrast test.
+- **A page**: a module exporting `X_HTML`, `X_PAGE_CSS`, `X_PAGE_JS`, assembled
+  in `__init__.py`. Reuse the shell, the confirmation `<dialog>`, the toast
+  region and the palette: `test_every_element_the_scripts_reach_for_exists`
+  fails if one is missing.
