@@ -807,7 +807,7 @@ CONSOLE_PAGE_CSS = """
 @media (max-width:900px){
   /* The drawing is nearly twice as wide as it is tall, so a tall row is mostly
      empty letterbox — height it to what the drawing actually uses. */
-  .map-body{grid-template-columns:1fr;grid-template-rows:minmax(200px,34vh) minmax(0,1fr);
+  .map-body{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(200px,34vh) minmax(0,1fr);
     padding:var(--s-3);gap:var(--s-3)}
   .map-side{border-left:0;border-top:1px solid var(--border);padding-left:0;
     padding-top:var(--s-3)}

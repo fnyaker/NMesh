@@ -109,6 +109,41 @@ sender; a peer's `EDIT`/`DELETE` only ever alters its own messages. A profile
 (bio/avatar) is **learned** from the peer; the **name is not in it** — that
 comes from the node's signed claim, and the node_id stays the real identity.
 
+## The screen
+
+Three panes on one grid: the **conversation list**, the **thread**, and the node
+card of whoever you are talking to. Which of them is on screen is a single
+attribute on the shell — `data-view="list" | "conv" | "peer"` — so at any width
+there is exactly one answer to "what am I looking at", and the panes cannot
+contradict each other.
+
+Wide enough (over 1180 px) shows all three. Between 860 and 1180 the node card
+takes the conversation's place, because everything in it is *about* the
+conversation. Below 860 the screen shows one pane at a time and the list is the
+navigation — no drawer and no hamburger, the same stance the console takes with
+its tab bar.
+
+Everything is prefixed `ch-`. The design system (`src/webassets/ui.py`) owns the
+generic names, and this page used to redefine `.msg` — quietly changing a shared
+component for itself alone. The prefix is what stops that.
+
+Three rules hold the layout together, and each of them is a bug that was really
+here (see `Docs/WebConsole/design` → *Constraints you cannot see*):
+
+- every grid track is `minmax(0,1fr)`. A bare `1fr` sizes to its content's
+  min-content width, and one pasted URL then pushed the page 126 px wider than
+  a phone;
+- the log's children are `flex:none`. Without it the browser shrank every bubble
+  instead of scrolling — messages crushed to 20 px and overlapping;
+- the message width cap sits on the row, which has a definite width, not on the
+  bubble inside a row that was itself shrink-to-fit.
+
+Both lists are **keyed**: the page polls every 1.2 s, and a row is created once,
+updated in place, and removed when it goes. Rebuilding them threw away the
+scroll position, any selection, and the click somebody was in the middle of
+making. A message that arrives while you are reading further up does not yank
+the view — it offers a **New messages ↓** button instead.
+
 ## Who you are talking to (the details panel)
 
 The name at the top of a conversation opens **the console's node card** — the
@@ -123,8 +158,7 @@ the conversation.
 
 Where it appears is the user's choice (profile → Preferences): **beside the
 conversation** (the default), in a **window**, or in a **tab**. Stored in this
-browser, like the theme. Under 1180 px the panel takes the conversation's place;
-under 860 px, the whole screen's.
+browser, like the theme.
 
 ## The social layer (contacts, groups, search)
 
