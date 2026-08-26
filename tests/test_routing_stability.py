@@ -588,7 +588,7 @@ class TestNoSelfInflictedLookupLoop:
         from src.node import MeshNode
         from tests.conftest import make_manager
         node = MeshNode(transport_manager=make_manager())
-        # La table refuse notre id, donc `contains` restera faux pour toujours :
+        # The table refuses our own id, so `contains` stays false forever:
         # that is exactly the trap the handler has to know about.
         node._routing.add(node.id, [], b"")
         assert not node._routing.contains(node.id)

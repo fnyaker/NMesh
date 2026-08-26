@@ -44,7 +44,7 @@ def test_image_ships_everything_build_payload_requires():
 
 
 def test_the_mandatory_pair_is_present():
-    """`build_payload` refuse tout arbre sans `src` ET `start.sh`."""
+    """`build_payload` refuses any tree without both `src` and `start.sh`."""
     copied = copied_entries()
     assert {"src", "start.sh"} <= copied
 

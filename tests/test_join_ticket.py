@@ -54,7 +54,7 @@ class TestRoundTrip:
 
 
 class TestHostileInput:
-    """Rien ne doit lever autre chose qu'une TicketError."""
+    """Nothing may raise anything other than a TicketError."""
 
     @pytest.mark.parametrize("text", [
         "", "   ", "nonsense", "!!!!!!!!", "A", "=" * 40,
@@ -75,9 +75,8 @@ class TestHostileInput:
             jt.decode("A" * (jt.MAX_TEXT + 1))
 
     def test_a_single_flipped_character_is_caught(self):
-        """Le checksum n'est pas une protection contre un attaquant — il
-        recalculerait — mais il attrape une faute de frappe avant qu'on
-        compose quoi que ce soit."""
+        """The checksum is no protection against an attacker — they would
+        recompute it — but it catches a typo before we dial anything."""
         text = a_ticket()
         caught = 0
         for index in range(len(text)):
@@ -121,7 +120,7 @@ class TestHostileInput:
 
 class TestEncodeRefusals:
     def test_a_hostname_is_refused(self):
-        """Un ticket porte une adresse, jamais un nom : un nom demanderait un
+        """A ticket carries an address, never a name: a name would need a
         resolver on the scanner's side and could point elsewhere later."""
         with pytest.raises(jt.TicketError):
             jt.encode("example.com", 9000, SEED, time.time() + 600)

@@ -30,7 +30,7 @@ class TestLinkQuality:
         assert flappy.as_dict()["jitter_ms"] > steady.as_dict()["jitter_ms"] * 10
 
     def test_loss_needs_more_than_one_probe(self):
-        """Une sonde en vol n'est pas 100 % de perte."""
+        """A probe in flight is not 100% loss."""
         quality = LinkQuality()
         quality.on_ping()
         assert quality.loss() is None

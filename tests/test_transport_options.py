@@ -170,7 +170,7 @@ class TestTheFileCarriesThemWithoutUnderstandingThem:
                                         "udp": {"max_reorder": "64"}}
 
     def test_the_file_never_validates_a_transport_setting(self):
-        """C'est le medium qui sait ; le fichier ne fait que transporter."""
+        """The medium is what knows; the file only carries it."""
         values, problems = config.parse("tcp.connect_timeout = banana\n")
         assert problems == []
         assert values["transports"]["tcp"]["connect_timeout"] == "banana"

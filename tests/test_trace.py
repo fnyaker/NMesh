@@ -119,7 +119,7 @@ class TestNeverBreaksTheLink:
             type = 1
             # ni ttl, ni src_id, ni dst_id
 
-        trace.record("in", Broken(), 80)          # ne doit pas lever
+        trace.record("in", Broken(), 80)          # must not raise
         assert trace.status()["dropped"] == 1
 
     def test_a_packet_type_that_is_not_an_integer_does_not_raise(self):

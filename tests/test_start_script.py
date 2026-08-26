@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 START = Path(__file__).resolve().parent.parent / "start.sh"
-# Chemin absolu : les tests isolent le PATH, bash ne serait plus trouvable.
+# An absolute path: the tests isolate the PATH, bash would no longer be found.
 BASH = shutil.which("bash")
 
-pytestmark = pytest.mark.skipif(BASH is None, reason="bash requis pour tester le lanceur")
+pytestmark = pytest.mark.skipif(BASH is None, reason="bash is needed to test the launcher")
 
 
 def run_snippet(tmp_path, snippet, *, os_release=None, fake_bins=(),
@@ -109,7 +109,7 @@ def test_package_manager_detection(tmp_path, os_release, binary, expected):
     ('ID=opensuse-leap\nID_LIKE=suse\n', "zypper"),
 ])
 def test_detection_falls_back_to_id_like(tmp_path, os_release, expected):
-    """Aucun gestionnaire dans le PATH : ID/ID_LIKE reste exploitable."""
+    """No manager in the PATH: ID/ID_LIKE is still usable."""
     out = run_snippet(tmp_path, "detect_os; echo $PKG", os_release=os_release,
                       isolate=True)
     assert out == expected
@@ -178,7 +178,7 @@ def test_pip_package_names_per_family(tmp_path, family, needle):
 
 @pytest.mark.parametrize("family", ["apt", "dnf", "yum", "pacman", "zypper", "apk", "xbps"])
 def test_every_family_can_build_liboqs(tmp_path, family):
-    """cmake + compilateur + git : sans eux, pas de crypto post-quantique."""
+    """cmake + a compiler + git: without them, no post-quantum crypto."""
     out = run_snippet(tmp_path, f'PKG={family}; pkg_names build').split()
     assert "cmake" in out
     assert "git" in out
@@ -207,7 +207,8 @@ def test_root_needs_no_sudo(tmp_path):
 
 
 def test_missing_sudo_is_refused_not_ignored(tmp_path):
-    """Conteneur non-root sans sudo : on le dit, on ne tente pas d'installer."""
+    """A non-root container with no sudo: we say so, we do not try to
+    install."""
     out = run_snippet(
         tmp_path,
         'detect_os; detect_sudo; pkg_install cmake && echo INSTALLED || echo REFUSED',
@@ -248,7 +249,8 @@ def test_arch_never_does_a_partial_upgrade(tmp_path):
 
 
 def test_install_role_retries_package_by_package(tmp_path):
-    """Un nom inconnu d'une release (ninja vs ninja-build) ne doit pas tout couler."""
+    """A name one release does not know (ninja vs ninja-build) must not sink
+    the rest."""
     log = tmp_path / "apt.log"
     stub = f'''
 for a in "$@"; do
@@ -269,7 +271,7 @@ echo "$@" >> {log}
 
 
 def test_apt_install_is_non_interactive(tmp_path):
-    """Sans DEBIAN_FRONTEND=noninteractive, apt peut bloquer sur un prompt."""
+    """Without DEBIAN_FRONTEND=noninteractive, apt can block on a prompt."""
     log = tmp_path / "env.log"
     out = run_snippet(
         tmp_path,
@@ -287,7 +289,7 @@ def test_apt_install_is_non_interactive(tmp_path):
 # ── venv / pip ───────────────────────────────────────────────────────────────
 
 def test_venv_capability_probe_requires_pip(tmp_path):
-    """Le cas Ubuntu neuf : `python3 -m venv` produit un venv sans pip."""
+    """The fresh-Ubuntu case: `python3 -m venv` produces a venv with no pip."""
     out = run_snippet(
         tmp_path,
         'PYTHON=fakepy; venv_capable && echo CAPABLE || echo MISSING',
@@ -330,7 +332,8 @@ def test_missing_virtualenv_directory_counts_as_broken(tmp_path):
 # ── cmake ────────────────────────────────────────────────────────────────────
 
 def test_ancient_cmake_is_rejected(tmp_path):
-    """CentOS 7 & co livrent cmake 2.8 : liboqs ne se configure pas avec."""
+    """CentOS 7 and friends ship cmake 2.8: liboqs will not configure with
+    it."""
     out = run_snippet(
         tmp_path,
         'have_build_tools && echo OK || echo TOO_OLD',
