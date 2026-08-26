@@ -1,18 +1,18 @@
 """
-Redialler une adresse : à la main, ou toute seule.
+Redialling an address: by hand, or on its own.
 
-Une node qui annonce quatre adresses dont une seule marche est le cas normal sur
-un vrai réseau. Trois mécanismes en découlent, et ce fichier les tient :
+A node advertising four addresses of which only one works is the normal case on
+a real network. Three mechanisms follow from that, and this file holds them:
 
-* **le bouton** — rejouer une adresse précise, ou toutes, et *dire* ce que
-  chacune a fait ;
-* **la boucle** — réessayer périodiquement, à la cadence que le *medium* déclare
-  (`retry_interval`), jamais à une cadence que le cœur impose ;
-* **le pilotage par latence** — déplacer un lien vivant vers une meilleure
-  adresse de la même node, uniquement si on l'a demandé.
+* **the button** — replay one precise address, or all of them, and *say* what
+  each one did;
+* **the loop** — retry periodically, at the cadence the *medium* declares
+  (`retry_interval`), never at one the core imposes;
+* **steering on latency** — move a live link to a better address of the same
+  node, only when someone asked for it.
 
-Le fil rouge : rien de tout ça ne doit pouvoir devenir une inondation, et une
-entrée hostile (id inconnu, URI qui n'est pas à cette node) ne compose rien.
+The thread running through them: none of this may become a flood, and a hostile
+input (an unknown id, a URI that is not this node's) dials nothing.
 """
 import asyncio
 import time
@@ -36,8 +36,8 @@ def _peer_id(seed: int) -> NodeID:
 
 
 class TestTheMediumOwnsTheCadence:
-    """Le cœur n'a pas d'avis sur la fréquence : une radio qui coûte une pile
-    par tentative et un Ethernet ne partagent pas un nombre."""
+    """The core has no opinion on the frequency: a radio that costs a battery
+    per attempt and an Ethernet do not share a number."""
 
     def test_tcp_and_udp_both_declare_it_and_it_is_off_by_default(self):
         for cls in (TCPTransport, UDPTransport):
@@ -46,8 +46,8 @@ class TestTheMediumOwnsTheCadence:
             assert field["min"] == 0.0 and field["max"] == 3600.0
 
     def test_a_transport_that_declares_nothing_is_never_retried(self):
-        """`fake://` n'a pas d'option : la boucle doit le laisser tranquille,
-        pas supposer une valeur."""
+        """`fake://` declares no option: the loop must leave it alone, not
+        assume a value."""
         node = _node()
         assert node._retry_interval("fake://somewhere") == 0.0
 
@@ -73,8 +73,8 @@ def _server_of(cls):
 
 
 class TestTheManualRetry:
-    """Le bouton. Il rend compte, et il ne compose que ce que la node connaît
-    déjà de cette identité."""
+    """The button. It reports back, and it dials only what the node already
+    knows of that identity."""
 
     @pytest.mark.asyncio
     async def test_an_unknown_id_is_refused_without_dialling(self):
@@ -97,9 +97,9 @@ class TestTheManualRetry:
 
     @pytest.mark.asyncio
     async def test_an_address_that_is_not_that_nodes_is_refused(self):
-        """La console est authentifiée, mais « tape une adresse et la node s'y
-        connecte » est une autre fonctionnalité, avec un autre modèle de
-        menace. Ici on ne compose que ce qu'on sait déjà d'elle."""
+        """The console is authenticated, but "type an address and the node
+        connects to it" is a different feature, with a different threat model.
+        Here we dial only what we already know of it."""
         node = _node()
         target = _peer_id(8)
         node._routing.add(target, ["fake://known:1"])
@@ -230,9 +230,9 @@ class TestThePeriodicRetry:
 
     @pytest.mark.asyncio
     async def test_the_loop_survives_a_dial_that_explodes(self, monkeypatch):
-        """Zéro crash : une boucle de récupération qui meurt est une perte
-        silencieuse de récupération. On la fait vraiment tourner, plusieurs
-        fois, avec un medium qui lève à chaque appel."""
+        """Zero crash: a recovery loop that dies is a silent loss of recovery.
+        We really run it, several times, with a medium that raises on every
+        call."""
         monkeypatch.setattr("src.node._RETRY_TICK", 0.01)
         node = _node()
         node._routing.add(_peer_id(6), ["fake://a:1"])
@@ -266,8 +266,8 @@ async def _never_called(*args, **kwargs):
 
 
 class TestSteeringOnLatency:
-    """Déplacer un lien vivant vers une meilleure adresse — seulement si on l'a
-    demandé, et seulement si le gain est réel."""
+    """Moving a live link to a better address — only when asked for it, and
+    only when the gain is real."""
 
     def test_it_is_off_until_someone_asks(self):
         node = _node()
@@ -332,8 +332,8 @@ class TestSteeringOnLatency:
 
     @pytest.mark.asyncio
     async def test_a_marginal_gain_is_not_a_reason_to_move(self):
-        """Deux millisecondes de mieux, c'est du bruit — pas une raison de
-        payer une poignée de main."""
+        """Two milliseconds better is noise — not a reason to pay for a
+        handshake."""
         node, peer, target = await _steerable(24)
         candidate = await _candidate(node, target)
         node._measure_peer = _measure_by_peer({id(peer): 50.0, id(candidate): 48.5})
@@ -406,7 +406,7 @@ def _measure_by_peer(table):
 
 
 def _dial_returning(node, peer):
-    """Ce qu'un vrai `_dial_uri` fait : le pair réussi est dans la liste."""
+    """What a real `_dial_uri` does: the peer that succeeded is in the list."""
     async def _run(node_id, uri, timeout):
         peer.remote_addr = uri
         if peer not in node._peers:
@@ -420,9 +420,9 @@ async def _no_dial(node_id, uri, timeout):
 
 
 class TestPriorityAndBalance:
-    """Choisir entre les adresses d'une node : ce que vaut le *medium* (une
-    priorité que l'opérateur pose) et ce que mesure l'*adresse*, pesés par un
-    seul curseur. Une seule règle, un seul endroit."""
+    """Choosing between a node's addresses: what the *medium* is worth (a
+    priority the operator sets) and what the *address* measures, weighed by a
+    single slider. One rule, in one place."""
 
     def test_the_shipped_priorities_are_the_ones_advertised(self):
         assert TCPTransport.setting("priority") == 0
@@ -450,8 +450,8 @@ class TestPriorityAndBalance:
         assert node.transport_balance == 50
 
     def test_at_zero_only_latency_counts(self):
-        """Le curseur à gauche : la priorité du medium ne doit plus rien
-        changer, même entre deux transports très différents."""
+        """The slider hard left: the medium's priority must change nothing at
+        all, even between two very different transports."""
         node = _node()
         node.set_transport_balance(0)
         node._transport_priority = lambda uri: 254 if "fast" in uri else -254
@@ -464,7 +464,7 @@ class TestPriorityAndBalance:
         assert node._address_score("good://a:1", 900.0) > node._address_score("bad://b:1", 1.0)
 
     def test_an_address_never_measured_sits_in_the_middle(self):
-        """« Jamais essayée » n'est ni une bonne ni une mauvaise nouvelle."""
+        """"Never tried" is neither good news nor bad news."""
         node = _node()
         node.set_transport_balance(0)
         never = node._address_score("fake://a:1", None)
@@ -472,8 +472,8 @@ class TestPriorityAndBalance:
         assert node._address_score("fake://a:1", 500.0) < never
 
     def test_latency_curves_so_one_absurd_number_flattens_nothing(self):
-        """Une échelle linéaire ferait qu'une mesure à 4 s écrase toutes les
-        différences réelles entre 5 et 50 ms."""
+        """A linear scale would let one 4 s reading crush every real difference
+        between 5 and 50 ms."""
         node = _node()
         node.set_transport_balance(0)
         near = node._address_score("fake://a:1", 5.0) - node._address_score("fake://a:1", 50.0)
@@ -494,15 +494,15 @@ class TestPriorityAndBalance:
         assert node._preferred(addresses, target.raw.hex())[0] == "slow://a:1"
 
     def test_global_ipv6_still_breaks_a_tie(self):
-        """Le départage historique n'est pas perdu : à score égal, une adresse
-        IPv6 globale reste joignable de bout en bout."""
+        """The historical tie-break is not lost: at equal score, a global IPv6
+        address stays reachable end to end."""
         node = _node()
         ordered = node._preferred(["fake://10.0.0.1:1", "fake://[2a01::1]:1"])
         assert ordered[0] == "fake://[2a01::1]:1"
 
     def test_the_scheme_order_shown_to_the_operator_is_the_real_one(self):
-        """La console affiche l'ordre calculé ici, pas une deuxième
-        implémentation de la règle en JavaScript."""
+        """The console displays the order computed here, not a second
+        implementation of the rule in JavaScript."""
         from src.tcp_transport import TCPServer, TCPTransport as T
         from src.udp_transport import UDPServer, UDPTransport as U
         from src.node import MeshNode
@@ -521,8 +521,8 @@ class TestPriorityAndBalance:
 
     @pytest.mark.asyncio
     async def test_steering_prefers_a_better_medium_at_equal_latency(self):
-        """Le point du système : à latence égale, le medium préféré gagne — et
-        c'est la même règle qui a ordonné les dials."""
+        """The point of the system: at equal latency the preferred medium wins —
+        and it is the same rule that ordered the dials."""
         node, peer, target = await _steerable(41)
         node.set_transport_balance(100)
         node._transport_priority = lambda uri: 254 if uri.endswith("b:2") else -254
@@ -543,8 +543,8 @@ class TestPriorityAndBalance:
 
     @pytest.mark.asyncio
     async def test_a_manager_that_cannot_answer_never_stops_a_dial(self):
-        """Zéro crash : un gestionnaire de transports tiers qui n'implémente pas
-        `setting()` doit scorer neutre, pas emporter la composition."""
+        """Zero crash: a third-party transport manager that does not implement
+        `setting()` must score neutral, not take the dial down with it."""
         class Mute:
             def is_supported(self, scheme):
                 return True

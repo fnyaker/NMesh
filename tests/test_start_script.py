@@ -1,10 +1,10 @@
-"""Le lanceur ./start.sh doit s'installer seul sur n'importe quelle distro.
+"""The ./start.sh launcher has to install itself on any distribution.
 
-Les pièges couverts ici sont ceux qui cassent une machine *neuve* : pas de pip
-(Debian/Ubuntu/Alpine/Arch découpent venv et pip hors de l'interpréteur), pip
-interdit sur le système (PEP 668), pas de sudo (conteneurs root), noms de
-paquets différents partout. On source start.sh en mode bibliothèque
-(NMESH_START_LIB=1) : rien n'est installé, rien n'est lancé.
+The traps covered here are the ones that break a *fresh* machine: no pip
+(Debian/Ubuntu/Alpine/Arch split venv and pip out of the interpreter), pip
+forbidden system-wide (PEP 668), no sudo (root containers), different package
+names everywhere. We source start.sh in library mode (NMESH_START_LIB=1):
+nothing is installed, nothing is launched.
 """
 
 import shutil
@@ -23,18 +23,18 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="bash requis pour tester le
 
 def run_snippet(tmp_path, snippet, *, os_release=None, fake_bins=(),
                 isolate=False, env=None):
-    """Source start.sh en mode bibliothèque puis exécute `snippet`.
+    """Source start.sh in library mode, then run `snippet`.
 
-    `isolate` coupe le PATH système : seuls les stubs (plus le minimum vital
-    emprunté à /usr/bin) sont visibles. C'est ainsi qu'on simule une machine où
-    sudo — ou le compilateur — n'existe pas.
+    `isolate` cuts the system PATH: only the stubs (plus the bare minimum
+    borrowed from /usr/bin) are visible. That is how we simulate a machine where
+    sudo — or the compiler — does not exist.
     """
     stub_dir = tmp_path / "stubbin"
     stub_dir.mkdir(exist_ok=True)
     base_path = "/usr/bin:/bin:/usr/sbin:/sbin"
     if isolate:
-        # Le strict nécessaire pour que start.sh se source et que les helpers
-        # tournent ; tout le reste doit venir des stubs.
+        # The bare minimum for start.sh to source and the helpers to run;
+        # everything else has to come from the stubs.
         for tool in ("dirname", "uname", "mktemp", "rm", "cat", "awk", "head", "cut", "mkdir", "env"):
             real = shutil.which(tool)
             if real and not (stub_dir / tool).exists():
@@ -72,7 +72,7 @@ def test_script_is_syntactically_valid():
     subprocess.run([BASH, "-n", str(START)], check=True)
 
 
-# ── détection de la distro ───────────────────────────────────────────────────
+# ── detecting the distribution ──────────────────────────────────────────────
 
 DISTROS = [
     ('ID=ubuntu\nID_LIKE=debian\n', "apt-get", "apt"),
@@ -91,7 +91,7 @@ DISTROS = [
 
 @pytest.mark.parametrize("os_release,binary,expected", DISTROS)
 def test_package_manager_detection(tmp_path, os_release, binary, expected):
-    """os-release fait foi — un apt-get qui traîne ne doit pas décider à sa place."""
+    """os-release is authoritative — a stray apt-get must not decide for it."""
     out = run_snippet(
         tmp_path,
         "detect_os; echo $PKG",
@@ -116,13 +116,13 @@ def test_detection_falls_back_to_id_like(tmp_path, os_release, expected):
 
 
 def test_declarative_distros_are_never_touched(tmp_path):
-    """NixOS et Gentoo se configurent en déclaratif : on n'installe rien."""
+    """NixOS and Gentoo are configured declaratively: we install nothing."""
     for ident, expected in (("nixos", "nix"), ("gentoo", "gentoo")):
         out = run_snippet(
             tmp_path,
             "detect_os; echo $PKG",
             os_release=f"ID={ident}\n",
-            # Même avec un pacman qui traîne, on ne bascule pas dessus.
+            # Even with a stray pacman around, we do not switch to it.
             fake_bins=[("pacman", "exit 0")],
             isolate=True,
         )
@@ -130,14 +130,14 @@ def test_declarative_distros_are_never_touched(tmp_path):
 
 
 def test_unknown_distro_is_reported_not_guessed(tmp_path):
-    """Distro inconnue et aucun gestionnaire connu : on le dit au lieu de deviner."""
+    """An unknown distro and no known manager: we say so instead of guessing."""
     out = run_snippet(tmp_path, "detect_os; echo $PKG", os_release="ID=exotic\n",
                       isolate=True)
     assert out == "unknown"
 
 
 def test_unknown_distro_still_uses_an_installed_tool(tmp_path):
-    """Dérivée exotique mais avec apk : on s'en sert."""
+    """An exotic derivative, but with apk: we use it."""
     out = run_snippet(tmp_path, "detect_os; echo $PKG", os_release="ID=exotic\n",
                       fake_bins=[("apk", "exit 0")], isolate=True)
     assert out == "apk"
@@ -153,20 +153,21 @@ def test_centos7_without_dnf_falls_back_to_yum(tmp_path):
 # ── noms de paquets ──────────────────────────────────────────────────────────
 
 def test_every_family_names_a_pip_or_venv_package(tmp_path):
-    """Le cas du rapport : machine neuve sans pip. Chaque famille sait le poser.
+    """The reported case: a fresh machine with no pip. Every family can lay it
+    down.
 
-    (Homebrew livre pip avec python : rien à installer là-bas.)
+    (Homebrew ships pip with python: nothing to install there.)
     """
     families = ["apt", "dnf", "yum", "pacman", "zypper", "apk", "xbps", "termux"]
     for family in families:
         out = run_snippet(tmp_path, f'PKG={family}; pkg_names pipvenv')
-        assert out, f"{family} n'installe pas pip/venv"
+        assert out, f"{family} does not install pip/venv"
 
 
 @pytest.mark.parametrize("family,needle", [
-    ("apt", "python3-venv"),      # Ubuntu/Debian : venv absent de python3
-    ("apk", "py3-pip"),           # Alpine : pip dans un paquet séparé
-    ("pacman", "python-pip"),     # Arch : ensurepip a besoin de python-pip
+    ("apt", "python3-venv"),      # Ubuntu/Debian: venv is not in python3
+    ("apk", "py3-pip"),           # Alpine: pip in a separate package
+    ("pacman", "python-pip"),     # Arch: ensurepip needs python-pip
     ("dnf", "python3-pip"),
     ("zypper", "python3-pip"),
 ])
@@ -232,7 +233,7 @@ def test_non_root_with_sudo_uses_it(tmp_path):
 # ── installation ─────────────────────────────────────────────────────────────
 
 def test_arch_never_does_a_partial_upgrade(tmp_path):
-    """`pacman -Sy` puis install = mise à jour partielle, non supportée par Arch."""
+    """`pacman -Sy` then install = a partial upgrade, unsupported by Arch."""
     log = tmp_path / "pacman.log"
     out = run_snippet(
         tmp_path,
@@ -262,7 +263,7 @@ echo "$@" >> {log}
         fake_bins=[("id", "echo 0"), ("apt-get", stub)],
         isolate=True,
     )
-    # Le lot complet échoue à cause de ninja-build, mais les autres passent.
+    # The whole batch fails because of ninja-build, but the others go through.
     assert "python3-dev" in out
     assert "pkg-config" in out
 
@@ -306,7 +307,7 @@ def test_venv_capability_probe_accepts_a_working_python(tmp_path):
 
 
 def test_broken_virtualenv_is_detected(tmp_path):
-    """Un venv dont l'interpréteur a disparu (upgrade de distro) est recréé."""
+    """A venv whose interpreter is gone (a distro upgrade) is recreated."""
     venv = tmp_path / "deadvenv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "python").write_text("#!/bin/sh\nexit 1\n")
@@ -362,22 +363,22 @@ def test_missing_compiler_is_detected(tmp_path):
         fake_bins=[
             ("cmake", 'echo "cmake version 3.28.3"'),
             ("make", "exit 0"), ("git", "exit 0"),
-            # Aucun cc/gcc/clang : PATH isolé, uniquement les stubs ci-dessus.
+            # No cc/gcc/clang: an isolated PATH, only the stubs above.
         ],
         isolate=True,
     )
     assert out == "MISSING"
 
 
-# ── un service n'hérite pas d'un environnement de session ────────────────────
-# systemd ne transmet ni HOME ni USER par défaut. Sous `set -u`, un `$HOME` nu
-# tuait le script au démarrage — « HOME : variable sans liaison » — et le nœud
-# repartait en boucle de redémarrage sans jamais se lancer.
+# ── a service inherits no session environment ───────────────────────────────
+# systemd passes neither HOME nor USER by default. Under `set -u`, a bare `$HOME`
+# killed the script at startup — "HOME: unbound variable" — and the node went
+# into a restart loop without ever launching.
 
 def test_home_unset_does_not_kill_the_script(tmp_path):
-    """Le cas exact du bug : aucun HOME dans l'environnement."""
+    """The exact case of the bug: no HOME in the environment."""
     out = run_snippet(tmp_path, "node_home", env={"HOME": ""})
-    assert out, "node_home doit toujours répondre quelque chose"
+    assert out, "node_home must always answer something"
     assert Path(out).is_dir()
 
 
@@ -389,8 +390,8 @@ def test_home_is_used_when_it_is_usable(tmp_path):
 
 
 def test_a_home_that_does_not_exist_is_not_trusted(tmp_path):
-    """Un compte système pointe souvent sur /nonexistent : écrire là échouerait
-    plus tard, au pire moment."""
+    """A system account often points at /nonexistent: writing there would fail
+    later, at the worst moment."""
     out = run_snippet(tmp_path, "node_home",
                       env={"HOME": str(tmp_path / "nonexistent")})
     assert out != str(tmp_path / "nonexistent")
@@ -408,21 +409,22 @@ def test_an_unwritable_home_is_not_trusted(tmp_path):
 
 
 def test_the_whole_script_survives_an_empty_environment(tmp_path):
-    """Plus large que node_home : sourcer start.sh avec un environnement nu ne
-    doit lever aucune variable sans liaison."""
+    """Wider than node_home: sourcing start.sh with a bare environment must
+    raise no unbound variable."""
     proc = subprocess.run(
         [BASH, "-c", f'. "{START}"; echo SOURCED'],
         capture_output=True, text=True, timeout=60,
         env={"NMESH_START_LIB": "1", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
     assert proc.returncode == 0, proc.stderr
     assert "SOURCED" in proc.stdout
+    # "sans liaison" is the same message under a French locale.
     assert "unbound" not in proc.stderr and "sans liaison" not in proc.stderr
 
 
-# ── ne pas recompiler liboqs pour rien ───────────────────────────────────────
-# Compiler liboqs prend des minutes et produit la même bibliothèque à chaque
-# fois. Changer de préfixe (install utilisateur qui passe en /opt, second nœud,
-# --prefix différent) ne doit pas repayer ce prix.
+# ── not recompiling liboqs for nothing ──────────────────────────────────────
+# Compiling liboqs takes minutes and produces the same library every time.
+# Changing prefix (a user install moving to /opt, a second node, a different
+# --prefix) must not pay that price again.
 
 def test_candidates_split_the_list_and_skip_the_destination(tmp_path):
     out = run_snippet(tmp_path, """
@@ -432,7 +434,7 @@ def test_candidates_split_the_list_and_skip_the_destination(tmp_path):
     """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
     lines = out.splitlines()
     assert "/a/_oqs" in lines and "/b/_oqs" in lines
-    assert "/dest/_oqs" not in lines          # inutile : c'est là qu'on écrit
+    assert "/dest/_oqs" not in lines          # pointless: that is where we write
     assert "" not in lines
 
 
@@ -453,8 +455,8 @@ def test_adoption_copies_the_library_instead_of_building(tmp_path):
     out = run_snippet(tmp_path, f"""
         OQS_PREFIX="{dest}"
         OQS_REUSE_FROM="{source}"
-        # Le contrôle est fonctionnel : la bibliothèque doit être *là* et se
-        # charger. On simule les deux états successifs.
+        # The check is functional: the library must be *there* and load. We
+        # simulate the two successive states.
         pq_ready() {{ [ -f "${{OQS_INSTALL_PATH:-}}/lib/liboqs.so" ]; }}
         adopt_liboqs 1.2.3 && echo "ADOPTED:$ADOPTED_FROM" || echo NOT_ADOPTED
     """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
@@ -464,8 +466,8 @@ def test_adoption_copies_the_library_instead_of_building(tmp_path):
 
 
 def test_an_unloadable_candidate_is_never_adopted(tmp_path):
-    """Un répertoire qui *ressemble* à une install liboqs ne suffit pas : si le
-    wrapper ne le charge pas, on recompile."""
+    """A directory that *looks* like a liboqs install is not enough: if the
+    wrapper does not load it, we recompile."""
     source = tmp_path / "old" / "_oqs"
     (source / "lib").mkdir(parents=True)
     (source / "lib" / "liboqs.so").write_text("not really a library")
@@ -490,8 +492,8 @@ def test_nothing_to_adopt_is_not_an_error(tmp_path):
 
 
 def test_the_cache_is_keyed_by_the_wrapper_version(tmp_path):
-    """Une montée de version du wrapper doit recompiler : wrapper et
-    bibliothèque restent appariés autour de la crypto."""
+    """A wrapper version bump must recompile: wrapper and library stay paired
+    around the crypto."""
     cache = tmp_path / "cache"
     first = run_snippet(tmp_path, "liboqs_cache_dir 0.16.0",
                         env={"NMESH_LIBOQS_CACHE": str(cache)})
@@ -514,8 +516,8 @@ def test_a_build_fills_the_cache(tmp_path):
 
 
 def test_an_unwritable_cache_does_not_break_the_install(tmp_path):
-    """Un /var/cache plein ou en lecture seule coûte un rebuild la prochaine
-    fois — jamais l'échec de l'installation en cours."""
+    """A full or read-only /var/cache costs a rebuild next time — never the
+    failure of the install in progress."""
     built = tmp_path / "prefix"
     (built / "lib").mkdir(parents=True)
     (built / "lib" / "liboqs.so").write_text("ELF")
@@ -531,11 +533,11 @@ def test_an_unwritable_cache_does_not_break_the_install(tmp_path):
     assert out == "SURVIVED"
 
 
-# ── les défauts ne sont plus injectés par le lanceur ─────────────────────────
-# start.sh préfixait `--udp 9001 --stun` à chaque lancement. Comme un drapeau de
-# ligne de commande bat le fichier par construction, `udp`, `no_udp` et `stun`
-# pouvaient être réglés dans nmesh.conf et étaient ignorés en silence : le
-# fichier décrivait un nœud qui se comportait autrement.
+# ── the defaults are no longer injected by the launcher ─────────────────────
+# start.sh used to prefix `--udp 9001 --stun` on every run. Since a command-line
+# flag beats the file by construction, `udp`, `no_udp` and `stun` could be set in
+# nmesh.conf and were silently ignored: the file described a node that behaved
+# otherwise.
 
 def test_the_launcher_injects_no_default_flags():
     main = START.read_text().split("MAIN", 1)[1]
@@ -546,8 +548,8 @@ def test_the_launcher_injects_no_default_flags():
 
 
 def test_an_explicit_udp_port_from_the_environment_is_still_honoured():
-    """Demander un port par l'environnement reste une demande explicite, au même
-    titre que passer le drapeau."""
+    """Asking for a port through the environment is still an explicit request,
+    just as passing the flag is."""
     source = START.read_text()
     assert 'NMESH_UDP_PORT' in source
     assert '--udp "$NMESH_UDP_PORT"' in source
