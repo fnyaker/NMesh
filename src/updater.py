@@ -30,7 +30,7 @@ every node that accepts an update. What limits it:
 
 Signing core releases with the ML-DSA machinery already used for app packages
 (:mod:`src.app_package`) is the obvious next step and would remove GitHub from
-the trusted set; ``todo/integrite-des-pairs.md`` covers the wider problem.
+the trusted set; ``todo/peer-integrity.md`` covers the wider problem.
 
 Never on the event loop
 -----------------------
