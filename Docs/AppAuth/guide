@@ -136,7 +136,7 @@ From an external app it is the same thing through the connector:
   instead.
 - **It does not protect against a compromised machine.** If the adversary owns
   the node, they own the key. The leads on that front are in
-  [`todo/integrite-des-pairs.md`](../../todo/integrite-des-pairs.md).
+  [`todo/peer-integrity.md`](../../todo/peer-integrity.md).
 
 Tests: [`tests/test_app_auth.py`](../../tests/test_app_auth.py) (scoping,
 freshness, replay, key binding, minting bounds, hostile parsing, mutual login)
