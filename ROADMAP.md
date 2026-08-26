@@ -376,9 +376,14 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 - Docs: `Docs/AppAPI/guide`, `Docs/WebConsole/design`.
 
 ### Mesh-native releases (`src/core_release.py`) — done
-- A node publishes **its own code**: a content-addressed package on the DHT plus
-  a descriptor signed with its ML-DSA identity, on a signing domain of its own so
-  it cannot be confused with an app release, a certificate or a handshake.
+- A node publishes **its own code**: one deterministic archive plus a descriptor
+  naming its hash, signed with its ML-DSA identity, on a signing domain of its
+  own so it cannot be confused with an app release, a certificate or a
+  handshake. Publishing touches **no network** — it signs and announces.
+- The package moves on demand (`RELEASE_FETCH`/`RELEASE_DATA`, routable and
+  sliced) from the publisher or from any node that kept a copy; receiving one
+  makes a node a source, so one publisher becomes a swarm and a publisher that
+  goes offline stops being necessary.
 - Gossiped as `RELEASE_ANNOUNCE` with the app catalogue's rules — verify, keep
   only what is newer (signed `ts`), re-gossip only when the view changed, catch a
   new peer up at the handshake. A release from an unpinned publisher is relayed

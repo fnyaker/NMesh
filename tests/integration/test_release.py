@@ -16,7 +16,6 @@ import os
 import pytest
 
 from src import core_release as cr
-from src.app_package import CHUNK_SIZE
 from src import updater
 from src.node import MeshNode
 from src.transport_manager import TransportManager
@@ -36,7 +35,12 @@ def _tree(root: str, version: str) -> str:
     with open(os.path.join(root, "src", "version.py"), "w") as handle:
         handle.write(f'__version__ = "{version}"\n')
     with open(os.path.join(root, "src", "node.py"), "w") as handle:
-        handle.write("# " + "the code, at length. " * 4000 + "\n")
+        handle.write("# the code\n")
+    # Incompressible, so the package really is bigger than one packet and the
+    # slicing is exercised rather than merely available. Repetitive filler
+    # gzips down to nothing and would prove the opposite of what it looks like.
+    with open(os.path.join(root, "src", "blob.bin"), "wb") as handle:
+        handle.write(os.urandom(200_000))
     with open(os.path.join(root, "scripts", "run.py"), "w") as handle:
         handle.write("print('hi')\n")
     with open(os.path.join(root, "start.sh"), "w") as handle:
@@ -75,15 +79,20 @@ class TestAReleaseCrossesTheMesh:
 
             node.trust_publisher(publisher._identity.dsa_public_key.hex(), "them")
 
-            # The content really comes back over the mesh, verified.
+            # The package really crosses the mesh, in slices, and verifies.
+            assert not node._packages.has(info["release_id"])
             fetched = await node.fetch_release(info["publisher_id"])
             assert fetched is not None
             _entry, files = fetched
             assert cr.version_of(files) == "9.9.9"
             assert files["scripts/run.py"] == b"print('hi')\n"
-            # Big enough to have been split: the reassembly is real, not a
-            # single value that happened to fit in one DHT entry.
-            assert len(files["src/node.py"]) > CHUNK_SIZE
+            assert len(files["src/blob.bin"]) == 200_000
+            # Bigger than one packet: the slicing and reassembly are real.
+            from src.node import _RELEASE_SLICE
+            assert entry["size"] > _RELEASE_SLICE
+            # Having received it, this node now holds it — and is somewhere
+            # else to ask. That is the whole distribution model.
+            assert node._packages.has(info["release_id"])
 
             # …and the install path runs end to end. The swap itself is the one
             # thing stubbed: replacing the tree this test runs from is not a
@@ -100,6 +109,45 @@ class TestAReleaseCrossesTheMesh:
             assert applied["files"]["src/version.py"] == b'__version__ = "9.9.9"\n'
         finally:
             await node.stop(); await publisher.stop()
+
+    async def test_a_third_node_fetches_from_the_one_that_kept_it(self, tmp_path):
+        """The swarm: a node that received a release serves it to the next,
+        without the publisher being involved at all."""
+        publisher, middle = await _pair(19393)
+        latecomer = MeshNode(_mgr())
+        try:
+            info = await publisher.publish_release(
+                _tree(str(tmp_path / "tree"), "9.9.9"))
+            async with asyncio.timeout(20.0):
+                while middle._releases.get(info["publisher_id"]) is None:
+                    await asyncio.sleep(0.1)
+            middle.trust_publisher(publisher._identity.dsa_public_key.hex())
+            assert await middle.fetch_release(info["publisher_id"]) is not None
+            assert middle._packages.has(info["release_id"])
+
+            # A third node joins through the middle one, and the publisher is
+            # taken off the air entirely.
+            code = middle.generate_invite()
+            await middle.start(["tcp://127.0.0.1:19394"])
+            await latecomer.join("tcp://127.0.0.1:19394", code)
+            await latecomer.wait_for_session(timeout=15.0)
+            async with asyncio.timeout(20.0):
+                while latecomer._releases.get(info["publisher_id"]) is None:
+                    await asyncio.sleep(0.1)
+            await publisher.stop()
+
+            latecomer.trust_publisher(
+                publisher._identity.dsa_public_key.hex())
+            fetched = await latecomer.fetch_release(info["publisher_id"])
+            assert fetched is not None, "the middle node did not serve it"
+            assert cr.version_of(fetched[1]) == "9.9.9"
+            assert latecomer._packages.has(info["release_id"])
+        finally:
+            await latecomer.stop(); await middle.stop()
+            try:
+                await publisher.stop()
+            except Exception:
+                pass
 
     async def test_a_newer_release_supersedes_over_the_wire(self, tmp_path):
         publisher, node = await _pair(19391)

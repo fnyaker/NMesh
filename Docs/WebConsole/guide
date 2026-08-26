@@ -371,11 +371,13 @@ rather than installing something the operator has not seen. No update ever
 happens without that click.
 
 **From the mesh** — below it, the same panel lists releases **published by
-nodes**, signed with their own identity, with no web host in the way. You pin
-the publisher keys this node accepts; a release from anyone else is shown and
-relayed but never installed, and pinning a publisher is a separate decision from
-letting them install while nobody is watching. This node's own code can be
-signed and offered from the same page. The full mechanism — the descriptor, the
+nodes**, signed with their own identity, with no web host in the way. Publishing
+signs the tree and announces it; the package itself moves only when someone asks
+for it, and whoever receives it can serve the next node. You pin the publisher
+keys this node accepts; a release from anyone else is shown and relayed but
+never installed, and pinning a publisher is a separate decision from letting
+them install while nobody is watching. This node's own code can be signed and
+offered from the same page. The full mechanism — the descriptor, the
 gossip, the three gates before anything touches disk:
 [`../Updates/guide`](../Updates/guide).
 

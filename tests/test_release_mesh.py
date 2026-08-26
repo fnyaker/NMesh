@@ -120,65 +120,48 @@ class TestPublishing:
             await node.stop()
 
 
-class TestPublishingIsNotAHundredRoundTrips:
-    """A release is ~120 values, and each dht_put is a full Kademlia lookup.
-    One after another, that is a hundred round trips with an operator watching
-    a spinner — which is exactly what a publish looked like on a real mesh."""
+class TestPublishingTouchesNothing:
+    """Publishing is signing and announcing. The first cut of this pushed the
+    tree onto the DHT as ~120 chunks, a Kademlia lookup each, paid up front for
+    nodes that may never ask — which is what made publishing take minutes on a
+    real mesh. Nothing goes anywhere now until somebody wants it."""
 
-    async def test_values_go_out_in_bounded_batches(self, tmp_path):
-        from src.node import _PUBLISH_CONCURRENCY
+    async def test_publishing_makes_no_lookups_at_all(self, tmp_path):
         node = _node()
         try:
-            in_flight, peak = 0, []
+            lookups = []
 
-            async def watched_lookup(node_id, *args, **kwargs):
-                nonlocal in_flight
-                in_flight += 1
-                peak.append(in_flight)
-                await asyncio.sleep(0.01)
-                in_flight -= 1
+            async def counted(node_id, *args, **kwargs):
+                lookups.append(node_id)
                 return []
 
-            node.kad_lookup = watched_lookup
+            node.kad_lookup = counted
             await node.publish_release(_tree(str(tmp_path)))
-            # Parallel enough to matter…
-            assert max(peak) > 1
-            # …and never "all of them at once", which is how a publish would
-            # become a flood.
-            assert max(peak) <= _PUBLISH_CONCURRENCY
+            assert lookups == []
         finally:
             await node.stop()
 
-    async def test_every_value_is_stored_locally_whatever_the_mesh_does(self):
-        """Replication is best effort: the publisher serves its own chunks, so
-        a peer it cannot reach costs reach, never the publish."""
+    async def test_a_publisher_with_no_peers_still_publishes(self, tmp_path):
         node = _node()
         try:
-            async def refusing_lookup(node_id, *args, **kwargs):
-                raise RuntimeError("no route to anywhere")
-
-            node.kad_lookup = refusing_lookup
-            values = [f"value {index}".encode() for index in range(20)]
-            keys = await node.dht_put_many(values)
-            assert len(keys) == len(values)
-            for key, value in zip(keys, values):
-                assert node._dht_store.get(key) == value
-        finally:
-            await node.stop()
-
-    async def test_a_publish_survives_a_mesh_that_answers_nothing(self, tmp_path):
-        node = _node()
-        try:
-            async def refusing_lookup(node_id, *args, **kwargs):
-                raise RuntimeError("no route to anywhere")
-
-            node.kad_lookup = refusing_lookup
             info = await node.publish_release(_tree(str(tmp_path)))
             assert info["version"] == "9.9.9"
-            # And it is genuinely fetchable from here afterwards.
-            node.trust_publisher(node._identity.dsa_public_key.hex())
-            fetched = await node.fetch_release(info["publisher_id"])
-            assert fetched is not None and fetched[1]["src/node.py"] == b"# the code\n"
+            # And it holds the package, so it can answer whoever turns up.
+            assert node._packages.has(info["release_id"])
+        finally:
+            await node.stop()
+
+    async def test_the_package_is_kept_to_be_served(self, tmp_path):
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            package = node._packages.get(info["release_id"])
+            assert package is not None
+            assert cr.open_package(package)["src/node.py"] == b"# the code\n"
+            assert info["package_bytes"] == len(package)
+            # (Whether the package is smaller than the tree depends on the
+            # tree: tar headers dominate a three-file fixture. The real one is
+            # measured in tests/integration/test_release.py.)
         finally:
             await node.stop()
 
@@ -186,7 +169,7 @@ class TestPublishingIsNotAHundredRoundTrips:
 class TestGossip:
     async def _release_from(self, publisher, tmp_path, version="9.9.9"):
         info = await publisher.publish_release(_tree(str(tmp_path), version))
-        return (await publisher.dht_get(bytes.fromhex(info["release_id"])),
+        return (publisher._releases.get(info["publisher_id"])["release"],
                 info["publisher_id"])
 
     async def test_an_announce_is_learned_and_passed_on_once(self, tmp_path):
@@ -197,7 +180,7 @@ class TestGossip:
             node._peers = [ingress, downstream]
             packet = Packet.create(RELEASE_ANNOUNCE,
                                    ingress.authenticated_id.raw,
-                                   b"\xff" * 20, blob)
+                                   b"\xff" * 20, b"\x00" + blob)
             await node._handle_release_announce(ingress, packet)
             assert node._releases.get(publisher_id) is not None
             assert any(p.type == RELEASE_ANNOUNCE for p in downstream.sent)
@@ -220,7 +203,7 @@ class TestGossip:
             await node._handle_release_announce(
                 ingress, Packet.create(RELEASE_ANNOUNCE,
                                        ingress.authenticated_id.raw,
-                                       b"\xff" * 20, blob))
+                                       b"\xff" * 20, b"\x00" + blob))
             assert any(p.type == RELEASE_ANNOUNCE for p in downstream.sent)
             listed = node.release_overview()["releases"][0]
             assert listed["trusted"] is False and listed["state"] == "untrusted"
@@ -239,7 +222,7 @@ class TestGossip:
                 await node._handle_release_announce(
                     ingress, Packet.create(RELEASE_ANNOUNCE,
                                            ingress.authenticated_id.raw,
-                                           b"\xff" * 20, bytes(payload)))
+                                           b"\xff" * 20, b"\x00" + bytes(payload)))
             assert len(node._releases) == 0
             assert downstream.sent == []
         finally:
@@ -253,7 +236,7 @@ class TestGossip:
             node._peers = [ingress]
             packet = Packet.create(RELEASE_ANNOUNCE,
                                    ingress.authenticated_id.raw,
-                                   b"\xff" * 20, blob)
+                                   b"\xff" * 20, b"\x00" + blob)
             for _ in range(500):
                 await node._handle_release_announce(ingress, packet)
             from src.node import _RELEASE_RATE_MAX
@@ -278,16 +261,17 @@ class TestGossip:
             old_root = _tree(str(tmp_path / "old"), "1.0.0")
             new_root = _tree(str(tmp_path / "new"), "2.0.0")
             old = await publisher.publish_release(old_root, ts=1000)
+            old_descriptor = publisher._releases.get(old["publisher_id"])["release"]
             new = await publisher.publish_release(new_root, ts=2000)
-            old_blob = await publisher.dht_get(bytes.fromhex(old["release_id"]))
-            new_blob = await publisher.dht_get(bytes.fromhex(new["release_id"]))
+            old_blob = old_descriptor
+            new_blob = publisher._releases.get(new["publisher_id"])["release"]
             ingress = _FakePeer()
             node._peers = [ingress]
             for blob in (new_blob, old_blob):
                 await node._handle_release_announce(
                     ingress, Packet.create(RELEASE_ANNOUNCE,
                                            ingress.authenticated_id.raw,
-                                           b"\xff" * 20, blob))
+                                           b"\xff" * 20, b"\x00" + blob))
             assert node._releases.get(new["publisher_id"])["version"] == "2.0.0"
         finally:
             await publisher.stop(); await node.stop()
@@ -297,12 +281,12 @@ class TestWhatMayBeInstalled:
     async def _offer(self, node, publisher, tmp_path, version="9.9.9", ts=None):
         info = await publisher.publish_release(_tree(str(tmp_path), version),
                                                ts=ts)
-        blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
+        blob = publisher._releases.get(info["publisher_id"])["release"]
         node._releases.offer(blob, node._identity.verify,
                              node._trusts_publisher)
-        # The content lives on the publisher's DHT; in a two-node test with no
-        # link, hand the node the store directly so the fetch is real.
-        node._dht_store = publisher._dht_store
+        # The package lives with the publisher; in a two-node test with no link
+        # between them, hand the node that store so the fetch is real.
+        node._packages = publisher._packages
         return info
 
     async def test_an_unpinned_publisher_installs_nothing(self, tmp_path):
@@ -381,11 +365,12 @@ class TestWhatMayBeInstalled:
             info = await self._offer(node, publisher, tmp_path)
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
 
-            async def tampered(root_key):
-                return {}, {"src/version.py": b'__version__ = "6.6.6"\n',
-                            "start.sh": b"#!/bin/sh\n"}
-
-            monkeypatch.setattr(node, "fetch_app", tampered)
+            # A package that is a valid tree but not the version signed for.
+            monkeypatch.setattr(
+                node._packages, "get",
+                lambda ident: cr.build_package(
+                    {"src/version.py": b'__version__ = "6.6.6"\n',
+                     "start.sh": b"#!/bin/sh\n"}))
             with pytest.raises(cr.ReleaseError, match="announces"):
                 await node.install_release(info["publisher_id"])
         finally:
@@ -398,10 +383,8 @@ class TestWhatMayBeInstalled:
             info = await self._offer(node, publisher, tmp_path)
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
 
-            async def absent(root_key):
-                return None
-
-            monkeypatch.setattr(node, "fetch_app", absent)
+            monkeypatch.setattr(node._packages, "get", lambda ident: None)
+            monkeypatch.setattr(node, "_release_sources_for", lambda entry: [])
             with pytest.raises(cr.ReleaseError, match="could not be fetched"):
                 await node.install_release(info["publisher_id"])
         finally:
@@ -429,7 +412,7 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
             assert node.release_overview()["releases"][0]["trusted"] is False
@@ -442,7 +425,7 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
             entry = node.trust_publisher(
@@ -459,7 +442,7 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
@@ -489,8 +472,8 @@ class TestAutomaticInstall:
     async def _ready(self, tmp_path, monkeypatch, auto=True):
         publisher, node = _node(), _node()
         info = await publisher.publish_release(_tree(str(tmp_path)))
-        blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
-        node._dht_store = publisher._dht_store
+        blob = publisher._releases.get(info["publisher_id"])["release"]
+        node._packages = publisher._packages
         entry = node.trust_publisher(
             publisher._identity.dsa_public_key.hex(), "them", auto=auto)
         node._releases.offer(blob, node._identity.verify, node._trusts_publisher)
