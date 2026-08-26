@@ -301,7 +301,7 @@ input[type="range"]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px var(--a
 .check.card-like:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
 .form-grid{display:grid;gap:var(--s-4);
   grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr))}
-.form-grid.one{grid-template-columns:1fr}
+.form-grid.one{grid-template-columns:minmax(0,1fr)}
 
 /* -- cards --------------------------------------------------------------- */
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
@@ -396,7 +396,7 @@ td.tight{width:1%;white-space:nowrap}
 tbody tr[data-clickable]{cursor:pointer}
 
 /* -- key/value lists ----------------------------------------------------- */
-.kv{display:grid;grid-template-columns:minmax(120px,auto) 1fr;gap:var(--s-2) var(--s-4);
+.kv{display:grid;grid-template-columns:minmax(120px,auto) minmax(0,1fr);gap:var(--s-2) var(--s-4);
   font-size:var(--fs-sm);align-items:baseline}
 .kv dt{color:var(--text-muted)}
 .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
@@ -668,7 +668,7 @@ main{min-width:0;display:flex;flex-direction:column}
 .split{display:grid;gap:var(--s-4);
   grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))}
 .split.wide-first{grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr)}
-@media (max-width:1040px){.split.wide-first{grid-template-columns:1fr}}
+@media (max-width:1040px){.split.wide-first{grid-template-columns:minmax(0,1fr)}}
 
 /* The overflow menu carries what the rail carries on a wide screen; showing it
    there too would be the same commands twice. Declared before the media query
@@ -700,7 +700,7 @@ main{min-width:0;display:flex;flex-direction:column}
    navigation to keep in sync. The rail's brand and foot have no place in a
    58px strip, so they move to the topbar's overflow menu (`.more-wrap`). */
 @media (max-width:900px){
-  .shell{grid-template-columns:1fr}
+  .shell{grid-template-columns:minmax(0,1fr)}
   .rail{position:fixed;z-index:40;inset:auto 0 0 0;top:auto;height:auto;width:auto;
     flex-direction:row;align-items:stretch;gap:0;padding:0;overflow:visible;
     border-right:0;border-top:1px solid var(--border);

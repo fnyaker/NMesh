@@ -318,15 +318,116 @@ def test_the_console_keeps_its_browser_preferences_in_the_browser():
     assert "/api/pref" not in webassets.APP_JS
 
 
+# ── layout that cannot overflow ─────────────────────────────────────────────
+# Both of these were real: a long message made the chat page scroll sideways on
+# a phone, and every bubble in the log was crushed to 20px so the conversation
+# could not be read at all.
+
+def _tracks(value: str):
+    """Split a `grid-template-columns` value into its tracks. Tracks are
+    separated by spaces; commas only ever appear inside a function."""
+    out, current, depth = [], "", 0
+    for ch in value:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == " " and depth == 0:
+            if current:
+                out.append(current)
+            current = ""
+        else:
+            current += ch
+    if current:
+        out.append(current)
+    return out
+
+
+@pytest.mark.parametrize("name", ["STYLE_CSS", "CHAT_CSS", "FLEET_CSS", "NODE_CSS"])
+def test_no_grid_track_takes_its_minimum_from_its_content(name):
+    """A bare `1fr` track is sized `minmax(auto,1fr)`, and that `auto` minimum is
+    the content's *min-content* width. One pasted URL in such a track is one very
+    long word, and the whole page grows wider than the screen — which is exactly
+    how a long chat message made a phone scroll sideways.
+
+    `minmax(0,1fr)` says the track may shrink to nothing, so the content wraps or
+    scrolls inside it instead of pushing the page."""
+    css = getattr(webassets, name)
+    for match in re.finditer(r"grid-template-columns:([^;}]+)", css):
+        for track in _tracks(match.group(1).strip()):
+            assert not re.fullmatch(r"[\d.]*fr", track), (name, match.group(1))
+
+
+def test_the_chat_log_cannot_squash_its_messages():
+    """The log is a flex column. Flex children shrink by default, so once the
+    messages were taller than the pane the browser shrank every one of them
+    instead of scrolling: bubbles crushed to a fraction of their height,
+    overlapping each other, and nothing readable. `flex:none` is the whole fix
+    and it must stay."""
+    assert ".ch-log>*{flex:none}" in webassets.CHAT_CSS
+
+
+def test_the_chat_shell_clips_instead_of_scrolling_sideways():
+    """The backstop behind the two rules above: if a future change reintroduces
+    an overflow, the page clips it. A visible bug beats an unusable one."""
+    assert re.search(r"\.ch\{[^}]*overflow:hidden", webassets.CHAT_CSS)
+
+
+def test_arbitrary_text_in_chat_wraps_rather_than_widening():
+    """A 300-character word and a pasted URL are the same thing to a layout
+    engine: one unbreakable token. Everything that receives message text says how
+    to break it.
+
+    `break-word` and not `anywhere`: both break the token, but `anywhere` also
+    counts those breaks in the box's intrinsic width, which collapses a
+    shrink-to-fit bubble towards a single character."""
+    for rule in (".ch-bubble{", ".ch-txt{"):
+        block = webassets.CHAT_CSS.split(rule, 1)[1].split("}", 1)[0]
+        assert "overflow-wrap:break-word" in block, rule
+    # …and the flex children holding it may actually become that narrow.
+    assert "min-width:0" in webassets.CHAT_CSS.split(".ch-bubble{", 1)[1].split("}", 1)[0]
+
+
+def test_the_message_width_cap_hangs_off_something_definite():
+    """A percentage `max-width` needs a containing block with a width to be a
+    percentage *of*. Capping the bubble instead of the row put the percentage
+    against a row that was itself shrink-to-fit — circular, and the browser
+    resolves it by undersizing: a three-line message wrapped inside a bubble
+    with room to spare. The cap sits on the row, which is a flex item of the log
+    and therefore has a definite width."""
+    row = webassets.CHAT_CSS.split(".ch-m{", 1)[1].split("}", 1)[0]
+    bubble = webassets.CHAT_CSS.split(".ch-bubble{", 1)[1].split("}", 1)[0]
+    assert "max-width:var(--page-bubble-max)" in row
+    assert "max-width" not in bubble
+
+
+def test_the_chat_page_does_not_redefine_the_design_system():
+    """`.msg` is a form message in :mod:`.ui`; chat used the same name for a
+    message bubble, so one page quietly changed a shared component for itself.
+    Everything of chat's own is prefixed, and the prefix is what keeps that from
+    happening again."""
+    own = webassets.CHAT_PAGE_CSS
+    for selector in re.finditer(r"(?m)^\.([a-z][a-z0-9-]*)", own):
+        name = selector.group(1)
+        assert name.startswith("ch-") or name == "ch", name
+
+
 def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
-    """Replacing a row under the pointer loses the click in progress. Lists
-    repainted on the poll write only when the content changed."""
+    """Replacing a row under the pointer loses the click in progress, and resets
+    the scroll under the reader. Lists repainted on the poll write only what
+    actually changed — either by writing the whole list through ``setHTML``, or,
+    where the rows are long-lived, by keying them and rewriting one row."""
     assert "function setHTML(" in webassets.ui.JS
     for source, holder in ((webassets.FLEET_JS, '"nodes"'),
                            (webassets.FLEET_JS, '"operators"'),
-                           (webassets.FLEET_JS, '"inbox"'),
-                           (webassets.CHAT_JS, '"chat-list"')):
+                           (webassets.FLEET_JS, '"inbox"')):
         assert "setHTML(" + holder in source, holder
+    # Chat keys both of its lists, because both are repainted every 1.2s and one
+    # of them is a conversation somebody is reading.
+    for marker in ("setHTML(el, rowHTML(it))",     # the conversation list
+                   "setHTML(el, html)",            # one message
+                   "if(next !== el) host.insertBefore(el, next)"):
+        assert marker in webassets.CHAT_JS, marker
 
 
 # ── auto-refresh, and what a refresh is not allowed to do ────────────────────

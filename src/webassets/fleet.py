@@ -296,7 +296,7 @@ FLEET_PAGE_CSS = """
 .t-b{font-weight:700}.t-cur{background:#cfe0f7;color:#0a0f16}
 
 .log{max-height:64vh;overflow:auto;font-size:var(--fs-sm)}
-.log .line{display:grid;grid-template-columns:76px 62px 1fr;gap:var(--s-3);
+.log .line{display:grid;grid-template-columns:76px 62px minmax(0,1fr);gap:var(--s-3);
   padding:var(--s-2) var(--s-4);border-bottom:1px solid var(--border)}
 .log .line:last-child{border-bottom:0}
 .log time{color:var(--text-faint);font-variant-numeric:tabular-nums}

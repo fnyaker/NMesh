@@ -170,6 +170,22 @@ What each of the pages used to solve on its own:
   on mobile (or iOS zooms); `tabular-nums` on numbers people compare.
 - **Colour is never the only signal**: every status badge carries its own word
   (`managed`, `no key`, `waiting on you`).
+- **No layout may take its minimum from its content.** Every `fr` grid track is
+  written `minmax(0,1fr)`, never a bare `1fr`. A bare `1fr` is
+  `minmax(auto,1fr)`, and that `auto` minimum is the content's *min-content*
+  width — so one pasted URL, which is one very long word, makes the track wider
+  than the screen and the whole page scrolls sideways. That is not theoretical:
+  it is what a long chat message did on a phone. Test:
+  `test_no_grid_track_takes_its_minimum_from_its_content`.
+- **A percentage `max-width` needs a parent with a width.** Capping a bubble at
+  `88%` of a row that was itself shrink-to-fit is circular, and a browser
+  settles it by undersizing. Percentage caps hang off a box whose width is
+  already decided.
+- **A flex child shrinks unless told not to.** In a scrolling column — a message
+  log, a list — the children must be `flex:none`, or once they are taller than
+  the pane the browser shrinks *them* instead of scrolling: content crushed and
+  overlapping, no scrollbar. Test:
+  `test_the_chat_log_cannot_squash_its_messages`.
 
 ## Adding something
 

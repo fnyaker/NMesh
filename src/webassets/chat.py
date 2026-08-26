@@ -6,8 +6,15 @@ files, replies and reactions — served by the console and backed by the
 ChatBridge. Same session, same strict CSP: no inline script, no external
 resource.
 
-The conversation list *is* the navigation, so this page takes the shell's rail
-slot for it rather than adding a second level of chrome.
+Three panes, one grid: the conversation list, the thread, and the node card of
+whoever you are talking to. Which of them is on screen is a single attribute
+(``data-view``) rather than a set of classes that can contradict each other, so
+"what am I looking at" has exactly one answer at any width.
+
+Everything here is prefixed ``ch-``. The design system in :mod:`.ui` owns the
+generic names, and a page that redefines one of them (this page used to redefine
+``.msg``) silently changes a component for itself alone — which is the drift the
+split exists to prevent.
 """
 
 CHAT_HTML = """<!doctype html>
@@ -38,29 +45,38 @@ CHAT_HTML = """<!doctype html>
 </div>
 
 <a class="skip" href="#main">Skip to the conversation</a>
-<div id="app" class="chat hidden">
-  <aside class="side">
-    <header class="side-head">
-      <button id="me-btn" class="avatar-btn" title="Your profile" aria-label="Your profile">
-        <span id="me-av" class="avatar"></span></button>
-      <div class="side-who">
-        <div id="me-name" class="name truncate"></div>
-        <div id="me-sub" class="mono tiny muted truncate"></div>
-      </div>
+
+<div id="app" class="ch hidden" data-view="list">
+
+  <!-- ── the conversation list: this page's navigation ──────────────────── -->
+  <aside class="ch-side" aria-label="Conversations">
+    <header class="ch-side-head">
+      <button id="me-btn" class="ch-me" title="Your profile">
+        <span id="me-av-slot" class="ch-av-slot"></span>
+        <span class="ch-me-txt">
+          <span id="me-name" class="ch-me-name truncate">…</span>
+          <span id="me-sub" class="mono ch-me-sub truncate"></span>
+        </span>
+      </button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
       <button id="new-btn" class="icon" title="New chat" aria-label="New chat">✎</button>
     </header>
-    <div class="side-search">
+
+    <div class="ch-side-search">
       <label class="search"><span class="sr-only">Search chats and people</span>
-        <input id="side-search" type="search" placeholder="Search chats and people…" autocomplete="off"></label>
-      <div id="side-results" class="dropdown hidden"></div>
+        <input id="side-search" type="search" placeholder="Search chats and people…"
+               autocomplete="off" spellcheck="false"></label>
+      <div id="side-results" class="ch-drop" hidden></div>
     </div>
-    <div id="chat-list" class="chat-list"></div>
-    <div class="side-foot"><a class="btn ghost wide" href="/">Back to console</a></div>
+
+    <div id="chat-list" class="ch-list" role="list"></div>
+
+    <div class="ch-side-foot"><a class="btn ghost wide" href="/">Back to console</a></div>
   </aside>
 
-  <main id="main" class="thread">
-    <div id="empty" class="empty">
+  <!-- ── the thread ─────────────────────────────────────────────────────── -->
+  <main id="main" class="ch-main">
+    <div id="empty" class="ch-blank">
       <div class="mark" aria-hidden="true">NM</div>
       <div class="t">No conversation open</div>
       <div class="h">Pick someone on the left, or start a new chat. Everything you send is
@@ -68,53 +84,71 @@ CHAT_HTML = """<!doctype html>
       <button id="empty-new" class="primary">Start a chat</button>
     </div>
 
-    <section id="conv" class="conv hidden">
-      <header class="conv-head">
-        <button id="back-btn" class="icon only-mobile" title="Back" aria-label="Back">‹</button>
-        <button id="info-btn" class="peer">
-          <span id="conv-av" class="avatar"></span>
-          <span class="peer-txt"><span id="conv-title" class="name truncate"></span>
-            <span id="conv-sub" class="tiny muted truncate"></span></span>
+    <section id="conv" class="ch-conv" hidden>
+      <header class="ch-head">
+        <button id="back-btn" class="icon ch-back" title="Back to the list" aria-label="Back to the list">‹</button>
+        <button id="info-btn" class="ch-peer">
+          <span id="conv-av-slot" class="ch-av-slot"></span>
+          <span class="ch-peer-txt">
+            <span id="conv-title" class="ch-peer-name truncate"></span>
+            <span id="conv-sub" class="tiny muted truncate"></span>
+          </span>
         </button>
-        <span class="grow"></span>
-        <button id="del-conv" class="icon" title="Delete conversation" aria-label="Delete conversation">🗑</button>
+        <button id="del-conv" class="icon ch-head-act" title="Delete conversation"
+                aria-label="Delete conversation">🗑</button>
       </header>
-      <div id="log" class="log"></div>
-      <div id="reply-bar" class="reply-bar hidden">
-        <div class="grow"><span id="reply-who" class="name"></span>
-          <span id="reply-text" class="muted small"></span></div>
+
+      <div class="ch-logwrap">
+        <div id="log" class="ch-log" tabindex="0" role="log" aria-label="Messages"></div>
+        <button id="jump" class="ch-jump" hidden>New messages ↓</button>
+      </div>
+
+      <div id="reply-bar" class="ch-reply" hidden>
+        <span class="ch-reply-mark" aria-hidden="true"></span>
+        <span class="grow">
+          <span id="reply-who" class="ch-reply-who"></span>
+          <span id="reply-text" class="muted small truncate"></span>
+        </span>
         <button id="reply-cancel" class="icon sm" aria-label="Cancel reply">✕</button>
       </div>
-      <form id="send-form" class="composer">
-        <button type="button" id="attach-btn" class="icon" title="Attach file" aria-label="Attach file">📎</button>
+
+      <form id="send-form" class="ch-composer">
+        <button type="button" id="attach-btn" class="icon" title="Attach a file"
+                aria-label="Attach a file">📎</button>
         <input id="file-input" type="file" hidden>
-        <textarea id="msg" rows="1" placeholder="Message" autocomplete="off"></textarea>
+        <div class="ch-input">
+          <textarea id="msg" rows="1" placeholder="Message" autocomplete="off"
+                    aria-label="Message"></textarea>
+        </div>
         <button type="button" id="emoji-btn" class="icon" title="Emoji" aria-label="Emoji">🙂</button>
-        <button type="submit" id="send-btn" class="icon send" title="Send" aria-label="Send">➤</button>
+        <button type="submit" id="send-btn" class="ch-send" title="Send" aria-label="Send">➤</button>
       </form>
     </section>
   </main>
 
   <!-- Who you are talking to, as the console describes them: the same view the
        node page serves, mounted here rather than framed. -->
-  <aside id="peer-panel" class="peer-panel" hidden aria-label="Node details">
-    <header class="peer-panel-head"><h2>Node</h2><span class="grow"></span>
-      <button id="peer-panel-close" class="icon" aria-label="Close">✕</button></header>
-    <div id="peer-view" class="peer-panel-body"></div>
+  <aside id="peer-panel" class="ch-aside" hidden aria-label="Node details">
+    <header class="ch-aside-head">
+      <button id="peer-back" class="icon ch-back" title="Back" aria-label="Back">‹</button>
+      <h2>Node</h2><span class="grow"></span>
+      <button id="peer-panel-close" class="icon" aria-label="Close">✕</button>
+    </header>
+    <div id="peer-view" class="ch-aside-body"></div>
   </aside>
 </div>
 
-<div id="ctx" class="ctx hidden"></div>
-<div id="emoji-pop" class="emoji-pop hidden"></div>
-<div id="viewer" class="viewer hidden"><img id="viewer-img" alt=""></div>
+<div id="ctx" class="ch-ctx" hidden></div>
+<div id="emoji-pop" class="ch-emoji" hidden></div>
+<div id="viewer" class="ch-viewer" hidden><img id="viewer-img" alt=""></div>
 
 <dialog id="settings" aria-labelledby="settings-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="settings-title">Your profile</h2>
       <button class="icon" data-close="settings" aria-label="Close">✕</button></header>
     <div class="sheet-body">
-      <div class="prof">
-        <span id="set-av" class="avatar big"></span>
+      <div class="ch-prof">
+        <span id="set-av" class="ch-av big"></span>
         <div class="btn-row">
           <label class="btn">Change photo<input id="av-input" type="file" accept="image/*" hidden></label>
           <button id="av-clear" class="danger">Remove</button>
@@ -156,16 +190,16 @@ CHAT_HTML = """<!doctype html>
       </div>
       <div id="nc-dm" class="stack">
         <label class="search"><span class="sr-only">Search by name</span>
-          <input id="nc-search" type="search" placeholder="Search by name…"></label>
-        <div id="nc-results" class="results"></div>
+          <input id="nc-search" type="search" placeholder="Search by name…" spellcheck="false"></label>
+        <div id="nc-results" class="ch-results"></div>
         <div class="field"><span>Or paste a node id</span>
           <div class="toolbar"><input id="nc-id" class="mono grow" placeholder="40-hex node id" spellcheck="false">
             <button id="nc-add" class="primary">Start</button></div></div>
       </div>
-      <div id="nc-grp" class="stack hidden">
+      <div id="nc-grp" class="stack" hidden>
         <label class="field"><span>Group name</span>
           <input id="grp-name" maxlength="64" placeholder="Group name"></label>
-        <div class="field"><span>Members</span><div id="grp-members" class="results"></div></div>
+        <div class="field"><span>Members</span><div id="grp-members" class="ch-results"></div></div>
         <button id="grp-create" class="primary">Create group</button>
       </div>
     </div>
@@ -197,669 +231,1088 @@ CHAT_HTML = """<!doctype html>
 </html>
 """
 
-
 CHAT_PAGE_CSS = """
-/* dvh, not vh: on a phone `100vh` is the viewport *without* the browser's
+/* ── the shell ───────────────────────────────────────────────────────────────
+   Three rules hold this page together. Each of them is a bug that was really
+   here, so none of them is decoration:
+
+   1. every grid track is `minmax(0,…)`, never a bare `1fr`. A `1fr` track takes
+      its *minimum* from its content, so one long word in a preview line pushed
+      the whole page 126px wider than a phone and the page scrolled sideways.
+   2. everything that can hold text carries `min-width:0` and wraps anywhere.
+      A flex or grid child refuses to shrink below its longest word otherwise,
+      and a pasted URL is one very long word.
+   3. `overflow:hidden` here is the backstop. If rules 1 and 2 are ever broken
+      again, the page clips instead of scrolling sideways — a visible bug beats
+      an unusable one.
+
+   `dvh`, not `vh`: on a phone `100vh` is the viewport *without* the browser's
    own bars, so the composer sits under them and the last message is cut. */
-.chat{display:grid;grid-template-columns:320px minmax(0,1fr);height:100dvh;
-  background:var(--canvas)}
-.side{display:flex;flex-direction:column;min-height:0;background:var(--rail);
+.ch{display:grid;grid-template-columns:var(--page-side-w) minmax(0,1fr);
+  height:100dvh;overflow:hidden;background:var(--canvas)}
+.ch>*{min-width:0;min-height:0}
+:root{--page-side-w:320px; --page-aside-w:380px; --page-bubble-max:min(58ch,80%)}
+
+/* The node card takes a third column when there is room for one. */
+.ch[data-view="peer"]{grid-template-columns:var(--page-side-w) minmax(0,1fr) minmax(0,var(--page-aside-w))}
+.ch[data-view="peer"] .ch-aside{display:flex}
+
+/* ── the list pane ──────────────────────────────────────────────────────── */
+.ch-side{display:flex;flex-direction:column;background:var(--rail);
   border-right:1px solid var(--border)}
-.side-head{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-3) var(--s-3);
+.ch-side-head{display:flex;align-items:center;gap:var(--s-1);padding:var(--s-3);
   border-bottom:1px solid var(--border)}
-.side-who{flex:1 1 auto;min-width:0}
-.side-who .name{font-weight:620;font-size:var(--fs-sm)}
-.side-search{padding:var(--s-3);position:relative}
-.side-search .search{max-width:none;width:100%}
-.side-foot{padding:var(--s-3);border-top:1px solid var(--border)}
-.chat-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 var(--s-2) var(--s-2)}
-.row-chat{display:flex;gap:var(--s-3);align-items:center;padding:var(--s-2);border-radius:var(--r-md);
-  cursor:pointer}
-.row-chat:hover{background:var(--surface-2)}
-.row-chat.active{background:var(--accent-soft)}
-.row-chat .body{flex:1 1 auto;min-width:0}
-.row-chat .top{display:flex;align-items:baseline;gap:var(--s-2)}
-.row-chat .rname{font-weight:600;font-size:var(--fs-sm);flex:1 1 auto;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.row-chat .time{font-size:var(--fs-2xs);color:var(--text-faint);flex:none}
-.row-chat .prev{font-size:var(--fs-xs);color:var(--text-muted);flex:1 1 auto;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ch-me{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:var(--s-3);
+  justify-content:flex-start;text-align:left;border:0;background:transparent;
+  padding:var(--s-1) var(--s-2)}
+.ch-me:hover{background:var(--surface-2);border-color:transparent}
+.ch-me-txt{display:flex;flex-direction:column;min-width:0}
+.ch-me-name{font-weight:620;font-size:var(--fs-sm)}
+.ch-me-sub{font-size:var(--fs-2xs);color:var(--text-faint)}
+.ch-side-search{padding:var(--s-3);position:relative}
+.ch-side-search .search{max-width:none;width:100%}
+.ch-side-foot{padding:var(--s-3) var(--s-3)
+              calc(var(--s-3) + env(safe-area-inset-bottom));
+  border-top:1px solid var(--border)}
+.ch-list{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:0 var(--s-2) var(--s-2);overscroll-behavior:contain}
 
-.avatar{width:36px;height:36px;flex:none;border-radius:50%;display:grid;place-items:center;
+.ch-row{display:flex;gap:var(--s-3);align-items:center;padding:var(--s-2);
+  border-radius:var(--r-md);cursor:pointer;min-width:0;width:100%;
+  border:0;background:transparent;text-align:left}
+.ch-row:hover{background:var(--surface-2);border-color:transparent}
+.ch-row[aria-current="true"]{background:var(--accent-soft)}
+.ch-row[aria-current="true"] .ch-row-name{color:var(--accent)}
+.ch-row-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.ch-row-top{display:flex;align-items:baseline;gap:var(--s-2);min-width:0}
+.ch-row-name{flex:1 1 auto;min-width:0;font-weight:600;font-size:var(--fs-sm)}
+.ch-row-time{flex:none;font-size:var(--fs-2xs);color:var(--text-faint)}
+.ch-row-prev{flex:1 1 auto;min-width:0;font-size:var(--fs-xs);color:var(--text-muted)}
+.ch-row-prev i{font-style:normal;color:var(--accent)}
+.ch-row .badge{flex:none}
+
+/* ── avatars ────────────────────────────────────────────────────────────── */
+/* A slot the script refills, so replacing the picture never replaces the
+   element an event listener is attached to. */
+.ch-av-slot{display:contents}
+.ch-av{width:36px;height:36px;flex:none;border-radius:50%;display:grid;place-items:center;
   background:var(--accent-soft);color:var(--accent);font:700 var(--fs-xs)/1 var(--font);
-  overflow:hidden}
-.avatar img{width:100%;height:100%;object-fit:cover}
-.avatar.big{width:76px;height:76px;font-size:var(--fs-xl)}
-.avatar-btn{padding:0;width:auto;min-height:0;border:0;background:transparent}
-.avatar-btn:hover{background:transparent;border-color:transparent}
+  overflow:hidden;user-select:none}
+.ch-av img{width:100%;height:100%;object-fit:cover}
+.ch-av.big{width:76px;height:76px;font-size:var(--fs-xl)}
+.ch-av.sm{width:26px;height:26px;font-size:9px}
 
-.thread{display:flex;flex-direction:column;min-width:0;min-height:0}
-.peer-panel{display:flex;flex-direction:column;min-width:0;min-height:0;
-  background:var(--canvas);border-left:1px solid var(--border)}
-.peer-panel-head{display:flex;align-items:center;gap:var(--s-2);
-  padding:var(--s-2) var(--s-4);border-bottom:1px solid var(--border);
+/* ── the thread pane ────────────────────────────────────────────────────── */
+.ch-main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.ch-blank{flex:1 1 auto;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:var(--s-3);padding:var(--s-6);text-align:center}
+.ch-blank[hidden]{display:none}
+.ch-blank .t{font-size:var(--fs-lg);font-weight:620}
+.ch-blank .h{color:var(--text-muted);max-width:44ch}
+.ch-conv{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;min-width:0}
+.ch-conv[hidden]{display:none}
+
+.ch-head{display:flex;align-items:center;gap:var(--s-1);min-width:0;
+  padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--border);
   background:var(--surface)}
-.peer-panel-head h2{font-size:var(--fs-md)}
-.peer-panel-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--s-4);
-  padding-bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
-.thread>.empty{flex:1 1 auto;justify-content:center}
-.conv{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
-.conv-head{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-4);
-  border-bottom:1px solid var(--border);background:var(--surface)}
-.peer{display:flex;align-items:center;gap:var(--s-3);border:0;background:transparent;
-  padding:var(--s-1) var(--s-2);min-width:0;text-align:left}
-.peer:hover{background:var(--surface-2)}
-.peer-txt{display:flex;flex-direction:column;min-width:0}
-.peer-txt .name{font-weight:620;font-size:var(--fs-md)}
-.only-mobile{display:none}
+.ch-peer{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:var(--s-3);
+  justify-content:flex-start;text-align:left;border:0;background:transparent;
+  padding:var(--s-1) var(--s-2)}
+.ch-peer:hover{background:var(--surface-2);border-color:transparent}
+.ch-peer-txt{display:flex;flex-direction:column;min-width:0}
+.ch-peer-name{font-weight:620;font-size:var(--fs-md)}
+.ch-head-act{flex:none}
+.ch-back{display:none;flex:none}
 
-.log{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--s-4);display:flex;
-  flex-direction:column;gap:2px;overscroll-behavior:contain}
+/* ── the log ─────────────────────────────────────────────────────────────
+   A flex column whose children are `flex:none`. Without that they inherit
+   `flex-shrink:1`, and once the messages are taller than the pane the browser
+   shrinks every one of them instead of scrolling: bubbles crushed to 20px,
+   overlapping each other, and no way to read the conversation. */
+.ch-logwrap{position:relative;flex:1 1 auto;min-height:0;display:flex}
+.ch-log{flex:1 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;
+  overscroll-behavior:contain;scroll-behavior:auto;
+  padding:var(--s-4) var(--s-4) var(--s-3);
+  display:flex;flex-direction:column;gap:2px}
+.ch-log>*{flex:none}
 /* A short conversation sits at the bottom, where the next message will appear,
    without breaking scrolling once it is long. */
-.log>:first-child{margin-top:auto}
-.daysep{align-self:center;margin:var(--s-3) 0;padding:2px 10px;border-radius:var(--r-full);
-  background:var(--surface-2);border:1px solid var(--border);font-size:var(--fs-2xs);
-  color:var(--text-muted)}
-.msg{display:flex;gap:var(--s-2);align-items:flex-end;max-width:min(680px,86%)}
-.msg.mine{align-self:flex-end;flex-direction:row-reverse}
-.msg.grouped{margin-top:0}
-.msg:not(.grouped){margin-top:var(--s-3)}
-.m-av{width:26px;height:26px;font-size:9px}
-.msg.grouped .m-av{visibility:hidden}
-.bubble{position:relative;background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r-lg);padding:var(--s-2) var(--s-3);min-width:64px;
-  box-shadow:var(--shadow-1);font-size:var(--fs-sm)}
-.msg.mine .bubble{background:var(--accent-soft);border-color:var(--accent-line)}
-.bubble.deleted{opacity:.6;font-style:italic}
-.bubble .who{font-size:var(--fs-2xs);font-weight:700;color:var(--accent);margin-bottom:2px}
-.bubble .txt{white-space:pre-wrap;overflow-wrap:anywhere}
-.bubble .meta{display:flex;align-items:center;gap:4px;justify-content:flex-end;
-  font-size:var(--fs-2xs);color:var(--text-faint);margin-top:2px}
-.bubble .edited{font-style:italic}
-.bubble .tick{color:var(--accent)}
-.quote{display:flex;flex-direction:column;gap:1px;padding:4px 8px;margin-bottom:4px;
+.ch-log>:first-child{margin-top:auto}
+.ch-log:focus-visible{outline-offset:-2px}
+
+/* Sticky, so "which day am I reading" survives scrolling back through a long
+   conversation. It therefore floats over the messages, and needs the depth of
+   something that floats — an outlined pill alone reads as text on text. */
+.ch-day{align-self:center;position:sticky;top:var(--s-1);z-index:2;margin:var(--s-3) 0;
+  padding:2px 10px;border-radius:var(--r-full);background:var(--surface);
+  border:1px solid var(--border);box-shadow:var(--shadow-2);
+  font-size:var(--fs-2xs);color:var(--text-muted);white-space:nowrap}
+
+/* The width cap lives on the *row*, not on the bubble, and that is not a
+   detail: the row is a flex item of the log, so it has a definite width to take
+   a percentage of. A percentage max-width on the bubble resolved against a row
+   that was itself shrink-to-fit — a circular constraint the browser settles by
+   undersizing, which wrapped "line three" onto two lines inside a bubble with
+   room to spare. `fit-content` + `margin-left:auto` right-aligns my own
+   messages without ever making the row's width depend on its content's. */
+.ch-m{display:flex;gap:var(--s-2);align-items:flex-end;min-width:0;
+  width:fit-content;max-width:var(--page-bubble-max);margin-top:var(--s-3)}
+.ch-m.mine{flex-direction:row-reverse;margin-left:auto}
+.ch-m.grouped{margin-top:0}
+.ch-m.grouped .ch-av{visibility:hidden}
+@media (prefers-reduced-motion:no-preference){
+  .ch-m.fresh{animation:ch-in .18s var(--ease) both}
+}
+@keyframes ch-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* The bubble is where arbitrary text lands, so wrapping is not optional here.
+   `break-word`, deliberately, and not `anywhere`: both break a 300-character
+   word, but `anywhere` also counts those breaks when the browser works out the
+   box's intrinsic width, which collapses a shrink-to-fit bubble towards one
+   character — a three-line message came out one narrow column. `break-word`
+   sizes the bubble to its longest line, lets `max-width` cap it, and breaks the
+   unbreakable token inside that cap. */
+.ch-bubble{position:relative;min-width:0;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:var(--s-2) var(--s-3);box-shadow:var(--shadow-1);font-size:var(--fs-sm);
+  overflow-wrap:break-word}
+.ch-m.mine .ch-bubble{background:var(--accent-soft);border-color:var(--accent-line)}
+.ch-bubble.deleted{opacity:.65;font-style:italic}
+.ch-bubble.target{outline:2px solid var(--accent);outline-offset:2px}
+.ch-who{font-size:var(--fs-2xs);font-weight:700;color:var(--accent);margin-bottom:2px}
+.ch-txt{white-space:pre-wrap;overflow-wrap:break-word}
+.ch-txt a{overflow-wrap:break-word}
+/* `nowrap` is what stops a two-word message from being squeezed into a bubble
+   too narrow for its own timestamp, which then wrapped onto three lines. The
+   bubble now cannot be narrower than its meta line. */
+.ch-meta{display:flex;align-items:center;gap:4px;justify-content:flex-end;
+  white-space:nowrap;font-size:var(--fs-2xs);color:var(--text-faint);margin-top:2px}
+.ch-meta .edited{font-style:italic}
+.ch-meta .tick{color:var(--accent)}
+
+.ch-quote{display:flex;flex-direction:column;gap:1px;padding:4px 8px;margin-bottom:4px;
   border-left:2px solid var(--accent);background:var(--surface-2);border-radius:var(--r-sm);
-  cursor:pointer;font-size:var(--fs-xs)}
-.quote .qn{font-weight:700;color:var(--accent)}
-.quote .qt{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.media{max-width:min(420px,100%);border-radius:var(--r-md);cursor:zoom-in;margin:-2px 0 2px}
-.file-card{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2);border-radius:var(--r-md);
-  background:var(--surface-2);color:inherit;text-decoration:none}
-.file-card:hover{text-decoration:none;background:var(--surface-3)}
-.file-card .fi{font-size:20px}
-.file-card .fmeta{display:flex;flex-direction:column;min-width:0}
-.file-card .fn{font-weight:600;font-size:var(--fs-sm)}
-.reacts{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
-.react{padding:1px 7px;border-radius:var(--r-full);background:var(--surface-2);
-  border:1px solid var(--border);font-size:var(--fs-2xs);cursor:pointer}
-.react.me{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  cursor:pointer;font-size:var(--fs-xs);min-width:0}
+.ch-quote .qn{font-weight:700;color:var(--accent)}
+.ch-quote .qt{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0}
 
-.reply-bar{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-4);
-  border-top:1px solid var(--border);background:var(--surface-2);font-size:var(--fs-sm)}
-.reply-bar .name{font-weight:700;color:var(--accent);margin-right:var(--s-2)}
-.composer{display:flex;align-items:flex-end;gap:var(--s-2);padding:var(--s-3) var(--s-4);
+/* Bounded in both axes: a portrait photo would otherwise take a whole screen
+   and push the conversation out of reach. */
+.ch-media{display:block;max-width:100%;max-height:min(48dvh,420px);width:auto;
+  border-radius:var(--r-md);cursor:zoom-in;margin:-2px 0 4px}
+.ch-file{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2);
+  border-radius:var(--r-md);background:var(--surface-2);color:inherit;
+  text-decoration:none;min-width:0}
+.ch-file:hover{text-decoration:none;background:var(--surface-3)}
+.ch-file .fi{font-size:20px;flex:none}
+.ch-file .fm{display:flex;flex-direction:column;min-width:0}
+.ch-file .fn{font-weight:600;font-size:var(--fs-sm);overflow-wrap:break-word}
+
+.ch-reacts{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.ch-react{padding:1px 7px;border-radius:var(--r-full);background:var(--surface-2);
+  border:1px solid var(--border);font-size:var(--fs-2xs);cursor:pointer;
+  min-height:0;color:var(--text-muted)}
+.ch-react.me{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+
+/* Reading back through a conversation must not be interrupted by an autoscroll,
+   so a new message while you are up there offers itself instead of jumping. */
+.ch-jump{position:absolute;left:50%;bottom:var(--s-3);transform:translateX(-50%);
+  z-index:3;min-height:var(--ctl-h-sm);padding:0 var(--s-3);font-size:var(--fs-xs);
+  font-weight:600;border-radius:var(--r-full);background:var(--accent);
+  color:var(--accent-fg);border-color:var(--accent);box-shadow:var(--shadow-2)}
+.ch-jump:hover{background:var(--accent-hover);color:var(--accent-fg)}
+.ch-jump[hidden]{display:none}
+
+/* ── composing ──────────────────────────────────────────────────────────── */
+.ch-reply{display:flex;align-items:center;gap:var(--s-2);min-width:0;
+  padding:var(--s-2) var(--s-3);border-top:1px solid var(--border);
+  background:var(--surface-2);font-size:var(--fs-sm)}
+.ch-reply[hidden]{display:none}
+.ch-reply>.grow{display:flex;align-items:baseline;gap:var(--s-2);min-width:0}
+.ch-reply-mark{width:2px;align-self:stretch;background:var(--accent);border-radius:2px;flex:none}
+.ch-reply-who{font-weight:700;color:var(--accent);flex:none}
+.ch-composer{display:flex;align-items:flex-end;gap:var(--s-2);min-width:0;
+  padding:var(--s-3) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom));
   border-top:1px solid var(--border);background:var(--surface)}
-.composer textarea{flex:1 1 auto;min-height:var(--ctl-h);max-height:140px;resize:none;
-  border-radius:var(--r-xl);padding:8px var(--s-4)}
-.composer .send{color:var(--accent-fg);background:var(--accent);border-color:var(--accent);
-  border-radius:50%}
-.composer .send:hover{background:var(--accent-hover);color:var(--accent-fg)}
+.ch-composer>button{flex:none}
+.ch-input{flex:1 1 auto;min-width:0}
+.ch-composer textarea{width:100%;min-height:var(--ctl-h);max-height:min(40dvh,160px);
+  resize:none;border-radius:var(--r-xl);padding:7px var(--s-4);overflow-y:auto;
+  /* 16px: anything smaller and iOS zooms the page on focus, which leaves the
+     composer off-screen and the layout at a scale nobody asked for. */
+  font-size:max(var(--fs-md),16px)}
+.ch-send{flex:none;width:var(--ctl-h);height:var(--ctl-h);padding:0;border-radius:50%;
+  background:var(--accent);color:var(--accent-fg);border-color:var(--accent);
+  font-size:14px}
+.ch-send:hover{background:var(--accent-hover);color:var(--accent-fg)}
+.ch-send:disabled{opacity:.5}
 
-.dropdown{position:absolute;left:var(--s-3);right:var(--s-3);top:calc(100% - var(--s-2));z-index:30;
-  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);
-  box-shadow:var(--shadow-3);max-height:60vh;overflow-y:auto;padding:var(--s-1)}
-.results{display:flex;flex-direction:column;gap:2px;max-height:46vh;overflow-y:auto}
-.res{display:flex;align-items:center;gap:var(--s-3);padding:var(--s-2);border-radius:var(--r-sm);
-  cursor:pointer;font-size:var(--fs-sm)}
-.res:hover{background:var(--surface-2)}
-.res .rt{display:flex;flex-direction:column;min-width:0}
-.res .rs{font-size:var(--fs-2xs);color:var(--text-muted)}
-.res .head{padding:var(--s-2) var(--s-2) 2px}
+/* ── the node card beside the conversation ──────────────────────────────── */
+.ch-aside{display:none;flex-direction:column;min-width:0;min-height:0;
+  background:var(--canvas);border-left:1px solid var(--border)}
+.ch-aside-head{display:flex;align-items:center;gap:var(--s-2);flex:none;
+  padding:var(--s-2) var(--s-4);border-bottom:1px solid var(--border);
+  background:var(--surface)}
+.ch-aside-head h2{font-size:var(--fs-md)}
+.ch-aside-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:var(--s-4);padding-bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
 
-.ctx{position:fixed;z-index:70;background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r-md);box-shadow:var(--shadow-3);padding:var(--s-1);min-width:170px}
-.ctx button{width:100%;justify-content:flex-start;border:0;background:transparent;
+/* ── search results, menus, overlays ────────────────────────────────────── */
+.ch-drop{position:absolute;left:var(--s-3);right:var(--s-3);top:calc(100% - var(--s-2));
+  z-index:30;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-md);box-shadow:var(--shadow-3);max-height:60dvh;
+  overflow-y:auto;overflow-x:hidden;padding:var(--s-1)}
+.ch-drop[hidden]{display:none}
+.ch-results{display:flex;flex-direction:column;gap:2px;max-height:46dvh;
+  overflow-y:auto;overflow-x:hidden}
+.ch-res{display:flex;align-items:center;gap:var(--s-3);padding:var(--s-2);
+  border-radius:var(--r-sm);cursor:pointer;font-size:var(--fs-sm);min-width:0;
+  width:100%;border:0;background:transparent;text-align:left}
+.ch-res:hover{background:var(--surface-2);border-color:transparent}
+.ch-res-txt{display:flex;flex-direction:column;min-width:0;flex:1 1 auto}
+.ch-res-sub{font-size:var(--fs-2xs);color:var(--text-muted)}
+.ch-res.head{padding:var(--s-2) var(--s-2) 2px;cursor:default}
+.ch-res.head:hover{background:transparent}
+.ch-res.none{cursor:default;color:var(--text-muted);padding:var(--s-3) var(--s-2)}
+.ch-res.none:hover{background:transparent}
+
+.ch-ctx{position:fixed;z-index:70;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-md);box-shadow:var(--shadow-3);padding:var(--s-1);min-width:170px;
+  max-width:min(260px,calc(100vw - 16px))}
+.ch-ctx[hidden]{display:none}
+.ch-ctx button{width:100%;justify-content:flex-start;border:0;background:transparent;
   border-radius:var(--r-sm);font-weight:500}
-.ctx button:hover{background:var(--surface-2);border-color:transparent}
-.emoji-pop{position:fixed;z-index:71;display:flex;gap:2px;padding:var(--s-1);
-  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-full);
+.ch-ctx button:hover{background:var(--surface-2);border-color:transparent}
+.ch-emoji{position:fixed;z-index:71;display:flex;flex-wrap:wrap;gap:2px;padding:var(--s-1);
+  max-width:min(300px,calc(100vw - 16px));
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-xl);
   box-shadow:var(--shadow-3)}
-.emoji-pop button{font-size:19px;width:34px;min-height:34px;padding:0;border:0;
+.ch-emoji[hidden]{display:none}
+.ch-emoji button{font-size:19px;width:34px;min-height:34px;padding:0;border:0;
   background:transparent;border-radius:50%}
-.viewer{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.9);display:grid;place-items:center;
-  padding:var(--s-5);cursor:zoom-out}
-.viewer img{max-width:100%;max-height:100%;border-radius:var(--r-md)}
-.prof{display:flex;flex-direction:column;align-items:center;gap:var(--s-3)}
+.ch-viewer{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.9);
+  display:grid;place-items:center;padding:var(--s-5);cursor:zoom-out}
+.ch-viewer[hidden]{display:none}
+.ch-viewer img{max-width:100%;max-height:100%;border-radius:var(--r-md)}
+.ch-prof{display:flex;flex-direction:column;align-items:center;gap:var(--s-3)}
 
+/* ── narrow: one pane at a time ──────────────────────────────────────────
+   The list *is* the navigation on this page, so a phone shows exactly one of
+   the three panes and `data-view` says which. No drawer, no hamburger — the
+   same stance the console takes with its tab bar. */
 @media (max-width:860px){
-  .chat{grid-template-columns:1fr}
-  .thread{display:none}
-  .chat.show-conv .side{display:none}
-  .chat.show-conv .thread{display:flex}
-  .only-mobile{display:inline-flex}
-  .msg{max-width:94%}
-  /* The home indicator on a phone sits exactly where the composer and the last
-     row of the list are. */
-  .composer{padding-bottom:calc(var(--s-2) + env(safe-area-inset-bottom))}
-  .side-foot{padding-bottom:calc(var(--s-3) + env(safe-area-inset-bottom))}
-  .log{padding:var(--s-3)}
+  .ch,.ch[data-view="peer"]{grid-template-columns:minmax(0,1fr)}
+  .ch>.ch-side,.ch>.ch-main,.ch>.ch-aside{grid-area:1/1;display:none}
+  .ch[data-view="list"]>.ch-side{display:flex}
+  .ch[data-view="conv"]>.ch-main{display:flex}
+  .ch[data-view="peer"]>.ch-aside{display:flex}
+  .ch-back{display:inline-flex}
+  .ch-aside{border-left:0}
+  :root{--page-bubble-max:88%}
+  .ch-log{padding:var(--s-3) var(--s-3) var(--s-2)}
+  .ch-head,.ch-composer{padding-inline:var(--s-2)}
 }
 
-/* The details panel, and what has to give way to it as the screen narrows.
-   Declared after the rules above on purpose: same specificity, so it is the
-   order that decides, and "the panel is open" has to be the last word. */
-.chat.show-peer{grid-template-columns:320px minmax(0,1fr) minmax(320px,380px)}
-@media (max-width:1180px){
-  /* No room for three: the conversation steps aside, its list stays.
-     Everything in the panel is *about* the conversation anyway. */
-  .chat.show-peer{grid-template-columns:320px minmax(0,1fr)}
-  .chat.show-peer .thread{display:none}
+/* Between the two: room for the list and one of the other panes, not all three.
+   The conversation is what steps aside, because everything in the node card is
+   about the conversation anyway. */
+@media (min-width:861px) and (max-width:1180px){
+  .ch[data-view="peer"]{grid-template-columns:var(--page-side-w) minmax(0,1fr)}
+  .ch[data-view="peer"]>.ch-main{display:none}
 }
-@media (max-width:860px){
-  .chat.show-peer{grid-template-columns:1fr}
-  .chat.show-peer .side{display:none}
-  .chat.show-peer .thread{display:none}
-  .peer-panel{border-left:0}
+
+/* A short viewport (a laptop with the keyboard up, a split screen) has no room
+   for a 320px list column either. */
+@media (max-width:1024px) and (min-width:861px){
+  :root{--page-side-w:270px}
 }
 """
 
-
 CHAT_PAGE_JS = r"""
 // ── chat page ───────────────────────────────────────────────────────────────
-let VER=0, sel=null, timer=null;
-let ST={me:null,pseudo:"",bio:"",has_avatar:false,contacts:[],known:[],groups:[]};
-let UNREAD={}, TYPING={}, replyTo=null, ncSel={};
-const MSGS={};            // conv -> {id -> record}
-const REACTS=["👍","❤️","😂","😮","😢","🔥","🎉","👏"];
-const initials=(s)=>{s=(s||"").trim();return s?s.slice(0,2).toUpperCase():"?";};
+// The page polls, so rendering has to be cheap and non-destructive: rebuilding
+// the log every 1.2s threw away the scroll position, any text selection, and
+// the click somebody was in the middle of making. Both lists are therefore
+// keyed — a row is created once, updated in place, and removed when it goes.
 
-SESSION.onLost=()=>{
-  if(timer){clearInterval(timer);timer=null;}
+let VER = 0, sel = null, timer = null;
+let ST = {me:null, pseudo:"", bio:"", has_avatar:false, contacts:[], known:[], groups:[]};
+let UNREAD = {}, TYPING = {}, replyTo = null, ncSel = {};
+const MSGS = {};                 // conv -> {id -> record}
+const REACTS = ["👍","❤️","😂","😮","😢","🔥","🎉","👏"];
+const initials = (s) => { s = (s || "").trim(); return s ? s.slice(0, 2).toUpperCase() : "?"; };
+
+SESSION.onLost = () => {
+  if(timer){ clearInterval(timer); timer = null; }
   $("app").classList.add("hidden"); $("login").classList.remove("hidden");
 };
 SESSION.load();
 
-// ---- identity / naming ----
+// ---- which pane is on screen ----------------------------------------------
+// One attribute, so the three panes can never disagree about who is showing.
+function view(next){
+  const app = $("app");
+  if(next) app.dataset.view = next;
+  return app.dataset.view;
+}
+
+// ---- identity / naming -----------------------------------------------------
 function hasAvatar(id){
-  if(id===ST.me||id==="self")return ST.has_avatar;
-  const r=findPerson(id); return !!(r&&r.has_avatar);
+  if(id === ST.me || id === "self") return ST.has_avatar;
+  const r = findPerson(id); return !!(r && r.has_avatar);
 }
-function findPerson(id){return ST.contacts.find(c=>c.id===id)||ST.known.find(c=>c.id===id)||null;}
+function findPerson(id){
+  return ST.contacts.find((c) => c.id === id) || ST.known.find((c) => c.id === id) || null;
+}
 function personName(id){
-  if(id===ST.me)return ST.pseudo||"You";
-  const r=findPerson(id); return (r&&r.pseudo)||shortId(id);
+  if(id === ST.me) return ST.pseudo || "You";
+  const r = findPerson(id); return (r && r.pseudo) || shortId(id);
 }
-function convIsGroup(conv){return conv&&conv.startsWith("g:");}
+function convIsGroup(conv){ return !!conv && conv.startsWith("g:"); }
 function convName(conv){
-  if(convIsGroup(conv)){const g=ST.groups.find(x=>"g:"+x.id===conv);return g?g.name:"Group";}
+  if(convIsGroup(conv)){
+    const g = ST.groups.find((x) => "g:" + x.id === conv); return g ? g.name : "Group";
+  }
   return personName(conv);
 }
-function convAvatarId(conv){return convIsGroup(conv)?null:conv;}
-function avatarHTML(id,name,cls){
-  const c="avatar"+(cls?" "+cls:"");
-  if(id&&hasAvatar(id))
-    return '<span class="'+c+'"><img alt="" src="/api/chat/avatar?id='+encodeURIComponent(id)+'&v='+VER+'"></span>';
-  return '<span class="'+c+'">'+esc(initials(name))+'</span>';
+function convAvatarId(conv){ return convIsGroup(conv) ? null : conv; }
+function avatarHTML(id, name, cls){
+  const c = "ch-av" + (cls ? " " + cls : "");
+  if(id && hasAvatar(id))
+    return '<span class="' + c + '"><img alt="" src="/api/chat/avatar?id=' +
+           encodeURIComponent(id) + '&v=' + VER + '"></span>';
+  return '<span class="' + c + '">' + esc(initials(name)) + "</span>";
 }
 
-// ---- polling ----
+// ---- polling ---------------------------------------------------------------
 async function poll(){
-  let j; try{ j=await(await api("/api/chat/messages?since="+VER)).json(); }catch(_){return;}
-  ST.me=j.me; ST.pseudo=j.pseudo||""; ST.bio=j.bio||""; ST.has_avatar=!!j.has_avatar;
-  ST.contacts=j.contacts||[]; ST.known=j.known||[]; ST.groups=j.groups||[];
-  UNREAD=j.unread||{}; TYPING=j.typing||{};
-  let touchedActive=false;
-  for(const m of (j.messages||[])){ (MSGS[m.conv]=MSGS[m.conv]||{})[m.id]=m; if(m.conv===sel)touchedActive=true; }
-  if(typeof j.version==="number")VER=j.version;
-  renderList();
-  if(sel){ renderHead(); if(touchedActive)renderLog(); }
+  let j;
+  try{ j = await (await api("/api/chat/messages?since=" + VER)).json(); }catch(_){ return; }
+  ST.me = j.me; ST.pseudo = j.pseudo || ""; ST.bio = j.bio || ""; ST.has_avatar = !!j.has_avatar;
+  ST.contacts = j.contacts || []; ST.known = j.known || []; ST.groups = j.groups || [];
+  UNREAD = j.unread || {}; TYPING = j.typing || {};
+  let touched = false;
+  for(const m of (j.messages || [])){
+    (MSGS[m.conv] = MSGS[m.conv] || {})[m.id] = m;
+    if(m.conv === sel) touched = true;
+  }
+  if(typeof j.version === "number") VER = j.version;
+  renderMe(); renderList();
+  if(sel){ renderHead(); if(touched) renderLog(); }
 }
 
-// ---- chat list ----
-function lastMsg(conv){const m=MSGS[conv];if(!m)return null;let best=null;for(const k in m){if(!best||m[k].id>best.id)best=m[k];}return best;}
-function preview(m){
-  if(!m)return "";
-  if(m.deleted)return "deleted message";
-  if(m.kind==="image")return "🖼 Photo";
-  if(m.kind==="file")return "📎 "+(m.name||"File");
-  return m.text||"";
+// ---- the conversation list -------------------------------------------------
+function lastMsg(conv){
+  const m = MSGS[conv]; if(!m) return null;
+  let best = null; for(const k in m) if(!best || m[k].id > best.id) best = m[k];
+  return best;
 }
-function clock(t){if(!t)return "";const d=new Date(t*1000);return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}
+function preview(m){
+  if(!m) return "";
+  if(m.deleted) return "deleted message";
+  if(m.kind === "image") return "🖼 Photo";
+  if(m.kind === "file") return "📎 " + (m.name || "File");
+  return m.text || "";
+}
+function clock(t){
+  if(!t) return "";
+  return new Date(t * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+}
 function convList(){
-  const seen=new Set(), out=[];
-  for(const conv in MSGS){const m=lastMsg(conv);if(m)out.push({conv,m,t:m.t||0});seen.add(conv);}
-  for(const g of ST.groups){const c="g:"+g.id;if(!seen.has(c)){out.push({conv:c,m:null,t:0});seen.add(c);}}
-  for(const c of ST.contacts){if(!seen.has(c.id)){out.push({conv:c.id,m:null,t:0});seen.add(c.id);}}
-  out.sort((a,b)=>b.t-a.t);
+  const seen = new Set(), out = [];
+  for(const conv in MSGS){ const m = lastMsg(conv); if(m) out.push({conv, m, t:m.t || 0}); seen.add(conv); }
+  for(const g of ST.groups){ const c = "g:" + g.id; if(!seen.has(c)){ out.push({conv:c, m:null, t:0}); seen.add(c); } }
+  for(const c of ST.contacts){ if(!seen.has(c.id)){ out.push({conv:c.id, m:null, t:0}); seen.add(c.id); } }
+  out.sort((a, b) => b.t - a.t);
   return out;
 }
+function renderMe(){
+  $("me-name").textContent = ST.pseudo || "Set your name";
+  $("me-sub").textContent = ST.me ? shortId(ST.me) : "";
+  setHTML("me-av-slot", avatarHTML(ST.me, ST.pseudo));
+}
+function rowHTML(it){
+  const name = convName(it.conv);
+  const typing = TYPING[it.conv];
+  const un = UNREAD[it.conv] || 0;
+  return avatarHTML(convAvatarId(it.conv), name) +
+    '<span class="ch-row-body">' +
+      '<span class="ch-row-top"><span class="ch-row-name truncate">' + esc(name) + "</span>" +
+      '<span class="ch-row-time">' + (it.m ? esc(clock(it.m.t)) : "") + "</span></span>" +
+      '<span class="ch-row-top"><span class="ch-row-prev truncate">' +
+        (typing ? "<i>typing…</i>" : esc(preview(it.m))) + "</span>" +
+      (un ? '<span class="badge accent">' + esc(un) + "</span>" : "") +
+    "</span></span>";
+}
 function renderList(){
-  const q=($("side-search").value||"").trim().toLowerCase();
-  $("me-name").textContent=ST.pseudo||"Set your name";
-  $("me-sub").textContent=ST.me?shortId(ST.me):"";
-  $("me-av").outerHTML='<span id="me-av">'+avatarHTML(ST.me,ST.pseudo)+'</span>';
-  // Built as a string and written only if it differs: this runs on the poll,
-  // and replacing the row under a pointer loses the click being made on it.
-  let html="", shown=0;
-  for(const it of convList()){
-    const name=convName(it.conv);
-    if(q&&!name.toLowerCase().includes(q))continue;
-    shown++;
-    const typing=TYPING[it.conv];
-    const prev=typing?"<i>typing…</i>":esc(preview(it.m));
-    const un=UNREAD[it.conv]||0;
-    html+='<div class="row-chat'+(it.conv===sel?" active":"")+'" data-conv="'+esc(it.conv)+'">'+
-      avatarHTML(convAvatarId(it.conv),name)+
-      '<div class="body"><div class="top"><span class="rname">'+esc(name)+'</span>'+
-      '<span class="time">'+(it.m?clock(it.m.t):"")+'</span></div>'+
-      '<div class="top"><span class="prev">'+prev+'</span>'+
-      (un?'<span class="badge">'+un+'</span>':'')+'</div></div></div>';
-  }
-  if(!shown)
-    html=q
-      ? emptyHTML("Nothing matches that","Try a shorter name, or paste a node id.")
+  const q = ($("side-search").value || "").trim().toLowerCase();
+  const items = convList().filter((it) => !q || convName(it.conv).toLowerCase().includes(q));
+  const host = $("chat-list");
+  if(!items.length){
+    setHTML(host, q
+      ? emptyHTML("Nothing matches that", "Try a shorter name, or paste a node id.")
       : emptyHTML("No conversation yet",
-                  "Start one with the pencil above, or by pasting someone's node id.");
-  setHTML("chat-list",html);
+                  "Start one with the pencil above, or by pasting someone's node id."));
+    return;
+  }
+  if(host.firstElementChild && !host.firstElementChild.classList.contains("ch-row"))
+    host.innerHTML = "";
+  // Keyed: reuse the row that is already there, in the order the data says.
+  const have = new Map();
+  for(const el of host.children) have.set(el.dataset.conv, el);
+  let previous = null;
+  for(const it of items){
+    let el = have.get(it.conv);
+    if(!el){
+      el = document.createElement("button");
+      el.type = "button"; el.className = "ch-row"; el.dataset.conv = it.conv;
+      el.setAttribute("role", "listitem");
+    }
+    have.delete(it.conv);
+    setHTML(el, rowHTML(it));
+    el.setAttribute("aria-current", it.conv === sel ? "true" : "false");
+    // insertBefore with the node already in place is a no-op, so an unchanged
+    // list touches nothing and a click in flight survives the poll.
+    const next = previous ? previous.nextSibling : host.firstChild;
+    if(next !== el) host.insertBefore(el, next);
+    previous = el;
+  }
+  for(const el of have.values()) el.remove();
 }
 
-// ---- conversation ----
+// ---- opening a conversation ------------------------------------------------
 function openConv(conv){
-  sel=conv; replyTo=null; setReplyBar();
-  $("empty").classList.add("hidden"); $("conv").classList.remove("hidden");
-  $("app").classList.add("show-conv");
-  renderHead(); renderLog(true); markRead();
-  renderList();
+  const changed = conv !== sel;
+  sel = conv; replyTo = null; setReplyBar();
+  $("empty").hidden = true; $("conv").hidden = false;
+  view("conv");
+  renderHead();
+  if(changed) $("log").replaceChildren();     // a different conversation, not a redraw
+  renderLog(true);
+  markRead(); renderList();
 }
-function markRead(){ if(sel){api("/api/chat/read","POST",{conv:sel}).catch(()=>{}); UNREAD[sel]=0;} }
+function closeConv(){
+  sel = null;
+  $("conv").hidden = true; $("empty").hidden = false;
+  view("list"); renderList();
+}
+function markRead(){
+  if(!sel) return;
+  api("/api/chat/read", "POST", {conv:sel}).catch(() => {});
+  UNREAD[sel] = 0;
+}
 function renderHead(){
-  const name=convName(sel);
-  $("conv-av").outerHTML='<span id="conv-av">'+avatarHTML(convAvatarId(sel),name)+'</span>';
-  $("conv-title").textContent=name;
-  let sub="";
-  if(TYPING[sel]){sub="typing…";}
-  else if(convIsGroup(sel)){const g=ST.groups.find(x=>"g:"+x.id===sel);sub=g?(g.members.length+" members"):"";}
-  else{const r=findPerson(sel);sub=r&&r.bio?r.bio:shortId(sel);}
-  $("conv-sub").textContent=sub;
+  const name = convName(sel);
+  setHTML("conv-av-slot", avatarHTML(convAvatarId(sel), name));
+  $("conv-title").textContent = name;
+  let sub = "";
+  if(TYPING[sel]) sub = "typing…";
+  else if(convIsGroup(sel)){
+    const g = ST.groups.find((x) => "g:" + x.id === sel);
+    sub = g ? (g.members.length + " member" + (g.members.length === 1 ? "" : "s")) : "";
+  }else{
+    const r = findPerson(sel); sub = (r && r.bio) ? r.bio : shortId(sel);
+  }
+  $("conv-sub").textContent = sub;
+  $("info-btn").disabled = convIsGroup(sel);
 }
-function sameDay(a,b){const x=new Date(a*1000),y=new Date(b*1000);return x.toDateString()===y.toDateString();}
+
+// ---- the log ---------------------------------------------------------------
+function sameDay(a, b){
+  return new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
+}
 function tickHTML(status){
-  if(status==="read")return '<span class="tick">✓✓</span>';
-  if(status==="delivered")return '<span>✓✓</span>';
-  return '<span>✓</span>';
+  if(status === "read") return '<span class="tick">✓✓</span>';
+  if(status === "delivered") return "<span>✓✓</span>";
+  return "<span>✓</span>";
+}
+function atBottom(log){ return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
+function toBottom(log, smooth){
+  log.scrollTo({top:log.scrollHeight, behavior:smooth ? "smooth" : "auto"});
+  $("jump").hidden = true;
 }
 function renderLog(force){
-  const log=$("log");
-  const nearBottom=force||(log.scrollHeight-log.scrollTop-log.clientHeight<80);
-  const store=MSGS[sel]||{};
-  const list=Object.values(store).sort((a,b)=>a.id-b.id);
-  log.innerHTML="";
-  let prev=null;
+  const log = $("log");
+  const pinned = force || atBottom(log);
+  const list = Object.values(MSGS[sel] || {}).sort((a, b) => a.id - b.id);
+  const have = new Map();
+  for(const el of log.children) if(el.dataset.key) have.set(el.dataset.key, el);
+  const fresh = log.childElementCount > 0;
+
+  let previous = null, anchor = null, added = 0;
   for(const m of list){
-    if(!prev||!sameDay(prev.t,m.t)){
-      const d=document.createElement("div");d.className="daysep";
-      d.textContent=new Date(m.t*1000).toLocaleDateString([],{month:"short",day:"numeric"});
-      log.appendChild(d);
+    // A day separator is a row like any other, keyed by its date, so it is not
+    // rebuilt (and does not flicker) when a message arrives under it.
+    if(!previous || !sameDay(previous.t, m.t)){
+      const key = "d" + new Date(m.t * 1000).toDateString();
+      let sep = have.get(key);
+      if(!sep){
+        sep = document.createElement("div");
+        sep.className = "ch-day"; sep.dataset.key = key;
+        sep.textContent = new Date(m.t * 1000).toLocaleDateString([], {month:"short", day:"numeric"});
+      }
+      have.delete(key);
+      anchor = place(log, sep, anchor);
     }
-    log.appendChild(msgEl(m,prev));
-    prev=m;
+    const key = "m" + m.id;
+    let el = have.get(key);
+    const isNew = !el;
+    if(isNew){
+      el = document.createElement("div");
+      el.dataset.key = key;
+      if(fresh) el.classList.add("fresh");
+      added++;
+    }
+    have.delete(key);
+    paintMsg(el, m, previous);
+    anchor = place(log, el, anchor);
+    previous = m;
   }
-  if(nearBottom)log.scrollTop=log.scrollHeight;
+  for(const el of have.values()) el.remove();
+
+  if(pinned) toBottom(log);
+  else if(added) $("jump").hidden = false;
 }
-function msgEl(m,prev){
-  const mine=m.src==="me";
-  const grouped=prev&&prev.src===m.src&&!prev._sep&&sameDay(prev.t,m.t);
-  const wrap=document.createElement("div");
-  wrap.className="msg"+(mine?" mine":"")+(grouped?" grouped":"");
-  wrap.dataset.mid=m.mid||""; wrap.dataset.id=m.id;
-  let inner="";
-  if(!mine)inner+=avatarHTML(m.src,personName(m.src)).replace('class="avatar"','class="avatar m-av"');
-  let body='<div class="bubble'+(m.deleted?" deleted":"")+'">';
-  if(!mine&&convIsGroup(sel)&&!grouped)body+='<div class="who">'+esc(personName(m.src))+'</div>';
-  if(m.reply){const q=(MSGS[sel]||{});let qr=null;for(const k in q)if(q[k].mid===m.reply)qr=q[k];
-    if(qr)body+='<div class="quote" data-goto="'+qr.id+'"><span class="qn">'+esc(qr.src==="me"?"You":personName(qr.src))+
-      '</span><span class="qt">'+esc(preview(qr))+'</span></div>';}
-  if(m.deleted){body+='<div class="txt">deleted message</div>';}
-  else if(m.kind==="image"){body+='<img class="media" alt="'+esc(m.name||"")+'" src="/api/chat/file?mid='+m.mid+'">';
-    if(m.text)body+='<div class="txt">'+esc(m.text)+'</div>';}
-  else if(m.kind==="file"){body+='<a class="file-card" href="/api/chat/file?mid='+m.mid+'" download="'+esc(m.name||"file")+'">'+
-    '<span class="fi">📄</span><span class="fmeta"><span class="fn">'+esc(m.name||"file")+'</span>'+
-    '<span class="muted">'+fmtSize(m.size)+'</span></span></a>';}
-  else{body+='<div class="txt">'+linkify(m.text)+'</div>';}
-  body+='<span class="meta">'+(m.edited&&!m.deleted?'<span class="edited">edited</span>':'')+
-    clock(m.t)+(mine&&!m.deleted?tickHTML(m.status):'')+'</span>';
-  body+=reactsHTML(m);
-  body+='</div>';
-  inner+=body;
-  wrap.innerHTML=inner;
-  return wrap;
+// Put `el` straight after `anchor`, doing nothing when it is already there.
+function place(host, el, anchor){
+  const next = anchor ? anchor.nextSibling : host.firstChild;
+  if(next !== el) host.insertBefore(el, next);
+  return el;
+}
+function paintMsg(el, m, prev){
+  const mine = m.src === "me";
+  const grouped = !!prev && prev.src === m.src && sameDay(prev.t, m.t);
+  const cls = "ch-m" + (mine ? " mine" : "") + (grouped ? " grouped" : "") +
+              (el.classList.contains("fresh") ? " fresh" : "");
+  if(el.className !== cls) el.className = cls;
+  el.dataset.mid = m.mid || ""; el.dataset.id = m.id;
+
+  let html = mine ? "" : avatarHTML(m.src, personName(m.src), "sm");
+  html += '<div class="ch-bubble' + (m.deleted ? " deleted" : "") + '">';
+  if(!mine && convIsGroup(sel) && !grouped)
+    html += '<div class="ch-who">' + esc(personName(m.src)) + "</div>";
+  if(m.reply){
+    const store = MSGS[sel] || {};
+    let quoted = null; for(const k in store) if(store[k].mid === m.reply) quoted = store[k];
+    if(quoted)
+      html += '<div class="ch-quote" data-goto="' + esc(quoted.id) + '">' +
+        '<span class="qn">' + esc(quoted.src === "me" ? "You" : personName(quoted.src)) + "</span>" +
+        '<span class="qt">' + esc(preview(quoted)) + "</span></div>";
+  }
+  if(m.deleted){
+    html += '<div class="ch-txt">deleted message</div>';
+  }else if(m.kind === "image"){
+    html += '<img class="ch-media" alt="' + esc(m.name || "") + '" src="/api/chat/file?mid=' +
+            encodeURIComponent(m.mid) + '">';
+    if(m.text) html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
+  }else if(m.kind === "file"){
+    html += '<a class="ch-file" href="/api/chat/file?mid=' + encodeURIComponent(m.mid) +
+      '" download="' + esc(m.name || "file") + '"><span class="fi">📄</span>' +
+      '<span class="fm"><span class="fn">' + esc(m.name || "file") + "</span>" +
+      '<span class="muted tiny">' + esc(fmtBytes(m.size)) + "</span></span></a>";
+  }else{
+    html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
+  }
+  html += '<div class="ch-meta">' +
+    (m.edited && !m.deleted ? '<span class="edited">edited</span>' : "") +
+    esc(clock(m.t)) + (mine && !m.deleted ? tickHTML(m.status) : "") + "</div>";
+  html += reactsHTML(m) + "</div>";
+  setHTML(el, html);
 }
 function reactsHTML(m){
-  const r=m.reactions||{}; const keys=Object.keys(r); if(!keys.length)return "";
-  let h='<div class="reacts">';
-  for(const e of keys){const arr=r[e]||[];const meIn=arr.includes(ST.me);
-    h+='<span class="react'+(meIn?" me":"")+'" data-react="'+esc(e)+'" data-mid="'+m.mid+'">'+esc(e)+' '+arr.length+'</span>';}
-  return h+'</div>';
+  const r = m.reactions || {}, keys = Object.keys(r);
+  if(!keys.length) return "";
+  let out = '<div class="ch-reacts">';
+  for(const e of keys){
+    const who = r[e] || [];
+    out += '<button type="button" class="ch-react' + (who.includes(ST.me) ? " me" : "") +
+      '" data-react="' + esc(e) + '" data-mid="' + esc(m.mid) + '">' +
+      esc(e) + " " + who.length + "</button>";
+  }
+  return out + "</div>";
 }
-function fmtSize(n){if(n==null)return"";const u=["B","KB","MB","GB"];let i=0;while(n>=1024&&i<3){n/=1024;i++;}return n.toFixed(i?1:0)+" "+u[i];}
-function linkify(t){t=esc(t);return t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" target="_blank" rel="noreferrer noopener">$1</a>');}
+function linkify(text){
+  return esc(text).replace(/(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" rel="noreferrer noopener">$1</a>');
+}
+function flash(id){
+  const el = $("log").querySelector('[data-id="' + CSS.escape(String(id)) + '"] .ch-bubble');
+  if(!el) return;
+  el.scrollIntoView({block:"center", behavior:"smooth"});
+  el.classList.add("target");
+  setTimeout(() => el.classList.remove("target"), 1200);
+}
 
-// ---- sending ----
+// ---- sending ---------------------------------------------------------------
 async function sendText(){
-  const ta=$("msg"); const text=ta.value.trim(); if(!text||!sel)return;
-  ta.value=""; autoGrow(); const reply=replyTo; replyTo=null; setReplyBar();
-  await api("/api/chat/send","POST",{conv:sel,text,reply}).catch(()=>{});
-  poll();
+  const box = $("msg"), text = box.value.trim();
+  if(!text || !sel) return;
+  box.value = ""; autoGrow();
+  const reply = replyTo; replyTo = null; setReplyBar();
+  await api("/api/chat/send", "POST", {conv:sel, text, reply}).catch(() => {});
+  toBottom($("log")); poll();
 }
 async function sendFile(file){
-  if(!file||!sel)return;
-  const b64=await toB64(file);
-  await api("/api/chat/file","POST",{conv:sel,name:file.name,data:b64,reply:replyTo}).catch(()=>{});
-  replyTo=null; setReplyBar(); poll();
+  if(!file || !sel) return;
+  const b64 = await toB64(file);
+  await api("/api/chat/file", "POST",
+            {conv:sel, name:file.name, data:b64, reply:replyTo}).catch(() => {});
+  replyTo = null; setReplyBar(); toBottom($("log")); poll();
 }
-function toB64(file){return new Promise((res,rej)=>{const r=new FileReader();
-  r.onload=()=>res((r.result+"").split(",")[1]||"");r.onerror=rej;r.readAsDataURL(file);});}
-let typingSent=0, typingStop=null;
+function toB64(file){
+  return new Promise((res, rej) => {
+    const reader = new FileReader();
+    reader.onload = () => res((reader.result + "").split(",")[1] || "");
+    reader.onerror = rej; reader.readAsDataURL(file);
+  });
+}
+let typingSent = 0, typingStop = null;
 function onTyping(){
-  if(!sel)return; const now=Date.now();
-  if(now-typingSent>3000){typingSent=now;api("/api/chat/typing","POST",{conv:sel,active:true}).catch(()=>{});}
+  if(!sel) return;
+  const now = Date.now();
+  if(now - typingSent > 3000){
+    typingSent = now;
+    api("/api/chat/typing", "POST", {conv:sel, active:true}).catch(() => {});
+  }
   clearTimeout(typingStop);
-  typingStop=setTimeout(()=>{typingSent=0;api("/api/chat/typing","POST",{conv:sel,active:false}).catch(()=>{});},3500);
+  typingStop = setTimeout(() => {
+    typingSent = 0;
+    api("/api/chat/typing", "POST", {conv:sel, active:false}).catch(() => {});
+  }, 3500);
 }
-function autoGrow(){const t=$("msg");t.style.height="auto";t.style.height=Math.min(t.scrollHeight,140)+"px";}
+// The textarea grows with what is typed, up to the ceiling the stylesheet sets;
+// past that it scrolls, so the composer can never eat the conversation.
+function autoGrow(){
+  const box = $("msg");
+  box.style.height = "auto";
+  const max = parseFloat(getComputedStyle(box).maxHeight) || 160;
+  box.style.height = Math.min(box.scrollHeight, max) + "px";
+  $("send-btn").disabled = !box.value.trim();
+}
 
-// ---- reply / context menu / reactions ----
+// ---- reply, context menu, reactions ---------------------------------------
+function recordFor(mid){
+  const store = MSGS[sel] || {};
+  for(const k in store) if(store[k].mid === mid) return store[k];
+  return null;
+}
 function setReplyBar(){
-  const bar=$("reply-bar"); if(!replyTo){bar.classList.add("hidden");return;}
-  const q=MSGS[sel]||{};let r=null;for(const k in q)if(q[k].mid===replyTo)r=q[k];
-  if(!r){replyTo=null;bar.classList.add("hidden");return;}
-  $("reply-who").textContent=r.src==="me"?"You":personName(r.src);
-  $("reply-text").textContent=preview(r); bar.classList.remove("hidden"); $("msg").focus();
+  const bar = $("reply-bar");
+  const rec = replyTo ? recordFor(replyTo) : null;
+  if(!rec){ replyTo = null; bar.hidden = true; return; }
+  $("reply-who").textContent = rec.src === "me" ? "You" : personName(rec.src);
+  $("reply-text").textContent = preview(rec);
+  bar.hidden = false; $("msg").focus();
 }
-function openCtx(x,y,mid){
-  const m=(MSGS[sel]||{});let rec=null;for(const k in m)if(m[k].mid===mid)rec=m[k];
-  if(!rec||rec.deleted)return;
-  const mine=rec.src==="me";
-  const ctx=$("ctx");
-  ctx.innerHTML='<button data-a="reply">Reply</button><button data-a="react">React</button>'+
-    (rec.kind==="text"?'<button data-a="copy">Copy</button>':'')+
-    (mine&&rec.kind==="text"?'<button data-a="edit">Edit</button>':'')+
-    (mine?'<button data-a="delete" class="danger">Delete</button>':'');
-  ctx.dataset.mid=mid; ctx.classList.remove("hidden");
-  const w=ctx.offsetWidth||180,h=ctx.offsetHeight||160;
-  ctx.style.left=Math.min(x,innerWidth-w-8)+"px"; ctx.style.top=Math.min(y,innerHeight-h-8)+"px";
+function openCtx(x, y, mid){
+  const rec = recordFor(mid);
+  if(!rec || rec.deleted) return;
+  const mine = rec.src === "me", ctx = $("ctx");
+  setHTML(ctx,
+    '<button data-a="reply">Reply</button><button data-a="react">React</button>' +
+    (rec.kind === "text" ? '<button data-a="copy">Copy</button>' : "") +
+    (mine && rec.kind === "text" ? '<button data-a="edit">Edit</button>' : "") +
+    (mine ? '<button data-a="delete" class="danger">Delete</button>' : ""));
+  ctx.dataset.mid = mid; ctx.hidden = false;
+  const w = ctx.offsetWidth || 180, h = ctx.offsetHeight || 160;
+  ctx.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + "px";
+  ctx.style.top = Math.max(8, Math.min(y, innerHeight - h - 8)) + "px";
 }
-function closeCtx(){$("ctx").classList.add("hidden");$("emoji-pop").classList.add("hidden");}
-function ctxAction(a){
-  const mid=$("ctx").dataset.mid; const m=(MSGS[sel]||{});let rec=null;for(const k in m)if(m[k].mid===mid)rec=m[k];
-  closeCtx(); if(!rec)return;
-  if(a==="reply"){replyTo=mid;setReplyBar();}
-  else if(a==="copy"){copyText(rec.text||"");}
-  else if(a==="edit"){const t=prompt("Edit message",rec.text||"");if(t!=null&&t.trim())api("/api/chat/edit","POST",{conv:sel,mid,text:t.trim()}).then(poll);}
-  else if(a==="delete"){confirmAction({title:"Delete this message for everyone?",
-    body:'<p class="muted small">It is replaced by a tombstone on every node that has it.</p>',
-    confirmLabel:"Delete", danger:true}).then((yes)=>{
-      if(yes)api("/api/chat/delete","POST",{conv:sel,mid}).then(poll);});}
-  else if(a==="react"){openEmoji(mid);}
+function closeCtx(){ $("ctx").hidden = true; $("emoji-pop").hidden = true; }
+function ctxAction(action){
+  const mid = $("ctx").dataset.mid, rec = recordFor(mid);
+  if(action !== "react") closeCtx();
+  if(!rec) return;
+  if(action === "reply"){ replyTo = mid; setReplyBar(); }
+  else if(action === "copy"){ copyText(rec.text || ""); }
+  else if(action === "edit"){
+    const text = prompt("Edit message", rec.text || "");
+    if(text != null && text.trim())
+      api("/api/chat/edit", "POST", {conv:sel, mid, text:text.trim()}).then(poll);
+  }else if(action === "delete"){
+    confirmAction({title:"Delete this message for everyone?",
+      body:'<p class="muted small">It is replaced by a tombstone on every node that has it.</p>',
+      confirmLabel:"Delete", danger:true}).then((yes) => {
+        if(yes) api("/api/chat/delete", "POST", {conv:sel, mid}).then(poll);
+      });
+  }else if(action === "react"){ openEmoji(mid); }
 }
 function openEmoji(mid){
-  const pop=$("emoji-pop"); pop.innerHTML=REACTS.map(e=>'<button data-e="'+e+'" data-mid="'+mid+'">'+e+'</button>').join("");
-  pop.classList.remove("hidden");
-  const r=$("ctx").getBoundingClientRect();
-  pop.style.left=Math.min(r.left,innerWidth-260)+"px"; pop.style.top=Math.max(8,r.top-56)+"px";
+  const pop = $("emoji-pop");
+  setHTML(pop, REACTS.map((e) =>
+    '<button type="button" data-e="' + esc(e) + '" data-mid="' + esc(mid) + '">' + esc(e) + "</button>").join(""));
+  pop.hidden = false;
+  const box = $("ctx").getBoundingClientRect();
+  const w = pop.offsetWidth || 260, h = pop.offsetHeight || 44;
+  pop.style.left = Math.max(8, Math.min(box.left, innerWidth - w - 8)) + "px";
+  pop.style.top = Math.max(8, Math.min(box.top - h - 8, innerHeight - h - 8)) + "px";
+  $("ctx").hidden = true;
 }
-function react(mid,emoji){api("/api/chat/react","POST",{conv:sel,mid,emoji}).then(poll).catch(()=>{});}
+function react(mid, emoji){
+  api("/api/chat/react", "POST", {conv:sel, mid, emoji}).then(poll).catch(() => {});
+}
 
-// ---- profile ----
+// ---- profile ---------------------------------------------------------------
+let pendingAvatar = undefined;   // undefined = unchanged, "" = clear, string = new b64
 function openSettings(){
-  $("set-name").value=ST.pseudo||""; $("set-bio").value=ST.bio||"";
-  $("set-id").textContent=ST.me||"";
-  $("set-av").outerHTML='<span id="set-av" class="avatar big">'+
-    (ST.has_avatar?'<img alt="" src="/api/chat/avatar?id=self&v='+VER+'">':esc(initials(ST.pseudo)))+'</span>';
-  $("set-details").value=detailMode();
-  pendingAvatar=undefined; $("settings").showModal();
+  $("set-name").value = ST.pseudo || "";
+  $("set-bio").value = ST.bio || "";
+  $("set-id").textContent = ST.me || "";
+  setHTML("set-av", ST.has_avatar
+    ? '<img alt="" src="/api/chat/avatar?id=self&v=' + VER + '">'
+    : esc(initials(ST.pseudo)));
+  $("set-details").value = detailMode();
+  pendingAvatar = undefined; $("settings").showModal();
 }
-let pendingAvatar=undefined;   // undefined=unchanged, ""=clear, string=new b64
 async function pickAvatar(file){
-  const b64=await resizeImage(file,256);
-  pendingAvatar=b64;
-  $("set-av").innerHTML='<img alt="" src="data:image/jpeg;base64,'+b64+'">';
+  const b64 = await resizeImage(file, 256);
+  pendingAvatar = b64;
+  setHTML("set-av", '<img alt="" src="data:image/jpeg;base64,' + b64 + '">');
 }
-function resizeImage(file,size){return new Promise((res,rej)=>{
-  const img=new Image(); const url=URL.createObjectURL(file);
-  img.onload=()=>{const s=Math.min(img.width,img.height);const c=document.createElement("canvas");
-    c.width=c.height=size;const g=c.getContext("2d");
-    g.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,size,size);
-    URL.revokeObjectURL(url); res(c.toDataURL("image/jpeg",0.85).split(",")[1]);};
-  img.onerror=rej; img.src=url;});
+function resizeImage(file, size){
+  return new Promise((res, rej) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const side = Math.min(img.width, img.height);
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      canvas.getContext("2d").drawImage(img, (img.width - side) / 2, (img.height - side) / 2,
+                                        side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      res(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
+    };
+    img.onerror = rej; img.src = url;
+  });
 }
 async function saveProfile(){
   setDetailMode($("set-details").value);
   // Two writes, because they belong to two owners: the name is the node's and
   // is signed by it, the bio and avatar are the chat app's own.
-  const name=$("set-name").value.trim();
-  if(name!==(ST.pseudo||"")){
-    const r=await api("/api/pseudo","POST",{pseudo:name}).catch(()=>null);
-    if(r&&!r.ok){
-      const j=await r.json().catch(()=>({}));
-      alert(j.error||"That name cannot be used.");
+  const name = $("set-name").value.trim();
+  if(name !== (ST.pseudo || "")){
+    const res = await api("/api/pseudo", "POST", {pseudo:name}).catch(() => null);
+    if(res && !res.ok){
+      const body = await res.json().catch(() => ({}));
+      toast(body.error || "That name cannot be used.", "danger");
       return;
     }
   }
-  const body={bio:$("set-bio").value};
-  if(pendingAvatar!==undefined)body.avatar=pendingAvatar;
-  await api("/api/chat/profile","POST",body).catch(()=>{});
-  $("settings").close(); poll();
+  const body = {bio:$("set-bio").value};
+  if(pendingAvatar !== undefined) body.avatar = pendingAvatar;
+  await api("/api/chat/profile", "POST", body).catch(() => {});
+  $("settings").close(); toast("Profile saved"); poll();
 }
 
-// ---- new chat / search / groups ----
-let ncMode="dm";
-function openNew(){ncMode="dm";ncSel={};$("nc-search").value="";$("nc-results").innerHTML="";
-  $("grp-name").value="";$("nc-id").value="";switchNc("dm");$("newchat").showModal();}
-function switchNc(m){ncMode=m;
-  $("nc-tab-dm").setAttribute("aria-selected",m==="dm");
-  $("nc-tab-grp").setAttribute("aria-selected",m==="grp");
-  $("nc-dm").classList.toggle("hidden",m!=="dm");$("nc-grp").classList.toggle("hidden",m!=="grp");
-  if(m==="grp")renderGroupPicker();}
-async function doSearch(q){
-  if(!q||!q.trim()){$("nc-results").innerHTML="";return;}
-  let hits=[]; try{hits=(await(await api("/api/chat/search","POST",{pseudo:q.trim()})).json()).results||[];}catch(_){}
-  const el=$("nc-results"); el.innerHTML="";
-  for(const r of hits){el.appendChild(personRow(r.id,r.pseudo||shortId(r.id),()=>{startChat(r.id);}));}
-  if(!hits.length)el.innerHTML='<div class="res rs">No one found.</div>';
+// ---- new chat, search, groups ---------------------------------------------
+function openNew(){
+  ncSel = {};
+  $("nc-search").value = ""; $("nc-results").replaceChildren();
+  $("grp-name").value = ""; $("nc-id").value = "";
+  switchNc("dm"); $("newchat").showModal();
 }
-function personRow(id,name,onClick){
-  const d=document.createElement("div");d.className="res";
-  d.innerHTML=avatarHTML(id,name)+'<div class="rt"><div class="truncate">'+esc(name)+
-    '</div><div class="rs mono truncate">'+esc(id)+'</div></div>';
-  d.addEventListener("click",onClick); return d;
+function switchNc(mode){
+  $("nc-tab-dm").setAttribute("aria-selected", String(mode === "dm"));
+  $("nc-tab-grp").setAttribute("aria-selected", String(mode === "grp"));
+  $("nc-dm").hidden = mode !== "dm";
+  $("nc-grp").hidden = mode !== "grp";
+  if(mode === "grp") renderGroupPicker();
+}
+function resRow(avatarId, name, sub, onClick){
+  const el = document.createElement("button");
+  el.type = "button"; el.className = "ch-res";
+  el.innerHTML = avatarHTML(avatarId, name) +
+    '<span class="ch-res-txt"><span class="truncate">' + esc(name) + "</span>" +
+    (sub ? '<span class="ch-res-sub mono truncate">' + esc(sub) + "</span>" : "") + "</span>";
+  if(onClick) el.addEventListener("click", onClick);
+  return el;
+}
+function noneRow(text){
+  const el = document.createElement("div");
+  el.className = "ch-res none"; el.textContent = text; return el;
+}
+async function doSearch(query){
+  const host = $("nc-results");
+  if(!query || !query.trim()){ host.replaceChildren(); return; }
+  host.replaceChildren(noneRow("Searching…"));
+  let hits = [];
+  try{ hits = (await (await api("/api/chat/search", "POST", {pseudo:query.trim()})).json()).results || []; }
+  catch(_){}
+  host.replaceChildren();
+  for(const r of hits)
+    host.appendChild(resRow(r.id, r.pseudo || shortId(r.id), shortId(r.id), () => startChat(r.id)));
+  if(!hits.length) host.appendChild(noneRow("No one found."));
 }
 async function startChat(id){
-  await api("/api/chat/contact","POST",{op:"add",id}).catch(()=>{});
+  await api("/api/chat/contact", "POST", {op:"add", id}).catch(() => {});
   $("newchat").close(); await poll(); openConv(id);
 }
-function resRow(avId,name,sub,onClick){
-  const d=document.createElement("div");d.className="res";
-  d.innerHTML=avatarHTML(avId,name)+'<div class="rt"><div class="truncate">'+esc(name)+'</div>'+
-    (sub?'<div class="rs mono truncate">'+esc(sub)+'</div>':'')+'</div>';
-  d.addEventListener("click",onClick);return d;
-}
-// Sidebar search: filters the chat list AND shows a dropdown of matching chats
-// and people (local directory + network DHT). Pseudos aren't unique, so several
-// hits can appear — the dropdown lets you pick the right node id.
-let sideT=null;
+// The list search filters the conversations *and* offers people who are not in
+// them yet — pseudos are not unique, so the id under each hit is what picks the
+// right node.
+let sideTimer = null;
 function sideSearch(){
   renderList();
-  const q=($("side-search").value||"").trim();
-  const dd=$("side-results");
-  if(!q){dd.classList.add("hidden");dd.innerHTML="";return;}
-  const ql=q.toLowerCase();
-  const chats=convList().filter(it=>convName(it.conv).toLowerCase().includes(ql));
-  dd.innerHTML="";
+  const query = ($("side-search").value || "").trim();
+  const drop = $("side-results");
+  if(!query){ drop.hidden = true; drop.replaceChildren(); return; }
+  const lower = query.toLowerCase();
+  const chats = convList().filter((it) => convName(it.conv).toLowerCase().includes(lower));
+  drop.replaceChildren();
   if(chats.length){
-    const h=document.createElement("div");h.className="res head eyebrow";h.textContent="Chats";dd.appendChild(h);
-    for(const it of chats.slice(0,8))
-      dd.appendChild(resRow(convAvatarId(it.conv),convName(it.conv),
-        convIsGroup(it.conv)?"group":shortId(it.conv),()=>{closeSide();openConv(it.conv);}));
+    const head = document.createElement("div");
+    head.className = "ch-res head eyebrow"; head.textContent = "Chats";
+    drop.appendChild(head);
+    for(const it of chats.slice(0, 8))
+      drop.appendChild(resRow(convAvatarId(it.conv), convName(it.conv),
+        convIsGroup(it.conv) ? "group" : shortId(it.conv),
+        () => { closeSide(); openConv(it.conv); }));
   }
-  const loading=document.createElement("div");loading.className="res head eyebrow";loading.textContent="People";dd.appendChild(loading);
-  const wait=document.createElement("div");wait.className="res rs";wait.textContent="Searching…";dd.appendChild(wait);
-  dd.classList.remove("hidden");
-  clearTimeout(sideT);
-  sideT=setTimeout(async()=>{
-    if(($("side-search").value||"").trim()!==q)return;   // stale
-    let hits=[]; try{hits=(await(await api("/api/chat/search","POST",{pseudo:q})).json()).results||[];}catch(_){}
-    hits=hits.filter(x=>!chats.some(c=>c.conv===x.id));
-    wait.remove();
-    if(hits.length){for(const r of hits)
-      dd.appendChild(resRow(r.id,r.pseudo||shortId(r.id),shortId(r.id),()=>{closeSide();startChat(r.id);}));}
-    else{const n=document.createElement("div");n.className="res rs";n.textContent="No people found.";dd.appendChild(n);}
-  },320);
+  const head = document.createElement("div");
+  head.className = "ch-res head eyebrow"; head.textContent = "People";
+  drop.appendChild(head);
+  const waiting = noneRow("Searching…");
+  drop.appendChild(waiting);
+  drop.hidden = false;
+  clearTimeout(sideTimer);
+  sideTimer = setTimeout(async () => {
+    if(($("side-search").value || "").trim() !== query) return;    // stale
+    let hits = [];
+    try{ hits = (await (await api("/api/chat/search", "POST", {pseudo:query})).json()).results || []; }
+    catch(_){}
+    hits = hits.filter((x) => !chats.some((c) => c.conv === x.id));
+    waiting.remove();
+    if(hits.length){
+      for(const r of hits)
+        drop.appendChild(resRow(r.id, r.pseudo || shortId(r.id), shortId(r.id),
+          () => { closeSide(); startChat(r.id); }));
+    }else{
+      drop.appendChild(noneRow("No people found."));
+    }
+  }, 320);
 }
-function closeSide(){$("side-results").classList.add("hidden");$("side-search").value="";renderList();}
+function closeSide(){
+  $("side-results").hidden = true; $("side-search").value = ""; renderList();
+}
 function renderGroupPicker(){
-  const el=$("grp-members");el.innerHTML="";
-  const people=[...ST.contacts,...ST.known];
-  const seen=new Set();
-  for(const p of people){if(seen.has(p.id))continue;seen.add(p.id);
-    const row=personRow(p.id,p.pseudo||shortId(p.id),null);
-    const pick=document.createElement("input");
-    pick.type="checkbox"; pick.checked=!!ncSel[p.id]; pick.tabIndex=-1;
+  const host = $("grp-members");
+  host.replaceChildren();
+  const seen = new Set(), people = [...ST.contacts, ...ST.known];
+  let shown = 0;
+  for(const p of people){
+    if(seen.has(p.id)) continue;
+    seen.add(p.id); shown++;
+    const row = resRow(p.id, p.pseudo || shortId(p.id), shortId(p.id), null);
+    const pick = document.createElement("input");
+    pick.type = "checkbox"; pick.checked = !!ncSel[p.id]; pick.tabIndex = -1;
     row.appendChild(pick);
-    row.addEventListener("click",()=>{ncSel[p.id]=!ncSel[p.id];pick.checked=!!ncSel[p.id];});
-    el.appendChild(row);}
-  if(!people.length)el.innerHTML='<div class="res rs">Add contacts first.</div>';
+    row.addEventListener("click", () => { ncSel[p.id] = !ncSel[p.id]; pick.checked = !!ncSel[p.id]; });
+    host.appendChild(row);
+  }
+  if(!shown) host.appendChild(noneRow("Add contacts first."));
 }
 async function createGroup(){
-  const name=$("grp-name").value.trim();const members=Object.keys(ncSel).filter(k=>ncSel[k]);
-  if(!name||!members.length)return;
-  const j=await(await api("/api/chat/group","POST",{op:"create",name,members})).json().catch(()=>({}));
-  $("newchat").close(); await poll(); if(j.id)openConv("g:"+j.id);
+  const name = $("grp-name").value.trim();
+  const members = Object.keys(ncSel).filter((k) => ncSel[k]);
+  if(!name || !members.length){ toast("A group needs a name and a member", "warn"); return; }
+  const j = await (await api("/api/chat/group", "POST",
+                             {op:"create", name, members})).json().catch(() => ({}));
+  $("newchat").close(); await poll();
+  if(j.id) openConv("g:" + j.id);
 }
 
-// ---- who you are talking to ----
-// The console already describes a node better than a chat page ever would:
-// the link, its addresses, what each side may do to the other. So chat does not
+// ---- who you are talking to ------------------------------------------------
+// The console already describes a node better than a chat page ever would: the
+// link, its addresses, what each side may do to the other. So chat does not
 // describe it again — it mounts the same view. Where it appears is a preference
 // about this screen, so it is stored per browser like the theme.
-const DETAIL_MODES=["panel","window","tab"];
+const DETAIL_MODES = ["panel", "window", "tab"];
 function detailMode(){
-  try{const v=localStorage.getItem("nmesh_chat_details");
-      if(DETAIL_MODES.includes(v))return v;}catch(_){}
+  try{
+    const v = localStorage.getItem("nmesh_chat_details");
+    if(DETAIL_MODES.includes(v)) return v;
+  }catch(_){}
   return "panel";
 }
 function setDetailMode(mode){
-  if(!DETAIL_MODES.includes(mode))return;
-  try{localStorage.setItem("nmesh_chat_details",mode);}catch(_){}
+  if(!DETAIL_MODES.includes(mode)) return;
+  try{ localStorage.setItem("nmesh_chat_details", mode); }catch(_){}
 }
 function closePeerPanel(){
-  $("peer-panel").hidden=true;
-  $("app").classList.remove("show-peer");
-  $("peer-view").innerHTML="";
+  $("peer-panel").hidden = true;
+  $("peer-view").replaceChildren();
+  view(sel ? "conv" : "list");
 }
 async function showPeer(id){
-  if(!id)return;
-  const mode=detailMode();
-  if(mode!=="panel"){ openLinked("/node?from=chat#"+id); return; }
-  $("peer-panel").hidden=false;
-  $("app").classList.add("show-peer");
-  await NODEVIEW.mount("peer-view",id,{
+  if(!id) return;
+  if(detailMode() !== "panel"){ openLinked("/node?from=chat#" + id); return; }
+  $("peer-panel").hidden = false;
+  view("peer");
+  await NODEVIEW.mount("peer-view", id, {
     hide:["chat"],                       // you are already in the conversation
-    onGone(){ closePeerPanel(); sel=null; poll(); },
+    onGone(){ closePeerPanel(); closeConv(); poll(); },
   });
 }
 
-// ---- events ----
+// ---- events ----------------------------------------------------------------
 function bind(){
-  $("side-search").addEventListener("input",sideSearch);
-  $("side-search").addEventListener("focus",sideSearch);
-  document.addEventListener("click",(e)=>{if(!e.target.closest(".side-search"))$("side-results").classList.add("hidden");});
-  $("me-btn").addEventListener("click",openSettings);
-  $("new-btn").addEventListener("click",openNew);
-  $("empty-new").addEventListener("click",openNew);
-  $("back-btn").addEventListener("click",()=>{sel=null;$("app").classList.remove("show-conv");$("conv").classList.add("hidden");$("empty").classList.remove("hidden");renderList();});
-  $("del-conv").addEventListener("click",async()=>{
-    if(!sel)return;
-    const group=convIsGroup(sel);
-    const agreed=await confirmAction({
-      title:group?"Leave and delete this group?":"Remove this contact?",
-      body:'<p class="muted small">The conversation disappears from this node. '+
-        (group?"The other members keep theirs.":"They can still write to you again.")+"</p>",
-      confirmLabel:group?"Leave group":"Remove", danger:true});
-    if(!agreed)return;
-    const gone=sel;
-    await api(group?"/api/chat/group":"/api/chat/contact","POST",
-      group?{op:"remove",id:gone.slice(2)}:{op:"remove",id:gone}).catch(()=>{});
-    delete MSGS[gone]; sel=null;
-    $("conv").classList.add("hidden"); $("empty").classList.remove("hidden");
-    $("app").classList.remove("show-conv");
-    toast(group?"Group left":"Contact removed");
-    poll();});
-  $("info-btn").addEventListener("click",()=>{ if(sel&&!convIsGroup(sel))showPeer(sel); });
-  $("peer-panel-close").addEventListener("click",closePeerPanel);
-  $("chat-list").addEventListener("click",(e)=>{const r=e.target.closest(".row-chat");if(r)openConv(r.dataset.conv);});
-  $("send-form").addEventListener("submit",(e)=>{e.preventDefault();sendText();});
-  $("msg").addEventListener("input",()=>{autoGrow();onTyping();});
-  $("msg").addEventListener("keydown",(e)=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendText();}});
-  $("attach-btn").addEventListener("click",()=>$("file-input").click());
-  $("file-input").addEventListener("change",(e)=>{if(e.target.files[0])sendFile(e.target.files[0]);e.target.value="";});
-  $("emoji-btn").addEventListener("click",()=>{const t=$("msg");t.value+="🙂";t.focus();autoGrow();});
-  $("reply-cancel").addEventListener("click",()=>{replyTo=null;setReplyBar();});
-  $("log").addEventListener("click",(e)=>{
-    const img=e.target.closest("img.media");if(img){$("viewer-img").src=img.src;$("viewer").classList.remove("hidden");return;}
-    const q=e.target.closest(".quote");if(q){const t=$("log").querySelector('.msg[data-id="'+q.dataset.goto+'"]');if(t)t.scrollIntoView({block:"center"});return;}
-    const rc=e.target.closest(".react");if(rc){react(rc.dataset.mid,rc.dataset.react);return;}});
-  $("log").addEventListener("contextmenu",(e)=>{const b=e.target.closest(".msg");if(b&&b.dataset.mid){e.preventDefault();openCtx(e.clientX,e.clientY,b.dataset.mid);}});
-  // long-press for touch
-  let lp=null;
-  $("log").addEventListener("touchstart",(e)=>{const b=e.target.closest(".msg");if(b&&b.dataset.mid){lp=setTimeout(()=>{const t=e.touches[0];openCtx(t.clientX,t.clientY,b.dataset.mid);},500);}},{passive:true});
-  $("log").addEventListener("touchend",()=>clearTimeout(lp));
-  $("ctx").addEventListener("click",(e)=>{const b=e.target.closest("button");if(b)ctxAction(b.dataset.a);});
-  $("emoji-pop").addEventListener("click",(e)=>{const b=e.target.closest("button");if(b){react(b.dataset.mid,b.dataset.e);closeCtx();}});
-  document.addEventListener("click",(e)=>{if(!e.target.closest(".ctx")&&!e.target.closest("#emoji-pop")&&!e.target.closest(".msg"))closeCtx();});
-  $("viewer").addEventListener("click",()=>$("viewer").classList.add("hidden"));
-  document.querySelectorAll("[data-close]").forEach(b=>b.addEventListener("click",()=>$(b.dataset.close).close()));
-  $("av-input").addEventListener("change",(e)=>{if(e.target.files[0])pickAvatar(e.target.files[0]);});
-  $("av-clear").addEventListener("click",()=>{pendingAvatar="";$("set-av").innerHTML=esc(initials($("set-name").value));});
-  $("save-prof").addEventListener("click",saveProfile);
-  $("nc-tab-dm").addEventListener("click",()=>switchNc("dm"));
-  $("nc-tab-grp").addEventListener("click",()=>switchNc("grp"));
-  let st=null;
-  $("nc-search").addEventListener("input",(e)=>{clearTimeout(st);const v=e.target.value;st=setTimeout(()=>doSearch(v),300);});
-  $("nc-add").addEventListener("click",()=>{const id=$("nc-id").value.trim();if(/^[0-9a-fA-F]{40}$/.test(id))startChat(id.toLowerCase());});
-  $("grp-create").addEventListener("click",createGroup);
-  PALETTE.add("New chat","Action",openNew);
-  PALETTE.add("Your profile","Action",openSettings);
-  PALETTE.add("Switch theme","Action",()=>THEME.toggle());
-  PALETTE.add("Back to the console","Go to",()=>{window.location="/";});
+  $("side-search").addEventListener("input", sideSearch);
+  $("side-search").addEventListener("focus", sideSearch);
+  document.addEventListener("click", (e) => {
+    if(!e.target.closest(".ch-side-search")) $("side-results").hidden = true;
+  });
+  $("me-btn").addEventListener("click", openSettings);
+  $("new-btn").addEventListener("click", openNew);
+  $("empty-new").addEventListener("click", openNew);
+  $("back-btn").addEventListener("click", closeConv);
+  $("peer-back").addEventListener("click", closePeerPanel);
+  $("del-conv").addEventListener("click", async () => {
+    if(!sel) return;
+    const group = convIsGroup(sel);
+    const agreed = await confirmAction({
+      title:group ? "Leave and delete this group?" : "Remove this contact?",
+      body:'<p class="muted small">The conversation disappears from this node. ' +
+        (group ? "The other members keep theirs." : "They can still write to you again.") + "</p>",
+      confirmLabel:group ? "Leave group" : "Remove", danger:true});
+    if(!agreed) return;
+    const gone = sel;
+    await api(group ? "/api/chat/group" : "/api/chat/contact", "POST",
+      group ? {op:"remove", id:gone.slice(2)} : {op:"remove", id:gone}).catch(() => {});
+    delete MSGS[gone];
+    closeConv();
+    toast(group ? "Group left" : "Contact removed");
+    poll();
+  });
+  $("info-btn").addEventListener("click", () => { if(sel && !convIsGroup(sel)) showPeer(sel); });
+  $("peer-panel-close").addEventListener("click", closePeerPanel);
+  $("chat-list").addEventListener("click", (e) => {
+    const row = e.target.closest(".ch-row");
+    if(row) openConv(row.dataset.conv);
+  });
+  $("send-form").addEventListener("submit", (e) => { e.preventDefault(); sendText(); });
+  $("msg").addEventListener("input", () => { autoGrow(); onTyping(); });
+  $("msg").addEventListener("keydown", (e) => {
+    if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendText(); }
+  });
+  $("attach-btn").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", (e) => {
+    if(e.target.files[0]) sendFile(e.target.files[0]);
+    e.target.value = "";
+  });
+  $("emoji-btn").addEventListener("click", () => {
+    const box = $("msg"); box.value += "🙂"; box.focus(); autoGrow();
+  });
+  $("reply-cancel").addEventListener("click", () => { replyTo = null; setReplyBar(); });
+  $("jump").addEventListener("click", () => toBottom($("log"), true));
+  $("log").addEventListener("scroll", () => { if(atBottom($("log"))) $("jump").hidden = true; });
+  $("log").addEventListener("click", (e) => {
+    const img = e.target.closest("img.ch-media");
+    if(img){ $("viewer-img").src = img.src; $("viewer").hidden = false; return; }
+    const quote = e.target.closest(".ch-quote");
+    if(quote){ flash(quote.dataset.goto); return; }
+    const chip = e.target.closest(".ch-react");
+    if(chip){ react(chip.dataset.mid, chip.dataset.react); return; }
+  });
+  $("log").addEventListener("contextmenu", (e) => {
+    const row = e.target.closest(".ch-m");
+    if(row && row.dataset.mid){ e.preventDefault(); openCtx(e.clientX, e.clientY, row.dataset.mid); }
+  });
+  // Long press is the touch equivalent of a right click; a finger that moves is
+  // a scroll, so the timer is cancelled rather than firing under the drag.
+  let press = null, from = null;
+  $("log").addEventListener("touchstart", (e) => {
+    const row = e.target.closest(".ch-m");
+    if(!row || !row.dataset.mid) return;
+    const touch = e.touches[0];
+    from = {x:touch.clientX, y:touch.clientY};
+    press = setTimeout(() => openCtx(from.x, from.y, row.dataset.mid), 500);
+  }, {passive:true});
+  $("log").addEventListener("touchmove", (e) => {
+    if(!press || !from) return;
+    const touch = e.touches[0];
+    if(Math.abs(touch.clientX - from.x) > 10 || Math.abs(touch.clientY - from.y) > 10){
+      clearTimeout(press); press = null;
+    }
+  }, {passive:true});
+  $("log").addEventListener("touchend", () => { clearTimeout(press); press = null; });
+  $("ctx").addEventListener("click", (e) => {
+    const button = e.target.closest("button");
+    if(button) ctxAction(button.dataset.a);
+  });
+  $("emoji-pop").addEventListener("click", (e) => {
+    const button = e.target.closest("button");
+    if(button){ react(button.dataset.mid, button.dataset.e); closeCtx(); }
+  });
+  document.addEventListener("click", (e) => {
+    if(!e.target.closest(".ch-ctx") && !e.target.closest("#emoji-pop") && !e.target.closest(".ch-m"))
+      closeCtx();
+  });
+  $("viewer").addEventListener("click", () => { $("viewer").hidden = true; });
+  document.addEventListener("keydown", (e) => {
+    if(e.key !== "Escape") return;
+    if(!$("viewer").hidden){ $("viewer").hidden = true; return; }
+    if(!$("ctx").hidden || !$("emoji-pop").hidden){ closeCtx(); return; }
+    if(!$("side-results").hidden){ $("side-results").hidden = true; return; }
+    if(view() === "peer"){ closePeerPanel(); return; }
+    if(replyTo){ replyTo = null; setReplyBar(); }
+  });
+  $$("[data-close]").forEach((b) => b.addEventListener("click", () => $(b.dataset.close).close()));
+  $("av-input").addEventListener("change", (e) => { if(e.target.files[0]) pickAvatar(e.target.files[0]); });
+  $("av-clear").addEventListener("click", () => {
+    pendingAvatar = "";
+    setHTML("set-av", esc(initials($("set-name").value)));
+  });
+  $("save-prof").addEventListener("click", saveProfile);
+  $("nc-tab-dm").addEventListener("click", () => switchNc("dm"));
+  $("nc-tab-grp").addEventListener("click", () => switchNc("grp"));
+  $("nc-search").addEventListener("input", debounce((e) => doSearch(e.target.value), 300));
+  $("nc-add").addEventListener("click", () => {
+    const id = $("nc-id").value.trim();
+    if(/^[0-9a-fA-F]{40}$/.test(id)) startChat(id.toLowerCase());
+    else toast("A node id is 40 hexadecimal characters", "warn");
+  });
+  $("grp-create").addEventListener("click", createGroup);
+  PALETTE.add("New chat", "Action", openNew);
+  PALETTE.add("Your profile", "Action", openSettings);
+  PALETTE.add("Switch theme", "Action", () => THEME.toggle());
+  PALETTE.add("Back to the console", "Go to", () => { window.location = "/"; });
 }
 
-// ---- auth / boot ----
+// ---- auth and boot ---------------------------------------------------------
 async function enter(token){
-  const h={}; if(token)h["Authorization"]="Bearer "+token;
-  const r=await fetch("/api/chat/messages?since=0",{headers:h});
-  if(!r.ok)return false;
-  if(token)SESSION.set(token);
+  const headers = {};
+  if(token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch("/api/chat/messages?since=0", {headers});
+  if(!res.ok) return false;
+  if(token) SESSION.set(token);
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   mountShell();
-  await poll(); if(timer)clearInterval(timer); timer=setInterval(poll,1200);
+  autoGrow();
+  await poll();
+  if(timer) clearInterval(timer);
+  timer = setInterval(poll, 1200);
   return true;
 }
-$("login-form").addEventListener("submit",async(e)=>{
-  e.preventDefault(); setMessage("err","");
-  await withBusy(e.submitter||$("login-form").querySelector("button"),async()=>{
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); setMessage("err", "");
+  await withBusy(e.submitter || $("login-form").querySelector("button"), async () => {
     try{
-      const res=await fetch("/api/login",{method:"POST",
+      const res = await fetch("/api/login", {method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({password:$("password").value})});
-      if(!res.ok){const j=await res.json().catch(()=>({}));
-        setMessage("err",j.error||"Login failed",true);return;}
-      $("password").value=""; await enter((await res.json()).token);
-    }catch(_){ setMessage("err","Console is not reachable",true); }
+      if(!res.ok){
+        const body = await res.json().catch(() => ({}));
+        setMessage("err", body.error || "Login failed", true); return;
+      }
+      $("password").value = "";
+      await enter((await res.json()).token);
+    }catch(_){ setMessage("err", "Console is not reachable", true); }
   });
 });
 bind();
-(function(){let tok=null;try{tok=sessionStorage.getItem("nmesh_token");}catch(_){}
-  enter(tok).then((ok)=>{if(!ok)$("login").classList.remove("hidden");});})();
+(function(){
+  let token = null;
+  try{ token = sessionStorage.getItem("nmesh_token"); }catch(_){}
+  enter(token).then((ok) => { if(!ok) $("login").classList.remove("hidden"); });
+})();
 """
