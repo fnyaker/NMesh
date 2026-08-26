@@ -1,8 +1,8 @@
-"""Le déploiement distant doit être aussi solide que `install.sh` en local.
+"""A remote deployment has to be as solid as `install.sh` is locally.
 
-C'est la même installation : le bootstrap ne pose rien lui-même, il livre l'arbre
-et appelle son `install.sh`. Un second installeur, plus faible, est exactement la
-façon dont un déploiement distant finit moins solide qu'un local.
+It is the same installation: the bootstrap lays nothing down itself, it delivers
+the tree and calls its `install.sh`. A second, weaker installer is exactly how a
+remote deployment ends up less solid than a local one.
 """
 import subprocess
 import tempfile
@@ -31,8 +31,8 @@ def sh_check(text: str) -> int:
 
 class TestPayload:
     def test_install_sh_travels_with_the_tree(self):
-        """Le bootstrap délègue tout à install.sh : un payload sans lui
-        n'installe rien."""
+        """The bootstrap delegates everything to install.sh: a payload without
+        it installs nothing."""
         assert "install.sh" in fp.PAYLOAD_INCLUDE
         payload = fp.build_payload(ROOT)
         import gzip, io, tarfile
@@ -59,8 +59,8 @@ class TestPayload:
 
 
 class TestTheTwoPhases:
-    """Le secret d'élévation n'entre jamais dans un script : la phase qui a
-    besoin de root demande un terminal distant, et le pty local y répond."""
+    """The elevation secret never enters a script: the phase that needs root
+    asks for a remote terminal, and the local pty answers it."""
 
     def test_both_phases_are_valid_posix_shell(self):
         stage = fp.staging_name()
@@ -68,8 +68,8 @@ class TestTheTwoPhases:
         assert sh_check(fp.build_install_phase(stage=stage)) == 0
 
     def test_the_delivery_phase_needs_no_privilege(self):
-        """Elle est pipée sur stdin : elle ne doit jamais vouloir de terminal,
-        donc jamais escalader ni lancer l'installation."""
+        """It is piped on stdin: it must never want a terminal, and therefore
+        never escalate nor start the installation."""
         script = fp.build_bootstrap(b"payload", {}, stage=fp.staging_name())
         code = [line for line in script.splitlines()
                 if line.strip() and not line.strip().startswith("#")]
@@ -91,7 +91,7 @@ class TestTheTwoPhases:
     def test_the_install_phase_calls_install_sh_and_nothing_of_its_own(self):
         script = fp.build_install_phase(stage=fp.staging_name())
         assert "./install.sh" in script
-        # Aucune unité écrite à la main : c'est le travail d'install.sh.
+        # No unit written by hand: that is install.sh's job.
         for reimplemented in ("[Unit]", "openrc-run", "launchctl load",
                               "systemctl daemon-reload"):
             assert reimplemented not in script, reimplemented
@@ -110,8 +110,8 @@ class TestTheTwoPhases:
             fp.build_install_phase(stage=fp.staging_name(), mode="root-ish")
 
     def test_escalation_is_stated_never_probed(self):
-        """Sonder pour savoir si on peut sudo, c'est des échecs sudo dans le
-        journal d'authentification de la cible."""
+        """Probing whether we can sudo means sudo failures in the target's
+        authentication log."""
         script = fp.build_install_phase(stage=fp.staging_name(), can_sudo=False)
         assert "CAN_SUDO=0" in script
         assert "a system install needs root" in script
@@ -157,9 +157,9 @@ class TestCredentials:
 
 
 class TestPromptOrdering:
-    """Quel secret veut un prompt se décide au *moment*, pas au libellé :
-    `sudo` demande « password for » et `su` un « password: » nu, tous deux
-    indiscernables de celui d'OpenSSH."""
+    """Which secret a prompt wants is decided by *when* it comes, not by its
+    wording: `sudo` asks "password for" and `su` a bare "password:", both
+    indistinguishable from OpenSSH's own."""
 
     def fresh(self, may_elevate=1):
         return {"password": 0, "passphrase": 0, "elevate": 0,
@@ -179,8 +179,8 @@ class TestPromptOrdering:
                                         answered) == b"SUDO\n"
 
     def test_a_re_prompt_outside_an_escalating_run_is_ignored(self):
-        """Sans terminal distant il n'y a pas de sudo en face : un second prompt
-        est OpenSSH qui redemande, et le rejouer brûle une tentative."""
+        """With no remote terminal there is no sudo on the other side: a second
+        prompt is OpenSSH asking again, and replaying burns an attempt."""
         creds = SshCredentials("bob", password="LOGIN")
         answered = self.fresh(may_elevate=0)
         assert fleet_ssh._prompt_answer(b"bob@host's password:", creds,
@@ -189,8 +189,8 @@ class TestPromptOrdering:
                                         answered) is None
 
     def test_a_third_prompt_is_left_unanswered(self):
-        """Un re-prompt veut dire que le secret était faux ; le rejouer ne fait
-        que brûler des tentatives contre un verrouillage."""
+        """A re-prompt means the secret was wrong; replaying it only burns
+        attempts against a lockout."""
         creds = SshCredentials("bob", password="LOGIN", sudo_password="SUDO")
         answered = self.fresh()
         fleet_ssh._prompt_answer(b"bob@host's password:", creds, answered)
@@ -211,8 +211,8 @@ class TestPromptOrdering:
 
 class TestTtyContract:
     async def test_piping_data_into_a_tty_command_is_refused(self):
-        """Avec un terminal distant, stdin *est* le terminal : des données
-        pipées et un prompt liraient le même canal."""
+        """With a remote terminal, stdin *is* the terminal: piped data and a
+        prompt would read the same channel."""
         creds = SshCredentials("bob", password="p")
         with pytest.raises(SshError):
             await fleet_ssh.run("host", creds, ["/bin/sh"],
@@ -220,8 +220,8 @@ class TestTtyContract:
 
 
 class TestRefusals:
-    """Un install système sans moyen d'atteindre root doit être refusé *avant*
-    d'ouvrir une session SSH, pas après que l'opérateur ait tout tapé."""
+    """A system install with no way to reach root must be refused *before* an
+    SSH session is opened, not after the operator has typed everything."""
 
     async def test_the_app_refuses_a_system_install_with_no_route_to_root(self):
         from tests.test_fleet import Peer
@@ -233,8 +233,8 @@ class TestRefusals:
         assert "root" in str(exc.value)
 
     async def test_a_user_install_needs_no_route_to_root(self):
-        """Il n'a pas besoin de root : il doit passer la porte, quoi qu'il
-        arrive ensuite côté machine."""
+        """It needs no root: it must get through the gate, whatever happens next
+        on the machine."""
         from tests.test_fleet import Peer
         app = Peer(repo_root=ROOT).app
         try:
@@ -244,12 +244,12 @@ class TestRefusals:
         except fp.ProvisionError as exc:
             assert "root" not in str(exc), exc
         except Exception:
-            pass          # l'échec SSH qui suit n'est pas ce qu'on teste ici
+            pass          # the SSH failure that follows is not what we test here
 
 
 class TestUpdateGrant:
-    """`update` a besoin de root sans humain. Le droit accordé est **un**
-    script, que le nœud ne peut pas réécrire — pas une règle sudo générale."""
+    """`update` needs root with no human. The right granted is **one** script,
+    which the node cannot rewrite — not a general sudo rule."""
 
     def _sudoers(self, *args):
         return subprocess.run(
@@ -258,9 +258,8 @@ class TestUpdateGrant:
             capture_output=True, text=True, timeout=60, cwd=ROOT)
 
     def test_the_wrapper_is_not_inside_the_install_prefix(self):
-        """Le préfixe appartient au compte du nœud : y mettre le script
-        autorisé reviendrait à le laisser réécrire ce qu'il a le droit de
-        lancer en root."""
+        """The prefix belongs to the node's account: putting the authorised
+        script there would let it rewrite what it is allowed to run as root."""
         from src.apps import fleet_host
         assert not fleet_host.UPDATE_WRAPPER.startswith("/opt/nmesh")
         assert fleet_host.UPDATE_WRAPPER.startswith("/usr/local/")
@@ -271,10 +270,10 @@ class TestUpdateGrant:
         line = [l for l in result.stdout.splitlines() if not l.startswith("#")][0]
         from src.apps import fleet_host
         assert line.strip().endswith(fleet_host.UPDATE_WRAPPER)
-        assert "ALL" not in line.split("NOPASSWD:")[1]      # pas de joker
+        assert "ALL" not in line.split("NOPASSWD:")[1]      # no wildcard
 
     def test_the_wrapper_refuses_arguments(self, tmp_path):
-        """Rien de ce que le nœud envoie ne doit pouvoir l'influencer."""
+        """Nothing the node sends may influence it."""
         result = self._sudoers("--wrapper")
         assert result.returncode == 0, result.stderr
         script = tmp_path / "nmesh-update"
@@ -316,9 +315,9 @@ class TestUpdateGrant:
 
 
 class TestNoNewPrivileges:
-    """Le durcissement de l'unité et le droit d'update se contredisaient : avec
-    `NoNewPrivileges=yes`, le noyau refuse tout binaire setuid — sudo échoue en
-    parlant d'un drapeau noyau, ce qui n'indique rien à faire."""
+    """The unit's hardening and the update right used to contradict each other:
+    with `NoNewPrivileges=yes` the kernel refuses every setuid binary — sudo
+    fails talking about a kernel flag, which suggests nothing to do."""
 
     def facts(self, **kwargs):
         from src.apps import fleet_host
@@ -337,7 +336,7 @@ class TestNoNewPrivileges:
         assert fleet_host.update_plan(facts) is None
 
     def test_a_root_node_is_not_affected(self):
-        """Rien à élever quand on est déjà root : le drapeau ne change rien."""
+        """Nothing to elevate when already root: the flag changes nothing."""
         from src.apps import fleet_host
         facts = self.facts(escalation=None, no_new_privs=True)
         assert facts.update_blocked == ""
@@ -350,12 +349,12 @@ class TestNoNewPrivileges:
 
 
 class TestServiceUnitFollowsTheGrant:
-    """L'unité ne peut pas être durcie *et* laisser passer l'update : les deux
-    choix doivent être faits ensemble, jamais indépendamment."""
+    """The unit cannot be hardened *and* let the update through: the two choices
+    have to be made together, never independently."""
 
     def directives(self, granted):
-        """Les lignes actives seulement : le commentaire qui explique la règle
-        cite les directives qu'il désactive."""
+        """The active lines only: the comment explaining the rule quotes the
+        directives it turns off."""
         return [line.strip() for line in self.unit(granted).splitlines()
                 if line.strip() and not line.startswith("#")]
 
