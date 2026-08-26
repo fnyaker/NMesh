@@ -147,13 +147,24 @@ sanitised**.
 The node's state, its virtualenv and anything an operator left in the install
 directory are never touched.
 
-### Installing is not restarting
+### Installing, then restarting
 
-An install puts the new code in place; the node keeps running the code it
-started with until something restarts it. That is deliberate, and it is the same
-reason automatic installs are safe to enable: a node that swaps its own code and
-immediately exits turns one bad release into a restart loop nobody is present to
-break. The console says "installed — restart the node to run it".
+Replacing the tree changes nothing in a process that is already running: the
+code is loaded, and an update only takes effect when the node starts again. So
+the node **leaves, and lets the service manager bring it back** — the same route
+a crash would take, which is why it only does that when something is watching:
+
+| | Restarts itself | Why |
+|---|---|---|
+| you press **Install** (mesh or GitHub) | yes, if `NMESH_SERVICE_MANAGED` | you asked, you are watching, and `.nmesh-previous` is there if it goes wrong |
+| you press Install with no service manager | no | exiting with nothing to bring it back is worse than running yesterday's code — the console says so and waits for you |
+| an **automatic** install | never | this is what stops one bad release becoming a restart loop nobody is present to break |
+
+The restart answers the operator first, then stops the node properly (bounded,
+so a peer refusing to close cannot keep the old code running for ever) and
+exits. `install.sh` writes `Restart=always` into the systemd unit and `KeepAlive`
+into the launchd plist, and sets `NMESH_SERVICE_MANAGED=1` in both — that
+variable is the node's only way of knowing anything will catch it.
 
 ### Automatic installs
 

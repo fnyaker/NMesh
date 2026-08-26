@@ -379,6 +379,12 @@ signed and offered from the same page. The full mechanism — the descriptor, th
 gossip, the three gates before anything touches disk:
 [`../Updates/guide`](../Updates/guide).
 
+Either way, installing replaces the files and then **restarts the node** so the
+new code is the code that runs — but only when a service manager is there to
+bring it back (`NMESH_SERVICE_MANAGED`). Without one, the node stays up and the
+page says to restart it yourself rather than pretending. Unattended installs
+from the mesh never restart at all.
+
 What is replaced, what is not, and the refusal cases (container, non-writable
 directory): [`../Setup/guide`](../Setup/guide).
 

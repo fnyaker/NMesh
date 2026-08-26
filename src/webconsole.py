@@ -420,6 +420,42 @@ class WebConsole:
             name="nmesh-console", daemon=True)
         self._thread.start()
 
+    # -- restarting onto freshly installed code ---------------------------
+    #
+    # Replacing the tree does not change the code already loaded in this
+    # process: an update only takes effect when the node starts again. The
+    # service manager is what starts it, so "restart" here means "exit, and let
+    # it bring us back" — the same path a crash would take, which is why it is
+    # only ever done when something is actually watching.
+
+    _RESTART_DELAY = 1.0        # let the operator's response reach them first
+
+    def _restart_worker(self) -> None:
+        """Stop the node properly, then leave. Never returns."""
+        time.sleep(self._RESTART_DELAY)
+        try:
+            if self._loop is not None and not self._loop.is_closed():
+                # Bounded: a peer refusing to close must not keep the old code
+                # running for ever, which is the thing we are here to end.
+                asyncio.run_coroutine_threadsafe(
+                    self._node.stop(), self._loop).result(timeout=20.0)
+        except Exception:
+            pass                # going down regardless; state writes are bounded
+        os._exit(0)
+
+    def restart_for_update(self) -> bool:
+        """Exit so the service manager starts us again on the new code.
+
+        Returns whether a restart was scheduled. Without a service manager
+        (``NMESH_SERVICE_MANAGED``), exiting would simply stop the node — a
+        worse outcome than running yesterday's code — so we stay up and the
+        console tells the operator to restart it themselves."""
+        if not updater.service_managed():
+            return False
+        threading.Thread(target=self._restart_worker, daemon=True,
+                         name="nmesh-restart").start()
+        return True
+
     def stop(self) -> None:
         if self._server is not None:
             self._server.shutdown()
@@ -1406,7 +1442,12 @@ def _make_handler(console: WebConsole):
                         return
                     result = console._call(node.install_release(publisher),
                                            timeout=400.0)
-                    self._json(200, {"ok": True, **result})
+                    # An operator pressed Install and is watching. The
+                    # unattended path (the release loop) never restarts — that
+                    # is where a bad release could become a restart loop.
+                    restarting = console.restart_for_update()
+                    self._json(200, {"ok": True, **result,
+                                     "restarting": restarting})
                     return
                 if path == "/api/releases/trust":
                     key = data.get("key")
@@ -1554,7 +1595,11 @@ def _make_handler(console: WebConsole):
             except Exception as exc:
                 self._json(500, {"error": f"update failed: {type(exc).__name__}"})
                 return
-            self._json(200, {"ok": True, **result})
+            # The files are in place; this process is still running the old
+            # ones. Answer first, then leave so the manager brings us back on
+            # the new code — otherwise the page's "restarting" is a lie.
+            restarting = console.restart_for_update()
+            self._json(200, {"ok": True, **result, "restarting": restarting})
 
         # -- fleet (remote management) ------------------------------------
         #

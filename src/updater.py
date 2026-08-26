@@ -98,8 +98,11 @@ def install_root() -> str:
 def service_managed() -> bool:
     """True when something will restart us if we exit.
 
-    ``install.sh`` sets this in every unit it writes. Without it, exiting to
-    pick up an update would simply stop the node — so we don't."""
+    ``install.sh`` sets this in every unit it writes, next to ``Restart=always``
+    / ``KeepAlive``. It is what the console checks before leaving to come back
+    on freshly installed code: without it, exiting would simply stop the node —
+    a worse outcome than running the previous version — so it stays up and says
+    so instead."""
     return os.environ.get("NMESH_SERVICE_MANAGED") == "1"
 
 
