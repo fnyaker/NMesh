@@ -61,13 +61,14 @@ receipt for routable types (see the gates).
 | CATALOG_ANNOUNCE | 0x18 | gossip of a **signed release** for the app store catalogue |
 | DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id |
 | ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **routable liveness probe**: reach a node id multi-hop (a remote ping through relays) |
+| RELEASE_ANNOUNCE | 0x1E | gossip of a **signed release of the node's own code** (see [`../Updates/guide`](../Updates/guide)) |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
   peer and `src_id == the authenticated peer`**. Only what is intrinsically
   per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
-  (`PUNCH_*`, `REACH_PROBE*`), and `CATALOG_ANNOUNCE` (re-stamped at every hop
-  during epidemic gossip).
+  (`PUNCH_*`, `REACH_PROBE*`), and the two gossip planes `CATALOG_ANNOUNCE` /
+  `RELEASE_ANNOUNCE` (re-stamped at every hop during epidemic gossip).
 - `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
   towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/
