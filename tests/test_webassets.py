@@ -404,6 +404,45 @@ def test_a_node_on_the_map_has_a_target_a_finger_can_hit():
     assert "circle.hit{fill:transparent" in webassets.STYLE_CSS
 
 
+# ── releases published by nodes ─────────────────────────────────────────────
+# The page must not re-derive who may install what: the node hands each row its
+# own state and the verb to POST.
+
+def test_the_release_rows_render_what_the_node_decided():
+    source = webassets.APP_JS
+    assert "function releaseRowHTML(" in source
+    assert 'entry.action === "install"' in source
+    # No version comparison in JavaScript — that rule lives in Python.
+    assert "is_newer" not in source and "compareVersions" not in source
+
+
+def test_an_unpinned_publisher_is_shown_without_an_install_button():
+    source = webassets.APP_JS
+    assert 'untrusted:"publisher not pinned"' in source
+    assert 'entry.trusted ?' in source
+
+
+def test_installing_a_release_asks_first():
+    """Replacing the node's own code is not a button you press by accident."""
+    source = webassets.APP_JS
+    block = source.split('data-install', 1)[1]
+    assert "confirmAction(" in block
+    assert '"/api/releases/install"' in source and "confirm:true" in source
+
+
+def test_pinning_a_publisher_is_the_only_way_a_key_gets_in():
+    html, source = webassets.INDEX_HTML, webassets.APP_JS
+    assert 'id="pin-key"' in html and 'id="pin-add"' in html
+    assert '"/api/releases/trust"' in source
+    # Trusting and auto-installing are two controls, not one.
+    assert 'id="pin-auto"' in html and '"/api/releases/auto"' in source
+
+
+def test_the_node_offers_its_own_publisher_key_to_copy():
+    assert 'id="publish-key"' in webassets.INDEX_HTML
+    assert 'data.publisher_key' in webassets.APP_JS
+
+
 # ── what belongs to a transport lives in that transport ─────────────────────
 
 def test_transport_facts_left_the_node_card():

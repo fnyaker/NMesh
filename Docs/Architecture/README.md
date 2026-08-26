@@ -10,7 +10,8 @@ other folders of `Docs/`. Here we describe the **internal mechanics**. Two
 guides sit next to security and deserve to be read alongside `security.md`:
 [`Docs/AppAuth/guide`](../AppAuth/guide) (the mesh identity as authentication
 for apps) and [`Docs/Apps/fleet`](../Apps/fleet) (the app that uses it to
-authorise remote execution).
+authorise remote execution). [`Docs/Updates/guide`](../Updates/guide) is the
+third: the mesh identity signing the node's **own code**.
 
 ## Map of the code (`src/`)
 

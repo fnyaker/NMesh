@@ -273,6 +273,10 @@ works on a machine with no internet.
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
+| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, this node's own publisher key |
+| POST    | `/api/releases/publish` | `{notes}` — signs the installed tree and announces it to the mesh |
+| POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
+| POST    | `/api/releases/trust` / `untrust` / `auto` | pin a publisher key, take it back, or let their releases install by themselves |
 | GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
@@ -365,6 +369,15 @@ opens a confirmation that **names the version**, and the request sent repeats
 that same version — a mismatch with what GitHub offers at click time is refused
 rather than installing something the operator has not seen. No update ever
 happens without that click.
+
+**From the mesh** — below it, the same panel lists releases **published by
+nodes**, signed with their own identity, with no web host in the way. You pin
+the publisher keys this node accepts; a release from anyone else is shown and
+relayed but never installed, and pinning a publisher is a separate decision from
+letting them install while nobody is watching. This node's own code can be
+signed and offered from the same page. The full mechanism — the descriptor, the
+gossip, the three gates before anything touches disk:
+[`../Updates/guide`](../Updates/guide).
 
 What is replaced, what is not, and the refusal cases (container, non-writable
 directory): [`../Setup/guide`](../Setup/guide).

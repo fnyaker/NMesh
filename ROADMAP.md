@@ -375,9 +375,28 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   every page keeps `frame-ancestors 'none'`.
 - Docs: `Docs/AppAPI/guide`, `Docs/WebConsole/design`.
 
+### Mesh-native releases (`src/core_release.py`) — done
+- A node publishes **its own code**: a content-addressed package on the DHT plus
+  a descriptor signed with its ML-DSA identity, on a signing domain of its own so
+  it cannot be confused with an app release, a certificate or a handshake.
+- Gossiped as `RELEASE_ANNOUNCE` with the app catalogue's rules — verify, keep
+  only what is newer (signed `ts`), re-gossip only when the view changed, catch a
+  new peer up at the handshake. A release from an unpinned publisher is relayed
+  and displayed, never installed, and the catalogue reserves room so a flood of
+  strangers cannot evict a pinned publisher.
+- Three gates before anything touches disk: the publisher is pinned by the
+  operator (nothing from the network can add a pin), the version is strictly
+  newer than the running one, and every byte verifies against the signed root —
+  including the version the tree itself declares, so a release cannot announce
+  one version and carry another.
+- Installing never restarts: the node keeps running the code it started with, so
+  one bad release cannot become a restart loop. Automatic installation is opt-in
+  per publisher.
+- GitHub remains as the first-run route only. Docs: `Docs/Updates/guide`.
+
 ### Long term
-- **Signing releases** (ML-DSA) and verifying the signature before applying an
-  update, to get out of trusting GitHub alone.
+- **Signing GitHub releases too** (or dropping that route once a node can always
+  reach a publisher it trusts on the mesh).
 - A trust score per node + revocation on betrayal.
 - Persisting the trust/cert table on disk.
 - meshnet-daemon: embeds the library, listens on a socket, multi-client.

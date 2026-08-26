@@ -321,9 +321,15 @@ Explicit refusals (`updatable()`), rather than breaking an installation:
 - the installation directory is not writable;
 - the node runs from a container image → update the image, not the tree.
 
-The trust model, said plainly: trust rests today on TLS, on GitHub, and on the
-people who publish the releases. **There is no release signature verified by the
-node yet** — a known limitation, documented in `src/updater.py`.
+The trust model, said plainly: this path trusts TLS, GitHub, and whoever can
+publish a release in the pinned repository. There is no signature over a GitHub
+release that the node verifies.
+
+**That is why the mesh path exists.** A node can also publish its own code as a
+package signed with its ML-DSA identity, and a node installs such a release only
+from a publisher key its operator pinned by hand — no web host in the trusted
+set at all. See [`../Updates/guide`](../Updates/guide). The GitHub route remains
+how a node with no peers yet gets its first version.
 
 The current version: `src/version.py` (a test binds that file to
 `pyproject.toml`, so the two cannot diverge).

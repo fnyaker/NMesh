@@ -412,6 +412,67 @@ INDEX_HTML = """<!doctype html>
             <pre id="update-notes" class="block" hidden></pre>
           </div>
         </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>From the mesh</h2>
+            <div class="sub">Releases published by nodes, signed — no web host in the way</div></div></div>
+          <div class="card-body stack">
+            <p class="muted small">A node publishes its own code, signed with its identity. You
+              decide whose signature this node accepts: nothing arriving from the network can add
+              a publisher, and a release from anyone you have not pinned is shown but never
+              installed.</p>
+            <div class="table-wrap">
+              <table><thead><tr><th>Version</th><th>Publisher</th><th>Published</th><th></th></tr></thead>
+                <tbody id="release-rows"></tbody></table>
+            </div>
+            <p id="release-empty" class="empty" hidden>No node has announced a release yet.</p>
+            <p id="release-status" class="msg"></p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Publishers you accept</h2>
+            <div class="sub">Whose signature may replace this node's code</div></div></div>
+          <div class="card-body stack">
+            <div class="table-wrap">
+              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th><th></th></tr></thead>
+                <tbody id="publisher-rows"></tbody></table>
+            </div>
+            <p id="publisher-empty" class="empty" hidden>No publisher pinned — this node installs
+              nothing from the mesh.</p>
+            <div class="form-grid">
+              <label class="field"><span>Publisher key</span>
+                <input id="pin-key" placeholder="the public key they gave you" autocomplete="off">
+                <span class="hint">Get it from them over a channel you trust. Anyone who can change
+                  it can ship you code.</span></label>
+              <label class="field"><span>Name</span>
+                <input id="pin-name" placeholder="who this is" autocomplete="off"></label>
+            </div>
+            <label class="check"><input id="pin-auto" type="checkbox">
+              <span>Install their releases automatically</span></label>
+            <p class="muted small">Automatic installs never restart the node: it keeps running the
+              code it started with until you restart it. Trusting a publisher and letting them
+              install while nobody is watching are two separate decisions.</p>
+            <div class="btn-row"><button id="pin-add" class="primary">Pin publisher</button></div>
+            <p id="pin-status" class="msg"></p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Publish this node's code</h2>
+            <div class="sub">Sign what is installed here and offer it to the mesh</div></div></div>
+          <div class="card-body stack">
+            <p class="muted small">Everyone who pinned <strong>this node's</strong> key can then
+              fetch it. The version comes from the tree itself, so a release cannot announce one
+              version and carry another.</p>
+            <label class="field"><span>Release notes</span>
+              <textarea id="publish-notes" rows="3" placeholder="what changed"></textarea></label>
+            <div class="kv"><div>This node's publisher key</div>
+              <div><code id="publish-key" class="inline"></code></div></div>
+            <div class="btn-row"><button id="publish-go">Publish</button></div>
+            <p id="publish-status" class="msg"></p>
+          </div>
+        </article>
       </div>
 
       <div data-sub="security" class="stack" hidden>
@@ -735,6 +796,12 @@ CONSOLE_PAGE_CSS = """
 .app-tile h3{flex:1 1 auto;min-width:0}
 .app-tile p{font-size:var(--fs-sm);color:var(--text-muted);flex:1 1 auto}
 .app-tile .btn-row{margin-top:auto}
+/* A release row stays one line high: the notes are a hint, not the row. The
+   wrapper scrolls on a narrow screen rather than squeezing the version into a
+   column one character wide. */
+#release-rows td:first-child strong{white-space:nowrap}
+#release-rows .tiny{max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#release-rows code,#publisher-rows code{white-space:nowrap}
 """
 
 
@@ -798,6 +865,7 @@ function onRoute(section, sub){
   // a stale form would offer to save values they no longer hold.
   if(section === "settings" && sub === "config") loadConfig();
   if(section === "settings" && sub === "diagnostics") loadTrace();
+  if(section === "settings" && sub === "updates") refreshReleases();
 }
 async function tick(){
   if(TICKING) return;
@@ -810,6 +878,7 @@ async function tick(){
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap();
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
+    if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
   }catch(_){
     railState("danger", "Console unreachable");
   }finally{ TICKING = false; }
@@ -2083,6 +2152,115 @@ async function applyUpdate(event){
 }
 $("update-check").addEventListener("click", checkForUpdates);
 $("update-apply").addEventListener("click", applyUpdate);
+
+// ---- releases from the mesh ------------------------------------------------
+// The node decides everything worth deciding — whose signature it accepts,
+// which version is newer, whether this install can be updated at all. Each row
+// arrives with its own state and the verb to POST, so nothing here re-derives
+// a rule that lives in Python.
+function releaseRowHTML(entry){
+  const words = {available:"", running:"running now", older:"older than what you run",
+                 untrusted:"publisher not pinned"};
+  const action = entry.action === "install"
+    ? '<button class="sm primary" data-install="' + esc(entry.publisher_id) + '">Install</button>'
+    : '<span class="muted small">' + esc(words[entry.state] || entry.state) + "</span>";
+  return "<tr><td><strong>" + esc(entry.version) + "</strong>" +
+    (entry.notes ? '<div class="tiny muted">' + esc(entry.notes.slice(0, 160)) + "</div>" : "") +
+    "</td><td><code>" + esc(shortId(entry.publisher_id)) + "</code>" +
+    (entry.trusted ? ' <span class="badge ok">pinned</span>'
+                   : ' <span class="badge">unpinned</span>') +
+    "</td><td>" + fmtAgo(Date.now() / 1000 - entry.ts) + "</td><td>" + action + "</td></tr>";
+}
+function publisherRowHTML(entry){
+  return '<tr><td>' + (entry.name ? esc(entry.name) : '<span class="muted">unnamed</span>') +
+    "</td><td><code>" + esc(shortId(entry.id)) + "</code></td><td>" +
+    '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
+    (entry.auto ? " checked" : "") + '><span class="sr-only">Install automatically</span></label>' +
+    '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
+}
+async function refreshReleases(){
+  try{
+    const {ok, data} = await apiJson("/api/releases");
+    if(!ok) return;
+    setHTML("release-rows", data.releases.map(releaseRowHTML).join(""));
+    $("release-empty").hidden = data.releases.length > 0;
+    setHTML("publisher-rows", data.publishers.map(publisherRowHTML).join(""));
+    $("publisher-empty").hidden = data.publishers.length > 0;
+    $("publish-key").textContent = data.publisher_key || "";
+    if(!data.updatable && data.reason)
+      setMessage("release-status", "This install cannot update itself: " + data.reason, true);
+    const last = data.log[data.log.length - 1];
+    if(last && last.outcome === "installed")
+      setMessage("release-status", "Installed " + last.version +
+        " — restart the node to run it.");
+  }catch(_){}
+}
+$("release-rows").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-install]");
+  if(!button) return;
+  const row = button.closest("tr");
+  const version = row ? row.querySelector("strong").textContent : "";
+  const agreed = await confirmAction({
+    title:"Install " + version + "?",
+    body:'<p class="muted small">The node fetches this release from the mesh, checks every byte ' +
+      "against the signature you pinned, and replaces its own files. It keeps running the code " +
+      "it started with until you restart it; the previous files are kept.</p>",
+    confirmLabel:"Install " + version});
+  if(!agreed) return;
+  await withBusy(button, async () => {
+    setMessage("release-status", "Fetching and verifying…");
+    const {ok, data} = await apiJson("/api/releases/install", "POST",
+      {publisher_id:button.dataset.install, confirm:true});
+    setMessage("release-status", ok
+      ? "Installed " + data.version + ". Restart the node to run it (previous files kept)."
+      : (data.error || "Install failed"), !ok);
+    await refreshReleases();
+  });
+});
+$("publisher-rows").addEventListener("click", async (event) => {
+  const unpin = event.target.closest("[data-unpin]");
+  if(!unpin) return;
+  const agreed = await confirmAction({
+    title:"Unpin this publisher?",
+    body:'<p class="muted small">Their releases stay visible, but this node stops accepting ' +
+      "code from them.</p>", confirmLabel:"Unpin", danger:true});
+  if(!agreed) return;
+  await apiJson("/api/releases/untrust", "POST", {publisher_id:unpin.dataset.unpin});
+  await refreshReleases();
+});
+$("publisher-rows").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-auto]");
+  if(!box) return;
+  const {ok} = await apiJson("/api/releases/auto", "POST",
+    {publisher_id:box.dataset.auto, auto:box.checked});
+  if(!ok) box.checked = !box.checked;
+  else toast(box.checked ? "Their releases will install automatically"
+                         : "Automatic installs off for this publisher");
+});
+$("pin-add").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const key = $("pin-key").value.trim();
+  if(!key){ setMessage("pin-status", "Paste the publisher's key first", true); return; }
+  const {ok, data} = await apiJson("/api/releases/trust", "POST",
+    {key, name:$("pin-name").value.trim(), auto:$("pin-auto").checked});
+  setMessage("pin-status", ok ? "Pinned." : (data.error || "Could not pin that key"), !ok);
+  if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = false; }
+  await refreshReleases();
+}));
+$("publish-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const agreed = await confirmAction({
+    title:"Publish this node's code?",
+    body:'<p class="muted small">The tree installed here is signed with this node\'s identity and ' +
+      "offered to the mesh. Anyone who pinned this key can install it.</p>",
+    confirmLabel:"Publish"});
+  if(!agreed) return;
+  setMessage("publish-status", "Reading, hashing and signing…");
+  const {ok, data} = await apiJson("/api/releases/publish", "POST",
+    {notes:$("publish-notes").value});
+  setMessage("publish-status", ok
+    ? "Published " + data.version + " (" + data.files + " files, " + fmtBytes(data.bytes) + ")."
+    : (data.error || "Publish failed"), !ok);
+  if(ok) await refreshReleases();
+}));
 
 // ---- configuration file ----------------------------------------------------
 // The form is built from what the node reports, never from a list hard-coded

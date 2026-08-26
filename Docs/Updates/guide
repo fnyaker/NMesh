@@ -1,0 +1,219 @@
+# Updates — releases published by nodes, signed
+
+A node publishes **its own code** as a signed, content-addressed package; other
+nodes hear about it over the mesh and, if their operator has pinned that
+publisher's key, fetch it, verify it and install it — optionally on their own.
+
+Code: [`src/core_release.py`](../../src/core_release.py) (the format, the pins,
+the catalogue), the release section of [`src/node.py`](../../src/node.py)
+(publishing, gossip, installing), [`src/updater.py`](../../src/updater.py) (the
+tree swap, shared with the GitHub path).
+
+## Why
+
+Downloading an update from a web host makes one company's account the root of
+trust for every node on the mesh. A mesh that carries sensitive traffic through
+hostile territory and then takes its own code from a single web service has a
+front door it does not control.
+
+So: no host in the way. The bytes travel the same DHT that already carries app
+packages, and the only thing that says "this is a real release" is a signature
+from a key the operator chose to accept.
+
+The GitHub path is still there ([`../Setup/guide`](../Setup/guide)) — it is how
+a node with no peers yet gets its first version. It is no longer the only way.
+
+## The three separate things
+
+They are deliberately not merged, and each is worth naming:
+
+| | What it proves | What it does not |
+|---|---|---|
+| **the content** (hash) | these are exactly the bytes the root names | who made them |
+| **the descriptor** (ML-DSA signature) | *this publisher* published *that content*, at *that time* | that you want their code |
+| **the pin** (an operator's decision) | this node accepts that publisher | anything about the content |
+
+Content addressing means a relay can neither substitute nor corrupt a package:
+you ask for a key, and check that what comes back hashes to it. The signature is
+what makes "who published this" a question with an answer. And the pin is the
+only one of the three that cannot arrive over the network.
+
+## The descriptor
+
+```
+{v, version, root_key, root_sha256, publisher, ts, notes, sig}
+```
+
+- `root_key` / `root_sha256` — the content root of the package (chunks +
+  manifest, exactly as in [`../AppSharing/guide`](../AppSharing/guide)).
+- `publisher` — the publisher's ML-DSA public key. The **publisher id** is
+  `sha256(key)[:20]`, derived and never carried: an id that does not follow from
+  the key presented is not a mismatch to resolve, it is a forgery.
+- `ts` — the signed publish time; the catalogue keeps the highest per publisher.
+- `sig` — ML-DSA-65 over `nmesh-core-release-v1 ‖ <the fields above>`.
+
+**The signing domain is its own.** The same identity key signs certificates,
+handshakes, app releases, directory claims and app-auth assertions; a shared
+domain would let one be replayed as another. An app release descriptor is not a
+core release and will not parse as one — there is a test for exactly that.
+
+### The version cannot lie
+
+The `version` in the descriptor is checked against `__version__` in
+`src/version.py` **inside the package** — when the release is built, and again
+after it is fetched, before anything touches disk. A release that announces
+0.9.6 and carries something else is refused rather than unpacked. Without that
+check the signed version would be decoration.
+
+## Publishing
+
+Console → **Settings → Updates → Publish this node's code**, or:
+
+```python
+info = await node.publish_release(notes="what changed")
+# {"version", "release_id", "publisher_id", "files", "bytes"}
+```
+
+The tree that is installed here is read (`src`, `scripts`, `start.sh`,
+`install.sh`, `requirements.txt`, `pyproject.toml`, `Docs`, `docker`,
+`README.md`, `CLAUDE.md` — the same set the updater swaps in), chunked onto the
+DHT, and signed. What is **not** carried: the node's state, its virtualenv, the
+liboqs build, `__pycache__`, and **symlinks** — a release is regular files, and
+a link is a way of pointing the extraction somewhere it was never meant to
+write.
+
+The publisher key to hand out is shown on that same card. Give it to people over
+a channel you trust: **anyone who can change that string on its way to them can
+ship them code.**
+
+## Pinning a publisher
+
+Console → **Settings → Updates → Publishers you accept**. Paste the key, name
+it, and decide separately whether their releases install automatically.
+
+Pinning is the only way a key enters that list — no packet, no peer, no app can
+add one. The file (`<data>/publishers.json`, mode 0600) holds public keys and
+two booleans; a corrupt or doctored file yields **no** trusted publisher rather
+than a guess. An entry whose id does not follow from its key is dropped, so a
+tampered file cannot slip a publisher in under a familiar id.
+
+Failing closed there costs an operator one re-pin. Failing open costs them the
+machine.
+
+## What the mesh offers
+
+`RELEASE_ANNOUNCE` (0x1E) carries a descriptor between **direct authenticated**
+peers, re-stamped at each hop, exactly like the app catalogue's gossip
+([`../AppStore/guide`](../AppStore/guide)):
+
+1. verify the signature — reject by default;
+2. keep it only if the publisher is unknown to us or the `ts` is strictly higher
+   (anti-rollback: replaying an old signed release cannot walk a node back);
+3. re-gossip **only when our view changed**, which is what makes the epidemic
+   terminate.
+
+A freshly authenticated peer is caught up on what we hold, so a node that joins
+learns about releases published before it arrived.
+
+**A release from a publisher nobody here pinned is still carried and relayed.**
+Refusing to relay what we would not install ourselves would break discovery for
+every other operator. It is shown flagged `unpinned`, and offers no action.
+
+The catalogue is bounded (one entry per publisher, `MAX_CATALOG`) and reserves
+room for pinned publishers: when it is full, a trusted newcomer evicts the
+oldest untrusted entry and an untrusted newcomer is simply refused. A flood of
+strangers cannot push out the publisher you actually rely on.
+
+Announces are rate-limited per ingress link (`_RELEASE_RATE_MAX` per window):
+verifying an ML-DSA signature is work, and a peer does not get to ask for it
+without end.
+
+## Installing
+
+Three gates, in this order — the cheap ones first:
+
+1. **the publisher is pinned** here;
+2. **the version is strictly newer** than the one running (`is_newer`), so a
+   signed older release is not an install path;
+3. **every byte verifies** against the signed root, and the tree's own version
+   matches what the descriptor announced.
+
+Only then does anything touch disk, and even then the previous tree is moved
+aside and restored if the swap fails part-way — a half-replaced install is the
+one outcome worth ruling out. Paths are checked one last time on the way in: a
+package containing a path that reaches outside its own tree is **refused, not
+sanitised**.
+
+The node's state, its virtualenv and anything an operator left in the install
+directory are never touched.
+
+### Installing is not restarting
+
+An install puts the new code in place; the node keeps running the code it
+started with until something restarts it. That is deliberate, and it is the same
+reason automatic installs are safe to enable: a node that swaps its own code and
+immediately exits turns one bad release into a restart loop nobody is present to
+break. The console says "installed — restart the node to run it".
+
+### Automatic installs
+
+Per publisher, off by default. A pass runs every `_RELEASE_TICK` seconds,
+installs at most one release, and remembers the release ids it has already tried
+so a failing one is not retried in a loop. Failures are recorded (visible in the
+console) rather than raised: this loop dying would silently stop the updates an
+operator asked for.
+
+## Console API
+
+| Method | Route | Role |
+|---|---|---|
+| GET | `/api/releases` | what the mesh offers, who is pinned, this node's own publisher key, and whether this install can update itself |
+| POST | `/api/releases/publish` | `{notes}` → sign the installed tree and announce it |
+| POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
+| POST | `/api/releases/trust` | `{key, name?, auto?}` → pin a publisher |
+| POST | `/api/releases/untrust` | `{publisher_id}` |
+| POST | `/api/releases/auto` | `{publisher_id, auto}` |
+
+Every route sits behind the console session, and every decision is made in the
+node: each release row arrives with its own `state` (`available` / `running` /
+`older` / `untrusted`) and the `action` to POST, so the page never re-derives a
+rule that lives in Python.
+
+## Bounds
+
+| Constant | Value | Why |
+|---|---|---|
+| `MAX_TREE_BYTES` | 64 MB | a release is source code, not a disk image |
+| `MAX_FILES` | 8192 | ditto |
+| `MAX_NOTES_LEN` | 4000 | notes are shown in a page |
+| `MAX_PUBLISHERS` | 32 | pinned keys an operator may hold |
+| `MAX_CATALOG` | 64 | publishers tracked, trusted-first |
+| `_RELEASE_RATE_MAX` | 32 / 10 s | signature verifications one link may ask for |
+| `_RELEASE_TRIED_MAX` | 32 | release ids remembered as already attempted |
+
+## What this does not solve
+
+- **A compromised publisher.** Pinning a key says you accept their code; if
+  their machine is taken, so is yours. Pin few keys, and pin people you would
+  already let run commands on the box.
+- **A compromised local machine.** If the adversary owns the node, they own the
+  identity key that signs and the file that decides who is trusted.
+  [`todo/peer-integrity.md`](../../todo/peer-integrity.md) covers that wider
+  problem honestly, including why pure software attestation does not close it.
+- **Rollback to a known-good version.** The previous tree is kept in
+  `.nmesh-previous`, so recovery is a move on the machine itself, not a mesh
+  operation.
+
+## Tests
+
+- [`tests/test_core_release.py`](../../tests/test_core_release.py) — the format
+  and the pins: forged and lifted signatures, an app release replayed as a core
+  release, a version that lies about its tree, a tampered trust file, the
+  trusted-first eviction, hostile blobs and random bytes.
+- [`tests/test_release_mesh.py`](../../tests/test_release_mesh.py) — publishing,
+  gossip that terminates, relaying what we do not trust, anti-rollback, the
+  three install gates, and the automatic pass.
+- [`tests/test_updater.py`](../../tests/test_updater.py) — the swap itself:
+  paths that reach outside, a failed swap restoring the previous tree, state and
+  virtualenv untouched.
+- [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes.
