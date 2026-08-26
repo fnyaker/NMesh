@@ -443,6 +443,19 @@ def test_the_node_offers_its_own_publisher_key_to_copy():
     assert 'data.publisher_key' in webassets.APP_JS
 
 
+def test_no_release_action_can_end_mid_sentence():
+    """A status left on "Reading, hashing and signing…" is indistinguishable
+    from a node that died. Every one of these ends in a message, including when
+    the call itself fails — a restart cuts the connection mid-answer, so this is
+    a path that really happens."""
+    source = webassets.APP_JS
+    for route in ('"/api/releases/publish"', '"/api/releases/install"',
+                  '"/api/releases/trust"'):
+        call = source.index(route)
+        window = source[call - 400:call + 700]
+        assert "catch(" in window, route
+
+
 # ── what belongs to a transport lives in that transport ─────────────────────
 
 def test_transport_facts_left_the_node_card():

@@ -152,6 +152,7 @@ _RELEASE_RATE_WINDOW = 10.0     # seconds
 _RELEASE_RATE_MAX    = 32       # release announces one link may push per window
 _RELEASE_TICK        = 300.0    # seconds between auto-install passes
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
+_PUBLISH_CONCURRENCY = 8        # DHT stores in flight while publishing
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
@@ -4675,6 +4676,25 @@ class MeshNode:
         )
         return key
 
+    async def dht_put_many(self, values: list[bytes]) -> list[bytes]:
+        """Store many values, a bounded number of lookups at a time.
+
+        A release is ~120 values, and :meth:`dht_put` is a full Kademlia lookup
+        each: one after another, that is a hundred round trips with an operator
+        watching a spinner. Bounded rather than all at once, because "publish
+        everything simultaneously" is how a publish becomes a flood.
+
+        Replication is **best effort**: every value is in our own store before
+        its lookup even starts, so a peer we cannot reach costs reach, never the
+        publish. Whoever fetches the release finds the chunks here."""
+        keys: list[bytes] = []
+        for start in range(0, len(values), _PUBLISH_CONCURRENCY):
+            batch = values[start:start + _PUBLISH_CONCURRENCY]
+            await asyncio.gather(*(self.dht_put(value) for value in batch),
+                                 return_exceptions=True)
+            keys.extend(_content_key(value) for value in batch)
+        return keys
+
     async def dht_get(self, key: bytes) -> bytes | None:
         """Fetch a value by key, verifying it hashes to the key. Caches locally."""
         local = self._dht_store.get(key)
@@ -4947,20 +4967,21 @@ class MeshNode:
         version = _core_version_of(files)
         _core_check_tree(files, version)          # what we sign is what we carry
         _, manifest, chunks = _app_build("nmesh", version, files)
-        for value in chunks.values():
-            await self.dht_put(value)
+        await self.dht_put_many(list(chunks.values()))
         root_bytes, manifest_chunks = _app_pack_root(manifest)
         if len(root_bytes) > MAX_VALUE:
             raise ReleaseError("this tree has too many files to publish")
-        for value in manifest_chunks.values():
-            await self.dht_put(value)
-        root_key = await self.dht_put(root_bytes)
+        await self.dht_put_many(list(manifest_chunks.values()))
+        # Through the same best-effort path as the chunks: a mesh that answers
+        # nothing must cost reach, not the publish. Everything is in our own
+        # store, and we are the one serving it.
+        root_key = (await self.dht_put_many([root_bytes]))[0]
         release_bytes = _core_build_release(
             root_key, hashlib.sha256(root_bytes).hexdigest(), version,
             self._identity.dsa_public_key, self._identity.sign, ts, notes)
         if len(release_bytes) > MAX_VALUE:
             raise ReleaseError("release descriptor too large")
-        release_id = await self.dht_put(release_bytes)
+        release_id = (await self.dht_put_many([release_bytes]))[0]
         if self._releases.offer(release_bytes, self._identity.verify,
                                 self._trusts_publisher):
             await self._gossip_release(release_bytes)
