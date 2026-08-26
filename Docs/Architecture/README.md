@@ -47,7 +47,8 @@ authorise remote execution).
 | `console_auth.py` | The console credential: scrypt hashing + salt, atomic 0600 write, constant-time comparison, bounds on the password. Shared by the console and by the installer's reset — one implementation. |
 | `trace.py` | **Protocol trace**: a bounded ring of packet events (type, size, TTL, ids) + totals per message type. Never a payload. Off by default, bounded in memory *and* in time, stops on its own. See [`../WebConsole/guide`](../WebConsole/guide). |
 | `config.py` | The node's configuration file (`nmesh.conf`): bounded, defensive parsing, per-setting validation, commented rendering, atomic 0600 write. Precedence command line > file > default. See [`../Setup/guide`](../Setup/guide). |
-| `version.py` / `updater.py` | The current version and tag comparison; checking GitHub releases and replacing the installed tree — **never without the operator's confirmation**, the node's state is untouched, the previous tree is kept and restored on failure. See [`../Setup/guide`](../Setup/guide). |
+| `version.py` / `updater.py` | The current version and tag comparison; obtaining a release (from GitHub, or from the mesh) and replacing the installed tree — the node's state is untouched, the previous tree is kept and restored on failure. See [`../Setup/guide`](../Setup/guide). |
+| `core_release.py` | **Mesh-native releases**: a node publishes the node's own code as a content-addressed package plus an ML-DSA-signed descriptor, gossiped like an app release. An operator pins the publisher keys they accept; nothing arriving from the network can add one. See [`../Updates/guide`](../Updates/guide). |
 
 ## The documents
 
