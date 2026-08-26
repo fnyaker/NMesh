@@ -1,136 +1,137 @@
-# Connecteur de données — brancher une app sur le mesh
+# The data connector — plugging an app into the mesh
 
-Le connecteur expose un socket local par lequel une application (sur le même
-hôte, ou un conteneur Docker qui monte le socket) envoie et reçoit des messages
-**de bout en bout** sur le mesh. C'est le **plan de données** (distinct de la
-console web, qui est le plan de *gestion*).
+The connector exposes a local socket through which an application (on the same
+host, or a Docker container mounting the socket) sends and receives **end-to-end**
+messages over the mesh. It is the **data plane** (distinct from the web console,
+which is the *management* plane).
 
-Le nœud devient ainsi le pont réseau de l'app : une app de chat, une supervision,
-n'importe quoi qui veut parler à d'autres nœuds du mesh.
+The node thus becomes the app's network bridge: a chat app, a monitoring agent,
+anything that wants to talk to other nodes on the mesh.
 
-## Lancer
+## Running it
 
 ```bash
 python scripts/console_demo.py --connector-port 8790
-# -> Data connector: 127.0.0.1:8790   token=<jeton généré>
+# -> Data connector: 127.0.0.1:8790   token=<generated token>
 ```
 
-Ou dans votre code :
+Or in your own code:
 
 ```python
 from src.data_connector import DataConnector
-conn = DataConnector(node, host="127.0.0.1", port=8790)   # ou unix_path="/run/nmesh.sock"
+conn = DataConnector(node, host="127.0.0.1", port=8790)   # or unix_path="/run/nmesh.sock"
 await conn.start()
 print(conn.token)
 ```
 
-## Sections d'application (app_id)
+## Application sections (app_id)
 
-Plusieurs apps peuvent partager un même nœud sans lire le trafic les unes des
-autres. Chaque message applicatif circule dans une **section** nommée par un
-**app_id** (`APP_ID_LEN` = 8 octets, voir `src/app_channel.py`). À l'intérieur
-de la charge utile DATA chiffrée E2E :
+Several apps can share one node without reading each other's traffic. Every
+application message travels in a **section** named by an **app_id**
+(`APP_ID_LEN` = 8 bytes, see `src/app_channel.py`). Inside the E2E-encrypted
+DATA payload:
 
 ```
-payload DATA E2E  =  app_id(8)  ‖  payload_app
+E2E DATA payload  =  app_id(8)  ‖  app_payload
 ```
 
-Le connecteur est le **seul** endroit qui pose et retire ce cadre : à la
-connexion, une app **déclare son app_id** ; le connecteur préfixe ses envois et
-ne lui livre **que** les messages de sa section (démultiplexage). Un message
-sans en-tête de section (trop court) est **jeté**. Le trafic de gestion
-(PING/PONG, routage, DHT, handshakes) n'emprunte jamais le plan DATA : il est
-donc structurellement hors de toute section.
+The connector is the **only** place that puts this frame on and takes it off: on
+connecting, an app **declares its app_id**; the connector prefixes what it sends
+and delivers it **only** the messages of its own section (demultiplexing). A
+message with no section header (too short) is **dropped**. Management traffic
+(PING/PONG, routing, DHT, handshakes) never uses the DATA plane: it is therefore
+structurally outside any section.
 
-Deux familles d'app_id : les apps **intégrées** (livrées avec le nœud) utilisent
-un id réservé dérivé du nom (`builtin_id`, ex. `CHAT_APP_ID`) et ne sont pas
-signées ; les apps **déployées** sont liées à la clé ML-DSA de leur auteur
-(`deployed_id`) et leur package est signé (voir `Docs/AppSharing/guide`).
+Two families of app_id: **built-in** apps (shipped with the node) use a reserved
+id derived from the name (`builtin_id`, e.g. `CHAT_APP_ID`) and are not signed;
+**deployed** apps are bound to their author's ML-DSA key (`deployed_id`) and
+their package is signed (see `Docs/AppSharing/guide`).
 
-## Protocole
+## Protocol
 
-Trames préfixées par une longueur (`uint32` big-endian) couvrant `type(1) | corps`.
+Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 
-| Sens | Type | Corps | Effet |
+| Direction | Type | Body | Effect |
 |------|------|-------|-------|
-| →    | `AUTH` (0x01)       | `app_id(8) + jeton (utf-8)` | authentifie + déclare la section |
-| ←    | `AUTH_OK` (0x81)    | —                           | authentifié |
-| ←    | `AUTH_FAIL` (0x82)  | —                           | jeton/section invalide, fermeture |
-| →    | `SEND` (0x02)       | `id_cible(20) + payload`    | `send_data(cible, app_id ‖ payload)` |
-| →    | `WHOAMI` (0x03)     | —                           | demande notre id de nœud |
-| ←    | `WHOAMI` (0x84)     | `id_noeud(20)`              | réponse |
-| ←    | `RECV` (0x83)       | `id_source(20) + payload`   | message entrant **de cette section** |
-| →    | `STORE_GET` (0x04)  | `clef(utf-8)`               | lit le tiroir local de cette section |
-| →    | `STORE_PUT` (0x05)  | `keylen(2) + clef + valeur` | écrit dans le tiroir |
-| →    | `STORE_DEL` (0x06)  | `clef(utf-8)`               | supprime une clé |
-| →    | `STORE_LIST` (0x07) | —                           | liste les clés du tiroir |
-| ←    | `STORE_VALUE` (0x85)| `present(1) + valeur`       | réponse `STORE_GET` |
-| ←    | `STORE_OK` (0x86)   | `ok(1)`                     | réponse `STORE_PUT` / `STORE_DEL` |
-| ←    | `STORE_KEYS` (0x87) | tableau JSON de clés        | réponse `STORE_LIST` |
-| →    | `APP_DHT_PUT` (0x08)| `flag(1) + keylen(2) + enc_key + contenu` | publie sur la DHT de l'app |
-| →    | `APP_DHT_GET` (0x09)| `keylen(2) + dec_key + clef_contenu(20)`  | récupère une entrée |
-| ←    | `APP_DHT_KEY` (0x88)| `clef_contenu(20)` ou vide  | réponse `APP_DHT_PUT` (vide = refus) |
-| ←    | `APP_DHT_VALUE`(0x89)| `present(1) + contenu`     | réponse `APP_DHT_GET` |
-| →    | `PSEUDO_PUB` (0x0A)  | `pseudo(utf-8)`             | publie mon pseudo→node id (annuaire) |
-| →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | cherche des node ids par pseudo |
-| ←    | `PSEUDO_KEY` (0x8A)  | `clé_annuaire(20)` ou vide  | réponse `PSEUDO_PUB` |
-| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | réponse `PSEUDO_LOOKUP` |
-| →    | `AUTH_ASSERT` (0x0C) | `audience(20) + ctx(32) + ttl(4) + purpose(utf-8)` | émet une assertion signée en notre nom |
-| →    | `AUTH_VERIFY` (0x0D) | `flags(1) + ctx(32) + plen(2) + purpose + assertion` | vérifie l'assertion d'un pair |
-| ←    | `AUTH_ASSERTION`(0x8C)| l'assertion, ou vide en cas de refus | réponse `AUTH_ASSERT` |
-| ←    | `AUTH_PRINCIPAL`(0x8D)| JSON principal, ou `null`  | réponse `AUTH_VERIFY` |
+| →    | `AUTH` (0x01)       | `app_id(8) + token (utf-8)` | authenticates + declares the section |
+| ←    | `AUTH_OK` (0x81)    | —                           | authenticated |
+| ←    | `AUTH_FAIL` (0x82)  | —                           | invalid token/section, connection closed |
+| →    | `SEND` (0x02)       | `target_id(20) + payload`   | `send_data(target, app_id ‖ payload)` |
+| →    | `WHOAMI` (0x03)     | —                           | asks for our node id |
+| ←    | `WHOAMI` (0x84)     | `node_id(20)`               | the answer |
+| ←    | `RECV` (0x83)       | `source_id(20) + payload`   | an incoming message **from this section** |
+| →    | `STORE_GET` (0x04)  | `key(utf-8)`                | reads this section's local drawer |
+| →    | `STORE_PUT` (0x05)  | `keylen(2) + key + value`   | writes to the drawer |
+| →    | `STORE_DEL` (0x06)  | `key(utf-8)`                | deletes a key |
+| →    | `STORE_LIST` (0x07) | —                           | lists the drawer's keys |
+| ←    | `STORE_VALUE` (0x85)| `present(1) + value`        | the `STORE_GET` answer |
+| ←    | `STORE_OK` (0x86)   | `ok(1)`                     | the `STORE_PUT` / `STORE_DEL` answer |
+| ←    | `STORE_KEYS` (0x87) | a JSON array of keys        | the `STORE_LIST` answer |
+| →    | `APP_DHT_PUT` (0x08)| `flag(1) + keylen(2) + enc_key + content` | publishes on the app's DHT |
+| →    | `APP_DHT_GET` (0x09)| `keylen(2) + dec_key + content_key(20)`   | fetches an entry |
+| ←    | `APP_DHT_KEY` (0x88)| `content_key(20)` or empty  | the `APP_DHT_PUT` answer (empty = refused) |
+| ←    | `APP_DHT_VALUE`(0x89)| `present(1) + content`     | the `APP_DHT_GET` answer |
+| →    | `PSEUDO_PUB` (0x0A)  | `pseudo(utf-8)`             | publishes my pseudo→node id (directory) |
+| →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | looks up node ids by pseudo |
+| ←    | `PSEUDO_KEY` (0x8A)  | `directory_key(20)` or empty| the `PSEUDO_PUB` answer |
+| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | the `PSEUDO_LOOKUP` answer |
+| →    | `AUTH_ASSERT` (0x0C) | `audience(20) + ctx(32) + ttl(4) + purpose(utf-8)` | issues a signed assertion in our name |
+| →    | `AUTH_VERIFY` (0x0D) | `flags(1) + ctx(32) + plen(2) + purpose + assertion` | verifies a peer's assertion |
+| ←    | `AUTH_ASSERTION`(0x8C)| the assertion, or empty if refused | the `AUTH_ASSERT` answer |
+| ←    | `AUTH_PRINCIPAL`(0x8D)| the principal as JSON, or `null` | the `AUTH_VERIFY` answer |
 
-La première trame **doit** être `AUTH` (avec l'app_id). Ensuite l'app envoie des
-`SEND` et reçoit des `RECV` de sa section au fil de l'eau. Côté client,
-`ConnectorClient(host, port, token, app_id)` fixe la section ; `from_env` lit
-`NMESH_APP_ID` (hex) ou retombe sur la section générique.
+The first frame **must** be `AUTH` (with the app_id). After that the app sends
+`SEND` frames and receives `RECV` frames from its section as they come. On the
+client side, `ConnectorClient(host, port, token, app_id)` fixes the section;
+`from_env` reads `NMESH_APP_ID` (hex) or falls back to the generic section.
 
-Les trames `STORE_*` pilotent le **store local par app** (« tiroir ») : un
-magasin clé→valeur chiffré, isolé par section. L'`app_id` **n'apparaît pas** dans
-la trame — le nœud le déduit de la session `AUTH`, donc une app ne touche jamais
-le tiroir d'une autre. Détails, bornes et robustesse : `Docs/AppStorage/guide`.
-Côté client : `store_put` / `store_get` / `store_delete` / `store_list`.
+The `STORE_*` frames drive the **per-app local store** (the "drawer"): an
+encrypted key→value store, isolated per section. The `app_id` **does not appear**
+in the frame — the node deduces it from the `AUTH` session, so an app never
+touches another's drawer. Details, bounds and solidity: `Docs/AppStorage/guide`.
+On the client side: `store_put` / `store_get` / `store_delete` / `store_list`.
 
-Les trames `APP_DHT_*` pilotent la **DHT par-app** (publique ou privée) : l'app
-donne le contenu et, pour le privé, la clé de chiffrement ; le nœud namespace par
-l'`app_id` de la session et fait la crypto DHT. Là encore l'`app_id` ne figure
-pas dans la trame. Côté client : `dht_put(contenu, enc_key?)` /
-`dht_get(clef_contenu, dec_key?)`. Détails : `Docs/Architecture/routing.md`.
+The `APP_DHT_*` frames drive the **per-app DHT** (public or private): the app
+supplies the content and, for private entries, the encryption key; the node
+namespaces by the session's `app_id` and does the DHT crypto. Here too the
+`app_id` is absent from the frame. On the client side: `dht_put(content,
+enc_key?)` / `dht_get(content_key, dec_key?)`. Details:
+`Docs/Architecture/routing.md`.
 
-Les trames `AUTH_*` donnent à l'app l'**identité du nœud comme authentification**
-(un SSO) : `assert_to(audience, purpose, ctx)` émet un énoncé signé ML-DSA « ce
-nœud, dans **cette** app, à **cet** interlocuteur, pour **ce** motif, sur **ce**
-contexte », et `verify_assertion(blob, purpose=…, ctx=…)` vérifie celui d'un
-pair. Comme pour le tiroir, l'`app_id` **ne figure pas dans la trame** — le nœud
-le déduit de la session `AUTH` — donc une app ne peut jamais émettre pour la
-section d'une autre.
+The `AUTH_*` frames give the app **the node's identity as authentication** (an
+SSO): `assert_to(audience, purpose, ctx)` issues an ML-DSA-signed statement —
+"this node, in **this** app, to **this** party, for **this** purpose, over
+**this** context" — and `verify_assertion(blob, purpose=…, ctx=…)` verifies a
+peer's. As with the drawer, the `app_id` **is not in the frame** — the node
+deduces it from the `AUTH` session — so an app can never issue for another's
+section.
 
-Ce n'est **pas** un oracle de signature : le nœud ne signe jamais des octets
-choisis par l'app, seulement une structure bornée dans un domaine dédié, le
-contexte libre n'entrant que par un hash de 32 octets. Sans cette règle, une app
-pourrait faire signer un corps de certificat par la clé du nœud. Détails,
-bornes et modèle de menace : [`Docs/AppAuth/guide`](../AppAuth/guide).
+This is **not** a signing oracle: the node never signs bytes chosen by the app,
+only a bounded structure in a dedicated domain, with free-form context entering
+solely as a 32-byte hash. Without that rule, an app could have a certificate
+body signed by the node's key. Details, bounds and threat model:
+[`Docs/AppAuth/guide`](../AppAuth/guide).
 
-Les trames `PSEUDO_*` pilotent l'**annuaire de pseudos** (find-by-pseudo réseau) :
-`publish_pseudo(pseudo)` publie une réclamation signée pseudo→node_id (liée à la
-clé de la session), `lookup_pseudo(pseudo)` renvoie tous les node ids réclamant ce
-pseudo. Namespacé par l'`app_id` de la session. Détails : `Docs/Architecture/routing.md`.
+The `PSEUDO_*` frames drive the **pseudo directory** (network find-by-pseudo):
+`publish_pseudo(pseudo)` publishes a signed pseudo→node_id claim (bound to the
+session's key), `lookup_pseudo(pseudo)` returns every node id claiming that
+pseudo. Namespaced by the session's `app_id`. Details:
+`Docs/Architecture/routing.md`.
 
-## Sécurité
+## Security
 
-- **Jeton obligatoire** (comparaison en temps constant) avant toute action ;
-  rien n'est accepté avant `AUTH`.
-- Trames **bornées** en taille, nombre de clients **plafonné**.
-- **Loopback par défaut** ; ou **socket Unix** (chmod 0600) pour l'IPC de
-  conteneurs ; un `ssl_context` peut envelopper l'écoute TCP.
-- Le connecteur possède la boucle `node.receive_data()` et **démultiplexe**
-  chaque message entrant vers les clients de la section concernée (isolation
-  entre apps ; un message sans section est jeté — rejet par défaut).
+- **The token is mandatory** (constant-time comparison) before any action;
+  nothing is accepted before `AUTH`.
+- Frames are **bounded** in size, the number of clients is **capped**.
+- **Loopback by default**; or a **Unix socket** (chmod 0600) for container IPC;
+  an `ssl_context` can wrap the TCP listener.
+- The connector owns the `node.receive_data()` loop and **demultiplexes** each
+  incoming message to the clients of the section concerned (isolation between
+  apps; a message with no section is dropped — reject by default).
 
-## Partage et déploiement d'applications
+## Sharing and deploying applications
 
-Ce connecteur est la brique de base : une app déclarée (manifeste + fichiers)
-lancée par le nœud s'y branche pour parler au réseau, sur sa propre section.
-Le partage d'apps par DHT et leur **déploiement signé** (app_id + signature de
-l'auteur) sont décrits dans `Docs/AppSharing/guide`.
-</content>
+This connector is the building block: a declared app (manifest + files) launched
+by the node plugs into it to talk to the network, on its own section. Sharing
+apps over the DHT and their **signed deployment** (app_id + the author's
+signature) are described in `Docs/AppSharing/guide`.

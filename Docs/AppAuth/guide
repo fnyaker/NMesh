@@ -1,96 +1,92 @@
-# Identité applicative — l'identité mesh comme système d'authentification
+# Application identity — the mesh identity as an authentication system
 
-Module : [`src/app_auth.py`](../../src/app_auth.py). Exposé aux apps intégrées
-par `node.app_auth(app_id)`, et aux apps externes par les trames `AUTH_*` du
-connecteur (voir [`Docs/DataConnector/guide`](../DataConnector/guide)).
+Module: [`src/app_auth.py`](../../src/app_auth.py). Exposed to built-in apps
+through `node.app_auth(app_id)`, and to external apps through the connector's
+`AUTH_*` frames (see [`Docs/DataConnector/guide`](../DataConnector/guide)).
 
-## Le manque que ça comble
+## The gap it fills
 
-Le mesh authentifie déjà le **transport** : quand une payload DATA arrive à une
-app, son `src_id` est prouvé par la session E2E (signature ML-DSA + chaîne de
-certificats, cf. [`Docs/Architecture/security.md`](../Architecture/security.md)).
-C'est une propriété forte, mais elle est **confinée à une session vivante sur un
-nœud** :
+The mesh already authenticates the **transport**: when a DATA payload reaches an
+app, its `src_id` is proven by the E2E session (ML-DSA signature + certificate
+chain, see [`Docs/Architecture/security.md`](../Architecture/security.md)). That
+is a strong property, but it is **confined to a live session on one node**:
 
-- une app ne peut pas la **re-vérifier plus tard** (après redémarrage, la preuve
-  n'existe plus) ;
-- elle ne peut pas la **transmettre** à un tiers ;
-- et surtout elle ne dit **rien de l'intention** : « ce paquet vient de X » n'est
-  pas « X a autorisé *cette action-là* ».
+- an app cannot **re-verify it later** (after a restart, the proof no longer
+  exists);
+- it cannot **pass it on** to a third party;
+- and above all it says **nothing about intent**: "this packet comes from X" is
+  not "X authorised *that particular action*".
 
-L'identité applicative ajoute la couche manquante : l'équivalent d'un SSO adossé
-à l'identité long terme du nœud.
+Application identity adds the missing layer: the equivalent of an SSO backed by
+the node's long-term identity.
 
-## L'assertion
+## The assertion
 
-Une **assertion** est un énoncé signé, court, auto-vérifiable :
+An **assertion** is a short, self-verifying signed statement:
 
-> le nœud **S** affirme, à l'intérieur de l'app **A**, à destination de **B**,
-> pour l'objet **P**, au sujet du contexte **C**, à l'instant **T**.
+> node **S** states, inside app **A**, addressed to **B**, for purpose **P**,
+> about context **C**, at instant **T**.
 
 ```
-assertion = version(1) ‖ flags(1) ‖ app_id(8) ‖ pub_len(2) ‖ clé_pub_DSA
+assertion = version(1) ‖ flags(1) ‖ app_id(8) ‖ pub_len(2) ‖ DSA public key
           ‖ audience(20) ‖ purpose_len(1) ‖ purpose
           ‖ nonce(16) ‖ issued_at(8) ‖ ttl(4) ‖ ctx(32) ‖ sig_len(2) ‖ signature
 ```
 
-Quatre propriétés, chacune load-bearing :
+Four properties, each load-bearing:
 
-| Propriété | Ce que ça empêche |
+| Property | What it prevents |
 |---|---|
-| **Portable** — vérifiable hors-ligne, sans la session qui l'a portée | Perdre la preuve au redémarrage ; ne pas pouvoir auditer après coup |
-| **Scopée** — `(app_id, audience, purpose)` | Rejouer une assertion d'une app dans une autre, vers un autre nœud, ou pour une autre action |
-| **Fraîche** — `issued_at` + `ttl`, tolérance `MAX_SKEW` (60 s) | Ressortir une vieille autorisation |
-| **À usage unique** — nonce 16 o dans un cache borné | Le rejeu, même dans la fenêtre de fraîcheur |
+| **Portable** — verifiable offline, without the session that carried it | Losing the proof at restart; being unable to audit after the fact |
+| **Scoped** — `(app_id, audience, purpose)` | Replaying one app's assertion in another, towards another node, or for another action |
+| **Fresh** — `issued_at` + `ttl`, tolerance `MAX_SKEW` (60 s) | Dusting off an old authorisation |
+| **Single use** — a 16-byte nonce in a bounded cache | Replay, even inside the freshness window |
 
-L'identité du signataire n'est **pas** un champ séparé : `NodeID` dérive de la
-clé présentée (`sha256(pub)[:20]`), donc il n'y a pas d'id à mentir — exactement
-l'invariant du reste du dépôt.
+The signer's identity is **not** a separate field: `NodeID` derives from the key
+presented (`sha256(pub)[:20]`), so there is no id to lie about — exactly the
+invariant the rest of the repository holds.
 
-## Ce n'est pas un oracle de signature
+## It is not a signing oracle
 
-C'est le point de sécurité central. Donner à une app une primitive « signe ces
-octets avec la clé du nœud » serait fatal : **la même clé ML-DSA** signe les
-certificats, les handshakes, les descripteurs de release et les réclamations
-d'annuaire. Une app pourrait faire signer un **corps de certificat** et
-s'auto-attester membre du réseau.
+This is the central security point. Giving an app a "sign these bytes with the
+node's key" primitive would be fatal: **the same ML-DSA key** signs
+certificates, handshakes, release descriptors and directory claims. An app could
+have a **certificate body** signed and attest itself into the network.
 
-Rien ici ne signe des octets fournis par l'app :
+Nothing here signs bytes supplied by the app:
 
-- l'entrée signée est **toujours** `_DOMAIN ‖ <champs structurés et bornés>` ;
-- le contexte libre de l'app n'entre que par un **hash 32 octets** (`ctx_hash`,
-  préfixé en longueur pour qu'on ne puisse pas re-découper un contexte en un
-  autre sens) ;
-- `_DOMAIN = b"nmesh-app-auth-v1"` est **distinct** de tous les autres domaines
-  de signature du dépôt (`nmesh-pseudo-dir-v1`, `nmesh-app-release-v1`, le corps
-  de certificat, l'entrée de handshake).
+- the signed input is **always** `_DOMAIN ‖ <structured, bounded fields>`;
+- the app's free-form context enters only as a **32-byte hash** (`ctx_hash`,
+  length-prefixed so one context cannot be re-cut into another);
+- `_DOMAIN = b"nmesh-app-auth-v1"` is **distinct** from every other signing
+  domain in the repository (`nmesh-pseudo-dir-v1`, `nmesh-app-release-v1`, the
+  certificate body, the handshake input).
 
-Une app ne peut donc pas orienter le signataire hors de l'espace app-auth, ni
-hors de **sa propre section** : l'`app_id` vient de la session (`AUTH` du
-connecteur, ou l'appel `node.app_auth(...)` du nœud), jamais de la trame.
+An app therefore cannot steer the signer outside the app-auth space, nor outside
+**its own section**: the `app_id` comes from the session (the connector's
+`AUTH`, or the node's `node.app_auth(...)` call), never from the frame.
 
-## Vérification — l'ordre compte
+## Verification — the order matters
 
-`verify_assertion` enchaîne, du moins cher au plus cher :
+`verify_assertion` runs, cheapest first:
 
-1. parse dans les bornes ;
-2. c'est **notre** app ;
-3. l'audience c'est **nous** (ou `ANY_AUDIENCE`) ;
-4. le `purpose` et le `ctx` attendus ;
-5. fraîcheur ;
-6. **nonce non vu** — brûlé seulement ici, une fois les tests bon marché passés,
-   pour qu'un flot de déchets ne puisse pas évincer des entrées vivantes d'un
-   cache borné ;
-7. signature ML-DSA ;
-8. cohérence TOFU de la clé (`TrustTable`, optionnel).
+1. parse within the bounds;
+2. it is **our** app;
+3. the audience is **us** (or `ANY_AUDIENCE`);
+4. the expected `purpose` and `ctx`;
+5. freshness;
+6. **the nonce is unseen** — burnt only here, once the cheap tests have passed,
+   so a flood of junk cannot evict live entries from a bounded cache;
+7. the ML-DSA signature;
+8. TOFU consistency of the key (`TrustTable`, optional).
 
-N'importe quel échec renvoie `None`. Aucun octet hostile ne lève : l'appelant
-n'a jamais à distinguer « invalide » de « mal formé ».
+Any failure returns `None`. No hostile byte raises: the caller never has to tell
+"invalid" from "malformed".
 
-## Login mutuel (optionnel)
+## Mutual login (optional)
 
-Pour établir une session applicative où **chacun** prouve sa vivacité sur un
-nonce choisi par l'autre :
+To establish an application session where **each side** proves liveness on a
+nonce chosen by the other:
 
 ```
 A → B   HELLO      nonce_a
@@ -98,51 +94,51 @@ B → A   CHALLENGE  nonce_b ‖ assertion_b(audience=A, ctx=H(nonce_a‖nonce_b
 A → B   PROVE      assertion_a(audience=B, ctx=H(nonce_a‖nonce_b))
 ```
 
-Les deux bouts obtiennent le même `sid = H(nonce_a ‖ nonce_b)`. Aucun des deux ne
-s'authentifie seul, et aucun des deux messages n'est rejouable.
+Both ends obtain the same `sid = H(nonce_a ‖ nonce_b)`. Neither authenticates
+alone, and neither message is replayable.
 
-## Utiliser depuis une app intégrée
+## Using it from a built-in app
 
 ```python
-auth = node.app_auth(MON_APP_ID)          # scopé à ma section
+auth = node.app_auth(MY_APP_ID)           # scoped to my section
 
-# émettre
-blob = auth.assert_to(cible, "monapp.action", ctx_hash(b"payload exact"))
+# issue
+blob = auth.assert_to(target, "myapp.action", ctx_hash(b"the exact payload"))
 
-# vérifier ce qu'un pair m'envoie
-principal = auth.verify(blob, purpose="monapp.action",
-                        ctx=ctx_hash(payload_reçu))
+# verify what a peer sends me
+principal = auth.verify(blob, purpose="myapp.action",
+                        ctx=ctx_hash(received_payload))
 if principal is None:
-    return                                 # rejet par défaut
-principal.node_id                          # qui, prouvé
+    return                                 # reject by default
+principal.node_id                          # who, proven
 ```
 
-Depuis une app externe, c'est la même chose à travers le connecteur :
+From an external app it is the same thing through the connector:
 `client.assert_to(...)` / `client.verify_assertion(...)`.
 
-## Bornes
+## Bounds
 
-| Constante | Valeur | Rôle |
+| Constant | Value | Role |
 |---|---|---|
-| `MAX_PURPOSE_LEN` | 64 | longueur d'un `purpose` |
-| `MAX_ASSERTION_LEN` | 32 Ko | taille d'une assertion avant parsing |
-| `DEFAULT_TTL` / `MAX_TTL` | 120 s / 86400 s | fenêtre de validité |
-| `MAX_SKEW` | 60 s | dérive d'horloge tolérée |
-| `MAX_NONCES` | 8192 | cache anti-rejeu (éviction FIFO → fenêtre plus courte, jamais de croissance) |
-| `MAX_SESSIONS` / `MAX_PENDING` | 512 / 512 | sessions et challenges en vol |
+| `MAX_PURPOSE_LEN` | 64 | the length of a `purpose` |
+| `MAX_ASSERTION_LEN` | 32 KB | the size of an assertion before parsing |
+| `DEFAULT_TTL` / `MAX_TTL` | 120 s / 86400 s | the validity window |
+| `MAX_SKEW` | 60 s | tolerated clock drift |
+| `MAX_NONCES` | 8192 | the anti-replay cache (FIFO eviction → a shorter window, never growth) |
+| `MAX_SESSIONS` / `MAX_PENDING` | 512 / 512 | sessions and challenges in flight |
 
-## Ce que ça ne fait pas
+## What it does not do
 
-- **Ce n'est pas de l'autorisation.** Une assertion prouve « qui, pour quoi » ;
-  décider si ce « qui » a le droit reste à l'app (l'app Fleet tient pour ça un
-  ledger de capabilities — voir [`Docs/Apps/fleet`](../Apps/fleet)).
-- **Ça ne remplace pas la session E2E.** C'est une couche de défense en
-  profondeur au-dessus, pas à la place.
-- **Ça ne protège pas d'une machine compromise.** Si l'adversaire possède le
-  nœud, il possède la clé. Les pistes sur ce front sont dans
+- **It is not authorisation.** An assertion proves "who, for what"; deciding
+  whether that "who" is allowed stays with the app (the Fleet app keeps a
+  capability ledger for exactly that — see [`Docs/Apps/fleet`](../Apps/fleet)).
+- **It does not replace the E2E session.** It is defence in depth on top, not
+  instead.
+- **It does not protect against a compromised machine.** If the adversary owns
+  the node, they own the key. The leads on that front are in
   [`todo/integrite-des-pairs.md`](../../todo/integrite-des-pairs.md).
 
-Tests : [`tests/test_app_auth.py`](../../tests/test_app_auth.py) (scoping,
-fraîcheur, rejeu, liaison de clé, bornes de minting, parsing hostile, login
-mutuel) et la classe `TestConnectorAppAuth` de
+Tests: [`tests/test_app_auth.py`](../../tests/test_app_auth.py) (scoping,
+freshness, replay, key binding, minting bounds, hostile parsing, mutual login)
+and the `TestConnectorAppAuth` class in
 [`tests/test_data_connector.py`](../../tests/test_data_connector.py).
