@@ -86,6 +86,18 @@ The publisher key to hand out is shown on that same card. Give it to people over
 a channel you trust: **anyone who can change that string on its way to them can
 ship them code.**
 
+Publishing is around 120 values onto the DHT — a chunk per file, plus the
+manifest's own chunks, the root and the descriptor — and each one is a Kademlia
+lookup. They go out `_PUBLISH_CONCURRENCY` at a time rather than one after
+another, which is the difference between a few seconds and a couple of minutes
+on a busy mesh, and bounded rather than all at once, because "publish everything
+simultaneously" is how a publish becomes a flood.
+
+Replication is **best effort**. Every value is in the publisher's own store
+before its lookup even starts, so a mesh that answers nothing costs reach, not
+the publish: the release still exists, still verifies, and the publisher serves
+its own chunks to whoever fetches it.
+
 ## Pinning a publisher
 
 Console → **Settings → Updates → Publishers you accept**. Paste the key, name

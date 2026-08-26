@@ -10,6 +10,7 @@ walk a node backwards or sideways.
 A release replaces the node's own code — of everything the mesh carries, this is
 the payload with the most authority — so most of these tests are refusals.
 """
+import asyncio
 import os
 import tempfile
 
@@ -115,6 +116,69 @@ class TestPublishing:
             assert node.release_overview()["releases"][0]["trusted"] is False
             node.trust_publisher(node._identity.dsa_public_key.hex())
             assert node.release_overview()["releases"][0]["trusted"] is True
+        finally:
+            await node.stop()
+
+
+class TestPublishingIsNotAHundredRoundTrips:
+    """A release is ~120 values, and each dht_put is a full Kademlia lookup.
+    One after another, that is a hundred round trips with an operator watching
+    a spinner — which is exactly what a publish looked like on a real mesh."""
+
+    async def test_values_go_out_in_bounded_batches(self, tmp_path):
+        from src.node import _PUBLISH_CONCURRENCY
+        node = _node()
+        try:
+            in_flight, peak = 0, []
+
+            async def watched_lookup(node_id, *args, **kwargs):
+                nonlocal in_flight
+                in_flight += 1
+                peak.append(in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                return []
+
+            node.kad_lookup = watched_lookup
+            await node.publish_release(_tree(str(tmp_path)))
+            # Parallel enough to matter…
+            assert max(peak) > 1
+            # …and never "all of them at once", which is how a publish would
+            # become a flood.
+            assert max(peak) <= _PUBLISH_CONCURRENCY
+        finally:
+            await node.stop()
+
+    async def test_every_value_is_stored_locally_whatever_the_mesh_does(self):
+        """Replication is best effort: the publisher serves its own chunks, so
+        a peer it cannot reach costs reach, never the publish."""
+        node = _node()
+        try:
+            async def refusing_lookup(node_id, *args, **kwargs):
+                raise RuntimeError("no route to anywhere")
+
+            node.kad_lookup = refusing_lookup
+            values = [f"value {index}".encode() for index in range(20)]
+            keys = await node.dht_put_many(values)
+            assert len(keys) == len(values)
+            for key, value in zip(keys, values):
+                assert node._dht_store.get(key) == value
+        finally:
+            await node.stop()
+
+    async def test_a_publish_survives_a_mesh_that_answers_nothing(self, tmp_path):
+        node = _node()
+        try:
+            async def refusing_lookup(node_id, *args, **kwargs):
+                raise RuntimeError("no route to anywhere")
+
+            node.kad_lookup = refusing_lookup
+            info = await node.publish_release(_tree(str(tmp_path)))
+            assert info["version"] == "9.9.9"
+            # And it is genuinely fetchable from here afterwards.
+            node.trust_publisher(node._identity.dsa_public_key.hex())
+            fetched = await node.fetch_release(info["publisher_id"])
+            assert fetched is not None and fetched[1]["src/node.py"] == b"# the code\n"
         finally:
             await node.stop()
 

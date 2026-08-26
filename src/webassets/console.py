@@ -2213,13 +2213,20 @@ $("release-rows").addEventListener("click", async (event) => {
   if(!agreed) return;
   await withBusy(button, async () => {
     setMessage("release-status", "Fetching and verifying…");
-    const {ok, data} = await apiJson("/api/releases/install", "POST",
-      {publisher_id:button.dataset.install, confirm:true});
-    setMessage("release-status", ok
-      ? (data.restarting
-         ? "Installed " + data.version + ". The node is restarting — reload in a moment."
-         : "Installed " + data.version + ". Restart the node to run it (previous files kept).")
-      : (data.error || "Install failed"), !ok);
+    try{
+      const {ok, data} = await apiJson("/api/releases/install", "POST",
+        {publisher_id:button.dataset.install, confirm:true});
+      setMessage("release-status", ok
+        ? (data.restarting
+           ? "Installed " + data.version + ". The node is restarting — reload in a moment."
+           : "Installed " + data.version + ". Restart the node to run it (previous files kept).")
+        : (data.error || "Install failed"), !ok);
+    }catch(_){
+      // A restart cuts the connection mid-answer, which is a success we cannot
+      // read. Say what is true: reload and look.
+      setMessage("release-status", "The console stopped answering — if the node "
+        + "was restarting, reload this page in a moment.", true);
+    }
     await refreshReleases();
   });
 });
@@ -2246,10 +2253,12 @@ $("publisher-rows").addEventListener("change", async (event) => {
 $("pin-add").addEventListener("click", (event) => withBusy(event.target, async () => {
   const key = $("pin-key").value.trim();
   if(!key){ setMessage("pin-status", "Paste the publisher's key first", true); return; }
-  const {ok, data} = await apiJson("/api/releases/trust", "POST",
-    {key, name:$("pin-name").value.trim(), auto:$("pin-auto").checked});
-  setMessage("pin-status", ok ? "Pinned." : (data.error || "Could not pin that key"), !ok);
-  if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = false; }
+  try{
+    const {ok, data} = await apiJson("/api/releases/trust", "POST",
+      {key, name:$("pin-name").value.trim(), auto:$("pin-auto").checked});
+    setMessage("pin-status", ok ? "Pinned." : (data.error || "Could not pin that key"), !ok);
+    if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = false; }
+  }catch(_){ setMessage("pin-status", "The node did not answer.", true); }
   await refreshReleases();
 }));
 $("publish-go").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -2259,13 +2268,22 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
       "offered to the mesh. Anyone who pinned this key can install it.</p>",
     confirmLabel:"Publish"});
   if(!agreed) return;
-  setMessage("publish-status", "Reading, hashing and signing…");
-  const {ok, data} = await apiJson("/api/releases/publish", "POST",
-    {notes:$("publish-notes").value});
-  setMessage("publish-status", ok
-    ? "Published " + data.version + " (" + data.files + " files, " + fmtBytes(data.bytes) + ")."
-    : (data.error || "Publish failed"), !ok);
-  if(ok) await refreshReleases();
+  // A tree is ~120 chunks onto the DHT: on a busy mesh this is not instant.
+  // Whatever happens it must end in a message — a status left mid-sentence is
+  // indistinguishable from a node that died.
+  setMessage("publish-status", "Reading, hashing and signing — this can take a "
+    + "moment on a busy mesh…");
+  try{
+    const {ok, data} = await apiJson("/api/releases/publish", "POST",
+      {notes:$("publish-notes").value});
+    setMessage("publish-status", ok
+      ? "Published " + data.version + " (" + data.files + " files, " + fmtBytes(data.bytes) + ")."
+      : (data.error || "Publish failed"), !ok);
+    if(ok) await refreshReleases();
+  }catch(_){
+    setMessage("publish-status", "Publishing did not finish — the node may still "
+      + "be working. Check Settings → Updates again in a minute.", true);
+  }
 }));
 
 // ---- configuration file ----------------------------------------------------
