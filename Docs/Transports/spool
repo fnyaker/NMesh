@@ -1,66 +1,65 @@
-# Transport spool — le mesh sur un medium fichier (store-and-forward)
+# The spool transport — the mesh over a file medium (store-and-forward)
 
-Le transport `spool` fait tourner tout le mesh (invite, handshake, routage,
-E2E) sur un **répertoire partagé** au lieu d'une socket. C'est le substrat du
-store-and-forward : le répertoire peut vivre sur un medium amovible (clé USB).
+The `spool` transport runs the whole mesh (invite, handshake, routing, E2E) over
+a **shared directory** instead of a socket. It is the substrate for
+store-and-forward: the directory can live on removable media (a USB stick).
 
-Schéma d'URL : `spool://<chemin_du_répertoire>`
-(ex. `spool:///mnt/usb/mesh`, `spool://./link`).
+URL scheme: `spool://<directory_path>`
+(e.g. `spool:///mnt/usb/mesh`, `spool://./link`).
 
-## Comment ça marche
+## How it works
 
-Un lien = un répertoire contenant, par session, deux fichiers journaux
-append-only, un par sens :
+A link = a directory containing, per session, two append-only journal files, one
+per direction:
 
 ```
-<link>/sess-<aléatoire>/
-    c2s.spool   client → serveur
-    s2c.spool   serveur → client
+<link>/sess-<random>/
+    c2s.spool   client → server
+    s2c.spool   server → client
 ```
 
-- **Client** (`node.join("spool://<link>", code)`) : crée un sous-répertoire de
-  session, écrit dans `c2s.spool`, lit `s2c.spool`.
-- **Serveur** (`node.start(["spool://<link>"])`) : surveille le répertoire, crée
-  un transport par nouvelle session détectée (multi-client), écrit `s2c.spool`,
-  lit `c2s.spool`.
+- **Client** (`node.join("spool://<link>", code)`): creates a session
+  subdirectory, writes to `c2s.spool`, reads `s2c.spool`.
+- **Server** (`node.start(["spool://<link>"])`): watches the directory, creates
+  one transport per new session it detects (multi-client), writes `s2c.spool`,
+  reads `c2s.spool`.
 
-Chaque paquet est écrit comme un enregistrement `magic | longueur | crc32 |
-payload`, **fsync**é (survit à une coupure de courant ou au retrait de la clé).
-Le lecteur suit un offset et **resynchronise** sur corruption (le medium est
-hostile) : un enregistrement au CRC invalide est sauté, pas fatal.
+Each packet is written as a `magic | length | crc32 | payload` record, and
+**fsync**ed (it survives a power cut or the stick being pulled). The reader
+tracks an offset and **resynchronises** on corruption (the medium is hostile): a
+record with an invalid CRC is skipped, not fatal.
 
-Quand les deux bouts sont en ligne sur le même répertoire, le lien se comporte
-comme une liaison vive (mais asynchrone). Emporter un fichier hors-ligne vers
-une autre machine, c'est le cas tolérant au délai.
+When both ends are online on the same directory, the link behaves like a live
+(if asynchronous) connection. Carrying a file offline to another machine is the
+delay-tolerant case.
 
-## Conteneur portable : `Bundle`
+## A portable container: `Bundle`
 
-Pour emporter un lot de paquets en un seul fichier (le « fichier de la clé
-USB »), `src/spool.py` fournit `Bundle` :
+To carry a batch of packets as a single file (the "USB stick file"),
+`src/spool.py` provides `Bundle`:
 
 ```python
 from src.spool import write_bundle, read_bundle
 write_bundle("/mnt/usb/carry.bundle", [pkt.pack() for pkt in packets])
-raw_packets = read_bundle("/mnt/usb/carry.bundle")   # lève BundleError si corrompu
+raw_packets = read_bundle("/mnt/usb/carry.bundle")   # raises BundleError if corrupt
 ```
 
-Intégrité SHA-256 sur tout le conteneur : toute troncature ou altération sur le
-medium est **détectée et rejetée**. La confidentialité et l'authenticité restent
-au niveau paquet (déjà chiffré/authentifié E2E) — le porteur ne peut ni lire ni
-forger.
+SHA-256 integrity over the whole container: any truncation or alteration on the
+medium is **detected and rejected**. Confidentiality and authenticity stay at
+the packet level (already E2E encrypted/authenticated) — the carrier can neither
+read nor forge.
 
-## Sécurité
+## Security
 
-- Medium **non fiable** : chaque paquet transporté est déjà chiffré E2E ; le
-  chemin de réception durci du nœud rejette tout paquet mal formé ou forgé.
-- Intégrité au niveau enregistrement (CRC) et conteneur (SHA-256).
-- Écritures durables (fsync fichier + répertoire).
+- The medium is **untrusted**: every packet carried is already E2E encrypted,
+  and the node's hardened receive path rejects any malformed or forged packet.
+- Integrity at the record level (CRC) and at the container level (SHA-256).
+- Durable writes (fsync on the file and on the directory).
 
-## Limite connue
+## Known limitation
 
-`TransportManager` n'accepte **qu'un serveur par schéma**. Un même nœud ne peut
-donc pas écouter simultanément sur deux répertoires `spool://` distincts
-(topologie A—cléUSB1—B—cléUSB2—C). Contournement actuel : plusieurs clients
-rejoignent le même répertoire hôte (le `SpoolServer` est multi-client). Support
-multi-écouteurs par schéma : voir ROADMAP.
-</content>
+`TransportManager` accepts **only one server per scheme**. One node therefore
+cannot listen on two distinct `spool://` directories at once (the
+A—usb1—B—usb2—C topology). The current workaround: several clients join the same
+host directory (`SpoolServer` is multi-client). Multi-listener support per
+scheme: see ROADMAP.

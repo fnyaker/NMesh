@@ -1,121 +1,123 @@
-# Flux de communication inter-nœuds
+# Inter-node communication flow
 
-## Phase 1 — Démarrage du nœud
-1. Génération de la paire de clés ML-KEM + ML-DSA (si inexistante)
-2. Attribution d'un ID Kademlia 160 bits (si non existant)
-
-
-## Phase 2 — Rejoindre le réseau (invitation)
-1. L'utilisateur fournit l'adresse d'un nœud existant + le code d'invitation (échangés hors-réseau)
-2. Le nœud invitant envoie un challenge aléatoire
-3. Le nouveau nœud répond avec HMAC(code, challenge) — prouve qu'il connaît le code sans l'envoyer en clair
-4. Envoi du paquet `INVITE` avec la réponse au challenge
-5. Réception d'un `INVITE_ACK` :
-   - Rejeté (mauvais code, rate-limit atteint, code expiré) → stop
-   - Validé → Phase 3
-   - Le code est détruit immédiatement après validation (usage unique)
+## Phase 1 — Node startup
+1. Generate the ML-KEM + ML-DSA key pair (if there is none)
+2. Assign a 160-bit Kademlia ID (if there is none)
 
 
-## Phase 3 — Handshake (établissement de session)
-
-**Acteurs** : ML-KEM, ML-DSA, AES-256-GCM — chacun un rôle distinct.
-
-**ML-KEM** — négocier un secret commun sans l'envoyer sur le réseau
-- Bob envoie sa clé publique ML-KEM
-- Alice génère un secret S, l'emballe avec la clé publique de Bob, l'envoie
-- Bob déchiffre avec sa clé privée → obtient S
-- Résultat : les deux connaissent S, personne d'autre ne l'a vu
-
-**ML-DSA** — prouver son identité (éviter l'usurpation)
-- Chaque nœud signe l'ensemble du contenu de son HANDSHAKE avec sa clé privée ML-DSA
-- L'autre vérifie la signature → garantit que personne n'a substitué les clés en transit
-
-**AES-256-GCM** — chiffrer rapidement tous les paquets suivants
-- ML-KEM est puissant mais lent → utilisé une seule fois pour établir S
-- S est dérivé en clé AES → utilisée pour tous les paquets (accélérée par le CPU, quelques microsecondes par paquet)
-- Le mode GCM garantit aussi l'intégrité : un paquet modifié en transit est détecté et jeté
-
-**Le certificat** — Alice atteste que Bob est membre du réseau
-- À la fin du handshake, Alice signe un certificat : clé publique ML-DSA de Bob + ID d'Alice + clé publique ML-DSA d'Alice + timestamp + signature ML-DSA d'Alice
-- L'ID et la clé publique d'Alice sont inclus pour permettre à n'importe quel nœud de remonter la chaîne de confiance
-- Ce certificat est inclus dans le `HANDSHAKE_ACK`
-- Bob le conserve et le présentera à chaque nouveau nœud rencontré en Phase 4
-- Le certificat seul ne suffit pas : le nœud destinataire challengera toujours Bob pour vérifier qu'il possède bien la clé privée associée
-
-**Déroulé** :
-1. Envoi `HANDSHAKE` : clé pub ML-KEM + clé pub ML-DSA + signature ML-DSA du payload
-2. Réception `HANDSHAKE_ACK` : clé pub ML-KEM d'Alice + secret S chiffré + certificat de Bob signé par Alice + signature ML-DSA d'Alice
-3. Bob vérifie la signature d'Alice, déchiffre S
-4. Dérivation de la clé de session AES-256 à partir de S
-5. Toute la suite est chiffrée AES-256-GCM avec cette clé
+## Phase 2 — Joining the network (invitation)
+1. The user supplies an existing node's address + the invitation code (exchanged off-network)
+2. The inviting node sends a random challenge
+3. The new node answers with HMAC(code, challenge) — proving it knows the code without sending it in the clear
+4. It sends the `INVITE` packet with the challenge response
+5. It receives an `INVITE_ACK`:
+   - Rejected (wrong code, rate limit reached, code expired) → stop
+   - Accepted → Phase 3
+   - The code is destroyed immediately after validation (single use)
 
 
-## Phase 4 — Intégration Kademlia (peuplement de la routing table)
+## Phase 3 — Handshake (establishing a session)
 
-**La routing table (k-buckets)**
-- Chaque nœud maintient des listes de nœuds connus organisées par tranches de distance XOR
-- Distance entre deux nœuds = XOR de leurs IDs (proximité logique, pas géographique)
-- k = 20 : chaque bucket contient au maximum 20 nœuds
-- En cas de bucket plein, on garde le nœud le plus actif (répond aux PING) — résistance naturelle aux pannes
+**The actors**: ML-KEM, ML-DSA, AES-256-GCM — each with a distinct role.
 
-**Preuve d'appartenance à chaque nouveau nœud rencontré**
-Quand Bob contacte C pour la première fois :
-1. Bob présente son certificat (signé par Alice, contenant l'ID et la clé publique d'Alice)
-2. C vérifie la signature d'Alice :
-   - Si Alice est dans les k-buckets de C → sa clé publique est déjà connue et vérifiée ✓
-   - Si Alice est inconnue → C fait un `FIND_NODE(alice.id)`, vérifie le certificat d'Alice, remonte la chaîne jusqu'à un nœud connu
-3. C envoie un challenge aléatoire à Bob
-4. Bob signe le challenge avec sa clé privée ML-DSA → C vérifie qu'il possède bien la clé privée du certificat
-5. La confiance est **mutuelle** : C présente aussi son certificat à Bob, et Bob le challenge en retour
-6. Si tout passe → session AES établie, nœud ajouté au k-bucket
+**ML-KEM** — negotiating a shared secret without sending it over the network
+- Bob sends his ML-KEM public key
+- Alice generates a secret S, encapsulates it with Bob's public key, sends it
+- Bob decapsulates with his private key → obtains S
+- Result: both know S, nobody else has seen it
 
-**Chaîne de confiance**
-- Chaque certificat pointe vers son signataire (qui a lui-même un certificat, signé par quelqu'un d'autre, etc.)
-- La chaîne remonte jusqu'au nœud fondateur du réseau, qui est auto-signé et connu de tous
-- N'importe quel nœud peut vérifier n'importe quel certificat en remontant la chaîne via Kademlia
+**ML-DSA** — proving identity (preventing impersonation)
+- Each node signs the whole content of its HANDSHAKE with its ML-DSA private key
+- The other verifies the signature → guarantees nobody substituted keys in transit
 
-**Peuplement de la routing table**
-1. `FIND_NODE(self.id)` → le nœud bootstrap répond `FOUND_NODE` : liste des k nœuds les plus proches de notre ID
-2. Handshake + échange de certificats + challenge avec chaque nœud découvert
-3. `FIND_NODE(self.id)` sur les nouveaux nœuds → nouveaux voisins encore plus proches
-4. Répéter jusqu'à stabilisation — sur 1000 nœuds : 3 à 5 tours maximum
+**AES-256-GCM** — encrypting every subsequent packet, fast
+- ML-KEM is strong but slow → used once, to establish S
+- S is derived into an AES key → used for every packet (CPU-accelerated, a few microseconds per packet)
+- GCM mode also guarantees integrity: a packet altered in transit is detected and dropped
 
+**The certificate** — Alice attests that Bob is a member of the network
+- At the end of the handshake, Alice signs a certificate: Bob's ML-DSA public key + Alice's ID + Alice's ML-DSA public key + a timestamp + Alice's ML-DSA signature
+- Alice's ID and public key are included so any node can walk the trust chain up
+- That certificate is carried in the `HANDSHAKE_ACK`
+- Bob keeps it and presents it to every new node he meets in Phase 4
+- The certificate alone is not enough: the receiving node always challenges Bob to check he really holds the matching private key
 
-## Phase 5 — Maintien des liens
-
-**Détection des pannes**
-- Chaque nœud envoie périodiquement un `PING` à ses pairs en k-buckets
-- `PONG` reçu → nœud vivant, timestamp "dernière vue" mis à jour
-- Pas de `PONG` après délai → le nœud est retesté une ou deux fois avant d'être considéré mort
-
-**Quand un nœud ne répond plus**
-1. Retrait du k-bucket
-2. `FIND_NODE` pour trouver un remplaçant et repeupler le bucket
-
-**Règle d'éviction quand un bucket est plein**
-Quand un nouveau nœud se présente et que le bucket correspondant est plein :
-- On PING le nœud le plus ancien du bucket
-- Il répond → il reste, le nouveau est ignoré
-- Il ne répond pas → il est retiré, le nouveau prend sa place
-
-Les k-buckets contiennent ainsi naturellement les nœuds les plus stables et actifs.
+**The sequence**:
+1. Send `HANDSHAKE`: ML-KEM public key + ML-DSA public key + an ML-DSA signature of the payload
+2. Receive `HANDSHAKE_ACK`: Alice's ML-KEM public key + the encapsulated secret S + Bob's certificate signed by Alice + Alice's ML-DSA signature
+3. Bob verifies Alice's signature, decapsulates S
+4. The AES-256 session key is derived from S
+5. Everything that follows is AES-256-GCM encrypted with that key
 
 
-## Phase 6 — Envoi de données
+## Phase 4 — Kademlia integration (filling the routing table)
 
-**Routage glouton**
-À chaque hop, le paquet est transmis au voisin dont l'ID est le plus proche (XOR) de la destination.
-La distance diminue strictement à chaque hop → convergence garantie en O(log N) sauts.
+**The routing table (k-buckets)**
+- Each node keeps lists of known nodes organised by XOR distance band
+- The distance between two nodes = the XOR of their IDs (logical proximity, not geographic)
+- k = 20: each bucket holds at most 20 nodes
+- When a bucket is full, the most active node is kept (the one that answers PINGs) — natural resistance to failure
 
-**Si le destinataire est inconnu**
-Bob ne connaît que l'ID de Charlie, pas son adresse : `FIND_NODE(charlie.id)` d'abord pour obtenir l'adresse du nœud le plus proche, puis routage du paquet.
+**Proving membership to each new node met**
+When Bob contacts C for the first time:
+1. Bob presents his certificate (signed by Alice, carrying Alice's ID and public key)
+2. C verifies Alice's signature:
+   - If Alice is in C's k-buckets → her public key is already known and verified ✓
+   - If Alice is unknown → C does a `FIND_NODE(alice.id)`, verifies Alice's certificate, and walks the chain up to a node it knows
+3. C sends a random challenge to Bob
+4. Bob signs the challenge with his ML-DSA private key → C checks he really holds the certificate's private key
+5. Trust is **mutual**: C presents its certificate to Bob too, and Bob challenges it back
+6. If everything passes → an AES session is established and the node is added to the k-bucket
 
-**TTL — éviter les boucles**
-- Chaque paquet part avec un TTL
-- Chaque nœud relais le décrémente de 1 avant retransmission
-- TTL = 0 → paquet jeté
-- Protège contre les boucles en cas de routing table corrompue ou de nœud malveillant
+**The trust chain**
+- Every certificate points at its signer (who has a certificate of their own, signed by someone else, and so on)
+- The chain walks up to the network's founding node, which is self-signed and known to all
+- Any node can verify any certificate by walking the chain through Kademlia
 
-**msg_id — déduplication**
-- Chaque nœud maintient un cache des `msg_id` récemment vus (CRC32 header + payload, TTL exclu)
-- Un paquet arrivant par deux chemins différents → le doublon est détecté et jeté immédiatement
+**Filling the routing table**
+1. `FIND_NODE(self.id)` → the bootstrap node answers `FOUND_NODE`: the k nodes closest to our ID
+2. Handshake + certificate exchange + challenge with each discovered node
+3. `FIND_NODE(self.id)` against the new nodes → still-closer neighbours
+4. Repeat until it settles — over 1000 nodes: 3 to 5 rounds at most
+
+
+## Phase 5 — Keeping the links up
+
+**Detecting failures**
+- Each node periodically sends a `PING` to its k-bucket peers
+- A `PONG` received → the node is alive, the "last seen" timestamp is updated
+- No `PONG` after the deadline → the node is retried once or twice before being considered dead
+
+**When a node stops answering**
+1. It is removed from the k-bucket
+2. A `FIND_NODE` finds a replacement and refills the bucket
+
+**The eviction rule when a bucket is full**
+When a new node shows up and the matching bucket is full:
+- The bucket's oldest node is PINGed
+- It answers → it stays, the newcomer is ignored
+- It does not answer → it is removed and the newcomer takes its place
+
+K-buckets therefore naturally hold the most stable and active nodes.
+
+
+## Phase 6 — Sending data
+
+**Greedy routing**
+At each hop, the packet is passed to the neighbour whose ID is closest (XOR) to
+the destination. The distance strictly decreases at each hop → convergence
+guaranteed in O(log N) hops.
+
+**If the recipient is unknown**
+Bob knows only Charlie's ID, not his address: a `FIND_NODE(charlie.id)` first,
+to obtain the closest node's address, then the packet is routed.
+
+**TTL — avoiding loops**
+- Every packet leaves with a TTL
+- Every relaying node decrements it by 1 before retransmitting
+- TTL = 0 → the packet is dropped
+- It protects against loops caused by a corrupt routing table or a malicious node
+
+**msg_id — deduplication**
+- Each node keeps a cache of recently seen `msg_id`s (CRC32 of header + payload, TTL excluded)
+- A packet arriving by two different paths → the duplicate is detected and dropped at once
