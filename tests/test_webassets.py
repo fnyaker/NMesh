@@ -328,3 +328,99 @@ def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
                            (webassets.FLEET_JS, '"inbox"'),
                            (webassets.CHAT_JS, '"chat-list"')):
         assert "setHTML(" + holder in source, holder
+
+
+# ── auto-refresh, and what a refresh is not allowed to do ────────────────────
+
+def test_the_refresh_interval_is_a_number_here_and_a_list_there():
+    """Un champ numérique est le bon contrôle au clavier et le mauvais sur un
+    téléphone (cible de 12 px, clavier qui couvre la page)."""
+    for html in (webassets.INDEX_HTML, webassets.FLEET_HTML):
+        assert 'id="refresh-secs"' in html and 'type="number"' in html
+        assert 'max="30"' in html
+        assert 'id="refresh-pick"' in html
+        assert 'value="0">Off' in html
+        # Off n'est pas une impasse : une pression lit quand même le nœud.
+        assert 'id="refresh-now"' in html
+    narrow = webassets.ui.CSS.split("@media (max-width:720px){", 1)[1]
+    assert ".refresh select{display:block}" in narrow
+
+
+def test_the_interval_is_clamped_and_remembered_in_the_browser():
+    source = webassets.ui.JS
+    assert 'localStorage.getItem("nmesh_refresh")' in source
+    assert "Math.min(this.MAX, Math.max(0, seconds))" in source
+    assert "/api/refresh" not in webassets.APP_JS      # pas un réglage du nœud
+
+
+def test_a_refresh_repaints_values_without_rebuilding_what_is_open():
+    """Le contrat : rafraîchir met à jour des valeurs. Les listes repeintes au
+    sondage passent par `setHTML`, qui n'écrit que si le contenu a changé."""
+    source = webassets.APP_JS
+    for holder in ('"network-summary"', '"map-links"'):
+        assert "setHTML(" + holder in source, holder
+    assert "setHTML(body," in source          # les tables de pairs
+
+
+def test_only_a_vanished_thing_may_be_deselected():
+    source = webassets.APP_JS
+    assert "if(MAP_PICK && !direct.some(" in source
+    assert "if(!group || group.links.length < 2) unfolded.delete(id)" in source
+
+
+# ── les liens actifs, groupés par node ───────────────────────────────────────
+
+def test_active_links_are_one_row_per_node_openable_onto_its_links():
+    source = webassets.APP_JS
+    assert "function groupByNode(" in source
+    assert "const LINKS_OPEN = {active: new Set(), known: new Set()}" in source
+    # Le repère affiché est le meilleur lien, et la gigue est *la sienne*.
+    assert "group.best == null || rtt < group.best.rtt_ms" in source
+    assert "data-fold=" in source
+
+
+# ── la carte et sa liste ─────────────────────────────────────────────────────
+
+def test_the_map_and_its_list_share_one_selection():
+    source = webassets.APP_JS
+    assert "MAP_PICK = MAP_PICK === id ? null : id" in source
+    assert "function revealPick(" in source
+    assert "data-link-details=" in source
+
+
+def test_a_captured_pointer_does_not_swallow_the_click_on_a_node():
+    """Capturer le pointeur (pour que le glissé survive à la sortie de
+    l'élément) redirige aussi le `click` sur l'élément capturant : sans
+    mémoriser la cible à l'appui, cliquer un nœud n'atteignait plus le nœud."""
+    source = webassets.APP_JS
+    assert "let MAP_DOWN_ON = null" in source
+    assert "MAP_DOWN_ON = (event.target.closest" in source
+    assert "const node = MAP_DOWN_ON ||" in source
+
+
+def test_a_node_on_the_map_has_a_target_a_finger_can_hit():
+    source = webassets.APP_JS
+    assert 'class:"hit"' in source
+    assert "Math.max(size.r * 2.2, 18)" in source
+    assert "circle.hit{fill:transparent" in webassets.STYLE_CSS
+
+
+# ── ce qui appartient à un transport vit dans ce transport ───────────────────
+
+def test_transport_facts_left_the_node_card():
+    assert 'id="relay-state"' not in webassets.INDEX_HTML
+    source = webassets.APP_JS
+    assert "const SCHEME_FACTS = {" in source
+    assert '"Public IP"' in source and '"Public UDP"' in source
+    # La carte du nœud ne garde que ce qui est vrai du nœud.
+    summary = source.split('const summary = [', 1)[1].split("];", 1)[0]
+    assert '"Internet"' in summary and '"Pending seeks"' in summary
+    assert "public_ip" not in summary and "stun_addr" not in summary
+
+
+def test_a_transport_opens_on_its_status_then_its_settings():
+    source = webassets.APP_JS
+    assert 'data-view="status"' in source and 'data-view="settings"' in source
+    assert 'data-panel="status"' in source and 'data-panel="settings"' in source
+    # Le choix de vue survit à un redraw, comme le pli.
+    assert "views[scheme] || \"status\"" in source

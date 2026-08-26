@@ -66,6 +66,21 @@ INDEX_HTML = """<!doctype html>
       <label class="ctx-pick" id="ctx-pick" hidden><span class="sr-only">Node being managed</span>
         <select id="ctx-node"></select></label>
       <span class="grow"></span>
+      <div id="refresh" class="refresh">
+        <label class="sr-only" for="refresh-secs">Auto-refresh, in seconds (0 turns it off)</label>
+        <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
+        <span class="unit" aria-hidden="true">s</span>
+        <label class="sr-only" for="refresh-pick">Auto-refresh</label>
+        <select id="refresh-pick">
+          <option value="0">Off</option>
+          <option value="1">1s</option>
+          <option value="2">2s</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+        </select>
+        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
+      </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
       <div class="menu-wrap more-wrap">
@@ -180,8 +195,7 @@ INDEX_HTML = """<!doctype html>
       <div data-sub="reach" class="stack" hidden>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Reachability</h2>
-            <div class="sub">Whether other nodes can open a link to this one</div></div>
-            <span id="relay-state" class="badge"></span></div>
+            <div class="sub">Whether other nodes can open a link to this one</div></div></div>
           <div class="card-body">
             <div id="network-summary" class="stats"></div>
             <div class="btn-row">
@@ -606,6 +620,14 @@ INDEX_HTML = """<!doctype html>
 # starts to look reusable, it belongs in `ui.py`, not in a second copy.
 CONSOLE_PAGE_CSS = """
 #chart{width:100%;height:236px;display:block}
+/* A node's own links, unfolded under it: indented, quieter, and not clickable
+   as a row — the node above is the thing you open. */
+.link-row.group>td:first-child{display:flex;align-items:center;gap:var(--s-2)}
+.link-row .fold{width:20px;min-height:20px;font-size:var(--fs-xs);flex:none}
+.link-row[data-inner]{background:var(--surface-2)}
+.link-row[data-inner]>td{color:var(--text-muted)}
+.link-in{display:inline-block;width:14px;border-left:1px solid var(--border-strong);
+  border-bottom:1px solid var(--border-strong);height:8px;margin-right:var(--s-2)}
 .dot.in{background:var(--accent)}
 .dot.out{background:var(--warn)}
 /* Each card keeps its own height: stretching the shorter one left a hole under
@@ -617,18 +639,20 @@ CONSOLE_PAGE_CSS = """
 .mesh-graph .edge{stroke:var(--border-strong);stroke-width:1.5}
 .mesh-graph .edge.routed{stroke-dasharray:3 4;opacity:.75}
 .mesh-graph .node circle{stroke:var(--surface);stroke-width:2;transition:r var(--speed) var(--ease)}
-.mesh-graph .node.direct circle{fill:var(--accent)}
-.mesh-graph .node.routed circle{fill:var(--warn)}
-.mesh-graph .node.self circle{fill:var(--text)}
+.mesh-graph .node circle.hit{fill:transparent;stroke:none;transition:none}
+.mesh-graph .node.direct circle:not(.hit){fill:var(--accent)}
+.mesh-graph .node.routed circle:not(.hit){fill:var(--warn)}
+.mesh-graph .node.self circle:not(.hit){fill:var(--text)}
 .mesh-graph .node.self text{fill:var(--text);font-weight:700}
 /* Labels sit over the edges: painting the stroke first gives each one a halo of
    the card's own background, so nothing has to be moved out of the way. */
 .mesh-graph .node text{font:600 9px var(--font);fill:var(--text-muted);text-anchor:middle;
   paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round}
 .mesh-graph .node{cursor:pointer}
-.mesh-graph .node:hover circle,.mesh-graph .node:focus-visible circle{r:13}
+.mesh-graph .node:hover circle:not(.hit),
+.mesh-graph .node:focus-visible circle:not(.hit){r:13}
 .mesh-graph .node:focus-visible{outline:none}
-.mesh-graph .node:focus-visible circle{stroke:var(--ring);stroke-width:2.5}
+.mesh-graph .node:focus-visible circle:not(.hit){stroke:var(--ring);stroke-width:2.5}
 
 #map-svg{width:100%;height:100%;min-height:0;flex:1 1 auto;
   /* The browser's own pan/zoom would fight the drag handler for the same
@@ -643,6 +667,9 @@ CONSOLE_PAGE_CSS = """
   flex-direction:column;gap:2px;padding:2px;background:var(--surface);
   border:1px solid var(--border);border-radius:var(--r-md);box-shadow:var(--shadow-1)}
 .map-zoom button{width:30px;min-height:30px}
+#transport-blocks [data-panel]{display:flex;flex-direction:column;gap:var(--s-4)}
+#transport-blocks [data-facts]:empty{display:none}
+#transport-blocks h3{margin-bottom:calc(-1 * var(--s-2))}
 .map-hint{position:absolute;left:var(--s-3);bottom:var(--s-3);pointer-events:none}
 .map-side{overflow-y:auto;min-height:0;border-left:1px solid var(--border);
   padding-left:var(--s-4)}
@@ -657,6 +684,8 @@ CONSOLE_PAGE_CSS = """
   overflow:hidden;text-overflow:ellipsis}
 .mesh-graph .edge.lossy{stroke:var(--warn)}
 #map-svg .edge.on{stroke:var(--accent);stroke-width:3}
+#map-svg .node.picked circle:not(.hit){stroke:var(--accent);stroke-width:3}
+#map-svg .node.picked text{fill:var(--text);font-weight:700}
 /* Sized in drawing units scaled by --map-unit, which the camera keeps in step
    with the zoom — the on-screen result is a constant 12px and 10px. */
 #map-svg .node text{font-size:calc(12px * var(--map-unit,1))}
@@ -714,12 +743,12 @@ CONSOLE_PAGE_JS = r"""
 // Reads /api/state on a timer and paints; every control posts and re-reads.
 // Nothing is cached across a reload: what the node says is the truth.
 
-let STATE = null, PREVIOUS = null, POLL = null, TICKING = false;
+let STATE = null, PREVIOUS = null, TICKING = false;
 const RATES = [];                       // ~90 samples, the throughput window
 
 // ---- gate ------------------------------------------------------------------
 function showGate(){
-  if(POLL){ clearInterval(POLL); POLL = null; }
+  REFRESH.stop();
   $("shell").classList.add("hidden");
   $("login").classList.remove("hidden");
   $("password").focus();
@@ -730,8 +759,7 @@ function enterConsole(){
   ROUTER.start(onRoute);
   paintContext();
   loadTargets();
-  tick();
-  if(!POLL) POLL = setInterval(tick, 2000);
+  REFRESH.mount(tick);
 }
 SESSION.onLost = showGate;
 SESSION.load();
@@ -781,6 +809,7 @@ async function tick(){
     trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap();
+    if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
   }catch(_){
     railState("danger", "Console unreachable");
   }finally{ TICKING = false; }
@@ -990,6 +1019,12 @@ function renderGraph(svg, state, size){
   const dot = (id, point, kind, label, caption) => {
     const group = svgEl("g", {class:"node " + kind, tabindex:"0", role:"button",
                               "data-node-id":id, "aria-label":label});
+    // An invisible, generous target under the visible dot. A 9px circle is a
+    // fine thing to look at and a poor thing to hit — with a finger it is
+    // barely a third of what a touch target has to be, and even with a mouse
+    // the gap between the circle and its label swallowed clicks.
+    group.appendChild(svgEl("circle", {cx:point.x, cy:point.y, class:"hit",
+                                       r:Math.max(size.r * 2.2, 18)}));
     group.appendChild(svgEl("circle", {cx:point.x, cy:point.y,
                                        r:kind === "self" ? size.self : size.r}));
     const text = svgEl("text", {x:point.x,
@@ -1036,7 +1071,10 @@ function paintMap(){
   // as soon as it refreshes under the finger.
   applyMapView();
   const direct = (STATE.topology || {}).direct || [];
-  $("map-links").innerHTML = direct.length ? direct.map((node) => {
+  // A pick that no longer exists is dropped — the one deselection a repaint is
+  // allowed to make.
+  if(MAP_PICK && !direct.some((node) => node.id === MAP_PICK)) MAP_PICK = null;
+  setHTML("map-links", direct.length ? direct.map((node) => {
     const quality = node.quality || {}, counters = node.counters || {};
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
     return '<div class="map-link' + (MAP_PICK === node.id ? " on" : "") +
@@ -1050,13 +1088,28 @@ function paintMap(){
       " · " + fmtBytes((counters.bytes_in || 0) + (counters.bytes_out || 0)) +
       (node.since ? " · up " + fmtDuration(node.since) : "") + "</div>" +
       (node.remote ? '<div class="tiny muted mono truncate">' + esc(node.remote) + "</div>" : "") +
-      sparkHTML(quality.samples_ms, {width:240, height:22}) + "</div>";
-  }).join("") : emptyHTML("No direct link", "Nothing to watch until this node has a neighbour.");
+      sparkHTML(quality.samples_ms, {width:240, height:22}) +
+      '<div class="btn-row"><button class="sm" data-link-details="' + esc(node.id) +
+      '">Details</button></div></div>';
+  }).join("") : emptyHTML("No direct link",
+                          "Nothing to watch until this node has a neighbour."));
   highlightEdge();
+  revealPick();
+}
+
+// The drawing and the list are one selection, so picking on either has to bring
+// the other into view — otherwise clicking a node on the map appears to do
+// nothing when its row is below the fold.
+function revealPick(){
+  if(!MAP_PICK) return;
+  const row = document.querySelector('[data-link="' + CSS.escape(MAP_PICK) + '"]');
+  if(row) row.scrollIntoView({block:"nearest"});
 }
 function highlightEdge(){
   $$("#map-svg [data-edge]").forEach((edge) =>
     edge.classList.toggle("on", edge.dataset.edge === MAP_PICK));
+  $$("#map-svg [data-node-id]").forEach((node) =>
+    node.classList.toggle("picked", node.dataset.nodeId === MAP_PICK));
 }
 // ---- panning and zooming the map -------------------------------------------
 // The viewBox *is* the camera: moving it pans, shrinking it zooms, and every
@@ -1129,9 +1182,15 @@ function zoomMapBy(factor){
 
 const MAP_PTR = new Map();       // live pointers, so a pinch can be told from a drag
 let MAP_PINCH = null, MAP_MOVED = 0;
+// Capturing the pointer is what makes a drag survive leaving the element — and
+// it also retargets the `click` that follows onto the capturing element. So the
+// node under the finger is remembered here, at press time, or clicking a node
+// on the map reaches the SVG and never the node.
+let MAP_DOWN_ON = null;
 
 function mapPointerDown(event){
   MAP_PTR.set(event.pointerId, {x:event.clientX, y:event.clientY});
+  MAP_DOWN_ON = (event.target.closest && event.target.closest("[data-node-id]")) || null;
   $("map-svg").setPointerCapture(event.pointerId);
   MAP_MOVED = 0;
   if(MAP_PTR.size === 2){
@@ -1196,6 +1255,8 @@ $("map-open").addEventListener("click", () => {
 });
 $("map-close").addEventListener("click", () => $("map-dialog").close());
 $("map-links").addEventListener("click", (event) => {
+  const details = event.target.closest("[data-link-details]");
+  if(details){ openNode(details.dataset.linkDetails); return; }
   const row = event.target.closest("[data-link]");
   if(!row) return;
   MAP_PICK = MAP_PICK === row.dataset.link ? null : row.dataset.link;
@@ -1204,12 +1265,19 @@ $("map-links").addEventListener("click", (event) => {
 $("map-svg").addEventListener("click", (event) => {
   // A pan that happens to end on a node is not a click on it.
   if(MAP_MOVED > 6) return;
-  const node = event.target.closest && event.target.closest("[data-node-id]");
-  if(node) openNode(node.dataset.nodeId);
+  const node = MAP_DOWN_ON ||
+    (event.target.closest && event.target.closest("[data-node-id]"));
+  if(!node) return;
+  const id = node.dataset.nodeId;
+  // Selecting, not opening: the details are one button away in the row this
+  // highlights, and a dialog over the map hides the thing being explored.
+  MAP_PICK = MAP_PICK === id ? null : id;
+  paintMap();
 });
 $("graph").addEventListener("click", (event) => {
   const node = event.target.closest && event.target.closest("[data-node-id]");
   if(node){ openNode(node.dataset.nodeId); return; }
+  // Clicking the card itself is the obvious way to ask for a bigger one.
   // Clicking the map itself is the obvious way to ask for a bigger one.
   $("map-open").click();
 });
@@ -1266,46 +1334,122 @@ function spanRow(columns, html){
 async function refreshPeers(){
   await Promise.all([paintNodes("active"), paintNodes("known")]);
 }
+// One node may hold several links at once — a LAN address and a punched UDP
+// path, say. Listing them flat makes a node with five links look like five
+// nodes, and hides the only number that matters at a glance: the best one it
+// has. So the table is one row per *node*, opening onto its links.
+// Per table, not shared: a node with three links in "active" may have one entry
+// in "known", and pruning the shared set against the wrong table folded the row
+// back on the next refresh.
+const LINKS_OPEN = {active: new Set(), known: new Set()};
+
+function groupByNode(items){
+  const order = [], byNode = new Map();
+  for(const item of items){
+    let group = byNode.get(item.id);
+    if(!group){
+      group = {id:item.id, links:[], best:null, node:item};
+      byNode.set(item.id, group);
+      order.push(group);
+    }
+    group.links.push(item);
+    const rtt = item.rtt_ms;
+    // The best link is the yardstick, and its jitter is the one worth showing:
+    // the jitter of a link nobody is using answers no question.
+    if(rtt != null && (group.best == null || rtt < group.best.rtt_ms)) group.best = item;
+  }
+  return order;
+}
+
+function linkRowHTML(node, kind, inner){
+  const transport = node.transport ||
+    ((node.addresses || [])[0] || "").split(":", 1)[0] || "—";
+  const tone = node.connected ? "ok" : (node.has_key ? "" : "warn");
+  const label = node.connected ? "authenticated" : (node.has_key ? "key known" : "no key");
+  const quality = (node.link || {}).quality || {};
+  const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+  return '<tr class="link-row"' + (inner ? ' data-inner' : ' data-clickable') +
+    ' data-node-id="' + esc(node.id) + '">' +
+    '<td class="mono">' + (inner ? '<span class="link-in"></span>' : "") +
+      esc(inner ? (transport + " link") : shortId(node.id)) + "</td>" +
+    "<td>" + badge(label, tone) +
+      (loss ? " " + badge(loss + "% loss", "warn") : "") + "</td>" +
+    "<td>" + esc(transport) +
+      ((node.link && node.link.remote)
+        ? '<div class="tiny muted mono truncate">' + esc(node.link.remote) + "</div>" : "") +
+    "</td>" +
+    '<td class="num">' + (node.rtt_ms == null ? "—" : esc(node.rtt_ms) + " ms") +
+      (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
+        " ms</div>" : "") + "</td>" +
+    "<td>" + (node.seen_ago == null ? "live" : esc(fmtAgo(node.seen_ago))) + "</td>" +
+    '<td class="tight">' + (inner ? "" :
+      '<button class="sm" data-node-id="' + esc(node.id) + '">Details</button>') +
+    "</td></tr>";
+}
+
+function groupRowHTML(group, unfolded){
+  const open = unfolded.has(group.id);
+  const best = group.best || group.links[0];
+  const quality = (best.link || {}).quality || {};
+  const schemes = [...new Set(group.links.map((link) => link.transport ||
+    ((link.link || {}).scheme) || "?"))];
+  return '<tr class="link-row group" data-clickable data-node-id="' + esc(group.id) +
+    '"><td class="mono">' +
+    '<button class="icon sm fold" data-fold="' + esc(group.id) + '" aria-expanded="' +
+    (open ? "true" : "false") + '" aria-label="' +
+    (open ? "Hide" : "Show") + ' the links to ' + esc(shortId(group.id)) + '">' +
+    (open ? "▾" : "▸") + "</button>" + esc(shortId(group.id)) + "</td>" +
+    "<td>" + badge(group.links.length + " link" +
+      (group.links.length === 1 ? "" : "s"), "ok") + "</td>" +
+    "<td>" + esc(schemes.join(", ")) + "</td>" +
+    '<td class="num">' + (best.rtt_ms == null ? "—" : esc(best.rtt_ms) + " ms") +
+      (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
+        " ms</div>" : "") + "</td>" +
+    "<td>" + (best.seen_ago == null ? "live" : esc(fmtAgo(best.seen_ago))) + "</td>" +
+    '<td class="tight"><button class="sm" data-node-id="' + esc(group.id) +
+    '">Details</button></td></tr>';
+}
+
 async function paintNodes(kind){
   const body = $(kind + "-list");
   if(!body.childElementCount) body.innerHTML = spanRow(6, skeletonHTML(3));
   try{
     const items = await fetchPage(kind);
     $(kind + "-count").textContent = PAGES[kind].total;
-    body.innerHTML = items.length ? items.map((node) => {
-      const transport = node.transport ||
-        ((node.addresses || [])[0] || "").split(":", 1)[0] || "—";
-      const tone = node.connected ? "ok" : (node.has_key ? "" : "warn");
-      const label = node.connected ? "authenticated" : (node.has_key ? "key known" : "no key");
-      const quality = (node.link || {}).quality || {};
-      const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
-      return '<tr data-clickable data-node-id="' + esc(node.id) + '">' +
-        '<td class="mono">' + esc(shortId(node.id)) + "</td>" +
-        "<td>" + badge(label, tone) +
-          (loss ? " " + badge(loss + "% loss", "warn") : "") + "</td>" +
-        "<td>" + esc(transport) +
-          ((node.link && node.link.remote)
-            ? '<div class="tiny muted mono truncate">' + esc(node.link.remote) + "</div>" : "") +
-        "</td>" +
-        '<td class="num">' + (node.rtt_ms == null ? "—" : esc(node.rtt_ms) + " ms") +
-          (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
-            " ms</div>" : "") + "</td>" +
-        "<td>" + (node.seen_ago == null ? "live" : esc(fmtAgo(node.seen_ago))) + "</td>" +
-        '<td class="tight"><button class="sm" data-node-id="' + esc(node.id) +
-        '">Details</button></td></tr>';
-    }).join("") : spanRow(6, emptyHTML(
+    const groups = groupByNode(items);
+    // A node that no longer has several links has nothing to unfold; forgetting
+    // it here is the one deselection a refresh is allowed to make.
+    const unfolded = LINKS_OPEN[kind];
+    [...unfolded].forEach((id) => {
+      const group = groups.find((entry) => entry.id === id);
+      if(!group || group.links.length < 2) unfolded.delete(id);
+    });
+    setHTML(body, groups.length ? groups.map((group) =>
+      group.links.length > 1
+        ? groupRowHTML(group, unfolded) + (unfolded.has(group.id)
+            ? group.links.map((link) => linkRowHTML(link, kind, true)).join("") : "")
+        : linkRowHTML(group.links[0], kind, false)).join("")
+      : spanRow(6, emptyHTML(
       PAGES[kind].query ? "No node matches that" :
         kind === "active" ? "No authenticated link yet" : "No known node yet",
       PAGES[kind].query ? "Try a shorter prefix of the id, or an address." :
         kind === "active" ? "Add one from Network → Add a node."
-                          : "Nodes appear here once this one has heard of them."));
+                          : "Nodes appear here once this one has heard of them.")));
     paintPager(kind, kind + "-pager", () => paintNodes(kind));
   }catch(_){
-    body.innerHTML = spanRow(6, errorHTML("Node list unavailable",
-      "The console could not read the routing table just now."));
+    setHTML(body, spanRow(6, errorHTML("Node list unavailable",
+      "The console could not read the routing table just now.")));
   }
 }
 ["active-list", "known-list"].forEach((id) => $(id).addEventListener("click", (event) => {
+  const fold = event.target.closest("[data-fold]");
+  if(fold){
+    const kind = id.split("-")[0], node = fold.dataset.fold;
+    if(LINKS_OPEN[kind].has(node)) LINKS_OPEN[kind].delete(node);
+    else LINKS_OPEN[kind].add(node);
+    paintNodes(kind);
+    return;
+  }
   const row = event.target.closest("[data-node-id]");
   if(row) openNode(row.dataset.nodeId);
 }));
@@ -1349,18 +1493,16 @@ $("node-dialog-close").addEventListener("click", () => $("node-dialog").close())
 // ---- reachability ----------------------------------------------------------
 function paintReach(state){
   const network = state.network || {};
-  const relay = $("relay-state");
-  relay.textContent = state.relay_capable ? "Relay capable" : "Client reachability";
-  relay.className = "badge " + (state.relay_capable ? "ok" : "");
+  // What is left here is about the *node*: can it see out at all, and how many
+  // seeks are in flight. A public IP is a fact about IP, and it now lives in
+  // the transport that dials with it.
   const summary = [
     ["Internet", network.internet == null ? "Checking…" : network.internet ? "Online" : "Offline"],
-    ["Public IP", network.public_ip || "Unknown"],
-    ["Public UDP", network.stun_addr || "Unknown"],
     ["Pending seeks", state.pending_seeks || 0],
   ];
-  $("network-summary").innerHTML = summary.map(([key, value]) =>
+  setHTML("network-summary", summary.map(([key, value]) =>
     '<div class="stat sm"><span class="v">' + esc(value) +
-    '</span><span class="k">' + esc(key) + "</span></div>").join("");
+    '</span><span class="k">' + esc(key) + "</span></div>").join(""));
   const transports = state.transport_details || [];
   // Aggregated from the live links rather than reported per scheme: the peers
   // are where the bytes and the latency actually are.
@@ -1473,6 +1615,16 @@ $("transport-blocks").addEventListener("click", async (event) => {
          on ? "UDP stopped" : "UDP started");
     return;
   }
+  const view = event.target.closest("[data-view]");
+  if(view){
+    const wanted = view.dataset.view;
+    $$("[data-view]", block).forEach((button) =>
+      button.setAttribute("aria-selected", button.dataset.view === wanted ? "true" : "false"));
+    $$("[data-panel]", block).forEach((panel) => {
+      panel.hidden = panel.dataset.panel !== wanted;
+    });
+    return;
+  }
   const flag = event.target.closest("[data-flag]");
   if(flag && STATE){
     const paths = {punch:"/api/punch", keepalive:"/api/punch/keepalive",
@@ -1565,28 +1717,61 @@ const SCHEME_EXTRAS = {
     "network. All three ride on this socket.</p>",
 };
 
-function transportBlockHTML(scheme, options, open){
+// Opening a transport answers "how is this medium doing" before it answers
+// "what can I change about it". Both in one scroll made the second question
+// bury the first, and the first is the one people open the block for.
+function transportBlockHTML(scheme, options, open, view){
   const extras = SCHEME_EXTRAS[scheme];
+  const settings = view === "settings";
   return '<details class="card" data-scheme="' + esc(scheme) + '"' + (open ? " open" : "") +
     "><summary>" + esc(scheme) +
     '<span class="grow"></span><span class="row" data-summary></span></summary>' +
     '<div class="card-body">' +
+    '<div class="segmented" role="tablist" aria-label="' + esc(scheme) + ' view">' +
+    '<button role="tab" data-view="status" aria-selected="' + (settings ? "false" : "true") +
+    '">Status</button>' +
+    '<button role="tab" data-view="settings" aria-selected="' + (settings ? "true" : "false") +
+    '">Settings</button></div>' +
+
+    '<div data-panel="status"' + (settings ? " hidden" : "") + ">" +
     '<div class="stats" data-stats></div>' +
+    '<dl class="kv" data-facts></dl>' +
     "<h3>Listeners</h3>" +
     '<div class="chips" data-listeners></div>' +
     '<div class="toolbar"><label class="field grow"><span class="sr-only">Listener URI</span>' +
     '<input class="mono" data-listen-uri spellcheck="false" placeholder="' +
     esc(scheme) + '://0.0.0.0:9002"></label>' +
     "<button data-listen-add>Add listener</button></div>" +
-    (extras ? extras() : "") +
+    (extras ? extras() : "") + "</div>" +
+
+    '<div data-panel="settings"' + (settings ? "" : " hidden") + ">" +
     (options.length
-      ? '<h3>Settings</h3><div class="form-grid">' +
+      ? '<div class="form-grid">' +
         options.map((field) => optionHTML(scheme, field)).join("") +
         '</div><div class="btn-row"><button class="primary" data-apply>Apply</button>' +
         '<span class="msg" id="opt-msg-' + esc(scheme) + '"></span></div>'
       : '<p class="hint">This medium declares no setting.</p>') +
-    "</div></details>";
+    "</div></div></details>";
 }
+
+// Facts that belong to one medium and to no other. The public IP is what a peer
+// dials over TCP; the STUN address is what it dials over UDP; neither is a
+// property of the node, which is where they used to be shown.
+//
+// Reachability is the exception, and knowingly so: the node decides it once,
+// across every transport (`relay_capable`). Showing it on the IP transports is
+// a presentation choice — where an operator looks for it — not a claim that it
+// was measured per medium. Making it genuinely per-transport is backend work.
+const SCHEME_FACTS = {
+  tcp: (state) => [
+    ["Public IP", (state.network || {}).public_ip || "Unknown"],
+    ["Reachable from", state.relay_capable ? "the open internet" : "this network only"],
+  ],
+  udp: (state) => [
+    ["Public UDP", (state.network || {}).stun_addr || "Unknown"],
+    ["Reachable from", state.relay_capable ? "the open internet" : "this network only"],
+  ],
+};
 
 // Rebuilt only when the set of transports or their declared settings changes:
 // a redraw on every tick would wipe the field someone is typing in.
@@ -1594,6 +1779,11 @@ async function loadTransportOptions(){
   const holder = $("transport-blocks");
   const open = new Set($$("#transport-blocks details[open]")
     .map((element) => element.dataset.scheme));
+  const views = {};
+  $$("#transport-blocks [data-scheme]").forEach((block) => {
+    const chosen = block.querySelector('[data-view][aria-selected="true"]');
+    if(chosen) views[block.dataset.scheme] = chosen.dataset.view;
+  });
   const declared = {};
   let persisted = true;
   try{
@@ -1611,7 +1801,8 @@ async function loadTransportOptions(){
   ])].sort();
   holder.innerHTML = schemes.length
     ? schemes.map((scheme) =>
-        transportBlockHTML(scheme, declared[scheme] || [], open.has(scheme))).join("")
+        transportBlockHTML(scheme, declared[scheme] || [], open.has(scheme),
+                           views[scheme] || "status")).join("")
     : emptyHTML("No transport registered",
                 "A node with no transport can neither listen nor dial.");
   if(!persisted && schemes.length)
@@ -1645,6 +1836,10 @@ function paintTransportLive(state){
       ["Ports", (info.ports || []).length ? info.ports.join(", ") : "—"],
     ].map(([key, value]) => '<div class="stat sm"><span class="v">' + esc(value) +
       '</span><span class="k">' + esc(key) + "</span></div>").join("");
+    const facts = SCHEME_FACTS[scheme];
+    setHTML(block.querySelector("[data-facts]"), facts
+      ? facts(state).map(([key, value]) => "<dt>" + esc(key) + "</dt><dd>" +
+          esc(value) + "</dd>").join("") : "");
     block.querySelector("[data-listeners]").innerHTML = mine.length ? mine.map((uri) =>
       '<span class="chip">' + esc(uri) + '<button class="icon sm" data-remove-listener="' +
       esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">✕</button></span>').join("")

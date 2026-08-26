@@ -73,6 +73,21 @@ FLEET_HTML = """<!doctype html>
           <div id="notif-list"></div>
         </div>
       </div>
+      <div id="refresh" class="refresh">
+        <label class="sr-only" for="refresh-secs">Auto-refresh, in seconds (0 turns it off)</label>
+        <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
+        <span class="unit" aria-hidden="true">s</span>
+        <label class="sr-only" for="refresh-pick">Auto-refresh</label>
+        <select id="refresh-pick">
+          <option value="0">Off</option>
+          <option value="1">1s</option>
+          <option value="2">2s</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+        </select>
+        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
+      </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
       <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
       <div class="menu-wrap more-wrap">
