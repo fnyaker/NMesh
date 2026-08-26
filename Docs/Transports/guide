@@ -1,79 +1,78 @@
-# Créer un transport NMesh
+# Writing an NMesh transport
 
-Un transport est la couche qui fait circuler les bytes entre deux nœuds.
-NMesh est totalement agnostique du medium : TCP, Bluetooth, LoRa, WebSocket,
-UART série, pigeons voyageurs — tout ce qui peut transmettre des bytes fonctionne.
+A transport is the layer that moves bytes between two nodes. NMesh is entirely
+agnostic about the medium: TCP, Bluetooth, LoRa, WebSocket, a serial UART,
+carrier pigeons — anything that can carry bytes works.
 
 ---
 
-## Les deux interfaces
+## The two interfaces
 
-### BaseTransport — une connexion
+### BaseTransport — one connection
 
-Représente un lien bidirectionnel entre deux nœuds.
-Une instance = un canal. Le transport doit :
-- Délimiter les paquets (framing) si le protocole sous-jacent est orienté flux
-- Sérialiser/désérialiser les objets Packet
+Represents a bidirectional link between two nodes. One instance = one channel.
+The transport must:
+- delimit packets (framing) if the underlying protocol is stream-oriented
+- serialise/deserialise Packet objects
 
 ```
 BaseTransport
-├── connect(address)   — ouvre une connexion sortante
-├── send(packet)       — envoie un paquet
-├── receive()          — reçoit un paquet (bloquant)
-└── close()            — ferme le lien
+├── connect(address)   — opens an outbound connection
+├── send(packet)       — sends a packet
+├── receive()          — receives a packet (blocking)
+└── close()            — closes the link
 ```
 
-`listen(address)` reste dans BaseTransport pour le cas mono-connexion (tests,
-liaisons point-à-point). Pour les nœuds qui acceptent plusieurs clients,
-utilisez BaseServer.
+`listen(address)` stays in BaseTransport for the single-connection case (tests,
+point-to-point links). For nodes that accept several clients, use BaseServer.
 
 
-### BaseServer — plusieurs connexions entrantes
+### BaseServer — several inbound connections
 
-Écoute sur une adresse et crée un nouveau BaseTransport par client accepté.
+Listens on an address and creates a new BaseTransport per accepted client.
 
 ```
 BaseServer
-├── listen(address)   — démarre l'écoute (non-bloquant)
-└── close()           — arrête d'accepter
+├── listen(address)   — starts listening (non-blocking)
+└── close()           — stops accepting
 ```
 
-Callback à setter avant listen() :
+The callback to set before listen():
 
     server.on_new_connection = async def(transport: BaseTransport) -> None
 
 ---
 
-## Intégration avec MeshNode
+## Integrating with MeshNode
 
 ```python
 node = MeshNode(
-    transport_factory=MonTransport,   # utilisé pour join()
-    server_factory=MonServeur,        # utilisé pour start()
+    transport_factory=MyTransport,    # used by join()
+    server_factory=MyServer,          # used by start()
 )
-await node.start("mon://adresse")
-await node.join("mon://autre_adresse", code)
+await node.start("mine://address")
+await node.join("mine://other_address", code)
 ```
 
-Par défaut : TCPTransport + TCPServer.
+By default: TCPTransport + TCPServer.
 
 ---
 
 ## Framing
 
-TCP est un flux d'octets sans frontières entre messages. Votre transport doit
-délimiter les paquets. Stratégie recommandée : préfixe 2 octets (uint16 big-endian)
-indiquant la taille du paquet suivant.
+TCP is a byte stream with no boundaries between messages. Your transport must
+delimit packets. The recommended strategy: a 2-byte prefix (uint16 big-endian)
+giving the size of the packet that follows.
 
 ```
-[0x00][0x4B]  →  75 octets suivants = un Packet
+[0x00][0x4B]  →  the next 75 bytes = one Packet
 ```
 
-Pour les protocoles orientés datagramme (UDP, LoRa, BLE), pas de framing
-nécessaire : un datagramme = un paquet.
+For datagram-oriented protocols (UDP, LoRa, BLE) no framing is needed: one
+datagram = one packet.
 
 ---
 
-## Exemple : transport en mémoire (pour tests)
+## Example: an in-memory transport (for tests)
 
-Voir Docs/Transports/template.py
+See Docs/Transports/template.py

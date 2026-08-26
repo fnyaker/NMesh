@@ -1,8 +1,8 @@
 """
-Template pour créer un transport NMesh personnalisé.
+Template for writing your own NMesh transport.
 
-Copiez ce fichier, renommez les classes, implémentez les méthodes abstraites.
-Les commentaires TODO indiquent ce que vous devez écrire.
+Copy this file, rename the classes, implement the abstract methods. The TODO
+comments say what you have to write.
 """
 import asyncio
 from src.transport import BaseTransport, BaseServer
@@ -10,82 +10,83 @@ from src.packet import Packet
 
 
 # ---------------------------------------------------------------------------
-# 1. Transport (une connexion)
+# 1. Transport (one connection)
 # ---------------------------------------------------------------------------
 
 class MyTransport(BaseTransport):
     """
-    Un transport point-à-point sur [votre medium].
+    A point-to-point transport over [your medium].
 
-    Contrat :
-    - send() envoie exactement un Packet, receive() en retourne exactement un.
-    - Si le medium est un flux (TCP, UART...), vous devez implémenter un framing.
-    - Si le medium est un datagramme (UDP, LoRa...), pas de framing nécessaire.
+    The contract:
+    - send() sends exactly one Packet, receive() returns exactly one.
+    - If the medium is a stream (TCP, UART...), you must implement framing.
+    - If the medium is datagram-based (UDP, LoRa...), no framing is needed.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        # TODO: initialiser vos ressources (socket, handle, file descriptor…)
+        # TODO: initialise your resources (socket, handle, file descriptor…)
 
     async def connect(self, address: str) -> None:
-        """Ouvrir une connexion sortante vers `address`."""
-        # TODO: parser l'adresse et ouvrir la connexion
-        # Exemple TCP : host, port = address.rsplit(':', 1)
+        """Open an outbound connection to `address`."""
+        # TODO: parse the address and open the connection
+        # TCP example: host, port = address.rsplit(':', 1)
         raise NotImplementedError
 
     async def listen(self, address: str) -> None:
-        """Écouter sur `address` et attendre une connexion entrante (bloquant)."""
-        # Optionnel si vous utilisez MyServer pour le multi-connexion.
-        # Implémenter si vous avez besoin du mode mono-connexion.
+        """Listen on `address` and wait for one inbound connection (blocking)."""
+        # Optional if you use MyServer for the multi-connection case.
+        # Implement it if you need the single-connection mode.
         raise NotImplementedError
 
     async def send(self, packet: Packet) -> None:
-        """Sérialiser et envoyer le paquet."""
+        """Serialise and send the packet."""
         data = packet.pack()
-        # TODO: si flux → préfixer la taille
+        # TODO: stream → prefix the size
         #   frame = struct.pack('!H', len(data)) + data
         #   await self._writer.write(frame)
-        # TODO: si datagramme → envoyer directement
+        # TODO: datagram → send it directly
         raise NotImplementedError
 
     async def receive(self) -> Packet:
-        """Bloquer jusqu'à la réception d'un paquet et le retourner."""
-        # TODO: si flux → lire le préfixe de taille, puis les N octets
+        """Block until a packet arrives, and return it."""
+        # TODO: stream → read the size prefix, then the N bytes
         #   length = struct.unpack('!H', await read(2))[0]
         #   data = await read(length)
-        # TODO: si datagramme → lire un datagramme complet
-        # Puis désérialiser :
+        # TODO: datagram → read one whole datagram
+        # Then deserialise:
         #   return Packet.unpack(data)
         raise NotImplementedError
 
     async def close(self) -> None:
-        """Fermer la connexion et libérer les ressources."""
-        # TODO: fermer le socket/handle proprement
+        """Close the connection and release the resources."""
+        # TODO: close the socket/handle cleanly
         raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
-# 2. Serveur (plusieurs connexions entrantes)
+# 2. Server (several inbound connections)
 # ---------------------------------------------------------------------------
 
 class MyServer(BaseServer):
     """
-    Serveur [votre medium] : écoute et crée un MyTransport par client accepté.
+    A [your medium] server: listens and creates one MyTransport per accepted
+    client.
 
-    Après listen(), chaque nouvelle connexion déclenche :
+    After listen(), every new connection triggers:
         await self.on_new_connection(transport)
-    où `transport` est une instance de MyTransport déjà connectée.
+    where `transport` is an already connected MyTransport instance.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        # TODO: initialiser vos ressources serveur
+        # TODO: initialise your server resources
 
     async def listen(self, address: str) -> None:
-        """Démarrer l'écoute — retour immédiat après bind."""
-        # TODO: binder l'adresse et démarrer la boucle d'acceptation en tâche de fond
+        """Start listening — returns as soon as the bind is done."""
+        # TODO: bind the address and start the accept loop in the background
         #
-        # Exemple asyncio TCP :
+        # asyncio TCP example:
         #   self._server = await asyncio.start_server(_accept, host, port)
         #
         # async def _accept(reader, writer):
@@ -95,13 +96,13 @@ class MyServer(BaseServer):
         raise NotImplementedError
 
     async def close(self) -> None:
-        """Arrêter d'accepter de nouvelles connexions."""
-        # TODO: fermer le serveur proprement
+        """Stop accepting new connections."""
+        # TODO: close the server cleanly
         raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
-# 3. Enregistrer avec MeshNode
+# 3. Registering it with MeshNode
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -109,25 +110,25 @@ if __name__ == "__main__":
     from src import MeshNode
 
     async def demo():
-        # Nœud hôte
+        # The host node
         host = MeshNode(
             transport_factory=MyTransport,
             server_factory=MyServer,
         )
         code = host.generate_invite()
-        await host.start("mon://adresse:1234")
+        await host.start("mine://address:1234")
 
-        # Nœud invité
+        # The invited node
         guest = MeshNode(
             transport_factory=MyTransport,
             server_factory=MyServer,
         )
-        await guest.join("mon://adresse:1234", code)
+        await guest.join("mine://address:1234", code)
         await guest.wait_for_session(timeout=10.0)
 
-        await guest.send_data(b"hello via mon transport")
+        await guest.send_data(b"hello over my transport")
         data = await host.receive_data()
-        print(f"reçu : {data}")
+        print(f"received: {data}")
 
         await guest.stop()
         await host.stop()
@@ -136,15 +137,15 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# 4. Transport en mémoire (utile pour les tests unitaires)
+# 4. An in-memory transport (handy for unit tests)
 # ---------------------------------------------------------------------------
 
 class InMemoryTransport(BaseTransport):
     """
-    Transport en mémoire — deux instances connectées via des queues asyncio.
-    Pratique pour tester la logique sans réseau réel.
+    An in-memory transport — two instances wired together by asyncio queues.
+    Handy for testing the logic without a real network.
 
-    Usage :
+    Usage:
         a, b = InMemoryTransport.make_pair()
         # a.send() → b.receive(), b.send() → a.receive()
     """
@@ -162,7 +163,7 @@ class InMemoryTransport(BaseTransport):
         return a, b
 
     async def connect(self, address: str) -> None:
-        pass  # connexion déjà établie via make_pair()
+        pass  # already connected through make_pair()
 
     async def listen(self, address: str) -> None:
         pass
