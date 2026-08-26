@@ -212,7 +212,7 @@ class TCPTransport(BaseTransport):
 
 
 class TCPServer(BaseServer):
-    """Accepts multiple incoming TCP connections — crée un TCPTransport par client."""
+    """Accepts multiple incoming TCP connections — one TCPTransport per client."""
 
     def __init__(self) -> None:
         super().__init__()

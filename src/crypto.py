@@ -58,15 +58,15 @@ class CryptoIdentity:
         ).derive(self._signer.export_secret_key())
 
     def save(self, path: str) -> None:
-        """Persiste la paire de clés DSA sur disque (format binaire brut)."""
+        """Persist the DSA key pair on disk (raw binary format)."""
         import struct, os
         pub = self._dsa_public
         secret = self._signer.export_secret_key()
         data = struct.pack('!HH', len(pub), len(secret)) + pub + secret
         tmp = path + ".tmp"
-        # La clé privée du nœud *est* son identité sur le mesh. Elle est créée
-        # en 0600 dès l'ouverture — pas par un chmod après coup, qui laisserait
-        # une fenêtre où n'importe qui sur la machine peut la lire.
+        # The node's private key *is* its identity on the mesh. It is created
+        # 0600 at open time — not by a chmod afterwards, which would leave a
+        # window where anyone on the machine could read it.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, 'wb') as f:
@@ -74,14 +74,14 @@ class CryptoIdentity:
         except BaseException:
             os.unlink(tmp)
             raise
-        # Un fichier déjà présent en 0644 (identité écrite par une version
-        # antérieure) garde son mode à travers le replace : on le corrige.
+        # A file already present in 0644 (an identity written by an earlier
+        # version) keeps its mode across the replace: fix it.
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: str) -> 'CryptoIdentity':
-        """Charge une identité depuis le disque. Crée une nouvelle si introuvable."""
+        """Load an identity from disk. Creates a new one if there is none."""
         import struct
         identity = cls.__new__(cls)
         try:
@@ -102,7 +102,7 @@ class CryptoIdentity:
         return identity
 
     def self_signed_cert(self) -> Certificate:
-        """Émet un certificat auto-signé (identité racine)."""
+        """Issue a self-signed certificate (a root identity)."""
         own_id = NodeID.from_public_key(self._dsa_public)
         now = int(time.time())
         cert = Certificate(own_id, self._dsa_public,
@@ -115,7 +115,7 @@ class CryptoIdentity:
 
     def issue_cert(self, subject_id: NodeID, subject_pub: bytes,
                    ttl_seconds: int = 365 * 86400) -> Certificate:
-        """Émet un certificat pour un sujet, signé par cette identité."""
+        """Issue a certificate for a subject, signed by this identity."""
         own_id = NodeID.from_public_key(self._dsa_public)
         now = int(time.time())
         expires = now + ttl_seconds

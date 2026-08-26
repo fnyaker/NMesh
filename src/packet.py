@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .crypto import SessionKey
 
-HEADER_FORMAT = '!BBB20s20sQ12s16s'   # msg_id est désormais uint64 (8 octets)
+HEADER_FORMAT = '!BBB20s20sQ12s16s'   # msg_id is now a uint64 (8 bytes)
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 MSG_ID_FORMAT = '!BB20s20s12s16s'
 

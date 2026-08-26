@@ -1212,10 +1212,10 @@ class MeshNode:
         return next((p.session for p in self._peers if p.session is not None), None)
 
     def generate_invite(self, ttl_seconds: float | None = None) -> str:
-        """Émet un code d'invitation. ``ttl_seconds`` allonge la fenêtre (borné
-        par `invite._MAX_TTL`) pour les invitations qui ne sont pas tapées à la
-        main — typiquement celle déposée sur une machine en cours de
-        provisioning, qui ne s'en servira qu'après l'installation."""
+        """Issue an invitation code. ``ttl_seconds`` widens the window (bounded
+        by `invite._MAX_TTL`) for invitations that are not typed by hand —
+        typically the one left on a machine being provisioned, which will not
+        use it until the install is done."""
         return self._invite.generate_code(ttl_seconds)
 
     async def start(self, addresses: list[str]) -> None:
@@ -5282,7 +5282,7 @@ class MeshNode:
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
-        # this observability bookkeeping break the handshake (zéro crash).
+        # this observability bookkeeping break the handshake (zero crash).
         if not peer.is_client_side:
             try:
                 scheme = self._peer_scheme(peer)

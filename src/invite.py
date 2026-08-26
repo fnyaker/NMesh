@@ -22,36 +22,35 @@ def compute_response(code: str, challenge: bytes) -> bytes:
 
 class InviteManager:
     """
-    Gère un pool de codes d'invitation actifs.
-    Supporte plusieurs codes simultanés (pour les réseaux étoile).
+    Manages a pool of active invitation codes.
+    Several codes can be live at once (for star networks).
     """
 
     def __init__(self) -> None:
-        # code -> (timestamp de création, TTL). Le TTL est par code : une
-        # invitation tapée à la main vit 5 minutes, alors qu'une invitation
-        # déposée sur une machine en cours de provisioning doit survivre à
-        # l'installation des dépendances (plusieurs dizaines de minutes) avant
-        # que la machine ne démarre et ne s'en serve.
+        # code -> (creation timestamp, TTL). The TTL is per code: an invitation
+        # typed by hand lives 5 minutes, while one left on a machine being
+        # provisioned has to survive the dependency install (tens of minutes)
+        # before that machine starts and uses it.
         self._codes: dict[str, tuple[float, float]] = {}
         self._failures: int = 0
         self._lockout_ts: float = 0.0
 
     def generate_code(self, ttl: float | None = None) -> str:
-        """Émet un code. ``ttl`` (secondes) est borné : allonger la fenêtre est
-        un choix explicite de l'appelant, jamais illimité. Le code reste à usage
-        unique, et le lockout anti-bruteforce s'applique quel que soit le TTL."""
+        """Issue a code. ``ttl`` (seconds) is bounded: widening the window is
+        an explicit choice by the caller, never unlimited. The code stays single
+        use, and the anti-bruteforce lockout applies whatever the TTL."""
         window = _CODE_TTL if ttl is None else max(1.0, min(float(ttl), _MAX_TTL))
         code = ''.join(secrets.choice(_ALPHABET) for _ in range(10))
         self._codes[code] = (time(), window)
         return code
 
     def generate_seeded_code(self, ttl: float | None = None) -> tuple[str, bytes]:
-        """Émet un code dérivé de 8 octets aléatoires, et rend les deux.
+        """Issue a code derived from 8 random bytes, and return both.
 
-        Exactement le même code que ``generate_code`` du point de vue du
-        protocole — usage unique, même lockout, jamais transmis en clair. La
-        seule différence est qu'un ticket de join peut le porter en 8 octets au
-        lieu de ses caractères, ce qui décide de la taille du QR code."""
+        Exactly the same code as ``generate_code`` as far as the protocol is
+        concerned — single use, the same lockout, never sent in the clear. The
+        only difference is that a join ticket can carry it as 8 bytes instead of
+        its characters, which decides the QR code's size."""
         from .join_ticket import SEED_BYTES, code_from_seed
         window = _CODE_TTL if ttl is None else max(1.0, min(float(ttl), _MAX_TTL))
         seed = secrets.token_bytes(SEED_BYTES)
@@ -67,8 +66,8 @@ class InviteManager:
 
     def consume(self, challenge: bytes | None = None,
                 response: bytes | None = None) -> None:
-        """Consomme le code qui correspond à (challenge, response).
-        Sans arguments, vide tous les codes (usage legacy ou reset)."""
+        """Consume the code matching (challenge, response).
+        With no arguments, clears every code (legacy use, or a reset)."""
         if challenge is None or response is None:
             self._codes.clear()
             return

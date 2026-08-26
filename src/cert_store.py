@@ -8,8 +8,8 @@ from .cert import Certificate
 
 class CertStore:
     """
-    Stocke les certificats connus et les racines de confiance.
-    Remplace TrustTable dans un modèle PKI P2P auto-raciné.
+    Holds the known certificates and the trusted roots.
+    Replaces TrustTable in a self-rooted P2P PKI model.
     """
 
     def __init__(self, own_id: NodeID) -> None:
@@ -34,17 +34,17 @@ class CertStore:
 
     def get_chain_to_root(self, target: NodeID) -> list[Certificate] | None:
         """
-        BFS dans le graphe d'émission pour trouver un chemin depuis target
-        jusqu'à une racine connue.
+        A BFS over the issuance graph, looking for a path from target up to a
+        known root.
 
-        On préfère une chaîne ancrée sur une racine **externe** (le réseau) :
-        un nœud qui a rejoint un réseau est aussi sa propre racine auto-signée,
-        mais présenter ``[cert_soi_self_signed]`` n'authentifie rien auprès des
-        pairs (personne ne fait confiance à cette racine). La chaîne réseau
-        (via l'émetteur qui nous a invité) est la seule vérifiable par autrui ;
-        la racine-soi n'est retenue qu'à défaut.
+        We prefer a chain anchored on an **external** root (the network): a node
+        that joined a network is also its own self-signed root, but presenting
+        ``[own_self_signed_cert]`` authenticates nothing to peers (nobody trusts
+        that root). The network chain (through the issuer that invited us) is
+        the only one others can verify; the self-root is kept only as a
+        fallback.
 
-        Retourne [cert_target, ..., cert_root_self_signed] ou None.
+        Returns [cert_target, ..., cert_root_self_signed] or None.
         """
         target_certs = self._certs.get(target.raw)
         if not target_certs:
@@ -95,15 +95,15 @@ class CertStore:
 
     def verify_chain(self, chain: list[Certificate]) -> NodeID | None:
         """
-        Vérifie une chaîne présentée par un pair.
-        Retourne l'ancre (NodeID du root) si valide, None sinon.
+        Verify a chain presented by a peer.
+        Returns the anchor (the root's NodeID) if it is valid, None otherwise.
 
         Invariants:
-          1. Chaque cert a ses invariants valides (déjà vérifiés à la désérialisation).
-          2. Liens d'émission continus.
-          3. Dernier cert self-signed.
-          4. Dernier cert.subject_id ∈ roots.
-          5. Aucun cert expiré.
+          1. Every cert holds its own invariants (already checked at parse time).
+          2. Unbroken issuance links.
+          3. The last cert is self-signed.
+          4. The last cert.subject_id is in roots.
+          5. No expired cert.
         """
         if not chain:
             return None
