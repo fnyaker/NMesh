@@ -1,440 +1,476 @@
-# Console web NMesh
+# NMesh web console
 
-Plan de gestion local d'une node : une page web pour visualiser l'état du
-réseau (graphe, pairs, débit, charge) et piloter la node (invitations, jointure
-d'un réseau, confiance à de nouveaux certificats).
+A local management surface for one node: a web page to watch the network
+(graph, peers, throughput, load) and to drive the node (invitations, joining a
+network, trusting new certificates).
 
-C'est **la surface la plus sensible du projet** — qui contrôle la console
-contrôle la node. Elle est donc conçue en parano maximale et **sans dépendance
-externe** (stdlib + `cryptography`, déjà présent).
+This is **the most sensitive surface in the project** — whoever controls the
+console controls the node. It is therefore built paranoid and **with no external
+dependency** (stdlib + `cryptography`, already present).
 
-## Lancer
+## Running it
 
 ```bash
 python scripts/console_demo.py --data ./mydata
 ```
 
-Au premier lancement, le mot de passe est **généré et affiché une seule fois**
-— notez-le. L'empreinte SHA-256 du certificat TLS auto-signé est affichée pour
-vérification dans le navigateur.
+On the first run the password is **generated and printed once** — write it down.
+The SHA-256 fingerprint of the self-signed TLS certificate is printed too, so it
+can be checked in the browser.
 
-Options :
-- `--console-host 0.0.0.0` : rend la console accessible depuis une autre
-  machine. Par défaut elle écoute sur `127.0.0.1` uniquement.
-- `--console-port 8787`, `--no-tls`, `--data DIR` (persiste identité + creds).
+Options:
+- `--console-host 0.0.0.0`: makes the console reachable from another machine. By
+  default it listens on `127.0.0.1` only.
+- `--console-port 8787`, `--no-tls`, `--data DIR` (persists identity + creds).
 
 ## Navigation
 
-Quatre sections, dans l'ordre où on en a besoin : ce que fait la node, à qui elle
-parle, ce qui tourne dessus, ce qu'on peut changer. **Chaque section est une
-route** — `#section/sous-section` — donc linkable, marque-pageable, et le bouton
-Retour du navigateur marche.
+Four sections, in the order you need them: what the node is doing, who it talks
+to, what runs on it, what you can change. **Every section is a route** —
+`#section/subsection` — so it is linkable, bookmarkable, and the browser's Back
+button works.
 
-| Section | Sous-sections | Route |
+| Section | Subsections | Route |
 |---|---|---|
 | **Overview** | — | `#overview` |
 | **Network** | Peers · Reachability · Add a node | `#network/peers`, `#network/reach`, `#network/join` |
 | **Apps** | Installed · App store | `#apps/installed`, `#apps/store` |
-| **Settings** | Updates · Security · Configuration · Diagnostics · Advanced | `#settings/updates`, `#settings/security`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
+| **Settings** | Updates · Security · This browser · Configuration · Diagnostics · Advanced | `#settings/updates`, `#settings/security`, `#settings/appearance`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
 
-Rejoindre un réseau est une action **réseau**, pas un réglage : tickets, QR,
-échange manuel, relais et certificats vivent dans *Network → Add a node*.
+Joining a network is a **network** action, not a setting: tickets, QR codes,
+manual exchange, relays and certificates all live in *Network → Add a node*.
 
-**⌘K / Ctrl-K** ouvre une palette de commandes : n'importe quelle section, plus
-les actions courantes (ping, créer un ticket, vérifier les mises à jour, changer
-de thème). **Le thème** suit le système par défaut ; le bouton de la barre du
-haut choisit clair ou sombre, et le choix reste dans ce navigateur.
+**⌘K / Ctrl-K** opens a command palette: any section, plus the common actions
+(ping, create a ticket, check for updates, switch theme). **The theme** follows
+the system by default; the top bar's button picks light or dark, and the choice
+stays in this browser.
 
-L'apparence, les jetons et les composants sont décrits dans
-[`Docs/WebConsole/design`](design) — à lire **avant** de toucher à une page.
+Appearance, tokens and components are described in
+[`Docs/WebConsole/design`](design) — read it **before** touching a page.
 
-## Gérer une autre node depuis cette console
+### Auto-refresh (top bar)
 
-Quand l'app fleet tourne et qu'au moins une node a accordé la capability
-`manage`, un **sélecteur de contexte** apparaît dans la barre du haut. Le choisir
-demande le **mot de passe console de cette node-là** — le grant ouvre le canal,
-le mot de passe ouvre la session — puis toute la console parle de cette node :
-overview, pairs, transports, apps, configuration, trace.
+The console re-reads the node on a timer, and **you set that timer**. On a
+desktop it is a number of seconds next to the ⟳ button: `0` turns it off, `30`
+is the maximum. Under 720 px the field becomes a short list (off · 1s · 5s ·
+10s · 30s) — a number spinner is a poor target on a phone, and a list of five
+answers covers what anyone actually picks. A value typed on a keyboard that is
+not in the list is added to it rather than silently rounded to one that is. The
+choice is kept per browser (`localStorage`), never sent to the node, and ⟳
+still reads the node once when auto-refresh is off.
 
-Techniquement, la page ajoute un en-tête `X-NMesh-Node: <id>` à chaque appel ;
-la console relaie l'appel par le mesh, et la node cible le **rejoue contre sa
-propre console** en loopback. Rien n'est réimplémenté : mêmes routes, mêmes
-plafonds, même lockout. Détail complet, bornes et chemins refusés :
+**The contract a refresh must honour**: it updates *values*. It does not close
+an open dialog or menu, does not drop a selected row, and does not wipe a field
+being typed in. Dropping a selection is legitimate in exactly one case — the
+selected thing is no longer there. Lists painted on the timer go through
+`setHTML`, which writes only when the markup actually changed, so a row under
+the pointer is not replaced mid-click.
+
+## Managing another node from this console
+
+When the fleet app is running and at least one node has granted the `manage`
+capability, a **context selector** appears in the top bar. Choosing it asks for
+**that node's console password** — the grant opens the channel, the password
+opens the session — and then the whole console talks about that node: overview,
+peers, transports, apps, configuration, trace.
+
+Technically the page adds an `X-NMesh-Node: <id>` header to every call; the
+console relays the call over the mesh, and the target node **replays it against
+its own console** over loopback. Nothing is reimplemented: same routes, same
+caps, same lockout. Full detail, bounds and refused paths:
 [`Docs/Apps/fleet`](../Apps/fleet).
 
-Une bande d'avertissement reste visible tant qu'on pilote une autre machine, et
-`Sign out` revient toujours à la console locale.
+A warning strip stays visible for as long as you are driving another machine,
+and `Sign out` always returns to the local console.
 
-## Observer le mesh en direct
+## Watching the mesh live
 
-- **La carte** (Overview → Topology) s'ouvre en grand d'un clic — sur la carte
-  elle-même, ou sur **Expand**. La carte étendue
-  étiquette chaque lien avec son medium, sa latence et sa perte, épaissit le
-  trait avec le volume transporté, passe en ambre un lien qui perd des sondes, et
-  liste les liens à côté avec leur courbe de latence. Elle se redessine à
-  chaque tick tant qu'elle est ouverte. Cliquer un nœud ouvre sa fiche.
-  - **Elle se déplace et se zoome** : glisser pour déplacer, molette ou pincement
-    pour zoomer (autour du curseur ou des deux doigts, pas du centre), `+` / `−`
-    / `⤢` en bas à droite, `+` `-` `0` au clavier, double-clic pour tout revoir.
-    Le zoom survit au rafraîchissement : la vue ne se remet pas à plat toutes les
-    deux secondes sous le doigt.
-  - Les étiquettes gardent une **taille constante à l'écran** quel que soit le
-    zoom — zoomer écarte le mesh au lieu de gonfler le texte — et la carte
-    **abandonne du détail quand elle est trop petite pour lui** : légendes des
-    liens d'abord, puis les noms. Sur un téléphone la vue d'ensemble est donc une
-    topologie propre ; les noms reviennent en zoomant, et une tape sur un nœud
-    ouvre sa fiche de toute façon.
-  - Sur écran étroit la liste des liens n'est pas supprimée : elle passe **sous**
-    le dessin.
-- **La fiche d'un nœud** est la *même* partout : le dialogue de la console, un
-  panneau à côté de la conversation dans chat, la feuille de fleet, ou la page
-  `/node#<id>` dans une fenêtre ou un onglet. Elle ne propose que ce que les
-  apps installées rendent possible (`Docs/AppAPI/guide`) et masque le bouton
-  qui ramène là d'où l'on vient : depuis chat, pas de « Message » ; depuis
-  fleet, pas de bouton fleet. Elle montre le lien réel :
-  points de terminaison local et distant tels que le medium les voit, sens,
-  durée, latence (dernier / meilleur / pire / gigue / perte, avec les
-  échantillons), les compteurs propres au transport, et **l'état de chaque
-  adresse connue** — en service, injoignable, jamais essayée. Chaque ligne porte
-  un **Retry**, et le tableau un **Retry all** : on rejoue une adresse précise ou
-  toutes, et la réponse dit ce que chacune a fait. Seules les adresses déjà
-  connues pour cette identité sont composées.
-  - L'ordre est celui des questions : qui c'est et où on en est, les quatre
-    chiffres qui disent si le lien va bien, ce que chacun a le droit de faire à
-    l'autre, puis les faits. **Adresses et compteurs sont repliés** (avec leur
-    nombre dans le titre) — un tableau d'adresses déplié repoussait les réponses
-    sous le pli.
-  - **Demander des droits fleet** demande *lesquels*, avec ce que chacun permet :
-    « accès » tout court n'est pas une question à laquelle quelqu'un peut
-    répondre. Rien n'est accordé en demandant — la demande arrive sur l'autre
-    machine et un humain là-bas décide, et peut accorder moins que demandé.
-- **Settings → This browser** garde ce qui appartient à cet écran et pas au
-  nœud : le thème, et la façon dont un lien vers une autre app s'ouvre (fenêtre,
-  onglet, ou selon la taille de l'écran). Deux machines connectées à la même
-  console gardent chacune les siennes ; rien n'est envoyé nulle part.
-- **Network → Reachability** est organisé en **un bloc par medium** : ce qu'il
-  porte (liens, latence moyenne, volume, ports), **ses écouteurs** (ajout et
-  retrait), ses commandes propres, et **ses réglages** — rendus à partir de ce que
-  le medium déclare (cases à cocher, listes multi-choix, nombres bornés, champs
-  libres). Appliqué au nœud vivant puis écrit dans le fichier de configuration ;
-  une valeur refusée reste à l'écran avec sa raison et n'atteint jamais le
-  fichier.
-  - Le bloc **udp** porte donc le port, le démarrage/arrêt du socket, le hole
-    punching, le keepalive NAT et la découverte LAN : tout ça roule sur cette
-    socket-là. Ces réglages étaient auparavant dans un encart « Listeners &
-    addressing » au nom neutre, alors qu'ils sont du TCP/IP.
-  - **`retry interval`** (tcp et udp) : à quelle fréquence redialer une node
-    connue à laquelle on n'a pas de lien, sur chacune de ses adresses. `0` —
-    la valeur par défaut — désactive : rien n'est réessayé tant que personne n'a
-    besoin d'une route.
-  - **`priority`** (tous les transports) : de −254 à 254, ce que ce nœud pense de
-    ce medium. Livré à `udp` **10**, `tcp` **0**, `spool` **−50**.
-  - **Le curseur « Choosing between a node's addresses »** (carte Reachability)
-    dit comment la priorité et la latence mesurée se partagent la décision :
-    tout à gauche, seule la vitesse compte ; tout à droite, seul le medium
-    choisi. La ligne en dessous montre **l'ordre qui en résulte**, calculé par le
-    nœud — la console ne réimplémente pas la règle.
-  - **Dynamic addressing** (carte Reachability, off par défaut) déplace un lien
-    vivant vers une autre adresse de la **même** node quand elle **score** mieux
-    — une adresse LAN plutôt que la publique, IPv6 plutôt qu'IPv4, ou simplement
-    le medium qu'on préfère. Le candidat est réellement composé et sondé avant
-    qu'on bouge, et on ne bouge que si le gain est net ; le perdant est fermé
-    dans les deux cas.
+- **The map** (Overview → Topology) opens large in one click — on the map
+  itself, or on **Expand**. The expanded map labels each link with its medium,
+  latency and loss, thickens the stroke with the volume carried, turns a link
+  losing probes amber, and lists the links beside it with their latency curve.
+  It redraws on every tick while it is open.
+  - **It pans and zooms**: drag to move, wheel or pinch to zoom (around the
+    cursor or the two fingers, not the centre), `+` / `−` / `⤢` at the bottom
+    right, `+` `-` `0` on the keyboard, double-click to see everything again.
+    The zoom survives the refresh: the view does not flatten itself every two
+    seconds under your finger.
+  - Labels keep a **constant size on screen** whatever the zoom — zooming
+    spreads the mesh out instead of inflating the text — and the map **drops
+    detail when it is too small for it**: link legends first, then names. On a
+    phone the overview is therefore a clean topology; names come back as you
+    zoom, and a tap on a node selects it anyway.
+  - On a narrow screen the link list is not removed: it moves **below** the
+    drawing.
+  - **One selection, shared with the list beside it.** Clicking a node on the
+    map selects it in the link list, and clicking a row in the list highlights
+    the node and its edges on the map. The selected row carries a **Details**
+    button — selecting is not opening, so a tap that only meant to point at
+    something does not throw a dialog over the map.
+- **Active links are grouped by node.** A node you hold five links with is one
+  row: its name, how many links, the lowest latency, and the jitter **of that
+  fastest link** — the jitter of a link nobody uses answers no question. Unfold
+  the row to see each link. The unfolded state is per table (active and known
+  are independent) and survives the refresh; a row folds back only when the node
+  it belongs to is gone.
+- **A node's card** is the *same* everywhere: the console's dialog, a panel
+  beside the conversation in chat, fleet's sheet, or the `/node#<id>` page in a
+  window or a tab. It offers only what the installed apps make possible
+  (`Docs/AppAPI/guide`) and hides the button that leads back where you came
+  from: from chat, no "Message"; from fleet, no fleet button. It shows the real
+  link: local and remote endpoints as the medium sees them, direction, duration,
+  latency (last / best / worst / jitter / loss, with the sample count), the
+  transport's own counters, and **the state of every known address** — in
+  service, unreachable, never tried. Every row carries a **Retry**, and the
+  table a **Retry all**: one precise address or all of them are dialled again,
+  and the answer says what each one did. Only addresses already known for that
+  identity are dialled.
+  - The order is the order of the questions: who this is and where we stand, the
+    four numbers that say whether the link is healthy, what each side is allowed
+    to do to the other, then the facts. **Addresses and counters are folded**
+    (with their count in the title) — an unfolded address table used to push the
+    answers below the fold.
+  - **Requesting fleet rights** asks *which ones*, with what each allows:
+    "access" on its own is not a question anyone can answer. Nothing is granted
+    by asking — the request lands on the other machine and a human there decides,
+    and may grant less than was asked.
+- **Settings → This browser** keeps what belongs to this screen and not to the
+  node: the theme, the auto-refresh interval, and how a link into another app
+  opens (a window, a tab, or by screen size). Two machines connected to the same
+  console each keep their own; nothing is sent anywhere.
 
-Ce qui n'appartient à aucun medium reste à part : la carte **Addressing** dit ce
-que ce nœud raconte de lui-même (adresses annoncées, IP locales, schémas).
+### Network → Reachability
 
-Ces chiffres viennent du transport lui-même (`endpoints()` / `stats()`), donc un
-nouveau medium apparaît ici sans modification de la console. Voir
+Reachability is organised as **one block per medium**. Unfolding a medium gives
+two views, chosen with a Status / Settings pair at the top of the block:
+
+- **Status** — what it carries (links, average latency, volume, ports), what it
+  says about the outside world (public IP and the address a STUN server saw, for
+  `tcp` and `udp`), its listeners (adding and removing), and its own commands.
+- **Settings** — its settings, rendered from what the medium declares
+  (checkboxes, multi-choice lists, bounded numbers, free fields). Applied to the
+  live node and then written to the configuration file; a refused value stays on
+  screen with its reason and never reaches the file.
+
+Splitting the two is why the public IP is no longer on the main page: it is a
+fact about **one transport**, and a page that shows it at the top teaches that
+the node is its TCP/IP address. Everything tied to a medium now lives inside
+that medium's block. The **relay-capable** badge sits with `tcp` and `udp` for
+the same reason — today that is a **presentation** choice only: the internal
+logic is unchanged and still node-wide, and measuring relay capability per
+medium is backend work that has not been done.
+
+- The **udp** block therefore carries the port, starting and stopping the
+  socket, hole punching, NAT keepalive and LAN discovery: all of that rides on
+  that one socket. These settings used to sit in a neutrally named "Listeners &
+  addressing" card, when they are TCP/IP.
+- **`retry interval`** (tcp and udp): how often to redial a known node we hold
+  no link to, on each of its addresses. `0` — the default — turns it off:
+  nothing is retried until someone needs a route.
+- **`priority`** (every transport): from −254 to 254, what this node thinks of
+  that medium. Shipped as `udp` **10**, `tcp` **0**, `spool` **−50**.
+- **The "Choosing between a node's addresses" slider** (Reachability card) says
+  how priority and measured latency share the decision: hard left, only speed
+  counts; hard right, only the chosen medium. The line below shows **the
+  resulting order**, computed by the node — the console does not reimplement the
+  rule.
+- **Dynamic addressing** (Reachability card, off by default) moves a live link
+  to another address of the **same** node when it **scores** better — a LAN
+  address rather than the public one, IPv6 rather than IPv4, or simply the
+  medium we prefer. The candidate is really dialled and probed before we move,
+  and we only move on a clear gain; the loser is closed either way.
+
+What belongs to no medium stays apart: the **Addressing** card says what this
+node claims about itself (advertised addresses, local IPs, schemes).
+
+These numbers come from the transport itself (`endpoints()` / `stats()`), so a
+new medium appears here with no change to the console. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
 
-## Modèle de sécurité
+## Security model
 
-- **TLS** auto-signé (ECDSA P-256), empreinte affichée au démarrage.
-- **Mot de passe** généré au premier run, stocké uniquement en **hash scrypt
-  salé** (`console.cred`, permissions 0600). Jamais en clair sur disque.
-- **Session** authentifiée par **jeton Bearer** (en-tête `Authorization`) **ou
-  cookie de session**. Le login pose un cookie `nmesh_session` :
-  `HttpOnly` (illisible par le JS de la page → une XSS ne l'exfiltre pas),
-  `SameSite=Strict` (jamais envoyé sur une requête cross-site → **aucune surface
-  CSRF**, la propriété qui justifiait autrefois l'absence totale de cookie), et
-  `Secure` sous TLS. Les deux chemins valident le **même** jeton (expiration
-  glissante, 1 h d'inactivité) ; le cookie existe pour qu'un **rafraîchissement
-  de page ne force plus un re-login**. C'est un cookie de session (sans
-  `Max-Age`) : il survit au refresh, disparaît à la fermeture du navigateur, et
-  le serveur borne de toute façon la durée de vie du jeton.
-- **Lockout** anti-bruteforce après plusieurs échecs de login.
-- **Bind loopback par défaut** ; l'exposition réseau est un choix explicite.
-- **CSP stricte** (`default-src 'self'`), assets same-origin, aucune ressource
-  externe (pas de CDN), plafond de taille des requêtes.
-- Le serveur HTTP tourne dans un thread dédié et **marshalle** toute
-  interaction avec la node sur la boucle asyncio : l'état de la node n'est
-  jamais touché hors du thread de la boucle.
+- **TLS**, self-signed (ECDSA P-256), fingerprint printed at startup.
+- **Password** generated on the first run, stored only as a **salted scrypt
+  hash** (`console.cred`, mode 0600). Never in the clear on disk.
+- **Session** authenticated by a **Bearer token** (`Authorization` header) **or
+  a session cookie**. Login sets an `nmesh_session` cookie: `HttpOnly` (the
+  page's JS cannot read it → an XSS does not exfiltrate it), `SameSite=Strict`
+  (never sent on a cross-site request → **no CSRF surface**, the property that
+  once justified having no cookie at all), and `Secure` under TLS. Both paths
+  validate the **same** token (sliding expiry, one hour of inactivity); the
+  cookie exists so that **refreshing the page no longer forces a re-login**. It
+  is a session cookie (no `Max-Age`): it survives a refresh, disappears when the
+  browser closes, and the server bounds the token's lifetime regardless.
+- **Lockout** against brute force after several failed logins.
+- **Loopback bind by default**; exposing it on the network is an explicit
+  choice.
+- **Strict CSP** (`default-src 'self'`), same-origin assets, no external
+  resource (no CDN), a cap on request size.
+- The HTTP server runs in a dedicated thread and **marshals** every interaction
+  with the node onto the asyncio loop: the node's state is never touched outside
+  the loop's thread.
 
-## Fichiers servis
+## Files served
 
-| Route | Rôle |
+| Route | Role |
 |---|---|
-| `/`, `/style.css`, `/app.js` | la console |
-| `/chat`, `/chat.css`, `/chat.js` | l'app de chat, si activée |
-| `/fleet`, `/fleet.css`, `/fleet.js` | l'app fleet, si activée |
-| `/theme.js` | pose le thème choisi **avant la première image** (bloquant dans `<head>`) |
-| `/favicon.svg` | l'icône ; sans elle chaque chargement prend un 404 sur `/favicon.ico` |
+| `/`, `/style.css`, `/app.js` | the console |
+| `/chat`, `/chat.css`, `/chat.js` | the chat app, if enabled |
+| `/fleet`, `/fleet.css`, `/fleet.js` | the fleet app, if enabled |
+| `/node`, `/node.css`, `/node.js` | the node card as a page (`/node#<id>`) |
+| `/theme.js` | sets the chosen theme **before the first paint** (blocking in `<head>`) |
+| `/favicon.svg` | the icon; without it every load takes a 404 on `/favicon.ico` |
 
-Tout est servi depuis la même origine, sans ressource externe : la console
-fonctionne sur une machine sans internet.
+Everything is served from the same origin with no external resource: the console
+works on a machine with no internet.
 
-## API (toutes en JSON, auth Bearer ou cookie sauf login)
+## API (all JSON, Bearer or cookie auth except login)
 
-| Méthode | Route            | Rôle                                           |
+| Method | Route            | Role                                           |
 |---------|------------------|------------------------------------------------|
-| POST    | `/api/login`     | `{password}` → `{token}` + pose le cookie `nmesh_session` |
-| POST    | `/api/logout`    | révoque le jeton (Bearer ou cookie) et efface le cookie |
-| GET     | `/api/state`     | snapshot (id, pairs, routing, débit, charge, **adressage**) |
-| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — liste paginée des pairs actifs / nœuds connus |
-| POST    | `/api/nodes/forget` | `{id}` — oublie un nœud connu (retire l'entrée de la table de routage, coupe une session live éventuelle) |
-| POST    | `/api/invite`    | génère un code d'invitation                    |
-| POST    | `/api/join`      | `{uri, code}` ou `{ticket}` — rejoint un réseau |
-| POST    | `/api/ticket`    | `{ttl}` → ticket compact + SVG du QR ; **409** si le nœud n'a pas d'adresse publique confirmée |
-| GET     | `/api/rootcert`  | notre certificat racine (hex) à partager       |
-| POST    | `/api/trust`     | `{cert_hex}` — fait confiance à un cert racine |
+| POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
+| POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**) |
+| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
+| POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
+| POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
+| POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
+| POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
+| GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
+| POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
+| POST    | `/api/invite`    | generates an invitation code                   |
+| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network  |
+| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
+| GET     | `/api/rootcert`  | our root certificate (hex) to share            |
+| POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
-| GET     | `/api/store`       | vue app store : `{catalog:[…state,action], installed:[…]}` |
-| POST    | `/api/store/publish` | `{name, version, files:{path:b64}}` — publie + annonce au réseau |
+| GET     | `/api/store`       | app store view: `{catalog:[…state,action], installed:[…]}` |
+| POST    | `/api/store/publish` | `{name, version, files:{path:b64}}` — publishes + announces to the network |
 | POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
-| GET     | `/api/chat/messages` | `?since=V` → feed (versionné) + profil + contacts/groups + unread + typing |
-| GET     | `/api/chat/file`   | `?mid=…` → octets d'un fichier/média (rendu inline des images) |
-| GET     | `/api/chat/avatar` | `?id=…` → octets d'un avatar (`self` ou node id)   |
-| POST    | `/api/chat/send`   | `{conv, text, reply?}` (`conv` = node id ou `g:`+group_id) |
-| POST    | `/api/chat/file`   | `{conv, name, data:b64, reply?}` — envoi de fichier/média |
-| POST    | `/api/chat/edit` / `delete` / `react` | `{conv, mid, …}` — édite / supprime / réagit |
-| POST    | `/api/chat/read`   | `{conv}` — marque lu (envoie l'accusé de lecture)  |
-| POST    | `/api/chat/typing` | `{conv, active}` — indicateur de frappe            |
-| POST    | `/api/chat/profile`| `{pseudo?, bio?, avatar?:b64}` — met à jour mon profil |
-| POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                    |
+| GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing |
+| GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
+| GET     | `/api/chat/avatar` | `?id=…` → an avatar's bytes (`self` or a node id) |
+| POST    | `/api/chat/send`   | `{conv, text, reply?}` (`conv` = node id or `g:`+group_id) |
+| POST    | `/api/chat/file`   | `{conv, name, data:b64, reply?}` — sends a file/medium |
+| POST    | `/api/chat/edit` / `delete` / `react` | `{conv, mid, …}` — edits / deletes / reacts |
+| POST    | `/api/chat/read`   | `{conv}` — marks read (sends the read receipt) |
+| POST    | `/api/chat/typing` | `{conv, active}` — typing indicator            |
+| POST    | `/api/chat/profile`| `{pseudo?, bio?, avatar?:b64}` — updates my profile |
+| POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
-| POST    | `/api/chat/search` | `{pseudo}` → local + annuaire DHT réseau + requête 1-saut |
-| GET     | `/api/fleet/state` | `?since=N` → nodes gérées, notifications d'enrôlement, journal, capabilities, faits machine |
-| GET     | `/api/fleet/shell` | `?sid=&offset=` → octets du terminal (base64) |
-| GET     | `/api/transports` | ce que chaque transport déclare prendre, avec les valeurs en vigueur |
-| POST    | `/api/transports` | `{scheme, values}` → applique puis persiste ; rend `applied` / `rejected` |
-| GET     | `/api/fleet/keys`  | clés SSH disponibles (disque + importées) — **métadonnées seulement** |
-| POST    | `/api/fleet/keys` / `keys-remove` | importe / retire une clé privée (tiroir chiffré) |
-| POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
-| POST    | `/api/fleet/caps-set` | `{node, caps}` → droits d'un opérateur **sur cette node**. Seul endroit où un droit s'ajoute : décidé par un humain ici |
-| POST    | `/api/fleet/caps-request` / `caps-drop` | `{node, caps}` → demander (la cible doit approuver) / rendre (immédiat) un droit sur une node gérée |
-| POST    | `/api/fleet/status` / `update` / `scan` | actions sur une node gérée. `scan` prend `targets` (sous-réseaux **et/ou** machines précises : `10.0.0.5`, `nas.lan:2222`) ; vide → **tous** les réseaux attachés |
-| POST    | `/api/fleet/shell` / `input` / `resize` / `close` | shell distant |
-| POST    | `/api/fleet/provision` | déploiement SSH : `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
-| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — apps **intégrées** |
-| GET     | `/api/update/check` | interroge les releases GitHub → `{current, latest?, newer, notes?, updatable, reason?}` |
-| POST    | `/api/update/apply` | `{version}` — installe cette release **exacte** ; un écart avec ce que GitHub propose est refusé |
-| GET     | `/api/config`    | réglages du nœud : valeurs courantes, éditables ou non, problèmes du fichier |
-| POST    | `/api/config`    | `{settings:{…}}` — écrit le fichier ; une valeur refusée n'écrit **rien** |
-| GET     | `/api/trace`     | `?events=1` → état + totaux par type de message (et les événements) |
-| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — bornes réclamées **plafonnées**, jamais obéies |
-| GET     | `/api/trace/export` | la trace complète en JSON (téléchargement) |
-| POST    | `/api/password`  | `{current, new}` — change le mot de passe ; le **courant est exigé** même avec une session valide |
+| POST    | `/api/chat/search` | `{pseudo}` → local + the network's DHT directory + a one-hop query |
+| GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
+| GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
+| GET     | `/api/transports` | what each transport declares it takes, with the values in force |
+| POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` |
+| GET     | `/api/fleet/keys`  | available SSH keys (disk + imported) — **metadata only** |
+| POST    | `/api/fleet/keys` / `keys-remove` | imports / removes a private key (encrypted drawer) |
+| POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
+| POST    | `/api/fleet/caps-set` | `{node, caps}` → an operator's rights **on this node**. The only place a right is added: decided by a human, here |
+| POST    | `/api/fleet/caps-request` / `caps-drop` | `{node, caps}` → request (the target must approve) / hand back (immediate) a right on a managed node |
+| POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
+| POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
+| POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
+| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
+| GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
+| POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
+| GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
+| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
+| GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) |
+| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed |
+| GET     | `/api/trace/export` | the whole trace as JSON (download)          |
+| POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
-La section **Expert — addressing & transports** montre toutes les URIs
-concrètes diffusées pour joindre la node (expansion des écoutes wildcard sur
-chaque IP locale), les URIs en écoute, les IP locales, et les transports
-enregistrés (● = actif). Le snapshot expose `advertised`, `listen`,
-`local_ips`, `transports`, `listening`.
+The **Expert — addressing & transports** section shows every concrete URI
+advertised to reach the node (wildcard listens expanded over each local IP), the
+listening URIs, the local IPs, and the registered transports (● = active). The
+snapshot exposes `advertised`, `listen`, `local_ips`, `transports`, `listening`.
 
-Dans la fiche détail d'un nœud (**Network → Peers**, bouton **Details**),
-**Forget node** retire ce nœud de la table de routage locale et coupe sa
-session si elle est active. Ce n'est **pas un bannissement** : la fusion
-automatique dans la table de routage à réception d'un PONG authentifié (et le
-maintien de voisinage) peuvent réapprendre le nœud s'il est encore joignable —
-voir `Docs/Architecture/gotchas.md`.
+In a node's card (**Network → Peers**, the **Details** button), **Forget node**
+removes that node from the local routing table and cuts its session if it is
+live. It is **not a ban**: automatic merging into the routing table on receiving
+an authenticated PONG (and neighbourhood maintenance) can learn the node again
+if it is still reachable — see `Docs/Architecture/gotchas.md`.
 
-La section **Apps (DHT)** de l'interface permet de publier une application
-(sélection de fichiers → identifiant partagé sur le mesh) et d'en récupérer une
-par son identifiant (fichiers vérifiés puis téléchargeables). Voir
-`Docs/AppSharing/guide`.
+The interface's **Apps (DHT)** section publishes an application (pick files → an
+identifier shared over the mesh) and fetches one by its identifier (files
+verified, then downloadable). See `Docs/AppSharing/guide`.
 
-La section **App Store** liste les apps **publiées sur le réseau** (catalogue
-partagé, re-diffusé automatiquement) avec un bouton Install/Update selon l'état,
-les apps installées localement (Uninstall), et un formulaire de publication. La
-décision d'état est calculée **côté nœud** (`store_overview`) ; le front ne fait
-que l'afficher. Voir `Docs/AppStore/guide`.
+The **App Store** section lists the apps **published on the network** (a shared
+catalogue, re-announced automatically) with an Install/Update button according
+to state, the locally installed apps (Uninstall), and a publishing form. The
+state decision is computed **on the node** (`store_overview`); the front end only
+displays it. See `Docs/AppStore/guide`.
 
-## App de chat intégrée (`/chat`)
+## The built-in chat app (`/chat`)
 
-Le nœud embarque une **app de chat par défaut**, branchée sur le mesh comme
-n'importe quelle app (connecteur de données, section `CHAT_APP_ID`). La console
-la surface :
+The node ships a **default chat app**, plugged into the mesh like any other app
+(data connector, `CHAT_APP_ID` section). The console surfaces it:
 
-- la section **Apps** liste les apps intégrées avec un lien **Open** ; le rail
-  en garde un raccourci permanent.
-- la sous-page **`/chat`** sert l'interface de chat, hébergée par **le même
-  serveur console** (pas de port ni de jeton séparés). Elle **réutilise la
-  session** : le cookie `nmesh_session` (même origine, `Path=/`) authentifie la
-  sous-page automatiquement, et le jeton Bearer reste passé via `sessionStorage`
-  (par onglet, jamais sur disque) pour l'usage explicite ; ouverte à froid sans
-  session valide, la page redemande le mot de passe console et se connecte
-  elle-même. Un simple **rafraîchissement** ne redemande plus rien.
-- les endpoints `/api/chat/*` exigent le **même jeton** que le reste de la
-  console. Sans app de chat attachée, ni `/chat` ni `/api/chat/*` n'existent
-  (404) et la liste d'apps est vide.
+- the **Apps** section lists the built-in apps with an **Open** link; the rail
+  keeps a permanent shortcut to it.
+- the **`/chat`** sub-page serves the chat interface, hosted by **the same
+  console server** (no separate port or token). It **reuses the session**: the
+  `nmesh_session` cookie (same origin, `Path=/`) authenticates the sub-page
+  automatically, and the Bearer token is still passed through `sessionStorage`
+  (per tab, never on disk) for explicit use; opened cold with no valid session,
+  the page asks for the console password and logs in by itself. A plain
+  **refresh** no longer asks for anything.
+- the `/api/chat/*` endpoints require the **same token** as the rest of the
+  console. With no chat app attached, neither `/chat` nor `/api/chat/*` exists
+  (404) and the app list is empty.
 
-Câblage : passer un `chat_bridge` (un `src.apps.chat_web.ChatBridge` enveloppant
-une `ChatApp`) à `WebConsole(...)`. Le lanceur `scripts/nmesh_node.py` le fait
-par défaut ; `--no-chat` le désactive. Voir `Docs/Apps/chat`.
+Wiring: pass a `chat_bridge` (a `src.apps.chat_web.ChatBridge` wrapping a
+`ChatApp`) to `WebConsole(...)`. The `scripts/nmesh_node.py` launcher does it by
+default; `--no-chat` turns it off. See `Docs/Apps/chat`.
 
-## App Fleet intégrée (`/fleet`)
+## The built-in Fleet app (`/fleet`)
 
-Gestion à distance et déploiement automatisé, servie par le **même serveur
-console** (même session, même cookie) comme la sous-page de chat.
-**Désactivée par défaut** : elle peut ouvrir un shell, donc on l'active
-explicitement (`--fleet`, ou le bouton **Enable** de la section Apps).
+Remote management and automated deployment, served by the **same console
+server** (same session, same cookie) as the chat sub-page. **Off by default**:
+it can open a shell, so it is enabled explicitly (`--fleet`, or the **Enable**
+button in the Apps section).
 
-La page a cinq sections, séparées selon la question posée : **Nodes** (celles
-qu'on contrôle, avec leur status et les actions update / shell / scan),
-**Who controls this node** (celles qui nous contrôlent, avec leurs droits et les
-demandes en attente), **Discover & deploy** (découverte LAN et provisioning SSH),
-**Shell** (terminal interactif), **Activity** (journal).
+The page has five sections, split by the question being asked: **Nodes** (the
+ones we control, with their status and the update / shell / scan actions),
+**Who controls this node** (the ones controlling us, with their rights and the
+pending requests), **Discover & deploy** (LAN discovery and SSH provisioning),
+**Shell** (an interactive terminal), **Activity** (the log).
 
-Les routes `/api/fleet/*` exigent la **même session** que le reste de la console,
-et n'existent pas (404) quand l'app est désactivée. Elles ne permettent que de
-*demander* : les trois portes d'autorisation vivent côté node cible, cette
-console ne peut rien s'accorder à elle-même. Voir [`Docs/Apps/fleet`](../Apps/fleet).
+The `/api/fleet/*` routes require the **same session** as the rest of the
+console, and do not exist (404) when the app is disabled. They only allow
+*asking*: the three authorisation gates live on the target node, and this
+console can grant itself nothing. See [`Docs/Apps/fleet`](../Apps/fleet).
 
-## Apps intégrées : installer, activer, désactiver
+## Built-in apps: install, enable, disable
 
-La section **Apps** liste les apps livrées avec le nœud sous forme de cartes —
-icône, nom, état (pastille « Running », « Stopped » ou « Not installed »), description, puis les actions Install / Enable / Disable /
-Uninstall et le lien **Open** (`/api/apps/*`). Deux états
-distincts : **installed** (le nœud garde l'état de l'app ; désinstaller **purge
-son tiroir chiffré**) et **enabled** (l'app est branchée au mesh maintenant ;
-désactiver l'arrête, son état survit). La bascule est **à chaud** — pas de
-redémarrage du nœud — et persistée dans `<data>/apps.json`.
+The **Apps** section lists the apps shipped with the node as cards — icon, name,
+state (a "Running", "Stopped" or "Not installed" dot), description, then the
+Install / Enable / Disable / Uninstall actions and the **Open** link
+(`/api/apps/*`). Two distinct states: **installed** (the node keeps the app's
+state; uninstalling **purges its encrypted drawer**) and **enabled** (the app is
+plugged into the mesh right now; disabling stops it, its state survives). The
+toggle is **live** — no node restart — and persisted in `<data>/apps.json`.
 
-Câblage : passer un `app_host` (un `src.app_registry.AppHost`) à `WebConsole(...)`.
-`scripts/nmesh_node.py` le fait ; le paramètre `chat_bridge` reste supporté pour
-un runner qui héberge une seule app lui-même.
+Wiring: pass an `app_host` (a `src.app_registry.AppHost`) to `WebConsole(...)`.
+`scripts/nmesh_node.py` does it; the `chat_bridge` parameter stays supported for
+a runner that hosts a single app itself.
 
-## Mises à jour (Settings → Updates)
+## Updates (Settings → Updates)
 
-Le panneau **Settings** affiche la version du nœud et un bouton *Check for
-updates*. S'il existe une release GitHub plus récente, elle est montrée avec
-ses notes ; *Install* ouvre une confirmation qui **nomme la version**, et la
-requête envoyée rappelle cette même version — un écart avec ce que GitHub
-propose au moment du clic est refusé plutôt que d'installer quelque chose que
-l'opérateur n'a pas vu. Aucune mise à jour n'a jamais lieu sans ce clic.
+The **Settings** panel shows the node's version and a *Check for updates*
+button. If a newer GitHub release exists, it is shown with its notes; *Install*
+opens a confirmation that **names the version**, and the request sent repeats
+that same version — a mismatch with what GitHub offers at click time is refused
+rather than installing something the operator has not seen. No update ever
+happens without that click.
 
-Ce qui est remplacé, ce qui ne l'est pas, et les cas de refus (conteneur,
-répertoire non inscriptible) : [`../Setup/guide`](../Setup/guide).
+What is replaced, what is not, and the refusal cases (container, non-writable
+directory): [`../Setup/guide`](../Setup/guide).
 
-## Configuration du nœud (Settings → Configuration)
+## Node configuration (Settings → Configuration)
 
-Toutes les options de lancement sont éditables depuis la console et stockées
-dans `<prefix>/nmesh.conf`. Le formulaire est construit à partir de ce que le
-nœud déclare (`GET /api/config`), jamais d'une liste codée dans la page.
+Every launch option is editable from the console and stored in
+`<prefix>/nmesh.conf`. The form is built from what the node declares
+(`GET /api/config`), never from a list hard-coded in the page.
 
-Rien n'est appliqué à chaud : les changements prennent effet **au redémarrage**
-du nœud, et la page le dit. Une valeur refusée n'écrit rien du tout — un champ
-fautif n'emporte pas les autres, et la console ne peut pas produire un fichier
-sur lequel le nœud refuserait de démarrer.
+Nothing is applied live: changes take effect **when the node restarts**, and the
+page says so. A refused value writes nothing at all — one bad field does not
+carry the others with it, and the console cannot produce a file the node would
+refuse to start on.
 
-`launch` (ce que le nœud exécute) et `data` (où vit l'état) sont **affichés mais
-non éditables ici** : le premier appartient à qui détient le fichier, le second
-à l'installeur. Le mot de passe console n'est pas un réglage.
+`launch` (what the node runs) and `data` (where the state lives) are **shown but
+not editable here**: the first belongs to whoever holds the file, the second to
+the installer. The console password is not a setting.
 
-Détail du format, des bornes et de la priorité ligne de commande > fichier >
-défaut : [`../Setup/guide`](../Setup/guide).
+Format, bounds and the command line > file > default precedence:
+[`../Setup/guide`](../Setup/guide).
 
-## Join rapide : ticket et QR code (Network → Add a node)
+## Fast join: ticket and QR code (Network → Add a node)
 
-Le join complet demande de déplacer deux choses à la main : une adresse et un
-code. Un **ticket** compacte les deux en une seule chaîne de **34 caractères**
-pour de l'IPv4 — dictable, tapable sur un téléphone, scannable depuis un écran.
+A full join means moving two things by hand: an address and a code. A **ticket**
+packs both into a single **34-character** string for IPv4 — dictable, typable on
+a phone, scannable from a screen.
 
 ```
 CTFQA4IHEMUHTNEHTMEQGWR7AHDJXX3KLQ
 ```
 
-**Le ticket est le secret.** Qui peut le lire peut rejoindre le réseau jusqu'à
-son expiration ou son unique usage — exactement aussi sensible que le code
-d'invitation qu'il contient. Photographier un QR code sur un écran ne demande
-aucune ingéniosité, et l'interface le dit à côté de chaque ticket émis.
+**The ticket is the secret.** Whoever can read it can join the network until it
+expires or is used once — exactly as sensitive as the invitation code it
+contains. Photographing a QR code on a screen takes no ingenuity, and the
+interface says so next to every ticket issued.
 
-- **Uniquement depuis un nœud joignable publiquement.** L'émission exige une
-  adresse `world` **confirmée** (une connexion entrante est réellement arrivée
-  dessus), pas une adresse qu'on croit publique. Sinon : 409, avec l'explication
-  — un ticket qui pointe vers une adresse injoignable est pire que pas de
-  ticket, il échoue après avoir été partagé.
-- **Durée choisie par l'opérateur** (1 minute à 6 heures), bornée côté nœud :
-  une valeur absurde est ramenée dans les clous, jamais obéie.
-- **Usage unique**, comme tout code d'invitation : un ticket photographié par
-  deux personnes n'en fait pas entrer deux.
-- Le QR est rendu par le nœud, en SVG, à partir du ticket qu'il vient d'émettre.
-  Il n'existe **pas** d'endpoint qui transforme un texte quelconque en QR code.
+- **Only from a publicly reachable node.** Issuing one requires a **confirmed**
+  `world` address (an inbound connection really arrived on it), not an address
+  we believe to be public. Otherwise: 409, with the explanation — a ticket
+  pointing at an unreachable address is worse than no ticket, it fails after
+  being shared.
+- **Lifetime chosen by the operator** (1 minute to 6 hours), bounded on the
+  node: an absurd value is brought back into range, never obeyed.
+- **Single use**, like every invitation code: a ticket photographed by two people
+  does not let two in.
+- The QR is rendered by the node, in SVG, from the ticket it has just issued.
+  There is **no** endpoint that turns arbitrary text into a QR code.
 
-### Scanner avec la caméra
+### Scanning with the camera
 
-Le bouton *Scan with camera* utilise le `BarcodeDetector` du navigateur —
-aucune bibliothèque, comme partout ailleurs dans ce projet. Là où il manque
-(Firefox aujourd'hui), la page le dit clairement et le collage reste
-disponible. La caméra exige la permission de l'utilisateur **et** une page en
-contexte sécurisé (HTTPS ou localhost).
+The *Scan with camera* button uses the browser's `BarcodeDetector` — no library,
+as everywhere else in this project. Where it is missing (Firefox today) the page
+says so plainly and pasting stays available. The camera requires the user's
+permission **and** a page in a secure context (HTTPS or localhost).
 
-## Changer le mot de passe (Settings → Console password)
+## Changing the password (Settings → Console password)
 
-`POST /api/password` exige le **mot de passe courant**, même depuis une session
-valide. C'est la propriété qui compte : sans ça, un vol de session deviendrait
-une prise de contrôle définitive du nœud — le voleur changerait le mot de passe
-et enfermerait dehors la personne à qui il appartient.
+`POST /api/password` requires the **current password**, even from a valid
+session. That is the property that matters: without it, a stolen session would
+become permanent control of the node — the thief would change the password and
+lock out the person it belongs to.
 
-- Un mauvais mot de passe courant compte dans le **même verrouillage** que la
-  page de login : cet endpoint n'est pas un moyen de deviner plus vite.
-- Nouveau mot de passe : 12 caractères au minimum, 256 au maximum (scrypt sur
-  une entrée non bornée est un déni de service), pas d'espaces en bordure.
-- En cas de succès, **toutes les autres sessions sont fermées** ; celle qui a
-  fait le changement reste ouverte — quelqu'un qui change son mot de passe
-  parce qu'il soupçonne une session volée ne doit pas être déconnecté par le
-  geste même qui corrige le problème.
-- Le hash n'est remplacé en mémoire qu'**après** l'écriture du fichier : une
-  écriture qui échoue laisse l'ancien mot de passe fonctionnel plutôt qu'un
-  nœud dans lequel plus personne ne peut entrer.
+- A wrong current password counts towards the **same lockout** as the login
+  page: this endpoint is not a faster way to guess.
+- New password: 12 characters minimum, 256 maximum (scrypt on unbounded input is
+  a denial of service), no leading or trailing spaces.
+- On success, **every other session is closed**; the one that made the change
+  stays open — someone changing their password because they suspect a stolen
+  session must not be logged out by the very act that fixes the problem.
+- The hash is replaced in memory only **after** the file is written: a failed
+  write leaves the old password working rather than a node nobody can get into.
 
-Mot de passe complètement perdu → `./install.sh --reset-password` sur la
-machine elle-même (voir [`../Setup/guide`](../Setup/guide)).
+Password lost entirely → `./install.sh --reset-password` on the machine itself
+(see [`../Setup/guide`](../Setup/guide)).
 
-## Trace protocolaire (Settings → Protocol trace)
+## Protocol trace (Settings → Protocol trace)
 
-Le graphe de débit dit *combien*, jamais *quoi*. La trace enregistre ce que le
-nœud envoie et reçoit réellement, par type de message — pour les questions du
-genre « pourquoi deux nœuds au repos se parlent-ils ? ».
+The throughput graph says *how much*, never *what*. The trace records what the
+node really sends and receives, per message type — for questions like "why are
+two idle nodes talking to each other?".
 
-C'est exactement l'outil qui a servi à trouver la boucle `FIND_NODE` /
-`FOUND_NODE` documentée dans
-[`../Architecture/gotchas.md`](../Architecture/gotchas.md) : un tableau par type
-de message, et la réponse était dans la première ligne.
+It is exactly the tool that found the `FIND_NODE` / `FOUND_NODE` loop documented
+in [`../Architecture/gotchas.md`](../Architecture/gotchas.md): one table per
+message type, and the answer was in the first row.
 
-Ce qui est enregistré : instant, sens, type de message, taille sur le fil, TTL,
-et les ids source/destination du header. **Jamais de payload** — ni le chiffré,
-ni le clair, ni une clé. Le header est déjà visible de tout relais du chemin ;
-le payload est ce que ce projet existe pour protéger, et un outil de debug n'est
-pas une raison de l'écrire quelque part.
+What is recorded: the instant, the direction, the message type, the size on the
+wire, the TTL, and the header's source/destination ids. **Never a payload** —
+not the ciphertext, not the plaintext, not a key. The header is already visible
+to every relay on the path; the payload is what this project exists to protect,
+and a debugging tool is no reason to write it down somewhere.
 
-Ce n'est pas anodin pour autant : une trace est un relevé de **métadonnées de
-routage** — qui ce nœud fréquente, quand, et combien. Donc : éteinte par défaut,
-en mémoire, bornée en nombre d'événements *et* en durée, elle s'arrête seule, et
-elle ne va sur disque que si un opérateur le demande (0600). Les bornes
-réclamées par la requête sont **plafonnées**, pas obéies.
+That does not make it harmless: a trace is a record of **routing metadata** —
+who this node keeps company with, when, and how much. So: off by default, in
+memory, bounded in number of events *and* in time, it stops on its own, and it
+reaches the disk only if an operator asks (0600). The bounds the request asks
+for are **capped**, not obeyed.
 
-## Rejoindre / relier deux réseaux
+## Joining / bridging two networks
 
-1. Sur la node hôte : **Generate invite code**.
-2. Sur la node invitée : **Join network** avec `tcp://hôte:port` + le code.
-3. Pour une confiance mutuelle entre racines distinctes : chaque node expose
-   son certificat via **Show our root certificate** ; l'autre le colle dans
-   **Trust certificate**.
+1. On the host node: **Generate invite code**.
+2. On the invited node: **Join network** with `tcp://host:port` + the code.
+3. For mutual trust between distinct roots: each node shows its certificate via
+   **Show our root certificate**; the other pastes it into **Trust certificate**.
 
-## Intégrer dans votre propre runner
+## Embedding in your own runner
 
 ```python
 from src.webconsole import WebConsole
@@ -443,4 +479,3 @@ console.start(loop=asyncio.get_running_loop())
 ...
 console.stop()
 ```
-</content>
