@@ -1,10 +1,9 @@
-"""Le fichier de configuration du nœud.
+"""The node's configuration file.
 
-Il est lu au démarrage et écrit depuis la console : c'est donc à la fois une
-entrée du processus et une surface d'édition. Les deux exigences se rejoignent —
-rien de ce qu'il contient ne doit pouvoir empêcher un nœud de démarrer, et rien
-de ce que la console envoie ne doit pouvoir écrire une valeur que le nœud
-refuserait ensuite.
+It is read at startup and written from the console: it is therefore both an
+input to the process and an editing surface. The two requirements meet —
+nothing it contains may stop a node from starting, and nothing the console sends
+may write a value the node would then refuse.
 """
 import os
 import stat
@@ -41,8 +40,8 @@ class TestParsing:
         assert values == {"fleet": True} and problems == []
 
     def test_only_the_keys_present_are_returned(self):
-        """Le lanceur doit distinguer « non réglé » de « réglé à la valeur qui
-        se trouve être le défaut » : c'est ce qui fait marcher la précédence."""
+        """The launcher has to tell "unset" from "set to the value that happens
+        to be the default": that is what makes precedence work."""
         values, _ = config.parse("fleet = true\n")
         assert list(values) == ["fleet"]
 
@@ -65,8 +64,8 @@ class TestParsing:
 
 
 class TestHostileFiles:
-    """Un fichier illisible se signale et s'ignore : un nœud qui ne démarre pas
-    est un pire résultat qu'un nœud sur ses valeurs par défaut."""
+    """An unreadable file is reported and set aside: a node that does not start
+    is a worse outcome than a node on its defaults."""
 
     def test_a_garbage_line_does_not_lose_the_rest(self):
         values, problems = config.parse("this is not a setting\nfleet = true\n")
@@ -120,8 +119,8 @@ class TestHostileFiles:
             assert "console_host" not in values, bad
 
     def test_a_value_cannot_smuggle_a_second_line(self):
-        """Une valeur qui emporte un saut de ligne se rouvrirait en deux lignes
-        au prochain chargement — un réglage écrit par la porte de derrière."""
+        """A value carrying a newline would reopen as two lines at the next
+        load — a setting written through the back door."""
         with pytest.raises(config.ConfigError):
             config.validate("console_host", "example.com\nfleet = true")
         with pytest.raises(config.ConfigError):
@@ -138,13 +137,13 @@ class TestConsoleEdits:
         merged, rejected = config.apply_edits(
             config.defaults(), {"console_port": "banana", "fleet": True})
         assert rejected and "console_port" in rejected[0]
-        # La valeur refusée reste celle d'avant ; l'autre n'est pas perdue.
+        # The refused value stays as it was; the other is not lost.
         assert merged["console_port"] == config.defaults()["console_port"]
         assert merged["fleet"] is True
 
     def test_launch_is_not_writable_from_the_console(self):
-        """Choisir ce que le nœud exécute n'est pas un réglage : ça appartient à
-        qui détient le fichier, pas à un formulaire web."""
+        """Choosing what the node runs is not a setting: it belongs to whoever
+        holds the file, not to a web form."""
         merged, rejected = config.apply_edits(config.defaults(),
                                               {"launch": "/bin/sh -c evil"})
         assert rejected and "launch" in rejected[0]
@@ -169,8 +168,8 @@ class TestConsoleEdits:
 
 class TestOnDisk:
     def test_the_file_is_owner_only(self, tmp_path):
-        """Il ne contient pas de secret aujourd'hui — raison de plus pour qu'il
-        ne devienne pas l'endroit où le premier apparaîtrait sans qu'on le voie."""
+        """It holds no secret today — all the more reason for it not to become
+        the place where the first one appears unnoticed."""
         path = str(tmp_path / "nmesh.conf")
         config.save(path, config.defaults())
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
@@ -188,8 +187,8 @@ class TestOnDisk:
         assert not os.path.exists(path + ".tmp")
 
     def test_the_password_is_never_a_setting(self):
-        """Un mot de passe en clair dans un fichier fait pour être édité et lu
-        n'est pas une option de configuration."""
+        """A password in the clear, in a file meant to be edited and read, is
+        not a configuration option."""
         assert not any("password" in name for name in config.SETTINGS)
         for line in config.render(config.defaults()).splitlines():
             stripped = line.strip()
@@ -202,9 +201,9 @@ class TestOnDisk:
 
 
 class TestUnreadableFile:
-    """Un fichier présent mais illisible n'est pas la même chose qu'un fichier
-    absent : le second est normal, le premier est une installation cassée qui
-    ferait tourner le nœud sur des réglages que personne n'a choisis."""
+    """A file that is present but unreadable is not the same thing as an absent
+    one: the second is normal, the first is a broken installation that would run
+    the node on settings nobody chose."""
 
     def test_it_is_reported_not_silently_empty(self, tmp_path, monkeypatch):
         path = tmp_path / "nmesh.conf"
@@ -224,9 +223,9 @@ class TestUnreadableFile:
 
 
 class TestLauncherPrecedence:
-    """`scripts/nmesh_node.py` applique ligne de commande > fichier > défaut, et
-    dit lesquels ont été écrasés — un fichier ignoré en silence est exactement
-    la panne qu'on veut rendre visible."""
+    """`scripts/nmesh_node.py` applies command line > file > default, and says
+    which were overridden — a silently ignored file is exactly the failure we
+    want to make visible."""
 
     def settle(self, path, argv):
         import importlib.util
@@ -331,8 +330,8 @@ class TestPasswordScript:
         assert console_auth.check(password, salt, digest)
 
     def test_stdout_carries_the_password_and_nothing_else(self):
-        """install.sh capture stdout : une bannière qui s'y glisserait
-        deviendrait le mot de passe."""
+        """install.sh captures stdout: a banner slipping in there would become
+        the password."""
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             result = self.run(d)

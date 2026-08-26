@@ -1,14 +1,14 @@
-"""Deux nœuds joints et inactifs ne doivent presque rien s'échanger.
+"""Two joined, idle nodes must exchange almost nothing.
 
-Le bug d'origine : `_maintain_neighbors` envoyait un FIND_NODE, la réponse
-FOUND_NODE réveillait la maintenance, qui repartait sans le moindre délai.
-Comme un FOUND_NODE transporte des chaînes de certificats (~15 ko), deux nœuds
-au repos saturaient le lien — 3 Mbit/s mesurés en local, un débit constant sur
-un lien réel. Un mesh plus petit que `_NEIGHBOR_FLOOR` ne peut jamais atteindre
-ce plancher, donc la recherche ne s'arrêtait jamais d'elle-même.
+The original bug: `_maintain_neighbors` sent a FIND_NODE, and the FOUND_NODE
+reply woke maintenance, which started again with no delay at all. Since a
+FOUND_NODE carries certificate chains (~15 KB), two idle nodes saturated the
+link — 3 Mbit/s measured locally, a constant rate on a real link. A mesh smaller
+than `_NEIGHBOR_FLOOR` can never reach that floor, so the search never stopped
+on its own.
 
-Exclu de la suite par défaut (voir pyproject addopts) : ce test observe du
-temps réel.
+Excluded from the default suite (see the pyproject addopts): this test observes
+real time.
 """
 import asyncio
 
@@ -42,15 +42,15 @@ class TestIdleChatter:
     async def test_two_idle_nodes_stay_quiet(self):
         host, guest = await _joined_pair("127.0.0.1:19341")
         try:
-            await asyncio.sleep(2)          # laisser le join se poser
+            await asyncio.sleep(2)          # let the join settle
             host.trace.start(seconds=40, events=20000, names=MESSAGE_NAMES)
             await asyncio.sleep(20)
             host.trace.stop()
             summary = host.trace.summary()
 
-            # Le seuil est large exprès : ce test attrape une boucle emballée,
-            # pas une variation de quelques paquets. Avant le correctif, cette
-            # fenêtre portait des mégaoctets.
+            # The threshold is wide on purpose: this test catches a runaway
+            # loop, not a variation of a few packets. Before the fix, this
+            # window carried megabytes.
             assert summary["bytes_in"] + summary["bytes_out"] < 200_000, summary
 
             found = [row for row in summary["rows"]
@@ -62,13 +62,13 @@ class TestIdleChatter:
             await host.stop()
 
     async def test_a_reply_that_teaches_nothing_does_not_relaunch_the_search(self):
-        """Le cœur du bug : une réponse ne doit pas être la cause de la question
-        suivante. Notre propre id compte comme « déjà connu » — la table refuse
-        de le stocker, donc `contains` est faux pour lui à jamais et chaque
-        réponse qui nous mentionne passait pour une découverte.
+        """The heart of the bug: a reply must not cause the next question. Our
+        own id counts as "already known" — the table refuses to store it, so
+        `contains` is false for it forever and every reply mentioning us looked
+        like a discovery.
 
-        Mesuré sur une fenêtre qui couvre au moins un cycle de maintenance,
-        sinon le test passerait aussi sur le code bogué."""
+        Measured over a window covering at least one maintenance cycle, or the
+        test would also pass on the buggy code."""
         host, guest = await _joined_pair("127.0.0.1:19342")
         try:
             await asyncio.sleep(2)
@@ -81,14 +81,14 @@ class TestIdleChatter:
 
             host._wake_neighbor_maintenance = spy
             await asyncio.sleep(25)
-            assert len(wakes) <= 3, f"maintenance réveillée {len(wakes)} fois"
+            assert len(wakes) <= 3, f"maintenance woke {len(wakes)} times"
         finally:
             await guest.stop()
             await host.stop()
 
     async def test_discovery_still_works_when_there_is_something_to_find(self):
-        """La borne ne doit pas éteindre la découverte : un troisième nœud qui
-        arrive doit être trouvé par le premier, qui ne l'a jamais dialé."""
+        """The bound must not turn discovery off: a third node that arrives has
+        to be found by the first, which never dialled it."""
         host, guest = await _joined_pair("127.0.0.1:19343")
         third = make_node()
         try:
@@ -102,7 +102,7 @@ class TestIdleChatter:
                     break
                 await asyncio.sleep(0.5)
             assert guest._routing.contains(third.id), \
-                "le troisième nœud n'a jamais été appris"
+                "the third node was never learned"
         finally:
             await third.stop()
             await guest.stop()
