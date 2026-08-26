@@ -1,329 +1,331 @@
-# Routage, DHT & propagation des adresses
+# Routing, DHT & address propagation
 
-Source : `routing.py`, `dht.py`, et dans `node.py` : `_ensure_route_to`,
+Source: `routing.py`, `dht.py`, and inside `node.py`: `_ensure_route_to`,
 `_connect_routing`, `_kademlia_lookup`, `_forward_packet`, `ping`/`_handle_ping`,
 `_handle_found_node`, keepalive.
 
-## Table de routage (`routing.py`)
+## Routing table (`routing.py`)
 
-Kademlia à 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
-`cert_chain`, **`last_seen`** (monotonic, posé à chaque `add`).
+Kademlia with 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
+`cert_chain`, **`last_seen`** (monotonic, set on every `add`).
 
-- `KBucket.K = 20`. Un bucket plein renvoie son plus ancien (candidat éviction).
-  Un nœud re-`add`é est déplacé en fin de bucket (LRU → on garde les actifs).
-- `RoutingTable.add(id, addresses, dsa_pub)` : **fusionne** les adresses
-  (`dict.fromkeys(existing + new)`) et la clé DSA ; crée un `NodeEntry` neuf →
-  `last_seen` rafraîchi. Ignore l'auto-ajout.
-- `all_entries()`, `get_closest(target, k)` (tri par distance XOR),
-  `export_entries`/`import_entries` (persistance ; seules les entrées avec clé
-  DSA sont exportables — sans clé on ne peut pas ré-authentifier).
-- `last_seen` alimente la console (« Known nodes », N plus récentes) et **doit**
-  alimenter la propagation d'adresses ciblée (voir plus bas).
+- `KBucket.K = 20`. A full bucket returns its oldest entry (an eviction
+  candidate). A node that is `add`ed again moves to the end of the bucket (LRU →
+  we keep the active ones).
+- `RoutingTable.add(id, addresses, dsa_pub)`: **merges** the addresses
+  (`dict.fromkeys(existing + new)`) and the DSA key; creates a fresh `NodeEntry`
+  → `last_seen` refreshed. Ignores adding ourselves.
+- `all_entries()`, `get_closest(target, k)` (sorted by XOR distance),
+  `export_entries`/`import_entries` (persistence; only entries with a DSA key
+  are exportable — without a key we cannot re-authenticate).
+- `last_seen` feeds the console ("Known nodes", the N most recent) and **must**
+  feed targeted address propagation (see below).
 
-## Kademlia « en mieux » (routage à la demande)
+## Kademlia "improved" (on-demand routing)
 
-Le concept de base est Kademlia, mais le routage est **agnostique du medium** et
-**à la demande** plutôt qu'un simple saut XOR aveugle :
+The base concept is Kademlia, but routing is **medium-agnostic** and **on
+demand** rather than a blind XOR hop:
 
-- `_forward_packet` (cf. `protocol.md`) : pair direct > **chemin retour observé**
-  (`_route_hints`, voir plus bas) > plus proche voisin XOR > acquisition de route
-  **en tâche de fond**. On préfère une route réellement joignable à un saut XOR
-  théorique — crucial à travers des frontières réseau où seuls certains nœuds ont
-  de la joignabilité.
-- `_ensure_route_to(target)` : renvoie un pair authentifié vers `target`, en
-  l'établissant si besoin. Ordre : pair existant → si absent de la table,
-  `_kademlia_lookup` → `_connect_routing` (essaie les adresses connues, IPv6
-  d'abord) → si aucune adresse joignable, `_punch_route_to` (NAT hole punch
-  coordonné par un relais, cf. `transports.md`).
-- `_kademlia_lookup(target)` : `FIND_NODE` itératif borné (`_KAD_LOOKUP_TIMEOUT`,
-  `_KAD_LOOKUP_MAX_ROUNDS`), agrège les `FOUND_NODE` jusqu'à stabilisation.
+- `_forward_packet` (see `protocol.md`): a direct peer > the **observed return
+  path** (`_route_hints`, see below) > the nearest XOR neighbour > acquiring the
+  route **in a background task**. We prefer a route that is actually reachable
+  to a theoretical XOR hop — crucial across network boundaries where only some
+  nodes have reachability.
+- `_ensure_route_to(target)`: returns an authenticated peer towards `target`,
+  establishing one if needed. Order: an existing peer → if absent from the
+  table, `_kademlia_lookup` → `_connect_routing` (tries the known addresses,
+  IPv6 first) → if no address is reachable, `_punch_route_to` (a NAT hole punch
+  coordinated by a relay, see `transports.md`).
+- `_kademlia_lookup(target)`: a bounded iterative `FIND_NODE`
+  (`_KAD_LOOKUP_TIMEOUT`, `_KAD_LOOKUP_MAX_ROUNDS`), aggregating `FOUND_NODE`
+  until it stabilises.
 
-### ⚑ L'acquisition de route ne bloque **jamais** une boucle de réception
+### ⚑ Acquiring a route **never** blocks a receive loop
 
-`_ensure_route_to` dure des secondes (lookup, dial, punch). L'appeler depuis un
-handler — donc depuis `_Peer._loop` — gèle le lien entrant pendant tout ce
-budget, **et ne peut pas aboutir** quand le `FOUND_NODE` attendu doit justement
-revenir par ce lien-là (cas du nœud qui n'a qu'un seul pair : blocage garanti).
+`_ensure_route_to` takes seconds (lookup, dial, punch). Calling it from a
+handler — therefore from `_Peer._loop` — freezes the incoming link for that
+whole budget, **and cannot succeed** when the `FOUND_NODE` it waits for has to
+come back over that very link (the case of a node with a single peer: a
+guaranteed deadlock).
 
-→ `_route_outbound(packet, blocking=False)` et `_forward_packet` ne font que le
-chemin rapide (envoi à un candidat vivant) ; s'il n'y a pas de candidat, le
-paquet part dans `_defer_route` : une **tâche de fond bornée**
-(`_MAX_DEFERRED_ROUTES`, suivie et annulée par `stop()`) qui acquiert la route
-puis réémet. Tout handler appelé depuis la boucle de réception
-(`_handle_find_node`, `_handle_find_value`, `_handle_dir_find`,
-`_handle_echo_request`, les deux handlers E2E) utilise `blocking=False`.
-`_maybe_upgrade_path` passe par la même réserve de tâches.
-**Ne jamais awaiter `_ensure_route_to` depuis un handler de paquet.**
+→ `_route_outbound(packet, blocking=False)` and `_forward_packet` only do the
+fast path (send to a live candidate); with no candidate, the packet goes into
+`_defer_route`: a **bounded background task** (`_MAX_DEFERRED_ROUTES`, tracked
+and cancelled by `stop()`) that acquires the route and re-sends. Every handler
+called from the receive loop (`_handle_find_node`, `_handle_find_value`,
+`_handle_dir_find`, `_handle_echo_request`, both E2E handlers) uses
+`blocking=False`. `_maybe_upgrade_path` goes through the same task pool.
+**Never await `_ensure_route_to` from a packet handler.**
 
-### Joindre un id **à distance** (multi-hop) — pas seulement un pair direct
+### Reaching an id **remotely** (multi-hop) — not only a direct peer
 
-**Tout ce qui adresse un `node id` est routable** et relayé de saut en saut
-(`_forward_packet`, glouton vers la cible en excluant le pair d'où vient le
-paquet — sur une chaîne cela dégénère en « passe à l'autre voisin ») jusqu'au
-destinataire, à travers **n'importe quel medium**. Sont routables : `DATA`,
-`E2E_HANDSHAKE`/`_ACK`, `ECHO_REQUEST`/`_REPLY`, **et tout le plan de contrôle
-Kademlia/DHT** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`,
-`DIR_STORE`/`DIR_FIND`/`DIR_FOUND`. Restent **directs** (un saut authentifié) :
-`PING`/`PONG` (keepalive par lien), la signalisation de punch, et le gossip du
-catalogue (re-stampé à chaque saut).
+**Everything addressed to a `node id` is routable** and relayed hop by hop
+(`_forward_packet`, greedily towards the target while excluding the peer the
+packet came from — on a chain this degenerates into "pass it to the other
+neighbour") up to the recipient, over **any medium**. Routable: `DATA`,
+`E2E_HANDSHAKE`/`_ACK`, `ECHO_REQUEST`/`_REPLY`, **and the whole Kademlia/DHT
+control plane** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`,
+`DIR_STORE`/`DIR_FIND`/`DIR_FOUND`. Still **direct** (one authenticated hop):
+`PING`/`PONG` (per-link keepalive), the punch signalling, and catalogue gossip
+(re-stamped at every hop).
 
-### Chemin retour appris du trafic (`_route_hints`) ⚑
+### A return path learned from traffic (`_route_hints`) ⚑
 
-La proximité XOR n'est qu'une **hypothèse** sur un overlay qu'on n'a pas fini
-d'apprendre ; le lien par lequel un paquet vient d'arriver est une **preuve**
-qu'il porte du trafic depuis cette source. Router une réponse par une nouvelle
-supposition gloutonne, alors que le chemin de la requête est là, envoyait des
-`FOUND_NODE`/`ECHO_REPLY`/ACK E2E dans une impasse.
+XOR proximity is only a **hypothesis** about an overlay we have not finished
+learning; the link a packet just arrived on is **proof** that it carries traffic
+from that source. Routing a reply by a fresh greedy guess, while the request's
+own path is right there, used to send `FOUND_NODE`/`ECHO_REPLY`/E2E ACKs into a
+dead end.
 
-- `_learn_reverse_path(peer, packet)` : après les portes de validation
-  (`msg_id` vérifié, non-doublon, lien authentifié), on note
-  `packet.src_id → pair d'entrée`. Un pair joignable en **direct** n'a pas
-  d'entrée (le lien direct est déjà le plus court).
-- `_route_candidates` place ce premier saut **en tête**, sauf si un lien direct
-  vers la cible existe — celui-là garde toujours la main. Le reste de la liste
-  (voisins triés par XOR) suit, donc un envoi qui échoue continue de descendre
-  la liste.
-- Borné (`_ROUTE_HINT_MAX = 256`, éviction FIFO) et daté (`_ROUTE_HINT_TTL`).
-- **Auto-réparation** : `_forget_route_hint(cible)` dès qu'une requête routée
-  reste sans réponse (`_kad_query_node`, `_dht_find_value_at`, `_dir_find_at`,
-  `_routed_ping`) ; `_forget_hints_via(pair)` quand un lien meurt. Un premier
-  saut qui cesse de porter — ou qui ment pour attirer le trafic — coûte une
-  requête en timeout, puis disparaît.
+- `_learn_reverse_path(peer, packet)`: after the validation gates (`msg_id`
+  verified, not a duplicate, link authenticated), we note
+  `packet.src_id → ingress peer`. A peer reachable **directly** gets no entry
+  (the direct link is already the shortest).
+- `_route_candidates` puts that first hop **at the front**, unless a direct link
+  to the target exists — that one always wins. The rest of the list (neighbours
+  sorted by XOR) follows, so a send that fails keeps walking down the list.
+- Bounded (`_ROUTE_HINT_MAX = 256`, FIFO eviction) and dated
+  (`_ROUTE_HINT_TTL`).
+- **Self-repair**: `_forget_route_hint(target)` as soon as a routed request goes
+  unanswered (`_kad_query_node`, `_dht_find_value_at`, `_dir_find_at`,
+  `_routed_ping`); `_forget_hints_via(peer)` when a link dies. A first hop that
+  stops carrying — or that lies to attract traffic — costs one request timing
+  out, and then disappears.
 
-Surface d'attaque assumée : un pair authentifié peut forger `src_id` pour
-attirer notre trafic vers une cible et le jeter. Il ne gagne rien qu'il n'ait
-déjà : le hint ne fait que **réordonner des pairs déjà authentifiés** (jamais
-de saut non authentifié), il n'écrase pas un lien direct, il est borné, daté,
-et effacé au premier silence. Un relais choisi par XOR pouvait déjà jeter le
-trafic de la même façon.
+An accepted attack surface: an authenticated peer can forge `src_id` to attract
+our traffic towards a target and drop it. They gain nothing they did not already
+have: the hint only **reorders peers that are already authenticated** (never an
+unauthenticated hop), it does not override a direct link, it is bounded, dated,
+and erased at the first silence. A relay chosen by XOR could already drop
+traffic the same way.
 
-Conséquence : `A → X en passant par tout l'alphabet` fonctionne pour **tout** —
-messages, ping, DHT adressé-contenu, annuaire de pseudos — même si A et X ne
-peuvent pas se connecter en direct (distant / NAT). Les requêtes (`_kad_query_node`,
-`_dht_store_at`/`_dht_find_value_at`, `_dir_store_at`/`_dir_find_at`) adressent le
-paquet au `node id` cible et passent par `_route_outbound` (direct si adjacent,
-multi-hop sinon) ; les réponses (`FOUND_*`) sont routées en retour vers le
-demandeur. Pour la **vivacité**, `console_ping_node` envoie un `ECHO_REQUEST`
-routé et mesure le RTT (`_routed_ping`) ; le champ `via` vaut `direct` ou `route`.
-E2E exige en plus une **racine de confiance commune** entre les extrémités (le
-routage atteint la cible, l'authentification demande une ancre partagée).
+Consequence: `A → X across the whole alphabet` works for **everything** —
+messages, ping, content-addressed DHT, pseudo directory — even if A and X cannot
+connect directly (remote / NAT). Requests (`_kad_query_node`,
+`_dht_store_at`/`_dht_find_value_at`, `_dir_store_at`/`_dir_find_at`) address the
+packet to the target `node id` and go through `_route_outbound` (direct if
+adjacent, multi-hop otherwise); replies (`FOUND_*`) are routed back to the
+seeker. For **liveness**, `console_ping_node` sends a routed `ECHO_REQUEST` and
+measures the RTT (`_routed_ping`); the `via` field is `direct` or `route`. E2E
+additionally requires a **shared trust root** between the ends (routing reaches
+the target, authentication wants a shared anchor).
 
-## DHT adressé par contenu (`dht.py`)
+## Content-addressed DHT (`dht.py`)
 
-- `ContentStore.put(key, value)` **refuse** si `key != sha256(value)[:20]`
-  (`content_key`). → un pair ne peut jamais stocker de données arbitraires sous
-  une clé choisie : l'empoisonnement DHT classique est fermé par construction.
-- Borné : `_MAX_ENTRIES = 8192`, `_MAX_BYTES = 128 MiB`, éviction LRU.
-- Réplication : `_DHT_K = 6` nœuds les plus proches (STORE/FIND_VALUE).
-- Usage : partage d'applications (`app_package.py`, cf. `Docs/AppSharing/guide`).
+- `ContentStore.put(key, value)` **refuses** if `key != sha256(value)[:20]`
+  (`content_key`). → a peer can never store arbitrary data under a chosen key:
+  classic DHT poisoning is closed by construction.
+- Bounded: `_MAX_ENTRIES = 8192`, `_MAX_BYTES = 128 MiB`, LRU eviction.
+- Replication: `_DHT_K = 6` nearest nodes (STORE/FIND_VALUE).
+- Use: sharing applications (`app_package.py`, see `Docs/AppSharing/guide`).
 
-## DHT par-app publique/privée (`app_dht.py`)
+## Public/private per-app DHT (`app_dht.py`)
 
-Overlay applicatif au-dessus du store adressé par contenu, sans en affaiblir
-l'anti-empoisonnement (c'est toujours la valeur *cadrée* qui est hashée et
-stockée). Chaque valeur est `app_id(8) ‖ flag(1) ‖ body` :
+An application overlay above the content-addressed store, without weakening its
+anti-poisoning (it is still the *framed* value that is hashed and stored). Every
+value is `app_id(8) ‖ flag(1) ‖ body`:
 
-- **Namespace par app.** L'`app_id` est celui que le nœud tient pour la session
-  authentifiée — **l'app ne le déclare pas**. Un lecteur n'accepte qu'une valeur
-  dont l'`app_id` cadré correspond au sien : deux apps ne se lisent jamais, même
-  en connaissant la clé de contenu de l'autre.
-- **Publique** (`flag=0`) : `body = contenu` en clair → toute instance de la
-  *même* app, sur n'importe quel nœud, la lit (« toutes les nodes »).
-- **Privée** (`flag=1`) : `body = nonce(12) ‖ AES-256-GCM(contenu)` chiffré par
-  le **nœud** sous une clé fournie par **l'app** (16/24/32 octets ; AAD =
-  `app_id ‖ flag`). Seules les instances qui détiennent aussi la clé lisent.
-  Le nœud fait la crypto DHT ; l'app possède le contenu, la clé, et sa
-  distribution entre nœuds. AES-GCM symétrique = post-quantique.
+- **A namespace per app.** The `app_id` is the one the node holds for the
+  authenticated session — **the app does not declare it**. A reader only accepts
+  a value whose framed `app_id` matches its own: two apps never read each other,
+  even knowing the other's content key.
+- **Public** (`flag=0`): `body = content` in the clear → any instance of the
+  *same* app, on any node, reads it ("all the nodes").
+- **Private** (`flag=1`): `body = nonce(12) ‖ AES-256-GCM(content)`, encrypted by
+  the **node** under a key supplied by **the app** (16/24/32 bytes; AAD =
+  `app_id ‖ flag`). Only instances that also hold the key can read. The node does
+  the DHT crypto; the app owns the content, the key, and its distribution
+  between nodes. Symmetric AES-GCM = post-quantum.
 
-API nœud : `app_dht_put(app_id, contenu, enc_key?) -> clé` /
-`app_dht_get(app_id, clé, dec_key?) -> contenu | None`. Côté app externe, mêmes
-opérations via le connecteur (`ConnectorClient.dht_put/dht_get`, l'`app_id` venant
-de la session — cf. `Docs/DataConnector/guide`). Contenu borné à `MAX_CONTENT`
-(≈ une valeur DHT). L'app gère son propre index de clés de contenu.
+Node API: `app_dht_put(app_id, content, enc_key?) -> key` /
+`app_dht_get(app_id, key, dec_key?) -> content | None`. From an external app,
+the same operations through the connector (`ConnectorClient.dht_put/dht_get`,
+with the `app_id` coming from the session — see `Docs/DataConnector/guide`).
+Content bounded by `MAX_CONTENT` (≈ one DHT value). The app keeps its own index
+of content keys.
 
-## Annuaire de pseudos (`pseudo_dir.py`)
+## Pseudo directory (`pseudo_dir.py`)
 
-Trouver un node_id **par pseudo**, à l'échelle du réseau — ce que l'adressage
-par contenu ne permet pas (la clé y est le hash de la valeur, pas du pseudo).
-C'est un **annuaire à clé** au-dessus de Kademlia, sans rien affaiblir grâce à
-des enregistrements **auto-authentifiés** :
+Finding a node_id **by pseudo**, across the network — which content addressing
+cannot do (there the key is the hash of the value, not of the pseudo). This is a
+**keyed directory** on top of Kademlia, weakening nothing thanks to
+**self-authenticating** records:
 
 ```
-clé         = sha256(DOMAIN : app_id : normalise(pseudo))[:20]
-réclamation = app_id ‖ ts ‖ pubkey ‖ pseudo ‖ signature ML-DSA
+key    = sha256(DOMAIN : app_id : normalise(pseudo))[:20]
+claim  = app_id ‖ ts ‖ pubkey ‖ pseudo ‖ ML-DSA signature
 ```
 
-- Le **node_id réclamé est dérivé de la `pubkey`** de la réclamation
-  (`NodeID.from_public_key`), et la signature est vérifiée sous cette pubkey.
-  Une réclamation ne peut donc lier un pseudo qu'au node_id **de son propre
-  auteur** — impossible de mapper « alice » sur le node_id d'une victime (même
-  fermeture de l'empoisonnement/usurpation que le store adressé-contenu).
-- Le récepteur **recalcule la clé** depuis l'`app_id` + pseudo de la réclamation
-  → impossible de la déposer sous une clé sans rapport.
-- Les pseudos ne sont **pas uniques** : plusieurs peuvent réclamer « alice ».
-  L'annuaire garde un **ensemble borné de réclamations par clé** (la plus récente
-  par node_id l'emporte) ; un lookup les renvoie toutes — le node_id reste
-  l'identité réelle.
+- The **claimed node_id is derived from the claim's `pubkey`**
+  (`NodeID.from_public_key`), and the signature is verified under that pubkey. A
+  claim can therefore only bind a pseudo to **its own author's** node_id — it is
+  impossible to map "alice" onto a victim's node_id (the same closure of
+  poisoning/impersonation as the content-addressed store).
+- The receiver **recomputes the key** from the claim's `app_id` + pseudo → it is
+  impossible to file it under an unrelated key.
+- Pseudos are **not unique**: several may claim "alice". The directory keeps a
+  **bounded set of claims per key** (the most recent per node_id wins); a lookup
+  returns all of them — the node_id remains the real identity.
 
-Paquets `DIR_STORE` / `DIR_FIND` / `DIR_FOUND`, répliqués/interrogés sur les
-`_DIR_K` nœuds les plus proches de la clé, bornés et rate-limités par lien. API
-nœud : `publish_pseudo(app_id, pseudo)` / `lookup_pseudo(app_id, pseudo)`. Côté
-app : `ConnectorClient.publish_pseudo/lookup_pseudo` (app_id de la session). Le
-chat publie automatiquement au `set_pseudo` et cherche le réseau au `search`.
+`DIR_STORE` / `DIR_FIND` / `DIR_FOUND` packets, replicated to and queried from
+the `_DIR_K` nodes nearest the key, bounded and rate-limited per link. Node API:
+`publish_pseudo(app_id, pseudo)` / `lookup_pseudo(app_id, pseudo)`. From an app:
+`ConnectorClient.publish_pseudo/lookup_pseudo` (the app_id from the session).
+Chat publishes automatically on `set_pseudo` and searches the network on
+`search`.
 
-## Maintenance de voisinage cible et recovery au démarrage
+## Target-neighbourhood maintenance and recovery at startup
 
-Un nœud ne survit pas à un voisinage éparse : il entretient activement un
-**groupe de voisins** choisis par distance XOR (le seul critère de maintien de
-table), et peut atteindre n'importe quel node-id en relayant à travers ses
-voisins et la DHT même sans pair direct commun.
+A node does not survive a sparse neighbourhood: it actively maintains a **group
+of neighbours** chosen by XOR distance (the only criterion for keeping the
+table), and can reach any node-id by relaying through its neighbours and the DHT
+even with no common direct peer.
 
-### Les deux régimes (`_maintain_neighbors`)
+### The two regimes (`_maintain_neighbors`)
 
-Le cycle tourne toutes les `_NEIGHBOR_REFRESH = 30 s` (au démarrage via
-`start()`, puis en boucle), mais son contenu dépend de ce qu'on tient déjà :
+The cycle runs every `_NEIGHBOR_REFRESH = 30 s` (at startup through `start()`,
+then in a loop), but what it does depends on what we already hold:
 
-- **Recherche** — tant que le nœud tient **moins de `_NEIGHBOR_FLOOR = 3` liens
-  authentifiés vivants** : `kad_lookup` sur son propre id pour rafraîchir son
-  voisinage, puis dial dirigé des `_NEIGHBOR_TARGET = 5` entrées
-  XOR-les-plus-proches dont il n'a pas de session (`_connect_routing`, IPv6 puis
-  IPv4). C'est un dial dirigé, pas un broadcast.
-- **Silence** — dès `_NEIGHBOR_FLOOR` liens tenus : ni lookup ni dial. Un nœud
-  qui cherche son propre id indéfiniment n'est que du trafic, et un mesh qui ne
-  se stabilise jamais est un mesh qu'un adversaire peut tenir occupé. Perdre un
-  des trois liens (`_drop_failed_peer`, keepalive) relance immédiatement la
-  recherche.
-- `force=True` (join/`bootstrap`) impose un cycle de recherche complet quoi
-  qu'on tienne déjà : une table fraîche doit se peupler.
+- **Searching** — while the node holds **fewer than `_NEIGHBOR_FLOOR = 3` live
+  authenticated links**: a `kad_lookup` on its own id to refresh its
+  neighbourhood, then a directed dial of the `_NEIGHBOR_TARGET = 5` XOR-nearest
+  entries it has no session with (`_connect_routing`, IPv6 then IPv4). It is a
+  directed dial, not a broadcast.
+- **Quiet** — as soon as `_NEIGHBOR_FLOOR` links are held: no lookup, no dial. A
+  node searching for its own id forever is nothing but traffic, and a mesh that
+  never settles is a mesh an adversary can keep busy. Losing one of the three
+  links (`_drop_failed_peer`, keepalive) restarts the search immediately.
+- `force=True` (join/`bootstrap`) imposes a full searching cycle whatever we
+  already hold: a fresh table has to fill up.
 
-### Promotion d'une node vue en transit
+### Promoting a node seen in transit
 
-Le set maintenu (`_neighbor_slots`) = les `_NEIGHBOR_FLOOR` liens vivants les
-plus proches ; sa **borne d'intérêt** (`_neighbor_cutoff`) est la distance du
-plus mauvais des trois.
+The maintained set (`_neighbor_slots`) = the `_NEIGHBOR_FLOOR` nearest live
+links; its **interest bound** (`_neighbor_cutoff`) is the distance of the worst
+of the three.
 
-- `_learn_reverse_path` voit passer tout paquet routable : si son `src_id` n'est
-  pas déjà un pair et qu'il est **strictement plus proche** que la borne, il
-  entre dans `_neighbor_watch` (`_note_neighbor_candidate`).
-- Le cycle suivant dial ces candidates **même en régime silencieux** : une fois
-  la session établie, la nouvelle entre dans le set et la moins intéressante en
-  sort. Le lien évincé n'est **jamais coupé de force** (il peut porter du trafic
-  applicatif ou relayer pour d'autres) : il cesse simplement d'être garanti.
-- Bornes et sécurité : `_neighbor_watch` est plafonnée
-  (`_NEIGHBOR_WATCH_TRACKED = 64`, plus ancienne évincée), les entrées devenues
-  vivantes ou dépassées sont purgées à chaque cycle
-  (`_neighbor_promotions`, au plus `_NEIGHBOR_TARGET` par cycle), et **observer
-  ne réveille jamais la boucle** : un `src_id` de paquet routé n'est pas
-  authentifié, il ne doit pas piloter notre cadence de dial. Au pire il coûte
-  une tentative avec back-off vers une identité qui devra ensuite prouver sa clé
-  au handshake (`NodeID` = hash de la clé DSA).
-- Back-off par identité : chaque identité en échec retarde ses prochaines
-  tentatives (`_neighbor_retry_until`, minimum `2 s`, plafond `60 s`) ; le
-  nombre d'identités suivies est borné (`_NEIGHBOR_RETRY_TRACKED = 128`) pour
-  qu'un scan large ne crée pas d'état sans fin. Une fois la session établie,
-  `_add_authed_peer` efface la pénalité.
-- Réseaux sans pairs directs : si nous n'avons aucune entrée voisine joignable,
-  on retombe sur `_kademlia_lookup` puis un envoi multi-peer ordonné vers
-  jusqu'à `_ROUTE_SEND_FANOUT = 5` candidats choisis par distance XOR, avec un
-  deadline commun. Un pair qui échoue n'entraîne pas la chute du message : on
-  essaie le suivant. L'échec total est repris par l'acquisition de route en
-  tâche de fond (`_defer_route`), jamais en bloquant le lien entrant.
-- Un lookup **n'hérite pas du verdict d'un autre**. `_kademlia_lookup` déduplique
-  par cible (`_pending_lookups`) : s'il en existe un en vol, il l'attend — mais
-  si la cible n'est toujours pas dans la table à la fin, il **relance le sien**
-  avec le budget restant. Cet autre lookup était parti d'une autre shortlist, à
-  un autre moment ; rendre son échec comme le nôtre, c'est abandonner un id
-  qu'on n'a jamais demandé. Une seule reprise : si le créneau est repris entre
-  temps, on rend `False` — deux nœuds ne peuvent pas s'enchaîner indéfiniment.
-- Dernier recours : `_kademlia_lookup(target)` itératif borné (`_KAD_LOOKUP_MAX_ROUNDS = 4`,
-  `_KAD_LOOKUP_TIMEOUT = 3.0 s`) agrège `FOUND_NODE` jusqu'à stabilisation ;
-  les résultats alimentent `_connect_routing` et la table de routage.
+- `_learn_reverse_path` sees every routable packet go by: if its `src_id` is not
+  already a peer and it is **strictly nearer** than the bound, it enters
+  `_neighbor_watch` (`_note_neighbor_candidate`).
+- The next cycle dials those candidates **even in the quiet regime**: once the
+  session is up, the new one enters the set and the least interesting leaves it.
+  The evicted link is **never cut by force** (it may carry application traffic or
+  relay for others): it simply stops being guaranteed.
+- Bounds and safety: `_neighbor_watch` is capped
+  (`_NEIGHBOR_WATCH_TRACKED = 64`, oldest evicted), entries that became live or
+  were passed are purged on every cycle (`_neighbor_promotions`, at most
+  `_NEIGHBOR_TARGET` per cycle), and **observing never wakes the loop**: the
+  `src_id` of a routed packet is not authenticated, so it must not drive our dial
+  cadence. At worst it costs one backed-off attempt towards an identity that will
+  then have to prove its key at the handshake (`NodeID` = hash of the DSA key).
+- Back-off per identity: every failing identity delays its next attempts
+  (`_neighbor_retry_until`, minimum `2 s`, ceiling `60 s`); the number of
+  identities tracked is bounded (`_NEIGHBOR_RETRY_TRACKED = 128`) so a wide scan
+  cannot create endless state. Once the session is up, `_add_authed_peer` clears
+  the penalty.
+- Networks with no direct peers: if we have no reachable neighbour entry, we fall
+  back on `_kademlia_lookup` and then an ordered multi-peer send to up to
+  `_ROUTE_SEND_FANOUT = 5` candidates chosen by XOR distance, with a shared
+  deadline. A peer that fails does not bring the message down: we try the next.
+  Total failure is picked up by background route acquisition (`_defer_route`),
+  never by blocking the incoming link.
+- A lookup **does not inherit another's verdict**. `_kademlia_lookup`
+  deduplicates by target (`_pending_lookups`): if one is in flight it waits for
+  it — but if the target is still not in the table at the end, it **starts its
+  own** with the remaining budget. That other lookup began from a different
+  shortlist at a different moment; returning its failure as ours means giving up
+  on an id we never asked about. One retry only: if the slot has been taken in
+  the meantime we return `False` — two nodes cannot chain each other forever.
+- Last resort: a bounded iterative `_kademlia_lookup(target)`
+  (`_KAD_LOOKUP_MAX_ROUNDS = 4`, `_KAD_LOOKUP_TIMEOUT = 3.0 s`) aggregates
+  `FOUND_NODE` until it stabilises; the results feed `_connect_routing` and the
+  routing table.
 
-## ⚑ Taille d'un `FOUND_NODE` (contrainte post-quantique)
+## ⚑ The size of a `FOUND_NODE` (a post-quantum constraint)
 
-Un certificat ML-DSA-65 pèse **~7,3 ko** (clé sujet + clé émetteur + signature),
-donc une chaîne jusqu'à une racine ~**14,6 ko**. Répondre à un `FIND_NODE` avec
-les `k = 20` entrées de Kademlia ferait ~292 ko : bien au-delà du plafond de
-60 000 octets d'un paquet. `Packet.create` levait, l'exception était avalée par
-la boucle de réception, **aucun** `FOUND_NODE` ne partait — dès la 5ᵉ node
-certifiée connue, tous les lookups du réseau expiraient en silence.
+An ML-DSA-65 certificate weighs **~7.3 kB** (subject key + issuer key +
+signature), so a chain up to a root is ~**14.6 kB**. Answering a `FIND_NODE`
+with Kademlia's `k = 20` entries would be ~292 kB: far beyond a packet's 60 000
+byte ceiling. `Packet.create` raised, the exception was swallowed by the receive
+loop, and **no** `FOUND_NODE` ever left — from the fifth known certified node
+onwards, every lookup on the network timed out silently.
 
-La réponse est donc **budgétée** :
+The reply is therefore **budgeted**:
 
-- `_EntryPacker(budget)` empile les entrées les plus proches tant qu'elles
-  tiennent dans `_FOUND_NODE_MAX_BYTES = 32 000`, et **mutualise les
-  certificats** dans un pool indexé (toutes les chaînes finissent sur la même
-  racine réseau : l'envoyer une fois par entrée doublait le paquet). En
-  pratique ≈ 3 entrées par réponse au lieu de rien du tout.
-- Les entrées **sans chaîne** sont sautées : le récepteur les jette de toute
-  façon (`_handle_found_node` exige une chaîne vérifiable), autant ne pas
-  dépenser le budget. Les chaînes sont construites au fur et à mesure, donc le
-  budget plafonne aussi le coût CPU d'un `FIND_NODE`.
-- On **balaie plus large que k** (`_FIND_NODE_SCAN = 64`) pour remplir ce
-  budget : `k` borne ce qu'on **renvoie**, pas ce qu'on **regarde**. Les entrées
-  utilisables sont dispersées dans la table (une table apprise par gossip en
-  contient beaucoup sans chaîne) ; se limiter aux k plus proches renvoyait une
-  réponse **vide** dès que ces k-là n'avaient pas de chaîne.
-- **Le répondeur se met lui-même dans la réponse**, classé par distance comme
-  n'importe quelle autre entrée. Kademlia exclut classiquement le répondeur (le
-  demandeur le connaît déjà, il vient de lui parler) — faux ici : un `FIND_NODE`
-  est **routé**, donc le demandeur peut n'atteindre le répondeur qu'à travers un
-  relais et ne jamais apprendre son entrée. Un lookup routé jusqu'à l'id
-  **exactement recherché** revenait alors avec les voisins de cette node, la
-  shortlist cessait de progresser, et le lookup abandonnait à un hop d'un id
-  qu'il avait pourtant atteint (`_kademlia_lookup` renvoie
-  `routing.contains(target)`). Le récepteur vérifie toujours la chaîne **et**
-  que le sujet du premier certificat *est* le node_id de l'entrée : un relais ne
-  peut pas forger cette entrée.
-- Moins d'entrées par réponse = quelques rounds de plus, jamais un lookup mort.
-- `_query_allowed` limite `FIND_NODE`/`FIND_VALUE` par lien entrant
-  (`_QUERY_RATE_MAX` par `_QUERY_RATE_WINDOW`) : ce sont les seules requêtes
-  minuscules dont la réponse est énorme **et** routée vers un `src_id` non
-  vérifié (levier de réflexion). C'est une **soupape anti-flood, pas du
-  shaping** : le pic légitime d'un pair est de l'ordre de 66 par fenêtre
-  (α × rounds d'un lookup, plat quand le réseau grandit), la borne est très
-  au-dessus. Une borne proche du trafic normal tue des lookups réels.
+- `_EntryPacker(budget)` stacks the nearest entries while they fit inside
+  `_FOUND_NODE_MAX_BYTES = 32 000`, and **shares certificates** through an
+  indexed pool (every chain ends on the same network root: sending it once per
+  entry doubled the packet). In practice ≈ 3 entries per reply instead of
+  nothing at all.
+- Entries **with no chain** are skipped: the receiver drops them anyway
+  (`_handle_found_node` requires a verifiable chain), so there is no point
+  spending the budget. Chains are built as we go, so the budget also caps the
+  CPU cost of a `FIND_NODE`.
+- We **scan wider than k** (`_FIND_NODE_SCAN = 64`) to fill that budget: `k`
+  bounds what we **return**, not what we **look at**. Usable entries are
+  scattered through the table (a table learned by gossip holds many with no
+  chain); limiting ourselves to the k nearest returned an **empty** reply as soon
+  as those k had no chain.
+- **The responder puts itself in the reply**, ranked by distance like any other
+  entry. Kademlia classically excludes the responder (the seeker already knows
+  it, they just talked) — false here: a `FIND_NODE` is **routed**, so the seeker
+  may only reach the responder through a relay and never learn its entry. A
+  lookup routed all the way to the **exact id being sought** then came back with
+  that node's neighbours, the shortlist stopped progressing, and the lookup gave
+  up one hop from an id it had in fact reached (`_kademlia_lookup` returns
+  `routing.contains(target)`). The receiver still verifies the chain **and** that
+  the subject of the first certificate *is* the entry's node_id: a relay cannot
+  forge that entry.
+- Fewer entries per reply = a few more rounds, never a dead lookup.
+- `_query_allowed` limits `FIND_NODE`/`FIND_VALUE` per incoming link
+  (`_QUERY_RATE_MAX` per `_QUERY_RATE_WINDOW`): these are the only tiny requests
+  whose reply is enormous **and** routed towards an unverified `src_id` (a
+  reflection lever). It is an **anti-flood valve, not shaping**: a peer's
+  legitimate peak is around 66 per window (α × a lookup's rounds, flat as the
+  network grows), and the bound is well above that. A bound close to normal
+  traffic kills real lookups.
 
-## Propagation des adresses  ⚑ invariant central
+## Address propagation  ⚑ a central invariant
 
-**But visé** : *connaître une node ⟹ connaître l'ensemble de ses adresses
-annoncées*, afin que le routage puisse choisir le meilleur medium (« si A↔B est
-en Bluetooth et B↔C en Wi-Fi… »).
+**The goal**: *knowing a node ⟹ knowing the whole set of addresses it
+announces*, so that routing can pick the best medium ("if A↔B is Bluetooth and
+B↔C is Wi-Fi…").
 
-### Ce qui existe aujourd'hui
+### What exists today
 
-- `advertised_uris()` = chaque URI d'écoute étendue sur `_local_ips` +
-  `_extra_addrs` (IP publique découverte, adresses observées).
-- Le **PING transporte `advertised_uris`** ; `_handle_ping` fait
-  `_routing.add(src, uris_valides, dsa_pub)` (fusion) et répond PONG.
-  `_validate_uri` filtre avant ajout (« rejeter par défaut »).
-- PING émis : au `bootstrap()`, par la **boucle de keepalive** (~20 s,
-  `_link_keepalive_loop`), **et sur changement d'adresse** (gossip ciblé, voir
-  ci-dessous). `FOUND_NODE` propage aussi les adresses connues. Le PING sert
-  aussi de mesure **RTT** (voir `_handle_pong`, exposé dans la console).
-- Découverte d'adresse : `OBSERVED_ADDR` (un pair nous dit l'IP d'où il nous
-  voit), STUN, IP publique HTTP → alimentent `_extra_addrs`, puis `_poke_net`.
+- `advertised_uris()` = every listening URI expanded over `_local_ips` +
+  `_extra_addrs` (the discovered public IP, observed addresses).
+- The **PING carries `advertised_uris`**; `_handle_ping` does
+  `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
+  `_validate_uri` filters before adding ("reject by default").
+- PINGs are sent: at `bootstrap()`, by the **keepalive loop** (~20 s,
+  `_link_keepalive_loop`), **and on an address change** (targeted gossip, see
+  below). `FOUND_NODE` also propagates known addresses. The PING doubles as an
+  **RTT** measurement (see `_handle_pong`, surfaced in the console).
+- Address discovery: `OBSERVED_ADDR` (a peer tells us the IP it sees us from),
+  STUN, the public IP over HTTP → they feed `_extra_addrs`, then `_poke_net`.
 
-### Gossip d'adresses sur changement (implémenté)
+### Address gossip on change (implemented)
 
-Quand l'ensemble annoncé change, on l'annonce **immédiatement** aux pairs
-récents, sans attendre le keepalive périodique :
+When the announced set changes, we announce it **immediately** to recent peers
+rather than waiting for the periodic keepalive:
 
-- `_announce_addresses(reason)` : recalcule `advertised_uris()`, **saute si
-  inchangé** (`_last_announced` → pas de tempête), sinon envoie un PING (qui
-  porte déjà `advertised_uris`) aux **≤ `_ANNOUNCE_FANOUT` = 5** pairs
-  authentifiés triés par `last_seen` décroissant (`_recent_authed_peers`). Gossip
-  Kademlia ciblé : peu de trafic, convergence rapide. Ne lève jamais.
-- Déclencheurs (`_announce_addresses_soon`, fire-and-forget depuis un contexte
-  sync) : `_on_network_change` (IP publique/locale), `_handle_observed_addr`
-  (nouvelle adresse observée), `add_listen` / `remove_listen`.
-- Le pair receveur, via `_handle_ping`, fait `_routing.add(src, advertised_uris)`
-  → il connaît la nouvelle adresse. Les nœuds plus lointains l'apprennent
-  paresseusement par lookup Kademlia (`FIND_NODE`) — modèle Kademlia normal.
+- `_announce_addresses(reason)`: recomputes `advertised_uris()`, **skips if
+  unchanged** (`_last_announced` → no storm), otherwise sends a PING (which
+  already carries `advertised_uris`) to the **≤ `_ANNOUNCE_FANOUT` = 5**
+  authenticated peers sorted by descending `last_seen`
+  (`_recent_authed_peers`). Targeted Kademlia gossip: little traffic, fast
+  convergence. It never raises.
+- Triggers (`_announce_addresses_soon`, fire-and-forget from a sync context):
+  `_on_network_change` (public/local IP), `_handle_observed_addr` (a new observed
+  address), `add_listen` / `remove_listen`.
+- The receiving peer, through `_handle_ping`, does
+  `_routing.add(src, advertised_uris)` → it knows the new address. More distant
+  nodes learn it lazily through a Kademlia lookup (`FIND_NODE`) — the normal
+  Kademlia model.
 
-Limite assumée : on pousse à ses **pairs directs** les plus récents (un PING est
-un message direct). La diffusion large reste lazy via Kademlia. Un pair
-fraîchement authentifié n'a donc pas *instantanément* toutes nos adresses ;
-elles arrivent au premier gossip/keepalive. Ne pas coder de dépendance dure sur
-« pair authentifié ⟹ toutes ses adresses connues à l'instant T ».
-</content>
+An accepted limit: we push to our most recent **direct peers** (a PING is a
+direct message). Wide diffusion stays lazy through Kademlia. A freshly
+authenticated peer therefore does not *instantly* have all our addresses; they
+arrive with the first gossip or keepalive. Do not write a hard dependency on
+"an authenticated peer ⟹ all its addresses known at instant T".

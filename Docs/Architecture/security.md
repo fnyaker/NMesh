@@ -1,202 +1,205 @@
-# Identité, crypto & confiance
+# Identity, crypto & trust
 
-Source : `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
-`invite.py`, et les handlers de handshake dans `node.py`.
+Source: `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
+`invite.py`, and the handshake handlers in `node.py`.
 
-## Identité
+## Identity
 
-- `CryptoIdentity` (`crypto.py`) détient une paire **ML-DSA-65** (signature).
-  La clé privée reste en mémoire ; `save/load` la persiste en binaire brut sous
-  le répertoire d'état (`node.key`), **créée en 0600 dès l'ouverture** (pas un
-  `chmod` après coup, qui laisserait une fenêtre de lecture) et re-serrée si un
-  fichier plus permissif traîne d'une version antérieure. Le répertoire d'état
-  lui-même est en 700 et appartient au compte dédié du nœud quand il a été posé
-  par `install.sh` (voir [`../Setup/guide`](../Setup/guide)).
-- `NodeID = sha256(clé_publique_DSA)[:20]` (`NodeID.from_public_key`). Donc
-  **l'ID est dérivable de la clé** : un `NodeID` qui ne correspond pas à la clé
-  présentée est un mensonge → rejet (`claimed_id != NodeID(packet.src_id)`).
-- ML-KEM-768 sert **uniquement** à négocier un secret au handshake ; le débit
-  se fait ensuite en AES-256-GCM.
+- `CryptoIdentity` (`crypto.py`) holds an **ML-DSA-65** pair (signature). The
+  private key stays in memory; `save/load` persists it as raw binary under the
+  state directory (`node.key`), **created 0600 at open time** (not a `chmod`
+  afterwards, which would leave a window in which it could be read) and
+  tightened again if a more permissive file is left over from an earlier
+  version. The state directory itself is 700 and belongs to the node's
+  dedicated account when `install.sh` put it there (see
+  [`../Setup/guide`](../Setup/guide)).
+- `NodeID = sha256(DSA_public_key)[:20]` (`NodeID.from_public_key`). So **the ID
+  is derivable from the key**: a `NodeID` that does not match the key presented
+  is a lie → reject (`claimed_id != NodeID(packet.src_id)`).
+- ML-KEM-768 is used **only** to negotiate a secret during the handshake;
+  throughput after that is AES-256-GCM.
 
-## Clés de session (`SessionKey`)
+## Session keys (`SessionKey`)
 
-- `SessionKey(shared_secret)` dérive une clé AES-256 via **HKDF-SHA256**
+- `SessionKey(shared_secret)` derives an AES-256 key with **HKDF-SHA256**
   (`info = b"nmesh-session-key"`).
-- `from_key` reconstruit une session depuis la clé 32o déjà dérivée (persistance
-  — on stocke la clé, jamais le secret ML-KEM brut).
-- `derive_secret` (HKDF sur la clé DSA) produit des sous-clés at-rest sous la
-  même frontière de confiance que l'identité (chiffrement du session store).
+- `from_key` rebuilds a session from the already-derived 32-byte key
+  (persistence — we store the key, never the raw ML-KEM secret).
+- `derive_secret` (HKDF over the DSA key) produces at-rest subkeys under the
+  same trust boundary as the identity (encrypting the session store).
 
-## Certificats & PKI P2P auto-racinée
+## Certificates & self-rooted P2P PKI
 
-Il n'y a **pas d'autorité centrale**. Chaque nœud est racine auto-signée de
-lui-même ; la confiance se propage par chaînes de certificats.
+There is **no central authority**. Every node is its own self-signed root; trust
+propagates through certificate chains.
 
-- `Certificate` (`cert.py`) : `subject_id/pub`, `issuer_id/pub`, `issued_at`,
-  `expires_at`, `signature`. `signed_body()` couvre tout sauf la signature.
-  `_build()` **revalide 3 invariants** à chaque (dé)sérialisation : `subject_id`
-  dérive de `subject_pub`, `issuer_id` de `issuer_pub`, et la signature de
-  l'émetteur est valide. → un certificat mal formé lève avant d'entrer en RAM.
-- `issue_cert` : à la fin d'un handshake accepté par invitation, l'hôte émet un
-  certificat pour le nouveau nœud (l'atteste comme membre), inclus dans le
-  `HANDSHAKE_ACK`. `self_signed_cert` : racine.
-- `CertStore` (`cert_store.py`) : `subject_id → [certs]` + ensemble de racines
-  (`_roots`, contient au moins soi).
-  - `get_chain_to_root(target)` : **BFS** dans le graphe d'émission jusqu'à une
-    racine. **Préfère une racine externe** (le réseau) : présenter sa propre
-    racine auto-signée n'authentifie rien auprès des pairs ; la chaîne réseau
-    (via l'émetteur qui nous a invités) est la seule vérifiable par autrui.
-  - `verify_chain(chain)` : liens d'émission continus + dernier cert self-signed
-    + dernier `subject_id ∈ roots` + aucun expiré → retourne l'ancre, sinon None.
-- `TrustTable` (`trust.py`) : **TOFU** `NodeID → clé DSA`. Première vue → stocke ;
-  vue suivante avec **clé différente** → `False` (compromission/usurpation).
+- `Certificate` (`cert.py`): `subject_id/pub`, `issuer_id/pub`, `issued_at`,
+  `expires_at`, `signature`. `signed_body()` covers everything but the
+  signature. `_build()` **re-validates three invariants** on every
+  (de)serialisation: `subject_id` derives from `subject_pub`, `issuer_id` from
+  `issuer_pub`, and the issuer's signature is valid. → a malformed certificate
+  raises before it ever reaches RAM.
+- `issue_cert`: at the end of a handshake accepted by invitation, the host
+  issues a certificate for the new node (attesting it as a member), included in
+  the `HANDSHAKE_ACK`. `self_signed_cert`: the root.
+- `CertStore` (`cert_store.py`): `subject_id → [certs]` plus a set of roots
+  (`_roots`, containing at least ourselves).
+  - `get_chain_to_root(target)`: a **BFS** through the issuance graph up to a
+    root. **Prefers an external root** (the network): presenting our own
+    self-signed root authenticates nothing to a peer; the network chain (through
+    the issuer who invited us) is the only one anybody else can verify.
+  - `verify_chain(chain)`: continuous issuance links + a self-signed last cert +
+    the last `subject_id ∈ roots` + nothing expired → returns the anchor,
+    otherwise None.
+- `TrustTable` (`trust.py`): **TOFU** `NodeID → DSA key`. First sighting →
+  store; a later sighting with a **different key** → `False` (compromise or
+  impersonation).
 
 ## Invitation (`invite.py`)
 
-Rejoindre = prouver la connaissance d'un code **sans l'envoyer en clair**.
+Joining = proving knowledge of a code **without sending it in the clear**.
 
-- `generate_code()` : code de 10 caractères, TTL 5 min, plusieurs codes
-  simultanés possibles (réseaux en étoile).
-- Challenge/réponse : `response = HMAC-SHA256(code, challenge)`
-  (`compute_response`). `verify_response` compare en **temps constant**
-  (`hmac.compare_digest`), purge les codes expirés.
-- **Usage unique** : `consume(challenge, response)` supprime le code qui matche.
-- Anti-bruteforce : `_MAX_FAILURES = 3` → lockout `_LOCKOUT_TTL = 60 s`.
-- **TTL par code.** `generate_code(ttl)` allonge la fenêtre d'un code précis,
-  borné par `_MAX_TTL` (6 h). C'est pour les invitations qui ne sont pas tapées
-  à la main : celle qu'une node dépose sur une machine en cours de provisioning
-  n'est redeemée qu'après l'installation des dépendances, bien au-delà des
-  5 minutes par défaut. Usage unique et lockout s'appliquent inchangés ; seule
-  la fenêtre bouge, et c'est un choix explicite de l'appelant.
+- `generate_code()`: a 10-character code, TTL 5 min, several codes may be live
+  at once (star networks).
+- Challenge/response: `response = HMAC-SHA256(code, challenge)`
+  (`compute_response`). `verify_response` compares in **constant time**
+  (`hmac.compare_digest`) and purges expired codes.
+- **Single use**: `consume(challenge, response)` deletes the code that matched.
+- Anti-bruteforce: `_MAX_FAILURES = 3` → a `_LOCKOUT_TTL = 60 s` lockout.
+- **TTL per code.** `generate_code(ttl)` widens the window of one specific code,
+  bounded by `_MAX_TTL` (6 h). This is for invitations that are not typed by
+  hand: the one a node leaves on a machine being provisioned is only redeemed
+  after its dependencies are installed, well beyond the default five minutes.
+  Single use and lockout apply unchanged; only the window moves, and that is an
+  explicit choice by the caller.
 
-## Ticket de join (`join_ticket.py`)
+## Join ticket (`join_ticket.py`)
 
-Même invitation, transportée autrement : une seule chaîne courte qui porte
-l'adresse **et** le code, pour un QR code ou une dictée.
+The same invitation, carried differently: a single short string carrying the
+address **and** the code, for a QR code or for reading aloud.
 
-- `generate_seeded_code(ttl)` émet un code ordinaire — usage unique, même
-  lockout, jamais transmis en clair — mais dérivé de 8 octets aléatoires, pour
-  qu'un ticket le porte en 8 octets plutôt qu'en caractères. Les deux côtés
-  dérivent la chaîne du code de la même façon (`code_from_seed`).
-- **Le ticket est le secret.** Il vaut exactement le code qu'il contient : qui
-  le lit peut rejoindre jusqu'à expiration ou usage unique. 64 bits d'entropie
-  derrière un code à usage unique et un lockout à 3 échecs.
-- **Émis seulement depuis une adresse `world` confirmée** (`public_endpoints`) :
-  pas « on croit que cette adresse est publique », mais « une connexion entrante
-  authentifiée est arrivée dessus ». Un ticket vers une adresse injoignable
-  échouerait après avoir été partagé.
-- L'expiration inscrite dans le ticket est un **indice** pour le lecteur, jamais
-  une autorité : seul le nœud émetteur décide si le code marche encore.
-- Le checksum (2 octets) attrape une faute de frappe avant de composer quoi que
-  ce soit. Ce n'est **pas** de l'intégrité contre un attaquant — il le
-  recalculerait.
-- Un ticket porte une **adresse numérique**, jamais un nom d'hôte : un nom
-  demanderait un résolveur côté scanner et pourrait pointer ailleurs plus tard.
-- Décodage traité comme une entrée hostile : longueur bornée, chaque champ
-  validé avant usage, et rien d'autre qu'une `TicketError` ne peut sortir.
+- `generate_seeded_code(ttl)` issues an ordinary code — single use, same
+  lockout, never transmitted in the clear — but derived from 8 random bytes, so
+  a ticket can carry it in 8 bytes rather than in characters. Both sides derive
+  the string from the code the same way (`code_from_seed`).
+- **The ticket is the secret.** It is worth exactly the code inside it: whoever
+  reads it can join until it expires or is used once. 64 bits of entropy behind
+  a single-use code and a lockout at three failures.
+- **Issued only from a confirmed `world` address** (`public_endpoints`): not "we
+  believe this address is public", but "an authenticated inbound connection
+  arrived on it". A ticket pointing at an unreachable address would fail after
+  it had already been shared.
+- The expiry written into the ticket is a **hint** for the reader, never an
+  authority: only the issuing node decides whether the code still works.
+- The checksum (2 bytes) catches a typo before anything is dialled. It is **not**
+  integrity against an attacker — they would recompute it.
+- A ticket carries a **numeric address**, never a hostname: a name would need a
+  resolver on the scanner's side and could point somewhere else later.
+- Decoding is treated as hostile input: bounded length, every field validated
+  before use, and nothing but a `TicketError` can come out.
 
-## Handshake par-saut (établissement d'une session entre 2 pairs directs)
+## Per-hop handshake (establishing a session between two direct peers)
 
-Flux (voir `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
-`_handle_handshake`, `_handle_handshake_ack`) :
+Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
+`_handle_handshake`, `_handle_handshake_ack`):
 
-1. Le serveur qui accepte une connexion envoie un **CHALLENGE** (aléatoire, +
-   marque `pending_challenge`).
-2. Le client répond via `initiate_handshake` : **HANDSHAKE** = clé pub ML-KEM +
-   clé pub ML-DSA + chaîne de certs + `sign(challenge‖kem_pub‖dsa_pub)`.
-   Si le client rejoignait par invitation, la réponse HMAC au challenge prouve
-   le code.
-3. Le serveur (`_handle_handshake`) vérifie la signature, vérifie `claimed_id`,
-   vérifie la chaîne (ou émet un cert si `invite_accepted`), encapsule ML-KEM →
-   `HANDSHAKE_ACK` = ciphertext ML-KEM + sa clé DSA + sa chaîne + cert émis +
-   signature. `peer.session = SessionKey(shared_secret)`.
-4. Le client (`_handle_handshake_ack`) vérifie, décapsule → même `SessionKey`.
+1. The server accepting a connection sends a **CHALLENGE** (random, and marks
+   `pending_challenge`).
+2. The client answers through `initiate_handshake`: **HANDSHAKE** = ML-KEM
+   public key + ML-DSA public key + certificate chain +
+   `sign(challenge‖kem_pub‖dsa_pub)`. If the client was joining by invitation,
+   the HMAC response to the challenge proves the code.
+3. The server (`_handle_handshake`) verifies the signature, verifies
+   `claimed_id`, verifies the chain (or issues a cert if `invite_accepted`),
+   encapsulates ML-KEM → `HANDSHAKE_ACK` = ML-KEM ciphertext + its DSA key + its
+   chain + the issued cert + a signature. `peer.session =
+   SessionKey(shared_secret)`.
+4. The client (`_handle_handshake_ack`) verifies and decapsulates → the same
+   `SessionKey`.
 
-À partir de là, `peer.authenticated_id` est posé des deux côtés et tout le
-trafic du lien est chiffré AES-256-GCM. La confiance est **mutuelle** (chacun
-challenge l'autre).
+From then on `peer.authenticated_id` is set on both sides and all traffic on the
+link is AES-256-GCM encrypted. Trust is **mutual** (each side challenges the
+other).
 
-> **Note d'invariant adresses** : le handshake **ne transporte pas** encore
-> l'ensemble des adresses annoncées du pair. Après authentification, on ne
-> connaît que l'adresse composée (client) ou aucune (serveur : `_routing.add(id,
-> [], pub)`). L'ensemble complet arrive par **gossip** (PING portant
-> `advertised_uris`, FOUND_NODE). Voir `routing.md` §propagation d'adresses pour
-> l'invariant visé et son mécanisme.
+> **Address invariant note**: the handshake does **not** yet carry the peer's
+> full set of announced addresses. After authentication we only know the address
+> that was dialled (client) or none at all (server: `_routing.add(id, [],
+> pub)`). The full set arrives by **gossip** (a PING carrying
+> `advertised_uris`, FOUND_NODE). See `routing.md` §address propagation for the
+> intended invariant and its mechanism.
 
-## Session E2E (de bout en bout)
+## E2E session (end to end)
 
-`_initiate_e2e_handshake` / `_handle_e2e_handshake(_ack)` : ML-KEM + signature +
-chaîne, mais **routés** à travers le mesh (types `_ROUTABLE_TYPES`) jusqu'à la
-destination finale. Résultat : `_e2e_sessions[peer]`. Les DATA sont chiffrées
-sous cette session E2E (`create_encrypted`) : **les relais ne déchiffrent
-jamais** — ils ne voient que le header de routage.
+`_initiate_e2e_handshake` / `_handle_e2e_handshake(_ack)`: ML-KEM + signature +
+chain, but **routed** across the mesh (`_ROUTABLE_TYPES`) to the final
+destination. Result: `_e2e_sessions[peer]`. DATA is encrypted under that E2E
+session (`create_encrypted`): **relays never decrypt** — they see only the
+routing header.
 
-### Re-clé côté répondeur : candidat probé, jamais d'écrasement à l'aveugle
+### Re-keying on the responder's side: a probed candidate, never a blind overwrite
 
-Un handshake valide qui arrive alors qu'une session est **déjà vivante** peut
-être un doublon tardif (retry toutes les 5 s, chemin relayé lent) ou une vraie
-re-clé (le pair a perdu sa session). Écraser la session à l'aveugle empoisonne
-le lien dans le cas du doublon (l'initiateur ignore l'ACK, garde l'ancienne
-clé → désaccord de clés permanent → tout DATA dropé au GCM, silencieusement).
-Le répondeur dérive donc une session **candidate** (`_e2e_rekey`, bornée
-`_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`), ACK normalement, et ne **promeut** le
-candidat que lorsqu'un DATA **déchiffre** sous lui (`_handle_data`) — preuve
-que le pair détient réellement la nouvelle clé.
+A valid handshake arriving while a session is **already live** may be a late
+duplicate (a retry every 5 s, a slow relayed path) or a genuine re-key (the peer
+lost its session). Overwriting the session blindly poisons the link in the
+duplicate case (the initiator ignores the ACK, keeps the old key → a permanent
+key disagreement → every DATA silently dropped at the GCM). The responder
+therefore derives a **candidate** session (`_e2e_rekey`, bounded by
+`_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`), ACKs normally, and **promotes** the
+candidate only when a DATA **decrypts** under it (`_handle_data`) — proof that
+the peer really holds the new key.
 
-Pourquoi c'est sûr : planter un candidat exige l'identité ML-DSA du pair
-(signature fraîche + chaîne ancrée, comme pour une établissement normal) ;
-promouvoir exige de décapsuler le KEM (seul le détenteur du secret KEM génère
-un DATA valide). Un handshake **rejoué** produit un candidat que l'attaquant ne
-peut jamais promouvoir (il ne décapsule pas notre ciphertext frais) → il
-expire. Un doublon légitime ne casse rien : la session vivante est conservée.
-</content>
+Why this is safe: planting a candidate requires the peer's ML-DSA identity (a
+fresh signature + an anchored chain, as for a normal establishment); promoting
+it requires decapsulating the KEM (only the holder of the KEM secret produces a
+valid DATA). A **replayed** handshake produces a candidate the attacker can
+never promote (they cannot decapsulate our fresh ciphertext) → it expires. A
+legitimate duplicate breaks nothing: the live session is kept.
 
-## Identité applicative (au-dessus de la session E2E)
+## Application identity (on top of the E2E session)
 
-Source : `app_auth.py`, exposé par `node.app_auth(app_id)` et par les trames
-`AUTH_*` du connecteur. Détail complet : [`Docs/AppAuth/guide`](../AppAuth/guide).
+Source: `app_auth.py`, exposed by `node.app_auth(app_id)` and by the connector's
+`AUTH_*` frames. Full detail: [`Docs/AppAuth/guide`](../AppAuth/guide).
 
-La session E2E authentifie le **transport** : quand une payload DATA arrive à une
-app, son `src_id` est prouvé. Mais cette preuve est confinée à une session
-vivante — irrécupérable après redémarrage, intransmissible, et muette sur
-l'**intention**. `app_auth` ajoute une **assertion** : un énoncé signé ML-DSA
-« le nœud S affirme, dans l'app A, à B, pour le purpose P, sur le contexte C, à
-l'instant T », portable, scopé, frais et à usage unique.
+The E2E session authenticates the **transport**: when a DATA payload reaches an
+app, its `src_id` is proven. But that proof is confined to a live session —
+unrecoverable after a restart, untransferable, and silent about **intent**.
+`app_auth` adds an **assertion**: an ML-DSA-signed statement that "node S
+asserts, in app A, to B, for purpose P, over context C, at time T", portable,
+scoped, fresh and single-use.
 
-Deux invariants de sécurité, à ne pas casser :
+Two security invariants, not to be broken:
 
-- **Ce n'est pas un oracle de signature.** La même clé ML-DSA signe certificats,
-  handshakes, releases et réclamations d'annuaire. Rien dans `app_auth` ne signe
-  des octets fournis par l'app : l'entrée signée est toujours
-  `b"nmesh-app-auth-v1" ‖ <champs structurés bornés>`, et le contexte libre
-  n'entre que par un hash 32 o. Le domaine est distinct de tous les autres du
-  dépôt. Une app ne peut donc pas faire signer un corps de certificat.
-- **L'`app_id` vient de la session, jamais de la trame** — comme pour le tiroir
-  et la DHT par-app. Une app ne peut pas émettre pour la section d'une autre.
+- **This is not a signing oracle.** The same ML-DSA key signs certificates,
+  handshakes, releases and directory claims. Nothing in `app_auth` signs bytes
+  supplied by the app: the signed input is always
+  `b"nmesh-app-auth-v1" ‖ <bounded structured fields>`, and free-form context
+  only enters through a 32-byte hash. The domain is distinct from every other in
+  the repository. An app therefore cannot get a certificate body signed.
+- **The `app_id` comes from the session, never from the frame** — as for the
+  drawer and the per-app DHT. An app cannot issue for another's section.
 
-L'identité du signataire n'est pas un champ séparé : `NodeID` dérive de la clé
-présentée, donc il n'y a pas d'id à mentir (même invariant que le handshake).
+The signer's identity is not a separate field: `NodeID` derives from the key
+presented, so there is no id to lie about (the same invariant as the handshake).
 
-`verify_assertion` ordonne ses contrôles du moins cher au plus cher et ne brûle
-le nonce anti-rejeu **qu'après** les contrôles bon marché — sinon un flot
-d'assertions invalides évincerait des entrées vivantes d'un cache borné.
+`verify_assertion` orders its checks from cheapest to most expensive and burns
+the anti-replay nonce **only after** the cheap ones — otherwise a flood of
+invalid assertions would evict live entries from a bounded cache.
 
-**Authentification n'est pas autorisation.** Une assertion prouve « qui, pour
-quoi » ; décider si ce « qui » a le droit reste à l'app. L'app Fleet
-(`Docs/Apps/fleet`) tient pour ça un ledger de capabilities local et persistant,
-et exige les **trois** portes : mesh authentifié, enrôlé avec la capability, et
-signature fraîche sur les octets exacts de la commande.
+**Authentication is not authorisation.** An assertion proves "who, for what";
+deciding whether that "who" is allowed remains the app's job. The Fleet app
+(`Docs/Apps/fleet`) keeps a local, persistent capability ledger for that, and
+requires **all three** gates: an authenticated mesh peer, enrolled with the
+capability, and a fresh signature over the exact bytes of the command.
 
-La capability `manage` ajoute une deuxième clé au lieu d'élargir la première :
-le grant mesh ouvre le canal, le **mot de passe console de la cible** ouvre la
-session, et les deux sont détenus par des personnes différentes. L'appel relayé
-est **rejoué contre la console de la cible** (loopback, certificat épinglé), donc
-la vérification de session, les plafonds et le lockout anti-bruteforce sont ceux
-de la console elle-même — un relais qui répondrait lui-même serait une seconde
-porte d'entrée avec ses propres bugs.
+The `manage` capability adds a second key rather than widening the first: the
+mesh grant opens the channel, the **target's console password** opens the
+session, and the two are held by different people. The relayed call is
+**replayed against the target's own console** (loopback, pinned certificate), so
+session checking, ceilings and the anti-bruteforce lockout are the console's own
+— a relay that answered by itself would be a second front door with its own bugs.
 
-Ce ledger n'est jamais élargi par le réseau. Un droit ne s'ajoute que par une
-décision locale sur la machine qui le subit ; le seul message qui touche aux
-capabilities sans humain (`ENROL_NARROW`) est **intersecté** avec ce que son
-émetteur détient déjà, donc ne peut que lui en retirer. Sans cette asymétrie, la
-capability la plus faible suffirait à atteindre toutes les autres.
+That ledger is never widened by the network. A right is only ever added by a
+local decision on the machine that bears it; the one message that touches
+capabilities without a human (`ENROL_NARROW`) is **intersected** with what its
+sender already holds, so it can only take some away. Without that asymmetry the
+weakest capability would be enough to reach all the others.

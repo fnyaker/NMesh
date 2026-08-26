@@ -1,83 +1,82 @@
-# NMesh — Architecture (comment ça marche vraiment)
+# NMesh — Architecture (how it actually works)
 
-> **À lire AVANT toute modification ou débogage.** Ces documents décrivent le
-> fonctionnement réel du code (pas une cible idéale). Si tu changes un
-> comportement décrit ici, **mets le document à jour dans le même commit**.
-> Une doc fausse est pire qu'absente.
+> **Read this BEFORE any change or debugging session.** These documents
+> describe how the code really behaves (not an ideal target). If you change a
+> behaviour described here, **update the document in the same commit**.
+> Documentation that lies is worse than none.
 
-Les guides d'usage (comment brancher une app, écrire un transport…) restent
-dans les autres dossiers de `Docs/`. Ici on décrit la **mécanique interne**.
-Deux guides sont adjacents à la sécurité et méritent d'être lus avec
-`security.md` : [`Docs/AppAuth/guide`](../AppAuth/guide) (l'identité mesh comme
-authentification pour les apps) et [`Docs/Apps/fleet`](../Apps/fleet) (l'app qui
-s'en sert pour autoriser de l'exécution à distance).
+The usage guides (how to plug an app in, how to write a transport…) stay in the
+other folders of `Docs/`. Here we describe the **internal mechanics**. Two
+guides sit next to security and deserve to be read alongside `security.md`:
+[`Docs/AppAuth/guide`](../AppAuth/guide) (the mesh identity as authentication
+for apps) and [`Docs/Apps/fleet`](../Apps/fleet) (the app that uses it to
+authorise remote execution).
 
-## Carte du code (`src/`)
+## Map of the code (`src/`)
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `node.py` | Le cœur (~4900 lignes) : boucle de réception, dispatch, handshake, routage (chemin retour appris, acquisition de route hors boucle de réception), DHT, E2E, hole punching, keepalive, reachability, **maintenance d'un voisinage cible et recovery multi-hop**. |
-| `packet.py` | Format de paquet, `msg_id`, AAD GCM, (dé)chiffrement d'un paquet. |
-| `node_id.py` | `NodeID` = sha256(clé pub DSA)[:20] ; distance XOR Kademlia. |
+| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**. |
+| `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
+| `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |
-| `cert.py` / `cert_store.py` | Certificats + PKI P2P auto-racinée (chaînes, vérif, racines). |
-| `trust.py` | TOFU `NodeID → clé DSA` (table de confiance simple). |
-| `invite.py` | Codes d'invitation (HMAC challenge/réponse, usage unique, lockout). |
-| `routing.py` | Table de routage Kademlia (k-buckets, `last_seen`). |
-| `dht.py` | Store DHT adressé par contenu (`key = sha256(valeur)[:20]`). |
-| `app_dht.py` | DHT par-app (overlay) : namespace par `app_id`, entrées publiques (clair) ou privées (AES-256-GCM sous clé fournie par l'app). |
-| `pseudo_dir.py` | Annuaire de pseudos à clé sur Kademlia : réclamations signées auto-authentifiées (pseudo→node_id lié à la clé pub), find-by-pseudo réseau. |
-| `transport.py` / `transport_manager.py` | Interfaces `BaseTransport`/`BaseServer` + registre par schéma d'URL. |
-| `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Transports concrets. |
-| `net_monitor.py` / `stun.py` / `ip_utils.py` | Suivi d'adressage, STUN, IPs locales, **énumération des réseaux attachés** (interface + masque réel, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, puis repli), résolveur DNS borné hors executor. |
-| `webconsole.py` / `webassets/` | Console web de gestion (HTTPS, stdlib). Les assets sont un paquet : `ui.py` porte le système de design, un module par page, et `nodeview.py` porte la **vue d'une node** — montée par le dialogue de la console *et* servie en `/node` pour que chat et fleet l'ouvrent. Voir [`Docs/WebConsole/design`](../WebConsole/design). |
-| `app_channel.py` | Sections d'app : cadrage `app_id ‖ payload` dans la payload DATA, ids intégrés/déployés (démux du connecteur). |
-| `data_connector.py` / `process_launcher.py` / `apps/` | Brancher des apps sur le mesh (une section par app). |
-| `apps/chat*.py` | App de chat intégrée : messages/fichiers/flux (`chat.py`), couche sociale contacts/pseudo/groupes (`chat_state.py`), UI console (`chat_web.py`). |
-| `app_package.py` | Packages adressés par contenu + **release signée** (déploiement : app_id lié à l'auteur ML-DSA, `ts` signé pour l'ordre des versions). |
-| `app_catalog.py` | App store : catalogue réseau (releases signées, gossipé, anti-rollback) + registre local d'apps installées. |
-| `app_storage.py` | Store local par app (« tiroir ») : clé→valeur chiffré au repos (AES-256-GCM, clé par app dérivée de l'identité), isolé par `app_id`, borné. |
-| `app_auth.py` | **Identité applicative** (SSO) : assertions signées ML-DSA scopées `(app, audience, purpose, ctx)`, fraîcheur, anti-rejeu, login mutuel. Domaine de signature séparé — jamais un oracle. |
-| `app_api.py` | **Surface d'API des apps** : une app déclare ses opérations (`API` + `api_<nom>`), tout le reste — une autre app, le cœur, une page — les appelle pareil. Refus par défaut : rien qui ne soit déclaré, chaque argument coercé et borné. Voir [`../AppAPI/guide`](../AppAPI/guide). |
-| `app_registry.py` | Registre des apps **intégrées** (installée / activée, persisté) + `AppHost` qui les démarre et les arrête à chaud. |
-| `apps/fleet*.py` | App de gestion/déploiement : protocole et rôles (`fleet.py`), ledger de capabilities (`fleet_state.py`), faits machine et plan d'update (`fleet_host.py`), scan LAN + SSH par pty (`fleet_ssh.py`), bootstrap de provisioning (`fleet_provision.py`), relais vers la console locale (`fleet_console.py`), pont console (`fleet_web.py`). |
-| `session_store.py` | Persistance chiffrée (sessions E2E + pairs). |
-| `join_ticket.py` | **Ticket de join compact** : adresse + port + graine du code + expiration + checksum, en base32 non paddé (34 caractères en IPv4). Décodage défensif : borné, tout validé, jamais autre chose qu'une `TicketError`. |
-| `qr.py` | Encodeur QR (ISO/IEC 18004) en stdlib pure : versions 1–10, niveaux M/L, modes alphanumérique et octet, Reed-Solomon et choix de masque. Vérifié contre un encodeur indépendant et un vrai décodeur. |
-| `console_auth.py` | Credential de la console : hachage scrypt + sel, écriture atomique en 0600, comparaison en temps constant, bornes sur le mot de passe. Partagé par la console et par le reset de l'installeur — une seule implémentation. |
-| `trace.py` | **Trace protocolaire** : anneau borné d'événements paquet (type, taille, TTL, ids) + totaux par type de message. Jamais de payload. Éteinte par défaut, bornée en mémoire *et* en durée, s'arrête seule. Voir [`../WebConsole/guide`](../WebConsole/guide). |
-| `config.py` | Fichier de configuration du nœud (`nmesh.conf`) : analyse bornée et défensive, validation par réglage, rendu commenté, écriture atomique en 0600. Priorité ligne de commande > fichier > défaut. Voir [`../Setup/guide`](../Setup/guide). |
-| `version.py` / `updater.py` | Version courante et comparaison de tags ; vérification des releases GitHub et remplacement de l'arbre installé — **jamais sans confirmation de l'opérateur**, l'état du nœud n'est pas touché, l'arbre précédent est conservé et restauré en cas d'échec. Voir [`../Setup/guide`](../Setup/guide). |
+| `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots). |
+| `trust.py` | TOFU `NodeID → DSA key` (a simple trust table). |
+| `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
+| `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
+| `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
+| `app_dht.py` | Per-app DHT (overlay): a namespace per `app_id`, entries public (in the clear) or private (AES-256-GCM under a key the app supplies). |
+| `pseudo_dir.py` | Pseudo directory keyed on Kademlia: self-authenticating signed claims (pseudo→node_id bound to the public key), find-by-pseudo across the network. |
+| `transport.py` / `transport_manager.py` | The `BaseTransport`/`BaseServer` interfaces + a registry by URL scheme. |
+| `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Concrete transports. |
+| `net_monitor.py` / `stun.py` / `ip_utils.py` | Address tracking, STUN, local IPs, **enumerating the attached networks** (interface + real mask, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, then a fallback), a bounded DNS resolver outside the executor. |
+| `webconsole.py` / `webassets/` | The web management console (HTTPS, stdlib). The assets are a package: `ui.py` carries the design system, one module per page, and `nodeview.py` carries the **node view** — mounted by the console's dialog, by chat, by fleet, *and* served at `/node`. See [`Docs/WebConsole/design`](../WebConsole/design). |
+| `app_channel.py` | App sections: `app_id ‖ payload` framing inside the DATA payload, built-in/deployed ids (connector demultiplexing). |
+| `data_connector.py` / `process_launcher.py` / `apps/` | Plugging apps into the mesh (one section per app). |
+| `apps/chat*.py` | The built-in chat app: messages/files/stream (`chat.py`), the social layer of contacts/pseudos/groups (`chat_state.py`), the console UI (`chat_web.py`). |
+| `app_package.py` | Content-addressed packages + a **signed release** (deployment: app_id bound to the ML-DSA author, a signed `ts` for version ordering). |
+| `app_catalog.py` | App store: the network catalogue (signed releases, gossiped, anti-rollback) + a local registry of installed apps. |
+| `app_storage.py` | A local per-app store (the "drawer"): key→value encrypted at rest (AES-256-GCM, a per-app key derived from the identity), isolated by `app_id`, bounded. |
+| `app_auth.py` | **Application identity** (SSO): ML-DSA-signed assertions scoped to `(app, audience, purpose, ctx)`, freshness, anti-replay, mutual login. A separate signing domain — never an oracle. |
+| `app_api.py` | **The app API surface**: an app declares its operations (`API` + `api_<name>`), and everything else — another app, the core, a page — calls them the same way. Reject by default: nothing that is not declared, every argument coerced and bounded. See [`../AppAPI/guide`](../AppAPI/guide). |
+| `app_registry.py` | The registry of **built-in** apps (installed / enabled, persisted) + `AppHost`, which starts and stops them live. |
+| `apps/fleet*.py` | The management/deployment app: protocol and roles (`fleet.py`), the capability ledger (`fleet_state.py`), machine facts and the update plan (`fleet_host.py`), LAN scan + SSH over a pty (`fleet_ssh.py`), provisioning bootstrap (`fleet_provision.py`), the relay to the local console (`fleet_console.py`), the console bridge (`fleet_web.py`). |
+| `session_store.py` | Encrypted persistence (E2E sessions + peers). |
+| `join_ticket.py` | **A compact join ticket**: address + port + the code's seed + expiry + checksum, in unpadded base32 (34 characters for IPv4). Defensive decoding: bounded, everything validated, never anything but a `TicketError`. |
+| `qr.py` | A QR encoder (ISO/IEC 18004) in pure stdlib: versions 1–10, levels M/L, alphanumeric and byte modes, Reed-Solomon and mask selection. Verified against an independent encoder and a real decoder. |
+| `console_auth.py` | The console credential: scrypt hashing + salt, atomic 0600 write, constant-time comparison, bounds on the password. Shared by the console and by the installer's reset — one implementation. |
+| `trace.py` | **Protocol trace**: a bounded ring of packet events (type, size, TTL, ids) + totals per message type. Never a payload. Off by default, bounded in memory *and* in time, stops on its own. See [`../WebConsole/guide`](../WebConsole/guide). |
+| `config.py` | The node's configuration file (`nmesh.conf`): bounded, defensive parsing, per-setting validation, commented rendering, atomic 0600 write. Precedence command line > file > default. See [`../Setup/guide`](../Setup/guide). |
+| `version.py` / `updater.py` | The current version and tag comparison; checking GitHub releases and replacing the installed tree — **never without the operator's confirmation**, the node's state is untouched, the previous tree is kept and restored on failure. See [`../Setup/guide`](../Setup/guide). |
 
-## Les documents
+## The documents
 
-1. **[protocol.md](protocol.md)** — paquet, `msg_id`, AAD, types de messages,
-   portes de validation du dispatch, TTL, déduplication, forwarding.
-2. **[security.md](security.md)** — identité, crypto post-quantique, certificats
-   & chaînes de confiance, invitation, handshake, session E2E.
-3. **[routing.md](routing.md)** — table de routage, `last_seen`, routage à la
-   demande, lookup Kademlia, DHT, **propagation des adresses**.
-4. **[transports.md](transports.md)** — abstraction transport, TCP/UDP/spool,
+1. **[protocol.md](protocol.md)** — packet, `msg_id`, AAD, message types, the
+   dispatch validation gates, TTL, deduplication, forwarding.
+2. **[security.md](security.md)** — identity, post-quantum crypto, certificates
+   & trust chains, invitation, handshake, E2E session.
+3. **[routing.md](routing.md)** — routing table, `last_seen`, on-demand
+   routing, Kademlia lookup, DHT, **address propagation**.
+4. **[transports.md](transports.md)** — the transport abstraction, TCP/UDP/spool,
    NAT hole punching, STUN, reachability/AutoNAT, net monitor, keepalive.
-5. **[gotchas.md](gotchas.md)** — les pièges durement appris (asyncio 3.12,
-   sondes réseau bloquantes, courses du hole punch, parallélisation des tests).
-   **Commence par là avant de déboguer un blocage ou une flakiness.**
+5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
+   blocking network probes, hole-punch races, parallelising the tests).
+   **Start here before debugging a hang or a flaky test.**
 
-## Les 4 couches (de bas en haut)
+## The four layers (bottom to top)
 
 ```
-   Apps (chat, call, data connector)         ── charge utile applicative
+   Apps (chat, call, data connector)          ── application payload
    ────────────────────────────────
-   E2E (E2E_HANDSHAKE / DATA chiffré)         ── secret de bout en bout, relais aveugles
+   E2E (E2E_HANDSHAKE / encrypted DATA)       ── end-to-end secrecy, blind relays
    ────────────────────────────────
-   Mesh (routage Kademlia, DHT, hole punch)   ── atteindre un NodeID par n'importe quel medium
+   Mesh (Kademlia routing, DHT, hole punch)   ── reach a NodeID over any medium
    ────────────────────────────────
-   Lien (handshake par saut + session AES)    ── un pair authentifié sur un transport
+   Link (per-hop handshake + AES session)     ── an authenticated peer on a transport
    ────────────────────────────────
-   Transport (tcp/udp/spool/…)                ── transporter des octets
+   Transport (tcp/udp/spool/…)                ── carry bytes
 ```
 
-Deux niveaux de chiffrement : **par-saut** (session négociée au handshake entre
-deux pairs directs) et **de bout en bout** (E2E, entre source et destination
-finale ; les relais ne voient que des métadonnées de routage).
-</content>
+Two levels of encryption: **per-hop** (a session negotiated at the handshake
+between two direct peers) and **end to end** (E2E, between the source and the
+final destination; relays see only routing metadata).
