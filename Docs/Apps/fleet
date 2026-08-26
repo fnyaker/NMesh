@@ -1,733 +1,721 @@
-# Fleet — gestion à distance et déploiement automatisé
+# Fleet — remote management and automated deployment
 
-App intégrée, servie à `/fleet` dans la console. Modules :
-[`fleet.py`](../../src/apps/fleet.py) (protocole + les deux rôles),
-[`fleet_state.py`](../../src/apps/fleet_state.py) (ledger de confiance),
-[`fleet_host.py`](../../src/apps/fleet_host.py) (faits machine + plan de mise à
-jour), [`fleet_ssh.py`](../../src/apps/fleet_ssh.py) (scan LAN + SSH),
+A built-in app, served at `/fleet` in the console. Modules:
+[`fleet.py`](../../src/apps/fleet.py) (protocol + both roles),
+[`fleet_state.py`](../../src/apps/fleet_state.py) (the trust ledger),
+[`fleet_host.py`](../../src/apps/fleet_host.py) (machine facts + the update
+plan), [`fleet_ssh.py`](../../src/apps/fleet_ssh.py) (LAN scan + SSH),
 [`fleet_provision.py`](../../src/apps/fleet_provision.py) (bootstrap),
-[`fleet_web.py`](../../src/apps/fleet_web.py) (pont console).
+[`fleet_web.py`](../../src/apps/fleet_web.py) (the console bridge).
 
-> **Désactivée par défaut.** Elle peut ouvrir un shell : on ne l'active pas
-> parce qu'elle a été livrée. `--fleet` au lancement, ou le bouton **Enable**
-> dans la section Apps de la console. Voir
-> [`Docs/AppStore/guide`](../AppStore/guide) pour les apps déployées, et
-> ci-dessous pour installer/désinstaller une app **intégrée**.
+> **Off by default.** It can open a shell: we do not enable it just because it
+> shipped. `--fleet` at launch, or the **Enable** button in the console's Apps
+> section. See [`Docs/AppStore/guide`](../AppStore/guide) for deployed apps, and
+> below for installing/uninstalling a **built-in** app.
 
-## Les deux rôles
+## The two roles
 
-Chaque nœud fait tourner la même app et peut jouer les deux rôles :
+Every node runs the same app and can play both roles:
 
-- **agent** — il obéit : répond au status, lance son propre gestionnaire de
-  paquets, ouvre un shell, balaie son LAN, provisionne des machines qu'il
-  atteint. Uniquement pour un opérateur **qu'il a enrôlé**, et uniquement pour
-  les **capabilities** que cet enrôlement a accordées ;
-- **opérateur** — il pilote : demande aux nœuds de l'enrôler, garde la liste de
-  ceux qui ont accepté, leur envoie des commandes.
+- **agent** — it obeys: answers status, runs its own package manager, opens a
+  shell, scans its LAN, provisions machines it can reach. Only for an operator
+  **it has enrolled**, and only for the **capabilities** that enrolment
+  granted;
+- **operator** — it drives: asks nodes to enrol it, keeps the list of those that
+  accepted, sends them commands.
 
-## Autorisation — trois portes indépendantes
+## Authorisation — three independent gates
 
-Une commande ne s'exécute que si les trois tiennent. Elles sont indépendantes
-exprès : qu'une seule cède ne suffit pas.
+A command runs only if all three hold. They are independent on purpose: one
+giving way is not enough.
 
-1. **Le mesh a authentifié l'émetteur.** La payload DATA porte un `src_id`
-   prouvé par la session E2E (ML-DSA + chaîne de certificats).
-2. **Il est enrôlé ici, avec cette capability.** Le ledger est local, persistant,
-   et ne grandit que par une décision locale explicite.
-3. **La commande porte une signature fraîche sur ses propres octets.** Chaque
-   requête embarque une assertion app-auth (voir
-   [`Docs/AppAuth/guide`](../AppAuth/guide)) dont l'audience est **ce** nœud, le
-   `purpose` nomme la capability, et le `ctx` est le hash du corps de la requête.
-   Une commande rejouée, redirigée ou modifiée ne vérifie pas.
+1. **The mesh has authenticated the sender.** The DATA payload carries a
+   `src_id` proven by the E2E session (ML-DSA + certificate chain).
+2. **They are enrolled here, with this capability.** The ledger is local,
+   persistent, and grows only by an explicit local decision.
+3. **The command carries a fresh signature over its own bytes.** Every request
+   embeds an app-auth assertion (see [`Docs/AppAuth/guide`](../AppAuth/guide))
+   whose audience is **this** node, whose `purpose` names the capability, and
+   whose `ctx` is the hash of the request body. A command replayed, redirected
+   or altered does not verify.
 
-La porte 3 est de la défense en profondeur sur la 1, mais elle apporte ce que la
-1 ne peut pas : la preuve est **portable**. « Ce nœud a autorisé exactement cette
-commande, à cet instant » reste vérifiable une fois la session disparue — c'est
-ce qui rend une fonction d'exécution à distance **auditable** et pas seulement
-fonctionnelle.
+Gate 3 is defence in depth over gate 1, but it brings what gate 1 cannot: the
+proof is **portable**. "This node authorised exactly this command, at this
+instant" stays verifiable once the session is gone — which is what makes a
+remote-execution feature **auditable** and not merely functional.
 
-> **L'exception assumée : le shell.** Signer chaque frappe coûterait une
-> signature post-quantique par caractère. **Ouvrir** un shell est signé ; les
-> frappes qui suivent sont liées au `sid` retourné et circulent sur le même canal
-> chiffré de bout en bout, depuis le même pair authentifié. L'acte signé est
-> « ouvre un shell en mon nom », qui est l'acte qui compte. Une entrée nommant un
-> `sid` depuis un **autre** nœud est jetée.
+> **The accepted exception: the shell.** Signing every keystroke would cost one
+> post-quantum signature per character. **Opening** a shell is signed; the
+> keystrokes that follow are bound to the `sid` returned and travel over the
+> same end-to-end encrypted channel, from the same authenticated peer. The
+> signed act is "open a shell in my name", which is the act that matters. Input
+> naming a `sid` from **another** node is dropped.
 
 ## Capabilities
 
-Du plus inoffensif au total. Une seule n'implique jamais une autre.
+From the most harmless to total. One never implies another.
 
-| Capability | Ce qu'elle autorise |
+| Capability | What it allows |
 |---|---|
-| `status` | lire uptime, charge, mémoire, disques |
-| `update` | lancer l'upgrade du gestionnaire de paquets de la machine |
-| `scan` | balayer le LAN de cette machine à la recherche d'hôtes SSH |
-| `provision` | installer NMesh sur des machines de ce LAN |
-| `shell` | ouvrir un shell interactif sous l'utilisateur du nœud |
-| `manage` | piloter la **console web** de cette node à distance — **le mot de passe console de la cible reste exigé** |
+| `status` | reading uptime, load, memory, disks |
+| `update` | running the machine's package manager upgrade |
+| `scan` | scanning this machine's LAN for SSH hosts |
+| `provision` | installing NMesh on machines of that LAN |
+| `shell` | opening an interactive shell as the node's user |
+| `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
 
-## Enrôlement — la notification
+## Enrolment — the notification
 
-1. Sur le PC opérateur : section **Nodes**, bouton **Request access to a node**,
-   coller le node id et cocher les capabilities.
-2. Sur la node cible : une bande **« Requests to manage this node »** apparaît en
-   haut de `/fleet`. Quelqu'un doit répondre.
-3. **Review & accept** ouvre la liste des capabilities demandées. On peut
-   **restreindre**, jamais élargir : approuver ne peut pas accorder plus que ce
-   que la demande affichait.
-4. À l'acceptation, l'opérateur reçoit un **grant signé** qu'il conserve — la
-   preuve que ce nœud a réellement consenti, vérifiable des mois plus tard.
+1. On the operator's PC: the **Nodes** section, the **Request access to a node**
+   button, paste the node id and tick the capabilities.
+2. On the target node: a **"Requests to manage this node"** strip appears at the
+   top of `/fleet`. Somebody has to answer.
+3. **Review & accept** opens the list of capabilities asked for. It can
+   **narrow**, never widen: approving cannot grant more than the request
+   displayed.
+4. On acceptance the operator receives a **signed grant** it keeps — proof that
+   this node really consented, verifiable months later.
 
-Rien n'est accordé avant cette réponse humaine. Une demande répétée **rafraîchit**
-l'entrée au lieu de s'empiler, et la file est plafonnée : un pair ne peut pas
-noyer la notification.
+Nothing is granted before that human answer. A repeated request **refreshes**
+the entry instead of stacking up, and the queue is capped: a peer cannot drown
+the notification.
 
-`Revoke` coupe la relation dans les deux sens, prévient l'autre bout, et ferme
-les shells ouverts par ce pair.
+`Revoke` cuts the relationship both ways, tells the other end, and closes the
+shells opened by that peer.
 
-## `manage` — piloter la console d'une autre node
+## `manage` — driving another node's console
 
-L'opérateur ouvre **sa** console, choisit une node dans un sélecteur de contexte,
-et toute la console se met à parler de cette node-là : overview, pairs,
-transports, apps, configuration, trace, mot de passe. Une seule interface, deux
-machines.
+The operator opens **their own** console, picks a node in a context selector,
+and the whole console starts talking about that node: overview, peers,
+transports, apps, configuration, trace, password. One interface, two machines.
 
-### Deux clés, deux personnes
+### Two keys, two people
 
-C'est la propriété qui rend la chose acceptable :
+This is the property that makes it acceptable:
 
-| Clé | Détenue par | Ce qu'elle ouvre |
+| Key | Held by | What it opens |
 |---|---|---|
-| le grant `manage` | un humain **sur la node cible** (il accepte la demande) | le canal |
-| le mot de passe console de la cible | l'opérateur | la session |
+| the `manage` grant | a human **on the target node** (they accept the request) | the channel |
+| the target's console password | the operator | the session |
 
-Ni l'une ni l'autre seule n'ouvre quoi que ce soit. Un opérateur compromis qui a
-le grant n'a rien tant qu'il ne connaît pas le mot de passe ; quelqu'un qui
-connaît le mot de passe n'a rien tant qu'aucune node ne lui a accordé `manage`.
+Neither on its own opens anything. A compromised operator holding the grant has
+nothing until they know the password; someone who knows the password has nothing
+until a node has granted them `manage`.
 
-Le mot de passe est tapé une fois, voyage **uniquement** dans la session E2E du
-mesh, n'est ni stocké ni journalisé. Le jeton que la console distante renvoie
-reste **en mémoire de la console locale**, indexé par la session locale qui l'a
-ouvert : le navigateur ne le voit jamais, et se déconnecter localement ferme
-toutes les sessions distantes ouvertes depuis là.
+The password is typed once, travels **only** inside the mesh's E2E session, and
+is neither stored nor logged. The token the remote console returns stays **in
+the local console's memory**, indexed by the local session that opened it: the
+browser never sees it, and signing out locally closes every remote session
+opened from there.
 
-### Le relais ne réinvente rien
+### The relay reinvents nothing
 
-La node cible ne répond pas elle-même : elle **rejoue l'appel contre sa propre
-console**, en HTTP sur la loopback, comme le ferait un navigateur sur cette
-machine (`src/apps/fleet_console.py`). Donc la vérification de session, les
-plafonds de corps, **le lockout anti-bruteforce du login**, chaque route et
-chaque refus sont ceux déjà écrits et déjà testés. L'app est un tuyau, pas une
-autorité. Le certificat auto-signé de la console est **épinglé** par empreinte :
-un processus qui squatterait le port ne peut pas répondre à sa place.
+The target node does not answer by itself: it **replays the call against its own
+console**, over HTTP on loopback, exactly as a browser on that machine would
+(`src/apps/fleet_console.py`). So the session check, the body caps, **the
+login's anti-bruteforce lockout**, every route and every refusal are the ones
+already written and already tested. The app is a pipe, not an authority. The
+console's self-signed certificate is **pinned** by fingerprint: a process
+squatting the port cannot answer in its place.
 
-### Ce qui ne passe pas par le relais
+### What does not go through the relay
 
-| Refusé | Pourquoi |
+| Refused | Why |
 |---|---|
-| `/api/fleet/*` | une node gérée n'est pas un **rebond**. Sans ça, un grant se propagerait à toutes les nodes que *celle-là* gère |
-| `/api/remote/*` | le relais qui pilote le relais — une boucle avec un saut mesh dedans |
-| `/api/chat/*` | les conversations de quelqu'un d'autre ne font pas partie de la gestion de sa machine, et le grant n'a jamais demandé ça |
-| tout ce qui n'est pas `/api/` | la page est déjà servie localement ; rien à aller chercher là-bas |
+| `/api/fleet/*` | a managed node is not a **bounce**. Without this, a grant would propagate to every node *that one* manages |
+| `/api/remote/*` | the relay driving the relay — a loop with a mesh hop in it |
+| `/api/chat/*` | somebody else's conversations are no part of managing their machine, and the grant never asked for that |
+| anything that is not `/api/` | the page is already served locally; there is nothing to fetch over there |
 
-Méthodes : `GET` et `POST` uniquement.
+Methods: `GET` and `POST` only.
 
-### Bornes
+### Bounds
 
-| Borne | Valeur | Raison |
+| Bound | Value | Reason |
 |---|---|---|
-| corps d'une requête relayée | 24 KiB (une frame) | au-delà, message clair : le faire depuis la node elle-même |
-| réponse réassemblée | 512 KiB | des deux côtés ; au-delà, une erreur explicite, **jamais** une réponse tronquée |
-| découpage d'une réponse | 32 KiB par frame | un snapshot de node chargée ne tient pas dans une frame |
-| appels simultanés hébergés | 8 par pair | un pair ne peut pas ouvrir un nombre non borné de sockets locales |
-| durée d'un appel | 25 s | un appel bloqué ne retient pas un handler mesh |
-| sessions distantes | 8 par session locale, 1 h d'inactivité | mémoire bornée, oubli automatique |
+| a relayed request's body | 24 KiB (one frame) | beyond that, a clear message: do it from the node itself |
+| a reassembled response | 512 KiB | on both sides; beyond that, an explicit error, **never** a truncated response |
+| splitting a response | 32 KiB per frame | a busy node's snapshot does not fit in one frame |
+| concurrent hosted calls | 8 per peer | a peer cannot open an unbounded number of local sockets |
+| the duration of a call | 25 s | a stuck call must not hold a mesh handler |
+| remote sessions | 8 per local session, 1 h of inactivity | bounded memory, automatic forgetting |
 
-### Dans l'interface
+### In the interface
 
-Le sélecteur n'apparaît que si l'app fleet tourne **et** qu'au moins une node a
-accordé `manage`. Une fois connecté, une **bande d'avertissement** et la marque
-du rail changent de couleur : « sur quelle machine suis-je » ne doit jamais être
-une devinette quand tous les boutons destructeurs de la page pointent ailleurs.
+The selector appears only if the fleet app is running **and** at least one node
+has granted `manage`. Once connected, a **warning strip** and the rail's mark
+change colour: "which machine am I on" must never be a guess when every
+destructive button on the page points elsewhere.
 
-## Changer les droits d'une relation existante
+## Changing the rights of an existing relationship
 
-Les droits ne sont pas figés à l'enrôlement. Deux mouvements, **volontairement
-asymétriques** : rendre un droit ne concerne que celui qui le détient, en
-accorder un engage la machine qui le subit.
+Rights are not frozen at enrolment. Two moves, **deliberately asymmetric**:
+handing a right back concerns only whoever holds it, granting one commits the
+machine that bears it.
 
-### Vue « Who controls this node »
+### The "Who controls this node" view
 
-Section **Who controls this node** sur `/fleet` : la liste des nœuds qui peuvent
-agir sur cette machine, avec leurs capabilities cochables. **Apply rights**
-applique la case cochée immédiatement — ajout compris. C'est légitime et c'est
-le seul endroit où un droit s'ajoute : la personne qui coche est sur la machine
-qui en porte la conséquence, et détient déjà l'autorité que le droit délègue.
-Décocher tout revient à `Cut off` (révocation complète).
+The **Who controls this node** section on `/fleet`: the list of nodes that can
+act on this machine, with their capabilities as checkboxes. **Apply rights**
+applies the ticked box immediately — additions included. That is legitimate and
+it is the only place a right is added: the person ticking is on the machine that
+carries the consequence, and already holds the authority the right delegates.
+Unticking everything amounts to `Cut off` (a full revocation).
 
-L'opérateur est prévenu par un `ENROL_GRANT` qui restate le grant, pour que sa
-propre liste cesse d'afficher des boutons qui seraient désormais refusés — et en
-affiche un qui ne le serait plus. Ce grant n'est accepté chez lui que pour
-l'entrée du nœud qui l'a signé.
+The operator is told by an `ENROL_GRANT` restating the grant, so that their own
+list stops showing buttons that would now be refused — and starts showing one
+that would not. That grant is accepted on their side only for the entry of the
+node that signed it.
 
-### Demander un droit en plus (bouton **Rights**, côté opérateur)
+### Asking for one more right (the **Rights** button, operator side)
 
-Cocher une capability qu'on n'a pas envoie un `ENROL_REQUEST` portant
-**l'ensemble complet** souhaité. Côté cible c'est exactement la notification
-d'enrôlement : parquée pour un humain, jamais auto-acceptée, et l'approbation ne
-peut que **restreindre** ce qui a été demandé. La bande affiche « More rights
-requested » avec ce que le demandeur détient déjà, pour que le delta soit
-lisible.
+Ticking a capability you do not have sends an `ENROL_REQUEST` carrying **the
+complete set** you want. On the target side that is exactly the enrolment
+notification: parked for a human, never auto-accepted, and the approval can only
+**narrow** what was asked. The strip shows "More rights requested" along with
+what the requester already holds, so the delta is readable.
 
-Il n'existe **aucun chemin** qui élargit un grant sans un humain sur la machine
-cible. C'est la propriété qui empêche l'échelle : sinon la capability la plus
-faible suffirait à atteindre les autres.
+There is **no path** that widens a grant without a human on the target machine.
+That is the property that prevents escalation: otherwise the weakest capability
+would be enough to reach the others.
 
-### Se délester d'un droit (`ENROL_NARROW`, 0x06)
+### Handing a right back (`ENROL_NARROW`, 0x06)
 
-Décocher une capability qu'on détient la retire **tout de suite**, sans demander
-la permission de personne : personne n'a besoin d'approuver qu'on en détienne
-*moins*. L'effet est d'abord local (un nœud qui ne nous entend jamais nous laisse
-quand même avec moins), puis annoncé par un `ENROL_NARROW` signé.
+Unticking a capability you hold removes it **at once**, asking nobody's
+permission: nobody needs to approve you holding *less*. The effect is local
+first (a node that never hears us still leaves us with less), then announced by
+a signed `ENROL_NARROW`.
 
-Côté cible, ce frame est le seul accepté sans humain, et il l'est parce qu'il est
-**intersecté** avec ce que l'émetteur détient déjà : au pire, un frame forgé ou
-rejoué retire des droits à son propre émetteur. Rendre le dernier droit termine
-la relation. Perdre `shell` ferme les shells déjà ouverts — sinon révoquer
-n'empêcherait que le *prochain*.
+On the target side, this frame is the only one accepted with no human, and it is
+because it is **intersected** with what the sender already holds: at worst, a
+forged or replayed frame removes rights from its own sender. Handing back the
+last right ends the relationship. Losing `shell` closes the shells already open
+— otherwise revoking would only stop the *next* one.
 
-Un nom de capability inconnu n'est **pas** lu comme « aucun droit » : la
-demande est refusée. Sans quoi une faute de frappe deviendrait une coupure.
+An unknown capability name is **not** read as "no rights": the request is
+refused. Otherwise a typo would become a cut-off.
 
-## `update` et `shell` : deux routes vers root, volontairement différentes
+## `update` and `shell`: two routes to root, deliberately different
 
-Il n'y a **pas** de capability « root ». Il y a deux capabilities dont les
-propriétés de sécurité n'ont rien à voir, et c'est voulu.
+There is **no** "root" capability. There are two capabilities whose security
+properties have nothing in common, and that is on purpose.
 
-### `update` — non assisté, donc étroit
+### `update` — unattended, therefore narrow
 
-Mettre à jour demande root **sans humain devant**. Donner au compte du nœud une
-règle sudo générale pour ça voudrait dire que n'importe quel bug du processus
-est root — le même bug qui, autrement, atteint un compte non privilégié et
-s'arrête là.
+Updating needs root **with no human in front**. Giving the node's account a
+general sudo rule for it would mean any bug in the process is a root bug — the
+same bug that otherwise reaches an unprivileged account and stops there.
 
-Le droit accordé est donc **un script**, et la règle sudoers ne nomme que ce
-chemin, sans arguments :
+The right granted is therefore **a script**, and the sudoers rule names only
+that path, with no arguments:
 
 ```
 nmesh ALL=(root) NOPASSWD: /usr/local/lib/nmesh/nmesh-update
 ```
 
-Deux détails qui font tout :
+Two details do all the work:
 
-- le script vit sous `/usr/local/lib`, **pas dans le préfixe d'installation** —
-  celui-ci appartient au compte du nœud, qui pourrait sinon réécrire ce qu'il a
-  le droit de lancer en root ;
-- il **refuse tout argument** et exécute une séquence figée (le plan du
-  gestionnaire de paquets détecté) : rien de ce que le nœud envoie ne
-  l'influence, ni un nom de paquet, ni un drapeau, ni une chaîne shell.
+- the script lives under `/usr/local/lib`, **not in the installation prefix** —
+  that one belongs to the node's account, which could otherwise rewrite what it
+  is allowed to run as root;
+- it **refuses every argument** and runs a fixed sequence (the detected package
+  manager's plan): nothing the node sends influences it, not a package name, not
+  a flag, not a shell string.
 
-S'accorde avec `./install.sh --allow-update`, se retire en relançant sans le
-drapeau — ce qui réécrit **aussi l'unité systemd**, parce qu'une unité durcie
-avec `NoNewPrivileges=yes` fait refuser `sudo` par le noyau et rend le droit
-inutilisable (voir [`FAQ.md`](../../FAQ.md)). Le nœud le détecte désormais
-**avant** de lancer `sudo` : `can_update` est faux et le refus nomme la cause et
-le correctif, au lieu de relayer un message de `sudo` sur un drapeau noyau. Le fichier sudoers est **validé par `visudo` avant d'être installé** :
-un fichier qui ne parse pas peut casser `sudo` pour toute la machine.
+Granted with `./install.sh --allow-update`, removed by running it again without
+the flag — which **also rewrites the systemd unit**, because a unit hardened
+with `NoNewPrivileges=yes` makes the kernel refuse `sudo` and renders the right
+unusable (see [`FAQ.md`](../../FAQ.md)). The node now detects that **before**
+running `sudo`: `can_update` is false and the refusal names the cause and the
+fix, instead of relaying a `sudo` message about a kernel flag. The sudoers file
+is **validated by `visudo` before being installed**: a file that does not parse
+can break `sudo` for the whole machine.
 
-Sans ce droit, `update` retombe sur `sudo -n <gestionnaire>` — ce qui, sur un
-nœud installé proprement (compte de service sans règle sudo), échoue. La
-console affiche donc `update_granted` : « le droit est là » ou « on compte sur
-un sudo sans mot de passe », deux choses différentes.
+Without that right, `update` falls back on `sudo -n <manager>` — which, on a
+cleanly installed node (a service account with no sudo rule), fails. The console
+therefore shows `update_granted`: "the right is there" or "we are counting on a
+passwordless sudo" are two different things.
 
-### `shell` — assisté, donc il suffit de taper `sudo`
+### `shell` — attended, so typing `sudo` is enough
 
-Le shell distant tourne sur un pty dont il est le **terminal de contrôle**
-(ioctl `TIOCSCTTY`). Sans ça, la session n'a aucun terminal : `/dev/tty` ne
-s'ouvre pas, `sudo` refuse de demander un mot de passe (« a terminal is
-required ») et le contrôle de tâches est éteint. C'était le cas ; ça ne l'est
-plus.
+The remote shell runs on a pty of which it is the **controlling terminal**
+(`TIOCSCTTY` ioctl). Without that, the session has no terminal at all:
+`/dev/tty` does not open, `sudo` refuses to ask for a password ("a terminal is
+required") and job control is off. That used to be the case; it no longer is.
 
-Conséquence : pour devenir root dans un shell fleet, on tape `sudo`, et **un
-humain qui connaît le mot de passe le tape**. Il n'y a aucun accès root
-permanent sans identifiant, et rien à accorder d'avance.
+The consequence: to become root in a fleet shell you type `sudo`, and **a human
+who knows the password types it**. There is no permanent credential-free root
+access, and nothing to grant in advance.
 
-Côté navigateur, le panneau est un vrai terminal : les frappes partent
-**brutes** (Ctrl-C, Tab, flèches, Ctrl-D), rien n'est écho localement, et un
-petit émulateur écrit pour l'occasion interprète les séquences d'échappement.
-C'est ce qui rend un prompt de mot de passe correct : le pty distant coupe
-l'écho, et il n'y a rien de ce côté-ci pour l'afficher — là où un champ texte
-ligne par ligne l'aurait montré en clair.
+In the browser, the panel is a real terminal: keystrokes go out **raw** (Ctrl-C,
+Tab, arrows, Ctrl-D), nothing is echoed locally, and a small emulator written
+for the occasion interprets the escape sequences. That is what makes a password
+prompt correct: the remote pty turns echo off, and there is nothing on this side
+to display it — where a line-by-line text field would have shown it in the
+clear.
 
-### Progression d'un update
+### An update's progress
 
-Un update dure des minutes. Chaque étape est annoncée **avant** de tourner (une
-progression qui n'apparaît qu'une fois l'étape finie est un résumé, pas une
-progression) : `step 1/2 : apt-get update`, puis la sortie réelle, puis le
-résultat avec le temps écoulé. La liste des nodes montre une barre et l'étape
-courante, et garde la dernière issue une fois terminé.
+An update takes minutes. Every step is announced **before** it runs (progress
+that appears only once a step is finished is a summary, not progress):
+`step 1/2: apt-get update`, then the real output, then the result with the
+elapsed time. The node list shows a bar and the current step, and keeps the last
+outcome once it is done.
 
-## Voir une node comme la console la voit
+## Seeing a node as the console sees it
 
-Chaque carte — une node gérée, ou une node qui gère celle-ci — porte un
-**Details** qui ouvre la fiche de nœud partagée dans la feuille de fleet : le
-lien réel, ses adresses, la latence, et ce que chacun a le droit de faire à
-l'autre. C'est la même vue que dans la console et dans chat
-(`src/webassets/nodeview.py`), montée ici plutôt que recopiée.
+Every card — a managed node, or a node that manages this one — carries a
+**Details** button opening the shared node card in fleet's sheet: the real link,
+its addresses, the latency, and what each side is allowed to do to the other. It
+is the same view as in the console and in chat
+(`src/webassets/nodeview.py`), mounted here rather than copied.
 
-Le bouton « Message » y est ; les boutons fleet n'y sont pas, puisqu'on est
-dedans.
+The "Message" button is there; the fleet buttons are not, since you are already
+inside fleet.
 
-## Ce qu'on fait d'une node gérée
+## What you do with a managed node
 
-- **Status** — uptime, charge, mémoire, disques, distro, gestionnaire de paquets.
-  Le dernier status est mis en cache pour l'affichage.
-- **Update** — la node dérive **elle-même** son plan depuis ses propres faits
-  (`fleet_host.update_argv`) : apt, dnf, yum, pacman, zypper, apk, xbps, brew,
-  pkg, avec `sudo -n`/`doas` si elle n'est pas root. Chaque commande est une
-  **liste argv** issue d'une table fixe — rien de ce que l'opérateur envoie n'y
-  entre, donc il n'y a aucune surface d'injection. Une machine sans gestionnaire
-  connu, ou sans chemin vers root, **refuse d'emblée** au lieu de commencer
-  quelque chose qu'elle ne peut pas finir. La sortie est streamée en direct.
-- **Shell** — un vrai pty. Bornes : `MAX_SHELLS = 4` simultanés par node,
-  inactivité `SHELL_IDLE_TIMEOUT` (15 min) → reap, entrée plafonnée, SIGHUP puis
-  kill à la fermeture. L'environnement du shell est **nettoyé** : le jeton du
-  connecteur qui vit dans `os.environ` n'est jamais transmis à un enfant.
-- **Scan LAN** / **Provisioning** — ci-dessous.
+- **Status** — uptime, load, memory, disks, distro, package manager. The last
+  status is cached for display.
+- **Update** — the node derives its plan **itself** from its own facts
+  (`fleet_host.update_argv`): apt, dnf, yum, pacman, zypper, apk, xbps, brew,
+  pkg, with `sudo -n`/`doas` if it is not root. Every command is an **argv
+  list** from a fixed table — nothing the operator sends enters it, so there is
+  no injection surface. A machine with no known manager, or no route to root,
+  **refuses upfront** rather than starting something it cannot finish. The
+  output is streamed live.
+- **Shell** — a real pty. Bounds: `MAX_SHELLS = 4` at once per node, inactivity
+  `SHELL_IDLE_TIMEOUT` (15 min) → reaped, input capped, SIGHUP then kill on
+  close. The shell's environment is **cleaned**: the connector token living in
+  `os.environ` is never passed to a child.
+- **LAN scan** / **Provisioning** — below.
 
-La détection des faits machine se fait **à l'installation de l'app** (premier
-démarrage) et est mise en cache ; `refresh_facts()` la relance.
+Machine facts are detected **when the app is installed** (first start) and
+cached; `refresh_facts()` runs it again.
 
-## Découverte LAN et provisioning
+## LAN discovery and provisioning
 
-Section **Discover & deploy**. Le scan peut tourner **localement** ou sur
-n'importe quelle node gérée ayant `scan` — c'est ce qui permet de déployer sur
-le LAN d'un site distant.
+The **Discover & deploy** section. The scan can run **locally** or on any
+managed node holding `scan` — which is what makes deploying onto a remote site's
+LAN possible.
 
-### Phase 1 — découvrir
+### Phase 1 — discovering
 
-Le scan couvre **tous les réseaux auxquels la node est attachée**, au préfixe
-réellement en usage — pas un `/24` supposé autour d'une adresse. Les interfaces
-et leurs masques sont énumérés par `src.ip_utils.local_networks()`, qui essaie
-plusieurs sources dans l'ordre de fiabilité et retombe jusqu'à ce que l'une
-réponde :
+The scan covers **every network the node is attached to**, at the prefix
+actually in use — not an assumed `/24` around an address. Interfaces and their
+masks are enumerated by `src.ip_utils.local_networks()`, which tries several
+sources in order of reliability and falls through until one answers:
 
-1. `/proc/net/route` (Linux) — les routes **connectées** (sans passerelle) sont
-   par définition les réseaux attachés, avec leur masque exact ;
-2. `ioctl SIOCGIFADDR`/`SIOCGIFNETMASK` sur chaque interface de
-   `socket.if_nameindex()` ;
-3. la sortie de `ip -o -4 addr` ou `ifconfig -a` (macOS, BSD) ;
-4. en dernier recours seulement, l'ancien `/24` supposé autour de chaque adresse
-   connue — reconnaissable au fait qu'aucun nom d'interface n'y est attaché.
+1. `/proc/net/route` (Linux) — the **connected** routes (with no gateway) are by
+   definition the attached networks, with their exact mask;
+2. `ioctl SIOCGIFADDR`/`SIOCGIFNETMASK` on each interface from
+   `socket.if_nameindex()`;
+3. the output of `ip -o -4 addr` or `ifconfig -a` (macOS, BSD);
+4. only as a last resort, the old assumed `/24` around each known address —
+   recognisable in that no interface name is attached to it.
 
-Une machine qu'on ne sait pas introspecter donne donc **moins de réseaux**, jamais
-une exception.
+A machine we cannot introspect therefore yields **fewer networks**, never an
+exception.
 
-Ce qui est écarté, et pourquoi :
+What is set aside, and why:
 
-| Écarté | Raison |
+| Set aside | Reason |
 |---|---|
-| IPv6 | un balayage de /64 n'existe pas |
-| loopback, link-local (`169.254/16`) | ce ne sont pas des LAN à découvrir |
-| préfixes publics | balayer un préfixe public où l'on se trouve, c'est scanner des inconnus |
-| `/31`, `/32` | pas d'hôtes à découvrir (liens point à point) |
+| IPv6 | scanning a /64 does not exist |
+| loopback, link-local (`169.254/16`) | these are not LANs to discover |
+| public prefixes | scanning a public prefix you happen to sit in means scanning strangers |
+| `/31`, `/32` | no hosts to discover (point-to-point links) |
 
-**Réseaux trop grands.** Un `/16`, c'est 65 000 connexions : ni une découverte de
-LAN, ni quelque chose qu'on lance par accident. Un réseau au-delà de
-`MAX_NET_ADDRESSES` (4096) est donc **rétréci autour de notre propre adresse**
-plutôt qu'abandonné, et le rétrécissement est **affiché** (`narrowed from
-10.0.0.0/16`) pour que l'opérateur puisse l'élargir délibérément en tapant le
-préfixe voulu dans le champ *Subnets*. Si on ne sait pas sur quoi centrer la
-tranche (adresse locale inconnue), le réseau est ignoré ouvertement plutôt que
-balayé dans un coin arbitraire.
+**Networks that are too large.** A `/16` is 65,000 connections: neither a LAN
+discovery nor something you start by accident. A network beyond
+`MAX_NET_ADDRESSES` (4096) is therefore **narrowed around our own address**
+rather than abandoned, and the narrowing is **displayed** (`narrowed from
+10.0.0.0/16`) so the operator can deliberately widen it by typing the prefix
+they want into the *Subnets* field. When there is nothing to centre the slice on
+(the local address is unknown), the network is skipped openly rather than
+scanned in an arbitrary corner.
 
-Le balayage lui-même : TCP borné, bannière SSH lue sans rien envoyer. Bornes :
-`MAX_HOSTS = 1024` au total, `MAX_SUBNETS = 16` réseaux, `MAX_CONCURRENCY = 128`,
-1,5 s par hôte, bannière plafonnée. Un `/8` fourni **explicitement** reste
-refusé.
+The scan itself: bounded TCP, the SSH banner read without sending anything.
+Bounds: `MAX_HOSTS = 1024` in total, `MAX_SUBNETS = 16` networks,
+`MAX_CONCURRENCY = 128`, 1.5 s per host, the banner capped. A `/8` given
+**explicitly** is still refused.
 
-### Cibler une machine précise
+### Targeting one precise machine
 
-Le champ *Targets* accepte quatre formes, si bien que « balaie mon LAN » et
-« regarde exactement cette machine » passent par le même endroit :
+The *Targets* field accepts four forms, so that "scan my LAN" and "look at
+exactly this machine" go through the same place:
 
-| Saisie | Effet |
+| Input | Effect |
 |---|---|
-| *(vide)* | balaie tous les réseaux attachés (détection automatique) |
-| `192.168.1.0/24` | balaie ce sous-réseau |
-| `192.168.1.42` | **une seule machine**, port SSH par défaut |
-| `192.168.1.42:2222` | une seule machine, port explicite |
-| `nas.lan` / `nas.lan:2222` | une seule machine par son nom |
-| `[fd00::5]:2222` | une seule machine en IPv6 |
+| *(empty)* | scans every attached network (automatic detection) |
+| `192.168.1.0/24` | scans that subnet |
+| `192.168.1.42` | **one machine only**, default SSH port |
+| `192.168.1.42:2222` | one machine, explicit port |
+| `nas.lan` / `nas.lan:2222` | one machine by name |
+| `[fd00::5]:2222` | one machine over IPv6 |
 
-Les noms sont résolus **en amont**, pas laissés à `open_connection` : celui-ci
-résoudrait sur l'executor par défaut d'asyncio, qui est joint au shutdown
-(`gotchas.md` §2). Le résolveur borné vit dans `ip_utils.bounded_getaddrinfo`,
-partagé avec le client STUN.
+Names are resolved **up front**, not left to `open_connection`: that would
+resolve on asyncio's default executor, which is joined at shutdown
+(`gotchas.md` §2). The bounded resolver lives in `ip_utils.bounded_getaddrinfo`,
+shared with the STUN client.
 
-Nommer une machine n'est **pas** balayer : un hôte précis tapé à la main est
-autorisé où qu'il soit, y compris hors des plages privées et en IPv6 — c'est une
-connexion vers une machine que l'opérateur a désignée. Un **préfixe** public,
-lui, reste refusé quel que soit celui qui l'a tapé : balayer une plage publique,
-c'est scanner des inconnus.
+Naming a machine is **not** scanning: a precise host typed by hand is allowed
+wherever it is, including outside the private ranges and over IPv6 — it is a
+connection to a machine the operator pointed at. A public **prefix**, on the
+other hand, stays refused whoever typed it: scanning a public range means
+scanning strangers.
 
-Ce qui n'est pas compris (port hors bornes, nom introuvable, préfixe refusé)
-revient **nommé** dans `rejected`, affiché sous les résultats et journalisé : une
-faute de frappe se lit comme une faute de frappe, jamais comme « rien trouvé ».
+What is not understood (a port out of bounds, a name that does not resolve, a
+refused prefix) comes back **named** in `rejected`, shown below the results and
+logged: a typo reads as a typo, never as "nothing found".
 
-Laissé vide, la détection automatique s'applique. Les réseaux effectivement balayés (avec leur
-interface, et le cas échéant la mention `narrowed`) sont affichés au-dessus des
-résultats, et repris dans le journal — « rien trouvé » n'est jamais ambigu sur
-*où* on a cherché.
+Left empty, automatic detection applies. The networks actually scanned (with
+their interface, and where applicable the `narrowed` note) are shown above the
+results and repeated in the log — "nothing found" is never ambiguous about
+*where* we looked.
 
-Pour chaque hôte trouvé, `ssh-keyscan` récupère les **clés d'hôte publiques** et
-leurs empreintes SHA-256, affichées dans la liste. Cette passe est **concurrente
-et sous une échéance globale** (`KEYSCAN_TIMEOUT`) : la faire hôte par hôte avec
-seulement un délai par hôte laissait un scan de LAN chargé immobile plusieurs
-minutes après la fin du balayage — vu d'une node distante, ça se lit « le scan
-n'a rien fait ». Les hôtes non atteints gardent une liste de clés vide, que
-l'interface affiche déjà comme « no host key ».
+For each host found, `ssh-keyscan` fetches the **public host keys** and their
+SHA-256 fingerprints, shown in the list. That pass is **concurrent and under a
+global deadline** (`KEYSCAN_TIMEOUT`): doing it host by host with only a
+per-host timeout left a busy LAN scan motionless for several minutes after the
+sweep finished — seen from a remote node, that reads as "the scan did nothing".
+Hosts not reached keep an empty key list, which the interface already shows as
+"no host key".
 
-### Phase 2 — choisir et déployer
+### Phase 2 — choosing and deploying
 
-L'utilisateur coche les machines, renseigne un utilisateur SSH, et **un mot de
-passe, une clé, ou les deux** (les deux sont tentés). Les clés privées locales
-sont détectées dans `~/.ssh` — **métadonnées seulement** (chemin, chiffrée ou
-non, commentaire de la `.pub`) ; le matériel de clé n'entre jamais dans l'état de
-l'app, c'est `ssh -i` qui lit le fichier au moment de se connecter.
+The user ticks the machines, gives an SSH user, and **a password, a key, or
+both** (both are tried). Local private keys are detected in `~/.ssh` —
+**metadata only** (path, encrypted or not, the `.pub` comment); key material
+never enters the app's state, it is `ssh -i` that reads the file at connection
+time.
 
-#### Donner une clé à un nœud en conteneur
+#### Giving a key to a containerised node
 
-Un conteneur n'a pas de `~/.ssh` : la détection ne trouve rien. Deux voies, au
-choix, décrites dans [`docker/docker-compose.yml`](../../docker/docker-compose.yml) :
+A container has no `~/.ssh`: detection finds nothing. Two routes, your choice,
+described in [`docker/docker-compose.yml`](../../docker/docker-compose.yml):
 
-1. **Monter ses clés en lecture seule** (`- ${HOME}/.ssh:/root/.ssh:ro`, ou une
-   seule clé). Lecture seule à dessein : le nœud ne fait que lire une clé.
-2. **Importer une clé depuis la console** — *Fleet → Discover & deploy →
-   « Upload a key… »*. Le bloc est visible **sans scan préalable**, puisque
-   donner sa clé vient avant de chercher des machines.
+1. **Mount your keys read-only** (`- ${HOME}/.ssh:/root/.ssh:ro`, or a single
+   key). Read-only on purpose: the node only reads a key.
+2. **Import a key from the console** — *Fleet → Discover & deploy → "Upload a
+   key…"*. The block is visible **without scanning first**, since giving your
+   key comes before looking for machines.
 
-Une clé importée est rangée dans le **tiroir chiffré** de l'app (AES-256-GCM
-sous une clé dérivée de l'identité du nœud — même frontière de confiance que le
-fichier d'identité), une entrée de tiroir par clé pour que le blob d'état reste
-petit. Ce que l'interface lit (`/api/fleet/keys`) ne contient **jamais** le
-matériel : identifiant, nom, « chiffrée ou non », origine.
+An imported key is put in the app's **encrypted drawer** (AES-256-GCM under a
+key derived from the node's identity — the same trust boundary as the identity
+file), one drawer entry per key so the state blob stays small. What the
+interface reads (`/api/fleet/keys`) **never** contains the material: an
+identifier, a name, "encrypted or not", the origin.
 
-`ssh -i` veut un chemin, donc une clé importée doit bien toucher un système de
-fichiers à un moment. La fenêtre est **une commande** : dossier temporaire 0700,
-fichier 0600, supprimé en sortie (`MaterialisedKey`, même forme que
-`KnownHosts`). C'est le compromis assumé de cette fonction, et il est borné.
+`ssh -i` wants a path, so an imported key does have to touch a filesystem at
+some point. The window is **one command**: a 0700 temporary directory, a 0600
+file, deleted on the way out (`MaterialisedKey`, the same shape as
+`KnownHosts`). That is this feature's accepted trade-off, and it is bounded.
 
-Quand le provisioning tourne sur une node **distante**, une clé importée n'a
-aucun chemin là-bas : c'est son **matériel** qui voyage, dans la même payload
-chiffrée de bout en bout que le mot de passe, vers une node déjà enrôlée avec
-`provision`, et il y est effacé à la fin du run. Une clé du disque voyage à
-l'inverse par son simple chemin.
+When provisioning runs on a **remote** node, an imported key has no path over
+there: its **material** travels, in the same end-to-end encrypted payload as the
+password, to a node already enrolled with `provision`, and is wiped there at the
+end of the run. A key from disk travels instead as its mere path.
 
-L'image Docker embarque `openssh-client` : sans lui la capability `provision` se
-déclare indisponible, ce qui est correct mais inutile pour une image dont c'est
-justement le rôle.
+The Docker image ships `openssh-client`: without it the `provision` capability
+declares itself unavailable, which is correct but useless for an image whose
+whole role that is.
 
-#### Élévation : dite, jamais devinée
+#### Elevation: stated, never guessed
 
-L'interface demande explicitement :
+The interface asks explicitly for:
 
-- l'utilisateur de connexion, et **mot de passe, clé, ou les deux** ;
-- une case **« cet utilisateur peut faire `sudo` »** ;
-- si elle est décochée, **un compte qui le peut** et son mot de passe ;
-- **où va NMesh** : *système* (`/opt/nmesh`, compte de service dédié —
-  recommandé) ou *utilisateur* (le home du compte de connexion, sans root).
+- the login user, and **a password, a key, or both**;
+- a checkbox **"this user can `sudo`"**;
+- if it is unticked, **an account that can** and its password;
+- **where NMesh goes**: *system* (`/opt/nmesh`, a dedicated service account —
+  recommended) or *user* (the login account's home, no root).
 
-Rien n'est sondé : tester si un compte peut `sudo` laisse des échecs `sudo` dans
-le journal d'authentification de la cible, et une machine qui les journalise a
-raison de le faire. Un install *système* sans moyen d'atteindre root est refusé
-**avant** d'ouvrir une session, pas après que l'opérateur ait tout tapé.
+Nothing is probed: testing whether an account can `sudo` leaves `sudo` failures
+in the target's authentication log, and a machine that logs them is right to do
+so. A *system* install with no way to reach root is refused **before** a session
+is opened, not after the operator has typed everything.
 
-Un install *utilisateur* fait tourner le nœud sous le compte de connexion : tout
-ce que ce compte lance peut alors lire sa clé d'identité. C'est le compromis à
-prendre quand root n'est pas disponible, et l'interface le dit.
+A *user* install runs the node under the login account: everything that account
+starts can then read its identity key. That is the trade-off to take when root
+is not available, and the interface says so.
 
-#### Deux sessions SSH, pour une raison précise
+#### Two SSH sessions, for a precise reason
 
-1. **Livraison** — un **bootstrap auto-extractible** (`/bin/sh`, POSIX pur) est
-   poussé sur l'entrée standard de `sh -s`. Il ne demande aucun privilège, donc
-   il ne peut pas vouloir de terminal. Il vérifie le **SHA-256** de la charge
-   utile **avant d'écrire un seul fichier**, déballe dans un répertoire de
-   transit **au nom imprévisible** sous le home du compte de connexion (pour
-   qu'un utilisateur local hostile ne puisse pas le pré-créer), et y écrit la
-   **pré-autorisation** en 0600.
-2. **Installation** — une seconde session **avec terminal distant** (`ssh -tt`).
-   C'est ce qui permet à `sudo` et `su` de demander leur mot de passe *là*, sur
-   un terminal, et au pty local d'y répondre — la même mécanique qui répond à
-   OpenSSH. Autrement dit : **le secret d'élévation n'entre jamais dans un
-   script**, exactement comme le mot de passe SSH. C'est toute la raison d'être
-   de la découpe en deux.
+1. **Delivery** — a **self-extracting bootstrap** (`/bin/sh`, pure POSIX) is
+   pushed on the standard input of `sh -s`. It asks for no privilege, so it
+   cannot want a terminal. It verifies the payload's **SHA-256** **before
+   writing a single file**, unpacks into a staging directory with an
+   **unpredictable name** under the login account's home (so a hostile local
+   user cannot pre-create it), and writes the **pre-authorisation** there in
+   0600.
+2. **Installation** — a second session **with a remote terminal** (`ssh -tt`).
+   That is what lets `sudo` and `su` ask for their password *there*, on a
+   terminal, and the local pty answer it — the same mechanism that answers
+   OpenSSH. In other words: **the elevation secret never enters a script**,
+   exactly like the SSH password. That is the entire reason for the split.
 
-Puis cette seconde phase **appelle `./install.sh`** de l'arbre livré, et
-n'installe rien elle-même. Dépendances, compte de service dédié, modes de
-fichiers, service de démarrage, cache liboqs, fichier de configuration : tout
-vient d'`install.sh`. **Un second installeur, plus faible, est exactement la
-façon dont un déploiement distant finit moins solide qu'un local** — c'était le
-cas, ça ne l'est plus.
+That second phase then **calls `./install.sh`** from the delivered tree, and
+installs nothing itself. Dependencies, the dedicated service account, file
+modes, the startup service, the liboqs cache, the configuration file: all of it
+comes from `install.sh`. **A second, weaker installer is exactly how a remote
+deployment ends up less solid than a local one** — that was the case, and it no
+longer is.
 
-Conséquence : `install.sh` voyage dans la charge utile, et un arbre sans lui est
-refusé à la construction du payload.
+The consequence: `install.sh` travels in the payload, and a tree without it is
+refused when the payload is built.
 
-Chaque étape émet un marqueur `::step::` que la console transforme en progression
-dans la section **Activity**. En cas d'échec, les **dernières lignes que la machine
-a réellement écrites** (bornées) partent aussi dans le journal : « dependency
-setup failed » sans rien derrière ne mène nulle part pour qui doit réparer. Une
-machine qui refuse d'être provisionnée est un **résultat**, pas une exception :
-le lot continue.
+Every step emits a `::step::` marker that the console turns into progress in the
+**Activity** section. On failure, the **last lines the machine actually wrote**
+(bounded) also go into the log: "dependency setup failed" with nothing behind it
+leads nowhere for whoever has to fix it. A machine that refuses to be
+provisioned is a **result**, not an exception: the batch carries on.
 
-### Phase 3 — la reprise de confiance
+### Phase 3 — taking over trust
 
-Le but est que la nouvelle machine finisse par faire confiance à l'opérateur —
-sans humain pour cliquer « accepter » sur un boîtier sans écran.
+The goal is for the new machine to end up trusting the operator — with no human
+to click "accept" on a box with no screen.
 
-Deux choses distinctes se jouent ici, et il vaut la peine de ne pas les
-confondre :
+Two distinct things happen here, and it is worth not confusing them:
 
-- **l'appartenance au réseau** — un certificat signé, une place dans le mesh ;
-- **la relation de gestion** — qui cette machine va *obéir*.
+- **membership of the network** — a signed certificate, a place in the mesh;
+- **the management relationship** — who this machine will *obey*.
 
-**Le certificat est signé par la node qui a lancé le scan.** C'est elle qui émet
-une **invitation fraîche, à usage unique, une par machine** (jamais partagée :
-l'échec de l'une ne doit pas brûler celle d'une autre), et qui l'écrit dans la
-pré-autorisation avec ses propres URI. Au premier démarrage, la machine neuve
-rejoint le mesh par cette invitation : c'est le flux ordinaire
-**invitation → handshake → `issue_cert`**, simplement automatisé. Le certificat
-émis chaîne ensuite jusqu'à la racine du réseau.
+**The certificate is signed by the node that ran the scan.** It is that node
+which issues a **fresh, single-use invitation, one per machine** (never shared:
+one failing must not burn another's), and writes it into the pre-authorisation
+along with its own URIs. On first start, the new machine joins the mesh through
+that invitation: it is the ordinary **invitation → handshake → `issue_cert`**
+flow, simply automated. The certificate issued then chains up to the network's
+root.
 
-C'est aussi la bonne node topologiquement : elle est sur le **même LAN** que la
-machine installée, donc joignable, là où l'opérateur peut être derrière un NAT à
-l'autre bout du monde.
+It is also the right node topologically: it is on the **same LAN** as the
+machine being installed, and therefore reachable, where the operator may be
+behind a NAT on the other side of the world.
 
-> **Fenêtre de l'invitation.** Un code tapé à la main vit 5 minutes. Celui-ci
-> n'est redeemé qu'**après** l'installation des dépendances, qui peut prendre
-> des dizaines de minutes sur une petite machine : `generate_invite(ttl)` permet
-> donc une fenêtre plus longue (3 h au provisioning, bornée par
-> `invite._MAX_TTL`). Il reste à **usage unique**, livré à une seule machine par
-> un canal SSH authentifié, et le lockout anti-bruteforce s'applique inchangé.
+> **The invitation's window.** A code typed by hand lives 5 minutes. This one is
+> redeemed only **after** the dependencies are installed, which can take tens of
+> minutes on a small machine: `generate_invite(ttl)` therefore allows a longer
+> window (3 h at provisioning, bounded by `invite._MAX_TTL`). It stays
+> **single-use**, delivered to a single machine over an authenticated SSH
+> channel, and the anti-bruteforce lockout applies unchanged.
 
-La pré-autorisation porte, elle, le **node id et la clé publique de l'opérateur**
-(livrés par le canal SSH authentifié, qui est la racine de confiance de ce
-volet-là) plus un **jeton à usage unique**. Au premier démarrage, la node :
+The pre-authorisation carries the **operator's node id and public key**
+(delivered over the authenticated SSH channel, which is that side's root of
+trust) plus a **single-use token**. On first start, the node:
 
-1. rejoint le mesh via l'invitation, et **attend la session** — `join` qui rend
-   la main ne prouve rien, le handshake qui délivre le certificat vient après ;
-2. enrôle l'opérateur avec les capabilities prévues ;
-3. prouve la possession du jeton, ce qui permet à l'opérateur de **lier cette
-   identité mesh toute neuve au run de provisioning** qu'il vient de faire ;
-4. **supprime le fichier**, quoi qu'il arrive.
+1. joins the mesh through the invitation, and **waits for the session** — a
+   `join` that returns proves nothing, the handshake that delivers the
+   certificate comes after;
+2. enrols the operator with the intended capabilities;
+3. proves possession of the token, which lets the operator **bind this brand-new
+   mesh identity to the provisioning run** they just did;
+4. **deletes the file**, whatever happens.
 
-Si la jointure échoue, la machine ne réclame rien et le dit : réclamer n'irait
-nulle part sans route vers qui que ce soit, et une machine « provisionnée » qui
-n'est sur aucun réseau doit se voir comme telle. Le résultat de provisioning
-porte `joins: false` quand aucune invitation n'a pu être émise.
+If joining fails, the machine claims nothing and says so: claiming would go
+nowhere with no route to anyone, and a "provisioned" machine that is on no
+network must see itself as such. The provisioning result carries `joins: false`
+when no invitation could be issued.
 
-Le jeton n'est pas un secret long terme : il répond une fois à « la node qui
-vient d'apparaître est-elle bien celle que j'ai installée ? ». L'opérateur ne
-garde que `sha256(jeton)`, et un jeton réclamé deux fois ne trouve plus rien.
+The token is not a long-term secret: it answers once to "is the node that just
+appeared really the one I installed?". The operator keeps only
+`sha256(token)`, and a token claimed twice finds nothing any more.
 
-Le `node id` de l'opérateur doit dériver de la clé livrée avec lui, sinon le
-fichier est rejeté — même invariant que partout ailleurs.
+The operator's `node id` must derive from the key delivered with it, or the file
+is rejected — the same invariant as everywhere else.
 
-## Sécurité des identifiants SSH
+## SSH credential security
 
-C'est le seul endroit de NMesh qui détient un identifiant **étranger**. Règle
-unique :
+This is the only place in NMesh that holds a **foreign** credential. One rule:
 
-> Un identifiant vit **en mémoire**, le temps d'un run, et **nulle part
-> ailleurs**.
+> A credential lives **in memory**, for the length of a run, and **nowhere
+> else**.
 
-- Pas sur disque, pas dans `argv` (que `ps` montre à tout utilisateur local), pas
-  dans l'environnement (`/proc/<pid>/environ`), pas dans une ligne de journal,
-  pas dans le tiroir de l'app, pas dans un paquet mesh en clair.
-- Le mécanisme : un **pseudo-terminal**. OpenSSH ne lit un mot de passe que
-  depuis son terminal de contrôle ; on lui en fournit un, on écrit le secret
-  dedans au prompt, et on le referme.
-- Chaque type de prompt est répondu **une seule fois** : un re-prompt signifie
-  que le secret était faux, et le rejouer ne ferait que brûler des tentatives
-  contre un lockout.
-- `SshCredentials` n'a pas de `__dict__` (`__slots__`) et son `repr` est rédigé :
-  un `print` accidentel ou une trace rendant ses locales ne fuit rien. `wipe()`
-  lâche les références dès la fin du run (les `str` CPython étant immuables, la
-  borne honnête est « pas conservé », pas « effacé de la RAM »).
-- Quand **aucune** clé d'hôte n'a pu être confirmée (pas de `ssh-keyscan` sur la
-  machine qui scanne, ou cible muette), le run retombe sur `accept-new` — un
-  affaiblissement réel, donc **annoncé** : une étape `warning: no host key to
-  pin` apparaît dans le journal et le résultat porte `pinned: false`. Jamais
-  silencieux.
-- Les clés d'hôte ne sont **pas** acceptées à l'aveugle : le scan montre les
-  empreintes, l'opérateur confirme, et le run épingle exactement celles-là dans
-  un `known_hosts` jetable (0600, supprimé après) avec
-  `StrictHostKeyChecking=yes`. C'est du TOFU avec un humain dans la boucle, pas
-  un `accept-new` qui signe pour n'importe quel intercepteur.
-- `IdentityAgent=none` + `IdentitiesOnly=yes` : ce qui authentifie est ce que
-  l'opérateur a choisi, pas ce que l'agent contient par hasard.
+- Not on disk, not in `argv` (which `ps` shows to every local user), not in the
+  environment (`/proc/<pid>/environ`), not in a log line, not in the app's
+  drawer, not in a mesh packet in the clear.
+- The mechanism: a **pseudo-terminal**. OpenSSH reads a password only from its
+  controlling terminal; we give it one, write the secret into it at the prompt,
+  and close it again.
+- Each kind of prompt is answered **once only**: a re-prompt means the secret
+  was wrong, and replaying it would only burn attempts against a lockout.
+- `SshCredentials` has no `__dict__` (`__slots__`) and its `repr` is redacted: an
+  accidental `print` or a traceback rendering its locals leaks nothing. `wipe()`
+  drops the references as soon as the run ends (CPython `str` being immutable,
+  the honest bound is "not kept", not "erased from RAM").
+- When **no** host key could be confirmed (no `ssh-keyscan` on the scanning
+  machine, or a silent target), the run falls back on `accept-new` — a real
+  weakening, therefore **announced**: a `warning: no host key to pin` step
+  appears in the log and the result carries `pinned: false`. Never silent.
+- Host keys are **not** accepted blindly: the scan shows the fingerprints, the
+  operator confirms, and the run pins exactly those in a throwaway `known_hosts`
+  (0600, deleted afterwards) with `StrictHostKeyChecking=yes`. That is TOFU with
+  a human in the loop, not an `accept-new` that signs for any interceptor.
+- `IdentityAgent=none` + `IdentitiesOnly=yes`: what authenticates is what the
+  operator chose, not what the agent happens to contain.
 
-**Quand le provisioning tourne sur une node distante**, l'identifiant traverse le
-mesh à l'intérieur de la payload DATA **chiffrée de bout en bout**, vers une node
-que l'opérateur a explicitement enrôlée avec `provision`, et y est effacé dès la
-fin du run. Cette confiance est déjà totale — `provision` implique que la node
-distante exécute du code qu'on lui envoie — donc ça n'ajoute pas d'exposition que
-l'enrôlement n'accordait pas déjà. C'est un choix explicite, pas un oubli.
+**When provisioning runs on a remote node**, the credential crosses the mesh
+inside the **end-to-end encrypted** DATA payload, to a node the operator
+explicitly enrolled with `provision`, and is wiped there as soon as the run
+ends. That trust is already total — `provision` means the remote node runs code
+we send it — so it adds no exposure the enrolment did not already grant. It is
+an explicit choice, not an oversight.
 
-### Pourquoi OpenSSH plutôt qu'une pile SSH en Python
+### Why OpenSSH rather than an SSH stack in Python
 
-Réécrire SSH, c'est réécrire du code cryptographique de protocole (échange de
-clés, vérification de clé d'hôte, multiplexage de canaux) sur le chemin qui
-provisionne des machines neuves. La charte met la sécurité en premier et préfère
-ne pas inventer de crypto : le binaire `ssh` du système est audité, omniprésent,
-et n'ajoute **aucune** dépendance Python. Le coût est une exigence runtime (un
-client `ssh` sur la machine qui provisionne), qu'on **détecte et signale** au
-lieu d'en faire une faiblesse silencieuse.
+Rewriting SSH means rewriting protocol cryptography (key exchange, host-key
+verification, channel multiplexing) on the path that provisions new machines.
+The charter puts security first and prefers not to invent crypto: the system's
+`ssh` binary is audited, ubiquitous, and adds **no** Python dependency. The cost
+is a runtime requirement (an `ssh` client on the provisioning machine), which we
+**detect and report** instead of turning it into a silent weakness.
 
-## Installer / activer une app intégrée
+## Installing / enabling a built-in app
 
-Registre : [`src/app_registry.py`](../../src/app_registry.py). Deux états
-distincts, parce qu'ils ne veulent pas dire la même chose :
+The registry: [`src/app_registry.py`](../../src/app_registry.py). Two distinct
+states, because they do not mean the same thing:
 
-- **installed** — ce nœud garde l'état de l'app. **Désinstaller purge son tiroir
-  chiffré** (ledger, historique). C'est réel et irréversible, pas un drapeau.
-- **enabled** — l'app est branchée au mesh maintenant. Désactiver l'arrête et
-  ferme sa section ; son état survit, donc réactiver reprend où on en était.
+- **installed** — this node keeps the app's state. **Uninstalling purges its
+  encrypted drawer** (ledger, history). That is real and irreversible, not a
+  flag.
+- **enabled** — the app is plugged into the mesh right now. Disabling stops it
+  and closes its section; its state survives, so re-enabling picks up where you
+  were.
 
-Depuis la console : section **Apps**, boutons Install / Enable / Disable /
-Uninstall. En ligne de commande : `--fleet`, `--no-chat`. Le choix est persisté
-dans `<data>/apps.json` (aucun secret : des noms et deux booléens ; un fichier
-corrompu redonne les défauts, jamais une app activée que l'opérateur n'a pas
-activée).
+From the console: the **Apps** section, the Install / Enable / Disable /
+Uninstall buttons. On the command line: `--fleet`, `--no-chat`. The choice is
+persisted in `<data>/apps.json` (no secrets: names and two booleans; a corrupt
+file gives back the defaults, never an app enabled that the operator did not
+enable).
 
-## Protocole (dans la section `fleet` du plan DATA)
+## Protocol (inside the `fleet` section of the DATA plane)
 
 ```
-requête signée : type(1) ‖ alen(2) ‖ assertion ‖ corps_json
-réponse        : type(1) ‖ corps_json
-flux shell     : type(1) ‖ sid(16) ‖ octets bruts
+a signed request : type(1) ‖ alen(2) ‖ assertion ‖ json_body
+a reply          : type(1) ‖ json_body
+the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 ```
 
-| Type | Val | Sens | Signé |
+| Type | Val | Direction | Signed |
 |---|---|---|---|
-| `ENROL_REQUEST` | 0x01 | opérateur → node | ✅ `fleet.enrol` |
+| `ENROL_REQUEST` | 0x01 | operator → node | ✅ `fleet.enrol` |
 | `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | ✅ `fleet.grant` |
-| `PREAUTH_CLAIM` | 0x05 | nouvelle node → opérateur | ✅ `fleet.preauth` |
-| `ENROL_NARROW` | 0x06 | opérateur → node (rendre un droit) | ✅ `fleet.narrow` |
-| `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | requête seulement |
+| `PREAUTH_CLAIM` | 0x05 | new node → operator | ✅ `fleet.preauth` |
+| `ENROL_NARROW` | 0x06 | operator → node (handing a right back) | ✅ `fleet.narrow` |
+| `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | the request only |
 | `ERROR` | 0x12 | ← | — |
-| `UPDATE_REQUEST` / `_OUTPUT` / `_RESULT` | 0x20–0x22 | → / ← / ← | requête seulement |
-| `SHELL_OPEN` / `_OPENED` | 0x30 / 0x31 | → / ← | ouverture seulement |
-| `SHELL_INPUT` / `_OUTPUT` / `_RESIZE` / `_CLOSE` | 0x32–0x35 | ↔ | lié au `sid` |
-| `SCAN_REQUEST` / `_RESULT` | 0x40 / 0x41 | → / ← | requête seulement |
-| `PROVISION_REQUEST` / `_PROGRESS` / `_RESULT` | 0x42–0x44 | → / ← / ← | requête seulement |
-| `CONSOLE_REQUEST` / `_REPLY` | 0x50 / 0x51 | → / ← | requête seulement (`fleet.manage`) |
+| `UPDATE_REQUEST` / `_OUTPUT` / `_RESULT` | 0x20–0x22 | → / ← / ← | the request only |
+| `SHELL_OPEN` / `_OPENED` | 0x30 / 0x31 | → / ← | the opening only |
+| `SHELL_INPUT` / `_OUTPUT` / `_RESIZE` / `_CLOSE` | 0x32–0x35 | ↔ | bound to the `sid` |
+| `SCAN_REQUEST` / `_RESULT` | 0x40 / 0x41 | → / ← | the request only |
+| `PROVISION_REQUEST` / `_PROGRESS` / `_RESULT` | 0x42–0x44 | → / ← / ← | the request only |
+| `CONSOLE_REQUEST` / `_REPLY` | 0x50 / 0x51 | → / ← | the request only (`fleet.manage`) |
 
-**Aucun nouveau type de paquet mesh** : tout circule dans `DATA`, section
-`builtin_id("fleet")`. Le plan de gestion du nœud est intouché.
+**No new mesh packet type**: everything travels in `DATA`, section
+`builtin_id("fleet")`. The node's management plane is untouched.
 
-Les réponses ne sont pas signées : elles empruntent le canal E2E déjà
-authentifié, et ne sont acceptées que si elles répondent à un `rid` que **nous**
-avons émis, pour ce type d'action, **depuis le nœud** à qui nous l'avons envoyé.
-Une réponse non sollicitée est jetée.
+Replies are not signed: they take the already authenticated E2E channel, and are
+accepted only if they answer a `rid` **we** issued, for that kind of action,
+**from the node** we sent it to. An unsolicited reply is dropped.
 
-## Bornes
+## Bounds
 
-| Constante | Valeur |
+| Constant | Value |
 |---|---|
-| `MAX_BODY` | 56 000 o par trame JSON |
-| `MAX_SHELLS` | 4 shells hébergés simultanément |
+| `MAX_BODY` | 56,000 B per JSON frame |
+| `MAX_SHELLS` | 4 shells hosted at once |
 | `SHELL_IDLE_TIMEOUT` | 900 s |
-| `SHELL_INPUT_MAX` | 8192 o par trame d'entrée |
-| `MAX_INFLIGHT` | 64 requêtes suivies côté opérateur |
+| `SHELL_INPUT_MAX` | 8192 B per input frame |
+| `MAX_INFLIGHT` | 64 requests tracked on the operator side |
 | `MAX_OPERATORS` / `MAX_MANAGED` | 64 / 4096 |
-| `MAX_PENDING` | 256 demandes en attente (TTL 7 j) |
+| `MAX_PENDING` | 256 pending requests (TTL 7 days) |
 | `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
-| `MAX_PAYLOAD` | 16 Mo poussés au provisioning |
-| `MAX_SSH_KEYS` / `MAX_SSH_KEY_BYTES` | 8 clés importées / 64 Ko par clé |
-| `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 réseaux balayés / 4096 adresses par réseau avant rétrécissement |
+| `MAX_PAYLOAD` | 16 MB pushed at provisioning |
+| `MAX_SSH_KEYS` / `MAX_SSH_KEY_BYTES` | 8 imported keys / 64 KB per key |
+| `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 networks scanned / 4096 addresses per network before narrowing |
 
-Le ledger **échoue fermé** : un blob corrompu ou altéré donne un ledger **vide**
-(on oublie qui on a cru, plutôt que de faire confiance à une liste forgée), et un
-nom de capability inconnu est jeté au chargement — un fichier trafiqué ne peut
-pas faire passer une capability en douce.
+The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
+ledger (we forget who we believed, rather than trusting a forged list), and an
+unknown capability name is dropped at load — a doctored file cannot slip a
+capability through.
 
-## Suivi des opérations
+## Tracking operations
 
-Une action envoyée à une node distante répond **de façon asynchrone** : la
-requête HTTP rend la main tout de suite, la réponse arrive plus tard par le
-mesh. Le pont console tient donc un registre d'opérations (`jobs` dans le
-snapshot) : `rid`, type, node visée, état (`running` / `ok` / `failed`) et un
-détail. Le panneau de déploiement suit le sien au lieu de rester figé sur
-« en cours ».
+An action sent to a remote node answers **asynchronously**: the HTTP request
+returns at once, the answer arrives later over the mesh. The console bridge
+therefore keeps a register of operations (`jobs` in the snapshot): `rid`, type,
+the node targeted, state (`running` / `ok` / `failed`) and a detail. The
+deployment panel follows its own instead of staying frozen on "in progress".
 
-L'interface les présente dans le **centre de notifications** — la cloche de la
-barre du haut, avec un compteur de non-lus. Les demandes d'accès en attente y
-figurent aussi : ce sont les deux choses qui réclament l'attention de quelqu'un.
-Un élément est « non lu » selon son `rid` **et** son état, donc une opération qui
-se termine est une nouvelle même si son démarrage en était déjà une ; ouvrir le
-menu marque ce qui est affiché. Un clic sur une ligne va à la section concernée.
+The interface presents them in the **notification centre** — the bell in the top
+bar, with an unread counter. Pending access requests are there too: those are
+the two things that need somebody's attention. An item is "unread" by its `rid`
+**and** its state, so an operation finishing is news even if its start already
+was; opening the menu marks what is shown. Clicking a row goes to the section
+concerned.
 
-> Ces éléments étaient auparavant des pastilles posées directement dans la barre
-> du haut, qui **grandissait** à chaque opération — le seul endroit de la page
-> dont la hauteur ne doit pas bouger. La liste est bornée (`NOTIF_MAX`), et
-> l'ensemble des clés lues aussi (`NOTIF_SEEN_MAX`).
+> These items used to be badges placed directly in the top bar, which **grew**
+> with every operation — the one place on the page whose height must not move.
+> The list is bounded (`NOTIF_MAX`), and so is the set of read keys
+> (`NOTIF_SEEN_MAX`).
 
-Deux propriétés à ne pas casser :
+Two properties not to break:
 
-- **La clôture ne dépend pas de l'ordre.** Un pair proche peut répondre en moins
-  d'une milliseconde, avant que le thread appelant ait noté le `rid`. Une
-  clôture qui arrive trop tôt est mise de côté et appliquée à l'enregistrement,
-  sinon l'opération resterait « en cours » à vie.
-- **Tout est borné** (`MAX_JOBS`), y compris la table des clôtures anticipées.
+- **Closing does not depend on ordering.** A nearby peer can answer in under a
+  millisecond, before the calling thread has noted the `rid`. A closure that
+  arrives too early is set aside and applied to the record, or the operation
+  would stay "in progress" forever.
+- **Everything is bounded** (`MAX_JOBS`), including the table of early closures.
 
-## Taille des réponses
+## Reply size
 
-Une réponse doit tenir dans **une trame DATA**. Couper du JSON à un offset
-d'octets produit quelque chose que le destinataire ne parse pas et jette en
-silence — la pire panne possible pour une réponse qu'un opérateur attend. Les
-réponses sont donc ajustées en **retirant des entrées**, jamais des octets :
-`_dump_json(document, *listes_à_réduire)` raccourcit les listes nommées jusqu'à
-ce que la trame passe, et `truncated` dit combien sont partis. L'interface le
-signale (« N result(s) dropped… narrow the target »). S'il ne reste plus rien à
-retirer, une erreur lisible part à la place d'une trame illisible.
+A reply must fit in **one DATA frame**. Cutting JSON at a byte offset produces
+something the recipient cannot parse and silently drops — the worst possible
+failure for a reply an operator is waiting on. Replies are therefore trimmed by
+**removing entries**, never bytes: `_dump_json(document, *lists_to_shrink)`
+shortens the named lists until the frame fits, and `truncated` says how many
+went. The interface reports it ("N result(s) dropped… narrow the target"). If
+there is nothing left to remove, a readable error goes out instead of an
+unreadable frame.
 
-## API console
+## Console API
 
-Toutes derrière la session console (Bearer ou cookie). Détails :
+All behind the console session (Bearer or cookie). Details:
 [`Docs/WebConsole/guide`](../WebConsole/guide).
 
-| Méthode | Route | Rôle |
+| Method | Route | Role |
 |---|---|---|
-| GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, faits, **jobs**, scans) |
-| GET | `/api/fleet/shell?sid=&offset=` | octets du terminal (base64) |
-| GET | `/api/fleet/keys` | clés SSH locales — **métadonnées seulement** |
-| POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrôlement |
-| POST | `/api/fleet/caps-set` | droits d'un opérateur **sur cette node** (humain local) |
-| POST | `/api/fleet/caps-request` / `caps-drop` | demander / rendre un droit sur une node gérée |
-| GET | `/api/remote/targets` | nodes ayant accordé `manage`, et si une session est ouverte |
-| POST | `/api/remote/connect` / `disconnect` | ouvre / ferme une session sur la console d'une node gérée |
-| *(toute route console)* | en-tête `X-NMesh-Node: <id>` | relaie l'appel vers cette node au lieu de l'exécuter ici |
+| GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, facts, **jobs**, scans) |
+| GET | `/api/fleet/shell?sid=&offset=` | terminal bytes (base64) |
+| GET | `/api/fleet/keys` | local SSH keys — **metadata only** |
+| POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
+| POST | `/api/fleet/caps-set` | an operator's rights **on this node** (a local human) |
+| POST | `/api/fleet/caps-request` / `caps-drop` | ask for / hand back a right on a managed node |
+| GET | `/api/remote/targets` | nodes that granted `manage`, and whether a session is open |
+| POST | `/api/remote/connect` / `disconnect` | opens / closes a session on a managed node's console |
+| *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
-| POST | `/api/fleet/shell` / `input` / `resize` / `close` | shell |
-| POST | `/api/fleet/provision` | déploiement |
-| POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | apps intégrées |
+| POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
+| POST | `/api/fleet/provision` | deployment |
+| POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | built-in apps |
 
 ## Tests
 
-- [`tests/test_fleet.py`](../../tests/test_fleet.py) — les trois portes, en
-  isolation : commande non signée, corps modifié, signature rejouée, signature
-  pour un autre nœud ou un autre `purpose`, émetteur non enrôlé, capability
-  absente, réponse non sollicitée, shell adressé par un tiers, fuzzing, et le
-  changement de droits : demander n'accorde rien, `ENROL_NARROW` ne peut
-  qu'ôter, perdre `shell` ferme le shell déjà ouvert ; et le relais console :
-  chemins refusés, découpage/réassemblage, réponse trop grande expliquée et non
-  tronquée, réponse forgée par un tiers ignorée, appels simultanés bornés.
-- [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — ledger (échec
-  fermé, bornes, `narrow_only` qui ne peut qu'ôter) et faits machine.
-- [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — le
-  secret ne fuit nulle part, le bootstrap n'est pas une surface d'injection.
-- [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes et
-  bascules d'apps.
+- [`tests/test_fleet.py`](../../tests/test_fleet.py) — the three gates, in
+  isolation: an unsigned command, an altered body, a replayed signature, a
+  signature for another node or another `purpose`, an unenrolled sender, a
+  missing capability, an unsolicited reply, a shell addressed by a third party,
+  fuzzing, and the change of rights: asking grants nothing, `ENROL_NARROW` can
+  only take away, losing `shell` closes the shell already open; and the console
+  relay: refused paths, splitting/reassembly, an over-large reply explained and
+  not truncated, a reply forged by a third party ignored, concurrent calls
+  bounded.
+- [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — the ledger
+  (failing closed, bounds, `narrow_only` that can only take away) and machine
+  facts.
+- [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — the
+  secret leaks nowhere, the bootstrap is not an injection surface.
+- [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes and
+  app toggles.
 - [`tests/integration/test_fleet.py`](../../tests/integration/test_fleet.py) —
-  deux nœuds réels, vrai mesh.
+  two real nodes, a real mesh.
