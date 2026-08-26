@@ -1,307 +1,313 @@
-# Plan de conception — Joignabilité agnostique + invitation relayée
+# Design plan — agnostic reachability + relayed invitation
 
-> **Statut : PLAN, pas encore implémenté.** Document de travail à valider avant
-> tout code. Objectif : permettre à deux nœuds de se joindre même derrière
-> CGNAT / double NAT / NAT symétrique, **sans dépendre d'un transport concret**,
-> et sans usine à gaz (pas de base de données de quotas dédiée).
+> **Status: A PLAN, not implemented yet.** A working document to be validated
+> before any code. The goal: letting two nodes reach each other even behind
+> CGNAT / double NAT / symmetric NAT, **without depending on a concrete
+> transport**, and without a contraption (no dedicated quota database).
 
-## 0. Principes directeurs (rappel charte)
+## 0. Guiding principles (a charter reminder)
 
-1. **Sécurité d'abord.** Tout paquet est présumé hostile. `NodeID = hash(clé DSA)`.
-   Rejet par défaut. Bornes partout.
-2. **Agnostique du transport.** Le cœur ne connaît **aucun** transport concret.
-   La joignabilité, le broadcast, le hole punching sont des **détails de
-   transport** exposés au cœur via une interface générique.
-3. **Le plus automatique possible.** Le réglage fin est expert ; par défaut tout
-   s'organise seul.
+1. **Security first.** Every packet is presumed hostile. `NodeID = hash(DSA key)`.
+   Reject by default. Bounds everywhere.
+2. **Transport-agnostic.** The core knows **no** concrete transport.
+   Reachability, broadcast and hole punching are **transport details** exposed to
+   the core through a generic interface.
+3. **As automatic as possible.** Fine tuning is for experts; by default
+   everything organises itself.
 
-Le constat qui motive tout : le hole punching direct échoue par construction
-quand les deux pairs sont derrière NAT symétrique (4G CGNAT, double NAT). La
-seule réponse robuste, universellement adoptée (Tailscale DERP, WebRTC TURN,
-libp2p circuit-relay), est le **relais** du trafic chiffré E2E. NMesh route déjà
-des paquets chiffrés E2E à travers des intermédiaires : on s'appuie dessus.
+The observation that motivates all of it: direct hole punching fails by
+construction when both peers are behind symmetric NAT (4G CGNAT, double NAT).
+The only robust answer, universally adopted (Tailscale DERP, WebRTC TURN, libp2p
+circuit-relay), is **relaying** the E2E-encrypted traffic. NMesh already routes
+E2E-encrypted packets through intermediaries: we build on that.
 
 ---
 
-## 1. Modèle de joignabilité agnostique (`reachability`)
+## 1. An agnostic reachability model (`reachability`)
 
-### 1.1 Le descripteur
+### 1.1 The descriptor
 
-Chaque **serveur de transport** (`BaseServer`) peut décrire comment on le joint,
-sous forme d'une liste de descripteurs opaques pour le cœur :
+Every **transport server** (`BaseServer`) can describe how it is reached, as a
+list of descriptors opaque to the core:
 
 ```
 Reachability = {
-  "transport": str,     # schéma, ex. "tcp", "udp", "ble"
+  "transport": str,     # scheme, e.g. "tcp", "udp", "ble"
   "scope":     str,     # "world" | "lan" | "broadcast" | "none"
-  "anchor":    str,     # discriminateur d'audience (voir plus bas)
-  "address":   str|None,# URI joignable en direct si applicable, sinon None
-  "confirmed": bool,    # joignabilité prouvée (dial-back / inbound accepté) vs supposée
+  "anchor":    str,     # an audience discriminator (see below)
+  "address":   str|None,# a directly reachable URI if applicable, else None
+  "confirmed": bool,    # reachability proven (dial-back / inbound accepted) vs assumed
 }
 ```
 
-- **`scope`** = largeur d'audience, ordonnée : `world` > `lan` > `broadcast` > `none`.
-- **`anchor`** = ce qui distingue deux audiences de même portée. **C'est la clé du
-  problème `192.168.0.0/24`** : mon LAN porte l'ancre `<mon-IP-publique>`, celui du
-  voisin `<son-IP-publique>` → même sous-réseau privé, **audiences distinctes**.
+- **`scope`** = the width of the audience, ordered: `world` > `lan` >
+  `broadcast` > `none`.
+- **`anchor`** = what distinguishes two audiences of the same scope. **This is
+  the key to the `192.168.0.0/24` problem**: my LAN carries the anchor
+  `<my-public-IP>`, my neighbour's `<their-public-IP>` → the same private subnet,
+  **distinct audiences**.
 
-Exemples concrets :
+Concrete examples:
 
-| Situation | Descripteur |
+| Situation | Descriptor |
 |---|---|
-| Port TCP ouvert au monde | `(tcp, world, "", tcp://IP:port, confirmed)` |
-| LAN derrière mon IP publique | `(tcp, lan, "<ip-pub>/24", tcp://192.168.x:port, confirmed)` |
-| UDP + STUN, mapping public | `(udp, world, "", udp://IP:port, confirmed)` |
-| Bluetooth (à venir) | `(ble, broadcast, "", None, confirmed)` |
-| Derrière NAT, pas joignable | `(udp, none, "", None, False)` |
+| A TCP port open to the world | `(tcp, world, "", tcp://IP:port, confirmed)` |
+| A LAN behind my public IP | `(tcp, lan, "<pub-ip>/24", tcp://192.168.x:port, confirmed)` |
+| UDP + STUN, a public mapping | `(udp, world, "", udp://IP:port, confirmed)` |
+| Bluetooth (to come) | `(ble, broadcast, "", None, confirmed)` |
+| Behind NAT, not reachable | `(udp, none, "", None, False)` |
 
-### 1.2 Le contrat sur les transports
+### 1.2 The contract on transports
 
-On ajoute deux capacités **optionnelles** aux interfaces (défauts sûrs pour ne
-rien casser des transports existants) :
+Two **optional** capabilities are added to the interfaces (with safe defaults so
+nothing breaks for existing transports):
 
 ```python
 class BaseServer:
     def reachability(self) -> list[Reachability]:
-        """Comment ce serveur est joignable, et par quelle audience.
-        Défaut : []  (le transport ne sait pas / n'est pas joignable)."""
+        """How this server is reachable, and by which audience.
+        Default: []  (the transport does not know / is not reachable)."""
         return []
 
     async def broadcast(self, data: bytes) -> bool:
-        """Diffuse data à l'aveugle dans le domaine du medium (LAN UDP, BLE…).
-        Retourne True si le transport sait broadcaster. Défaut : False."""
+        """Broadcasts data blind into the medium's domain (LAN UDP, BLE…).
+        Returns True if the transport can broadcast. Default: False."""
         return False
 
 class BaseTransport:
     @classmethod
     def can_reach(cls, desc: Reachability, local_ctx: dict) -> bool:
-        """Depuis notre contexte réseau (local_ctx), peut-on tenter de joindre
-        un nœud annonçant desc ? Défaut : desc a une address + scope != none."""
+        """From our network context (local_ctx), can we try to reach a node
+        advertising desc? Default: desc has an address + scope != none."""
 ```
 
-- **`reachability()`** : le transport IP la remplit à partir de ce qu'on a déjà
-  (adresse observée via `remote_ip()`/OBSERVED_ADDR, STUN keepalive, et surtout
-  **connexion entrante authentifiée acceptée** = preuve passive de joignabilité).
-- **`can_reach()`** : IP renvoie `True` pour `world`, et pour `lan` seulement si
-  l'ancre correspond à notre IP publique observée. `broadcast` → traité à part
-  (on broadcast, on ne « route » pas vers).
-- **`broadcast()`** : UDP/BLE l'implémentent ; TCP/spool non. Le cœur l'appelle
-  sans savoir comment c'est fait.
+- **`reachability()`**: the IP transport fills it in from what we already have
+  (the address observed through `remote_ip()`/OBSERVED_ADDR, STUN keepalive,
+  and above all an **accepted authenticated inbound connection** = passive proof
+  of reachability).
+- **`can_reach()`**: IP returns `True` for `world`, and for `lan` only if the
+  anchor matches our observed public IP. `broadcast` → handled separately (we
+  broadcast, we do not "route" towards it).
+- **`broadcast()`**: UDP/BLE implement it; TCP/spool do not. The core calls it
+  without knowing how it is done.
 
-Le cœur **agrège** les `reachability()` de tous ses serveurs → sa propre
-joignabilité → l'annonce (dans le routing/presence) et s'auto-tague
-**relais-capable** s'il a ≥1 descripteur `confirmed` à portée `world` (ou une
-portée définie utile).
+The core **aggregates** the `reachability()` of all its servers → its own
+reachability → advertises it (in routing/presence) and tags itself
+**relay-capable** if it has ≥1 `confirmed` descriptor at `world` scope (or at a
+usefully defined scope).
 
-### 1.3 Auto-détection du rôle relais
+### 1.3 Auto-detecting the relay role
 
-- **Passif (gratuit, sûr)** : un nœud qui a accepté une connexion entrante
-  authentifiée qu'il n'a pas initiée est *prouvé* joignable → `confirmed=True`.
-- **Actif (phase 2, façon AutoNAT)** : `REACH_PROBE` — on demande à un pair de se
-  reconnecter à notre adresse annoncée et de confirmer. Garde-fous anti-
-  amplification : seulement l'adresse revendiquée dans la même famille que la
-  source observée, jamais les plages privées, borné, rate-limité, et la
-  reconnexion tente un vrai handshake (échec 1:1 sur une victime au hasard).
+- **Passive (free, safe)**: a node that accepted an authenticated inbound
+  connection it did not initiate is *proven* reachable → `confirmed=True`.
+- **Active (phase 2, AutoNAT style)**: `REACH_PROBE` — we ask a peer to
+  reconnect to our advertised address and confirm. Anti-amplification
+  safeguards: only the address claimed in the same family as the observed
+  source, never the private ranges, bounded, rate-limited, and the reconnection
+  attempts a real handshake (a 1:1 failure on a random victim).
 
 ---
 
-## 2. Invitation relayée + broadcast (bloc unique)
+## 2. Relayed invitation + broadcast (one block)
 
-### 2.1 Principe
+### 2.1 The principle
 
-**Relayer une invitation ≈ relayer un paquet.** Aucun nœud n'a de rôle spécial
-imposé ; pas de base de données de quotas. Un **seul** bloc b64, généré par
-l'inviteur A, remis à l'invité B hors-bande. B « tente tout » : il **broadcast**
-la demande sur les transports capables **et** la **route** vers une liste de
-relais de secours. N'importe quel nœud du réseau qui reçoit la demande la
-vérifie et la fait suivre vers A.
+**Relaying an invitation ≈ relaying a packet.** No node has a special role
+imposed on it; no quota database. A **single** b64 block, generated by inviter
+A, handed to invitee B out of band. B "tries everything": it **broadcasts** the
+request on the transports capable of it **and** **routes** it towards a list of
+fallback relays. Any node in the network that receives the request verifies it
+and passes it on towards A.
 
-### 2.2 Contenu du bloc b64
+### 2.2 What is in the b64 block
 
 ```
 InviteBlock = {
   "v":      3,
-  "code":   <code d'invitation>,        # capacité anti-abus (existant, TTL 5 min)
-  "cert":   <cert auto-signé de A, hex>, # porte la clé pub ; NodeID(A)=hash(clé)
-  "exp":    <timestamp d'expiration>,
-  "token":  <sig_A( TAG || H(code) || exp ), hex>,  # autorisation de rendez-vous
-  "relays": [ Reachability, ... ]        # nœuds à portée large, secours si pas de broadcast
+  "code":   <invitation code>,           # the anti-abuse capability (existing, TTL 5 min)
+  "cert":   <A's self-signed cert, hex>, # carries the public key; NodeID(A)=hash(key)
+  "exp":    <expiry timestamp>,
+  "token":  <sig_A( TAG || H(code) || exp ), hex>,  # the rendezvous authorisation
+  "relays": [ Reachability, ... ]        # widely reachable nodes, a fallback when there is no broadcast
 }
 ```
 
-- `cert` donne la clé publique de A ⇒ tout récepteur vérifie `NodeID(A)=hash(clé)`
-  et la validité de `token`.
-- `token` = **A signe l'autorisation de rendez-vous**. C'est le garde-fou anti-
-  spam : un extérieur ne peut pas forger une invitation « émise par un membre »
-  sans la clé de A. Un récepteur qui **partage le root** de A vérifie en plus
-  l'appartenance réseau ; sinon il vérifie au moins l'auto-cohérence (sig valide
-  pour la clé fournie) et **rate-limite par clé**.
-- `relays` : uniquement des nœuds à **portée définie et large** (`world`, ou une
-  audience que B a des chances de partager). **Jamais** de `broadcast` (on ne
-  route pas vers un domaine indéfini — il ne sert qu'en opportuniste).
+- `cert` gives A's public key ⇒ any receiver checks `NodeID(A)=hash(key)` and
+  the validity of `token`.
+- `token` = **A signs the rendezvous authorisation**. That is the anti-spam
+  safeguard: an outsider cannot forge an invitation "issued by a member" without
+  A's key. A receiver that **shares A's root** additionally checks network
+  membership; otherwise it at least checks self-consistency (a valid signature
+  for the key supplied) and **rate-limits per key**.
+- `relays`: only nodes at a **defined and wide** scope (`world`, or an audience
+  B stands a chance of sharing). **Never** `broadcast` (we do not route towards
+  an undefined domain — it only serves opportunistically).
 
-### 2.3 Nouveau type de paquet : `INVITE_SEEK` (pré-auth, borné)
+### 2.3 A new packet type: `INVITE_SEEK` (pre-auth, bounded)
 
-C'est le seul paquet **routable avant authentification** — il porte sa propre
-preuve (`token`), il est TTL-borné, dédupliqué, rate-limité.
+This is the only packet **routable before authentication** — it carries its own
+proof (`token`), it is TTL-bounded, deduplicated, rate-limited.
 
 ```
 INVITE_SEEK payload = {
-  inviter_id,           # NodeID(A) — vers qui router (en clair, assumé)
-  cert_A, exp, token,   # recopiés du bloc (vérifiables par tout nœud)
-  seeker_id, cert_B,    # identité de B (son vrai NodeID) — pour le chemin retour
-  rdv_nonce             # corrélation d'un aller-retour, borne la table de rendez-vous
+  inviter_id,           # NodeID(A) — who to route towards (in the clear, accepted)
+  cert_A, exp, token,   # copied from the block (verifiable by any node)
+  seeker_id, cert_B,    # B's identity (its real NodeID) — for the return path
+  rdv_nonce             # correlates a round trip, bounds the rendezvous table
 }
 ```
 
-**Décision (validée) : on transmet l'ID de A en clair.** Aucun risque
-cryptographique (`NodeID = hash(clé pub)`, pas d'usurpation possible sans la clé
-privée), et surtout ça garde le routage **dirigé** (Kademlia, ~log(n) hops) →
-ça passe à l'échelle de 4 à 4000 nœuds. On **écarte** explicitement toute
-diffusion/flood réseau (qui, elle, ne scalerait pas). Masquer l'ID de A
-(chiffrement de groupe, tag de reconnaissance, IDs éphémères) est **abandonné** :
-ça imposait soit une clé de réseau partagée (point de compromission unique,
-inefficace contre un membre hostile), soit du flooding. Amélioration éventuelle
-notée pour plus tard si un modèle de menace l'exige, mais hors v1.
+**The decision (settled): A's ID travels in the clear.** No cryptographic risk
+(`NodeID = hash(public key)`, no impersonation possible without the private
+key), and above all it keeps routing **directed** (Kademlia, ~log(n) hops) → it
+scales from 4 to 4000 nodes. We explicitly **rule out** any network flood (which
+would not scale). Hiding A's ID (group encryption, a recognition tag, ephemeral
+IDs) is **abandoned**: it required either a shared network key (a single point
+of compromise, ineffective against a hostile member) or flooding. A possible
+improvement is noted for later if a threat model demands it, but it is out of
+v1.
 
-### 2.4 Machine à états du join
+### 2.4 The join state machine
 
 ```
-B (invité)                    R (relais, pair direct de A)      A (inviteur)
+B (invitee)                   R (relay, a direct peer of A)     A (inviter)
    │                             │                                │
-   │ 1. ouvre un lien vers R (sortant → traverse tout NAT)        │
-   │    + envoie INVITE_SEEK ────┤                                │
-   │ 1'. (opportuniste) broadcast le SEEK sur transports capables │
+   │ 1. opens a link to R (outbound → traverses any NAT)          │
+   │    + sends INVITE_SEEK ─────┤                                │
+   │ 1'. (opportunistic) broadcasts the SEEK on capable transports│
    │                             │                                │
-   │                             │ 2. vérifie token+cert+exp      │
-   │                             │    (sinon drop + rate-limit)   │
-   │                             │ 3. note rdv_nonce → lien(B)    │
-   │                             │    (table rendez-vous, bornée) │
-   │                             │ 4. route SEEK vers inviter_id ─┤
-   │                             │    (dirigé : pair direct, sinon│
-   │                             │     Kademlia/on-demand, TTL)   │
-   │                             │                                │ 5. A voit
+   │                             │ 2. checks token+cert+exp       │
+   │                             │    (otherwise drop + rate-limit)│
+   │                             │ 3. notes rdv_nonce → link(B)   │
+   │                             │    (rendezvous table, bounded) │
+   │                             │ 4. routes the SEEK to inviter_id┤
+   │                             │    (directed: a direct peer,   │
+   │                             │     else Kademlia/on-demand, TTL)│
+   │                             │                                │ 5. A sees
    │                             │                                │  H(code)+token OK
    │                             │ 6. CHALLENGE (dst = seeker_id) ◄┤
-   │                             │ 7. route retour via table rdv  │
-   │ 8. CHALLENGE reçu ◄─────────┤                                │
+   │                             │ 7. return path via the rdv table│
+   │ 8. CHALLENGE received ◄─────┤                                │
    │                             │                                │
-   │ 9. INVITE(code) / HANDSHAKE (signés ML-DSA) tunnelés A↔B via R (E2E)
-   │        … déroulé d'invitation existant, bout-en-bout …       │
-   │ 10. session E2E établie (routée par R) — fiable immédiatement│
+   │ 9. INVITE(code) / HANDSHAKE (ML-DSA signed) tunnelled A↔B through R (E2E)
+   │        … the existing invitation sequence, end to end …      │
+   │ 10. E2E session established (routed by R) — reliable at once │
    │                             │                                │
-   │ 11. (optionnel) tentative de punch direct → bascule si succès│
+   │ 11. (optional) a direct punch attempt → switch over if it works│
 ```
 
-Points clés :
-- **Routage dirigé, pas de flood.** R route le SEEK vers `inviter_id` : dans le
-  cas simple R est un **pair direct de A** (A l'a choisi parmi ses propres pairs
-  à joignabilité large) → 2 hops, chemin retour trivial. Cas général : Kademlia
-  vers `inviter_id`, borné TTL. Ça scale à des milliers de nœuds.
-- **R n'est qu'un tuyau** : il route des paquets signés qu'il ne peut pas forger
-  (invariant NMesh : « un relais ne voit que des métadonnées de routage »).
-- **Chemin retour** : R garde une **table de rendez-vous** `rdv_nonce → (lien, exp)`,
-  bornée et courte. A répond en adressant `seeker_id` ; R renvoie sur le lien d'où
-  venait le SEEK.
-- **B est joint par le lien qu'il a lui-même ouvert vers R** (sortant → traverse
-  tout NAT). Aucune joignabilité entrante requise côté B.
-- **Broadcast opportuniste** : si un nœud du réseau entend le SEEK sur le même
-  medium (BLE, LAN UDP), il joue R et route (toujours dirigé vers `inviter_id`,
-  jamais de flood). Sinon, la liste `relays` du bloc prend le relais.
+Key points:
+- **Directed routing, no flood.** R routes the SEEK towards `inviter_id`: in the
+  simple case R is a **direct peer of A** (A chose it among its own widely
+  reachable peers) → 2 hops, a trivial return path. The general case: Kademlia
+  towards `inviter_id`, TTL-bounded. It scales to thousands of nodes.
+- **R is nothing but a pipe**: it routes signed packets it cannot forge (the
+  NMesh invariant: "a relay sees nothing but routing metadata").
+- **The return path**: R keeps a **rendezvous table** `rdv_nonce → (link, exp)`,
+  bounded and short-lived. A answers addressing `seeker_id`; R sends it back over
+  the link the SEEK came from.
+- **B is reached over the link it opened itself towards R** (outbound →
+  traverses any NAT). No inbound reachability is required on B's side.
+- **Opportunistic broadcast**: if a node on the network hears the SEEK on the
+  same medium (BLE, LAN UDP), it plays R and routes (always directed towards
+  `inviter_id`, never a flood). Otherwise the block's `relays` list takes over.
 
-### 2.5 Sélection des relais dans le bloc (réponse à « pas en aléatoire »)
+### 2.5 Choosing the block's relays (the answer to "not at random")
 
-A choisit les relais par critères déterministes :
-1. Candidats = nœuds connus de A ayant ≥1 descripteur `reachability` **`confirmed`,
-   scope `world`** (joignables par n'importe qui, donc par B où qu'il soit).
-2. À défaut de `world`, des scopes définis **variés** (ancres différentes) pour
-   **couvrir plusieurs audiences** — maximiser la chance que B en partage une.
-3. Borné (ex. 5, configurable). Trié par fraîcheur de confirmation.
-4. Jamais de `broadcast`/`none`.
+A picks the relays on deterministic criteria:
+1. Candidates = nodes A knows with ≥1 `reachability` descriptor that is
+   **`confirmed`, scope `world`** (reachable by anyone, therefore by B wherever
+   it is).
+2. Failing `world`, **varied** defined scopes (different anchors) to **cover
+   several audiences** — maximising the chance that B shares one.
+3. Bounded (5, say, configurable). Sorted by how fresh the confirmation is.
+4. Never `broadcast`/`none`.
 
-### 2.6 Côté invité, après le join
+### 2.6 On the invitee's side, after the join
 
-B **garde la liste des relais utilisés** (pour communiquer au début), puis
-**étoffe sa propre vue** au fil des découvertes mesh (routing/DHT existants).
-Aucune base dédiée : c'est le routing table + presence déjà là.
+B **keeps the list of relays used** (to communicate at first), then **fleshes
+out its own view** as the mesh discovers things (the existing routing/DHT). No
+dedicated database: it is the routing table + presence already there.
 
 ---
 
-## 3. Modèle de sécurité (points de revue)
+## 3. Security model (review points)
 
-| Risque | Réponse |
+| Risk | Answer |
 |---|---|
-| Extérieur qui spamme des SEEK pour tuer un nœud | `token` signé par un membre requis ; sinon drop. Rate-limit **par clé** de cert. TTL + dédup sur le routage du SEEK. |
-| Amplification (SEEK routé à l'infini) | TTL décrémenté par hop, dédup borné (déjà en place pour les paquets routés), table de rendez-vous bornée. |
-| Relais malveillant | Ne peut que **jeter/retarder** (jamais lire ni forger : handshake signé ML-DSA, E2E). C'est déjà dans le modèle de menace. |
-| Rejeu du bloc | `code` à usage unique + `exp`. A peut invalider (le code expire ; annulation = on laisse expirer / on régénère). |
-| Fuite de métadonnée (ID de A diffusé) | **Accepté (décidé).** ID = adresse, pas de compromission de clé. Le masquage (clé de groupe / tag / IDs éphémères) est écarté en v1 car il impose flood ou clé partagée qui ne scalent/protègent pas. Amélioration future si besoin. |
-| Pré-auth traversant le mesh | **Un seul** type (`INVITE_SEEK`) autorisé pré-auth, strictement token-gated, borné, rate-limité. Revue de sécurité dédiée à l'implémentation. |
+| An outsider spamming SEEKs to kill a node | A `token` signed by a member is required; otherwise drop. Rate-limit **per cert key**. TTL + dedup on the SEEK's routing. |
+| Amplification (a SEEK routed forever) | TTL decremented per hop, bounded dedup (already in place for routed packets), a bounded rendezvous table. |
+| A malicious relay | It can only **drop or delay** (never read or forge: ML-DSA-signed handshake, E2E). That is already in the threat model. |
+| Replaying the block | A single-use `code` + `exp`. A can invalidate it (the code expires; cancelling = let it expire / regenerate). |
+| Metadata leak (A's ID broadcast) | **Accepted (decided).** An ID is an address, not a key compromise. Hiding it (a group key / tag / ephemeral IDs) is ruled out in v1 because it forces flooding or a shared key that neither scale nor protect. A future improvement if needed. |
+| Pre-auth traffic crossing the mesh | **One** type only (`INVITE_SEEK`) is allowed pre-auth, strictly token-gated, bounded, rate-limited. A dedicated security review at implementation time. |
 
-**Annulation d'invitation** (demande utilisateur) : pas de DB à purger — le
-`code` est à usage unique et expire. « Annuler » = régénérer/laisser expirer.
-Si on veut une révocation active plus tard, elle passera par le même canal
-signé (hors scope v1).
-
----
-
-## 4. Refactor web UI — statut/config **génériques** par transport
-
-Aujourd'hui la section « Transports » est câblée sur IP (punch, STUN, IP
-publique). On la rend agnostique :
-
-- **`console_snapshot`** expose, par transport actif, un bloc **générique** :
-  `{ scheme, reachability: [...], status: {<clés libres>}, config: {<clés libres>} }`.
-  Le cœur ne fabrique pas ces clés : **chaque transport** fournit son `status()`
-  et son `config_schema()`. La web UI les **rend génériquement** (tableau
-  clé/valeur + contrôles typés depuis le schéma).
-- Le hole punching / STUN / manual holes deviennent le `status()`/`config()` **du
-  transport UDP**, plus des concepts du cœur. La section Transports affiche « ce
-  que le transport déclare », quel qu'il soit.
-- **Config spécifique par transport depuis l'UI** : un `config_schema()` standard
-  (liste de champs `{clé, type, label, défaut}`) → l'UI génère les contrôles ;
-  `console_set_transport_config(scheme, {...})` applique. Un futur transport BLE
-  n'exige **aucune** modif de l'UI.
-
-Panneau invitation : « Connect a node » (générer un bloc / coller un bloc),
-progression du join, et — en **expert** — la liste des relais choisis et l'état.
+**Cancelling an invitation** (a user request): no DB to purge — the `code` is
+single-use and expires. "Cancel" = regenerate / let it expire. If we want active
+revocation later, it will go through the same signed channel (out of scope for
+v1).
 
 ---
 
-## 5. Plan d'implémentation (incréments testés)
+## 4. Web UI refactor — **generic** status/config per transport
 
-Chaque étape est autonome, testée (dont entrées hostiles), suite verte avant de
-merger.
+Today the "Transports" section is wired to IP (punch, STUN, public IP). We make
+it agnostic:
 
-- **Étape 1 — Modèle de joignabilité (cœur + IP).** `Reachability`, `reachability()`
-  sur `BaseServer`, agrégation dans le cœur, signal passif (inbound accepté),
-  auto-tag relais. Snapshot expose la joignabilité. *Aucun changement de
-  comportement réseau — juste de l'observabilité.*
-- **Étape 2 — `INVITE_SEEK` + table de rendez-vous + routage pré-auth borné.**
-  Le paquet, sa vérification (token/cert/exp), le routage vers `inviter_id`, la
-  table `rdv_id→lien`. Tests hostiles (token forgé, expiré, flood, TTL).
-- **Étape 3 — Bloc d'invitation v3 + join « tente tout ».** Génération/validation
-  du bloc, envoi aux relays + `broadcast()` sur transports capables, réponse de A,
-  handshake tunnelé, session E2E via relais. Test e2e A↔B via un relais, **sans
-  lien direct**.
-- **Étape 4 — `broadcast()` sur UDP (LAN) + découverte de relais.** ✅
-  Raffinement adopté vs « broadcaster le SEEK brut » : le chemin retour d'un
-  broadcast fire-and-forget est fragile (le témoin n'a pas de lien vers B).
-  À la place, **découverte LAN** (`src/lan_discovery.py`) : B diffuse un beacon
-  `NDSC`, tout membre du medium répond (`NDSA`) avec ses adresses joignables ;
-  B les ajoute à ses relais candidats et rejoint via le **chemin étape 3**
-  (lien réel, fiable). Même effet (« un membre du medium sert de relais »),
-  sans bridge datagramme. Borné + rate-limité. Port fixe 45888, capacité
-  `broadcast()` générique sur `BaseServer`/UDP.
-- **Étape 5 — Refactor web UI générique** (status/config par transport, UDP
-  migré derrière l'interface, panneau invitation).
-- **Étape 6 — Bonus** : préférence IPv6 directe ; `REACH_PROBE` actif (AutoNAT) ;
-  ID de rendez-vous éphémère pour A.
+- **`console_snapshot`** exposes, per active transport, a **generic** block:
+  `{ scheme, reachability: [...], status: {<free keys>}, config: {<free keys>} }`.
+  The core does not invent those keys: **each transport** supplies its `status()`
+  and its `config_schema()`. The web UI **renders them generically** (a key/value
+  table + typed controls from the schema).
+- Hole punching / STUN / manual holes become the UDP transport's
+  `status()`/`config()`, and stop being core concepts. The Transports section
+  shows "what the transport declares", whatever it is.
+- **Per-transport config from the UI**: a standard `config_schema()` (a list of
+  fields `{key, type, label, default}`) → the UI generates the controls;
+  `console_set_transport_config(scheme, {...})` applies them. A future BLE
+  transport requires **no** UI change.
 
-## 6. Hors scope (pour être explicite)
+The invitation panel: "Connect a node" (generate a block / paste a block), the
+join's progress, and — in **expert** mode — the list of relays chosen and their
+state.
 
-- Implémentation d'un transport Bluetooth/LoRa (on prépare l'interface, on ne
-  code pas le medium).
-- Base de données de quotas/DB d'invitations par nœud (abandonnée — inutile).
-- Révocation active d'invitation (le TTL suffit en v1).
-- ID permanent de A masqué (amélioration future, notée).
+---
+
+## 5. Implementation plan (tested increments)
+
+Each step stands alone, is tested (hostile inputs included), and the suite is
+green before merging.
+
+- **Step 1 — The reachability model (core + IP).** `Reachability`,
+  `reachability()` on `BaseServer`, aggregation in the core, the passive signal
+  (an accepted inbound), the relay auto-tag. The snapshot exposes reachability.
+  *No change in network behaviour — observability only.*
+- **Step 2 — `INVITE_SEEK` + the rendezvous table + bounded pre-auth routing.**
+  The packet, its verification (token/cert/exp), routing towards `inviter_id`,
+  the `rdv_id→link` table. Hostile tests (a forged token, an expired one, a
+  flood, TTL).
+- **Step 3 — Invitation block v3 + a "try everything" join.** Generating and
+  validating the block, sending to the relays + `broadcast()` on capable
+  transports, A's answer, the tunnelled handshake, an E2E session through the
+  relay. An end-to-end test A↔B through a relay, **with no direct link**.
+- **Step 4 — `broadcast()` over UDP (LAN) + relay discovery.** ✅ A refinement
+  adopted over "broadcast the raw SEEK": the return path of a fire-and-forget
+  broadcast is fragile (the witness has no link to B). Instead, **LAN
+  discovery** (`src/lan_discovery.py`): B broadcasts an `NDSC` beacon, any member
+  of the medium answers (`NDSA`) with its reachable addresses; B adds them to its
+  candidate relays and joins through the **step-3 path** (a real, reliable link).
+  The same effect ("a member of the medium acts as a relay"), with no datagram
+  bridge. Bounded + rate-limited. Fixed port 45888, a generic `broadcast()`
+  capability on `BaseServer`/UDP.
+- **Step 5 — The generic web UI refactor** (status/config per transport, UDP
+  moved behind the interface, the invitation panel).
+- **Step 6 — Bonus**: direct IPv6 preference; active `REACH_PROBE` (AutoNAT); an
+  ephemeral rendezvous ID for A.
+
+## 6. Out of scope (to be explicit)
+
+- Implementing a Bluetooth/LoRa transport (we prepare the interface, we do not
+  code the medium).
+- A quota database / a per-node invitation DB (abandoned — pointless).
+- Active invitation revocation (the TTL is enough in v1).
+- Hiding A's permanent ID (a future improvement, noted).
