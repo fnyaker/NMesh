@@ -10,6 +10,13 @@ Two halves, deliberately separate:
     the one on offer. A page left open for an hour cannot install something the
     operator never saw.
 
+There are two ways in
+---------------------
+``apply``/``apply_sync`` take a GitHub tag and download it. ``apply_files`` takes
+files a caller has already fetched from the mesh and verified against a signed
+content root (:mod:`src.core_release`) — no download, no GitHub, no TLS. Both
+end in the same swap, so the backup-and-restore path is written once.
+
 Where the trust actually sits
 -----------------------------
 This is a supply-chain surface, so it is worth stating plainly rather than
@@ -21,16 +28,19 @@ every node that accepts an update. What limits it:
 
   - the repository is **pinned** (``NMESH_UPDATE_REPO`` exists for forks, but a
     peer cannot choose it — nothing on the mesh reaches this module);
-  - an update is **never automatic** — a human confirms a named version;
+  - an update from GitHub is **never automatic** — a human confirms a named
+    version;
   - the download is **bounded**, the archive is extracted with a filter that
     refuses paths outside the destination, and the unpacked tree is checked to
     look like NMesh before anything is replaced;
   - the previous tree is **kept** until the new one is in place, and restored if
     the swap fails.
 
-Signing core releases with the ML-DSA machinery already used for app packages
-(:mod:`src.app_package`) is the obvious next step and would remove GitHub from
-the trusted set; ``todo/peer-integrity.md`` covers the wider problem.
+The mesh path exists precisely to take GitHub out of that set:
+:mod:`src.core_release` signs a release with an ML-DSA identity and this node
+installs it only from a publisher whose key its operator pinned. What neither
+path can defend against is a compromised machine — ``todo/peer-integrity.md``
+covers that wider problem.
 
 Never on the event loop
 -----------------------
@@ -111,7 +121,7 @@ def updatable() -> tuple[bool, str]:
 # Bounded network access
 # ---------------------------------------------------------------------------
 
-async def _bounded(call, timeout: float):
+async def _bounded(call, timeout: float, what: str = "talking to GitHub"):
     """Await a blocking call that runs in a daemon thread we never join.
 
     Not ``to_thread`` / ``run_in_executor``: asyncio joins its default executor
@@ -134,7 +144,7 @@ async def _bounded(call, timeout: float):
     try:
         result = await asyncio.wait_for(fut, timeout)
     except asyncio.TimeoutError:
-        raise UpdateError("timed out talking to GitHub") from None
+        raise UpdateError(f"timed out {what}") from None
     if isinstance(result, BaseException):
         raise result
     return result
@@ -278,12 +288,52 @@ def _verify_tree(path: str) -> None:
                           + ", ".join(missing))
 
 
-def apply_sync(tag: str, *, root: str | None = None) -> dict:
-    """Download ``tag`` and put it in place. Returns what happened.
+def _swap_tree(source: str, root: str) -> str:
+    """Put ``source`` in place of the installed tree, and return the backup dir.
 
     The previous tree is moved aside, not deleted, and restored if the swap
     fails part-way — a half-replaced install is the one outcome worth ruling
-    out."""
+    out. Shared by every way of obtaining a release, so the recovery path is
+    written once: a second, weaker swap is how one route ends up less solid
+    than the other."""
+    backup = os.path.join(root, _BACKUP_DIR)
+    shutil.rmtree(backup, ignore_errors=True)
+    os.makedirs(backup, exist_ok=True)
+    moved: list[str] = []
+    try:
+        for entry in REPLACE_ENTRIES:
+            incoming = os.path.join(source, entry)
+            if not os.path.exists(incoming):
+                continue
+            current = os.path.join(root, entry)
+            if os.path.exists(current):
+                shutil.move(current, os.path.join(backup, entry))
+                moved.append(entry)
+            if os.path.isdir(incoming):
+                shutil.copytree(incoming, current, symlinks=True)
+            else:
+                shutil.copy2(incoming, current)
+    except Exception as exc:
+        # Put back exactly what we took, so a failed update leaves the node
+        # running the version it was running before.
+        for entry in moved:
+            target = os.path.join(root, entry)
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=True)
+            elif os.path.exists(target):
+                os.unlink(target)
+            shutil.move(os.path.join(backup, entry), target)
+        raise UpdateError(f"could not replace the tree: {exc}") from exc
+
+    for script in ("start.sh", "install.sh"):
+        path = os.path.join(root, script)
+        if os.path.exists(path):
+            os.chmod(path, 0o755)
+    return backup
+
+
+def apply_sync(tag: str, *, root: str | None = None) -> dict:
+    """Download ``tag`` and put it in place. Returns what happened."""
     root = root or install_root()
     ok, reason = updatable()
     if not ok:
@@ -291,44 +341,11 @@ def apply_sync(tag: str, *, root: str | None = None) -> dict:
 
     archive = _download(tag)
     stage = os.path.join(root, _STAGE_DIR)
-    backup = os.path.join(root, _BACKUP_DIR)
     shutil.rmtree(stage, ignore_errors=True)
     try:
         source = _extract(archive, stage)
         _verify_tree(source)
-
-        shutil.rmtree(backup, ignore_errors=True)
-        os.makedirs(backup, exist_ok=True)
-        moved: list[str] = []
-        try:
-            for entry in REPLACE_ENTRIES:
-                incoming = os.path.join(source, entry)
-                if not os.path.exists(incoming):
-                    continue
-                current = os.path.join(root, entry)
-                if os.path.exists(current):
-                    shutil.move(current, os.path.join(backup, entry))
-                    moved.append(entry)
-                if os.path.isdir(incoming):
-                    shutil.copytree(incoming, current, symlinks=True)
-                else:
-                    shutil.copy2(incoming, current)
-        except Exception as exc:
-            # Put back exactly what we took, so a failed update leaves the node
-            # running the version it was running before.
-            for entry in moved:
-                target = os.path.join(root, entry)
-                if os.path.isdir(target):
-                    shutil.rmtree(target, ignore_errors=True)
-                elif os.path.exists(target):
-                    os.unlink(target)
-                shutil.move(os.path.join(backup, entry), target)
-            raise UpdateError(f"could not replace the tree: {exc}") from exc
-
-        for script in ("start.sh", "install.sh"):
-            path = os.path.join(root, script)
-            if os.path.exists(path):
-                os.chmod(path, 0o755)
+        backup = _swap_tree(source, root)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -342,7 +359,76 @@ def apply_sync(tag: str, *, root: str | None = None) -> dict:
     }
 
 
+def apply_files_sync(files: dict, version: str, *,
+                     root: str | None = None) -> dict:
+    """Put an already-verified set of files in place of the installed tree.
+
+    This is the mesh path (see :mod:`src.core_release`): the caller has fetched
+    a content-addressed package and checked every byte of it against a signed
+    root, so there is nothing to download and nothing left to trust here. What
+    remains is still ours to check — the paths, which decide *where* those bytes
+    land, and the shape of the tree they make."""
+    root = root or install_root()
+    ok, reason = updatable()
+    if not ok:
+        raise UpdateError(reason)
+    if not files:
+        raise UpdateError("the release is empty")
+
+    stage = os.path.join(root, _STAGE_DIR)
+    shutil.rmtree(stage, ignore_errors=True)
+    source = os.path.join(stage, "tree")
+    try:
+        os.makedirs(source, exist_ok=True)
+        for path, content in files.items():
+            safe = safe_relative(path)
+            if safe is None:
+                # Refused, not sanitised: a package reaching outside its own
+                # tree is not a release with one bad path in it.
+                raise UpdateError(f"the release contains an unusable path: {path!r}")
+            dest = os.path.join(source, safe)
+            os.makedirs(os.path.dirname(dest) or source, exist_ok=True)
+            with open(dest, "wb") as handle:
+                handle.write(content)
+        _verify_tree(source)
+        backup = _swap_tree(source, root)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    return {
+        "applied": version,
+        "previous": __version__,
+        "root": root,
+        "backup": backup,
+        "restart_required": True,
+        "service_managed": service_managed(),
+    }
+
+
+def safe_relative(path) -> str | None:
+    """A relative path with no absolute root, no ``..`` escape, no NUL — or
+    ``None``. The one gate between a package's own idea of where its files go
+    and this machine's filesystem."""
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return None
+    norm = os.path.normpath(path.replace("\\", "/"))
+    if os.path.isabs(norm) or norm.startswith("..") or norm == ".":
+        return None
+    parts = norm.split(os.sep)
+    if ".." in parts or not all(parts):
+        return None
+    return norm
+
+
 async def apply(tag: str, *, root: str | None = None) -> dict:
     """Install release ``tag``. The caller is responsible for having asked."""
     return await _bounded(lambda: apply_sync(tag, root=root),
                           DOWNLOAD_TIMEOUT + 60)
+
+
+async def apply_files(files: dict, version: str, *,
+                      root: str | None = None) -> dict:
+    """Install verified files. The caller is responsible for having verified
+    them — this only puts them in place."""
+    return await _bounded(lambda: apply_files_sync(files, version, root=root),
+                          300.0, what="installing the release")

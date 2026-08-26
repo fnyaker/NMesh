@@ -228,6 +228,114 @@ class TestApply:
             updater.apply_sync("v9.9.9", root=str(root))
 
 
+class TestApplyingVerifiedFiles:
+    """The mesh path: the caller has already checked every byte against a
+    signed root, so nothing is downloaded here. What is still ours to check is
+    where those bytes land."""
+
+    def _install(self, tmp_path):
+        root = tmp_path / "install"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "node.py").write_text("old node\n")
+        (root / "start.sh").write_text("#!/bin/sh\necho old\n")
+        (root / "data").mkdir()
+        (root / "data" / "node.key").write_text("IDENTITY")
+        (root / ".venv").mkdir()
+        (root / ".venv" / "marker").write_text("venv")
+        return root
+
+    def _apply(self, monkeypatch, root, files, version="9.9.9"):
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        return updater.apply_files_sync(files, version, root=str(root))
+
+    def test_files_replace_the_tree(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        result = self._apply(monkeypatch, root, {
+            "src/node.py": b"new node\n",
+            "src/deep/thing.py": b"nested\n",
+            "start.sh": b"#!/bin/sh\necho new\n",
+        })
+        assert result["applied"] == "9.9.9"
+        assert (root / "src" / "node.py").read_text() == "new node\n"
+        assert (root / "src" / "deep" / "thing.py").read_text() == "nested\n"
+        assert (root / "start.sh").read_text() == "#!/bin/sh\necho new\n"
+
+    def test_the_scripts_stay_executable(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        self._apply(monkeypatch, root, {"src/node.py": b"x\n",
+                                        "start.sh": b"#!/bin/sh\n"})
+        assert os.stat(root / "start.sh").st_mode & 0o111
+
+    def test_state_and_the_virtualenv_are_untouched(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        self._apply(monkeypatch, root, {"src/node.py": b"x\n",
+                                        "start.sh": b"#!/bin/sh\n"})
+        assert (root / "data" / "node.key").read_text() == "IDENTITY"
+        assert (root / ".venv" / "marker").read_text() == "venv"
+
+    @pytest.mark.parametrize("path", [
+        "/etc/passwd", "../escaped.py", "src/../../escaped.py",
+        "src/\x00node.py", "", ".", "..",
+    ])
+    def test_a_path_that_reaches_outside_refuses_the_whole_release(
+            self, tmp_path, monkeypatch, path):
+        """Refused, not sanitised: a package reaching outside its own tree is
+        not a release with one bad path in it."""
+        root = self._install(tmp_path)
+        with pytest.raises(updater.UpdateError):
+            self._apply(monkeypatch, root, {"src/version.py": b"x\n",
+                                            "start.sh": b"#!/bin/sh\n",
+                                            path: b"pwn\n"})
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+        assert not (tmp_path.parent / "escaped.py").exists()
+
+    def test_something_that_is_not_a_node_is_refused(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        with pytest.raises(updater.UpdateError):
+            self._apply(monkeypatch, root, {"README.md": b"hello\n"})
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+
+    def test_an_empty_release_is_refused(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        with pytest.raises(updater.UpdateError):
+            self._apply(monkeypatch, root, {})
+
+    def test_a_refusal_to_update_still_applies(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        monkeypatch.setattr(updater, "updatable", lambda: (False, "read-only"))
+        with pytest.raises(updater.UpdateError, match="read-only"):
+            updater.apply_files_sync({"src/x.py": b"x"}, "9.9.9", root=str(root))
+
+    def test_a_failed_swap_restores_the_previous_tree(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        real_copy = updater.shutil.copytree
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_copy(*args, **kwargs)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(updater.shutil, "copytree", flaky)
+        with pytest.raises(updater.UpdateError):
+            self._apply(monkeypatch, root, {"src/node.py": b"new\n",
+                                            "start.sh": b"#!/bin/sh\n",
+                                            "scripts/x.py": b"y\n"})
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+
+    def test_no_staging_directory_is_left_behind(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        self._apply(monkeypatch, root, {"src/node.py": b"x\n",
+                                        "start.sh": b"#!/bin/sh\n"})
+        assert not (root / ".nmesh-update").exists()
+
+    def test_safe_relative_is_the_one_gate(self):
+        assert updater.safe_relative("src/node.py") == os.path.join("src", "node.py")
+        for bad in ("/abs", "../up", "a/../../b", "a/\x00b", "", None, 42, "."):
+            assert updater.safe_relative(bad) is None
+
+
 class TestGuards:
     def test_repo_is_pinned_by_default(self, monkeypatch):
         monkeypatch.delenv("NMESH_UPDATE_REPO", raising=False)
