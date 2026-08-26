@@ -21,7 +21,7 @@ INSTALL = ROOT / "install.sh"
 BASH = shutil.which("bash")
 
 pytestmark = pytest.mark.skipif(BASH is None,
-                                reason="bash requis pour tester l'installeur")
+                                reason="bash is needed to test the installer")
 
 
 def run_snippet(tmp_path, snippet, *, fake_bins=(), env=None, isolate=False):

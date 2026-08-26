@@ -9,8 +9,8 @@ mutates it on the event loop, the web thread reads snapshots).
 Persistence is opt-in and can go two ways:
   - a **``store`` backend** (:class:`DrawerStore`) — the node's per-app encrypted
     drawer (:mod:`src.app_storage`). This is what the built-in chat uses so that
-    contacts/pseudos never sit in the clear on disk (charter: aucun secret en
-    clair sur disque sans raison).
+    contacts/pseudos never sit in the clear on disk (charter: no secret in the clear
+    on disk without a reason).
   - a plain **``path``** — an atomic 0600 JSON file, kept for demos/tests that
     hold no real data.
 With neither, the state stays purely in memory. It holds routing metadata (node

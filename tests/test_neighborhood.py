@@ -157,7 +157,7 @@ async def test_losing_a_slot_resumes_the_search(monkeypatch):
     await node.stop()
 
 
-# ── promotion d'une node vue en transit ──────────────────────────────────────
+# ── promoting a node seen in transit ────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_closer_node_seen_in_transit_is_watched():
@@ -204,7 +204,7 @@ async def test_relayed_packet_feeds_the_watch_list():
 
 @pytest.mark.asyncio
 async def test_promotion_is_dialled_even_when_satisfied(monkeypatch):
-    """Au-dessus du plancher on reste silencieux… sauf pour une meilleure node."""
+    """Above the floor we stay quiet… except for a better node."""
     node = await _node()
     for _ in range(_NEIGHBOR_FLOOR):
         await _attach_peer(node, _id_at_distance(node, 4))
@@ -259,7 +259,7 @@ async def test_watch_list_is_cleaned_and_bounded():
         node._note_neighbor_candidate(_id_at_distance(node, 40))
     assert len(node._neighbor_watch) <= _NEIGHBOR_WATCH_TRACKED
 
-    # Une candidate devenue pair vivant sort de la liste d'attente.
+    # A candidate that became a live peer leaves the waiting list.
     watched = next(iter(node._neighbor_watch))
     await _attach_peer(node, watched)
     assert watched not in node._neighbor_promotions()

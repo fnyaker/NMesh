@@ -1317,7 +1317,7 @@ class TestPasswordChange:
 
 
 class TestJoinTicket:
-    """Émettre un ticket et rejoindre avec, depuis la console."""
+    """Issuing a ticket and joining with it, from the console."""
 
     async def test_issuing_needs_a_session(self):
         node, console = await _make_console()
@@ -1329,7 +1329,7 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
     async def test_a_node_with_no_public_address_is_told_why(self):
-        """409 avec une explication, pas un ticket qui ne peut pas marcher."""
+        """A 409 with an explanation, not a ticket that cannot work."""
         node, console = await _make_console()
         try:
             _, token = await _login(console)
@@ -1389,7 +1389,7 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
     async def test_joining_still_accepts_a_uri_and_a_code(self):
-        """Le ticket s'ajoute au join complet, il ne le remplace pas."""
+        """The ticket adds to the full join, it does not replace it."""
         node, console = await _make_console()
         try:
             _, token = await _login(console)

@@ -19,7 +19,7 @@ check("plain text", screen(t)[0], "hello world");
 
 t = new Term(40, 5);
 t.write("password: ");            // sudo's prompt, echo off, nothing typed back
-check("prompt stays put", screen(t)[0], "password:");   // fin d'espace coupée à l'affichage
+check("prompt stays put", screen(t)[0], "password:");   // trailing space trimmed on display
 
 t = new Term(40, 5);
 t.write("abc\b\b\bxyz");          // backspace editing, as readline does

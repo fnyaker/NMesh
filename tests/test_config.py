@@ -338,8 +338,7 @@ class TestPasswordScript:
             assert len(result.stdout.strip().splitlines()) == 1
 
     def test_a_chosen_password_comes_from_stdin_not_the_arguments(self, tmp_path):
-        """Un mot de passe en argument est lisible par tout le monde dans
-        `ps`."""
+        """A password in an argument is readable by everyone in `ps`."""
         result = self.run(str(tmp_path), "--stdin", stdin="a-chosen-password\n")
         assert result.returncode == 0, result.stderr
         from src import console_auth

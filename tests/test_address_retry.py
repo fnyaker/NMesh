@@ -164,7 +164,7 @@ class TestTheManualRetry:
 
 
 class TestThePeriodicRetry:
-    """La boucle. Ce qui est fixe ici, c'est qu'elle ne peut pas inonder."""
+    """The loop. What is fixed here is that it cannot flood."""
 
     @pytest.mark.asyncio
     async def test_nothing_is_dialled_while_every_medium_says_zero(self):
