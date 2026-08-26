@@ -4,7 +4,7 @@ A decentralised, transport-agnostic mesh network, built to carry sensitive data
 through a **hostile** environment. This file sets the non-negotiable
 principles. Every contribution must respect them.
 
-## ⚑ Architecture documentation — MANDATORY
+## Architecture documentation — MANDATORY
 
 `Docs/Architecture/` describes **how the code actually works** (protocol,
 security, routing, transports, and above all `gotchas.md`: the hard-won traps
@@ -98,7 +98,7 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
 ## Contribution discipline
 
 - **Documentation follows the code, in the same commit — always, no
-  exception.** This rule generalises the ⚑ section above to **all** the
+  exception.** This rule generalises the section above to **all** the
   documentation, not only `Docs/Architecture/`.
   - **BEFORE coding: read the documents concerned.** `Docs/Architecture/` first
     (internal mechanics), then the usage guides affected
@@ -117,6 +117,46 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   comment density.
 - A comment explains only a **constraint** the code cannot show, never the
   "what" nor where it came from.
+
+### Name the thing, then count the thing
+
+Most of the bugs that reach a user are not hard: they are a name that lies. A
+`_Peer` in this codebase is a **link**, and a node may hold several at once — so
+`authenticated_peers` counted links while the console printed "Connected to N
+**nodes**". One number, four labels, right for two of them, and it survived a
+whole pass that grouped those very links by node.
+
+- **The name carries the unit.** `link_count` and `node_count`, never `peers`.
+  If a reader has to open the definition to know what a number counts, rename it
+  rather than comment it.
+- **Derive, do not re-derive.** There was already a helper returning one link per
+  identity; the snapshot re-implemented the count inline and got a different
+  meaning. Two expressions for one quantity is two chances to be wrong.
+- **Read the label out loud against the value.** Before shipping a number to a
+  screen, say the sentence it will render: "Connected to 3 nodes" — is it three
+  *nodes*? A label and its value are one claim, and the claim has to be true.
+- **Ask who else uses this.** Every change: what reads this field, this
+  function, this row — and what will? A count consumed under two labels is a
+  count that will be wrong under one of them.
+- Change the *cause*, not the symptom: a wrong number on a page is fixed in the
+  thing that computes it, once, not corrected at each place it is displayed.
+
+### No emoji in an interface
+
+Emoji make a product look cheap, render differently on every platform, and carry
+no meaning to a screen reader. They are also the lazy way out of drawing
+something.
+
+- **Graphical interfaces use SVG icons** — `icon()` in
+  [`src/webassets/ui.py`](src/webassets/ui.py), one set, shared by every page,
+  inheriting `currentColor` and sized in `em`. A page never inlines its own
+  glyph.
+- **Terminal output uses words**, aligned: `ok`, `warning:`, `failed`. A dingbat
+  is not guaranteed to render in a minimal console, and a word always is.
+- **Documentation uses structure** — a heading, a table, an admonition line in
+  prose. Not a green tick.
+- The one exception is content that *is* an emoji: the chat reaction palette,
+  and what a person types. Those are the user's, not the interface's.
 - **Every finished piece of work bumps the version**, in the same commit. One
   step on the patch number per task (or per block of tasks landing together):
   `0.1.3` → `0.1.4`. The patch number is **not capped at 9** — it counts up

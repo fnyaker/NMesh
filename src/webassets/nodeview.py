@@ -495,7 +495,7 @@ PAGE_HTML = """<!doctype html>
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Node</span></span></a>
     <span class="grow"></span>
-    <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
+    <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
   </header>
   <div id="view"></div>
 </main>

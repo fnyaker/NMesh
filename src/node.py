@@ -189,7 +189,7 @@ _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
 _BROADCAST_ID    = b"\xff" * 20
 _MSG_DEDUP_MAX         = 10_000
-_MAX_PEERS             = 128
+_MAX_PEERS             = 128    # open links, not distinct nodes: a node may hold several
 _MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
 _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
 _MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
@@ -2873,10 +2873,14 @@ class MeshNode:
                          + ([self._udp_listen_uri] if self._udp_listen_uri else []),
             "running": self._running,
             "uptime": self._metrics.uptime(),
-            "peer_count": len(self._peers),
-            "authenticated_peers": sum(
-                1 for p in self._peers if p.authenticated_id and p.session
-            ),
+            # Two different quantities, named so they cannot be confused again.
+            # A node may hold several links at once (a LAN address and a punched
+            # UDP path, say), so these are not the same number — and a console
+            # that printed the link count under the word "nodes" is exactly what
+            # one ambiguous name costs.
+            "link_count": sum(1 for p in self._peers
+                              if p.authenticated_id and p.session),
+            "node_count": len(self._authenticated_peers()),
             "peers": peers,
             "routing": routing,
             "routing_size": len(routing),
@@ -3552,7 +3556,11 @@ class MeshNode:
 
     def _transport_details(self) -> list[dict]:
         """Per-scheme view of the transport layer for the console: listeners,
-        ports, connected peers — plus hole-punching state for udp://."""
+        ports, open links — plus hole-punching state for udp://.
+
+        `links` counts links and not nodes on purpose: a transport carries
+        links, and one node reached over both tcp and udp is one link on each.
+        The console labels it "Links" for the same reason."""
         listening = (self._transport_manager.listening_uris()
                      + ([self._udp_listen_uri] if self._udp_listen_uri else []))
         by_scheme: dict[str, list[str]] = {}
@@ -3561,11 +3569,11 @@ class MeshNode:
             if parsed is not None:
                 by_scheme.setdefault(parsed[0], []).append(uri)
 
-        peer_schemes: dict[str, int] = {}
+        links_by_scheme: dict[str, int] = {}
         for p in self._peers:
             scheme = self._peer_scheme(p)
             if scheme is not None:
-                peer_schemes[scheme] = peer_schemes.get(scheme, 0) + 1
+                links_by_scheme[scheme] = links_by_scheme.get(scheme, 0) + 1
 
         self._prune_punch_pending()
         details: list[dict] = []
@@ -3586,7 +3594,7 @@ class MeshNode:
                 "scheme": scheme,
                 "listening": uris,
                 "ports": sorted(set(ports)),
-                "peers": peer_schemes.get(scheme, 0),
+                "links": links_by_scheme.get(scheme, 0),
             }
             if scheme == "udp":
                 now = time.monotonic()
@@ -3599,7 +3607,7 @@ class MeshNode:
                                    if self._observed_udp_addr else None),
                     "ready": ready,
                     "reason": reason,
-                    "relay_peers": self._relay_peer_count(),
+                    "relay_nodes": self._relay_node_count(),
                     "manual_holes": [{
                         "addr": f"{h}:{p}",
                         "sent": e["sent"],
@@ -3619,11 +3627,14 @@ class MeshNode:
             details.append(entry)
         return details
 
-    def _relay_peer_count(self) -> int:
-        """Authenticated peers that could coordinate a punch (or that we could
-        relay between). Hole punching is impossible without at least one."""
-        return sum(1 for p in self._peers
-                   if p.authenticated_id is not None and p.session is not None)
+    def _relay_node_count(self) -> int:
+        """How many *nodes* could coordinate a punch (or be relayed between).
+        Hole punching is impossible without at least one.
+
+        Nodes, not links: two links to the same node are still one coordinator,
+        and counting links here would have told the operator they had two ways
+        through when they had one."""
+        return len(self._authenticated_peers())
 
     def _punch_readiness(self) -> tuple[bool, str]:
         """Explain, for the console, whether a punch can happen right now.
@@ -3635,11 +3646,11 @@ class MeshNode:
             return False, "hole punching is off"
         if self._udp_server is None:
             return False, "no UDP listener — start UDP first"
-        relays = self._relay_peer_count()
+        relays = self._relay_node_count()
         if relays == 0:
-            return False, ("no connected peer to coordinate through — join a "
+            return False, ("no connected node to coordinate through — join a "
                            "reachable node (a public rendezvous) first")
-        return True, (f"ready — {relays} peer(s) can coordinate a punch; it "
+        return True, (f"ready — {relays} node(s) can coordinate a punch; it "
                       "fires on demand when you reach an unreachable node")
 
     def console_set_punch_enabled(self, enabled: bool) -> bool:

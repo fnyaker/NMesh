@@ -40,7 +40,7 @@ demand** rather than a blind XOR hop:
   (`_KAD_LOOKUP_TIMEOUT`, `_KAD_LOOKUP_MAX_ROUNDS`), aggregating `FOUND_NODE`
   until it stabilises.
 
-### ⚑ Acquiring a route **never** blocks a receive loop
+### Acquiring a route **never** blocks a receive loop
 
 `_ensure_route_to` takes seconds (lookup, dial, punch). Calling it from a
 handler — therefore from `_Peer._loop` — freezes the incoming link for that
@@ -69,7 +69,7 @@ control plane** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`
 `PING`/`PONG` (per-link keepalive), the punch signalling, and catalogue gossip
 (re-stamped at every hop).
 
-### A return path learned from traffic (`_route_hints`) ⚑
+### A return path learned from traffic (`_route_hints`)
 
 XOR proximity is only a **hypothesis** about an overlay we have not finished
 learning; the link a packet just arrived on is **proof** that it carries traffic
@@ -278,7 +278,7 @@ of the three.
   `FOUND_NODE` until it stabilises; the results feed `_connect_routing` and the
   routing table.
 
-## ⚑ The size of a `FOUND_NODE` (a post-quantum constraint)
+## The size of a `FOUND_NODE` (a post-quantum constraint)
 
 An ML-DSA-65 certificate weighs **~7.3 kB** (subject key + issuer key +
 signature), so a chain up to a root is ~**14.6 kB**. Answering a `FIND_NODE`
@@ -322,7 +322,7 @@ The reply is therefore **budgeted**:
   network grows), and the bound is well above that. A bound close to normal
   traffic kills real lookups.
 
-## Address propagation  ⚑ a central invariant
+## Address propagation — a central invariant
 
 **The goal**: *knowing a node ⟹ knowing the whole set of addresses it
 announces*, so that routing can pick the best medium ("if A↔B is Bluetooth and

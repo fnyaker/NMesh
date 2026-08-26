@@ -87,7 +87,7 @@ async def main():
             ok = got == orig_pcm
 
             print(f"  frames sent  : {sent}")
-            print(f"  audio        : {'identical ✓' if ok else 'MISMATCH ✗'} "
+            print(f"  audio        : {'identical' if ok else 'MISMATCH'} "
                   f"({len(got)}/{len(orig_pcm)} bytes)")
             if latencies:
                 lat = sorted(latencies)

@@ -196,7 +196,7 @@ Two things the launcher no longer does:
   each other.
 
 At startup the node prints the file's problems **and** the settings overridden
-by the command line (`Config ⚠`). A silently ignored file is exactly the failure
+by the command line (`Config warn`). A silently ignored file is exactly the failure
 you want to see.
 
 Defensive reading, like every input to the process: size and line count bounded,
@@ -225,7 +225,7 @@ spool.poll_interval = 0.5
 The file carries them **as text and does not validate them**: the medium is the
 only thing that knows what it takes. At startup they are distributed before
 anything listens or dials; a refused value or an unknown scheme comes out as
-`Config ⚠` and stays at its default. In the console: **Network → Reachability**,
+`Config warn` and stays at its default. In the console: **Network → Reachability**,
 one panel per transport, rendered from what the transport declares. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
 

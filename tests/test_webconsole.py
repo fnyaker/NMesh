@@ -1461,6 +1461,65 @@ class TestRestartingOntoNewCode:
             console.stop(); await node.stop()
 
 
+class TestNodesAreNotLinks:
+    """A node may hold several links at once, so the two are different numbers.
+
+    They were one number under four labels — "Connected to N nodes" printed the
+    link count — which is what a name that does not carry its unit costs."""
+
+    async def _two_links_to_one_node(self, node):
+        """Give the node two authenticated links to the *same* identity."""
+        from src.node_id import NodeID
+        from src.crypto import SessionKey
+        same = NodeID(b"\x11" * 20)
+        for _ in range(2):
+            peer = await node._inject_peer(_FakeAuthPeerTransport())
+            peer.authenticated_id = same
+            peer.session = SessionKey(b"\x00" * 32)
+        return same
+
+    async def test_the_snapshot_counts_both_and_names_both(self):
+        node, console = await _make_console()
+        try:
+            await self._two_links_to_one_node(node)
+            state = await node.console_snapshot()
+            assert state["link_count"] == 2
+            assert state["node_count"] == 1
+            # The ambiguous name is gone, not merely shadowed.
+            assert "authenticated_peers" not in state
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_nodes_links_are_never_split_across_pages(self):
+        """Paging by link would show one node twice, once with each half of its
+        links, and count links under a heading that says nodes."""
+        node, console = await _make_console()
+        try:
+            await self._two_links_to_one_node(node)
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/nodes?scope=active&limit=1&offset=0", token)
+            assert status == 200
+            assert body["total"] == 1                 # one node…
+            assert len(body["items"]) == 2            # …carrying both its links
+            assert {row["id"] for row in body["items"]} == {"11" * 20}
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_known_table_still_pages_by_row(self):
+        """Each known row is already one node, so nothing changes there."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/nodes?scope=known&limit=5&offset=0", token)
+            assert status == 200 and body["total"] == len(body["items"])
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestPseudoEndpoints:
     """Naming this node, and finding others by name.
 

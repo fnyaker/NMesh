@@ -576,6 +576,20 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 .flush{padding:0}
 .bare{border:0;padding:0;margin:0;min-width:0}
 .stat.sm .v{font-size:var(--fs-md);font-weight:600}
+/* -- icons ---------------------------------------------------------------- */
+/* Sized in `em` and painted with `currentColor`, so an icon is the size and the
+   colour of the text it sits beside, in every theme, without a second rule.
+   These replaced emoji: a different picture on every platform, nothing at all
+   for a screen reader, and cheap-looking wherever they did render. */
+.ic{width:1.15em;height:1.15em;flex:none;display:inline-block;vertical-align:-.16em;
+  stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.ic.lg{width:1.4em;height:1.4em}
+/* A disclosure chevron points down when open and right when closed — one icon
+   turned, not two drawings to keep in step. */
+.ic.turn{transform:rotate(-90deg);transition:transform var(--speed) var(--ease)}
+[aria-expanded="true"] .ic.turn{transform:none}
+button>.ic:only-child{width:1.25em;height:1.25em}
+
 .search{position:relative;min-width:min(200px,100%);flex:1 1 220px;max-width:340px}
 .search input{padding-left:var(--s-7)}
 .search::before{content:"";position:absolute;left:13px;top:50%;width:11px;height:11px;
@@ -616,7 +630,7 @@ SHELL = """
 .nav button:hover,.nav a:hover{background:var(--surface-2);color:var(--text);
   border-color:transparent;text-decoration:none}
 .nav button[aria-selected="true"]{background:var(--accent-soft);color:var(--accent)}
-.nav .ic{width:16px;height:16px;flex:none;opacity:.9}
+.nav .ic{width:16px;height:16px;opacity:.9}
 .nav .tail{margin-left:auto;font-size:var(--fs-xs);color:var(--text-faint);font-weight:600}
 .rail-foot{margin-top:auto;padding-top:var(--s-3);border-top:1px solid var(--border);
   display:flex;flex-direction:column;gap:var(--s-2)}
@@ -808,6 +822,35 @@ const shortId = (id) => id ? id.slice(0, 6) + "…" + id.slice(-4) : "unknown";
 // same one, and a lookalike costs an attacker nothing to register. So the id
 // always travels with it — never a name on its own.
 const nodeLabel = (id, pseudo) => pseudo ? pseudo + " · " + shortId(id) : shortId(id);
+// ---- icons -----------------------------------------------------------------
+// One set for the whole product. Paths only: the wrapper is written once by
+// `icon()`, so every icon shares a stroke weight, a box and a baseline.
+const ICONS = {
+  close:      '<path d="M18 6 6 18M6 6l12 12"/>',
+  back:       '<path d="M15 18 9 12l6-6"/>',
+  moon:       '<path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/>',
+  sun:        '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  attach:     '<path d="M21 11.6 12.4 20a5.5 5.5 0 1 1-7.8-7.8l8.6-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.5a1.8 1.8 0 1 1-2.6-2.6l7.9-7.8"/>',
+  emoji:      '<circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8.5 14.5a4.5 4.5 0 0 0 7 0"/>',
+  compose:    '<path d="M12 20h9M16.4 3.6a2.1 2.1 0 0 1 3 3L7.5 18.5 3.5 19.5l1-4Z"/>',
+  trash:      '<path d="M3 6h18M8 6V4h8v2M18.5 6l-1 14h-11l-1-14M10 10.5v6M14 10.5v6"/>',
+  send:       '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"/>',
+  image:      '<rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 15.5 16 10.5 5.5 21"/>',
+  file:       '<path d="M14 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8ZM14 2.5V8h5.5"/>',
+  check:      '<path d="M20 6.5 9.2 17.3 4 12.1"/>',
+  checkTwice: '<path d="M1.5 12.4 6 16.9 15.2 7.7M12 16.9 21.7 7.2"/>',
+  chevron:    '<path d="M6 9.5 12 15.5l6-6"/>',
+};
+// `title` is what a screen reader announces; without one the icon is decorative
+// and hidden, because a button beside it already carries the label.
+function icon(name, title){
+  const path = ICONS[name];
+  if(!path) return "";
+  return '<svg class="ic" viewBox="0 0 24 24" ' +
+    (title ? 'role="img"><title>' + esc(title) + "</title>"
+           : 'aria-hidden="true">') + path + "</svg>";
+}
+
 function debounce(fn, delay){
   let timer; return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay || 250); };
 }
@@ -822,6 +865,9 @@ function fmtBytes(value){
   return (unit ? amount.toFixed(1) : Math.round(amount)) + " " + units[unit];
 }
 function fmtRate(value){ return value == null ? "—" : fmtBytes(value) + "/s"; }
+// "1 node", "2 nodes". Written once so a count and its unit always agree — and
+// so the unit is right there in the call, where a reader can check it.
+function plural(count, word){ return count + " " + word + (count === 1 ? "" : "s"); }
 function fmtNum(value){
   return value == null ? "—" : Number(value).toLocaleString(undefined, {maximumFractionDigits:1});
 }
@@ -887,7 +933,7 @@ function toast(text, kind, detail){
   node.className = "toast " + (kind || "");
   node.innerHTML = '<div class="grow"><div class="t">' + esc(text) + "</div>" +
     (detail ? '<div class="b">' + esc(detail) + "</div>" : "") + "</div>" +
-    '<button class="icon sm" aria-label="Dismiss">✕</button>';
+    '<button class="icon sm" aria-label="Dismiss">' + icon("close") + "</button>";
   node.querySelector("button").addEventListener("click", () => node.remove());
   region.appendChild(node);
   setTimeout(() => node.remove(), kind === "danger" ? 9000 : 5000);
@@ -1047,7 +1093,9 @@ const THEME = {
   paint(){
     const button = $("theme-toggle"); if(!button) return;
     const dark = this.current() === "dark";
-    button.textContent = dark ? "☀" : "☾";
+    // The button offers the theme you would switch *to*, so the sun shows
+    // while the page is dark.
+    setHTML(button, icon(dark ? "sun" : "moon"));
     button.title = dark ? "Switch to the light theme" : "Switch to the dark theme";
     button.setAttribute("aria-label", button.title);
   },

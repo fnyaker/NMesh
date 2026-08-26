@@ -40,6 +40,14 @@ button works.
 Joining a network is a **network** action, not a setting: tickets, QR codes,
 manual exchange, relays and certificates all live in *Network → Add a node*.
 
+**Nodes and links are two counts, never one.** A node may hold several links at
+once — a LAN address and a punched UDP path, say — so "connected to 2 nodes" and
+"3 links up" are both true at the same time. Every number on screen names which
+one it is: the Overview headline and the **Network** tab badge count *nodes*;
+the rail line, the *Active links* card and each transport's badge count *links*.
+They come from two separate fields (`node_count`, `link_count`), because one
+field under two labels is a field that is wrong under one of them.
+
 **⌘K / Ctrl-K** opens a command palette: any section, plus the common actions
 (ping, create a ticket, check for updates, switch theme). **The theme** follows
 the system by default; the top bar's button picks light or dark, and the choice
@@ -107,12 +115,15 @@ and `Sign out` always returns to the local console.
     the node and its edges on the map. The selected row carries a **Details**
     button — selecting is not opening, so a tap that only meant to point at
     something does not throw a dialog over the map.
-- **Active links are grouped by node.** A node you hold five links with is one
-  row: its name, how many links, the lowest latency, and the jitter **of that
-  fastest link** — the jitter of a link nobody uses answers no question. Unfold
-  the row to see each link. The unfolded state is per table (active and known
-  are independent) and survives the refresh; a row folds back only when the node
-  it belongs to is gone.
+- **Connected nodes are one row each**, whatever the number of links. A node you
+  hold five links with is one row: its name, how many links, the lowest latency,
+  and the jitter **of that fastest link** — the jitter of a link nobody uses
+  answers no question. Unfold the row to see each link. The unfolded state is
+  per table (active and known are independent) and survives the refresh; a row
+  folds back only when the node it belongs to is gone.
+  The count beside the heading, and the one on the Network tab, are therefore
+  **nodes**; the page is paged by node too, so a node's links can never be split
+  across two pages and show it twice.
 - **A node's card** is the *same* everywhere: the console's dialog, a panel
   beside the conversation in chat, fleet's sheet, or the `/node#<id>` page in a
   window or a tab. It offers only what the installed apps make possible
@@ -381,7 +392,7 @@ and answered instantly from what this node already knows. *Ask the network* adds
 one directory lookup for the exact name, which reaches somebody this node has
 never met. Every result carries the node id and opens the node card.
 
-The **Active links** and **Known nodes** tables filter on names too, through the
+The **Connected nodes** and **Known nodes** tables filter on names too, through the
 search box they already have.
 
 ## Updates (Settings → Updates)

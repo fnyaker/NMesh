@@ -358,9 +358,9 @@ async def main() -> None:
     # nobody chose. Say it here, where the operator is already looking, not in a
     # line scrolled past twenty seconds earlier.
     for problem in config_problems + transport_problems:
-        print(f"  Config ⚠      : {problem}")
+        print(f"  Config warn   : {problem}")
     if config_overridden:
-        print(f"  Config ⚠      : overridden on the command line: "
+        print(f"  Config warn   : overridden on the command line: "
               f"{', '.join(config_overridden)}")
     if pub_ip:
         print(f"  Public IP     : {pub_ip}   (self-discovered)")

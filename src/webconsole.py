@@ -323,8 +323,7 @@ class WebConsole:
         """This node's name and id, for the field that edits it."""
         return {"pseudo": self._node.pseudo,
                 "id": self._node.id.raw.hex(),
-                "max": MAX_PSEUDO,
-                "known": len(self._node._pseudo_book)}
+                "max": MAX_PSEUDO}
 
     def _persist_pseudo(self, pseudo: str):
         """Record the adopted pseudo in the configuration file so it survives a
@@ -634,6 +633,22 @@ def _number(raw, default: int = 0) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _page_by_node(links: list, offset: int, limit: int) -> tuple:
+    """One page of *nodes*, carrying every link each of them holds.
+
+    Returns ``(links_on_this_page, node_total)``. The node order is the order
+    the links arrived in, so the caller's sort still decides it."""
+    order, by_node = [], {}
+    for link in links:
+        bucket = by_node.get(link["id"])
+        if bucket is None:
+            bucket = by_node[link["id"]] = []
+            order.append(link["id"])
+        bucket.append(link)
+    page = order[offset:offset + limit]
+    return [link for node_id in page for link in by_node[node_id]], len(order)
 
 
 def _matches_list_query(item: dict, query: str) -> bool:
@@ -996,9 +1011,18 @@ def _make_handler(console: WebConsole):
                         str(item.get("app_id", ""))))
                 matched = [item for item in items
                            if _matches_list_query(item, query)]
+                # The active table shows one row per *node*, unfolding onto that
+                # node's links, so it has to be paged by node: paging by link
+                # would let one node's links straddle a page boundary and show
+                # the node twice, once with each half — and would count links
+                # under a heading that says nodes.
+                if path == "/api/nodes" and scope == "active":
+                    rows, total = _page_by_node(matched, offset, limit)
+                else:
+                    rows, total = matched[offset:offset + limit], len(matched)
                 self._json(200, {
-                    "items": matched[offset:offset + limit],
-                    "total": len(matched),
+                    "items": rows,
+                    "total": total,
                     "limit": limit,
                     "offset": offset,
                 })

@@ -86,7 +86,7 @@ Settings → Identity → *Find a node by name*. Type as much as you know:
 - `jose` finds `José`, and case never matters.
 
 Results are ranked best-first and each carries its node id and a link to the
-node's details. The **Active links** and **Known nodes** tables filter on names
+node's details. The **Connected nodes** and **Known nodes** tables filter on names
 too, so the search box you already use works on them.
 
 This all answers instantly, because it reads names this node has already

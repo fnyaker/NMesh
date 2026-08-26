@@ -62,7 +62,7 @@ async def main() -> None:
     try:
         # --- text conversation ---
         print("\n[text]")
-        await alice_app.send_text(bob.id, "Salut Bob 👋")
+        await alice_app.send_text(bob.id, "Hello Bob")
         msg = await _expect(bob_app, TextMessage)
         print(f"  Bob received : {msg.text!r} from {msg.src.raw.hex()[:12]}…")
         await bob_app.send_text(alice.id, "Hi Alice, got it!")

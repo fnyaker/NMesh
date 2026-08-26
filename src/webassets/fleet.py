@@ -89,7 +89,7 @@ FLEET_HTML = """<!doctype html>
         <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
       </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme">☾</button>
+      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
       <div class="menu-wrap more-wrap">
         <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
                 aria-label="More">⋯</button>
@@ -250,7 +250,7 @@ FLEET_HTML = """<!doctype html>
 <dialog id="modal" aria-labelledby="modal-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="modal-title"></h2>
-      <button id="modal-close" class="icon" aria-label="Close">✕</button></header>
+      <button id="modal-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div id="modal-body" class="sheet-body"></div>
   </div>
 </dialog>

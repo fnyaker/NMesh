@@ -718,7 +718,7 @@ function render(msgs){ const log=$("log");
   for(const m of msgs){ const d=document.createElement("div");
     d.className="bubble"+(m.src==="me"?" me":"");
     const who=m.src==="me"?"you":m.src.slice(0,12)+"…";
-    let txt = m.type==="file" ? ("📎 "+m.name+" ("+m.size+" B)") : m.text;
+    let txt = m.type==="file" ? (m.name+" — "+m.size+" B") : m.text;
     d.innerHTML='<div class="who"></div><div class="body"></div>';
     d.querySelector(".who").textContent=who; d.querySelector(".body").textContent=txt;
     log.appendChild(d);

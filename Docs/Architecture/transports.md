@@ -117,7 +117,8 @@ address never tried is `untried`, not broken. Bounded twice over: 128 nodes,
 Three further outcomes never reach the medium and are recorded anyway, because
 a blank line next to an address that does not work teaches nothing: `invalid`
 (the URI is not one), `no transport` (no registered transport serves that
-scheme — the reason carries the scheme) and `peer limit` (`_MAX_PEERS` reached).
+scheme — the reason carries the scheme) and `peer limit` (`_MAX_PEERS` reached
+— a ceiling on open **links**, not on distinct nodes; one node may hold several).
 
 **A single dialling path.** `node._dial_uri(node_id, uri, timeout)` is the only
 place an outgoing link is opened: the routing-table walk, the console's *Retry*
@@ -277,7 +278,7 @@ coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
    because on the relay's server side `remote_addr` is `None`).
 3. Each creates a `_punch_pending` state and sends a **burst of raw UDP PROBEs**,
    ML-DSA signed (`_send_punch_probes`).
-   - ⚠ If the peer's UDP address is unknown (empty), **we keep the state** and do
+   - **Careful:** if the peer's UDP address is unknown (empty), **we keep the state** and do
      not probe: the peer has our address and is probing us; an incoming PROBE
      completes the punch from its source address. (A historical bug: deleting the
      state blocked the initiator — see `gotchas.md`.)

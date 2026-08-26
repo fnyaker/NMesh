@@ -611,10 +611,10 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 
 | Type | Val | Direction | Signed |
 |---|---|---|---|
-| `ENROL_REQUEST` | 0x01 | operator → node | ✅ `fleet.enrol` |
-| `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | ✅ `fleet.grant` |
-| `PREAUTH_CLAIM` | 0x05 | new node → operator | ✅ `fleet.preauth` |
-| `ENROL_NARROW` | 0x06 | operator → node (handing a right back) | ✅ `fleet.narrow` |
+| `ENROL_REQUEST` | 0x01 | operator → node | signed, `fleet.enrol` |
+| `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | signed, `fleet.grant` |
+| `PREAUTH_CLAIM` | 0x05 | new node → operator | signed, `fleet.preauth` |
+| `ENROL_NARROW` | 0x06 | operator → node (handing a right back) | signed, `fleet.narrow` |
 | `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | the request only |
 | `ERROR` | 0x12 | ← | — |
 | `UPDATE_REQUEST` / `_OUTPUT` / `_RESULT` | 0x20–0x22 | → / ← / ← | the request only |

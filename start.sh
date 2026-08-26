@@ -32,10 +32,10 @@ else
     G=''; R=''; Y=''; B=''; N=''
 fi
 
-ok()   { echo -e "${G}[✓]${N} $*"; }
-fail() { echo -e "${R}[✗]${N} $*"; exit 1; }
-info() { echo -e "${B}[i]${N} $*"; }
-warn() { echo -e "${Y}[!]${N} $*"; }
+ok()   { echo -e "${G}[ ok ]${N} $*"; }
+fail() { echo -e "${R}[fail]${N} $*"; exit 1; }
+info() { echo -e "${B}[ .. ]${N} $*"; }
+warn() { echo -e "${Y}[warn]${N} $*"; }
 
 # ── where "home" is when there is no session ─────────────────────────────────
 # A node started by a service manager inherits almost nothing: no HOME, often no
