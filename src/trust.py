@@ -5,12 +5,13 @@ from .node_id import NodeID
 
 class TrustTable:
     """
-    Stocke l'identité cryptographique des nœuds connus : NodeID → DSA public key.
+    Holds the cryptographic identity of known nodes: NodeID -> DSA public key.
 
-    Modèle TOFU (Trust On First Use) :
-    - Premier contact : clé inconnue → stockée, retourne True.
-    - Contact suivant : clé connue et identique → retourne True.
-    - Contact suivant : clé DIFFÉRENTE → retourne False (attaque ou compromission).
+    A TOFU (Trust On First Use) model:
+    - First contact: an unknown key -> stored, returns True.
+    - A later contact: a known, identical key -> returns True.
+    - A later contact: a DIFFERENT key -> returns False (an attack, or a
+      compromise).
     """
 
     def __init__(self) -> None:

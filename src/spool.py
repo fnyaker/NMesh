@@ -3,7 +3,7 @@ Store-and-forward primitives — a portable bundle container.
 
 Delay/disruption-tolerant networking: the two endpoints of a link are never
 online at the same time. The medium is a file physically carried from one node
-to another ("clé USB fixée à un pigeon"). A ``Bundle`` packs many packets into
+to another ("a USB stick strapped to a pigeon"). A ``Bundle`` packs many packets into
 one integrity-checked file — the thing you copy onto the removable medium.
 
 Security model (see CLAUDE.md): the medium is hostile territory. Every packet
