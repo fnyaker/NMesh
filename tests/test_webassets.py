@@ -1,8 +1,8 @@
-"""Les assets de la console sont des chaînes Python : rien ne les compile.
+"""The console's assets are Python strings: nothing compiles them.
 
-Une erreur de syntaxe dans le JS ne casse pas un test, elle casse *toute* la
-console à l'exécution — page blanche, sans message. Ces vérifications-là sont
-donc faites ici, à la construction.
+A syntax error in the JS does not break one test, it breaks the *whole* console
+at runtime — a blank page, with no message. Those checks are therefore made
+here, at build time.
 """
 import pathlib
 import re
@@ -20,7 +20,7 @@ NODE = shutil.which("node")
 SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS")
 
 
-@pytest.mark.skipif(NODE is None, reason="node requis pour analyser le JS")
+@pytest.mark.skipif(NODE is None, reason="node is needed to parse the JS")
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_the_script_parses(name):
     source = getattr(webassets, name)
@@ -32,15 +32,15 @@ def test_the_script_parses(name):
     assert result.returncode == 0, result.stderr
 
 
-# Les URI de namespace XML (`http://www.w3.org/...`) sont des identifiants, pas
-# des adresses à charger : `createElementNS` ne va sur le réseau pour rien.
+# XML namespace URIs (`http://www.w3.org/...`) are identifiers, not addresses to
+# load: `createElementNS` never goes to the network.
 _NAMESPACE_URIS = ("http://www.w3.org/", "http://www.w3.org/1999/xhtml")
 
 
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_no_external_resource_is_pulled_in(name):
-    """La console est hors ligne par construction : rien ne doit être chargé
-    depuis un tiers, ni script, ni police, ni image."""
+    """The console is offline by construction: nothing may be loaded from a
+    third party — no script, no font, no image."""
     import re
     source = getattr(webassets, name)
     for match in re.finditer(r'https?://[^\s"\'`)]*', source):
@@ -49,32 +49,32 @@ def test_no_external_resource_is_pulled_in(name):
 
 
 def test_every_element_the_scripts_reach_for_exists():
-    """Un `$("id")` qui ne correspond à rien lève au chargement et emporte le
-    reste du script avec lui."""
+    """A `$("id")` that matches nothing throws at load and takes the rest of the
+    script with it."""
     import re
     pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML",
              "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML"}
     for script_name, html_name in pages.items():
         html = getattr(webassets, html_name)
-        # Seulement la partie propre à la page : le runtime partagé garde tous
-        # ses accès derrière un `if(element)`, précisément parce que toutes les
-        # pages ne portent pas tout le châssis.
+        # Only the page's own part: the shared runtime keeps every access behind
+        # an `if(element)`, precisely because not every page carries the whole
+        # shell.
         source = getattr(webassets, script_name)[len(webassets.ui.JS):]
-        # Seulement les accès littéraux au chargement : ceux construits
-        # dynamiquement visent des éléments créés par le script lui-même.
+        # Only the literal accesses at load time: dynamically built ones target
+        # elements the script creates itself.
         for match in re.finditer(r'\$\("([a-z0-9-]+)"\)\.addEventListener', source):
             element = match.group(1)
-            # Un id que le script fabrique lui-même (markup injecté) n'a rien à
-            # faire dans la page statique.
+            # An id the script mints itself (injected markup) has no business
+            # being in the static page.
             if f'id="{element}"' in source:
                 continue
             assert f'id="{element}"' in html, f"{script_name}: {element}"
 
 
-# ── l'émulateur de terminal ─────────────────────────────────────────────────
-# Écrit plutôt que pris en dépendance (un shell où l'on tape `sudo` a besoin
-# d'un terminal, pas d'un panneau de log). Il est donc à nous de prouver qu'il
-# lit correctement ce qu'un vrai shell écrit.
+# ── the terminal emulator ───────────────────────────────────────────────────
+# Written rather than taken as a dependency (a shell where you type `sudo` needs
+# a terminal, not a log pane). So it is on us to prove it reads correctly what a
+# real shell writes.
 
 TERM_SUITE = pathlib.Path(__file__).with_name("term_emulator_test.js")
 
@@ -84,7 +84,7 @@ def _terminal_source() -> str:
     return "// ---- a small terminal" + body.split("// ---- shell ----")[0]
 
 
-@pytest.mark.skipif(NODE is None, reason="node requis pour exécuter le JS")
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
 def test_the_terminal_reads_back_what_a_shell_writes(tmp_path):
     source = tmp_path / "term.js"
     source.write_text(_terminal_source(), encoding="utf-8")
@@ -94,24 +94,24 @@ def test_the_terminal_reads_back_what_a_shell_writes(tmp_path):
 
 
 def test_the_terminal_never_renders_unescaped_markup():
-    """La sortie vient d'une machine distante : elle est écrite dans le DOM en
-    innerHTML, donc l'échappement n'est pas cosmétique."""
+    """The output comes from a remote machine: it is written into the DOM as
+    innerHTML, so escaping is not cosmetic."""
     source = _terminal_source()
     assert "escHtml" in source
     assert 'replace(/&/g,"&amp;")' in source
 
 
 def test_the_terminal_pane_takes_real_keystrokes():
-    """Un champ texte ligne par ligne afficherait un mot de passe en clair ; des
-    frappes brutes laissent le pty distant décider de ce qui revient."""
+    """A line-by-line text field would show a password in the clear; raw
+    keystrokes let the remote pty decide what comes back."""
     assert 'addEventListener("keydown"' in webassets.FLEET_JS
     assert "function keyBytes" in webassets.FLEET_JS
     assert 'tabindex="0"' in webassets.FLEET_HTML
 
 
 def test_the_rights_panel_is_wired_to_a_real_element():
-    """La vue « qui peut contrôler cette node » est le seul endroit où un droit
-    s'ajoute : si son conteneur manque, elle disparaît en silence."""
+    """The "who can control this node" view is the only place a right is added:
+    if its container is missing, it disappears silently."""
     assert 'id="operators"' in webassets.FLEET_HTML
     assert 'data-tab="access"' in webassets.FLEET_HTML
     assert "function paintOperators" in webassets.FLEET_JS
@@ -120,11 +120,11 @@ def test_the_rights_panel_is_wired_to_a_real_element():
         assert route in webassets.FLEET_JS, route
 
 
-# ── la CSP stricte, appliquée aux assets eux-mêmes ──────────────────────────
-# `default-src 'self'` sans `unsafe-inline` : un attribut `style=` est ignoré
-# par le navigateur **en silence**. Une barre de progression écrite comme ça ne
-# se remplit jamais et personne ne voit d'erreur. Les assignations CSSOM
-# (`element.style.x = …`) ne sont pas concernées et restent permises.
+# ── the strict CSP, applied to the assets themselves ────────────────────────
+# `default-src 'self'` without `unsafe-inline`: a `style=` attribute is ignored
+# by the browser **silently**. A progress bar written that way never fills and
+# nobody sees an error. CSSOM assignments (`element.style.x = …`) are not
+# covered and stay allowed.
 
 STYLE_ATTRIBUTE = re.compile(r"""style\s*=\s*["']""")
 
@@ -135,14 +135,14 @@ STYLE_ATTRIBUTE = re.compile(r"""style\s*=\s*["']""")
                                   "FLEET_CSS", "NODE_CSS"])
 def test_no_inline_style_attribute_anywhere(name):
     source = getattr(webassets, name)
-    # Le commentaire qui explique la règle a le droit de la citer.
+    # The comment explaining the rule is allowed to quote it.
     lines = [line for line in source.splitlines()
              if STYLE_ATTRIBUTE.search(line) and "attribute silently" not in line]
-    assert not lines, f"{name}: attribut style inline — {lines[:2]}"
+    assert not lines, f"{name}: inline style attribute — {lines[:2]}"
 
 
 def test_the_console_still_forbids_inline_anything():
-    """Si la CSP s'assouplissait, la règle ci-dessus perdrait son sens."""
+    """If the CSP were relaxed, the rule above would lose its meaning."""
     from src.webconsole import _SECURITY_HEADERS
     policy = _SECURITY_HEADERS["Content-Security-Policy"]
     assert "default-src 'self'" in policy
@@ -150,8 +150,8 @@ def test_the_console_still_forbids_inline_anything():
 
 
 def test_every_page_offers_a_skip_link_and_a_focus_ring():
-    """Deux garanties clavier qu'on perd sans s'en rendre compte : sauter le
-    rail pour atteindre le contenu, et voir où est le focus."""
+    """Two keyboard guarantees that are lost without anyone noticing: skipping
+    the rail to reach the content, and seeing where the focus is."""
     for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
         assert 'class="skip"' in html
         assert 'id="main"' in html
@@ -161,9 +161,8 @@ def test_every_page_offers_a_skip_link_and_a_focus_ring():
 
 
 def test_the_three_pages_share_one_design_system():
-    """Le contrat du paquet : une seule source pour les jetons, les composants
-    et le runtime. Si une page cessait de la charger, elle divergerait en
-    silence."""
+    """The package's contract: one source for the tokens, the components and the
+    runtime. If a page stopped loading it, it would diverge silently."""
     for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS,
                 webassets.NODE_CSS):
         assert css.startswith(webassets.ui.CSS)
@@ -173,8 +172,8 @@ def test_the_three_pages_share_one_design_system():
 
 
 def test_the_two_maps_share_one_drawing_routine():
-    """La petite carte et la carte étendue sont la même fonction à deux tailles.
-    Deux implémentations divergeraient au premier changement."""
+    """The small map and the expanded map are the same function at two sizes.
+    Two implementations would diverge at the first change."""
     source = webassets.APP_JS
     assert "function renderGraph(" in source
     assert source.count("function renderGraph(") == 1
@@ -184,16 +183,16 @@ def test_the_two_maps_share_one_drawing_routine():
 
 
 def test_the_console_renders_whatever_a_transport_reports():
-    """Les compteurs d'un transport sont affichés par leurs propres noms : la
-    console ne connaît ni « retransmits » ni « SNR », et c'est le point."""
+    """A transport's counters are displayed under their own names: the console
+    knows neither "retransmits" nor "SNR", and that is the point."""
     source = webassets.APP_JS
     assert "statsHTML(link)" in source
     assert "Object.entries(stats)" in source
 
 
-# ── la navigation étroite et les menus ───────────────────────────────────────
-# Chacun de ces tests correspond à un bug réellement rencontré dans un vrai
-# navigateur : ils sont ici pour qu'il ne revienne pas.
+# ── narrow navigation and the menus ─────────────────────────────────────────
+# Each of these tests matches a bug really met in a real browser: they are here
+# so it does not come back.
 
 PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS",
          "NODE_HTML": "NODE_JS"}
@@ -201,8 +200,8 @@ PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS
 
 @pytest.mark.parametrize("html_name", list(PAGES))
 def test_every_menu_starts_closed(html_name):
-    """Un panneau `.menu` sans attribut `hidden` s'affiche au chargement et
-    intercepte les clics du bouton censé l'ouvrir."""
+    """A `.menu` panel with no `hidden` attribute shows at load and intercepts
+    the clicks of the button meant to open it."""
     html = getattr(webassets, html_name)
     for match in re.finditer(r'<div id="([a-z-]+)" class="menu"([^>]*)>', html):
         assert "hidden" in match.group(2), match.group(1)
@@ -217,31 +216,31 @@ def test_every_menu_button_points_at_a_panel(html_name):
 
 @pytest.mark.parametrize("html_name", ["INDEX_HTML", "FLEET_HTML"])
 def test_every_tab_has_a_short_name_for_the_tab_bar(html_name):
-    """En barre d'onglets, le libellé long est masqué et `data-label` prend sa
-    place via `::before` : sans lui, l'onglet est vide."""
+    """In the tab bar the long label is hidden and `data-label` takes its place
+    through `::before`: without it, the tab is empty."""
     html = getattr(webassets, html_name)
-    # Seulement la navigation principale : les sous-onglets d'une section ne
-    # descendent pas dans la barre du bas.
+    # The main navigation only: a section's subtabs do not go down into the
+    # bottom bar.
     tabs = re.findall(r'<button role="tab"[^>]*data-tab="[^"]+".*?</button>', html, re.S)
     assert tabs
     for tab in tabs:
         assert 'data-label="' in tab, tab
-        # Le libellé long doit être enveloppé, sinon il n'y a rien à masquer.
+        # The long label must be wrapped, or there is nothing to hide.
         assert '<span class="lbl">' in tab, tab[:90]
 
 
 def test_the_topbar_does_not_capture_its_own_menus():
-    """`backdrop-filter` sur un élément en fait le bloc conteneur de tous ses
-    descendants `position:fixed` : la feuille de notifications s'ancrait alors
-    sous la barre au lieu du bas de l'écran. Le flou vit sur un pseudo-élément."""
+    """`backdrop-filter` on an element makes it the containing block for every
+    `position:fixed` descendant: the notification sheet then anchored under the
+    bar instead of the bottom of the screen. The blur lives on a pseudo-element."""
     block = ui.SHELL.split(".topbar{", 1)[1].split("}", 1)[0]
     assert "backdrop-filter" not in block
     assert "backdrop-filter" in ui.SHELL.split(".topbar::before{", 1)[1].split("}", 1)[0]
 
 
 def test_the_overflow_button_defaults_to_hidden_before_the_query_shows_it():
-    """À spécificité égale, la dernière règle gagne — media query ou pas. Le
-    défaut doit donc être déclaré avant la requête qui l'active."""
+    """At equal specificity the last rule wins — media query or not. The default
+    must therefore be declared before the query that turns it on."""
     default = ui.SHELL.index(".more-wrap{display:none}")
     shown = ui.SHELL.index(".more-wrap{display:inline-flex}")
     assert default < shown
@@ -253,10 +252,10 @@ def test_the_tab_bar_hides_what_cannot_fit_and_the_page_ends_above_it():
     assert "--tabbar-h" in narrow
 
 
-# ── la vue d'une node, partagée ──────────────────────────────────────────────
-# Elle est montée à deux endroits : le dialogue de la console et la page
-# `/node` qu'ouvrent chat et fleet. Deux copies qui divergent était l'autre
-# option ; ces tests sont là pour qu'on n'y retombe pas.
+# ── one node view, shared ───────────────────────────────────────────────────
+# It is mounted in two places: the console's dialog and the `/node` page chat
+# and fleet open. Two copies drifting apart was the other option; these tests
+# are here so we do not fall back into it.
 
 def test_one_node_view_mounted_twice_and_never_copied():
     for script in (webassets.APP_JS, webassets.NODE_JS):
@@ -267,8 +266,8 @@ def test_one_node_view_mounted_twice_and_never_copied():
 
 
 def test_the_view_only_offers_what_an_app_declares():
-    """Un bouton qui appelle une app absente ne doit pas être dessiné : la vue
-    lit le catalogue avant de décider quoi proposer."""
+    """A button calling an app that is not there must not be drawn: the view
+    reads the catalogue before deciding what to offer."""
     source = webassets.NODE_JS
     assert '"/api/app-api"' in source
     assert 'this.has("chat", "peer")' in source
@@ -282,19 +281,19 @@ def test_the_view_hides_the_button_pointing_back_where_it_came_from():
 
 
 def test_the_addresses_are_folded_away_by_default():
-    """La question « quelles adresses » vient après « ce lien va bien ? ». Un
-    tableau déplié repoussait les réponses sous le pli."""
+    """The "which addresses" question comes after "is this link healthy?". An
+    unfolded table pushed the answers below the fold."""
     source = webassets.NODE_JS
     assert 'foldHTML("Addresses"' in source
     assert "<details class=\\\"card\\\"><summary>" in source or \
            '<details class="card"><summary>' in source
 
 
-# ── les trajets d'une app à l'autre ──────────────────────────────────────────
+# ── the journeys from one app to another ────────────────────────────────────
 
 def test_every_page_mounts_the_same_view_and_hides_the_way_it_came():
-    """Le bouton qui ramène là d'où l'on vient n'est pas dessiné : depuis chat
-    on ne propose pas chat, depuis fleet on ne propose pas fleet."""
+    """The button leading back where you came from is not drawn: from chat we do
+    not offer chat, from fleet we do not offer fleet."""
     assert 'NODEVIEW.mount("peer-view"' in webassets.CHAT_JS
     assert 'hide:["chat"]' in webassets.CHAT_JS
     assert 'NODEVIEW.mount("fleet-node-view"' in webassets.FLEET_JS
@@ -306,13 +305,13 @@ def test_chat_can_show_a_node_beside_a_window_or_a_tab():
     assert 'id="set-details"' in webassets.CHAT_HTML
     for mode in ('value="panel"', 'value="window"', 'value="tab"'):
         assert mode in webassets.CHAT_HTML, mode
-    # Sortir de chat passe par la page, pas par un cadre.
+    # Leaving chat goes through the page, not through a frame.
     assert 'openLinked("/node?from=chat#"' in webassets.CHAT_JS
 
 
 def test_the_console_keeps_its_browser_preferences_in_the_browser():
-    """Thème et mode d'ouverture ne sont pas des réglages du nœud : deux
-    machines connectées à la même console gardent chacune les siens."""
+    """The theme and the open mode are not the node's settings: two machines
+    connected to the same console each keep their own."""
     assert 'data-subtab="appearance"' in webassets.INDEX_HTML
     assert 'id="pref-open"' in webassets.INDEX_HTML and 'id="pref-theme"' in webassets.INDEX_HTML
     assert 'localStorage.getItem("nmesh_open_mode")' in webassets.ui.JS
@@ -320,8 +319,8 @@ def test_the_console_keeps_its_browser_preferences_in_the_browser():
 
 
 def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
-    """Remplacer une ligne sous le pointeur perd le clic en cours. Les listes
-    qui se repeignent au sondage écrivent seulement si le contenu a changé."""
+    """Replacing a row under the pointer loses the click in progress. Lists
+    repainted on the poll write only when the content changed."""
     assert "function setHTML(" in webassets.ui.JS
     for source, holder in ((webassets.FLEET_JS, '"nodes"'),
                            (webassets.FLEET_JS, '"operators"'),
@@ -333,14 +332,14 @@ def test_a_list_painted_on_a_timer_is_not_rebuilt_for_nothing():
 # ── auto-refresh, and what a refresh is not allowed to do ────────────────────
 
 def test_the_refresh_interval_is_a_number_here_and_a_list_there():
-    """Un champ numérique est le bon contrôle au clavier et le mauvais sur un
-    téléphone (cible de 12 px, clavier qui couvre la page)."""
+    """A number field is the right control on a keyboard and the wrong one on a
+    phone (a 12 px target, a keyboard covering the page)."""
     for html in (webassets.INDEX_HTML, webassets.FLEET_HTML):
         assert 'id="refresh-secs"' in html and 'type="number"' in html
         assert 'max="30"' in html
         assert 'id="refresh-pick"' in html
         assert 'value="0">Off' in html
-        # Off n'est pas une impasse : une pression lit quand même le nœud.
+        # Off is not a dead end: one press still reads the node.
         assert 'id="refresh-now"' in html
     narrow = webassets.ui.CSS.split("@media (max-width:720px){", 1)[1]
     assert ".refresh select{display:block}" in narrow
@@ -350,16 +349,16 @@ def test_the_interval_is_clamped_and_remembered_in_the_browser():
     source = webassets.ui.JS
     assert 'localStorage.getItem("nmesh_refresh")' in source
     assert "Math.min(this.MAX, Math.max(0, seconds))" in source
-    assert "/api/refresh" not in webassets.APP_JS      # pas un réglage du nœud
+    assert "/api/refresh" not in webassets.APP_JS      # not a setting of the node
 
 
 def test_a_refresh_repaints_values_without_rebuilding_what_is_open():
-    """Le contrat : rafraîchir met à jour des valeurs. Les listes repeintes au
-    sondage passent par `setHTML`, qui n'écrit que si le contenu a changé."""
+    """The contract: a refresh updates values. Lists repainted on the poll go
+    through `setHTML`, which writes only when the content changed."""
     source = webassets.APP_JS
     for holder in ('"network-summary"', '"map-links"'):
         assert "setHTML(" + holder in source, holder
-    assert "setHTML(body," in source          # les tables de pairs
+    assert "setHTML(body," in source          # the peer tables
 
 
 def test_only_a_vanished_thing_may_be_deselected():
@@ -368,18 +367,18 @@ def test_only_a_vanished_thing_may_be_deselected():
     assert "if(!group || group.links.length < 2) unfolded.delete(id)" in source
 
 
-# ── les liens actifs, groupés par node ───────────────────────────────────────
+# ── active links, grouped by node ───────────────────────────────────────────
 
 def test_active_links_are_one_row_per_node_openable_onto_its_links():
     source = webassets.APP_JS
     assert "function groupByNode(" in source
     assert "const LINKS_OPEN = {active: new Set(), known: new Set()}" in source
-    # Le repère affiché est le meilleur lien, et la gigue est *la sienne*.
+    # The yardstick shown is the best link, and the jitter is *its own*.
     assert "group.best == null || rtt < group.best.rtt_ms" in source
     assert "data-fold=" in source
 
 
-# ── la carte et sa liste ─────────────────────────────────────────────────────
+# ── the map and its list ────────────────────────────────────────────────────
 
 def test_the_map_and_its_list_share_one_selection():
     source = webassets.APP_JS
@@ -389,9 +388,9 @@ def test_the_map_and_its_list_share_one_selection():
 
 
 def test_a_captured_pointer_does_not_swallow_the_click_on_a_node():
-    """Capturer le pointeur (pour que le glissé survive à la sortie de
-    l'élément) redirige aussi le `click` sur l'élément capturant : sans
-    mémoriser la cible à l'appui, cliquer un nœud n'atteignait plus le nœud."""
+    """Capturing the pointer (so a drag survives leaving the element) also
+    retargets the `click` onto the capturing element: without remembering the
+    target at pointerdown, clicking a node no longer reached the node."""
     source = webassets.APP_JS
     assert "let MAP_DOWN_ON = null" in source
     assert "MAP_DOWN_ON = (event.target.closest" in source
@@ -405,14 +404,14 @@ def test_a_node_on_the_map_has_a_target_a_finger_can_hit():
     assert "circle.hit{fill:transparent" in webassets.STYLE_CSS
 
 
-# ── ce qui appartient à un transport vit dans ce transport ───────────────────
+# ── what belongs to a transport lives in that transport ─────────────────────
 
 def test_transport_facts_left_the_node_card():
     assert 'id="relay-state"' not in webassets.INDEX_HTML
     source = webassets.APP_JS
     assert "const SCHEME_FACTS = {" in source
     assert '"Public IP"' in source and '"Public UDP"' in source
-    # La carte du nœud ne garde que ce qui est vrai du nœud.
+    # The node's card keeps only what is true of the node.
     summary = source.split('const summary = [', 1)[1].split("];", 1)[0]
     assert '"Internet"' in summary and '"Pending seeks"' in summary
     assert "public_ip" not in summary and "stun_addr" not in summary
@@ -422,5 +421,5 @@ def test_a_transport_opens_on_its_status_then_its_settings():
     source = webassets.APP_JS
     assert 'data-view="status"' in source and 'data-view="settings"' in source
     assert 'data-panel="status"' in source and 'data-panel="settings"' in source
-    # Le choix de vue survit à un redraw, comme le pli.
+    # The chosen view survives a redraw, like the fold.
     assert "views[scheme] || \"status\"" in source
