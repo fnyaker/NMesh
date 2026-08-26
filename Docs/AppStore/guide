@@ -1,85 +1,84 @@
-# App store — catalogue partagé, installation, mise à jour
+# App store — a shared catalogue, installing, updating
 
-Une node publie une app ; **toutes** la découvrent et peuvent l'installer, la
-mettre à jour, la désinstaller — via une page **Store** dans la console. Le
-catalogue est **partagé et re-diffusé** automatiquement par le réseau.
+One node publishes an app; **every** node discovers it and can install, update
+or uninstall it — through a **Store** page in the console. The catalogue is
+**shared and re-announced** automatically by the network.
 
-Modules : [`src/app_catalog.py`](../../src/app_catalog.py) (catalogue +
-registre installé), releases signées dans
-[`src/app_package.py`](../../src/app_package.py), gossip dans `src/node.py`.
+Modules: [`src/app_catalog.py`](../../src/app_catalog.py) (catalogue + installed
+registry), signed releases in
+[`src/app_package.py`](../../src/app_package.py), gossip in `src/node.py`.
 
-## Deux couches
+## Two layers
 
-- **Catalogue** (réseau, en mémoire) — annuaire des apps *publiées*. Chaque
-  entrée est une **release signée** (cf. `Docs/AppSharing/guide`) : auto-
-  vérifiable, liée à la clé ML-DSA de l'auteur, portant un **`ts` signé** (heure
-  de publication). Une node garde le `ts` le plus élevé par `app_id`.
-- **Installées** (local, persisté) — ce que *cette* node a réellement installé
-  (récupéré + écrit sur disque), distinct de ce qui existe sur le réseau.
+- **Catalogue** (network-wide, in memory) — the directory of *published* apps.
+  Each entry is a **signed release** (see `Docs/AppSharing/guide`):
+  self-verifying, bound to the author's ML-DSA key, carrying a **signed `ts`**
+  (the publication time). A node keeps the highest `ts` per `app_id`.
+- **Installed** (local, persisted) — what *this* node has actually installed
+  (fetched + written to disk), distinct from what exists on the network.
 
-## Propagation (gossip épidémique borné)
+## Propagation (bounded epidemic gossip)
 
-Un nouveau type de paquet `CATALOG_ANNOUNCE` (0x18) transporte une release
-signée entre pairs **directs authentifiés** (comme `STORE`). À la réception, la
-node :
+A packet type `CATALOG_ANNOUNCE` (0x18) carries a signed release between
+**direct authenticated** peers (like `STORE`). On receipt the node:
 
-1. **vérifie** la signature (rejet par défaut si invalide) ;
-2. l'accepte seulement si `app_id` inconnu **ou** `ts` strictement supérieur à ce
-   qu'elle détient — sinon elle **ignore** (anti-rollback : un relais ne peut pas
-   la faire régresser en rejouant une vieille release signée) ;
-3. si sa vue a changé, **re-diffuse** à ses autres pairs (src re-stampé à chaque
-   saut). Comme une entrée en double ou plus ancienne n'est pas re-diffusée,
-   **l'épidémie s'arrête d'elle-même** (pas de boucle, pas d'amplification).
+1. **verifies** the signature (reject by default if it is invalid);
+2. accepts it only if the `app_id` is unknown **or** the `ts` is strictly higher
+   than what it holds — otherwise it **ignores** it (anti-rollback: a relay
+   cannot walk it backwards by replaying an old signed release);
+3. if its view changed, **re-announces** to its other peers (the src is
+   re-stamped at each hop). Since a duplicate or older entry is not
+   re-announced, **the epidemic stops on its own** (no loop, no amplification).
 
-À la fin d'un handshake, une node **pousse tout son catalogue** au nouveau pair
-(`_sync_catalog_to`) : une node qui rejoint rattrape les apps publiées avant son
-arrivée. Débit borné par lien (`_CATALOG_RATE_MAX`/fenêtre), catalogue plafonné
-(`MAX_APPS`), release ≤ une valeur DHT.
+At the end of a handshake, a node **pushes its whole catalogue** to the new peer
+(`_sync_catalog_to`): a node that joins catches up on apps published before it
+arrived. The rate is bounded per link (`_CATALOG_RATE_MAX`/window), the
+catalogue is capped (`MAX_APPS`), and a release is ≤ one DHT value.
 
-## Sécurité (rappels)
+## Security (reminders)
 
-- Une entrée du catalogue est **inforgeable** sans la clé de l'auteur (signature)
-  et **non-régressable** (`ts`). `app_id = deployed_id(auteur, nom)` : personne
-  d'autre ne publie sous cet `app_id`.
-- **Install vérifie le contenu** avant d'écrire quoi que ce soit : les fichiers
-  sont réassemblés depuis la DHT et comparés à la racine signée (adressage par
-  contenu). Les chemins du manifeste sont **assainis** (`_safe_rel`) → aucune
-  écriture hors du dossier de l'app.
-- Tout est **borné** ; tout fichier de registre corrompu donne un registre vide,
-  jamais un crash.
+- A catalogue entry is **unforgeable** without the author's key (signature) and
+  **cannot be walked back** (`ts`). `app_id = deployed_id(author, name)`: nobody
+  else publishes under that `app_id`.
+- **Install verifies the content** before writing anything: the files are
+  reassembled from the DHT and compared against the signed root (content
+  addressing). Manifest paths are **sanitised** (`_safe_rel`) → nothing is ever
+  written outside the app's folder.
+- Everything is **bounded**; a corrupt registry file yields an empty registry,
+  never a crash.
 
-## API nœud
+## Node API
 
 ```python
-info = await node.publish_store_app(name, version, files)  # publie + annonce
-node.catalog_list()          # apps connues sur le réseau
-node.installed_list()        # apps installées localement
-node.store_overview()        # vue UI : catalogue annoté (state/action) + installées
-await node.install_app(app_id_hex)     # récupère+vérifie+installe → record | None
-await node.update_app(app_id_hex)      # réinstalle si ts plus récent → record | None
-node.uninstall_app(app_id_hex)          # retire le record + les fichiers → bool
+info = await node.publish_store_app(name, version, files)  # publishes + announces
+node.catalog_list()          # apps known on the network
+node.installed_list()        # apps installed locally
+node.store_overview()        # the UI view: annotated catalogue (state/action) + installed
+await node.install_app(app_id_hex)     # fetch+verify+install → record | None
+await node.update_app(app_id_hex)      # reinstalls if the ts is newer → record | None
+node.uninstall_app(app_id_hex)          # drops the record + the files → bool
 ```
 
-**Toute la logique de décision est en Python** : `store_overview()` calcule, pour
-chaque app du catalogue, son `state` (`install` / `update` / `installed`) et
-l'`action` à POSTer. Le front-end ne fait que **rendre** cette vue.
+**Every decision is made in Python**: `store_overview()` computes, for each app
+in the catalogue, its `state` (`install` / `update` / `installed`) and the
+`action` to POST. The front end only **renders** that view.
 
-## API console (auth Bearer/cookie)
+## Console API (Bearer/cookie auth)
 
-| Méthode | Route | Rôle |
+| Method | Route | Role |
 |---|---|---|
-| GET  | `/api/store`            | vue complète (`{catalog:[…state,action], installed:[…]}`) |
-| POST | `/api/store/publish`    | `{name, version, files:{path:b64}}` → publie + annonce |
-| POST | `/api/store/install`    | `{app_id}` → installe |
-| POST | `/api/store/update`     | `{app_id}` → met à jour si plus récent |
-| POST | `/api/store/uninstall`  | `{app_id}` → désinstalle |
+| GET  | `/api/store`            | the full view (`{catalog:[…state,action], installed:[…]}`) |
+| POST | `/api/store/publish`    | `{name, version, files:{path:b64}}` → publishes + announces |
+| POST | `/api/store/install`    | `{app_id}` → installs |
+| POST | `/api/store/update`     | `{app_id}` → updates if newer |
+| POST | `/api/store/uninstall`  | `{app_id}` → uninstalls |
 
-La page **App Store** de la console liste les apps disponibles (bouton
-Install/Update selon l'état calculé côté nœud) et installées (Uninstall), et
-permet de publier une app sur le réseau.
+The console's **App Store** page lists the available apps (an Install/Update
+button according to the state computed on the node) and the installed ones
+(Uninstall), and can publish an app to the network.
 
-## Câblage
+## Wiring
 
-`scripts/nmesh_node.py` passe `app_store_dir=<data>/appstore` quand `--data` est
-fourni (registre `installed.json` + fichiers sous `apps/`). Sans `--data`, le
-catalogue reste en mémoire et rien n'est installé sur disque.
+`scripts/nmesh_node.py` passes `app_store_dir=<data>/appstore` when `--data` is
+given (an `installed.json` registry + files under `apps/`). Without `--data`,
+the catalogue stays in memory and nothing is installed on disk.

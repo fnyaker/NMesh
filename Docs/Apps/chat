@@ -1,33 +1,33 @@
-# Application de chat
+# The chat application
 
-Messagerie de référence de NMesh, construite sur le connecteur de données. Une
-vraie app de messagerie de bout en bout : **profils** (nom, bio, avatar),
-**conversations** 1:1 et **groupes**, **réponses**, **édition**, **suppression**,
-**réactions emoji**, **accusés livré/lu**, **indicateur de frappe**, **partage
-de fichiers et médias** (chunké + vérifié, images en aperçu), **recherche de
-personnes par pseudo** (local + annuaire DHT réseau), plus le **flux temps réel**
-de trames horodatées — la primitive qu'un appel voix/vidéo utiliserait. Tout
-reste **E2E chiffré** ; le nœud ne voit que des métadonnées de routage.
+NMesh's reference messaging app, built on the data connector. A real end-to-end
+messenger: **profiles** (name, bio, avatar), 1:1 **conversations** and
+**groups**, **replies**, **editing**, **deletion**, **emoji reactions**,
+**delivered/read receipts**, a **typing indicator**, **file and media sharing**
+(chunked + verified, images previewed), **finding people by pseudo** (local + the
+network's DHT directory), plus the **real-time stream** of timestamped frames —
+the primitive a voice/video call would use. Everything stays **E2E encrypted**;
+the node sees nothing but routing metadata.
 
-## App intégrée par défaut (console `/chat`)
+## Built in by default (console `/chat`)
 
-Le chat est l'**app par défaut** livrée avec le nœud. `scripts/nmesh_node.py`
-la démarre automatiquement : il ouvre un connecteur de données en loopback,
-branche une `ChatApp` en interne (section `CHAT_APP_ID`), et la surface sur la
-console web à **`/chat`** (liste **Apps** → **Open**). Rien à lancer : l'app est
-intégrée, accessible depuis l'UI, et réutilise la session console. `--no-chat`
-la désactive. Étant livrée avec le nœud (code en dépôt), elle utilise un app_id
-réservé et **n'est pas signée** — contrairement à une app déployée sur le mesh
-(voir `Docs/AppSharing/guide`). Détails console : `Docs/WebConsole/guide`.
+Chat is the **default app** shipped with the node. `scripts/nmesh_node.py`
+starts it automatically: it opens a loopback data connector, plugs a `ChatApp`
+in internally (section `CHAT_APP_ID`), and surfaces it on the web console at
+**`/chat`** (the **Apps** list → **Open**). Nothing to launch: the app is built
+in, reachable from the UI, and reuses the console session. `--no-chat` turns it
+off. Being shipped with the node (its code is in the repository), it uses a
+reserved app_id and is **not signed** — unlike an app deployed over the mesh
+(see `Docs/AppSharing/guide`). Console details: `Docs/WebConsole/guide`.
 
-## Démo auto-contenue
+## Self-contained demo
 
 ```bash
 python scripts/chat_demo.py
 ```
 
-Monte deux nœuds sur localhost et exécute une conversation, un transfert de
-fichier (1 Mo) et un flux temps réel, avec un rapport latence/débit. Exemple :
+Brings up two nodes on localhost and runs a conversation, a file transfer (1 MB)
+and a real-time stream, with a latency/throughput report. For example:
 
 ```
 [file]  Bob received : picture.bin (1000000 bytes) integrity=OK
@@ -37,149 +37,152 @@ fichier (1 Mo) et un flux temps réel, avec un rapport latence/débit. Exemple :
         latency ms   : avg 0.5 | p50 0.5 | p95 0.8 | max 0.9
 ```
 
-## Client interactif
+## Interactive client
 
-Contre un nœud exposant un connecteur (voir `Docs/DataConnector/guide` et le
-lanceur `Docs/ProcessLauncher/guide`) :
+Against a node exposing a connector (see `Docs/DataConnector/guide` and the
+launcher in `Docs/ProcessLauncher/guide`):
 
 ```bash
 NMESH_CONNECTOR_HOST=127.0.0.1 NMESH_CONNECTOR_PORT=8790 \
 NMESH_CONNECTOR_TOKEN=<token> python scripts/chat_app.py --peer <node_id_hex>
 ```
 
-Commandes : `<texte>` envoie un message ; `/peer <hex>` change de destinataire ;
-`/file <chemin>` envoie un fichier ; `/quit` quitte.
+Commands: `<text>` sends a message; `/peer <hex>` changes recipient;
+`/file <path>` sends a file; `/quit` leaves.
 
-### Interface web (option de l'app de chat)
+### Web interface (an option of the chat app)
 
 ```bash
 ... python scripts/chat_app.py --peer <hex> --web 8791
-# web UI: http://127.0.0.1:8791/   token=<jeton>
+# web UI: http://127.0.0.1:8791/   token=<token>
 ```
 
-Quand l'option `--web` est activée, **l'app de chat** (et non le nœud ni la
-console de gestion) fait remonter ses messages vers une petite page web et
-route les envois via l'app. Tout passe par l'app de chat : la web UI s'abonne à
-son flux d'événements (`ChatApp.add_listener`). Loopback + jeton Bearer, CSP
-stricte, assets same-origin.
+With `--web` on, **the chat app** (not the node, not the management console)
+pushes its messages to a small web page and routes what you send through the
+app. Everything goes through the chat app: the web UI subscribes to its event
+stream (`ChatApp.add_listener`). Loopback + Bearer token, strict CSP,
+same-origin assets.
 
-## Bibliothèque
+## Library
 
 ```python
 from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
 
-app = ChatApp(connector_client)      # ConnectorClient déjà connecté
+app = ChatApp(connector_client)      # a ConnectorClient already connected
 await app.start()
 await app.send_text(peer, "hello")
-await app.send_file(peer, "photo.png", data)         # chunké, intégrité SHA-256
-await app.send_frame(peer, stream_id, seq, payload)  # temps réel
+await app.send_file(peer, "photo.png", data)         # chunked, SHA-256 integrity
+await app.send_frame(peer, stream_id, seq, payload)  # real time
 ev = await app.next_event()          # TextMessage | FileReceived | Frame
 ```
 
-## Format applicatif
+## Application format
 
-Chaque charge utile DATA E2E : `type(1) ‖ corps`.
+Every E2E DATA payload: `type(1) ‖ body`.
 
-Chaque message visible porte un **`msg_id`** de 16 octets (frappé par
-l'émetteur) pour que réponses, éditions, suppressions, réactions et accusés
-puissent le référencer. Une **portée de conversation** est un `group_id` de 16
-octets, ou tout-à-zéro pour un échange direct (1:1) avec l'émetteur.
+Every visible message carries a 16-byte **`msg_id`** (minted by the sender) so
+replies, edits, deletions, reactions and receipts can reference it. A
+**conversation scope** is a 16-byte `group_id`, or all-zero for a direct (1:1)
+exchange with the sender.
 
-| Type           | Corps                                                        |
-|----------------|--------------------------------------------------------------|
-| `TEXT`         | msg_id(16), reply_to(16), texte utf-8                        |
-| `FILE_OFFER`   | msg_id(16), reply_to(16), transfer_id, total, taille, sha256, nom |
-| `FILE_CHUNK`   | transfer_id, index, données                                  |
-| `STREAM`       | stream_id, seq, ts_ns, charge utile                          |
-| `PROFILE`      | pseudo, bio, avatar (annonce mon profil)                     |
-| `GROUP_INVITE` | group_id(16), nom, roster (liste de node ids)                |
-| `GROUP_TEXT`   | group_id(16), msg_id(16), reply_to(16), texte                |
-| `RECEIPT`      | kind(livré/lu), scope(16), liste de msg_id (accusés)         |
-| `TYPING`       | scope(16), état (frappe / arrêt)                             |
-| `EDIT`         | scope(16), msg_id(16), nouveau texte                         |
-| `DELETE`       | scope(16), msg_id(16)                                        |
-| `REACTION`     | scope(16), msg_id(16), emoji (vide = retire)                 |
-| `DIR_QUERY`    | query_id(4), pseudo (« qui est ce pseudo ? »)                |
-| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (réponse sur soi)           |
+| Type           | Body                                                          |
+|----------------|---------------------------------------------------------------|
+| `TEXT`         | msg_id(16), reply_to(16), utf-8 text                          |
+| `FILE_OFFER`   | msg_id(16), reply_to(16), transfer_id, total, size, sha256, name |
+| `FILE_CHUNK`   | transfer_id, index, data                                      |
+| `STREAM`       | stream_id, seq, ts_ns, payload                                |
+| `PROFILE`      | pseudo, bio, avatar (announces my profile)                    |
+| `GROUP_INVITE` | group_id(16), name, roster (a list of node ids)               |
+| `GROUP_TEXT`   | group_id(16), msg_id(16), reply_to(16), text                  |
+| `RECEIPT`      | kind (delivered/read), scope(16), a list of msg_id            |
+| `TYPING`       | scope(16), state (typing / stopped)                           |
+| `EDIT`         | scope(16), msg_id(16), new text                               |
+| `DELETE`       | scope(16), msg_id(16)                                         |
+| `REACTION`     | scope(16), msg_id(16), emoji (empty removes it)               |
+| `DIR_QUERY`    | query_id(4), pseudo ("who is this pseudo?")                   |
+| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (an answer about oneself)    |
 
-Robustesse : tout message applicatif est validé et borné ; un message mal formé
-est ignoré, jamais fatal (la charte s'applique aussi au niveau app). L'intégrité
-des fichiers est vérifiée (SHA-256) avant livraison. Sécurité des primitives
-sensibles : une **réaction/édition/suppression** n'agit que si elle vient de
-l'émetteur d'origine du message ; un `EDIT`/`DELETE` d'un pair n'altère que ses
-propres messages. Le profil (nom/bio/avatar) est **appris** du pair mais le
-node_id reste l'identité réelle.
+Solidity: every application message is validated and bounded; a malformed one is
+ignored, never fatal (the charter applies at app level too). File integrity is
+verified (SHA-256) before delivery. The sensitive primitives are guarded: a
+**reaction/edit/deletion** only acts if it comes from the message's original
+sender; a peer's `EDIT`/`DELETE` only ever alters its own messages. A profile
+(name/bio/avatar) is **learned** from the peer, but the node_id stays the real
+identity.
 
-## Qui est en face (panneau de détails)
+## Who you are talking to (the details panel)
 
-Le nom en haut d'une conversation ouvre **la fiche de nœud de la console** — la
-même vue partout (`src/webassets/nodeview.py`) : le lien réel, ses adresses, et
-ce que chacun des deux nœuds a le droit de faire à l'autre. Chat ne la
-redécrit pas, il la **monte** ; ce n'est pas une iframe, c'est le même code dans
-le même document, donc aucune page n'a besoin d'être cadrable.
+The name at the top of a conversation opens **the console's node card** — the
+same view everywhere (`src/webassets/nodeview.py`): the real link, its
+addresses, and what each of the two nodes is allowed to do to the other. Chat
+does not re-describe it, it **mounts** it; this is not an iframe, it is the same
+code in the same document, so no page needs to be frameable.
 
-Le bouton « Message » n'y est pas : on y est déjà. Les boutons fleet, eux, y
-sont — demander des droits sur la machine d'en face se fait donc sans quitter la
-conversation.
+The "Message" button is not there: you are already there. The fleet buttons are
+— asking for rights on the machine you are talking to therefore takes no leaving
+the conversation.
 
-Où elle apparaît est un choix de l'utilisateur (profil → Preferences) : **à côté
-de la conversation** (par défaut), dans une **fenêtre**, ou dans un **onglet**.
-Stocké dans ce navigateur, comme le thème. Sous 1180 px le panneau prend la
-place de la conversation ; sous 860 px, celle de l'écran.
+Where it appears is the user's choice (profile → Preferences): **beside the
+conversation** (the default), in a **window**, or in a **tab**. Stored in this
+browser, like the theme. Under 1180 px the panel takes the conversation's place;
+under 860 px, the whole screen's.
 
-## Couche sociale (contacts, pseudo, groupes, recherche)
+## The social layer (contacts, pseudo, groups, search)
 
-Tout est **côté app** (la node ne connaît rien de ces notions) et persisté par
-`src/apps/chat_state.py` (`ChatState`, borné). Le chat intégré le range dans le
-**tiroir chiffré** du nœud (`node.app_storage`, section `CHAT_APP_ID`, via
-`DrawerStore`) : contacts/pseudos ne sont **jamais en clair sur disque**, et
-survivent au redémarrage. **L'historique des messages** (le fil de la web UI,
-`ChatBridge`) est persisté au même endroit → il ne disparaît plus au refresh ni
-au redémarrage. Sans `--data`, le tiroir reste en RAM (démos/tests). Un
-`ChatState(path=…)` en JSON clair reste disponible pour les tests/démos sans
-données réelles.
+All of it lives **in the app** (the node knows nothing of these notions) and is
+persisted by `src/apps/chat_state.py` (`ChatState`, bounded). The built-in chat
+puts it in the node's **encrypted drawer** (`node.app_storage`, section
+`CHAT_APP_ID`, through `DrawerStore`): contacts and pseudos are **never in the
+clear on disk**, and survive a restart. **Message history** (the web UI's feed,
+`ChatBridge`) is persisted in the same place → it no longer vanishes on a
+refresh or a restart. Without `--data`, the drawer stays in RAM (demos/tests). A
+`ChatState(path=…)` in plain JSON remains available for tests and demos with no
+real data.
 
-- **Mon identité** : `whoami` donne mon node id (à copier/partager) ; je peux
-  fixer un **pseudo** (`set_pseudo`) qui est annoncé à mes contacts (`PROFILE`).
-- **Contacts** : `add_contact` / `remove_contact` (node id + pseudo). Ajouter un
-  contact lui annonce mon profil.
-- **Groupes** : `create_group(nom, membres)` génère un `group_id`, m'ajoute au
-  roster et envoie un `GROUP_INVITE` à chaque membre. `send_group_text` **fanne**
-  le message vers chaque membre (aucun relais par les membres → ni boucle ni
-  amplification). Le mesh n'a pas de multicast : le groupe est purement applicatif.
-- **Recherche par pseudo** — trois sources combinées :
-  1. `find_by_pseudo` : annuaire **local** (contacts + pseudos appris via `PROFILE`).
-  2. **Annuaire DHT réseau** (`lookup_pseudo_network`) : trouve **n'importe qui**
-     ayant publié son pseudo, **sans être déjà contact**. `set_pseudo` publie
-     automatiquement une réclamation signée `pseudo→node_id` dans l'annuaire
-     (`node.publish_pseudo`, cf. `Docs/Architecture/routing.md`) ; une réclamation
-     ne peut lier un pseudo qu'au node_id de son propre auteur (anti-usurpation).
-  3. `dir_query` : requête **1 saut** aux contacts ; chacun ne répond que **sur
-     lui-même** (`DIR_REPLY`, id ≠ émetteur rejeté), jamais sur ses contacts (vie
-     privée). Les réponses asynchrones arrivent dans `dir_results` (polling UI).
+- **My identity**: `whoami` gives my node id (to copy and share); I can set a
+  **pseudo** (`set_pseudo`), which is announced to my contacts (`PROFILE`).
+- **Contacts**: `add_contact` / `remove_contact` (node id + pseudo). Adding a
+  contact announces my profile to them.
+- **Groups**: `create_group(name, members)` mints a `group_id`, adds me to the
+  roster and sends a `GROUP_INVITE` to each member. `send_group_text` **fans**
+  the message out to every member (members never relay → no loop, no
+  amplification). The mesh has no multicast: a group is purely an application
+  notion.
+- **Search by pseudo** — three sources combined:
+  1. `find_by_pseudo`: the **local** directory (contacts + pseudos learned
+     through `PROFILE`).
+  2. **The network's DHT directory** (`lookup_pseudo_network`): finds **anyone**
+     who has published their pseudo, **without already being a contact**.
+     `set_pseudo` automatically publishes a signed `pseudo→node_id` claim into
+     the directory (`node.publish_pseudo`, see
+     `Docs/Architecture/routing.md`); a claim can only bind a pseudo to its own
+     author's node_id (no impersonation).
+  3. `dir_query`: a **one-hop** query to contacts; each answers **about itself
+     only** (`DIR_REPLY`, an id ≠ the sender is rejected), never about its own
+     contacts (privacy). The asynchronous answers land in `dir_results` (the UI
+     polls it).
 
-Toutes ces actions sont pilotables depuis la sous-page `/chat` de la console
-(identité + copie d'id, contacts, groupes, recherche). Voir `Docs/WebConsole/guide`.
+All of this is drivable from the console's `/chat` sub-page (identity + copying
+the id, contacts, groups, search). See `Docs/WebConsole/guide`.
 
-## Appels audio (`src/apps/call.py`)
+## Audio calls (`src/apps/call.py`)
 
-Le flux `STREAM` est la primitive d'un appel. `AudioCall` s'appuie dessus pour
-transporter de l'audio PCM en temps réel :
+The `STREAM` flow is a call's primitive. `AudioCall` builds on it to carry PCM
+audio in real time:
 
 ```bash
-python scripts/call_demo.py      # 2 nœuds, un WAV streamé, audio vérifié bit-à-bit
+python scripts/call_demo.py      # 2 nodes, a WAV streamed, audio verified bit for bit
 ```
 
 ```python
 from src.apps.call import AudioCall, WavSource, WavSink
 tx = AudioCall(chat_app)
-await tx.place(peer, WavSource("in.wav"), stream_id=1)   # émet
-rx = AudioCall(chat_app); rx.attach()                    # reçoit
+await tx.place(peer, WavSource("in.wav"), stream_id=1)   # sends
+rx = AudioCall(chat_app); rx.attach()                    # receives
 rx.render(src, 1, WavSink("out.wav"))
 ```
 
-Le backend **WAV** (stdlib `wave`) donne un appel testable de bout en bout avec
-de vrais échantillons, sans matériel ni dépendance. Pour un **micro/HP live**,
-implémentez `AudioSource`/`AudioSink` avec un backend périphérique
-(ex. sounddevice) **dans votre app** — NMesh reste sans dépendance audio.
-</content>
+The **WAV** backend (stdlib `wave`) gives an end-to-end testable call with real
+samples, with no hardware and no dependency. For a **live mic/speaker**,
+implement `AudioSource`/`AudioSink` with a device backend (sounddevice, say)
+**in your app** — NMesh keeps no audio dependency.

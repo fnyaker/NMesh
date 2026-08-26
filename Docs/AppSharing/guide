@@ -1,88 +1,85 @@
-# Partage d'applications via DHT
+# Sharing applications over the DHT
 
-Une application est un ensemble de fichiers empaquetés et publiés sur une table
-de hachage distribuée (DHT). N'importe quel nœud peut la récupérer par son
-identifiant, la vérifier, l'utiliser, et la **re-partager** automatiquement.
+An application is a set of files packaged and published on a distributed hash
+table (DHT). Any node can fetch it by its identifier, verify it, use it, and
+automatically **re-share** it.
 
-## Adressage par contenu (le cœur de la sécurité)
+## Content addressing (the heart of the security)
 
-Tout est identifié par son hash :
+Everything is identified by its hash:
 
-- un fichier est découpé en chunks ; la clé d'un chunk = `sha256(chunk)[:20]`.
-- le manifeste liste, par fichier : taille, SHA-256 complet, et les clés de
-  chunks ordonnées.
-- la **clé de contenu** de l'app (sa clé DHT) = `sha256(root)[:20]` (voir plus
-  bas). À ne pas confondre avec l'**app_id runtime** (8 octets, la section du
-  connecteur) : voir « Déploiement signé ».
+- a file is cut into chunks; a chunk's key = `sha256(chunk)[:20]`.
+- the manifest lists, per file: size, full SHA-256, and the ordered chunk keys.
+- the app's **content key** (its DHT key) = `sha256(root)[:20]` (see below). Not
+  to be confused with the **runtime app_id** (8 bytes, the connector's section):
+  see "Signed deployment".
 
-Conséquence : on demande une clé et on **vérifie que ce qui revient hashe vers
-cette clé**. Un relais ou un pair malveillant ne peut ni substituer du contenu
-ni empoisonner le DHT (un nœud refuse de stocker une valeur dont la clé ne
-correspond pas à son hash). Aucune confiance dans l'émetteur n'est requise.
+The consequence: you ask for a key and **check that what comes back hashes to
+that key**. A malicious relay or peer can neither substitute content nor poison
+the DHT (a node refuses to store a value whose key does not match its hash). No
+trust in the sender is required.
 
-## Publier / récupérer (API nœud)
+## Publishing / fetching (node API)
 
 ```python
 files = {"app.py": b"...", "README": b"..."}
 app_id = await node.publish_app("chat", "0.1.0", files)
-#   -> chunks + manifeste stockés sur les K nœuds les plus proches de chaque clé
+#   -> chunks + manifest stored on the K nodes closest to each key
 
 manifest, files = await node.fetch_app(app_id)
-#   -> récupère le manifeste puis les chunks, vérifie chaque hash, réassemble.
-#      Le nœud met en cache ce qu'il récupère → il re-partage ensuite.
+#   -> fetches the manifest then the chunks, verifies every hash, reassembles.
+#      The node caches what it fetches → it re-shares it afterwards.
 ```
 
-`fetch_app` retourne `None` si l'app est introuvable, et lève `AppPackageError`
-si un chunk manque ou échoue sa vérification d'intégrité.
+`fetch_app` returns `None` if the app cannot be found, and raises
+`AppPackageError` if a chunk is missing or fails its integrity check.
 
-## Protocole DHT
+## DHT protocol
 
-Trois types de paquets, échangés sur un lien direct authentifié (établi à la
-demande, comme `FIND_NODE`) :
+Three packet types, exchanged over a direct authenticated link (established on
+demand, like `FIND_NODE`):
 
-- `STORE key(20)‖valeur` — le récepteur stocke si `key == sha256(valeur)[:20]`.
-- `FIND_VALUE key(20)‖query_id(8)` — demande une valeur.
-- `FOUND_VALUE query_id(8)‖valeur` — réponse (valeur vide = absente).
+- `STORE key(20)‖value` — the receiver stores it if `key == sha256(value)[:20]`.
+- `FIND_VALUE key(20)‖query_id(8)` — asks for a value.
+- `FOUND_VALUE query_id(8)‖value` — the answer (an empty value means absent).
 
-Bornes : valeur ≤ ~59 Ko (une charge utile de paquet), magasin local plafonné
-en nombre d'entrées et en octets (éviction LRU) → pas d'épuisement mémoire sous
-un flot de `STORE`.
+Bounds: a value ≤ ~59 KB (one packet payload), the local store capped in number
+of entries and in bytes (LRU eviction) → no memory exhaustion under a flood of
+`STORE`.
 
-## Manifestes chunkés (grosses apps)
+## Chunked manifests (large apps)
 
-Le manifeste n'est plus borné par une seule valeur DHT : il est lui-même
-**chunké et adressé par contenu**. La clé de contenu pointe vers un petit
-**root** qui liste les chunks du manifeste (`clé = sha256(root)[:20]`). À la
-récupération, le root est lu, le manifeste réassemblé et vérifié, puis les
-fichiers. Une app peut donc avoir un nombre arbitraire de fichiers/chunks.
+The manifest is no longer bounded by a single DHT value: it is itself **chunked
+and content-addressed**. The content key points at a small **root** listing the
+manifest's chunks (`key = sha256(root)[:20]`). On fetch, the root is read, the
+manifest reassembled and verified, then the files. An app can therefore have any
+number of files and chunks.
 
-## Déploiement signé (app_id + signature)
+## Signed deployment (app_id + signature)
 
-L'adressage par contenu prouve **ce que sont** les octets ; il ne dit rien de
-**qui** les publie. Pour déployer une app de façon authentifiée, on ajoute un
-**descripteur de release signé** qui lie un root de contenu à l'identité ML-DSA
-de son auteur.
+Content addressing proves **what** the bytes are; it says nothing about **who**
+publishes them. To deploy an app in an authenticated way, we add a **signed
+release descriptor** binding a content root to its author's ML-DSA identity.
 
-- l'**app_id runtime** (8 octets, la section du connecteur) d'une app déployée
-  est `deployed_id(clé_pub_auteur, nom)` — stable entre versions, **infalsifiable
-  sans la clé de l'auteur**.
-- le descripteur `{v, nom, version, root_key, root_sha256, author, app_id, sig}`
-  est signé (ML-DSA-65) sur son domaine séparé. Il est publié sur la DHT comme
-  toute valeur : son identifiant, la **`release_id`**, est `sha256(desc)[:20]`.
+- the **runtime app_id** (8 bytes, the connector's section) of a deployed app is
+  `deployed_id(author_pubkey, name)` — stable across versions, **unforgeable
+  without the author's key**.
+- the descriptor `{v, name, version, root_key, root_sha256, author, app_id, sig}`
+  is signed (ML-DSA-65) on its own separate domain. It is published on the DHT
+  like any value: its identifier, the **`release_id`**, is `sha256(desc)[:20]`.
 
 ```python
 info = await node.publish_signed_app("widget", "2.1.0", files)
-#   -> publie chunks + manifeste + root + descripteur signé
+#   -> publishes chunks + manifest + root + the signed descriptor
 #      info == {"release_id": "…", "app_id": "…"}
 
 meta, files = await node.fetch_signed_app(bytes.fromhex(info["release_id"]))
-#   -> vérifie la signature AVANT tout contenu, puis réassemble + vérifie les
-#      fichiers. meta == {app_id, name, version, author}
+#   -> verifies the signature BEFORE any content, then reassembles and verifies
+#      the files. meta == {app_id, name, version, author}
 ```
 
-**Rejet par défaut** (`app_package.parse_release`) : JSON invalide, champ
-manquant/trop long, `app_id` non lié à la clé auteur, ou signature invalide →
-`AppPackageError`, rien n'est installé. Les apps **intégrées** (le chat livré
-avec le nœud) n'empruntent pas ce chemin : code en dépôt, app_id réservé
-(`builtin_id`), aucune signature.
-</content>
+**Reject by default** (`app_package.parse_release`): invalid JSON, a missing or
+over-long field, an `app_id` not bound to the author's key, or an invalid
+signature → `AppPackageError`, nothing is installed. **Built-in** apps (the chat
+shipped with the node) do not take this path: their code is in the repository,
+their app_id is reserved (`builtin_id`), and there is no signature.

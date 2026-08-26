@@ -1,89 +1,90 @@
-# Store local sécurisé par app (« tiroir »)
+# A secure local per-app store (the "drawer")
 
-Chaque application branchée sur le nœud dispose d'un **tiroir** : un magasin
-clé→valeur local, **chiffré au repos**, **isolé** des autres apps, et **borné**.
-Le chat intégré peut s'en servir, comme n'importe quelle app externe branchée
-via le connecteur de données.
+Every application plugged into the node gets a **drawer**: a local key→value
+store, **encrypted at rest**, **isolated** from the other apps, and **bounded**.
+The built-in chat can use it, as can any external app plugged in through the
+data connector.
 
-Implémentation : [`src/app_storage.py`](../../src/app_storage.py).
+Implementation: [`src/app_storage.py`](../../src/app_storage.py).
 
-## Modèle
+## Model
 
-- Un tiroir est nommé par l'**`app_id`** — les mêmes 8 octets de section que le
-  connecteur lie déjà à chaque client à l'`AUTH`. **L'app ne nomme jamais son
-  tiroir** : c'est le nœud qui fournit l'id depuis la session authentifiée. Une
-  app ne peut donc pas atteindre le tiroir d'une autre.
-- Un **fichier par tiroir** (`<app_id_hex>.drawer`), donc le rayon de casse
-  d'une corruption est une seule app.
-- Chaque tiroir est chiffré sous **sa propre clé**, dérivée de l'identité
-  long-terme du nœud (HKDF, `app_id` mélangé dans l'`info`). Même avec le
-  fichier en main, la clé d'une app ne dérive jamais celle d'une autre ; et
-  l'`app_id` sert d'**AAD** GCM → un fichier renommé vers un autre tiroir échoue
-  à se déchiffrer (substitution inter-tiroirs détectée).
-- **AES-256-GCM** (post-quantique en tant que primitive symétrique). Même
-  frontière de confiance que le fichier d'identité déjà sur disque : aucune
-  nouvelle information secrète n'est exposée au medium.
-- **Persistance opt-in** : sans chemin (`app_storage_path`), les tiroirs vivent
-  en RAM uniquement — exactement comme la persistance de session E2E.
+- A drawer is named by its **`app_id`** — the same 8 section bytes the connector
+  already binds to each client at `AUTH`. **An app never names its own drawer**:
+  the node supplies the id from the authenticated session. An app therefore
+  cannot reach another's drawer.
+- **One file per drawer** (`<app_id_hex>.drawer`), so the blast radius of a
+  corruption is a single app.
+- Each drawer is encrypted under **its own key**, derived from the node's
+  long-term identity (HKDF, with `app_id` mixed into the `info`). Even holding
+  the file, one app's key never derives another's; and the `app_id` serves as
+  the GCM **AAD** → a file renamed onto another drawer fails to decrypt
+  (cross-drawer substitution is detected).
+- **AES-256-GCM** (post-quantum as a symmetric primitive). The same trust
+  boundary as the identity file already on disk: no new secret is exposed to the
+  medium.
+- **Opt-in persistence**: with no path (`app_storage_path`), drawers live in RAM
+  only — exactly like E2E session persistence.
 
-## Bornes (anti-épuisement, anti-amplification)
+## Bounds (anti-exhaustion, anti-amplification)
 
-Toutes dures (voir `src/app_storage.py`) : longueur de clé (`MAX_KEY_LEN`),
-taille de valeur (`MAX_VALUE`), nombre de clés par tiroir (`MAX_KEYS`), octets
-par tiroir (`MAX_DRAWER_BYTES`), et nombre de tiroirs (`MAX_DRAWERS`). Un `put`
-qui violerait une borne renvoie `False` sans effet de bord. Une app locale
-hostile ne peut ni saturer la mémoire ni remplir le disque à travers nous.
+All hard (see `src/app_storage.py`): key length (`MAX_KEY_LEN`), value size
+(`MAX_VALUE`), number of keys per drawer (`MAX_KEYS`), bytes per drawer
+(`MAX_DRAWER_BYTES`), and number of drawers (`MAX_DRAWERS`). A `put` that would
+break a bound returns `False` with no side effect. A hostile local app can
+neither saturate memory nor fill the disk through us.
 
-## Robustesse (jamais de crash)
+## Solidity (never a crash)
 
-Le chemin de chargement traite **tout fichier comme hostile** : corruption,
-troncature, falsification (échec d'authentification GCM), mauvaise clé, ou champ
-mal formé donnent un **tiroir vide** et un redémarrage propre — jamais un crash,
-jamais les données d'une autre app.
+The load path treats **every file as hostile**: corruption, truncation,
+tampering (a GCM authentication failure), the wrong key, or a malformed field
+all yield an **empty drawer** and a clean start — never a crash, never another
+app's data.
 
-## API nœud (apps intégrées)
-
-```python
-node.app_store_put(app_id, "clef", b"valeur")   # -> bool (False si borne dépassée)
-node.app_store_get(app_id, "clef")               # -> bytes | None
-node.app_store_delete(app_id, "clef")            # -> bool
-node.app_store_list(app_id)                       # -> [clefs...] triées
-```
-
-L'appelant passe **l'`app_id` lié à la session**, jamais un id choisi par l'app.
-
-## API connecteur (apps externes)
-
-Le client `ConnectorClient` expose le tiroir de **sa propre** section (l'`app_id`
-donné à l'`AUTH`) :
+## Node API (built-in apps)
 
 ```python
-await client.store_put("clef", b"valeur")   # -> bool
-await client.store_get("clef")               # -> bytes | None
-await client.store_delete("clef")            # -> bool
-await client.store_list()                     # -> [clefs...]
+node.app_store_put(app_id, "key", b"value")   # -> bool (False if a bound is broken)
+node.app_store_get(app_id, "key")              # -> bytes | None
+node.app_store_delete(app_id, "key")           # -> bool
+node.app_store_list(app_id)                     # -> [keys...] sorted
 ```
 
-Frames (voir `src/data_connector.py`) — l'app_id n'apparaît **pas** dans la
-frame, il est déduit de la session :
+The caller passes **the `app_id` bound to the session**, never an id chosen by
+the app.
 
-| Type | Sens | Corps |
+## Connector API (external apps)
+
+The `ConnectorClient` exposes the drawer of **its own** section (the `app_id`
+given at `AUTH`):
+
+```python
+await client.store_put("key", b"value")   # -> bool
+await client.store_get("key")              # -> bytes | None
+await client.store_delete("key")           # -> bool
+await client.store_list()                   # -> [keys...]
+```
+
+Frames (see `src/data_connector.py`) — the app_id does **not** appear in the
+frame, it is deduced from the session:
+
+| Type | Direction | Body |
 |---|---|---|
-| `STORE_GET`   | client→nœud | `clef(utf-8)` |
-| `STORE_PUT`   | client→nœud | `keylen(2) ‖ clef ‖ valeur` |
-| `STORE_DEL`   | client→nœud | `clef(utf-8)` |
-| `STORE_LIST`  | client→nœud | vide |
-| `STORE_VALUE` | nœud→client | `present(1) ‖ valeur` (réponse GET) |
-| `STORE_OK`    | nœud→client | `ok(1)` (réponse PUT/DEL) |
-| `STORE_KEYS`  | nœud→client | tableau JSON de clés (réponse LIST) |
+| `STORE_GET`   | client→node | `key(utf-8)` |
+| `STORE_PUT`   | client→node | `keylen(2) ‖ key ‖ value` |
+| `STORE_DEL`   | client→node | `key(utf-8)` |
+| `STORE_LIST`  | client→node | empty |
+| `STORE_VALUE` | node→client | `present(1) ‖ value` (the GET answer) |
+| `STORE_OK`    | node→client | `ok(1)` (the PUT/DEL answer) |
+| `STORE_KEYS`  | node→client | a JSON array of keys (the LIST answer) |
 
-Note : une valeur transmise **via le connecteur** est bornée par le plafond de
-frame du connecteur (~70 Ko), atteint avant `MAX_VALUE`. Les apps intégrées, qui
-appellent `node.app_store_*` directement, ne sont bornées que par `MAX_VALUE`.
-La réponse `STORE_LIST` est plafonnée à une frame : un tiroir à très grand nombre
-de clés doit tenir son propre index dans une valeur.
+Note: a value sent **through the connector** is bounded by the connector's frame
+cap (~70 KB), reached before `MAX_VALUE`. Built-in apps, which call
+`node.app_store_*` directly, are bounded only by `MAX_VALUE`. The `STORE_LIST`
+answer is capped at one frame: a drawer with a very large number of keys must
+keep its own index in a value.
 
-## Câblage
+## Wiring
 
-`scripts/nmesh_node.py` passe `app_storage_path=<data>/app_store` quand `--data`
-est fourni ; sans `--data`, les tiroirs restent en RAM.
+`scripts/nmesh_node.py` passes `app_storage_path=<data>/app_store` when `--data`
+is given; without `--data`, drawers stay in RAM.

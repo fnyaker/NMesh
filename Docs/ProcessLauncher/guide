@@ -1,52 +1,50 @@
-# Lanceur de sous-processus
+# The subprocess launcher
 
-Le nœud peut lancer des applications déclarées et les **raccorder au mesh** : il
-injecte dans leur environnement les coordonnées du connecteur de données local
-(hôte, port, jeton). L'app rejoint alors le réseau via `ConnectorClient` — le
-nœud devient son pont réseau, l'app n'a rien à savoir du mesh.
+The node can start declared applications and **plug them into the mesh**: it
+injects the local data connector's coordinates (host, port, token) into their
+environment. The app then joins the network through `ConnectorClient` — the node
+becomes its network bridge, and the app needs to know nothing about the mesh.
 
-## Lancer une app avec le nœud
+## Launching an app with the node
 
 ```bash
 python scripts/console_demo.py --connector-port 8790 \
     --launch "python scripts/example_app.py"
-# répétez --launch pour plusieurs apps
+# repeat --launch for several apps
 ```
 
-`--launch` nécessite `--connector-port` (l'app doit avoir un connecteur où se
-brancher). À l'arrêt du nœud, toutes les apps lancées sont terminées proprement.
+`--launch` requires `--connector-port` (the app needs a connector to plug into).
+When the node stops, every launched app is terminated cleanly.
 
-## Écrire une app
+## Writing an app
 
 ```python
 from src.data_connector import ConnectorClient
 
 async def main():
-    client = ConnectorClient.from_env()      # lit NMESH_CONNECTOR_HOST/PORT/TOKEN
+    client = ConnectorClient.from_env()      # reads NMESH_CONNECTOR_HOST/PORT/TOKEN
     await client.connect()
-    me = await client.whoami()               # notre NodeID sur le mesh
+    me = await client.whoami()               # our NodeID on the mesh
     while True:
-        src, payload = await client.recv()   # message entrant
+        src, payload = await client.recv()   # an incoming message
         await client.send(src, b"echo:" + payload)
 ```
 
-Voir [`scripts/example_app.py`](../../scripts/example_app.py) (service d'écho
-complet).
+See [`scripts/example_app.py`](../../scripts/example_app.py) (a complete echo
+service).
 
-## Variables injectées
+## Injected variables
 
-| Variable                | Contenu                             |
+| Variable                | Contents                            |
 |-------------------------|-------------------------------------|
-| `NMESH_CONNECTOR_HOST`  | hôte du connecteur (loopback)       |
-| `NMESH_CONNECTOR_PORT`  | port du connecteur                  |
-| `NMESH_CONNECTOR_TOKEN` | jeton d'authentification            |
-| `NMESH_NODE_ID`         | NodeID du nœud (hex)                |
+| `NMESH_CONNECTOR_HOST`  | the connector's host (loopback)     |
+| `NMESH_CONNECTOR_PORT`  | the connector's port                |
+| `NMESH_CONNECTOR_TOKEN` | the authentication token            |
+| `NMESH_NODE_ID`         | the node's NodeID (hex)             |
 
-## Sécurité
+## Security
 
-- Les commandes sont de la **configuration déclarée par l'opérateur**, pas de
-  l'entrée réseau ; elles sont exécutées via `exec` (jamais un shell) → aucune
-  surface d'injection de commande.
-- Le jeton ne transite que par l'environnement de l'enfant.
-- Nombre d'enfants borné ; tous terminés à l'arrêt du nœud.
-</content>
+- Commands are **configuration declared by the operator**, not network input;
+  they are run through `exec` (never a shell) → no command-injection surface.
+- The token travels only through the child's environment.
+- The number of children is bounded; all are terminated when the node stops.
