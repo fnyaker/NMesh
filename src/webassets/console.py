@@ -403,7 +403,8 @@ INDEX_HTML = """<!doctype html>
             <span id="version-pill" class="badge"></span></div>
           <div class="card-body">
             <p class="muted small">Nothing is installed without you confirming the exact version.
-              Applying an update replaces the node's files and restarts it.</p>
+              Applying an update replaces the node's files, then restarts the node if something
+              is there to bring it back — otherwise it says so and waits for you.</p>
             <div class="btn-row">
               <button id="update-check">Check for updates</button>
               <button id="update-apply" class="primary" hidden>Install</button>
@@ -450,9 +451,10 @@ INDEX_HTML = """<!doctype html>
             </div>
             <label class="check"><input id="pin-auto" type="checkbox">
               <span>Install their releases automatically</span></label>
-            <p class="muted small">Automatic installs never restart the node: it keeps running the
-              code it started with until you restart it. Trusting a publisher and letting them
-              install while nobody is watching are two separate decisions.</p>
+            <p class="muted small">Automatic installs never restart the node — that is what keeps
+              one bad release from becoming a restart loop nobody is present to break. Installing
+              by hand does restart it. Trusting a publisher and letting them install while nobody
+              is watching are two separate decisions.</p>
             <div class="btn-row"><button id="pin-add" class="primary">Pin publisher</button></div>
             <p id="pin-status" class="msg"></p>
           </div>
@@ -2141,7 +2143,9 @@ async function applyUpdate(event){
       const {ok, data} = await apiJson("/api/update/apply", "POST",
         {version:UPDATE_OFFER, confirm:true});
       if(!ok){ status.textContent = data.error || "Update failed."; return; }
-      status.textContent = data.service_managed
+      // What it says is what the node reported doing, not what we hope: a node
+      // nothing would bring back does not restart itself, and says so.
+      status.textContent = data.restarting
         ? "Installed " + data.applied + ". The node is restarting — reload this page in a moment."
         : "Installed " + data.applied + ". Restart the node to run it (previous files in " +
           data.backup + ").";
@@ -2203,8 +2207,8 @@ $("release-rows").addEventListener("click", async (event) => {
   const agreed = await confirmAction({
     title:"Install " + version + "?",
     body:'<p class="muted small">The node fetches this release from the mesh, checks every byte ' +
-      "against the signature you pinned, and replaces its own files. It keeps running the code " +
-      "it started with until you restart it; the previous files are kept.</p>",
+      "against the signature you pinned, and replaces its own files. It then restarts if a " +
+      "service manager is there to bring it back. The previous files are kept either way.</p>",
     confirmLabel:"Install " + version});
   if(!agreed) return;
   await withBusy(button, async () => {
@@ -2212,7 +2216,9 @@ $("release-rows").addEventListener("click", async (event) => {
     const {ok, data} = await apiJson("/api/releases/install", "POST",
       {publisher_id:button.dataset.install, confirm:true});
     setMessage("release-status", ok
-      ? "Installed " + data.version + ". Restart the node to run it (previous files kept)."
+      ? (data.restarting
+         ? "Installed " + data.version + ". The node is restarting — reload in a moment."
+         : "Installed " + data.version + ". Restart the node to run it (previous files kept).")
       : (data.error || "Install failed"), !ok);
     await refreshReleases();
   });

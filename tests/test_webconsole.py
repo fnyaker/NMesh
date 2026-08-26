@@ -1400,6 +1400,67 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
 
+class TestRestartingOntoNewCode:
+    """Replacing the tree changes nothing in a running process: the update only
+    takes effect when the node starts again.
+
+    So the node has to leave, and let the service manager bring it back. What
+    matters is that it leaves **only** when something is watching — exiting with
+    nothing to restart it is a worse outcome than running yesterday's code — and
+    that the console reports what actually happened rather than what it hoped."""
+
+    async def test_it_leaves_when_a_service_manager_will_bring_it_back(
+            self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            assert console.restart_for_update() is True
+            # The worker runs in its own thread; give it a moment to be seen.
+            for _ in range(50):
+                if left:
+                    break
+                await asyncio.sleep(0.01)
+            assert left == [True]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_stays_up_when_nothing_would_restart_it(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            assert console.restart_for_update() is False
+            await asyncio.sleep(0.05)
+            assert left == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_mesh_install_says_whether_it_is_restarting(self,
+                                                                monkeypatch):
+        """The page prints the node's answer, so the answer has to be in it."""
+        node, console = await _make_console()
+        try:
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            _, token = await _login(console)
+
+            async def installed(publisher_id):
+                return {"applied": "9.9.9", "version": "9.9.9",
+                        "restart_required": True}
+
+            monkeypatch.setattr(node, "install_release", installed)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/install", token,
+                {"publisher_id": "aa" * 20, "confirm": True})
+            assert status == 200 and body["restarting"] is False
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestReleaseEndpoints:
     """Publishing, pinning and installing code over the mesh, from the console.
 

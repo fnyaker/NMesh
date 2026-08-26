@@ -289,8 +289,12 @@ real test of a running systemd. Likewise, a service manager that refuses the
 service does not fail the installation: it is a warning, and the installed tree
 stays runnable by hand.
 
-Every unit written exports `NMESH_SERVICE_MANAGED=1`: that is what allows the
-updater (below) to restart the node, knowing something will bring it back.
+Every unit written exports `NMESH_SERVICE_MANAGED=1`, next to `Restart=always`
+(systemd) or `KeepAlive` (launchd): that pair is what lets a node install an
+update and then **exit to come back on the new code**. Replacing the tree does
+nothing to a process that already has the old code loaded, so leaving is the
+update. Without that variable the node stays up and says to restart it by hand —
+exiting with nothing to catch it would be worse than running the old version.
 
 The tests source `install.sh` with `NMESH_INSTALL_LIB=1` and exercise init
 detection, privileges, paths, account creation, the generated units and the tree
