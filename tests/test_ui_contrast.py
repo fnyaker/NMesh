@@ -1,10 +1,10 @@
 """
-Le contraste du thème n'est pas une affaire de goût.
+A theme's contrast is not a matter of taste.
 
-Les jetons de couleur sont lus dans la feuille de style, résolus (ils se
-référencent entre eux), puis chaque paire texte/fond est mesurée selon WCAG 2.1
-dans **les deux** thèmes. Sous 4.5 pour du texte courant, le test échoue : une
-console qu'on lit mal à 3 h du matin est un défaut, pas une préférence.
+The colour tokens are read from the stylesheet, resolved (they reference each
+other), then every text/background pair is measured against WCAG 2.1 in **both**
+themes. Below 4.5 for body text the test fails: a console that is hard to read
+at 3 a.m. is a defect, not a preference.
 """
 import re
 
@@ -12,8 +12,8 @@ import pytest
 
 from src.webassets import ui
 
-# (avant-plan, arrière-plan, ratio minimum). 4.5 = AA texte normal, 3.0 = AA
-# grand texte et composants d'interface (bordures, pastilles).
+# (foreground, background, minimum ratio). 4.5 = AA body text, 3.0 = AA large
+# text and interface components (borders, dots).
 TEXT_PAIRS = [
     ("--text", "--canvas", 4.5),
     ("--text", "--surface", 4.5),
@@ -47,7 +47,7 @@ def _declarations(block: str) -> dict:
 
 
 def _blocks():
-    """Les jetons du thème clair, puis ceux du sombre (clair + surcharges)."""
+    """The light theme's tokens, then the dark one's (light + overrides)."""
     root = ui.TOKENS.split(":root{", 1)[1].split("\n}", 1)[0]
     light = _declarations(root)
     dark = dict(light)
@@ -59,7 +59,7 @@ def _resolve(name: str, table: dict, depth: int = 0) -> str:
     value = table[name].strip()
     match = re.fullmatch(r"var\((--[a-z0-9-]+)\)", value)
     if match:
-        assert depth < 8, f"boucle de référence sur {name}"
+        assert depth < 8, f"reference loop on {name}"
         return _resolve(match.group(1), table, depth + 1)
     return value
 
@@ -93,19 +93,19 @@ def test_pair_is_readable(theme, front, back, minimum):
     table = _blocks()[theme]
     ratio = contrast(_resolve(front, table), _resolve(back, table))
     assert ratio >= minimum, (
-        f"{theme}: {front} sur {back} = {ratio:.2f}:1, minimum {minimum}")
+        f"{theme}: {front} on {back} = {ratio:.2f}:1, minimum {minimum}")
 
 
 def test_both_themes_define_the_same_semantic_tokens():
-    """Un jeton défini d'un seul côté est une couleur qui traverse le thème."""
+    """A token defined on one side only is a colour that crosses the theme."""
     light, dark = _blocks()["light"], _blocks()["dark"]
     assert set(dark) == set(light)
 
 
 def test_no_page_redefines_a_token():
-    """Les jetons ont un seul point de définition : le reste les consomme."""
+    """Tokens have one definition point: everything else consumes them."""
     from src import webassets
     for name in ("CONSOLE_PAGE_CSS", "CHAT_PAGE_CSS", "FLEET_PAGE_CSS"):
         page = getattr(webassets, name)
         for declaration in re.findall(r"(--[a-z0-9-]+)\s*:", page):
-            assert declaration.startswith("--page-"), f"{name} redéfinit {declaration}"
+            assert declaration.startswith("--page-"), f"{name} redefines {declaration}"

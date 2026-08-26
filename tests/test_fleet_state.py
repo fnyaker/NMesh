@@ -300,9 +300,9 @@ class TestHostFacts:
 
 
 class TestSshKeyVault:
-    """Un conteneur n'a pas de `~/.ssh` : l'opérateur doit pouvoir confier une
-    clé au nœud. Elle vit dans le tiroir chiffré, et ce que l'interface lit ne
-    contient **jamais** le matériel."""
+    """A container has no `~/.ssh`: the operator must be able to entrust a key
+    to the node. It lives in the encrypted drawer, and what the interface reads
+    **never** contains the material."""
 
     KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2\n"
@@ -352,7 +352,7 @@ class TestSshKeyVault:
         assert state.remove_ssh_key(entry["id"]) is False
 
     def test_material_is_stored_in_the_drawer_not_the_index(self):
-        """Le blob d'état reste petit : le matériel a sa propre entrée."""
+        """The state blob stays small: the material has its own entry."""
         store = MemoryStore()
         state = FleetState(store)
         entry = state.add_ssh_key("laptop", self.KEY)

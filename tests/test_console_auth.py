@@ -1,8 +1,7 @@
-"""Le credential de la console : hachage, stockage, vérification.
+"""The console credential: hashing, storage, verification.
 
-Une seule implémentation, partagée par la console et par le script de reset de
-l'installeur — un format qui divergerait entre deux écrivains serait un bug
-d'authentification silencieux.
+One implementation, shared by the console and by the installer's reset script —
+a format that diverged between two writers would be a silent authentication bug.
 """
 import os
 import stat
@@ -22,8 +21,8 @@ class TestHashing:
         assert stored.startswith("scrypt$")
 
     def test_the_same_password_hashes_differently_each_time(self, tmp_path):
-        """Un sel par credential : deux nœuds avec le même mot de passe ne
-        doivent pas se reconnaître dans un fichier volé."""
+        """One salt per credential: two nodes with the same password must not
+        recognise each other in a stolen file."""
         first = str(tmp_path / "a.cred")
         second = str(tmp_path / "b.cred")
         console_auth.write(first, "identical-password-here")
@@ -43,8 +42,8 @@ class TestHashing:
         assert console_auth.check("the-right-password", salt, digest)
 
     def test_an_absurdly_long_password_is_refused_before_hashing(self):
-        """scrypt sur une entrée non bornée est le déni de service le moins
-        cher qui soit."""
+        """scrypt on unbounded input is the cheapest denial of service there
+        is."""
         salt, digest = b"\x00" * 16, b"\x00" * 32
         assert console_auth.check("x" * (console_auth.MAX_LENGTH + 1),
                                   salt, digest) is False
@@ -65,8 +64,8 @@ class TestCorruptFiles:
         assert console_auth.read(str(path)) is None
 
     def test_an_unknown_algorithm_is_refused(self, tmp_path):
-        """Un jour où on changera de KDF, un vieux fichier ne doit pas être lu
-        comme s'il était du nouveau."""
+        """The day we change KDF, an old file must not be read as if it were
+        the new one."""
         path = tmp_path / "console.cred"
         path.write_text("md5$aabb$ccdd")
         assert console_auth.read(str(path)) is None
@@ -92,7 +91,7 @@ class TestValidation:
             console_auth.validate("x" * (console_auth.MAX_LENGTH + 1))
 
     def test_surrounding_whitespace_is_refused(self):
-        """Invisible dans un formulaire, impossible à retaper plus tard."""
+        """Invisible in a form, impossible to retype later."""
         with pytest.raises(console_auth.CredentialError):
             console_auth.validate("  a-fine-password-here  ")
 
@@ -116,8 +115,8 @@ class TestOnDisk:
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
     def test_the_umask_cannot_loosen_it(self, tmp_path):
-        """Créé en 0600 dès le premier octet, pas resserré après coup : « après
-        coup » est une fenêtre où n'importe qui sur la machine peut le lire."""
+        """Created 0600 from the first byte, not tightened afterwards:
+        "afterwards" is a window where anyone on the machine can read it."""
         path = str(tmp_path / "console.cred")
         previous = os.umask(0)
         try:

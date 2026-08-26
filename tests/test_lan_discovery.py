@@ -1,5 +1,5 @@
 """
-LAN relay discovery (étape 4).
+LAN relay discovery (step 4).
 
 When no relay is configured but a mesh member sits on the same broadcast
 domain, a joiner finds it by broadcasting a beacon; the member answers with

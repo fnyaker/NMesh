@@ -1,5 +1,5 @@
 """
-Relayed invitation — block generation + join validation (étape 3).
+Relayed invitation — block generation + join validation (step 3).
 
 A single block lets a node bring in a peer with no direct link: it carries a
 signed rendezvous token plus relays the joiner can reach the inviter through.

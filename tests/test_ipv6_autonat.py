@@ -1,5 +1,5 @@
 """
-IPv6-first connect ordering + AutoNAT active reachability (étape 6).
+IPv6-first connect ordering + AutoNAT active reachability (step 6).
 
 IPv6-first: when a peer advertises both a NAT'd IPv4 and a global IPv6, trying
 the IPv6 endpoint first often gives a direct, NAT-free link. AutoNAT: a node

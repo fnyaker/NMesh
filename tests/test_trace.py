@@ -1,9 +1,9 @@
-"""La trace protocolaire.
+"""The protocol trace.
 
-Elle sert à répondre à « pourquoi ces deux nœuds se parlent-ils ? », et elle est
-posée sur le chemin chaud de chaque paquet entrant et sortant. Les deux
-contraintes qui comptent : elle ne doit **jamais** enregistrer de payload, et
-elle ne doit jamais pouvoir tuer la boucle de réception qu'elle observe.
+It exists to answer "why are these two nodes talking to each other?", and it
+sits on the hot path of every incoming and outgoing packet. The two constraints
+that matter: it must **never** record a payload, and it must never be able to
+kill the receive loop it observes.
 """
 import json
 import os
@@ -17,7 +17,7 @@ from src.trace import Trace
 
 
 class _Packet:
-    """Un paquet réduit à ce que la trace regarde."""
+    """A packet reduced to what the trace looks at."""
 
     def __init__(self, type_=0x01, payload=b"secret payload", ttl=64,
                  src=b"\x11" * 20, dst=b"\x22" * 20):
@@ -43,8 +43,8 @@ class TestOffByDefault:
 
 
 class TestNoPayloadEverLeaves:
-    """Le header est déjà visible de tout relais ; le payload est précisément ce
-    que ce projet existe pour protéger. Un outil de debug n'est pas une raison."""
+    """The header is already visible to every relay; the payload is precisely
+    what this project exists to protect. A debug tool is no reason."""
 
     def test_the_payload_is_nowhere_in_what_is_kept(self):
         trace = Trace()
@@ -86,8 +86,8 @@ class TestBounds:
         assert trace.status()["capacity"] == trace_mod.MAX_EVENTS
 
     def test_a_request_for_an_endless_trace_is_capped(self):
-        """Une trace qui tourne jusqu'à ce qu'on y repense est une fuite avec un
-        nom sympathique."""
+        """A trace that runs until someone remembers it is a leak with a
+        friendly name."""
         trace = Trace()
         trace.start(seconds=10 ** 9)
         assert trace.status()["seconds_left"] <= trace_mod.MAX_SECONDS
@@ -95,7 +95,7 @@ class TestBounds:
     def test_it_stops_on_its_own_when_the_time_is_up(self):
         trace = Trace()
         trace.start(seconds=1)
-        trace._stops_at = time.monotonic() - 1      # comme si le temps était passé
+        trace._stops_at = time.monotonic() - 1      # as if the time had run out
         trace.record("in", _Packet(), 80)
         assert trace.status()["running"] is False
 
@@ -108,8 +108,8 @@ class TestBounds:
 
 
 class TestNeverBreaksTheLink:
-    """Perdre une ligne de trace n'est rien ; perdre la boucle de réception est
-    un bug de sécurité."""
+    """Losing a trace line is nothing; losing the receive loop is a security
+    bug."""
 
     def test_a_packet_missing_its_fields_does_not_raise(self):
         trace = Trace()
@@ -138,9 +138,9 @@ class TestNeverBreaksTheLink:
 
 class TestSummary:
     def test_the_rate_uses_the_recording_window_not_the_burst(self):
-        """Une trace de 30 s qui contient une rafale d'une demi-seconde décrit
-        une demi-seconde de trafic dans trente — diviser par la rafale
-        annoncerait un débit que le lien n'a jamais tenu."""
+        """A 30 s trace containing a half-second burst describes half a second
+        of traffic in thirty — dividing by the burst would announce a rate the
+        link never sustained."""
         trace = Trace()
         trace.start(seconds=60)
         trace._started_at = time.time() - 60
@@ -172,7 +172,7 @@ class TestSummary:
 
 class TestOnDisk:
     def test_a_written_trace_is_owner_only(self, tmp_path):
-        """Une trace nomme qui ce nœud fréquente et quand."""
+        """A trace names who this node keeps company with, and when."""
         trace = Trace()
         trace.start(seconds=5)
         trace.record("in", _Packet(), 80)

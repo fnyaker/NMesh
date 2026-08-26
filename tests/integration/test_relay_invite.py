@@ -1,5 +1,5 @@
 """
-Relayed invitation — end-to-end (étape 3).
+Relayed invitation — end-to-end (step 3).
 
 The point of the whole feature: a node brings in a peer with NO direct link,
 through a relay. Real TCP on loopback; A and B never connect to each other —

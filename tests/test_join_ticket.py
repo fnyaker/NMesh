@@ -1,7 +1,7 @@
 """Le ticket de join compact.
 
-Il voyage sur un écran, un bout de papier, une photo. Tout ce qui revient doit
-donc être traité comme hostile, et rien ne doit pouvoir lever autre chose qu'une
+It travels on a screen, a scrap of paper, a photo. Everything that comes back
+must therefore be treated as hostile, and nothing may raise anything other than a
 `TicketError`.
 """
 import time
@@ -19,7 +19,7 @@ def a_ticket(host="203.0.113.7", port=9000, seed=SEED, ttl=600):
 
 class TestRoundTrip:
     def test_an_ipv4_ticket_stays_short(self):
-        """34 caractères : dictable, tapable sur un téléphone, et un QR de
+        """34 characters: dictable, typable on a phone, and a QR of
         version 2."""
         assert len(a_ticket()) == 34
 
@@ -33,8 +33,8 @@ class TestRoundTrip:
         assert parsed["uri"] == "tcp://[2001:db8::1]:9000"
 
     def test_case_and_spacing_do_not_matter(self):
-        """Base32 est insensible à la casse pour que le ticket puisse être
-        dicté et retapé."""
+        """Base32 is case-insensitive so the ticket can be dictated and
+        retyped."""
         text = a_ticket()
         spaced = text.lower()[:8] + " " + text.lower()[8:20] + "-" + text.lower()[20:]
         assert jt.decode(spaced)["uri"] == jt.decode(text)["uri"]
@@ -87,7 +87,7 @@ class TestHostileInput:
                 jt.decode(broken)
             except jt.TicketError:
                 caught += 1
-        assert caught >= len(text) - 2      # quasi toutes, à la marge du hasard
+        assert caught >= len(text) - 2      # nearly all of them, at the margin of chance
 
     def test_a_truncated_ticket_is_refused(self):
         text = a_ticket()
@@ -122,7 +122,7 @@ class TestHostileInput:
 class TestEncodeRefusals:
     def test_a_hostname_is_refused(self):
         """Un ticket porte une adresse, jamais un nom : un nom demanderait un
-        résolveur côté scanner et pourrait pointer ailleurs plus tard."""
+        resolver on the scanner's side and could point elsewhere later."""
         with pytest.raises(jt.TicketError):
             jt.encode("example.com", 9000, SEED, time.time() + 600)
 

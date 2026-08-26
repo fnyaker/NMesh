@@ -576,20 +576,20 @@ class TestLookupDoesNotInheritAnotherLookupsFailure:
 
 
 class TestNoSelfInflictedLookupLoop:
-    """Une réponse ne doit jamais être la cause de la question suivante.
+    """A reply must never be the cause of the next question.
 
-    `_handle_found_node` réveillait la maintenance dès qu'une réponse contenait
-    des entrées valides. Comme la table de routage refuse de stocker notre
-    propre id, `contains` est faux pour lui à jamais : une réponse qui ne fait
-    que nous renvoyer notre propre identité passait pour une découverte, et
-    relançait un FIND_NODE — indéfiniment, à ~15 ko de certificats par tour."""
+    `_handle_found_node` woke maintenance as soon as a reply held valid
+    entries. Since the routing table refuses to store our own id, `contains` is
+    false for it forever: a reply that merely echoes our own identity back
+    looked like a discovery, and restarted a FIND_NODE — endlessly, at ~15 KB of
+    certificates per round."""
 
     def test_our_own_id_is_never_a_discovery(self):
         from src.node import MeshNode
         from tests.conftest import make_manager
         node = MeshNode(transport_manager=make_manager())
         # La table refuse notre id, donc `contains` restera faux pour toujours :
-        # c'est exactement le piège que le handler doit connaître.
+        # that is exactly the trap the handler has to know about.
         node._routing.add(node.id, [], b"")
         assert not node._routing.contains(node.id)
 
@@ -604,7 +604,7 @@ class TestNoSelfInflictedLookupLoop:
         assert node._routing.contains(other)
 
     def test_the_maintenance_loop_has_a_floor_between_cycles(self):
-        """Un réveil peut raccourcir l'attente, jamais la supprimer."""
+        """A wake-up may shorten the wait, never remove it."""
         from src import node as node_mod
         assert node_mod._NEIGHBOR_MIN_INTERVAL > 0
         assert node_mod._NEIGHBOR_IDLE_MAX >= node_mod._NEIGHBOR_REFRESH

@@ -122,8 +122,8 @@ class TestPacketAad:
 
 
 class TestIdentityOnDisk:
-    """La clé privée *est* l'identité du nœud sur le mesh : sur disque, elle ne
-    doit être lisible que par le compte qui fait tourner le nœud."""
+    """The private key *is* the node's identity on the mesh: on disk it must be
+    readable only by the account running the node."""
 
     def test_saved_identity_is_owner_only(self, tmp_path):
         path = str(tmp_path / "node.key")
