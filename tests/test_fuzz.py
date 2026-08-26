@@ -33,7 +33,7 @@ from src.node import (
     _MAX_MALFORMED,
     DATA, PING, PONG, FIND_NODE, FOUND_NODE,
     HANDSHAKE, HANDSHAKE_ACK, CHALLENGE, INVITE, INVITE_ACK,
-    E2E_HANDSHAKE, E2E_HANDSHAKE_ACK,
+    E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, CATALOG_ANNOUNCE, RELEASE_ANNOUNCE,
 )
 from src.node_id import NodeID
 from src.packet import Packet, PacketError
@@ -48,7 +48,10 @@ _OK_EXC = (ValueError, PacketError, struct.error, UnicodeDecodeError,
            IndexError, KeyError, OverflowError)
 
 _ALL_TYPES = [DATA, PING, PONG, FIND_NODE, FOUND_NODE, HANDSHAKE, HANDSHAKE_ACK,
-              CHALLENGE, INVITE, INVITE_ACK, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK]
+              CHALLENGE, INVITE, INVITE_ACK, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK,
+              # The two gossip planes: both carry a signed blob a peer chose,
+              # and one of them decides what code this node may run.
+              CATALOG_ANNOUNCE, RELEASE_ANNOUNCE]
 
 
 def _random_bytes(rng: random.Random, max_len: int = 4096) -> bytes:
