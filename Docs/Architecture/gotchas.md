@@ -1,420 +1,411 @@
-# Pièges & leçons (à lire AVANT de déboguer un blocage ou une flakiness)
+# Traps & lessons (read BEFORE debugging a hang or a flaky test)
 
-Bugs réels rencontrés et corrigés. Chacun a coûté cher à diagnostiquer. Si tu
-retouches la zone, garde le correctif — et si tu en ajoutes un, documente-le ici.
+Real bugs, hit and fixed. Each one was expensive to diagnose. If you touch the
+area, keep the fix — and if you add one, document it here.
 
-## Blocages (le job/nœud « ne finit jamais »)
+## Hangs (the job/node "never finishes")
 
-### 1. asyncio 3.12 : `Server.wait_closed()` attend les connexions clientes
-Python 3.12 a changé la sémantique : `wait_closed()` bloque jusqu'à la fermeture
-de **toutes les connexions acceptées**, plus seulement la socket d'écoute.
-Fermer un serveur (`remove_listen`, `close`) pendant qu'un pair reste connecté
-**ne revenait jamais** → hang infini (5 h en CI avant kill).
-→ Correctif : `_wait_closed_bounded()` (`tcp_transport.py`) borne l'attente.
-**Ne jamais `await server.wait_closed()` nu** sur un serveur qui peut avoir des
-clients vivants.
+### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections
+Python 3.12 changed the semantics: `wait_closed()` blocks until **every accepted
+connection** is closed, not only the listening socket. Closing a server
+(`remove_listen`, `close`) while a peer stayed connected **never returned** → an
+infinite hang (5 h in CI before the kill).
+→ Fix: `_wait_closed_bounded()` (`tcp_transport.py`) bounds the wait. **Never
+`await server.wait_closed()` bare** on a server that may have live clients.
 
-### 2. Sondes réseau bloquantes → boucle/shutdown figés
-`discover_public_ip` faisait du socket **bloquant** (`getaddrinfo` sans timeout,
-`connect`) directement sur la boucle asyncio. Sur réseau restreint (CI) → gel.
-Piège subtil : `loop.run_in_executor(None, …)` **ne résout pas** le problème —
-asyncio **joint l'executor par défaut au shutdown**, donc un thread coincé dans
-`getaddrinfo` fige `asyncio.run()` à la sortie.
-→ Correctif : sonde dans un **thread daemon abandonné au timeout** (jamais
-joint), bornée (`_PUBLIC_IP_TIMEOUT`). Idem DNS STUN (`_bounded_getaddrinfo`).
-**Toute I/O réseau bloquante potentiellement lente doit être bornée ET hors de
-la boucle ET non-jointe au shutdown.**
+### 2. Blocking network probes → a frozen loop/shutdown
+`discover_public_ip` did **blocking** socket work (`getaddrinfo` with no
+timeout, `connect`) directly on the asyncio loop. On a restricted network (CI) →
+a freeze. The subtle trap: `loop.run_in_executor(None, …)` **does not solve** the
+problem — asyncio **joins the default executor at shutdown**, so a thread stuck
+in `getaddrinfo` freezes `asyncio.run()` on the way out.
+→ Fix: the probe runs in a **daemon thread abandoned on timeout** (never
+joined), bounded (`_PUBLIC_IP_TIMEOUT`). Same for STUN DNS
+(`_bounded_getaddrinfo`).
+**Any potentially slow blocking network I/O must be bounded AND off the loop AND
+not joined at shutdown.**
 
-### 3b. `asyncio.wait_for` peut *perdre* une annulation (Python 3.11)
-`TCPTransport.receive` utilisait `asyncio.wait_for(readexactly, timeout)`. Si la
-lecture interne se termine dans le même pas de boucle que l'annulation de la
-tâche englobante, `wait_for` peut **avaler** le `CancelledError` : la boucle de
-réception ne sort pas et se **re-bloque** sur le `receive()` suivant → `peer.stop()`
-(qui fait `await self._task`) attend une tâche qui ne meurt jamais. Symptôme :
-un `stop()` qui fige, révélé par du trafic concurrent (le gossip d'adresses
-générant un PING/PONG juste avant l'arrêt).
-→ Correctif : `async with asyncio.timeout(...)` au lieu de `wait_for` — il
-propage l'annulation proprement. **Ne pas réintroduire `wait_for` sur un chemin
-qui doit rester annulable.**
+### 3b. `asyncio.wait_for` can *lose* a cancellation (Python 3.11)
+`TCPTransport.receive` used `asyncio.wait_for(readexactly, timeout)`. If the
+inner read completes in the same loop step as the cancellation of the enclosing
+task, `wait_for` can **swallow** the `CancelledError`: the receive loop does not
+exit and **blocks again** on the next `receive()` → `peer.stop()` (which does
+`await self._task`) waits for a task that never dies. Symptom: a `stop()` that
+freezes, revealed by concurrent traffic (address gossip producing a PING/PONG
+just before shutdown).
+→ Fix: `async with asyncio.timeout(...)` instead of `wait_for` — it propagates
+the cancellation cleanly. **Do not reintroduce `wait_for` on a path that must
+stay cancellable.**
 
-### 2b. Lire un pty dans un thread refige le shutdown (même piège que 2)
-Le shell distant de l'app Fleet et le pilotage d'OpenSSH lisent tous deux un
-**pty maître**. La tentation est `loop.run_in_executor(None, os.read, fd, n)` —
-et c'est exactement le piège du point 2 sous un autre visage : la lecture d'un
-pty dont le pair ne ferme jamais **ne rend pas la main**, le thread reste dans
-l'executor par défaut, et asyncio **joint cet executor au shutdown** → `stop()`
-ne revient jamais.
-→ Correctif : `fleet_ssh.watch_pty()` — `os.set_blocking(fd, False)` +
-`loop.add_reader(fd, …)`. Aucun thread à joindre, aucune lecture où se coincer,
-et l'EOF (EIO sur Linux quand l'enfant raccroche) retire proprement le reader.
-**Tout fd qui peut ne jamais rendre la main se lit par `add_reader`, jamais dans
-un thread.**
+### 2b. Reading a pty in a thread freezes shutdown again (the same trap as 2)
+The Fleet app's remote shell and its driving of OpenSSH both read a **pty
+master**. The temptation is `loop.run_in_executor(None, os.read, fd, n)` — and
+that is exactly trap 2 wearing another face: reading a pty whose peer never
+closes **never returns**, the thread stays in the default executor, and asyncio
+**joins that executor at shutdown** → `stop()` never comes back.
+→ Fix: `fleet_ssh.watch_pty()` — `os.set_blocking(fd, False)` +
+`loop.add_reader(fd, …)`. No thread to join, no read to get stuck in, and EOF
+(EIO on Linux when the child hangs up) removes the reader cleanly.
+**Any fd that may never return is read with `add_reader`, never in a thread.**
 
-Corollaire dans la même zone : la tâche qui pompe un pty ferme sa propre session
-en fin de flux. Si `close()` annule cette tâche sans garde, elle s'annule
-elle-même en plein démontage et ne finit jamais son nettoyage — d'où le
-`task is not asyncio.current_task()` dans `_Shell.close()`.
+A corollary in the same area: the task pumping a pty closes its own session at
+the end of the stream. If `close()` cancels that task without a guard, it
+cancels itself mid-teardown and never finishes its cleanup — hence the
+`task is not asyncio.current_task()` in `_Shell.close()`.
 
-### 3. Un lien TCP inactif meurt tout seul
-`receive()` TCP lève au `_READ_TIMEOUT` (60 s) sans données → lien reapé. Sans
-keepalive, un lien sain mais silencieux tombe. → `_link_keepalive_loop` (PING
-toutes les 20 s). Si tu vois des liens qui « tombent au bout d'un moment »,
-regarde le keepalive avant tout.
+### 3. An idle TCP link dies on its own
+TCP `receive()` raises at `_READ_TIMEOUT` (60 s) with no data → the link is
+reaped. Without a keepalive, a healthy but silent link goes down. →
+`_link_keepalive_loop` (a PING every 20 s). If you see links "dropping after a
+while", look at the keepalive first.
 
-### 4. Un `connect()` TCP sans timeout pend des minutes
-Dialer une adresse injoignable (IP privée d'un pair NATté apprise par gossip,
-hôte mort) sans borne laisse l'OS épuiser son timeout SYN (~2 min) **dans**
-`_ensure_route_to` — qui est awaité par `_forward_packet` (ça gèle la boucle de
-réception du lien entrant) et par le fallback de `console_ping_node`.
-→ Correctif : `_CONNECT_TIMEOUT` (4 s) via `async with asyncio.timeout(...)`
-(cancellable, cf. 3b) dans `TCPTransport.connect`. **Toute ouverture de
-connexion vers une adresse non prouvée doit être bornée.**
+### 4. A TCP `connect()` with no timeout hangs for minutes
+Dialling an unreachable address (a NATted peer's private IP learned by gossip, a
+dead host) with no bound lets the OS exhaust its SYN timeout (~2 min) **inside**
+`_ensure_route_to` — which is awaited by `_forward_packet` (freezing the
+incoming link's receive loop) and by `console_ping_node`'s fallback.
+→ Fix: `_CONNECT_TIMEOUT` (4 s) through `async with asyncio.timeout(...)`
+(cancellable, see 3b) in `TCPTransport.connect`. **Every connection opened
+towards an unproven address must be bounded.**
 
-### 4b. `peer.stop()` attendait sans borne une tâche annulée qui ne meurt pas
-`_Peer.stop()` faisait `task.cancel()` puis `await task` **sans borne**. Quand
-l'annulation tombe sur une lecture dont le future était déjà annulé, la tâche
-reste marquée « cancelling » et attend un réveil qui n'arrive jamais → `stop()`
-n'en revient pas. Observé sur ~1 démontage sur 3 dès qu'un nœud a plusieurs
-pairs (le hang existait avant les correctifs de routage, il était juste rare).
-→ Attente bornée (`_PEER_STOP_TIMEOUT`) : la fermeture du transport qui suit
-détruit le lien de toute façon. `MeshNode.stop()` arrête aussi ses pairs **en
-parallèle** (`gather`), sinon 128 liens empilent 128 bornes.
-**Aucune attente de tâche au démontage ne doit être non bornée.**
+### 4b. `peer.stop()` waited without a bound for a cancelled task that never dies
+`_Peer.stop()` did `task.cancel()` then `await task` **with no bound**. When the
+cancellation lands on a read whose future was already cancelled, the task stays
+marked "cancelling" and waits for a wake-up that never comes → `stop()` never
+returns. Observed on roughly one teardown in three as soon as a node has several
+peers (the hang predated the routing fixes, it was simply rare).
+→ A bounded wait (`_PEER_STOP_TIMEOUT`): closing the transport afterwards
+destroys the link anyway. `MeshNode.stop()` also stops its peers **in parallel**
+(`gather`), or 128 links stack 128 bounds.
+**No task wait at teardown may be unbounded.**
 
-### 12. Une réponse qui déclenche la question suivante — le lien saturé au repos
-`_maintain_neighbors` envoyait un `FIND_NODE` ; `_handle_found_node` réveillait
-la maintenance dès que la réponse contenait des entrées valides ; la boucle
-`await self._neighbor_wakeup.wait()` rendait donc la main **immédiatement** et
-repartait. Comme un `FOUND_NODE` transporte des chaînes de certificats (~15 ko,
-cf. §9), deux nœuds joints et **inactifs** échangeaient 3 Mbit/s mesurés en
-loopback — sur un lien réel, tout ce que le lien peut porter, en permanence.
+### 12. An answer that triggers the next question — the link saturated at rest
+`_maintain_neighbors` sent a `FIND_NODE`; `_handle_found_node` woke maintenance
+as soon as the answer held valid entries; the `await self._neighbor_wakeup.wait()`
+therefore returned **immediately** and started again. Since a `FOUND_NODE`
+carries certificate chains (~15 kB, see §9), two joined and **idle** nodes
+exchanged 3 Mbit/s measured over loopback — on a real link, everything the link
+can carry, permanently.
 
-Trois causes empilées, les trois corrigées :
-1. **Notre propre id passait pour une découverte.** La table de routage refuse
-   de stocker `self._id`, donc `contains(self._id)` est faux *à jamais* : chaque
-   réponse qui nous mentionnait en retour ressemblait à une nouveauté et
-   réveillait la maintenance. On ne réveille plus que sur un id réellement
-   nouveau, et jamais sur le nôtre.
-2. **Aucun plancher entre deux cycles.** `_NEIGHBOR_MIN_INTERVAL` : un réveil
-   peut raccourcir l'attente, jamais la supprimer. **Aucune boucle pilotée par
-   ce qu'un pair nous envoie ne doit pouvoir tourner sans borne** — c'est autant
-   une question d'amplification que de débit.
-3. **Une recherche qui ne peut pas aboutir ne s'arrêtait jamais.** Un mesh plus
-   petit que `_NEIGHBOR_FLOOR` (3) est sous le plancher pour toujours, donc
-   `searching` restait vrai. Les cycles improductifs partent maintenant en
-   backoff exponentiel jusqu'à `_NEIGHBOR_IDLE_MAX` (5 min), et le keepalive
-   cesse de pousser une recherche qui n'a plus rien à trouver. Tout événement
-   réel (pair perdu ou gagné, identité inconnue) réveille et remet le backoff à
-   zéro.
+Three stacked causes, all three fixed:
+1. **Our own id counted as a discovery.** The routing table refuses to store
+   `self._id`, so `contains(self._id)` is false *forever*: every answer that
+   mentioned us back looked like news and woke maintenance. We now only wake on
+   a genuinely new id, and never on our own.
+2. **No floor between two cycles.** `_NEIGHBOR_MIN_INTERVAL`: a wake-up may
+   shorten the wait, never remove it. **No loop driven by what a peer sends us
+   may run unbounded** — that is as much about amplification as about
+   throughput.
+3. **A search that cannot succeed never stopped.** A mesh smaller than
+   `_NEIGHBOR_FLOOR` (3) is below the floor forever, so `searching` stayed true.
+   Unproductive cycles now back off exponentially up to `_NEIGHBOR_IDLE_MAX`
+   (5 min), and the keepalive stops pushing a search with nothing left to find.
+   Any real event (a peer lost or gained, an unknown identity) wakes it and
+   resets the backoff.
 
-Mesure avant/après sur deux nœuds joints au repos : **3036 kbit/s → 2,1
-kbit/s**. Trouvé avec `src/trace.py` (Settings → Protocol trace), verrouillé par
-`tests/integration/test_idle_chatter.py` — qui inclut un test « la découverte
-marche toujours », parce que la borne ne doit pas éteindre ce qu'elle protège.
+Before/after on two joined nodes at rest: **3036 kbit/s → 2.1 kbit/s**. Found
+with `src/trace.py` (Settings → Protocol trace), locked down by
+`tests/integration/test_idle_chatter.py` — which includes a "discovery still
+works" test, because a bound must not switch off what it protects.
 
-## Routage : les bugs « ça marche à 3 nœuds, plus à 6 »
+## Routing: the "works at 3 nodes, not at 6" bugs
 
-### 9. Un `FOUND_NODE` qui ne rentre pas dans un paquet — Kademlia meurt en silence
-Un certificat ML-DSA-65 pèse ~7,3 ko, donc une chaîne jusqu'à une racine ~14,6 ko.
-`_handle_find_node` empaquetait les `k = 20` entrées de Kademlia → ~292 ko, très
-au-delà du plafond de 60 000 octets. `Packet.create` levait `PacketError`,
-`_Peer._loop` avalait l'exception (« un paquet malformé ne tue pas le lien »), et
-**aucune réponse ne partait**. Dès la **5ᵉ** node certifiée dans la table, tous
-les `FIND_NODE` du réseau restaient sans réponse : plus de lookup, donc plus
-d'`_ensure_route_to` vers un id inconnu, donc un mesh qui « marchait au début »
-et se dégradait aux seuls pairs directs en grandissant. Aucun log, aucun test
-rouge — les topologies de test avaient 2-5 nœuds, juste sous la falaise.
-→ Réponse **budgétée** (`_FOUND_NODE_MAX_BYTES`) et certificats mutualisés dans
-un pool (`_EntryPacker`) ; entrées sans chaîne sautées. Voir `routing.md`.
-**Tout ce qui empaquette N certificats dans un paquet doit être borné en octets,
-et vérifié par un test à N > 5.**
+### 9. A `FOUND_NODE` that does not fit in a packet — Kademlia dies silently
+An ML-DSA-65 certificate weighs ~7.3 kB, so a chain up to a root ~14.6 kB.
+`_handle_find_node` packed Kademlia's `k = 20` entries → ~292 kB, far beyond the
+60 000-byte ceiling. `Packet.create` raised `PacketError`, `_Peer._loop`
+swallowed the exception ("a malformed packet does not kill the link"), and **no
+reply ever left**. From the **fifth** certified node in the table onwards, every
+`FIND_NODE` on the network went unanswered: no more lookups, so no more
+`_ensure_route_to` towards an unknown id, so a mesh that "worked at first" and
+degraded to direct peers only as it grew. No log, no red test — the test
+topologies had 2-5 nodes, just under the cliff.
+→ A **budgeted** reply (`_FOUND_NODE_MAX_BYTES`) and certificates shared through
+a pool (`_EntryPacker`); entries with no chain skipped. See `routing.md`.
+**Anything packing N certificates into a packet must be bounded in bytes, and
+checked by a test with N > 5.**
 
-### 10. Acquérir une route depuis une boucle de réception : gel + interblocage
-`_forward_packet` et les handlers de réponse (`_handle_find_node`,
-`_handle_find_value`, `_handle_dir_find`, `_handle_echo_request`, E2E) awaitaient
-`_ensure_route_to` — lookup + dial + hole punch, plusieurs secondes — **dans**
-`_Peer._loop`. Deux conséquences :
-1. le lien entrant ne traite plus rien pendant tout le budget (un pair qui envoie
-   des paquets vers des ids injoignables gèle le lien à volonté : PING/PONG
-   perdus, RTT en vrac, « le ping ne répond plus ») ;
-2. le lookup lancé attend un `FOUND_NODE` qui doit souvent revenir **par ce
-   lien-là** — quand c'est notre seul pair, l'attente est perdue d'avance.
-Mesuré : un unique paquet non routable gelait le lien 4,95 s.
-→ `_defer_route` / `_route_outbound(blocking=False)` : chemin rapide en ligne,
-acquisition en tâche de fond bornée (`_MAX_DEFERRED_ROUTES`, annulée par
-`stop()`). **Ne jamais awaiter `_ensure_route_to` depuis un handler de paquet.**
+### 10. Acquiring a route from a receive loop: a freeze plus a deadlock
+`_forward_packet` and the reply handlers (`_handle_find_node`,
+`_handle_find_value`, `_handle_dir_find`, `_handle_echo_request`, E2E) awaited
+`_ensure_route_to` — lookup + dial + hole punch, several seconds — **inside**
+`_Peer._loop`. Two consequences:
+1. the incoming link processes nothing for that whole budget (a peer sending
+   packets towards unreachable ids can freeze the link at will: PINGs/PONGs
+   lost, RTT ruined, "the ping stopped answering");
+2. the lookup started waits for a `FOUND_NODE` that often has to come back **over
+   that very link** — when it is our only peer, the wait is lost before it
+   begins.
+Measured: a single unroutable packet froze the link for 4.95 s.
+→ `_defer_route` / `_route_outbound(blocking=False)`: the fast path inline,
+acquisition in a bounded background task (`_MAX_DEFERRED_ROUTES`, cancelled by
+`stop()`). **Never await `_ensure_route_to` from a packet handler.**
 
-### 11. Les réponses étaient routées par une nouvelle supposition XOR
-Une réponse (`FOUND_NODE`, `ECHO_REPLY`, ACK E2E, `DATA`) repartait par un choix
-glouton recalculé de zéro, alors que le chemin que la requête venait d'emprunter
-était la seule information *prouvée* disponible. Sur une chaîne ça marche par
-accident ; dès qu'un nœud a plusieurs voisins, la réponse peut partir dans une
-impasse et le demandeur ne voit qu'un timeout.
-→ `_learn_reverse_path` / `_route_hints` (borné, daté, oublié au premier
-silence), consulté par `_route_candidates`. Détail et surface d'attaque assumée
-dans `routing.md`. **Un lien direct vers la cible garde toujours la priorité.**
+### 11. Replies were routed by a fresh XOR guess
+A reply (`FOUND_NODE`, `ECHO_REPLY`, an E2E ACK, `DATA`) left again by a greedy
+choice recomputed from scratch, while the path the request had just taken was
+the only *proven* information available. On a chain that works by accident; as
+soon as a node has several neighbours, the reply can go into a dead end and the
+seeker sees only a timeout.
+→ `_learn_reverse_path` / `_route_hints` (bounded, dated, forgotten at the first
+silence), consulted by `_route_candidates`. Detail and the accepted attack
+surface in `routing.md`. **A direct link to the target always keeps priority.**
 
-### 12. Une limite de débit calée sur le trafic normal casse le trafic normal
-Le garde-fou anti-réflexion sur `FIND_NODE`/`FIND_VALUE` a d'abord été posé à
-64 requêtes / 10 s par lien. Le pic **légitime** mesuré est ~66 (α × rounds d'un
-lookup, plus quelques lookups concurrents) : la limite refusait donc de vraies
-requêtes et rendait les lookups aléatoires — exactement la panne qu'on corrigeait.
-→ `_QUERY_RATE_MAX = 512` : une soupape anti-flood, pas du shaping.
-**Mesurer le pic légitime avant de fixer une borne de débit ; le pic ne grandit
-pas forcément avec le réseau (ici il est plat, borné par le comportement d'un
-lookup, pas par le nombre de nœuds).**
+### 12. A rate limit set at normal traffic breaks normal traffic
+The anti-reflection guard on `FIND_NODE`/`FIND_VALUE` was first set at
+64 requests / 10 s per link. The measured **legitimate** peak is ~66 (α × a
+lookup's rounds, plus a few concurrent lookups): the limit therefore refused
+real requests and made lookups random — exactly the failure we were fixing.
+→ `_QUERY_RATE_MAX = 512`: an anti-flood valve, not shaping.
+**Measure the legitimate peak before setting a rate bound; the peak does not
+necessarily grow with the network (here it is flat, bounded by a lookup's
+behaviour, not by the number of nodes).**
 
-## Sessions E2E & vivacité (les bugs « ça ne livre plus jamais »)
+## E2E sessions & liveness (the "it never delivers again" bugs)
 
-### 5. Répondre à un E2E_HANDSHAKE en écrasant la session empoisonne le lien
-Le retry E2E réémet un handshake toutes les 5 s tant que de la data est en
-file. Sur un chemin lent (relais), un doublon arrive **après** l'établissement.
-Répondre naïvement = écraser la session côté répondeur avec une nouvelle clé,
-alors que l'initiateur n'a plus d'état pending pour ce doublon, **ignore l'ACK**
-et garde l'ancienne clé → les deux bouts chiffrent avec des clés différentes →
-chaque DATA échoue au GCM → **drop silencieux et permanent** (aucun des deux
-ne ré-initie : chacun « a » une session). Même effet en glare quand l'ACK
-double le handshake perdant en chemin.
-→ Correctif : avec une session déjà vivante, le répondeur dérive une clé
-**candidate** (bornée `_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`) et ACK quand même,
-mais ne la promeut que si un DATA **déchiffre** sous elle (preuve que le pair a
-réellement complété ce handshake — cas du pair qui a perdu sa session). Un
-doublon ne produit jamais un tel paquet → le candidat expire. Tests :
+### 5. Answering an E2E_HANDSHAKE by overwriting the session poisons the link
+The E2E retry re-sends a handshake every 5 s while data is queued. On a slow
+path (a relay), a duplicate arrives **after** establishment. Answering naively =
+overwriting the responder's session with a new key, while the initiator has no
+pending state for that duplicate, **ignores the ACK** and keeps the old key →
+the two ends encrypt with different keys → every DATA fails at the GCM → a
+**silent, permanent drop** (neither re-initiates: each one "has" a session). The
+same effect in a glare when the ACK doubles the losing handshake in flight.
+→ Fix: with a session already live, the responder derives a **candidate** key
+(bounded by `_E2E_REKEY_MAX`, TTL `_E2E_REKEY_TTL`) and ACKs anyway, but only
+promotes it if a DATA **decrypts** under it (proof that the peer really
+completed that handshake — the case of a peer that lost its session). A
+duplicate never produces such a packet → the candidate expires. Tests:
 `tests/test_nat_relay_fixes.py`, `tests/integration/test_nat_relay_e2e.py`.
-**Ne jamais réinstaller une session E2E sans preuve que le pair détient la clé.**
+**Never reinstall an E2E session without proof that the peer holds the key.**
 
-### 6. Le PONG est inconditionnel
-`_handle_ping` ne répondait que si le PING portait des URI valides. Un nœud
-NATté sans listeners (ou sans adresses annonçables) ne recevait donc **jamais**
-de PONG : son `ping_sent_at` restait armé à vie (RTT jamais résolu) et le ping
-console d'un pair direct semblait mort. → Le PONG suit toujours les gates
-(payload non vide, src = pair authentifié, adresses décodables).
-La fusion dans la table de routage, elle, se fait **toujours** pour l'émetteur
-authentifié (un PING prouve sa fraîcheur même sans adresse annonçable — sinon
-un pair NATté vivant se fait purger de la table faute d'adresse), mais **seules
-les URI valides** sont ajoutées à `addresses` : une entrée peut donc exister
-avec `addresses == []` (recency sans adresse exploitable), jamais avec une URI
-mal formée dedans.
+### 6. The PONG is unconditional
+`_handle_ping` only answered if the PING carried valid URIs. A NATted node with
+no listeners (or with no announceable address) therefore **never** got a PONG:
+its `ping_sent_at` stayed armed forever (the RTT never resolved) and a direct
+peer's console ping looked dead. → The PONG always follows the gates (a non-empty
+payload, src = an authenticated peer, decodable addresses).
+The merge into the routing table, on the other hand, **always** happens for the
+authenticated sender (a PING proves its freshness even with no announceable
+address — otherwise a live NATted peer is purged from the table for lack of one),
+but **only valid URIs** are added to `addresses`: an entry may therefore exist
+with `addresses == []` (recency with no usable address), never with a malformed
+URI inside it.
 
-### 7. Le timeout keepalive UDP était plus court que la cadence du trafic
-`_KEEPALIVE_TIMEOUT = 15 s` avec un keepalive toutes les 25 s et des PING mesh
-toutes les 20 s (commentaire : « 3 missed keepalives ») → dès que les phases
-s'alignaient, un lien punché **sain** était déclaré mort → flapping de route :
-`_route_outbound` préfère le pair direct mourant → ECHO/DATA aspirés dans un
-trou noir → « ping ne marche plus » intermittent dans les deux sens.
-→ `_KEEPALIVE_TIMEOUT = 75 s` (3 × intervalle). **Un timeout de mort doit
-toujours être ≥ 3 × la plus grande cadence de trafic légitime.**
+### 7. The UDP keepalive timeout was shorter than the traffic cadence
+`_KEEPALIVE_TIMEOUT = 15 s` with a keepalive every 25 s and mesh PINGs every 20 s
+(the comment said "3 missed keepalives") → as soon as the phases lined up, a
+**healthy** punched link was declared dead → route flapping: `_route_outbound`
+prefers the dying direct peer → ECHO/DATA sucked into a black hole → an
+intermittent "ping stopped working" in both directions.
+→ `_KEEPALIVE_TIMEOUT = 75 s` (3 × the interval). **A death timeout must always
+be ≥ 3 × the largest legitimate traffic cadence.**
 
-### 8. Fenêtre de séquence UDP : comparaison modulaire, pas de set infini
-La dédup receveur utilisait un `_recv_seen` **non borné** (spray de seq →
-mémoire) et cassait le lien au wrap 2³² (tout seq post-wrap déjà « vu »).
-→ `process_incoming` raisonne en distance modulaire (RFC 1982) autour du
-curseur de délivrance : en-ordre → livrer ; en-avant → buffer borné
-(`_MAX_REORDER`) ; en-arrière → duplicata, re-ACK. Aucun set, état borné par
-construction.
+### 8. UDP sequence window: modular comparison, not an infinite set
+Receiver deduplication used an **unbounded** `_recv_seen` (a spray of sequence
+numbers → memory) and broke the link at the 2³² wrap (every post-wrap sequence
+already "seen").
+→ `process_incoming` reasons in modular distance (RFC 1982) around the delivery
+cursor: in order → deliver; ahead → a bounded buffer (`_MAX_REORDER`); behind →
+a duplicate, re-ACK. No set, bounded state by construction.
 
-## Hole punching (voir aussi `transports.md`)
+## Hole punching (see also `transports.md`)
 
-- **Ne pas supprimer `_punch_pending` quand l'adresse UDP du pair est inconnue**
-  (relais qui ne connaît que le lien TCP → adresse vide). L'initiateur (plus
-  grand NodeID) doit garder son état pour compléter le punch depuis le PROBE
-  entrant. Le supprimer bloquait le punch de façon déterministe (surtout 3.12).
-- **Dé-dupliquer les transports initiateur** : les deux pairs punchent souvent
-  en même temps → risque de deux `UDPTransport` vers la même adresse qui se
-  courent après (aucun ne s'authentifie).
-- **Kick en rafale** : ouvrir le lien punché avec UN seul keepalive était fragile
-  (une perte UDP = punch perdu). `_kick_punched_link` envoie une rafale bornée.
+- **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a
+  relay that only knows the TCP link → an empty address). The initiator (the
+  larger NodeID) must keep its state to complete the punch from the incoming
+  PROBE. Deleting it blocked the punch deterministically (especially on 3.12).
+- **De-duplicate initiator transports**: both peers often punch at the same time
+  → a risk of two `UDPTransport`s to the same address racing each other (neither
+  authenticates).
+- **Kick in a burst**: opening the punched link with ONE keepalive was fragile
+  (one lost UDP datagram = a lost punch). `_kick_punched_link` sends a bounded
+  burst.
 
-## Tests : parallélisation & non-blocage
+## Tests: parallelism & not blocking
 
-La suite tourne en parallèle (`pytest-xdist`, `-n auto`, config dans
-`pyproject.toml`). Pièges quand tu ajoutes/déplaces un test :
+The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
+`pyproject.toml`). Traps when you add or move a test:
 
-- **Ports fixes = collision entre workers.** Une *fixture* partagée par plusieurs
-  tests doit binder un port **éphémère** (`:0`) puis relire le port
-  (cf. fixtures TCP/UDP dans `tests/test_*_transport.py`). Un port fixe unique
-  par test unique est OK ; un port fixe partagé ne l'est pas.
-- **Broadcast LAN = diaphonie entre workers.** Les tests qui émettent/écoutent
-  sur `DISCOVERY_PORT` s'entendent entre eux. Ils sont épinglés à un seul worker
-  via `pytestmark = pytest.mark.xdist_group("lan_discovery")` (+ `--dist
-  loadgroup`). Tout nouveau test de broadcast doit rejoindre ce groupe.
-- **Pas de réseau réel en test.** Fixture autouse `_no_public_network_probes`
-  (`tests/conftest.py`) neutralise `discover_public_ip` et la sonde STUN → aucune
-  dépendance Internet, aucun risque de gel. Ne pas la contourner sans raison.
-- **Filet anti-hang** : `--timeout=120 --timeout-method=thread` — tout test qui
-  dépasse 120 s échoue avec une trace (au lieu de 5 h). Si un test légitime
-  approche cette limite, il y a un vrai problème, pas une limite trop basse.
-- **La console tient la boucle : ne l'appelez pas depuis la boucle.** Le serveur
-  HTTP tourne dans un thread et marshalle chaque action vers la boucle asyncio
-  (`run_coroutine_threadsafe(...).result()`). Un test (ou un script) qui fait un
-  appel HTTP **synchrone depuis la boucle** bloque celle-ci pendant que le thread
-  serveur attend qu'elle exécute sa coroutine → interblocage franc, qui ressemble
-  à un timeout réseau. Tous les tests console passent par
-  `await asyncio.to_thread(_request, …)` ; garder ce motif.
-- **Attendre une condition, pas dormir.** Remplacer `await asyncio.sleep(0.1)`
-  « pour laisser propager » par un poll sur l'état observable (les transports en
-  mémoire propagent en ~ms). Les tests négatifs (« rien ne se passe ») gardent un
-  timeout court, mais borné.
+- **Fixed ports = a collision between workers.** A *fixture* shared by several
+  tests must bind an **ephemeral** port (`:0`) and then read the port back (see
+  the TCP/UDP fixtures in `tests/test_*_transport.py`). One fixed port for one
+  unique test is fine; a shared fixed port is not.
+- **LAN broadcast = crosstalk between workers.** Tests that send or listen on
+  `DISCOVERY_PORT` hear each other. They are pinned to a single worker with
+  `pytestmark = pytest.mark.xdist_group("lan_discovery")` (+ `--dist loadgroup`).
+  Any new broadcast test must join that group.
+- **No real network in tests.** The autouse fixture `_no_public_network_probes`
+  (`tests/conftest.py`) neutralises `discover_public_ip` and the STUN probe → no
+  Internet dependency, no risk of a freeze. Do not work around it without a
+  reason.
+- **A hang net**: `--timeout=120 --timeout-method=thread` — any test exceeding
+  120 s fails with a traceback (instead of 5 h). If a legitimate test approaches
+  that limit, there is a real problem, not a limit set too low.
+- **The console holds the loop: do not call it from the loop.** The HTTP server
+  runs in a thread and marshals every action onto the asyncio loop
+  (`run_coroutine_threadsafe(...).result()`). A test (or a script) making a
+  **synchronous HTTP call from the loop** blocks it while the server thread waits
+  for it to run its coroutine → a hard deadlock that looks like a network
+  timeout. Every console test goes through
+  `await asyncio.to_thread(_request, …)`; keep that pattern.
+- **Wait for a condition, do not sleep.** Replace `await asyncio.sleep(0.1)` "to
+  let it propagate" with a poll on the observable state (in-memory transports
+  propagate in milliseconds). Negative tests ("nothing happens") keep a short
+  timeout, but a bounded one.
 
-## App layer : les pannes silencieuses d'une réponse
+## The app layer: a reply's silent failures
 
-- **Ne jamais couper du JSON à un offset d'octets.** `_dump_json` de l'app Fleet
-  tronquait à `MAX_BODY` pour tenir dans une trame DATA. Le résultat n'est pas
-  une réponse courte : c'est du JSON invalide, que le destinataire jette
-  silencieusement. Vu de l'opérateur, la commande « ne fait rien ». On retire
-  désormais des **entrées** (listes nommées) jusqu'à ce que ça passe, avec un
-  compteur `truncated`. **Toute réponse à taille variable doit être ajustée par
-  éléments, jamais par octets.**
-- **Une action asynchrone doit avoir un état observable.** Un scan demandé à une
-  node distante revenait bien sur le fil, mais l'interface ne redessinait jamais
-  l'onglet concerné : le résultat arrivait dans l'état et n'était jamais affiché.
-  Une boucle de polling doit redessiner *tout* ce qui peut changer, pas seulement
-  ce que l'utilisateur vient de déclencher.
-- **Une clôture peut précéder son enregistrement.** Le pont note l'opération
-  après que l'appel a rendu la main ; un pair proche répond avant. La clôture
-  doit être idempotente et indépendante de l'ordre, sinon l'opération reste
-  « en cours » pour toujours. (Symptôme : un test vert seul, rouge en parallèle.)
+- **Never cut JSON at a byte offset.** The Fleet app's `_dump_json` truncated at
+  `MAX_BODY` to fit a DATA frame. The result is not a short reply: it is invalid
+  JSON, which the recipient drops silently. From the operator's side, the command
+  "does nothing". We now remove **entries** (named lists) until it fits, with a
+  `truncated` counter. **Any variable-size reply must be trimmed by elements,
+  never by bytes.**
+- **An asynchronous action must have an observable state.** A scan asked of a
+  remote node did come back over the wire, but the interface never redrew the
+  tab concerned: the result landed in the state and was never shown. A polling
+  loop must redraw *everything* that can change, not only what the user just
+  triggered.
+- **A completion can precede its own registration.** The bridge records the
+  operation after the call returns; a nearby peer answers before that. Closing
+  must be idempotent and order-independent, or the operation stays "running"
+  forever. (Symptom: a test green on its own, red in parallel.)
 
-## Divers
+## Miscellaneous
 
-- `console.stop()` bloquait 0,5 s : `ThreadingHTTPServer.serve_forever()` sonde
-  le drapeau d'arrêt toutes les 0,5 s par défaut. On passe `poll_interval`
-  serré (`webconsole.py`, `chat_web.py`).
-- Docker : liboqs est **compilé** (image de base séparée `Dockerfile.base`,
-  publiée seulement aux MAJ de deps ; l'image applicative build FROM elle). Le
-  build de base a besoin de `make` → `build-essential`, pas `gcc` seul (sinon
-  CMake : « CMAKE_MAKE_PROGRAM is not set »).
-- Docker : l'image applicative doit copier **`start.sh` et `pyproject.toml`** en
-  plus de `src/` et `scripts/`. Sans eux, l'app fleet échoue à l'exécution avec
-  « no NMesh tree at /app » — `build_payload` exige `src` **et** `start.sh` pour
-  pousser un arbre installable. Rien ne casse à la construction, d'où
+- `console.stop()` blocked for 0.5 s: `ThreadingHTTPServer.serve_forever()` polls
+  its shutdown flag every 0.5 s by default. We pass a tight `poll_interval`
+  (`webconsole.py`, `chat_web.py`).
+- Docker: liboqs is **compiled** (a separate base image `Dockerfile.base`,
+  published only on dependency updates; the application image builds FROM it).
+  The base build needs `make` → `build-essential`, not `gcc` alone (otherwise
+  CMake: "CMAKE_MAKE_PROGRAM is not set").
+- Docker: the application image must copy **`start.sh` and `pyproject.toml`** as
+  well as `src/` and `scripts/`. Without them the fleet app fails at runtime with
+  "no NMesh tree at /app" — `build_payload` requires `src` **and** `start.sh` to
+  push an installable tree. Nothing breaks at build time, hence
   `tests/test_docker_image_tree.py`.
-- `systemctl` présent ne prouve **pas** que systemd tourne : beaucoup d'images
-  de conteneur le livrent sans init derrière, et chaque appel meurt sur « Failed
-  to connect to bus ». Le vrai test d'un systemd démarré est l'existence de
-  `/run/systemd/system` — `install.sh` exige les deux.
-- `sudo mkdir -p` sur un chemin **du home de l'utilisateur** donne le répertoire
-  à root. `install.sh` créait ainsi `~/.local/share/nmesh/data` en root-owned
-  pour une installation utilisateur, et le nœud — qui tourne sous ce compte —
-  mourait sur sa toute première écriture : *« PermissionError: …
-  /data/node.key.tmp »*. `ensure_dir` crée donc le répertoire **sans escalader**
-  quand il le peut, n'escalade qu'en dernier recours, et remet toujours le
-  propriétaire attendu (ce qui répare aussi une installation précédente).
-- Un compte système n'a pas de home utilisable, or `start.sh` cherche liboqs
-  sous `$HOME/_oqs`. Le nœud lancé sous `nmesh` ne trouvait donc pas sa crypto.
-  `install.sh` épingle `HOME` sur le répertoire d'installation — à l'install
-  **et** dans l'unité — pour que la bibliothèque construite soit exactement
-  celle que le service charge.
-- Un service n'hérite pas d'un environnement de session : systemd ne transmet ni
-  `HOME` ni `USER`. Sous `set -u`, le `$HOME` nu de `start.sh` tuait le script
-  avant tout démarrage — *« HOME : variable sans liaison »* — et systemd le
-  relançait en boucle. `node_home()` résout un répertoire réellement
-  inscriptible (environnement → entrée passwd → répertoire d'installation).
-  **Aucun script lancé par un service ne doit déréférencer une variable
-  d'environnement de session sans repli.**
-- liboqs n'est compilé qu'une fois par machine : le résultat est mis en cache
-  sous `/var/cache/nmesh/liboqs-<version du wrapper>` et réutilisé par toute
-  install ultérieure (préfixe différent, second nœud). La réutilisation est
-  décidée **fonctionnellement** — le wrapper charge la bibliothèque candidate et
-  ML-KEM-768 / ML-DSA-65 répondent — jamais sur un nom de fichier ou un numéro
-  de version, et la vérification est refaite à destination après la copie.
-- `install.sh` écrit `nmesh.conf` **avant** le verrouillage des droits, pas
-  après. Le fichier est créé en 0600 par qui lance l'installeur : écrit après le
-  `chown -R` vers le compte du nœud, il restait `root:root` et le nœud ne
-  pouvait pas le lire du tout. Symptôme : un nœud qui repart sur **toutes** ses
-  valeurs par défaut alors que le fichier dit autre chose (console sur
-  127.0.0.1, app fleet absente). `tests/test_install_script.py` verrouille
-  l'ordre.
-- Un défaut injecté par le lanceur bat le fichier de config, donc l'annule.
-  `start.sh` préfixait `--udp 9001 --stun` à chaque lancement : `udp`, `no_udp`
-  et `stun` étaient réglables dans `nmesh.conf` et silencieusement sans effet.
-  **Un défaut n'a le droit d'exister qu'à un seul endroit** — ici
-  `src/config.py`. Corollaire : le nœud annonce au démarrage les réglages du
-  fichier écrasés par la ligne de commande.
-- Un pty sur les descripteurs d'un shell ne suffit **pas** : il faut en faire le
-  **terminal de contrôle** de la session (ioctl `TIOCSCTTY`). Sans ça,
-  `/dev/tty` ne s'ouvre pas, `sudo` refuse de demander un mot de passe et le
-  contrôle de tâches est éteint — un pty avec un prompt dedans, pas un
-  terminal. `start_new_session=True` a déjà fait le `setsid()` quand le
-  `preexec_fn` tourne : la session existe, elle ne possède simplement aucun
+- `systemctl` being present does **not** prove systemd is running: many container
+  images ship it with no init behind, and every call dies on "Failed to connect
+  to bus". The real test for a running systemd is the existence of
+  `/run/systemd/system` — `install.sh` requires both.
+- `sudo mkdir -p` on a path **inside the user's home** gives the directory to
+  root. `install.sh` used to create `~/.local/share/nmesh/data` root-owned for a
+  user installation, and the node — running under that account — died on its very
+  first write: *"PermissionError: … /data/node.key.tmp"*. `ensure_dir` therefore
+  creates the directory **without escalating** where it can, escalates only as a
+  last resort, and always restores the expected owner (which also repairs an
+  earlier installation).
+- A system account has no usable home, yet `start.sh` looks for liboqs under
+  `$HOME/_oqs`. The node started as `nmesh` therefore could not find its crypto.
+  `install.sh` pins `HOME` to the installation directory — at install time **and**
+  in the unit — so the library that was built is exactly the one the service
+  loads.
+- A service does not inherit a session environment: systemd passes neither `HOME`
+  nor `USER`. Under `set -u`, `start.sh`'s bare `$HOME` killed the script before
+  anything started — *"HOME: unbound variable"* — and systemd restarted it in a
+  loop. `node_home()` resolves a directory that is actually writable
+  (environment → passwd entry → installation directory).
+  **No script launched by a service may dereference a session environment
+  variable without a fallback.**
+- liboqs is compiled once per machine: the result is cached under
+  `/var/cache/nmesh/liboqs-<wrapper version>` and reused by any later install (a
+  different prefix, a second node). Reuse is decided **functionally** — the
+  wrapper loads the candidate library and ML-KEM-768 / ML-DSA-65 answer — never
+  on a filename or a version number, and the check is redone at the destination
+  after the copy.
+- `install.sh` writes `nmesh.conf` **before** locking permissions down, not
+  after. The file is created 0600 by whoever runs the installer: written after
+  the `chown -R` to the node's account it stayed `root:root` and the node could
+  not read it at all. Symptom: a node coming back on **all** its defaults while
+  the file says otherwise (the console on 127.0.0.1, no fleet app).
+  `tests/test_install_script.py` locks the order down.
+- A default injected by the launcher beats the configuration file, and therefore
+  cancels it. `start.sh` used to prefix `--udp 9001 --stun` on every launch:
+  `udp`, `no_udp` and `stun` were settable in `nmesh.conf` and silently had no
+  effect. **A default is only allowed to exist in one place** — here
+  `src/config.py`. A corollary: at startup the node announces which settings from
+  the file the command line overrode.
+- A pty on a shell's descriptors is **not** enough: it must be made the session's
+  **controlling terminal** (the `TIOCSCTTY` ioctl). Without it `/dev/tty` will not
+  open, `sudo` refuses to ask for a password and job control is off — a pty with a
+  prompt in it, not a terminal. `start_new_session=True` has already done the
+  `setsid()` by the time `preexec_fn` runs: the session exists, it simply owns no
   terminal.
-- `sudo` et `su` refusent de demander un mot de passe sans terminal. Un `ssh`
-  sans `-tt` ne donne pas de tty au shell distant : « sudo: a terminal is
-  required ». Et avec `-tt`, le prompt distant revient sur **stdout** de ssh et
-  la réponse doit partir dans son **stdin** — pas sur le pty local, qui ne sert
-  qu'aux prompts d'OpenSSH lui-même. D'où, pour la phase qui escalade : stdin,
-  stdout et stderr tous branchés sur le pty, **écho du tty coupé** (sinon le mot
-  de passe tapé ressort dans la sortie collectée, qui part dans le journal de
-  l'opérateur), et aucune donnée pipée — avec un terminal distant, stdin *est*
-  le terminal.
-- Un prompt de mot de passe ne se distingue pas au libellé : `sudo` écrit
-  « password for », `su` un « password: » nu, OpenSSH les deux. Ce qui les
-  sépare est le **moment** : le premier est la connexion, les suivants une
-  élévation — et seuls les runs qui ont demandé un terminal distant peuvent en
-  faire face. Ailleurs, un second prompt est OpenSSH qui redemande, et y
-  répondre brûle une tentative contre le verrouillage de la cible.
-- `install.sh` ne fait jamais échouer une installation parce qu'un gestionnaire
-  de service a refusé le service : sous `set -euo pipefail`, un `systemctl` qui
-  sort en erreur tuait tout le script après que l'arbre eut été copié. C'est
-  maintenant un avertissement, l'installation reste utilisable à la main.
+- `sudo` and `su` refuse to ask for a password with no terminal. An `ssh` without
+  `-tt` gives the remote shell no tty: "sudo: a terminal is required". And with
+  `-tt`, the remote prompt comes back on ssh's **stdout** and the answer must go
+  into its **stdin** — not onto the local pty, which serves only OpenSSH's own
+  prompts. Hence, for the escalating phase: stdin, stdout and stderr all wired to
+  the pty, **tty echo off** (or the typed password comes back out in the collected
+  output, which goes into the operator's log), and no piped data — with a remote
+  terminal, stdin *is* the terminal.
+- A password prompt cannot be told apart by its wording: `sudo` writes "password
+  for", `su` a bare "password:", OpenSSH both. What separates them is the
+  **moment**: the first is the login, the following ones an escalation — and only
+  runs that asked for a remote terminal can face one. Elsewhere, a second prompt
+  is OpenSSH asking again, and answering it burns an attempt against the target's
+  lockout.
+- `install.sh` never fails an installation because a service manager refused the
+  service: under `set -euo pipefail`, a `systemctl` exiting with an error killed
+  the whole script after the tree had been copied. It is a warning now, and the
+  installation stays usable by hand.
 
-## Maintenance de voisinage
+## Neighbourhood maintenance
 
-- Le scan par bucket éloigné utilise `routing.get_closest(target, k)` trié par
-  XOR : si le bucket courant est saturé, le plus ancien candidat remonte et est
-  tenté d'abord — ça peut cibler un nœud déjà connecté. `_connect_routing`
-  déduplique donc les sessions existantes avant de dialer.
-- Les identités en échec accumulent un back-off indépendant ; sans borne
-  (`_NEIGHBOR_RETRY_TRACKED`), une table de routage énorme peut faire grandir
-  ce suivi sans fin. Cette table est une simple `dict` bornée en taille.
-- **Au-dessus de `_NEIGHBOR_FLOOR = 3` liens vivants, un cycle de maintenance ne
-  fait plus rien** (ni `kad_lookup`, ni dial) — c'est voulu (voir
-  `routing.md`). Un test qui attend un dial doit donc soit rester sous le
-  plancher, soit appeler `_maintain_neighbors(force=True)` ; sinon il constate
-  un silence parfaitement normal et conclut à tort à une régression.
-- La **promotion** (une node vue en transit, plus proche que notre pire
-  créneau) dial *même en régime silencieux* : c'est un second chemin, en plus du
-  scan par bucket, qui peut créer un raccourci dans un test de topologie en
-  chaîne. Même parade : `_stop_neighbor_maintenance()` après le join.
-- Observer une candidate ne **réveille jamais** la boucle de maintenance. C'est
-  délibéré : le `src_id` d'un paquet routé n'est pas authentifié, et réveiller
-  sur réception laisserait n'importe qui choisir un id proche du nôtre pour
-  fixer notre cadence de dial (amplification). La candidate est traitée au
-  cycle suivant, au plus 30 s après.
-- Le dial multi-peer partage un deadline commun : on évite d'« attendre le plus
-  lent » quand la cible est simplement injoignable. Un échec collectif est
-  distingué d'un échec partiel (certains pairs répondent, d'autres non) pour
-  que le fallback Kademlia ne « double-dial » pas des candidats déjà valides.
-- **Un lookup vers un id qu'on connaît déjà comme pair du réseau ne le fait pas
-  entrer dans la table.** Symptôme observé en CI (~1 run sur 8, bien avant
-  d'être compris) : `_kademlia_lookup(z)` renvoie `False` en 50 ms dans une
-  étoile relais, alors que le relais connaît parfaitement `z`. Deux causes
-  cumulées, corrigées ensemble :
-  1. la shortlist contenait `z` (distance 0) → le `FIND_NODE` partait **vers
-     `z` lui-même**, qui répondait avec ses voisins sans **jamais s'inclure** ;
-     la shortlist ne progressait plus, le lookup s'arrêtait au premier round et
-     `routing.contains(z)` restait faux. Le répondeur s'inclut désormais dans sa
-     réponse (`_handle_find_node`, cf. `routing.md`) ;
-  2. `_kademlia_lookup` renvoyait le verdict d'un lookup **déjà en vol** sur la
-     même cible (`_pending_lookups`) — parti d'une autre shortlist, à un autre
-     moment. Il relance maintenant le sien avec le budget restant.
-  Moralité pour le débogage : un lookup qui échoue en quelques dizaines de ms
-  n'a rien demandé au réseau. Regarder `_pending_lookups` **avant** de suspecter
-  le transport.
-- **Un test de topologie en chaîne (A-B-C-D-E, sans raccourci) doit désactiver
-  la maintenance de voisinage**, pas seulement `_punch_enabled`. Dès que les
-  nœuds ont chacun une adresse TCP écoutable, `_maintain_neighbors` les
-  connecte directement dès qu'ils s'apprennent via le routage (c'est le but :
-  résilience par liens XOR-proches). Ça casse l'hypothèse « pas de raccourci »
-  d'un test qui vérifie le multi-hop pur. `await nd._stop_neighbor_maintenance()`
-  après le join. Les topologies relais (pairs NATtés sans listener, ex.
-  `test_routed_ping.py`, `test_nat_relay_e2e.py`) n'ont pas ce problème : sans
-  adresse dialable, la maintenance ne peut pas créer de raccourci.
-- **« Forget node » (console web, `console_forget_node`) n'est pas un
-  bannissement.** Il retire l'entrée de `RoutingTable` et coupe la session live
-  éventuelle, mais la fusion PONG (tout émetteur authentifié est réinséré dans
-  la table — voir plus haut) et le scan de maintenance de voisinage ci-dessus
-  peuvent réapprendre le même nœud dès qu'il recontacte la node. Un vrai
-  bannissement demanderait une liste d'exclusion persistante consultée par
-  `RoutingTable.add`/PONG, qui n'existe pas aujourd'hui.
-</content>
+- The distant-bucket scan uses `routing.get_closest(target, k)` sorted by XOR: if
+  the current bucket is saturated, the oldest candidate rises and is tried first
+  — which may target a node that is already connected. `_connect_routing`
+  therefore de-duplicates existing sessions before dialling.
+- Failing identities accumulate an independent back-off; without a bound
+  (`_NEIGHBOR_RETRY_TRACKED`), an enormous routing table could grow that tracking
+  endlessly. That table is a plain `dict`, bounded in size.
+- **Above `_NEIGHBOR_FLOOR = 3` live links, a maintenance cycle does nothing**
+  (no `kad_lookup`, no dial) — that is intended (see `routing.md`). A test
+  expecting a dial must therefore either stay below the floor or call
+  `_maintain_neighbors(force=True)`; otherwise it observes a perfectly normal
+  silence and wrongly concludes a regression.
+- **Promotion** (a node seen in transit, nearer than our worst slot) dials *even
+  in the quiet regime*: it is a second path, on top of the bucket scan, which can
+  create a shortcut in a chain-topology test. The same guard applies:
+  `_stop_neighbor_maintenance()` after the join.
+- Observing a candidate **never wakes** the maintenance loop. This is
+  deliberate: the `src_id` of a routed packet is not authenticated, and waking on
+  receipt would let anyone pick an id near ours to set our dial cadence
+  (amplification). The candidate is handled on the next cycle, at most 30 s later.
+- The multi-peer dial shares a common deadline: we avoid "waiting for the
+  slowest" when the target is simply unreachable. A collective failure is
+  distinguished from a partial one (some peers answer, others do not) so that the
+  Kademlia fallback does not "double-dial" candidates that are already valid.
+- **A lookup for an id we already know as a peer of the network does not put it
+  in the table.** Observed in CI (~1 run in 8, long before it was understood):
+  `_kademlia_lookup(z)` returns `False` in 50 ms in a relay star, while the relay
+  knows `z` perfectly well. Two stacked causes, fixed together:
+  1. the shortlist contained `z` (distance 0) → the `FIND_NODE` went **to `z`
+     itself**, which answered with its neighbours and **never included itself**;
+     the shortlist stopped progressing, the lookup stopped at the first round and
+     `routing.contains(z)` stayed false. The responder now includes itself in its
+     reply (`_handle_find_node`, see `routing.md`);
+  2. `_kademlia_lookup` returned the verdict of a lookup **already in flight**
+     for the same target (`_pending_lookups`) — started from a different
+     shortlist, at a different moment. It now restarts its own with the remaining
+     budget.
+  The debugging moral: a lookup that fails in a few tens of milliseconds asked
+  the network nothing. Look at `_pending_lookups` **before** suspecting the
+  transport.
+- **A chain-topology test (A-B-C-D-E, no shortcut) must disable neighbourhood
+  maintenance**, not only `_punch_enabled`. As soon as the nodes each have a
+  listenable TCP address, `_maintain_neighbors` connects them directly the moment
+  they learn about each other through routing (that is the point: resilience
+  through XOR-near links). It breaks the "no shortcut" assumption of a test
+  checking pure multi-hop. `await nd._stop_neighbor_maintenance()` after the
+  join. Relay topologies (NATted peers with no listener, e.g.
+  `test_routed_ping.py`, `test_nat_relay_e2e.py`) do not have this problem:
+  with no dialable address, maintenance cannot create a shortcut.
+- **"Forget node" (web console, `console_forget_node`) is not a ban.** It removes
+  the entry from `RoutingTable` and cuts any live session, but the PONG merge
+  (every authenticated sender is reinserted into the table — see above) and the
+  neighbourhood maintenance scan above can relearn the same node as soon as it
+  contacts this one again. A real ban would need a persistent exclusion list
+  consulted by `RoutingTable.add`/PONG, which does not exist today.

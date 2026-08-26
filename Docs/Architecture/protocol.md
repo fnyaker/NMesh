@@ -1,133 +1,138 @@
-# Protocole inter-nœuds
+# Inter-node protocol
 
-Source de vérité : `src/packet.py`, `src/node.py` (constantes + `_handle_packet`).
+Source of truth: `src/packet.py`, `src/node.py` (constants + `_handle_packet`).
 
-## Format du paquet
+## Packet format
 
-`HEADER_FORMAT = '!BBB20s20sQ12s16s'` → **header de 79 octets**, suivi du payload.
+`HEADER_FORMAT = '!BBB20s20sQ12s16s'` → a **79-byte header**, followed by the
+payload.
 
-| Champ | Taille | Notes |
+| Field | Size | Notes |
 |---|---|---|
-| version | 1 | protocole (=1) |
-| type | 1 | voir table des types |
-| ttl | 1 | décrémenté à chaque hop ; **exclu de l'AAD et du `msg_id`** |
-| src_id | 20 | NodeID émetteur |
-| dst_id | 20 | NodeID destinataire (`0xff…ff` = broadcast) |
-| msg_id | 8 | uint64, voir ci-dessous |
-| nonce | 12 | `os.urandom(12)`, unique par paquet (AES-GCM) |
-| gcm_tag | 16 | tag d'authenticité AES-256-GCM |
-| payload | ≤ 60000 | clair pour le contrôle, chiffré pour DATA/E2E |
+| version | 1 | protocol (=1) |
+| type | 1 | see the type table |
+| ttl | 1 | decremented at every hop; **excluded from the AAD and from `msg_id`** |
+| src_id | 20 | sender NodeID |
+| dst_id | 20 | recipient NodeID (`0xff…ff` = broadcast) |
+| msg_id | 8 | uint64, see below |
+| nonce | 12 | `os.urandom(12)`, unique per packet (AES-GCM) |
+| gcm_tag | 16 | AES-256-GCM authenticity tag |
+| payload | ≤ 60000 | in the clear for control, encrypted for DATA/E2E |
 
-> ⚠️ La vieille note « 75 octets / CRC32 » est **fausse** : c'est 79 octets et
-> un `msg_id` uint64 dérivé de sha256.
+> ⚠️ The old "75 bytes / CRC32" note is **wrong**: it is 79 bytes and a uint64
+> `msg_id` derived from sha256.
 
-### `msg_id` (anti-rejeu / anti-amplification)
+### `msg_id` (anti-replay / anti-amplification)
 
 `msg_id = int(sha256(version‖type‖src‖dst‖nonce‖gcm_tag‖payload)[:8])`
-(`Packet.compute_msg_id`). **TTL et msg_id exclus** du calcul.
+(`Packet.compute_msg_id`). **TTL and msg_id are excluded** from the computation.
 
-Il *engage le contenu* du paquet : un relais ne peut pas forger un nouvel
-`msg_id` pour le même payload afin de contourner la déduplication et amplifier
-un flood. Vérifié à la réception pour les types routables (voir portes).
+It *binds the content* of the packet: a relay cannot forge a new `msg_id` for
+the same payload to sidestep deduplication and amplify a flood. Verified on
+receipt for routable types (see the gates).
 
-### AAD et chiffrement (`Packet.aad`, `create_encrypted`, `decrypt_payload`)
+### AAD and encryption (`Packet.aad`, `create_encrypted`, `decrypt_payload`)
 
-- **AAD** (authentifié, non chiffré) = `version‖type‖src‖dst‖nonce` — **le TTL
-  n'y est pas** (il change à chaque hop).
-- Le payload DATA/E2E est chiffré AES-256-GCM sous la clé de session ; le
-  `gcm_tag` couvre AAD + payload.
-- Le header est donc *en clair mais authentifié*.
+- **AAD** (authenticated, not encrypted) = `version‖type‖src‖dst‖nonce` — **the
+  TTL is not in it** (it changes at every hop).
+- The DATA/E2E payload is encrypted with AES-256-GCM under the session key; the
+  `gcm_tag` covers AAD + payload.
+- The header is therefore *in the clear but authenticated*.
 
-## Table des types (`src/node.py`)
+## Type table (`src/node.py`)
 
-| Type | Val | Rôle |
+| Type | Val | Role |
 |---|---|---|
-| DATA | 0x00 | données applicatives (chiffrées E2E) |
-| PING / PONG | 0x01 / 0x02 | vivacité + **gossip d'adresses** (le PING porte `advertised_uris` ; le PONG est **inconditionnel** — un nœud sans adresses annonçables y a droit) |
-| FIND_NODE / FOUND_NODE | 0x03 / 0x04 | lookup Kademlia (nœuds proches) |
-| FIND_VALUE / FOUND_VALUE | 0x05 / 0x06 | lookup DHT par clé |
-| STORE | 0x07 | stocker une valeur DHT (adressée par contenu) |
-| HANDSHAKE / HANDSHAKE_ACK | 0x08 / 0x09 | session par-saut (ML-KEM + ML-DSA + cert) |
-| INVITE / INVITE_ACK | 0x0A / 0x0B | (legacy) présentation de code d'invitation |
-| CHALLENGE | 0x0C | challenge d'authentification |
-| E2E_HANDSHAKE / _ACK | 0x0D / 0x0E | session de bout en bout (re-clé avec session vivante : candidat probé par DATA, cf. `security.md`) |
-| OBSERVED_ADDR | 0x0F | « voici l'IP d'où je te vois » (découverte d'adresse publique) |
-| PUNCH_REQUEST / _RELAY | 0x10 / 0x11 | coordination de NAT hole punch via relais |
-| PUNCH_PROBE / _ACK | 0x12 / 0x13 | **datagrammes UDP bruts** (pas des Packet mesh), signés ML-DSA |
-| INVITE_SEEK | 0x14 | invitation relayée, **routable AVANT auth**, token-gated |
-| RELAY_CARRY | 0x15 | transporte un paquet de handshake entre 2 nœuds via un relais |
-| REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT : « rappelle-moi pour confirmer que je suis joignable » |
-| CATALOG_ANNOUNCE | 0x18 | gossip d'une **release signée** pour le catalogue de l'app store |
-| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | annuaire de pseudos : stocke/cherche/répond une **réclamation signée** pseudo→node_id |
-| ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **sonde de vivacité routable** : joindre un node id en multi-hop (ping à distance via relais) |
+| DATA | 0x00 | application data (E2E encrypted) |
+| PING / PONG | 0x01 / 0x02 | liveness + **address gossip** (the PING carries `advertised_uris`; the PONG is **unconditional** — a node with no announceable address is entitled to one) |
+| FIND_NODE / FOUND_NODE | 0x03 / 0x04 | Kademlia lookup (nearby nodes) |
+| FIND_VALUE / FOUND_VALUE | 0x05 / 0x06 | DHT lookup by key |
+| STORE | 0x07 | store a DHT value (content-addressed) |
+| HANDSHAKE / HANDSHAKE_ACK | 0x08 / 0x09 | per-hop session (ML-KEM + ML-DSA + cert) |
+| INVITE / INVITE_ACK | 0x0A / 0x0B | (legacy) presenting an invitation code |
+| CHALLENGE | 0x0C | authentication challenge |
+| E2E_HANDSHAKE / _ACK | 0x0D / 0x0E | end-to-end session (re-keying with a live session: the candidate is probed by DATA, see `security.md`) |
+| OBSERVED_ADDR | 0x0F | "here is the IP I see you from" (public address discovery) |
+| PUNCH_REQUEST / _RELAY | 0x10 / 0x11 | coordinating a NAT hole punch through a relay |
+| PUNCH_PROBE / _ACK | 0x12 / 0x13 | **raw UDP datagrams** (not mesh Packets), ML-DSA signed |
+| INVITE_SEEK | 0x14 | relayed invitation, **routable BEFORE auth**, token-gated |
+| RELAY_CARRY | 0x15 | carries a handshake packet between two nodes through a relay |
+| REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT: "call me back to confirm I am reachable" |
+| CATALOG_ANNOUNCE | 0x18 | gossip of a **signed release** for the app store catalogue |
+| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id |
+| ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **routable liveness probe**: reach a node id multi-hop (a remote ping through relays) |
 
-Regroupements (constantes) :
-- `_DIRECT_TYPES` : un seul saut authentifié → **exigent un pair authentifié et
-  `src_id == pair authentifié`**. Uniquement ce qui est intrinsèquement par-lien :
-  `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, la signalisation de punch
-  (`PUNCH_*`, `REACH_PROBE*`), et `CATALOG_ANNOUNCE` (re-stampé à chaque saut lors
-  du gossip épidémique).
-- `_ROUTABLE_TYPES` : **tout ce qui adresse un `node id`** → relayé multi-hop vers
-  `dst_id` (`_forward_packet`). Inclut `DATA`, `E2E_HANDSHAKE`/`_ACK`,
-  `ECHO_REQUEST`/`_REPLY`, **et le plan de contrôle Kademlia/DHT** : `FIND_NODE`/
+Groupings (constants):
+- `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
+  peer and `src_id == the authenticated peer`**. Only what is intrinsically
+  per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
+  (`PUNCH_*`, `REACH_PROBE*`), and `CATALOG_ANNOUNCE` (re-stamped at every hop
+  during epidemic gossip).
+- `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
+  towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
+  `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/
   `FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`, `DIR_STORE`/`DIR_FIND`/
-  `DIR_FOUND`. → le DHT et l'annuaire fonctionnent `A→X` à travers des relais,
-  pas seulement vers un pair direct.
-- `INVITE_SEEK` et `RELAY_CARRY` sont traités **avant** les portes (pré-auth,
-  strictement bornés/token-gated).
+  `DIR_FOUND`. → the DHT and the directory work `A→X` through relays, not only
+  towards a direct peer.
+- `INVITE_SEEK` and `RELAY_CARRY` are handled **before** the gates (pre-auth,
+  strictly bounded/token-gated).
 
-### Sections d'application (dans la payload DATA)
+### Application sections (inside the DATA payload)
 
-Le **management** (tout le reste du tableau : PING, routage, DHT, handshakes…)
-vit dans des **types de paquets distincts** — jamais dans DATA. Les **données
-applicatives** vivent, elles, uniquement dans `DATA`, et sont sous-divisées en
-**sections par app** : la payload DATA déchiffrée E2E est `app_id(8) ‖ payload`
-(voir `src/app_channel.py`). Le nœud traite la payload comme opaque ; c'est le
-**connecteur** qui pose/retire le cadre et démultiplexe par `app_id`, de sorte
-qu'une app ne voit que sa section. Une payload trop courte pour porter un
-`app_id` est jetée. `app_id` réservé pour les apps intégrées (`builtin_id`),
-lié à la clé auteur pour les apps déployées (`deployed_id`, package signé).
+**Management** (everything else in the table: PING, routing, DHT, handshakes…)
+lives in **distinct packet types** — never in DATA. **Application data**, on the
+other hand, lives only in `DATA`, and is subdivided into **per-app sections**:
+the E2E-decrypted DATA payload is `app_id(8) ‖ payload` (see
+`src/app_channel.py`). The node treats the payload as opaque; it is the
+**connector** that adds/removes the frame and demultiplexes by `app_id`, so that
+an app sees only its own section. A payload too short to carry an `app_id` is
+dropped. `app_id` is reserved for built-in apps (`builtin_id`) and bound to the
+author key for deployed apps (`deployed_id`, signed package).
 
-Les apps intégrées occupent chacune leur section : `builtin_id("chat")`,
-`builtin_id("fleet")`. L'app de gestion **n'ajoute aucun type de paquet** — son
-protocole (enrôlement, status, update, shell, scan, provisioning) vit
-entièrement dans sa section de `DATA`, donc le plan de gestion du nœud est
-intouché. Voir [`Docs/Apps/fleet`](../Apps/fleet).
+Built-in apps each occupy their own section: `builtin_id("chat")`,
+`builtin_id("fleet")`. The management app **adds no packet type** — its protocol
+(enrolment, status, update, shell, scan, provisioning) lives entirely inside its
+`DATA` section, so the node's management plane is untouched. See
+[`Docs/Apps/fleet`](../Apps/fleet).
 
-## Portes de validation (`_handle_packet`) — le cœur sécurité
+## Validation gates (`_handle_packet`) — the security core
 
-Ordre exact appliqué à chaque paquet reçu :
+The exact order applied to every packet received:
 
-1. `INVITE_SEEK` → handler dédié pré-auth (rate-limité par lien, borné). Return.
-2. `RELAY_CARRY` → handler dédié. Return.
-3. Si `type ∈ _DIRECT_TYPES` : rejeter si le pair n'est pas authentifié, ou si
-   `src_id != authenticated_id`. (« rejeter par défaut ».)
-4. Si `type ∈ _ROUTABLE_TYPES` :
-   - pair authentifié requis ;
-   - `msg_id == compute_msg_id()` sinon rejet (anti-amplification) ;
-   - `_is_seen(msg_id)` → déjà vu → rejet (déduplication bornée, `_MSG_DEDUP_MAX
-     = 10 000`, éviction FIFO) ;
-   - `_learn_reverse_path` : le lien d'entrée est mémorisé comme chemin retour
-     vers `src_id` (borné/daté, cf. `routing.md`) ;
-   - si `dst_id` n'est ni nous ni broadcast → `_forward_packet` puis return.
-5. Sinon, dispatch vers le handler du type.
+1. `INVITE_SEEK` → dedicated pre-auth handler (rate-limited per link, bounded).
+   Return.
+2. `RELAY_CARRY` → dedicated handler. Return.
+3. If `type ∈ _DIRECT_TYPES`: reject if the peer is not authenticated, or if
+   `src_id != authenticated_id`. ("reject by default".)
+4. If `type ∈ _ROUTABLE_TYPES`:
+   - an authenticated peer is required;
+   - `msg_id == compute_msg_id()` or reject (anti-amplification);
+   - `_is_seen(msg_id)` → already seen → reject (bounded deduplication,
+     `_MSG_DEDUP_MAX = 10 000`, FIFO eviction);
+   - `_learn_reverse_path`: the ingress link is remembered as the return path
+     towards `src_id` (bounded/dated, see `routing.md`);
+   - if `dst_id` is neither us nor broadcast → `_forward_packet`, then return.
+5. Otherwise, dispatch to the type's handler.
 
-## Forwarding (`_forward_packet`) — routage glouton
+## Forwarding (`_forward_packet`) — greedy routing
 
-Pour un paquet dont on n'est pas la destination (TTL > 1) :
-1. **Pair direct** vers `dst` (authentifié, session) → envoyer (TTL-1).
-2. Sinon le **chemin retour observé** vers `dst` (`_route_hints`), s'il est
-   frais et son lien vivant — une preuve vaut mieux qu'une supposition XOR.
-3. Sinon **plus proche voisin** par distance XOR (`min(distance(dst, peer))`).
-4. Aucun candidat → `_defer_route` : lookup Kademlia + route à la demande dans
-   une **tâche de fond bornée**, jamais dans la boucle de réception du lien
-   entrant (elle y restait figée plusieurs secondes, et le `FOUND_NODE` attendu
-   devait souvent revenir par ce même lien — cf. `routing.md` et `gotchas.md`).
+For a packet we are not the destination of (TTL > 1):
+1. A **direct peer** towards `dst` (authenticated, with a session) → send
+   (TTL-1).
+2. Otherwise the **observed return path** towards `dst` (`_route_hints`), if it
+   is fresh and its link alive — proof beats an XOR guess.
+3. Otherwise the **nearest neighbour** by XOR distance
+   (`min(distance(dst, peer))`).
+4. No candidate → `_defer_route`: a Kademlia lookup plus an on-demand route in a
+   **bounded background task**, never inside the receive loop of the incoming
+   link (it used to sit there frozen for several seconds, and the `FOUND_NODE`
+   it waited for often had to come back over that very link — see `routing.md`
+   and `gotchas.md`).
 
-`with_decremented_ttl()` à chaque saut ; TTL ≤ 1 → on ne relaie pas (anti-boucle,
-en complément de la déduplication `msg_id`).
+`with_decremented_ttl()` at every hop; TTL ≤ 1 → we do not relay (anti-loop, on
+top of `msg_id` deduplication).
 
-## Corps d'un `FOUND_NODE` (pool de certificats)
+## The body of a `FOUND_NODE` (certificate pool)
 
 ```
 query_id(8) ‖ pool_count(H) ‖ [cert_len(H) ‖ cert]*pool_count
@@ -136,21 +141,22 @@ entry = node_id(20) ‖ addr_count(B) ‖ chain_len(B)
         ‖ [addr_len(H) ‖ addr]*addr_count ‖ index(H)*chain_len
 ```
 
-Les chaînes référencent le pool par index au lieu de répéter des certificats
-post-quantiques de ~7,3 ko. Bornes de décodage (rejet par défaut) :
+Chains reference the pool by index instead of repeating post-quantum
+certificates of ~7.3 kB. Decoding bounds (reject by default):
 `pool_count ≤ _ENTRY_POOL_MAX`, `entry_count ≤ _ENTRY_COUNT_MAX` (= k),
-`chain_len ≤ _ENTRY_CHAIN_MAX`, index dans le pool. Un certificat illisible
-annule la chaîne de l'entrée (jamais une chaîne partielle). Côté émission, la
-réponse est **budgétée en octets** — voir `routing.md`, c'est un invariant :
-sans budget, la réponse dépassait le plafond du paquet et n'était jamais émise.
-L'émetteur **s'inclut** dans les candidats (classé par distance) : un `FIND_NODE`
-routé peut venir d'un demandeur qui ne l'atteint qu'à travers un relais et qui,
-sinon, n'apprendrait jamais son entrée (cf. `routing.md`).
+`chain_len ≤ _ENTRY_CHAIN_MAX`, indices inside the pool. An unreadable
+certificate voids the entry's chain (never a partial chain). On the sending
+side, the reply is **budgeted in bytes** — see `routing.md`, it is an invariant:
+without the budget the reply exceeded the packet ceiling and was never sent. The
+sender **includes itself** among the candidates (ranked by distance): a routed
+`FIND_NODE` may come from a seeker who only reaches it through a relay and who
+would otherwise never learn its entry (see `routing.md`).
 
-## Invariants (rappel, cf. CLAUDE.md)
+## Invariants (reminder, see CLAUDE.md)
 
-- Header en clair mais **authentifié** (AAD). Payload applicatif chiffré E2E.
-- `msg_id` engage le contenu, **vérifié à la réception**.
-- TTL décrémenté par hop, hors AAD et hors `msg_id`.
-- Déduplication bornée. Rejet par défaut de tout paquet mal formé/non autorisé.
-</content>
+- The header is in the clear but **authenticated** (AAD). The application
+  payload is E2E encrypted.
+- `msg_id` binds the content, and is **verified on receipt**.
+- TTL decremented per hop, outside the AAD and outside `msg_id`.
+- Bounded deduplication. Reject by default for any malformed/unauthorised
+  packet.

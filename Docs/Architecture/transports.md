@@ -1,22 +1,22 @@
-# Transports, NAT & joignabilité
+# Transports, NAT & reachability
 
-Source : `transport.py`, `transport_manager.py`, `tcp_transport.py`,
-`udp_transport.py`, `spool_transport.py`, `stun.py`, `net_monitor.py`, et dans
-`node.py` : hole punching, reachability, keepalive.
+Source: `transport.py`, `transport_manager.py`, `tcp_transport.py`,
+`udp_transport.py`, `spool_transport.py`, `stun.py`, `net_monitor.py`, and
+inside `node.py`: hole punching, reachability, keepalive.
 
-## Abstraction
+## The abstraction
 
-- `BaseTransport` : `connect / send / receive / close` (un lien bidirectionnel).
-- `BaseServer` : `listen / close` + callback `on_new_connection(transport)`.
-- `TransportManager` : registre **par schéma d'URL** (`tcp`, `udp`, `spool`, …).
-  N'importe qui implémente les deux interfaces et `register("scheme", T, S)`.
-  Le cœur ne connaît aucun transport concret. Écoute clée par URI exacte (un
-  nœud peut écouter sur plusieurs adresses ; refuse un doublon d'URI).
+- `BaseTransport`: `connect / send / receive / close` (one bidirectional link).
+- `BaseServer`: `listen / close` + an `on_new_connection(transport)` callback.
+- `TransportManager`: a registry **by URL scheme** (`tcp`, `udp`, `spool`, …).
+  Anyone implements the two interfaces and calls `register("scheme", T, S)`. The
+  core knows no concrete transport. Listeners are keyed by exact URI (a node may
+  listen on several addresses; a duplicate URI is refused).
 
-## Se configurer : `OPTIONS` / `configure()`
+## Configuring itself: `OPTIONS` / `configure()`
 
-Même principe que l'observabilité : **le medium déclare, le reste est écrit une
-fois.** Un transport pose deux attributs de classe et n'écrit aucune validation :
+The same principle as observability: **the medium declares, everything else is
+written once.** A transport sets two class attributes and writes no validation:
 
 ```python
 class TCPTransport(BaseTransport):
@@ -27,301 +27,298 @@ class TCPTransport(BaseTransport):
                         {"value": "ipv6", "label": "IPv6"}]),
         option("source_address", "text", "", "…", placeholder="192.168.1.20"),
     )
-    SETTINGS: dict = {}          # valeurs en vigueur, au niveau de la classe
+    SETTINGS: dict = {}          # the values in force, at class level
 ```
 
-Types : `bool`, `int`, `float`, `text`, `choice`, `multi` — soit exactement les
-cases à cocher, listes multi-choix et champs libres qu'une interface sait
-rendre. `restart=True` marque une valeur que le processus vivant ne peut pas
-reprendre : le dire est la différence entre un réglage cassé et un réglage pas
-encore actif.
+Kinds: `bool`, `int`, `float`, `text`, `choice`, `multi` — exactly the
+checkboxes, multi-choice lists and free fields an interface knows how to render.
+`restart=True` marks a value the live process cannot pick up: saying so is the
+difference between a broken setting and one that is simply not live yet.
 
-- `coerce()` traduit et **borne** (min/max, longueur, valeur d'une liste de
-  choix, ligne unique) avec un message qu'un humain peut suivre. Écrit une fois :
-  un medium qui validerait lui-même validerait légèrement différemment.
-- `configure()` applique **partiellement** : un champ mauvais ne jette pas les
-  quatre bons tapés avec lui, et rend `{"applied": …, "rejected": {nom: raison}}`.
-  `SETTINGS` est **remplacé**, jamais muté — un dictionnaire de classe partagé
-  n'est pas un endroit qu'on édite sous un lien vivant.
-- `TransportManager.options() / configure() / setting() / settings()` ne fait que
-  passer les choses : il sait quelle classe répond pour un schéma, rien de plus.
-  `setting(scheme, name)` est ce que le cœur appelle quand il a besoin d'une
-  valeur d'un medium (la cadence de redial, par exemple) sans savoir quelle
-  classe la sert.
+- `coerce()` translates and **bounds** (min/max, length, membership of a choice
+  list, single line) with a message a human can act on. Written once: a medium
+  validating for itself would validate slightly differently.
+- `configure()` applies **partially**: one bad field does not throw away the four
+  good ones typed with it, and it returns
+  `{"applied": …, "rejected": {name: reason}}`. `SETTINGS` is **replaced**, never
+  mutated — a class dictionary shared by instances is not a place to edit under a
+  live link.
+- `TransportManager.options() / configure() / setting() / settings()` is pure
+  pass-through: it knows which class answers for a scheme, and nothing more.
+  `setting(scheme, name)` is what the core calls when it needs a value from a
+  medium (the re-dial cadence, say) without knowing which class serves it.
 
-### Persistance
+### Persistence
 
-Le fichier de configuration accepte des clés **namespacées** `schéma.option` et
-les porte **en texte, sans les valider** : c'est le medium qui sait. Au
-démarrage, `_apply_transport_settings()` les distribue avant que quoi que ce
-soit n'écoute ou ne compose ; une valeur refusée est signalée sur la bannière et
-laissée à son défaut — un nœud qui refuse de démarrer parce qu'un délai est mal
-tapé est un pire résultat qu'un nœud qui tourne sur son défaut.
+The configuration file accepts **namespaced** `scheme.option` keys and carries
+them **as text, without validating them**: the medium is what knows. At startup
+`_apply_transport_settings()` distributes them before anything listens or dials;
+a refused value is reported on the banner and left at its default — a node that
+refuses to start because a timeout was mistyped is a worse outcome than a node
+running on its default.
 
-La console (Network → Reachability) rend le formulaire **à partir de la
-déclaration**, applique d'abord et écrit ensuite : une valeur que le transport
-refuse n'atteint jamais le fichier, sinon le prochain démarrage la refuserait à
-son tour avec personne devant le clavier pour lire pourquoi.
+The console (Network → Reachability) renders the form **from the declaration**,
+applies first and writes afterwards: a value the transport refuses never reaches
+the file, or the next startup would refuse it in turn with nobody at the
+keyboard to read why.
 
-Réglages actuels : TCP (délai de connexion, délai de lecture, `TCP_NODELAY`,
-familles d'adresses, adresse source), UDP (intervalle et délai de keepalive,
-profondeur du buffer de réordonnancement), spool (intervalle de scrutation).
+Current settings: TCP (connect timeout, read timeout, `TCP_NODELAY`, address
+families, source address), UDP (keepalive interval and timeout, reorder buffer
+depth), spool (poll interval).
 
-## S'observer soi-même : `endpoints()` et `stats()`
+## Observing itself: `endpoints()` and `stats()`
 
-Deux crochets optionnels sur `BaseTransport`, de la même forme que
-`reachability()` : **le medium se décrit, le cœur n'interprète rien.**
+Two optional hooks on `BaseTransport`, shaped like `reachability()`: **the
+medium describes itself, the core interprets nothing.**
 
 ```python
 def endpoints(self) -> dict:      # {"local": uri|None, "remote": uri|None}
 def stats(self) -> dict:          # {"retransmits": 12, "rto ms": 50.0, …}
 ```
 
-- `endpoints()` n'est **pas** l'URI qu'on a composée : c'est le point de
-  terminaison tel que le medium le voit maintenant. Sur un lien *accepté* c'est
-  la seule adresse qui existe, et c'est celle qui dit à l'opérateur laquelle des
-  adresses d'un pair porte réellement le trafic.
-- `stats()` est libre par construction : un lien UDP a des retransmissions et un
-  buffer de réordonnancement, un lien série a un débit, une liaison LoRa a un
-  SNR. La console **affiche les noms qu'on lui donne**, donc un transport que la
-  console n'a jamais vu devient observable sans une ligne de code côté console.
+- `endpoints()` is **not** the URI we dialled: it is the endpoint as the medium
+  sees it now. On an *accepted* link it is the only address there is, and it is
+  what tells an operator which of a peer's addresses actually carries the
+  traffic.
+- `stats()` is free-form by construction: a UDP link has retransmits and a
+  reorder buffer, a serial link has a baud rate, a LoRa link has an SNR. The
+  console **renders the names it is given**, so a transport the console has never
+  seen becomes observable with no console-side code.
 
-Deux règles, parce que c'est *pollé* : les valeurs sont des scalaires
-JSON-compatibles, et la lecture ne bloque jamais. Le cœur se protège quand même
-— un transport qui lève, qui rend un objet imbriqué ou cinquante clés ne casse
-pas le snapshot : il est ignoré, filtré, borné à 16 entrées
-(`tests/test_link_stats.py`).
+Two rules, because this is *polled*: the values are JSON-safe scalars, and
+reading them never blocks. The core protects itself anyway — a transport that
+raises, returns a nested object or fifty keys does not break the snapshot: it is
+ignored, filtered, bounded to 16 entries (`tests/test_link_stats.py`).
 
-Implémentations actuelles : TCP rend le remplissage du buffer d'écriture (un
-nombre qui reste haut = ce pair ne draine pas, ce qu'aucun compteur de paquets
-ne montre) et `TCP_NODELAY` ; UDP rend retransmissions, réordonnancements,
-frames non acquittées, RTO courant et keepalives manqués.
+Current implementations: TCP reports the write buffer's fill (a number that
+stays high means that peer is not draining, which no packet counter shows) and
+`TCP_NODELAY`; UDP reports retransmits, reorderings, unacknowledged frames, the
+current RTO and missed keepalives.
 
-## Qualité d'un lien (`metrics.LinkQuality`)
+## Link quality (`metrics.LinkQuality`)
 
-Un RTT unique ne distingue pas un lien stable à 40 ms d'un lien qui oscille
-entre 5 et 400 ms. Chaque lien garde donc les **32 derniers échantillons**
-(borné, minuscule) réduits aux quatre chiffres qu'on lit vraiment : dernier,
-meilleur, pire, **gigue** (moyenne des écarts consécutifs). La **perte** est
-comptée à part — une sonde qui ne revient jamais n'a pas d'aller-retour à
-moyenner — et vaut `None` tant qu'une seule sonde est en vol : une sonde en
-attente n'est pas 100 % de perte.
+A single RTT cannot tell a steady 40 ms link from one oscillating between 5 and
+400 ms. Every link therefore keeps the **last 32 samples** (bounded, tiny)
+reduced to the four numbers people actually read: last, best, worst, **jitter**
+(the mean of consecutive differences). **Loss** is counted separately — a probe
+that never comes back has no round trip to average — and is `None` while only
+one probe is in flight: a pending probe is not 100% loss.
 
-## Statut de chaque adresse (`node._dial_log`)
+## The status of each address (`node._dial_log`)
 
-Un nœud qui annonce quatre adresses dont une marche est le cas normal sur un
-vrai réseau, et « laquelle, et pourquoi pas les autres » est la première
-question qu'on se pose. Chaque tentative est donc notée : `connected`,
-`no-answer`, `timeout`, `refused`, avec le motif et la durée. Le lien vivant
-gagne sur le journal (une adresse qui porte du trafic est `in-use`, quoi qu'elle
-ait fait la semaine dernière), et une adresse jamais essayée est `untried`, pas
-en panne. Borné deux fois : 128 nœuds, 8 adresses chacun.
+A node advertising four addresses of which one works is the normal case on a
+real network, and "which one, and why not the others" is the first question
+anybody asks. Every attempt is therefore recorded: `connected`, `no-answer`,
+`timeout`, `refused`, with the reason and the duration. A live link beats the
+log (an address carrying traffic is `in-use`, whatever it did last week), and an
+address never tried is `untried`, not broken. Bounded twice over: 128 nodes,
+8 addresses each.
 
-Trois issues supplémentaires n'atteignent jamais le medium et sont notées quand
-même, parce qu'une ligne vide en face d'une adresse qui ne marche pas
-n'apprend rien : `invalid` (l'URI n'en est pas une), `no transport` (aucun
-transport enregistré ne sert ce schéma — le motif porte le schéma) et
-`peer limit` (`_MAX_PEERS` atteint).
+Three further outcomes never reach the medium and are recorded anyway, because
+a blank line next to an address that does not work teaches nothing: `invalid`
+(the URI is not one), `no transport` (no registered transport serves that
+scheme — the reason carries the scheme) and `peer limit` (`_MAX_PEERS` reached).
 
-**Un seul chemin de composition.** `node._dial_uri(node_id, uri, timeout)` est le
-seul endroit où un lien sortant s'ouvre : la marche de la table de routage, le
-bouton *Retry* de la console, la boucle périodique et la sonde de latence y
-passent tous. Elles appliquent donc le même timeout, démontent une tentative
-ratée de la même façon, et — ce qui compte pour l'opérateur — notent la même
-issue sur la même adresse. Elle ne lève jamais : un dial qui échoue est le cas
-normal, pas une erreur.
+**A single dialling path.** `node._dial_uri(node_id, uri, timeout)` is the only
+place an outgoing link is opened: the routing-table walk, the console's *Retry*
+button, the periodic loop and the latency probe all go through it. They
+therefore apply the same timeout, tear a failed attempt down the same way, and —
+the part that matters to an operator — record the same outcome against the same
+address. It never raises: a dial that fails is the normal case, not an error.
 
-## Redialer une adresse
+## Re-dialling an address
 
-Trois mécanismes, une seule fonction de dial (ci-dessus).
+Three mechanisms, one dial function (above).
 
-**À la main** — `console_retry_addresses(node_hex, uri="")` rejoue une adresse
-précise, ou toutes (et s'arrête à la première qui marche : « rends-moi un lien »,
-pas « ouvre-en quatre »). Il ne compose **que des adresses déjà connues pour
-cette identité** : la console est authentifiée, mais « tape une adresse et le
-nœud s'y connecte » est une autre fonctionnalité avec un autre modèle de menace.
-La réponse dit ce que chaque adresse a fait, dans les mots du tableau ci-dessus.
+**By hand** — `console_retry_addresses(node_hex, uri="")` replays one specific
+address, or all of them (stopping at the first that works: "give me back a
+link", not "open four"). It only dials **addresses already known for that
+identity**: the console is authenticated, but "type an address and the node
+connects to it" is a different feature with a different threat model. The reply
+says what each address did, in the words of the table above.
 
-**Périodiquement** — `_address_retry_loop`. Un nœud tombé parce que son FAI a
-bronché, que le portable a dormi ou qu'un switch a redémarré revient sur sa
-propre adresse ; sans ça, rien ne réessaie tant que personne n'a besoin d'une
-route. La **cadence appartient au medium** : `retry_interval` est une option
-déclarée par le transport (0 = jamais, valeur par défaut), parce qu'une radio qui
-coûte une pile par tentative et un Ethernet n'ont pas à partager un nombre. Ce
-qui est fixe dans le cœur, c'est la **forme** de la boucle, pour qu'un réglage
-d'opérateur ne puisse pas la transformer en inondation :
+**Periodically** — `_address_retry_loop`. A node that dropped because its ISP
+hiccuped, its laptop slept or a switch rebooted comes back on its own address;
+without this, nothing tries again until something needs a route. The **cadence
+belongs to the medium**: `retry_interval` is an option declared by the transport
+(0 = never, the default), because a radio that costs a battery per attempt and
+an Ethernet have no business sharing a number. What is fixed in the core is the
+**shape** of the loop, so that an operator's setting cannot turn it into a
+flood:
 
-| borne | valeur | ce qu'elle empêche |
+| bound | value | what it prevents |
 |---|---|---|
-| `_RETRY_TICK` | 5 s | une boucle qui tourne à plein régime |
-| `_RETRY_MAX_PER_PASS` | 4 dials | qu'un nœud avec 200 pairs connus compose 200 fois |
-| `_RETRY_NODES_SCANNED` | 64 | que la passe grandisse avec la table |
-| `_RETRY_DIAL_TIMEOUT` | 8 s | qu'une adresse morte tienne la passe |
+| `_RETRY_TICK` | 5 s | a loop running flat out |
+| `_RETRY_MAX_PER_PASS` | 4 dials | a node with 200 known peers dialling 200 times |
+| `_RETRY_NODES_SCANNED` | 64 | the pass growing with the table |
+| `_RETRY_DIAL_TIMEOUT` | 8 s | a dead address holding the pass |
 
-Un nœud déjà lié n'est jamais redialé, et la boucle ne meurt sur rien : une
-boucle de récupération qui s'arrête est une perte silencieuse de récupération.
+A node already linked is never re-dialled, and the loop dies on nothing: a
+recovery loop that stops is a silent loss of recovery.
 
-## Choisir entre les adresses d'une node : priorité × latence
+## Choosing between a node's addresses: priority × latency
 
-Deux choses décident, et ce ne sont pas des choses de même nature.
+Two things decide, and they are not the same kind of thing.
 
-- **Ce que vaut le medium** — `priority`, une option déclarée par chaque
-  transport, de −254 à 254. Défauts livrés : `udp` **10**, `tcp` **0**,
-  `spool` **−50**. Le cœur n'a pas d'avis là-dessus : seul l'opérateur sait si
-  sa liaison LoRa est la précieuse ou le dernier recours.
-- **Ce que mesure l'adresse** — la dernière durée notée pour cette URI dans
+- **What the medium is worth** — `priority`, an option declared by every
+  transport, from −254 to 254. Shipped defaults: `udp` **10**, `tcp` **0**,
+  `spool` **−50**. The core has no opinion here: only the operator knows whether
+  their LoRa link is the precious one or the last resort.
+- **What the address measures** — the last duration recorded for that URI in
   `_dial_log`.
 
-Le curseur `transport_balance` (0..100, défaut 50) dit combien pèse chaque
-moitié : `0` = la latence seule décide, `100` = la priorité seule.
+The `transport_balance` slider (0..100, default 50) says how much each half
+weighs: `0` = latency alone decides, `100` = priority alone.
 
 ```
 score(uri) = w · (priority + 254) / 508  +  (1 − w) · 25 / (25 + ms)
                                                           w = balance / 100
 ```
 
-Deux propriétés voulues :
+Two intended properties:
 
-- **Les deux moitiés sont ramenées à 0..1 dans l'absolu**, pas les unes par
-  rapport aux autres. Un score veut donc dire la même chose à chaque passe : deux
-  adresses comparées aujourd'hui et demain donnent la même réponse, et la boucle
-  de pilotage peut utiliser une marge fixe.
-- **La latence *courbe*, elle ne s'échelonne pas.** 0 ms vaut 1, 25 ms vaut 0.5,
-  4 s vaut encore quelque chose. Une échelle linéaire ferait qu'une mesure
-  absurde écrase toutes les différences réelles entre 5 et 50 ms.
+- **Both halves are mapped onto 0..1 absolutely**, not against each other. A
+  score therefore means the same thing on every pass: two addresses compared
+  today and tomorrow give the same answer, and the steering loop can use a fixed
+  margin.
+- **Latency *curves*, it does not scale.** 0 ms is worth 1, 25 ms 0.5, 4 s still
+  something. A linear scale would let one absurd measurement flatten every real
+  difference between 5 and 50 ms.
 
-Une adresse **jamais mesurée** vaut le milieu : ni récompensée ni punie d'être
-neuve. Un medium qui ne sait pas répondre (pas de `setting()`) vaut neutre — ce
-n'est pas une raison d'arrêter de composer.
+An address **never measured** is worth the middle: neither rewarded nor punished
+for being new. A medium that cannot answer (no `setting()`) is worth neutral —
+that is no reason to stop dialling.
 
-`node._preferred(uris, node_hex)` trie par score décroissant ; une adresse
-**IPv6 globale** départage à score égal (joignable de bout en bout, elle évite le
-NAT entièrement). C'est le tri qu'utilisent *tous* les chemins qui choisissent
-une adresse : la marche de la table de routage, le redial, le bloc de join, le
-hole punch. `node.transport_preference()` rend l'ordre des schémas seuls, pour
-que la console l'affiche sans réimplémenter la règle en JavaScript.
+`node._preferred(uris, node_hex)` sorts by descending score; a **global IPv6**
+address breaks a tie (reachable end to end, it avoids NAT entirely). That is the
+sort *every* path choosing an address uses: the routing-table walk, the re-dial,
+the join block, the hole punch. `node.transport_preference()` returns the order
+of the schemes alone, so the console can show it without reimplementing the rule
+in JavaScript.
 
-## Choisir l'adresse à la latence (`dynamic_address`, off par défaut)
+## Steering an address on latency (`dynamic_address`, off by default)
 
-Un nœud joignable à plusieurs adresses est en général joignable à plusieurs
-**qualités** — une adresse LAN et l'adresse publique de la même machine, IPv4 et
-IPv6 par des chemins différents. Celle qui sert est celle qui a été composée en
-premier : choisie par l'ordre, pas par ce qu'elle vaut.
+A node reachable at several addresses is usually reachable at several
+**qualities** — a LAN address and the same machine's public one, IPv4 and IPv6
+over different paths. The one in use is the one dialled first: chosen by order,
+not by what it is worth.
 
-`_address_steering_loop` corrige ça quand l'opérateur le demande (`--dynamic-address`,
-clé `dynamic_address`, ou le bouton de la console). **Un** candidat par passe :
+`_address_steering_loop` fixes that when the operator asks
+(`--dynamic-address`, the `dynamic_address` key, or the console's button).
+**One** candidate per pass:
 
-1. un lien vivant dont on a mesuré la latence, et une adresse de la même node qui
-   n'est pas celle en service ni mesurée récemment (`_ADDR_STEER_COOLDOWN`) ;
-2. la latence courante est mesurée par de vraies sondes (`_ADDR_STEER_PROBES`) ;
-3. le candidat est **composé** et mesuré pareil — une adresse qui a l'air rapide
-   mais ne finit pas la poignée de main n'est pas une meilleure adresse ;
-4. on ne bouge que si le **score** (ci-dessus, donc priorité *et* latence)
-   gagne au moins `_ADDR_STEER_MIN_GAIN`. C'est volontairement le même score que
-   l'ordre de composition : « ce medium est préféré » et « cette adresse est plus
-   rapide » sont tranchés par une seule règle, pas par deux qui peuvent se
-   contredire. Deux millisecondes, c'est du bruit ; à latence égale, le medium
-   préféré gagne.
+1. a live link whose latency we have measured, and an address of the same node
+   that is neither the one in use nor measured recently
+   (`_ADDR_STEER_COOLDOWN`);
+2. the current latency is measured with real probes (`_ADDR_STEER_PROBES`);
+3. the candidate is **dialled** and measured the same way — an address that
+   looks fast but cannot finish a handshake is not a better address;
+4. we only move if the **score** (above, so priority *and* latency) wins by at
+   least `_ADDR_STEER_MIN_GAIN`. Deliberately the same score as the dial order:
+   "this medium is preferred" and "this address is faster" are settled by one
+   rule, not by two that can contradict each other. Two milliseconds is noise;
+   at equal latency, the preferred medium wins.
 
-Le perdant est fermé dans les deux cas : le nœud ne garde jamais deux liens vers
-un même pair au-delà de la mesure. C'est off par défaut parce que c'est un
-échange — un dial et une poignée de main contre quelques millisecondes — et que
-seul l'opérateur sait s'il en vaut la peine.
+The loser is closed either way: the node never keeps two links to one peer
+beyond the measurement. It is off by default because it is a trade — a dial and
+a handshake against a few milliseconds — and only the operator knows whether it
+is worth it.
 
 ## TCP (`tcp_transport.py`)
 
-- Framing : préfixe **2 octets** (uint16 big-endian) = taille du `Packet` suivant.
-- `_CONNECT_TIMEOUT = 4 s` : un `connect()` sans réponse échoue vite (au lieu de
-  pendre sur le timeout SYN de l'OS) — indispensable quand on diale des adresses
-  non prouvées (IP privées d'un pair NATté apprises par gossip). Via
-  `asyncio.timeout`, jamais `wait_for` (annulation, cf. `gotchas.md` §3b).
-- `_READ_TIMEOUT = 60 s` : un `receive()` sans données pendant 60 s lève →
-  le lien est considéré mort et reapé. **Un lien inactif meurt donc s'il n'y a
-  pas de keepalive** (cf. §keepalive).
-- **`_wait_closed_bounded`** : Python 3.12 a changé `Server.wait_closed()` — il
-  bloque jusqu'à la fermeture de **toutes les connexions clientes acceptées**,
-  plus seulement la socket d'écoute. Fermer un port pendant qu'un pair y reste
-  connecté ne revenait jamais (hang). On borne l'attente (la socket d'écoute est
-  déjà fermée par `close()`, c'est l'essentiel). Voir `gotchas.md`.
+- Framing: a **2-byte** prefix (uint16 big-endian) = the size of the `Packet`
+  that follows.
+- `_CONNECT_TIMEOUT = 4 s`: a `connect()` with no answer fails fast (instead of
+  hanging on the OS SYN timeout) — indispensable when dialling unproven
+  addresses (the private IPs of a NATted peer learned by gossip). Through
+  `asyncio.timeout`, never `wait_for` (cancellation, see `gotchas.md` §3b).
+- `_READ_TIMEOUT = 60 s`: a `receive()` with no data for 60 s raises → the link
+  is treated as dead and reaped. **An idle link therefore dies without a
+  keepalive** (see §keepalive).
+- **`_wait_closed_bounded`**: Python 3.12 changed `Server.wait_closed()` — it
+  now blocks until **every accepted client connection** is closed, not only the
+  listening socket. Closing a port while a peer stayed connected never returned
+  (a hang). We bound the wait (the listening socket is already closed by
+  `close()`, which is what matters). See `gotchas.md`.
 
 ## UDP (`udp_transport.py`)
 
-UDP est sans connexion et non fiable → une **couche de fiabilité** :
-- Frame : `NUDP`(magic 4o) + seq(4) + ack(4) + sack(4) + flags(1) + payload_len(2)
-  + payload. ACK cumulatif + SACK, retransmission avec backoff (`_RTO_*`),
-  réordonnancement borné, keepalive (25 s), tout borné.
-- Fenêtre de réception **modulaire** (RFC 1982) autour du curseur de délivrance :
-  en-ordre → livré ; en-avant → buffer borné (`_MAX_REORDER`) ; en-arrière →
-  duplicata, re-ACK. Pas de set de seq vus (état borné quoi qu'envoie un pair
-  hostile ; le wrap 2³² ne fige plus le lien).
-- Mort d'un lien : `_KEEPALIVE_TIMEOUT = 75 s` (3 × l'intervalle de 25 s, et
-  au-dessus de la cadence PING mesh de 20 s) — en dessous, un lien punché sain
-  mais silencieux était tué quand les phases s'alignaient (flapping de route).
-- `UDPServer` : **une socket partagée**, multiplexée par `(ip, port)` source.
-  Un datagramme d'une source inconnue crée un `UDPTransport` + `on_new_connection`
-  — comme un accept TCP. Datagrammes `NPPB`/`NPAK`/STUN routés vers
-  `on_raw_datagram` (hole punch), pas vers un transport fiable.
+UDP is connectionless and unreliable → a **reliability layer**:
+- Frame: `NUDP` (4-byte magic) + seq(4) + ack(4) + sack(4) + flags(1) +
+  payload_len(2) + payload. Cumulative ACK + SACK, retransmission with backoff
+  (`_RTO_*`), bounded reordering, keepalive (25 s), all bounded.
+- A **modular** receive window (RFC 1982) around the delivery cursor: in order →
+  delivered; ahead → a bounded buffer (`_MAX_REORDER`); behind → a duplicate,
+  re-ACK. No set of seen sequence numbers (bounded state whatever a hostile peer
+  sends; the 2³² wrap no longer freezes the link).
+- Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
+  20 s mesh PING cadence) — below that, a healthy but silent punched link was
+  killed when the phases lined up (route flapping).
+- `UDPServer`: **one shared socket**, multiplexed by source `(ip, port)`. A
+  datagram from an unknown source creates a `UDPTransport` +
+  `on_new_connection` — like a TCP accept. `NPPB`/`NPAK`/STUN datagrams are
+  routed to `on_raw_datagram` (hole punch), not to a reliable transport.
 
 ## Store-and-forward (`spool_transport.py`)
 
-Le mesh tourne aussi sur un **répertoire/fichier** (`spool://DIR`) : chaque nœud
-écrit ses paquets sortants dans un fichier et sonde (poll `_POLL = 0.02 s`) le
-fichier du pair. Pour liens hors-ligne / très haute latence (« clé USB portée à
-pied »). Même invite/handshake/E2E, sans socket.
+The mesh also runs over a **directory/file** (`spool://DIR`): each node writes
+its outgoing packets to a file and polls (`_POLL = 0.02 s`) the peer's file. For
+offline / very high latency links ("a USB stick carried on foot"). The same
+invite/handshake/E2E, with no socket.
 
-## NAT hole punching (dans `node.py`)
+## NAT hole punching (in `node.py`)
 
-But : établir un lien **UDP direct** entre deux nœuds derrière NAT, coordonné par
-un relais commun. Machinerie (constantes `_PUNCH_*`) :
+The goal: establish a **direct UDP** link between two nodes behind NAT,
+coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
 
-1. A envoie `PUNCH_REQUEST(target, my_udp_port)` au relais (TCP).
-2. Le relais envoie `PUNCH_RELAY` **aux deux** : à la cible C (avec l'adresse
-   UDP réelle de A) et au demandeur A (avec l'adresse **TCP** de C — souvent
-   vide, car côté serveur du relais `remote_addr` est `None`).
-3. Chacun crée un état `_punch_pending` et envoie une **rafale de PROBE** UDP
-   bruts, signés ML-DSA (`_send_punch_probes`).
-   - ⚠ Si l'adresse UDP du pair est inconnue (vide), **on garde l'état** et on
-     ne sonde pas : le pair, lui, a notre adresse et nous sonde ; un PROBE
-     entrant complète le punch depuis son adresse source. (Bug historique :
-     supprimer l'état bloquait l'initiateur — cf. `gotchas.md`.)
-4. À réception d'un PROBE valide → ACK + `_complete_punch`. Le nœud au **plus
-   grand NodeID** est l'initiateur : il ouvre le `UDPTransport`, l'enregistre, et
-   **kicke** le répondeur (rafale de keepalives, `_kick_punched_link`, pour
-   survivre à une perte de datagramme). Le répondeur accepte via la voie UDP
-   normale. Puis handshake standard → lien authentifié.
-   - Dé-dup : un seul transport initiateur par adresse (les deux pairs punchent
-     souvent en même temps).
-5. `_maybe_upgrade_path` : envoyer des données à un pair joignable seulement par
-   relais déclenche automatiquement un essai de lien direct (rate-limité par
-   cible, `_UPGRADE_COOLDOWN`).
+1. A sends `PUNCH_REQUEST(target, my_udp_port)` to the relay (over TCP).
+2. The relay sends `PUNCH_RELAY` **to both**: to the target C (with A's real UDP
+   address) and to the requester A (with C's **TCP** address — often empty,
+   because on the relay's server side `remote_addr` is `None`).
+3. Each creates a `_punch_pending` state and sends a **burst of raw UDP PROBEs**,
+   ML-DSA signed (`_send_punch_probes`).
+   - ⚠ If the peer's UDP address is unknown (empty), **we keep the state** and do
+     not probe: the peer has our address and is probing us; an incoming PROBE
+     completes the punch from its source address. (A historical bug: deleting the
+     state blocked the initiator — see `gotchas.md`.)
+4. On receiving a valid PROBE → ACK + `_complete_punch`. The node with the
+   **larger NodeID** is the initiator: it opens the `UDPTransport`, registers it,
+   and **kicks** the responder (a burst of keepalives, `_kick_punched_link`, to
+   survive a lost datagram). The responder accepts through the normal UDP path.
+   Then the standard handshake → an authenticated link.
+   - De-duplication: one initiator transport per address (both peers often punch
+     at the same time).
+5. `_maybe_upgrade_path`: sending data to a peer only reachable through a relay
+   automatically triggers an attempt at a direct link (rate-limited per target,
+   `_UPGRADE_COOLDOWN`).
 
-## Découverte d'adresse & joignabilité
+## Address discovery & reachability
 
-- `OBSERVED_ADDR` : un pair qui accepte notre connexion nous renvoie l'IP source
-  qu'il voit → notre adresse publique vue de là (ajout borné à `_extra_addrs`).
-- STUN (`stun.py`) : adresse UDP réflexive publique. Résolution DNS bornée
-  (`_bounded_getaddrinfo`, thread daemon abandonné au timeout — sinon un DNS
-  bloqué fige le shutdown, cf. `gotchas.md`).
-- **AutoNAT** : `REACH_PROBE`/`REACH_PROBE_ACK` — demander à un pair de nous
-  rappeler pour **confirmer activement** qu'on est joignable (avant de se
-  déclarer relais public).
-- `NetMonitor` (`net_monitor.py`) : re-vérifie l'adressage local sur timer court
-  et relance les sondes réseau (IP publique HTTP, STUN) sur *trigger* (IP locale
-  changée, saut d'horloge = suspend/resume, `poke` du nœud, refresh périodique).
-  Sondes bornées, échec silencieux, **ne bloque jamais la boucle**
-  (`discover_public_ip` en thread daemon, cf. `gotchas.md`).
+- `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it
+  sees → our public address as seen from there (bounded addition to
+  `_extra_addrs`).
+- STUN (`stun.py`): the public reflexive UDP address. Bounded DNS resolution
+  (`_bounded_getaddrinfo`, a daemon thread abandoned on timeout — otherwise a
+  stuck DNS freezes shutdown, see `gotchas.md`).
+- **AutoNAT**: `REACH_PROBE`/`REACH_PROBE_ACK` — asking a peer to call us back to
+  **actively confirm** that we are reachable (before declaring ourselves a public
+  relay).
+- `NetMonitor` (`net_monitor.py`): re-checks local addressing on a short timer
+  and re-runs the network probes (public IP over HTTP, STUN) on a *trigger* (a
+  changed local IP, a clock jump = suspend/resume, a `poke` from the node, a
+  periodic refresh). Bounded probes, silent failure, **never blocks the loop**
+  (`discover_public_ip` in a daemon thread, see `gotchas.md`).
 
-## Keepalive de lien (`_link_keepalive_loop`)
+## Link keepalive (`_link_keepalive_loop`)
 
-Un lien sain mais **inactif** est reapé au `_READ_TIMEOUT` (TCP 60 s). Le nœud
-PING donc chaque pair établi toutes les **20 s** (`_LINK_KEEPALIVE_INTERVAL`),
-bien en deçà. Les liens du **set maintenu** (`_neighbor_slots`, les
-`_NEIGHBOR_FLOOR = 3` plus proches — cf. `routing.md`) sont pingés **en
-premier** : ce sont ceux que le nœud s'engage à tenir, ils ne doivent jamais
-être affamés par un pair lent ou mort placé plus tôt dans la liste. Si le
-compte de liens vivants passe sous le plancher à la fin d'un cycle, la
-maintenance de voisinage est réveillée immédiatement. Les deux extrémités le font → trafic dans les deux sens ; toute
-trame entrante réarme le timeout. Démarré dans `start()`/`join()`, arrêté dans
-`stop()`. Ne lève jamais. (Ce PING porte aussi `advertised_uris` → gossip
-d'adresses, cf. `routing.md`.)
-</content>
+A healthy but **idle** link is reaped at `_READ_TIMEOUT` (TCP 60 s). The node
+therefore PINGs every established peer every **20 s**
+(`_LINK_KEEPALIVE_INTERVAL`), well below it. The links of the **maintained set**
+(`_neighbor_slots`, the `_NEIGHBOR_FLOOR = 3` nearest — see `routing.md`) are
+pinged **first**: those are the ones the node commits to holding, and they must
+never be starved by a slow or dead peer placed earlier in the list. If the count
+of live links falls below the floor at the end of a cycle, neighbourhood
+maintenance is woken immediately. Both ends do this → traffic in both
+directions; any incoming frame rearms the timeout. Started in `start()`/`join()`,
+stopped in `stop()`. Never raises. (That PING also carries `advertised_uris` →
+address gossip, see `routing.md`.)
