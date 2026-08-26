@@ -1,12 +1,12 @@
 """
-Configurer un transport sans que la console sache ce qu'est un transport.
+Configuring a transport without the console knowing what a transport is.
 
-Un medium **déclare** ce qu'il prend (`OPTIONS`) ; la coercition, les bornes, les
-messages de refus et le rendu sont écrits **une fois**. Ajouter un réglage à un
-transport, c'est une ligne ; ajouter un transport ne coûte rien à la console.
+A medium **declares** what it takes (`OPTIONS`); the coercion, the bounds, the
+refusal messages and the rendering are written **once**. Adding a setting to a
+transport is one line; adding a transport costs the console nothing.
 
-Ce fichier vérifie les deux moitiés du contrat : ce qu'on accepte, et surtout ce
-qu'on refuse — un réglage est une entrée extérieure comme une autre.
+This file checks both halves of the contract: what we accept, and above all what
+we refuse — a setting is an external input like any other.
 """
 import pytest
 
@@ -20,8 +20,8 @@ from src.udp_transport import UDPTransport
 
 @pytest.fixture(autouse=True)
 def restore_settings():
-    """Les réglages sont au niveau de la classe : un test ne doit pas les
-    laisser modifiés pour le suivant."""
+    """Settings live on the class: one test must not leave them changed for the
+    next."""
     saved = {cls: dict(cls.SETTINGS)
              for cls in (TCPTransport, UDPTransport, SpoolTransport)}
     yield
@@ -48,7 +48,7 @@ class TestCoercion:
             assert expected in str(failure.value)
 
     def test_a_number_that_is_not_one_is_refused(self):
-        """`float("nan")` passe `float()` sans être un nombre utilisable."""
+        """`float("nan")` passes `float()` without being a usable number."""
         field = option("x", "float", 1.0, "")
         for bad in ("nan", "inf", "-inf"):
             with pytest.raises(OptionError):
@@ -59,8 +59,8 @@ class TestCoercion:
         assert coerce(field, "  192.168.1.2  ") == "192.168.1.2"
         with pytest.raises(OptionError):
             coerce(field, "a" * 300)
-        # Une valeur qui porte un saut de ligne se scinderait en deux clés à la
-        # relecture du fichier de configuration.
+        # A value carrying a newline would split into two keys when the
+        # configuration file is read back.
         with pytest.raises(OptionError):
             coerce(field, "one\ntwo")
 
@@ -76,7 +76,7 @@ class TestCoercion:
                        choices=[{"value": "ipv4"}, {"value": "ipv6"}])
         assert coerce(field, ["ipv4"]) == ["ipv4"]
         assert coerce(field, "ipv4, ipv6") == ["ipv4", "ipv6"]
-        assert coerce(field, ["ipv4", "ipv4"]) == ["ipv4"]     # dédupliqué
+        assert coerce(field, ["ipv4", "ipv4"]) == ["ipv4"]     # deduplicated
         with pytest.raises(OptionError):
             coerce(field, ["ipv4", "carrier-pigeon"])
         with pytest.raises(OptionError):
@@ -119,11 +119,11 @@ class TestConfigure:
         fields = {field["name"]: field for field in Declaring.options()}
         assert fields["loud"]["value"] is True
         assert fields["loud"]["default"] is False
-        assert fields["timeout"]["value"] == 4.0        # jamais touché → défaut
+        assert fields["timeout"]["value"] == 4.0        # never touched → the default
 
     def test_settings_are_replaced_not_mutated(self):
-        """Un dictionnaire de classe partagé n'est pas un endroit qu'on édite
-        sous un lien vivant."""
+        """A shared class dictionary is not a place to edit under a live
+        link."""
         Declaring.configure({"loud": True})
         before = Declaring.SETTINGS
         Declaring.configure({"timeout": 2})
@@ -153,7 +153,7 @@ class TestThroughTheManager:
 
     def test_only_what_differs_from_the_default_is_stored(self):
         manager = self.manager()
-        manager.configure("tcp", {"nodelay": True})       # déjà le défaut
+        manager.configure("tcp", {"nodelay": True})       # already the default
         assert manager.settings() == {}
 
     def test_an_unregistered_scheme_is_refused(self):
@@ -209,8 +209,8 @@ class TestAtStartup:
         return module
 
     def test_a_mistyped_setting_is_reported_not_fatal(self):
-        """Un nœud qui refuse de démarrer parce qu'un délai est mal tapé est un
-        pire résultat qu'un nœud qui tourne sur son défaut."""
+        """A node that refuses to start because a timeout is mistyped is a worse
+        outcome than a node running on its default."""
         module = self.loader()
         manager = TransportManager()
         manager.register("tcp", TCPTransport, TCPServer)

@@ -301,7 +301,7 @@ class TestFleetRoutes:
             await node.stop()
 
     async def test_remote_targets_lists_only_manage_grants(self):
-        """Le sélecteur de contexte ne propose que ce qui a été accordé."""
+        """The context selector offers only what has been granted."""
         node, console, host, built = await _make(enabled=True)
         try:
             _status, token = await _login(console)
@@ -346,8 +346,8 @@ class TestFleetRoutes:
             await node.stop()
 
     async def test_the_context_header_without_a_session_is_refused(self):
-        """Sans session distante, la requête est refusée — jamais exécutée en
-        local. Un en-tête ignoré ferait agir sur la mauvaise machine."""
+        """With no remote session the request is refused — never run locally.
+        An ignored header would act on the wrong machine."""
         node, console, host, built = await _make(enabled=True)
         try:
             _status, token = await _login(console)
@@ -365,7 +365,7 @@ class TestFleetRoutes:
             await node.stop()
 
     async def test_our_own_id_in_the_header_stays_local(self):
-        """Se désigner soi-même n'est pas un aller-retour par le mesh."""
+        """Naming ourselves is not a round trip through the mesh."""
         node, console, host, _built = await _make(enabled=True)
         try:
             _status, token = await _login(console)
@@ -433,9 +433,9 @@ class TestFleetRoutes:
 
 
 class TestOperationTracking:
-    """Une action distante répond de façon asynchrone. Sans suivi, la page n'a
-    aucun moyen de dire si elle a réussi, échoué, ou tourne encore — c'est
-    exactement ce qui faisait qu'un scan distant « ne faisait rien »."""
+    """A remote action answers asynchronously. With no tracking, the page has
+    no way of saying whether it succeeded, failed, or is still running — which
+    is exactly what made a remote scan look like it "did nothing"."""
 
     async def _bridge(self):
         node = MeshNode(transport_manager=make_manager())
@@ -482,16 +482,16 @@ class TestOperationTracking:
             await node.stop()
 
     async def test_an_answer_that_beats_its_registration_still_lands(self):
-        """Un pair proche répond en moins d'une milliseconde, avant même que le
-        thread appelant ait noté le rid. La clôture ne doit pas dépendre de cet
-        ordre — sinon l'opération reste « en cours » à vie."""
+        """A nearby peer answers in under a millisecond, before the calling
+        thread has even noted the rid. Closing must not depend on that order —
+        or the operation stays "in progress" forever."""
         node, app, bridge = await self._bridge()
         try:
             rid = "ff" * 8
-            bridge._finish(rid, "ok", "arrivé en avance")   # avant le _job
+            bridge._finish(rid, "ok", "arrived early")   # before the _job
             bridge._job(rid, "scan", "aa" * 20)
             job = next(j for j in bridge.snapshot()["jobs"] if j["rid"] == rid)
-            assert job["state"] == "ok" and job["detail"] == "arrivé en avance"
+            assert job["state"] == "ok" and job["detail"] == "arrived early"
         finally:
             bridge.stop()
             await node.stop()
@@ -531,8 +531,8 @@ class TestOperationTracking:
 
 
 class TestKeyUpload:
-    """Importer une clé depuis la console — le seul moyen d'en donner une à un
-    nœud en conteneur, où `~/.ssh` n'existe pas."""
+    """Importing a key from the console — the only way to give one to a node in
+    a container, where `~/.ssh` does not exist."""
 
     KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAA\n"
@@ -600,8 +600,8 @@ class TestKeyUpload:
             await node.stop()
 
     async def test_uploaded_key_is_offered_for_provisioning(self):
-        """Le pont doit résoudre l'id choisi en *matériel*, puisque la machine
-        qui s'en servira n'a aucun chemin vers ce fichier."""
+        """The bridge has to resolve the chosen id into *material*, since the
+        machine that will use it has no path to that file."""
         node, console, host, built = await _make(enabled=True)
         try:
             _status, token = await _login(console)
@@ -610,7 +610,7 @@ class TestKeyUpload:
             bridge = host.bridge("fleet")
             path, material = bridge._resolve_key(body["key"]["id"], None)
             assert path is None and material == self.KEY
-            # Une clé du disque voyage à l'inverse par son chemin.
+            # A key from disk travels the other way, by its path.
             path, material = bridge._resolve_key("file:/home/me/.ssh/id", None)
             assert path == "/home/me/.ssh/id" and material is None
         finally:
