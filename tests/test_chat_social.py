@@ -1,9 +1,13 @@
 """
-Chat social layer — profiles, groups and pseudo lookup on the wire.
+Chat social layer — profiles and groups on the wire.
 
 A capturing stub client stands in for the connector: we assert the bytes the
 app emits, and feed it inbound payloads to drive its handlers. Everything is
 app-level (no node).
+
+Names are conspicuously absent from all of it. A pseudo is the node's, carried
+in a signed claim; chat neither sends one nor believes one sent to it, and the
+tests below hold that line.
 """
 import asyncio
 import struct
@@ -11,16 +15,15 @@ import struct
 import pytest
 
 from src.apps.chat import (
-    ChatApp, ProfileReceived, GroupMessage, GroupInvited, DirResult,
-    _PROFILE, _GROUP_INVITE, _GROUP_TEXT, _DIR_QUERY, _DIR_REPLY,
+    ChatApp, ProfileReceived, GroupMessage, GroupInvited,
+    _PROFILE, _GROUP_INVITE, _GROUP_TEXT,
     GROUP_ID_LEN, MSG_ID_LEN,
 )
 from src.node_id import NodeID
 
 
-def _profile_body(pseudo=b"", bio=b"", avatar=b""):
-    return (bytes([_PROFILE]) + struct.pack("!H", len(pseudo)) + pseudo
-            + struct.pack("!H", len(bio)) + bio + avatar)
+def _profile_body(bio=b"", avatar=b""):
+    return bytes([_PROFILE]) + struct.pack("!H", len(bio)) + bio + avatar
 
 ME = NodeID(bytes([0x01]) * 20)
 B = NodeID(bytes([0x02]) * 20)
@@ -51,13 +54,13 @@ async def _next(app, kind, timeout=2.0):
 class TestSend:
     async def test_send_profile(self):
         app = _app()
-        app.state.set_profile(pseudo="alice", bio="hi", avatar=b"AV")
+        app.state.set_profile(bio="hi", avatar=b"AV")
         await app.send_profile(B)
-        assert app._client.sent[-1] == (B, _profile_body(b"alice", b"hi", b"AV"))
+        assert app._client.sent[-1] == (B, _profile_body(b"hi", b"AV"))
 
     async def test_create_group_invites_members(self):
         app = _app()
-        app.state.add_contact(B.raw.hex(), "bob")
+        app.state.add_contact(B.raw.hex())
         gid = await app.create_group("team", [B])
         # Roster is us + B, stored locally…
         assert set(app.state.group_members(gid.hex())) == {ME.raw.hex(), B.raw.hex()}
@@ -80,23 +83,25 @@ class TestSend:
         # gid | mid(16) | reply_to(16) | text
         assert payload[1 + GROUP_ID_LEN + MSG_ID_LEN + GROUP_ID_LEN:] == b"hi all"
 
-    async def test_dir_query_hits_contacts(self):
-        app = _app()
-        app.state.add_contact(B.raw.hex(), "bob")
-        qid = await app.dir_query("bob")
-        assert isinstance(qid, int)
-        assert app._client.sent[-1][0] == B
-        assert app._client.sent[-1][1][0] == _DIR_QUERY
-
 
 class TestReceive:
     async def test_profile_learned(self):
         app = _app()
-        app._dispatch(B, _profile_body(b"bob", b"bob's bio", b"BOBAV"))
+        app._dispatch(B, _profile_body(b"bob's bio", b"BOBAV"))
         ev = await _next(app, ProfileReceived)
-        assert ev.pseudo == "bob" and ev.bio == "bob's bio" and ev.avatar == b"BOBAV"
-        assert app.state.known[B.raw.hex()]["pseudo"] == "bob"
+        assert ev.bio == "bob's bio" and ev.avatar == b"BOBAV"
         assert app.state.get_avatar(B.raw.hex()) == b"BOBAV"
+
+    async def test_a_profile_cannot_carry_a_name(self):
+        # The old format put a pseudo first. Replayed here, those bytes are read
+        # as a bio length and the message is dropped — but the point is the
+        # stronger one: there is nowhere in a profile for a name to go, so a
+        # peer cannot tell us what to call it.
+        app = _app()
+        legacy = (bytes([_PROFILE]) + struct.pack("!H", 3) + b"bob"
+                  + struct.pack("!H", 2) + b"hi")
+        app._dispatch(B, legacy)
+        assert app.state.known.get(B.raw.hex(), {}).get("pseudo", "") != "bob"
 
     async def test_group_invite_adds_group(self):
         app = _app()
@@ -118,39 +123,6 @@ class TestReceive:
         app._dispatch(B, body)
         ev = await _next(app, GroupMessage)
         assert ev.group_id == gid and ev.src == B and ev.text == "yo group" and ev.mid == mid
-
-    async def test_dir_query_replies_only_for_own_pseudo(self):
-        app = _app()
-        app.state.set_pseudo("zoe")
-        qid = 0xDEADBEEF
-        app._dispatch(C, bytes([_DIR_QUERY]) + struct.pack("!I", qid) + b"zoe")
-        await asyncio.sleep(0)   # let the scheduled reply task run
-        await asyncio.sleep(0)
-        reply = next((p for t, p in app._client.sent if t == C), None)
-        assert reply is not None
-        assert reply[0] == _DIR_REPLY
-        assert struct.unpack_from("!I", reply, 1)[0] == qid
-        assert reply[5:25] == ME.raw
-
-    async def test_dir_query_ignored_when_pseudo_differs(self):
-        app = _app()
-        app.state.set_pseudo("zoe")
-        app._dispatch(C, bytes([_DIR_QUERY]) + struct.pack("!I", 1) + b"someone-else")
-        await asyncio.sleep(0)
-        assert app._client.sent == []   # no reply
-
-    async def test_dir_reply_must_be_about_sender(self):
-        app = _app()
-        # C claims that "bob" is B — a spoof; must be dropped.
-        spoof = bytes([_DIR_REPLY]) + struct.pack("!I", 1) + B.raw + b"bob"
-        app._dispatch(C, spoof)
-        assert B.raw.hex() not in app.state.known
-        # C answering about itself is accepted.
-        honest = bytes([_DIR_REPLY]) + struct.pack("!I", 1) + C.raw + b"carol"
-        app._dispatch(C, honest)
-        ev = await _next(app, DirResult)
-        assert ev.node_id == C and ev.pseudo == "carol"
-        assert app.state.known[C.raw.hex()]["pseudo"] == "carol"
 
 
 class TestHostile:

@@ -1,135 +1,216 @@
 """
-Pseudo directory tests.
+The pseudo directory.
 
-Two layers: the pure keyed-directory logic in src.pseudo_dir (self-authenticating
-claims, node-id binding, bounds, hostile input), and the node-level publish /
-lookup with its DIR_STORE / DIR_FIND / DIR_FOUND handlers.
+Two layers: the pure claim logic in ``src.pseudo_dir`` (self-authenticating
+records, node-id binding, canonical names, bounds, hostile input), and the
+node-level publish / lookup with its DIR_STORE / DIR_FIND / DIR_FOUND handlers.
 """
 import os
-import struct
 
 import pytest
 
-from src import pseudo_dir
 from src.pseudo_dir import (
-    dir_key, build_claim, parse_claim, PseudoStore, PseudoDirError,
-    encode_claims, decode_claims,
+    dir_key, build_claim, parse_claim, PseudoBook, PseudoDirError,
+    encode_claims, decode_claims, MAX_CLAIM, _MAX_PER_KEY,
 )
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 from src.node import MeshNode, DIR_STORE, DIR_FIND, DIR_FOUND, _QID_LEN
 from src.packet import Packet
-from src.app_channel import CHAT_APP_ID, builtin_id
 from tests.conftest import make_manager
 
-APP = CHAT_APP_ID
-OTHER_APP = builtin_id("other")
+
+def _claim(ident, pseudo="alice", ts=1000):
+    return build_claim(pseudo, ident.dsa_public_key, ident.sign, ts)
 
 
-def _claim(ident, app=APP, pseudo="alice", ts=1000):
-    return build_claim(app, pseudo, ident.dsa_public_key, ident.sign, ts)
+def _parsed(ident, pseudo="alice", ts=1000):
+    raw = _claim(ident, pseudo, ts)
+    return parse_claim(raw, ident.verify), raw
 
 
 class TestKey:
-    def test_deterministic_and_case_insensitive(self):
-        assert dir_key(APP, "Alice") == dir_key(APP, "  alice ")
-        assert len(dir_key(APP, "alice")) == 20
-
-    def test_app_scoped(self):
-        assert dir_key(APP, "alice") != dir_key(OTHER_APP, "alice")
+    def test_deterministic_case_and_accent_insensitive(self):
+        assert dir_key("Alice") == dir_key("alice")
+        assert dir_key("José") == dir_key("jose")
+        assert len(dir_key("alice")) == 20
 
     def test_distinct_pseudos_differ(self):
-        assert dir_key(APP, "alice") != dir_key(APP, "bob")
+        assert dir_key("alice") != dir_key("bob")
 
 
 class TestClaim:
     def test_roundtrip_and_node_binding(self):
         ident = CryptoIdentity()
-        c = parse_claim(_claim(ident), ident.verify)
-        assert c is not None
-        # The node id is derived from the pubkey in the claim — not free to set.
-        assert c["node_id"] == NodeID.from_public_key(ident.dsa_public_key).raw
-        assert c["pseudo"] == "alice"
-        assert c["key"] == dir_key(APP, "alice")
-        assert c["app_id"] == APP
+        claim, raw = _parsed(ident, "Alice", 42)
+        assert claim["pseudo"] == "Alice" and claim["ts"] == 42
+        assert claim["node_id"] == NodeID.from_public_key(ident.dsa_public_key).raw
+        assert claim["key"] == dir_key("alice")
+        assert len(raw) <= MAX_CLAIM
 
     def test_cannot_claim_a_victims_node_id(self):
-        # Whatever a claim says, its node id is hash(pubkey_in_claim). An attacker
-        # signing with their own key can only ever produce their own node id, so
-        # they cannot map a pseudo onto someone else's identity.
-        attacker = CryptoIdentity()
-        victim_id = NodeID.from_public_key(CryptoIdentity().dsa_public_key).raw
-        c = parse_claim(_claim(attacker, pseudo="victim"), attacker.verify)
-        assert c["node_id"] != victim_id
-
-    def test_wrong_key_rejected(self):
-        ident, other = CryptoIdentity(), CryptoIdentity()
-        raw = _claim(ident)
-        # Verifying with a key that isn't the claim's pubkey must fail.
-        assert parse_claim(raw, lambda m, s, k: other.verify(m, s, other.dsa_public_key)) is None
+        # The id is derived from the pubkey *inside* the claim, so the only id a
+        # signer can bind a name to is its own. There is no field to lie in.
+        attacker, victim = CryptoIdentity(), CryptoIdentity()
+        claim, _ = _parsed(attacker, "victim")
+        assert claim["node_id"] != NodeID.from_public_key(victim.dsa_public_key).raw
 
     def test_tampered_pseudo_rejected(self):
         ident = CryptoIdentity()
-        raw = bytearray(_claim(ident, pseudo="alice"))
-        i = raw.find(b"alice")
-        raw[i:i + 5] = b"evilx"          # flip the pseudo → signature breaks
+        raw = bytearray(_claim(ident, "alice"))
+        i = raw.index(b"alice")
+        raw[i:i + 5] = b"alicE"
         assert parse_claim(bytes(raw), ident.verify) is None
 
-    def test_bad_app_id_rejected_on_build(self):
+    def test_tampered_signature_rejected(self):
         ident = CryptoIdentity()
-        with pytest.raises(PseudoDirError):
-            build_claim(b"short", "alice", ident.dsa_public_key, ident.sign)
+        raw = bytearray(_claim(ident))
+        raw[-1] ^= 0xFF
+        assert parse_claim(bytes(raw), ident.verify) is None
+
+    def test_a_non_canonical_name_is_refused_on_both_sides(self):
+        # Refused when signing, so we never emit one…
+        ident = CryptoIdentity()
+        for bad in ("bob ", "  bob", "bo​b", "x" * 51, "ali‮ce"):
+            with pytest.raises(PseudoDirError):
+                build_claim(bad, ident.dsa_public_key, ident.sign)
+
+    def test_a_signed_non_canonical_name_is_still_refused_on_receipt(self):
+        # …and refused on arrival even when perfectly signed, which is the case
+        # that matters: the signer is hostile, not buggy.
+        import struct
+        from src.pseudo_dir import _HDR, _signing_input, CLAIM_VERSION
+        ident = CryptoIdentity()
+        pseudo = "ali‮ce"        # right-to-left override, renders reversed
+        node_id = NodeID.from_public_key(ident.dsa_public_key).raw
+        encoded = pseudo.encode("utf-8")
+        sig = ident.sign(_signing_input(node_id, pseudo, 7))
+        forged = (_HDR.pack(CLAIM_VERSION, 7, len(ident.dsa_public_key),
+                            len(encoded), len(sig))
+                  + ident.dsa_public_key + encoded + sig)
+        assert parse_claim(forged, ident.verify) is None
+
+    def test_version_is_checked(self):
+        ident = CryptoIdentity()
+        raw = bytearray(_claim(ident))
+        raw[0] = 99
+        assert parse_claim(bytes(raw), ident.verify) is None
 
     def test_hostile_input_never_crashes(self):
         ident = CryptoIdentity()
-        for bad in (b"", b"\x00", os.urandom(9), os.urandom(50),
-                    APP + struct.pack("!QHHH", 0, 9999, 9999, 9999) + b"x"):
-            assert parse_claim(bad, ident.verify) is None
+        for junk in (b"", b"\x00", os.urandom(64), os.urandom(MAX_CLAIM + 1),
+                     b"\x02" + b"\xff" * 40, None, "not bytes", 42):
+            assert parse_claim(junk, ident.verify) is None
+
+    def test_a_verifier_that_throws_is_not_a_way_in(self):
+        def explode(*_args):
+            raise RuntimeError("boom")
+        assert parse_claim(_claim(CryptoIdentity()), explode) is None
 
 
-class TestPseudoStore:
-    def test_multiple_claimants_per_pseudo(self):
-        a, b = CryptoIdentity(), CryptoIdentity()
-        store = PseudoStore()
-        ca, cb = _claim(a), _claim(b)
-        assert store.put(parse_claim(ca, a.verify), ca)
-        assert store.put(parse_claim(cb, b.verify), cb)
-        # Same pseudo → same key → both claims kept.
-        assert len(store.get(dir_key(APP, "alice"))) == 2
+class TestPseudoBook:
+    def test_several_nodes_may_wear_one_name(self):
+        book = PseudoBook()
+        idents = [CryptoIdentity() for _ in range(3)]
+        for ident in idents:
+            book.offer(*_parsed(ident, "alice"))
+        assert len(book.get(dir_key("alice"))) == 3
+        assert len(book) == 3
 
-    def test_newer_ts_supersedes_same_node(self):
+    def test_newer_ts_supersedes_and_older_is_ignored(self):
+        book = PseudoBook()
         ident = CryptoIdentity()
-        store = PseudoStore()
-        old, new = _claim(ident, ts=1000), _claim(ident, ts=2000)
-        assert store.put(parse_claim(old, ident.verify), old)
-        assert store.put(parse_claim(new, ident.verify), new)
-        assert store.put(parse_claim(old, ident.verify), old) is False  # older ignored
-        assert len(store.get(dir_key(APP, "alice"))) == 1
+        node_id = NodeID.from_public_key(ident.dsa_public_key).raw
+        assert book.offer(*_parsed(ident, "alice", 100)) is True
+        assert book.offer(*_parsed(ident, "alicia", 200)) is True
+        assert book.pseudo_of(node_id) == "alicia"
+        # A replayed older claim must not roll the name back.
+        assert book.offer(*_parsed(ident, "alice", 100)) is False
+        assert book.pseudo_of(node_id) == "alicia"
+        # Nor may the same timestamp re-open the question.
+        assert book.offer(*_parsed(ident, "alice", 200)) is False
+        assert book.pseudo_of(node_id) == "alicia"
 
-    def test_per_key_bounded(self):
-        store = PseudoStore(max_per_key=3)
-        for _ in range(5):
-            idn = CryptoIdentity()
-            raw = _claim(idn)
-            store.put(parse_claim(raw, idn.verify), raw)
-        assert len(store.get(dir_key(APP, "alice"))) == 3
-
-    def test_key_count_bounded(self):
-        store = PseudoStore(max_keys=2)
+    def test_one_entry_per_node_whatever_the_name(self):
+        book = PseudoBook()
         ident = CryptoIdentity()
-        for name in ("a", "b", "c"):
-            raw = _claim(ident, pseudo=name)
-            store.put(parse_claim(raw, ident.verify), raw)
-        assert len(store) == 2
+        book.offer(*_parsed(ident, "alice", 1))
+        book.offer(*_parsed(ident, "bob", 2))
+        assert len(book) == 1
+        assert book.get(dir_key("alice")) == []      # the old key is released
+        assert len(book.get(dir_key("bob"))) == 1
 
+    def test_bounded_by_entries(self):
+        book = PseudoBook(max_nodes=4)
+        for i in range(10):
+            book.offer(*_parsed(CryptoIdentity(), f"p{i}"))
+        assert len(book) == 4
+
+    def test_bounded_by_bytes(self):
+        # Claims are ~5 kB each: without a byte budget, a flood of perfectly
+        # valid signed claims is a memory-exhaustion vector.
+        book = PseudoBook(max_nodes=1000, max_bytes=12_000)
+        for i in range(10):
+            book.offer(*_parsed(CryptoIdentity(), f"p{i}"))
+        assert book.nbytes <= 12_000
+        assert 0 < len(book) < 10
+
+    def test_a_claim_evicted_on_the_way_in_is_not_a_change(self):
+        # Saying our view changed would have us re-gossip a claim we do not
+        # hold, every time it arrives: an epidemic that never terminates, and
+        # only under memory pressure — the worst time to find out.
+        book = PseudoBook(max_nodes=1000, max_bytes=100)   # under one claim
+        assert book.offer(*_parsed(CryptoIdentity(), "alice")) is False
+        assert len(book) == 0
+
+    def test_bounded_per_key(self):
+        book = PseudoBook()
+        for _ in range(_MAX_PER_KEY + 5):
+            book.offer(*_parsed(CryptoIdentity(), "crowded"))
+        assert len(book.get(dir_key("crowded"))) == _MAX_PER_KEY
+
+    def test_search_ranks_best_first(self):
+        book = PseudoBook()
+        for name in ("Alice Ada", "alicia", "Bob", "Malice"):
+            book.offer(*_parsed(CryptoIdentity(), name))
+        names = [h["pseudo"] for h in book.search("ali")]
+        # prefix matches before the one that only contains it; "Bob" not at all.
+        assert names[-1] == "Malice" and set(names[:2]) == {"Alice Ada", "alicia"}
+        assert "Bob" not in names
+
+    def test_search_is_limited(self):
+        book = PseudoBook()
+        for i in range(20):
+            book.offer(*_parsed(CryptoIdentity(), f"alice{i}"))
+        assert len(book.search("alice", limit=5)) == 5
+
+    def test_recent_is_newest_first_and_bounded(self):
+        book = PseudoBook()
+        for i in range(5):
+            book.offer(*_parsed(CryptoIdentity(), f"p{i}"))
+        recent = book.recent(2)
+        assert len(recent) == 2
+        assert recent[0] == book.claims()[-1]
+
+    def test_forget_releases_both_indexes(self):
+        book = PseudoBook()
+        ident = CryptoIdentity()
+        claim, raw = _parsed(ident, "alice")
+        book.offer(claim, raw)
+        book.forget(claim["node_id"])
+        assert len(book) == 0 and book.nbytes == 0
+        assert book.get(dir_key("alice")) == []
+
+
+class TestWireEncoding:
     def test_encode_decode_roundtrip(self):
-        ident = CryptoIdentity()
-        claims = [_claim(ident, pseudo="alice")]
+        claims = [_claim(CryptoIdentity(), f"p{i}") for i in range(3)]
         assert decode_claims(encode_claims(claims)) == claims
 
     def test_decode_hostile(self):
         assert decode_claims(b"") == []
-        assert decode_claims(struct.pack("!H", 9999) + b"short") == []
+        assert decode_claims(b"\xff\xff") == []          # length beyond the blob
+        assert decode_claims(b"\x00\x00") == []          # zero-length entry
 
 
 class _FakePeer:
@@ -138,38 +219,45 @@ class _FakePeer:
         self.session = object()
         self.sent = []
         self.relay_only = False
+        self._malformed = 0
+
+    def note_abuse(self) -> bool:
+        from src.node import _MAX_MALFORMED
+        self._malformed += 1
+        return self._malformed > _MAX_MALFORMED
+
     async def send(self, pkt):
         self.sent.append(pkt)
+
     async def stop(self):
         pass
 
 
 class TestNodeDirectory:
-    async def _node(self):
-        return MeshNode(transport_manager=make_manager())
+    async def _node(self, pseudo=None):
+        return MeshNode(transport_manager=make_manager(), pseudo=pseudo)
 
     async def test_publish_then_lookup_local(self):
+        node = await self._node("Alice")
+        try:
+            await node.publish_pseudo()
+            res = await node.lookup_pseudo("alice")   # case-insensitive
+            assert [r["id"] for r in res] == [node.id.raw.hex()]
+            assert res[0]["pseudo"] == "Alice"
+        finally:
+            await node.stop()
+
+    async def test_publish_without_a_pseudo_does_nothing(self):
         node = await self._node()
         try:
-            await node.publish_pseudo(APP, "Alice")
-            res = await node.lookup_pseudo(APP, "alice")   # case-insensitive
-            assert res == [{"id": node.id.raw.hex(), "pseudo": "Alice"}]
+            assert await node.publish_pseudo() == ""
         finally:
             await node.stop()
 
     async def test_lookup_unknown_empty(self):
-        node = await self._node()
+        node = await self._node("alice")
         try:
-            assert await node.lookup_pseudo(APP, "nobody") == []
-        finally:
-            await node.stop()
-
-    async def test_app_namespaced(self):
-        node = await self._node()
-        try:
-            await node.publish_pseudo(APP, "alice")
-            # Same pseudo, different app namespace → no leak.
-            assert await node.lookup_pseudo(OTHER_APP, "alice") == []
+            assert await node.lookup_pseudo("nobody") == []
         finally:
             await node.stop()
 
@@ -177,16 +265,16 @@ class TestNodeDirectory:
         node = await self._node()
         author = CryptoIdentity()
         try:
-            raw = _claim(author, pseudo="carol")
+            raw = _claim(author, "carol")
             peer = _FakePeer()
-            await node._handle_dir_store(peer, Packet.create(DIR_STORE,
-                peer.authenticated_id.raw, b"\xff" * 20, raw))
-            assert node._pseudo_store.get(dir_key(APP, "carol"))
-            # A tampered claim is dropped.
+            await node._handle_dir_store(peer, Packet.create(
+                DIR_STORE, peer.authenticated_id.raw, b"\xff" * 20, raw))
+            assert node._pseudo_book.get(dir_key("carol"))
             bad = bytearray(raw); bad[-1] ^= 0xFF
-            await node._handle_dir_store(peer, Packet.create(DIR_STORE,
-                peer.authenticated_id.raw, b"\xff" * 20, bytes(bad)))
-            assert len(node._pseudo_store.get(dir_key(APP, "carol"))) == 1
+            await node._handle_dir_store(peer, Packet.create(
+                DIR_STORE, peer.authenticated_id.raw, b"\xff" * 20, bytes(bad)))
+            assert len(node._pseudo_book.get(dir_key("carol"))) == 1
+            assert peer._malformed == 1      # and the sender wears it
         finally:
             await node.stop()
 
@@ -194,13 +282,14 @@ class TestNodeDirectory:
         node = await self._node()
         author = CryptoIdentity()
         try:
-            raw = _claim(author, pseudo="dave")
-            node._pseudo_store.put(parse_claim(raw, node._identity.verify), raw)
+            claim, raw = _parsed(author, "dave")
+            node._pseudo_book.offer(claim, raw)
             peer = _FakePeer()
             node._peers.append(peer)   # DIR_FOUND routes back via _route_outbound
             qid = os.urandom(_QID_LEN)
-            await node._handle_dir_find(peer, Packet.create(DIR_FIND,
-                peer.authenticated_id.raw, node.id.raw, dir_key(APP, "dave") + qid))
+            await node._handle_dir_find(peer, Packet.create(
+                DIR_FIND, peer.authenticated_id.raw, node.id.raw,
+                dir_key("dave") + qid))
             assert peer.sent and peer.sent[-1].type == DIR_FOUND
             assert peer.sent[-1].payload[:_QID_LEN] == qid
             assert decode_claims(peer.sent[-1].payload[_QID_LEN:]) == [raw]

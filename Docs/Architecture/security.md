@@ -185,9 +185,9 @@ presented, so there is no id to lie about (the same invariant as the handshake).
 each use gets its own domain and none of them can be replayed as another:
 `nmesh-app-auth-v1` (assertions), `nmesh-app-release-v1` (app packages),
 `nmesh-core-release-v1` (a release of the node's own code — see
-[`Docs/Updates/guide`](../Updates/guide)), `nmesh-pseudo-dir-v1` (directory
-claims), plus the certificate body and the handshake input. Adding a seventh use
-means adding a seventh domain, not reusing the nearest one.
+[`Docs/Updates/guide`](../Updates/guide)), `nmesh-pseudo-v2` (a node's claim to
+a name — see below), plus the certificate body and the handshake input. Adding a
+seventh use means adding a seventh domain, not reusing the nearest one.
 
 `verify_assertion` orders its checks from cheapest to most expensive and burns
 the anti-replay nonce **only after** the cheap ones — otherwise a flood of
@@ -211,3 +211,42 @@ local decision on the machine that bears it; the one message that touches
 capabilities without a human (`ENROL_NARROW`) is **intersected** with what its
 sender already holds, so it can only take some away. Without that asymmetry the
 weakest capability would be enough to reach all the others.
+
+## Pseudos (a name is a label, never an identity)
+
+A node's identity is its `NodeID`, the hash of its ML-DSA public key. A pseudo
+is the changeable name shown beside it. It never decides anything — not routing,
+not authentication, not trust — so an attacker who registers a lookalike gains
+nothing they did not already have.
+
+What keeps it usable anyway is that a name never travels bare. It travels as a
+**claim signed by the very identity it names**, and the id inside that claim is
+derived from the key that signed it, so a claim can only ever bind a name to its
+author's own node. That is why a claim from a stranger can be accepted, cached
+and re-served without a second thought — see
+[`routing.md`](routing.md) for the format.
+
+**The form is checked, not repaired.** `src/pseudo.py` defines one canonical
+spelling (NFC, no `C*`-category character, plain spaces only, single-spaced, at
+most 50 characters), and a receiver re-derives it from what arrived. A pseudo
+that is not already canonical is **refused, however well it is signed** — a
+trailing space, a zero-width joiner or a right-to-left override is not sloppy
+input, it is a name engineered to render as somebody else's. Refusing before
+verifying also means a hostile name costs no signature check.
+
+**A peer that sends one is charged for it.** A claim that is oversized,
+unparseable, badly signed, or non-canonical is counted against the link it came
+on (`_Peer.note_abuse`), and the peer is cut once the count passes
+`_MAX_MALFORMED` — the same counter and the same ceiling as an undecodable
+frame, because it is the same judgement. An honest relay verifies before
+re-sending, so whoever hands us a bad claim either forged it or forwarded
+without checking; neither is something to absorb quietly.
+
+**A name only moves forward.** Claims carry a timestamp that must strictly
+increase per node id, so a relay replaying an old claim cannot roll somebody
+back to a name they abandoned.
+
+**No app can rename the node.** The connector exposes reading and searching
+pseudos and nothing else. The node's name is shown in its console and used by
+every app, so choosing it belongs to whoever runs the node — not to any app that
+happens to hold a connector token.

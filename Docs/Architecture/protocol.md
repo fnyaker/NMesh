@@ -59,17 +59,19 @@ receipt for routable types (see the gates).
 | RELAY_CARRY | 0x15 | carries a handshake packet between two nodes through a relay |
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT: "call me back to confirm I am reachable" |
 | CATALOG_ANNOUNCE | 0x18 | gossip of a **signed release** for the app store catalogue |
-| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id |
+| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id (exact name; the partial search is answered from the gossiped book) |
 | ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **routable liveness probe**: reach a node id multi-hop (a remote ping through relays) |
 | RELEASE_ANNOUNCE | 0x1E | gossip of a **signed release of the node's own code**, prefixed by a `have` byte saying whether the sender holds the package (see [`../Updates/guide`](../Updates/guide)) |
 | RELEASE_FETCH / _DATA | 0x1F / 0x20 | "send me this release's package from this offset" and a slice in answer — **routable**, so a holder several hops away is reachable |
+| PSEUDO_ANNOUNCE | 0x21 | gossip of a **signed claim** binding a node's chosen name to its id (see [`routing.md`](routing.md)) |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
   peer and `src_id == the authenticated peer`**. Only what is intrinsically
   per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
-  (`PUNCH_*`, `REACH_PROBE*`), and the two gossip planes `CATALOG_ANNOUNCE` /
-  `RELEASE_ANNOUNCE` (re-stamped at every hop during epidemic gossip).
+  (`PUNCH_*`, `REACH_PROBE*`), and the three gossip planes `CATALOG_ANNOUNCE` /
+  `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` (re-stamped at every hop during
+  epidemic gossip).
 - `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
   towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/

@@ -224,6 +224,9 @@ async def main() -> None:
                     help="expose a data connector on this loopback port for apps")
     ap.add_argument("--launch", action="append", default=[], metavar="CMD",
                     help="launch an app wired to the mesh (repeatable); needs --connector-port")
+    ap.add_argument("--pseudo", default=None,
+                    help="display name for this node, shown beside its id "
+                         "(at most 50 characters; the id stays the identity)")
     ap.add_argument("--no-chat", action="store_true", default=None,
                     help="disable the built-in chat app (served at /chat on the console)")
     ap.add_argument("--fleet", action="store_true", default=None,
@@ -260,6 +263,7 @@ async def main() -> None:
         # Pinned release publishers live with the node's state: what may
         # replace this node's code is not something to forget on restart.
         release_dir=args.data if args.data else None,
+        pseudo=getattr(args, "pseudo", "") or None,
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

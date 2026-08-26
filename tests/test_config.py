@@ -63,6 +63,48 @@ class TestParsing:
         assert config.parse("listen = tcp://0.0.0.0:9000")[0]["listen"] == "0.0.0.0:9000"
 
 
+class TestPseudoSetting:
+    """The name is validated here in exactly the form the network validates it,
+    so a name the mesh would drop never reaches a running node."""
+
+    def test_a_usable_name_round_trips_canonicalised(self, tmp_path):
+        path = str(tmp_path / "nmesh.conf")
+        values = config.defaults()
+        values["pseudo"] = "Alice Ada"
+        config.save(path, values)
+        loaded, problems = config.load(path)
+        assert problems == [] and loaded["pseudo"] == "Alice Ada"
+
+    def test_typing_slips_are_tidied(self):
+        values, problems = config.parse("pseudo =   Alice   Ada  \n")
+        assert problems == [] and values["pseudo"] == "Alice Ada"
+
+    def test_empty_means_unnamed(self):
+        values, problems = config.parse("pseudo =\n")
+        assert problems == [] and values["pseudo"] == ""
+
+    @pytest.mark.parametrize("bad,says", [
+        ("x" * 51, "50 characters"),
+        ("ali\u202ece", "invisible"),          # right-to-left override
+        ("bo\u200bb", "invisible"),            # zero width space
+        ("a\u00a0b", "plain space"),           # no-break space
+    ])
+    def test_a_name_the_mesh_would_refuse_is_refused_here(self, bad, says):
+        values, problems = config.parse(f"pseudo = {bad}\n")
+        assert values == {}
+        assert len(problems) == 1 and says in problems[0]
+
+    def test_the_console_may_edit_it(self):
+        merged, rejected = config.apply_edits(
+            config.defaults(), {"pseudo": "  Bob  "})
+        assert rejected == [] and merged["pseudo"] == "Bob"
+
+    def test_the_console_cannot_set_an_unusable_one(self):
+        merged, rejected = config.apply_edits(
+            config.defaults(), {"pseudo": "x" * 51})
+        assert merged["pseudo"] == "" and len(rejected) == 1
+
+
 class TestHostileFiles:
     """An unreadable file is reported and set aside: a node that does not start
     is a worse outcome than a node on its defaults."""

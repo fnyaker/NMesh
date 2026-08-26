@@ -163,12 +163,12 @@ class TestRichProtocol:
 
     async def test_profile_bio_and_avatar(self):
         a, b = await self._pair()
-        a.state.set_profile(pseudo="Alice", bio="hi bio", avatar=b"AVATARBYTES")
+        a.state.set_profile(bio="hi bio", avatar=b"AVATARBYTES")
         await a.send_profile(DST)
         _feed(b, a._client, SRC)
         ev = _drain(b)[0]
         assert isinstance(ev, ProfileReceived)
-        assert ev.pseudo == "Alice" and ev.bio == "hi bio" and ev.avatar == b"AVATARBYTES"
+        assert ev.bio == "hi bio" and ev.avatar == b"AVATARBYTES"
 
 
 class TestHardening:

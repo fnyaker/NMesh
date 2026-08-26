@@ -35,7 +35,7 @@ button works.
 | **Overview** | — | `#overview` |
 | **Network** | Peers · Reachability · Add a node | `#network/peers`, `#network/reach`, `#network/join` |
 | **Apps** | Installed · App store | `#apps/installed`, `#apps/store` |
-| **Settings** | Updates · Security · This browser · Configuration · Diagnostics · Advanced | `#settings/updates`, `#settings/security`, `#settings/appearance`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
+| **Settings** | Identity · Updates · Security · This browser · Configuration · Diagnostics · Advanced | `#settings/identity`, `#settings/updates`, `#settings/security`, `#settings/appearance`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
 
 Joining a network is a **network** action, not a setting: tickets, QR codes,
 manual exchange, relays and certificates all live in *Network → Add a node*.
@@ -256,10 +256,12 @@ works on a machine with no internet.
 | POST    | `/api/chat/edit` / `delete` / `react` | `{conv, mid, …}` — edits / deletes / reacts |
 | POST    | `/api/chat/read`   | `{conv}` — marks read (sends the read receipt) |
 | POST    | `/api/chat/typing` | `{conv, active}` — typing indicator            |
-| POST    | `/api/chat/profile`| `{pseudo?, bio?, avatar?:b64}` — updates my profile |
-| POST    | `/api/chat/contact`| `{op:add\|remove, id, pseudo?}`                |
+| POST    | `/api/chat/profile`| `{bio?, avatar?:b64}` — updates my profile (the **name** is the node's, see `/api/pseudo`) |
+| POST    | `/api/chat/contact`| `{op:add\|remove, id}`                          |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
-| POST    | `/api/chat/search` | `{pseudo}` → local + the network's DHT directory + a one-hop query |
+| POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
+| GET     | `/api/pseudo`      | this node's name, id and the length limit; `?q=…` searches names instead (`&wide=1` also asks the network) |
+| POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
 | GET     | `/api/transports` | what each transport declares it takes, with the values in force |
@@ -360,6 +362,27 @@ toggle is **live** — no node restart — and persisted in `<data>/apps.json`.
 Wiring: pass an `app_host` (a `src.app_registry.AppHost`) to `WebConsole(...)`.
 `scripts/nmesh_node.py` does it; the `chat_bridge` parameter stays supported for
 a runner that hosts a single app itself.
+
+## This node's name (Settings → Identity)
+
+Two cards. The first sets **what this node is called** — the name shown beside
+its id everywhere, in the console and in every app. Saving does two things: the
+node signs a new claim and announces it to the mesh straight away, and the name
+is written to the configuration file so a restart keeps it. If the file cannot
+be written the rename still stands for this run, and the page says so rather
+than pretending otherwise.
+
+A name the network would refuse is refused here, in the same words: at most 50
+characters, nothing invisible or directional, plain spaces only. See
+[`Docs/Pseudos/guide`](../Pseudos/guide).
+
+The second card **finds a node by name**, whole or partial, ranked best-first
+and answered instantly from what this node already knows. *Ask the network* adds
+one directory lookup for the exact name, which reaches somebody this node has
+never met. Every result carries the node id and opens the node card.
+
+The **Active links** and **Known nodes** tables filter on names too, through the
+search box they already have.
 
 ## Updates (Settings → Updates)
 

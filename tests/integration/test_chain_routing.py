@@ -15,7 +15,6 @@ import pytest
 from src import MeshNode
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
-from src.app_channel import CHAT_APP_ID
 
 
 def make_node() -> MeshNode:
@@ -68,10 +67,14 @@ class TestChainRouting:
             assert val == b"chain dht payload"
 
             # 4) pseudo directory: X publishes, A resolves it across the chain.
-            await x.publish_pseudo(CHAT_APP_ID, "xavier")
-            hits = await asyncio.wait_for(
-                a.lookup_pseudo(CHAT_APP_ID, "xavier"), timeout=20.0)
+            x.set_pseudo("xavier")
+            await x.publish_pseudo()
+            hits = await asyncio.wait_for(a.lookup_pseudo("xavier"), timeout=20.0)
             assert any(h["id"] == x.id.raw.hex() for h in hits)
+
+            # …and the gossip plane got there on its own, hop by hop, without
+            # anybody asking: A can name X from its own book.
+            assert a.pseudo_of(x.id) == "xavier"
         finally:
             for nd in nodes:
                 await nd.stop()

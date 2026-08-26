@@ -48,7 +48,8 @@ from .core_release import (ReleaseCatalog, ReleaseStore, TrustedPublishers,
                            read_tree as _core_read_tree,
                            release_id as _core_release_id,
                            version_of as _core_version_of)
-from .pseudo_dir import (PseudoStore, dir_key as _dir_key,
+from .pseudo import canonical as _pseudo_canonical
+from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_key,
                          build_claim as _dir_build_claim,
                          parse_claim as _dir_parse_claim,
                          encode_claims as _dir_encode, decode_claims as _dir_decode,
@@ -100,6 +101,7 @@ ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
 RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
 RELEASE_FETCH     = 0x1F   # "send me this release's package, from here"
 RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
+PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -153,7 +155,7 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE}
+                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -170,6 +172,11 @@ _HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
+_PSEUDO_RATE_WINDOW  = 10.0     # seconds
+_PSEUDO_RATE_MAX     = 64       # pseudo claims one link may gossip at us per window
+_PSEUDO_SEARCH_MAX   = 50       # results one search may return
+_PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
+_MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
                     FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
@@ -957,8 +964,7 @@ class _Peer:
                 # oversized payload). One bad packet must never kill the link:
                 # drop it, count the abuse, and keep serving. Persistent garbage
                 # is treated as hostile and the peer is cut.
-                self._malformed += 1
-                if self._malformed > _MAX_MALFORMED:
+                if self.note_abuse():
                     return
                 continue
             nbytes = _HEADER_BYTES + len(packet.payload)
@@ -973,6 +979,18 @@ class _Peer:
                 raise
             except Exception:
                 pass  # malformed payload or handler bug — drop, loop continues
+
+    def note_abuse(self) -> bool:
+        """Count one thing this peer did that a correct node never does, and say
+        whether it has now earned being cut.
+
+        The receive loop counts frames it could not even decode; handlers count
+        what decoded but was a lie — a claim signed by nobody, a name in a form
+        the protocol forbids. Both are the same judgement ("this peer is not
+        playing the protocol") so both feed the same counter, and the console
+        shows it under one heading."""
+        self._malformed += 1
+        return self._malformed > _MAX_MALFORMED
 
     async def send(self, packet: Packet) -> None:
         await self.transport.send(packet)
@@ -1099,7 +1117,8 @@ class MeshNode:
                  session_store_path: str | None = None,
                  app_storage_path: str | None = None,
                  app_store_dir: str | None = None,
-                 release_dir: str | None = None) -> None:
+                 release_dir: str | None = None,
+                 pseudo: str | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1177,10 +1196,16 @@ class MeshNode:
         self._release_tried: OrderedDict[bytes, str] = OrderedDict()
         self._release_log: list[dict] = []
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
-        # Pseudo directory: find node ids by pseudo, network-wide.
-        self._pseudo_store = PseudoStore()
+        # Pseudos: the changeable name beside the unchangeable id. One book
+        # holds every claim we have verified — our own included — and answers
+        # both "what is this node called?" and "who is called this?".
+        self._pseudo_book = PseudoBook()
+        self._pseudo = ""
+        self._pseudo_claim: bytes | None = None
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
         self._dir_rate: OrderedDict[int, tuple] = OrderedDict()      # id(peer)->(n,win)
+        self._pseudo_rate: OrderedDict[int, tuple] = OrderedDict()   # id(peer)->(n,win)
+        self._detached: set = set()   # fire-and-forget tasks, bounded
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
         # Off until an operator turns it on. Handed to every peer so the two
@@ -1261,6 +1286,12 @@ class MeshNode:
         self._relay_join_timeout: float = _RELAY_JOIN_TIMEOUT
         # Keeps local/public addressing fresh (created on start(), needs a loop)
         self._net_monitor: NetMonitor | None = None
+        if pseudo:
+            # Raises on a name that cannot be one, rather than quietly running
+            # unnamed: the configuration layer validates first (see
+            # ``config.SETTINGS``), so reaching here with a bad one is a caller
+            # bug and deserves to be visible.
+            self.set_pseudo(pseudo)
 
     @property
     def id(self) -> NodeID:
@@ -1302,6 +1333,7 @@ class MeshNode:
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_release_watch()
+        self._announce_own_pseudo()   # peers that were already up learn our name
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
         """Applied when the monitor sees our addressing move: refresh the
@@ -2796,6 +2828,7 @@ class MeshNode:
         for p in self._peers:
             peers.append({
                 "authenticated_id": p.authenticated_id.raw.hex() if p.authenticated_id else None,
+                "pseudo": self.pseudo_of(p.authenticated_id) if p.authenticated_id else "",
                 "is_client_side": p.is_client_side,
                 "has_session": p.session is not None,
                 "malformed": p._malformed,
@@ -2819,6 +2852,7 @@ class MeshNode:
             routing.append({
                 "id": hexid,
                 "addresses": list(e.addresses),
+                "pseudo": self.pseudo_of(hexid),
                 "address_status": self._address_status(hexid, e.addresses, p),
                 "seen_ago": max(0.0, now - e.last_seen),
                 "connected": p is not None,
@@ -2829,6 +2863,7 @@ class MeshNode:
             })
         return {
             "id": self._id.raw.hex(),
+            "pseudo": self._pseudo,
             "addresses": list(self._addresses),
             "listen": list(self._addresses),
             "advertised": self.advertised_uris(),
@@ -2871,6 +2906,7 @@ class MeshNode:
             direct_ids.add(peer.authenticated_id)
             direct.append({
                 "id": peer.authenticated_id.raw.hex(),
+                "pseudo": self.pseudo_of(peer.authenticated_id),
                 "transport": self._peer_scheme(peer),
                 "rtt_ms": (round(peer.last_rtt * 1000, 1)
                            if peer.last_rtt is not None else None),
@@ -2893,6 +2929,7 @@ class MeshNode:
                 continue
             routed.append({
                 "id": target.raw.hex(),
+                "pseudo": self.pseudo_of(target),
                 "via": via.raw.hex(),
                 "seen_ago": max(0.0, now - seen_at),
                 "evidence": "locally-observed-first-hop",
@@ -2912,6 +2949,7 @@ class MeshNode:
                 peer = authed.get(node_id)
                 known.append({
                     "id": node_id,
+                    "pseudo": self.pseudo_of(node_id),
                     "addresses": sorted(e.addresses),
                     "address_status": self._address_status(
                         node_id, sorted(e.addresses), peer),
@@ -2938,6 +2976,7 @@ class MeshNode:
                 addresses.append(p.remote_addr)
             out.append({
                 "id": node_id,
+                "pseudo": self.pseudo_of(node_id),
                 "authenticated_id": node_id,
                 "addresses": sorted(addresses),
                 "seen_ago": (max(0.0, now - route.last_seen)
@@ -4122,6 +4161,7 @@ class MeshNode:
             REACH_PROBE:       self._handle_reach_probe,
             REACH_PROBE_ACK:   self._handle_reach_probe_ack,
             CATALOG_ANNOUNCE:  self._handle_catalog_announce,
+            PSEUDO_ANNOUNCE:   self._handle_pseudo_announce,
             RELEASE_ANNOUNCE:  self._handle_release_announce,
             RELEASE_FETCH:     self._handle_release_fetch,
             RELEASE_DATA:      self._handle_release_data,
@@ -5327,12 +5367,172 @@ class MeshNode:
                 return None
         return None
 
-    # -- pseudo directory (find node ids by pseudo, network-wide) ---------
+    # -- pseudos (the changeable name beside the unchangeable id) ---------
     #
-    # A keyed directory over Kademlia. Records are self-authenticating (a claim
-    # can only bind a pseudo to the claimant's own node id), so an attacker-
-    # chosen key buys nothing. See :mod:`src.pseudo_dir`. The app_id (from the
-    # session) namespaces pseudos per app.
+    # Two planes, one book. Gossip (PSEUDO_ANNOUNCE) spreads a node's signed
+    # claim to everyone it can reach, which is what makes a *partial* search
+    # possible at all: you cannot hash half a name into a DHT key, but you can
+    # rank the names you already hold. The keyed directory (DIR_*) covers the
+    # rest — an exact pseudo whose owner sits beyond our gossip horizon.
+    #
+    # Claims are self-authenticating (see :mod:`src.pseudo_dir`), so accepting
+    # them from strangers and re-serving them is safe; and a peer that sends one
+    # we cannot verify, or a name in a form the protocol forbids, is not making
+    # a mistake we should absorb — it is counted and eventually cut.
+
+    @property
+    def pseudo(self) -> str:
+        """This node's own pseudo, or "" if it has none."""
+        return self._pseudo
+
+    def set_pseudo(self, pseudo: str) -> str:
+        """Adopt ``pseudo`` as this node's name and sign a fresh claim for it.
+
+        Returns the canonical form actually adopted; raises
+        :class:`~src.pseudo.PseudoError` if it cannot be one. An empty string
+        drops the pseudo — the node keeps its id and simply stops offering a
+        name. The new claim is announced to the mesh if the node is running."""
+        if isinstance(pseudo, str) and not pseudo.strip():
+            # Local only. A claim says "this node is called X"; there is no
+            # signed way to say "called nothing", so peers keep the last name
+            # they were told until they forget it. Renaming propagates, clearing
+            # does not — see Docs/Pseudos/guide.
+            self._pseudo, self._pseudo_claim = "", None
+            self._pseudo_book.forget(self._id.raw)
+            return ""
+        wanted = _pseudo_canonical(pseudo)
+        # Strictly forward, even when two renames land in the same second:
+        # peers keep the newest claim per node and drop the rest, so a
+        # timestamp that failed to move would leave them on the old name.
+        previous = self._pseudo_book.ts_of(self._id.raw)
+        ts = int(time.time())
+        if previous is not None and ts <= previous:
+            ts = previous + 1
+        claim = _dir_build_claim(wanted, self._identity.dsa_public_key,
+                                 self._identity.sign, ts)
+        parsed = _dir_parse_claim(claim, self._identity.verify)
+        if parsed is None:                       # never seen; a signed claim we
+            raise PseudoDirError("could not verify our own claim")   # cannot read
+        self._pseudo, self._pseudo_claim = wanted, claim
+        self._pseudo_book.offer(parsed, claim)
+        self._announce_own_pseudo()
+        return wanted
+
+    def _announce_own_pseudo(self) -> None:
+        """Gossip our claim, if there is one and a loop to do it on."""
+        if self._pseudo_claim is None or not self._running:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_bounded(self._gossip_pseudo(self._pseudo_claim))
+
+    def pseudo_of(self, node_id) -> str:
+        """What a node is called, or "" when we have never seen a claim for it.
+        Display only — never a substitute for the id."""
+        raw = node_id.raw if isinstance(node_id, NodeID) else node_id
+        if isinstance(raw, str):
+            try:
+                raw = bytes.fromhex(raw)
+            except ValueError:
+                return ""
+        if not isinstance(raw, (bytes, bytearray)):
+            return ""
+        return self._pseudo_book.pseudo_of(bytes(raw)) or ""
+
+    def _pseudo_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._pseudo_rate, peer,
+                                    _PSEUDO_RATE_WINDOW, _PSEUDO_RATE_MAX)
+
+    def _absorb_claim(self, peer: '_Peer', raw: bytes):
+        """Verify a claim that arrived from ``peer`` and file it.
+
+        Returns the claim if our view changed (so gossip should continue), None
+        otherwise. A claim that does not verify is charged to the peer that sent
+        it: an honest relay verifies before re-sending, so whoever handed us a
+        bad one either forged it or forwarded without checking."""
+        if not raw or len(raw) > _MAX_CLAIM:
+            self._charge_abuse(peer)
+            return None
+        claim = _dir_parse_claim(raw, self._identity.verify)
+        if claim is None:
+            self._charge_abuse(peer)
+            return None
+        return claim if self._pseudo_book.offer(claim, bytes(raw)) else None
+
+    def _spawn_bounded(self, coro) -> None:
+        """Run a coroutine detached from the caller.
+
+        Two things a bare ``create_task`` does not give: a reference, without
+        which the loop may collect the task mid-flight, and a ceiling, without
+        which fire-and-forget work piles up under pressure exactly when the node
+        can least afford it."""
+        if len(self._detached) >= _MAX_DETACHED:
+            coro.close()
+            return
+        try:
+            task = asyncio.create_task(coro)
+        except RuntimeError:
+            coro.close()       # no running loop (teardown) — nothing to run on
+            return
+        self._detached.add(task)
+        task.add_done_callback(self._detached.discard)
+
+    def _charge_abuse(self, peer: '_Peer') -> None:
+        """Count a protocol violation and cut the peer once they pile up. Never
+        inline: we are inside that peer's own receive task, which must not be
+        cancelled from here (see :meth:`_reap_peer`)."""
+        if peer.note_abuse():
+            self._spawn_bounded(self._reap_peer(peer))
+
+    async def _handle_pseudo_announce(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._pseudo_allowed(peer):
+            return
+        # Re-gossip only when our view actually changed, so the epidemic dies
+        # out instead of circulating forever (same shape as the catalog).
+        if self._absorb_claim(peer, packet.payload) is not None:
+            await self._gossip_pseudo(packet.payload, exclude=peer)
+
+    async def _gossip_pseudo(self, raw: bytes,
+                             exclude: '_Peer | None' = None) -> None:
+        # Re-stamp src_id to us at each hop so the next node's direct-type gate
+        # (src_id must equal the immediate sender) accepts it.
+        pkt = Packet.create(PSEUDO_ANNOUNCE, self._id.raw, _BROADCAST_ID, raw)
+        for p in list(self._peers):
+            if p is exclude or p.authenticated_id is None or p.session is None:
+                continue
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    async def _sync_pseudos_to(self, peer: '_Peer') -> None:
+        """Catch a freshly authenticated peer up on the names we know.
+
+        Ours first — it is the one thing this peer certainly wants — then the
+        most recently learned, bounded: the book holds far more than belongs in
+        a burst at connection time, and the rest arrives by gossip anyway."""
+        claims = self._pseudo_book.recent(_PSEUDO_SYNC_MAX)
+        if self._pseudo_claim is not None:
+            claims = [self._pseudo_claim] + [c for c in claims
+                                             if c != self._pseudo_claim]
+        for raw in claims:
+            if peer.authenticated_id is None or peer.session is None:
+                return
+            try:
+                await peer.send(Packet.create(PSEUDO_ANNOUNCE, self._id.raw,
+                                              _BROADCAST_ID, raw))
+            except Exception:
+                return
+
+    def _schedule_pseudo_sync(self, peer: '_Peer') -> None:
+        if not len(self._pseudo_book):
+            return
+        try:
+            asyncio.create_task(self._sync_pseudos_to(peer))
+        except RuntimeError:
+            pass  # no running loop (e.g. teardown) — nothing to sync
 
     def _dir_allowed(self, peer: '_Peer') -> bool:
         now = time.monotonic()
@@ -5354,18 +5554,16 @@ class MeshNode:
     async def _handle_dir_store(self, peer: '_Peer', packet: Packet) -> None:
         if not self._dir_allowed(peer):
             return
-        # parse_claim verifies the signature and the node-id binding; only a
-        # self-consistent claim is ever stored (reject by default).
-        claim = _dir_parse_claim(packet.payload, self._identity.verify)
-        if claim is not None:
-            self._pseudo_store.put(claim, packet.payload)
+        # Same gate as the gossip plane: only a self-consistent, canonically
+        # named claim is stored, and a bad one is charged to its sender.
+        self._absorb_claim(peer, packet.payload)
 
     async def _handle_dir_find(self, peer: '_Peer', packet: Packet) -> None:
         if len(packet.payload) != 20 + _QID_LEN:
             return
         key = packet.payload[:20]
         query_id = packet.payload[20:]
-        body = query_id + _dir_encode(self._pseudo_store.get(key))
+        body = query_id + _dir_encode(self._pseudo_book.get(key))
         # routes back to the querier — never inline, we are in a receive loop
         await self._route_outbound(
             Packet.create(DIR_FOUND, self._id.raw, packet.src_id, body),
@@ -5427,38 +5625,43 @@ class MeshNode:
                 targets.append(nid)
         return targets
 
-    async def publish_pseudo(self, app_id: bytes, pseudo: str) -> str:
-        """Publish a signed claim that ``pseudo`` maps to this node, replicated to
-        the nodes closest to its key and to our direct peers. Returns the key."""
-        claim = _dir_build_claim(app_id, pseudo, self._identity.dsa_public_key,
-                                 self._identity.sign)
-        parsed = _dir_parse_claim(claim, self._identity.verify)
-        if parsed is not None:
-            self._pseudo_store.put(parsed, claim)   # keep + re-serve locally
-        key = _dir_key(app_id, pseudo)
+    async def publish_pseudo(self) -> str:
+        """Replicate our claim into the keyed directory and gossip it.
+
+        Gossip alone reaches everyone we can talk to; the directory copy is what
+        makes us findable by exact name from a node that has never heard of us.
+        Returns the directory key, or "" when this node has no pseudo."""
+        if self._pseudo_claim is None:
+            return ""
+        claim = self._pseudo_claim
+        key = _dir_key(self._pseudo)
+        await self._gossip_pseudo(claim)
         await asyncio.gather(
             *(self._dir_store_at(nid, claim) for nid in await self._dir_targets(key)),
             return_exceptions=True,
         )
         return key.hex()
 
-    async def lookup_pseudo(self, app_id: bytes, pseudo: str) -> list[dict]:
-        """Find every node claiming ``pseudo`` in this app's namespace. Returns
-        ``[{"id": node_id_hex, "pseudo": pseudo}]`` — possibly several (pseudos
-        aren't unique); the node id is the real identity. Queries the closest
-        nodes and our direct peers **in parallel** so one slow/unreachable peer
-        can't stall the whole lookup."""
-        key = _dir_key(app_id, pseudo)
-        found: dict[str, str] = {}
+    async def lookup_pseudo(self, pseudo: str) -> list[dict]:
+        """Every node claiming exactly ``pseudo``, network-wide.
+
+        Pseudos are not unique, so this returns a list; the node id in each row
+        is the real identity. Queries the nodes closest to the key and our
+        direct peers **in parallel**, so one slow or unreachable peer cannot
+        stall the whole lookup."""
+        key = _dir_key(pseudo)
+        found: dict[str, dict] = {}
 
         def absorb(raw: bytes) -> None:
             claim = _dir_parse_claim(raw, self._identity.verify)
-            if claim is None or claim["app_id"] != app_id or claim["key"] != key:
+            if claim is None or claim["key"] != key:
                 return
-            self._pseudo_store.put(claim, raw)      # cache → this node re-serves it
-            found[claim["node_id"].hex()] = claim["pseudo"]
+            self._pseudo_book.offer(claim, raw)     # cache → this node re-serves it
+            found[claim["node_id"].hex()] = {"id": claim["node_id"].hex(),
+                                             "pseudo": claim["pseudo"],
+                                             "ts": claim["ts"], "match": 0}
 
-        for raw in self._pseudo_store.get(key):
+        for raw in self._pseudo_book.get(key):
             absorb(raw)
         blobs = await asyncio.gather(
             *(self._dir_find_at(nid, key) for nid in await self._dir_targets(key)),
@@ -5468,7 +5671,29 @@ class MeshNode:
             if isinstance(blob, (bytes, bytearray)):
                 for raw in _dir_decode(blob):
                     absorb(raw)
-        return [{"id": h, "pseudo": p} for h, p in found.items()]
+        return list(found.values())
+
+    def find_pseudo(self, query: str, limit: int = 20) -> list[dict]:
+        """Nodes whose pseudo matches ``query``, whole or partial, best first.
+
+        Answered entirely from what this node already holds, so it costs nothing
+        and returns instantly — which is what lets a console field search as
+        somebody types."""
+        return self._pseudo_book.search(query, min(int(limit), _PSEUDO_SEARCH_MAX))
+
+    async def search_pseudo(self, query: str, limit: int = 20) -> list[dict]:
+        """:meth:`find_pseudo`, widened by one exact directory lookup.
+
+        The local book only knows names that reached us by gossip. Asking the
+        directory for the query *as typed* is what finds somebody whose node we
+        have never met — and costs one round of parallel queries, so it stays a
+        deliberate act rather than something a keystroke triggers."""
+        limit = min(int(limit), _PSEUDO_SEARCH_MAX)
+        try:
+            await self.lookup_pseudo(query)
+        except Exception:
+            pass          # the local answer is still worth returning
+        return self.find_pseudo(query, limit)
 
     # -- application packages ---------------------------------------------
 
@@ -5780,6 +6005,7 @@ class MeshNode:
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
+        self._schedule_pseudo_sync(peer)   # …and on who is called what
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zero crash).
@@ -5862,6 +6088,7 @@ class MeshNode:
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
+        self._schedule_pseudo_sync(peer)   # …and on who is called what
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------

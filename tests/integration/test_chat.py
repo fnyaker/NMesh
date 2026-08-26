@@ -17,15 +17,15 @@ from src.data_connector import DataConnector, ConnectorClient
 from src.app_channel import CHAT_APP_ID
 from src.apps.chat import (
     ChatApp, TextMessage, FileReceived, Frame,
-    ProfileReceived, GroupInvited, GroupMessage, DirResult,
+    ProfileReceived, GroupInvited, GroupMessage,
     Edited, Deleted, Reaction, Receipt, _READ,
 )
 
 
-def make_node() -> MeshNode:
+def make_node(pseudo=None) -> MeshNode:
     mgr = TransportManager()
     mgr.register("tcp", TCPTransport, TCPServer)
-    return MeshNode(mgr)
+    return MeshNode(mgr, pseudo=pseudo)
 
 
 async def _chat_for(node) -> tuple[DataConnector, ChatApp]:
@@ -136,11 +136,12 @@ class TestRichChatOverMesh:
             assert rc.kind == _READ and mid in rc.mids
 
             # Guest publishes a rich profile (bio + avatar) → host learns it.
+            # No name in it: that comes from the node's signed claim.
             await guest_app.add_contact(host.id, announce=False)
-            await guest_app.set_profile(pseudo="guesty", bio="on the mesh",
+            await guest_app.set_profile(bio="on the mesh",
                                         avatar=b"AVATARBYTES", announce=True)
             prof = await _wait_for(host_app, ProfileReceived)
-            assert prof.pseudo == "guesty" and prof.bio == "on the mesh"
+            assert prof.bio == "on the mesh"
             assert prof.avatar == b"AVATARBYTES"
             assert host_app.state.get_avatar(guest.id.raw.hex()) == b"AVATARBYTES"
         finally:
@@ -153,9 +154,9 @@ class TestRichChatOverMesh:
 
 
 class TestSocialOverMesh:
-    async def test_profile_group_and_pseudo_lookup(self):
-        host = make_node()
-        guest = make_node()
+    async def test_profile_group_and_name_lookup(self):
+        host = make_node(pseudo="hosty")
+        guest = make_node(pseudo="guesty")
         code = host.generate_invite()
         await host.start(["tcp://127.0.0.1:19171"])
         await guest.join("tcp://127.0.0.1:19171", code)
@@ -165,12 +166,15 @@ class TestSocialOverMesh:
         host_conn, host_app = await _chat_for(host)
         guest_conn, guest_app = await _chat_for(guest)
         try:
-            # Guest adds host as a contact and announces its pseudo → host learns it.
-            await guest_app.set_pseudo("guesty", announce=False)
+            # Guest adds host as a contact and announces its profile.
             await guest_app.add_contact(host.id, announce=True)
             prof = await _wait_for(host_app, ProfileReceived)
-            assert prof.src == guest.id and prof.pseudo == "guesty"
-            assert host_app.state.known[guest.id.raw.hex()]["pseudo"] == "guesty"
+            assert prof.src == guest.id
+            # The name did not travel in that profile — it reached the host node
+            # by gossip, and the chat app reads it from there.
+            host_app.state.add_contact(guest.id.raw.hex())
+            await host_app.refresh_pseudos()
+            assert host_app.state.contacts[guest.id.raw.hex()]["pseudo"] == "guesty"
 
             # Guest creates a group with host and messages it.
             gid = await guest_app.create_group("team", [host.id])
@@ -180,12 +184,10 @@ class TestSocialOverMesh:
             gm = await _wait_for(host_app, GroupMessage)
             assert gm.group_id == gid and gm.src == guest.id and gm.text == "hey team"
 
-            # Host sets a pseudo; guest (host is its contact) resolves it by pseudo.
-            await host_app.set_pseudo("hosty", announce=False)
-            await guest_app.dir_query("hosty")
-            res = await _wait_for(guest_app, DirResult)
-            assert res.node_id == host.id and res.pseudo == "hosty"
-            # host is already a contact of guest, so the learned pseudo lands there.
+            # And the guest finds the host by a *partial* name, through the app
+            # — which is the whole point of the book being local.
+            hits = await guest_app.search_pseudo("host")
+            assert any(h["id"] == host.id.raw.hex() for h in hits)
             assert guest_app.state.contacts[host.id.raw.hex()]["pseudo"] == "hosty"
         finally:
             await host_app.stop()

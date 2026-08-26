@@ -141,6 +141,22 @@ in the trusted set. Same page in the console; the mechanism is in
 Docker is still possible (`docker/`), but it is no longer the recommended route
 for a dedicated machine.
 
+## Names
+
+A node is identified by its id — twenty bytes from its signing key, unique and
+impossible to choose. Beside it sits a **pseudo**: a name you pick, change
+whenever you like, and see everywhere the node appears (console, chat, fleet).
+Set it in **Settings → Identity**, with `--pseudo`, or in `nmesh.conf`.
+
+A pseudo is a label, never an identity — names are not unique and decide
+nothing, so the id is always shown with them. What is guaranteed is that nobody
+can put a name on *your* node: a name travels as a claim signed by the identity
+it names. Names are searched **whole or partially** (`ali` finds `Alice Ada`,
+`jose` finds `José`), instantly, from what the node has already learned by
+gossip.
+
+→ [`Docs/Pseudos/guide`](Docs/Pseudos/guide)
+
 ## Web console
 
 A **responsive** management interface (four sections: Overview, Network, Apps,
@@ -153,8 +169,9 @@ Settings):
   is bound, what it carries, what it takes), and how to add a node.
 - Apps: installed apps + a **scalable store** (server-paginated catalogue,
   search, install/uninstall actions).
-- Settings: updates, console password, this browser's preferences, the startup
-  configuration file, diagnostics.
+- Settings: this node's name and a search for other nodes' names, updates,
+  console password, this browser's preferences, the startup configuration file,
+  diagnostics.
 
 → [`Docs/WebConsole/guide`](Docs/WebConsole/guide)
 

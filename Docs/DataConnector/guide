@@ -71,10 +71,12 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | →    | `APP_DHT_GET` (0x09)| `keylen(2) + dec_key + content_key(20)`   | fetches an entry |
 | ←    | `APP_DHT_KEY` (0x88)| `content_key(20)` or empty  | the `APP_DHT_PUT` answer (empty = refused) |
 | ←    | `APP_DHT_VALUE`(0x89)| `present(1) + content`     | the `APP_DHT_GET` answer |
-| →    | `PSEUDO_PUB` (0x0A)  | `pseudo(utf-8)`             | publishes my pseudo→node id (directory) |
-| →    | `PSEUDO_LOOKUP`(0x0B)| `pseudo(utf-8)`             | looks up node ids by pseudo |
-| ←    | `PSEUDO_KEY` (0x8A)  | `directory_key(20)` or empty| the `PSEUDO_PUB` answer |
-| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo}]`      | the `PSEUDO_LOOKUP` answer |
+| →    | `PSEUDO_MINE` (0x0A) | empty                       | what is this node called? |
+| →    | `PSEUDO_LOOKUP`(0x0B)| `flags(1) + query(utf-8)`   | finds nodes by name, whole or partial (bit 0 = also ask the network) |
+| →    | `PSEUDO_OF` (0x0E)   | `node_id(20) * n`           | resolves ids to names, in one call |
+| ←    | `PSEUDO_MINE_RESP`(0x8A)| `pseudo(utf-8)`, empty if unnamed | the `PSEUDO_MINE` answer |
+| ←    | `PSEUDO_RESULTS`(0x8B)| JSON `[{id, pseudo, ts, match}]` | the `PSEUDO_LOOKUP` answer, best match first |
+| ←    | `PSEUDO_NAMES` (0x8E)| JSON `{id_hex: pseudo}`     | the `PSEUDO_OF` answer (ids with no known name are absent) |
 | →    | `AUTH_ASSERT` (0x0C) | `audience(20) + ctx(32) + ttl(4) + purpose(utf-8)` | issues a signed assertion in our name |
 | →    | `AUTH_VERIFY` (0x0D) | `flags(1) + ctx(32) + plen(2) + purpose + assertion` | verifies a peer's assertion |
 | ←    | `AUTH_ASSERTION`(0x8C)| the assertion, or empty if refused | the `AUTH_ASSERT` answer |
@@ -112,11 +114,16 @@ solely as a 32-byte hash. Without that rule, an app could have a certificate
 body signed by the node's key. Details, bounds and threat model:
 [`Docs/AppAuth/guide`](../AppAuth/guide).
 
-The `PSEUDO_*` frames drive the **pseudo directory** (network find-by-pseudo):
-`publish_pseudo(pseudo)` publishes a signed pseudo→node_id claim (bound to the
-session's key), `lookup_pseudo(pseudo)` returns every node id claiming that
-pseudo. Namespaced by the session's `app_id`. Details:
-`Docs/Architecture/routing.md`.
+The `PSEUDO_*` frames read **names** — `my_pseudo()`, `lookup_pseudo(query,
+wide=…)` (ranked, partial, case- and accent-insensitive), `pseudos_of(ids)`, and
+`refresh_names(ids)` / `name_of(id)` over a cache shared by every app on this
+client.
+
+They are **read-only, deliberately**: there is no frame that renames the node. A
+pseudo is shown in the node's console and used by every app on it, so choosing
+it belongs to whoever runs the node, not to an app holding a connector token.
+Renaming goes through the console. Details:
+[`Docs/Pseudos/guide`](../Pseudos/guide).
 
 ## Security
 

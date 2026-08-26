@@ -271,9 +271,12 @@ class FleetBridge:
             "version": version,
             "log_seq": self._log_seq,
             "log": log,
-            "managed": sorted(state.managed(),
-                              key=lambda entry: entry.get("label") or entry["id"]),
-            "operators": state.operators(),
+            "managed": sorted((dict(entry, pseudo=self._name_of(entry["id"]))
+                               for entry in state.managed()),
+                              key=lambda entry: entry.get("label")
+                              or entry.get("pseudo") or entry["id"]),
+            "operators": [dict(entry, pseudo=self._name_of(entry["id"]))
+                          for entry in state.operators()],
             "pending_in": state.pending_in(),
             "pending_out": state.pending_out(),
             "provisioned": state.provisioned(),
@@ -404,12 +407,19 @@ class FleetBridge:
     # remote session it never held, and closing the local session closes them
     # all. Nothing about a remote console is ever written to disk.
 
+    def _name_of(self, id_hex: str) -> str:
+        """A node's own pseudo, from the cache the app keeps warm. Read-only and
+        synchronous: this runs while a snapshot is being built."""
+        fn = getattr(getattr(self._app, "_client", None), "name_of", None)
+        return fn(id_hex) if fn is not None else ""
+
     def remote_targets(self) -> list:
         """Nodes that granted us ``manage``, and whether a session is open."""
         with self._lock:
             open_now = {node for (_, node) in self._remote}
         return [
             {"id": entry["id"], "label": entry.get("label") or "",
+             "pseudo": self._name_of(entry["id"]),
              "connected": entry["id"] in open_now}
             for entry in sorted(self._app.state.managed(),
                                 key=lambda item: item.get("label") or item["id"])

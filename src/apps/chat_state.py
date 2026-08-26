@@ -107,7 +107,6 @@ class ChatState:
         doc = self._read_doc()
         if not isinstance(doc, dict):
             return
-        self.pseudo = normalize_pseudo(str(doc.get("pseudo", "")))
         self.bio = str(doc.get("bio", ""))[:_MAX_BIO]
         if isinstance(doc.get("contacts"), dict):
             for k, v in list(doc["contacts"].items())[:_MAX_CONTACTS]:
@@ -140,7 +139,9 @@ class ChatState:
                 self.avatar = mine[:_MAX_AVATAR]
 
     def _save_locked(self) -> None:
-        doc = {"pseudo": self.pseudo, "bio": self.bio,
+        # Our own pseudo is deliberately absent: it lives on the node, which
+        # signs it. Persisting a copy here would only let the two disagree.
+        doc = {"bio": self.bio,
                "contacts": self.contacts, "known": self.known,
                "groups": self.groups, "avatar_ids": list(self._avatars.keys())}
         if self._store is not None:
@@ -166,17 +167,19 @@ class ChatState:
     # -- mutations (called on the event loop thread) ----------------------
 
     def set_pseudo(self, pseudo: str) -> None:
+        """Mirror the node's pseudo into the app.
+
+        Chat does not own this value and cannot change it — the node signs it
+        and the console edits it. Kept here only so the app can render a name
+        without a round trip on every frame."""
         with self._lock:
             self.pseudo = normalize_pseudo(pseudo)
-            self._save_locked()
 
-    def set_profile(self, *, pseudo: str | None = None, bio: str | None = None,
+    def set_profile(self, *, bio: str | None = None,
                     avatar: bytes | None = None) -> None:
         """Update my own profile. Only provided fields change; ``avatar=b''``
-        clears the picture."""
+        clears the picture. The pseudo is not here: it belongs to the node."""
         with self._lock:
-            if pseudo is not None:
-                self.pseudo = normalize_pseudo(pseudo)
             if bio is not None:
                 self.bio = str(bio)[:_MAX_BIO]
             if avatar is not None:
@@ -184,7 +187,7 @@ class ChatState:
                 self._store_avatar_locked("self", self.avatar)
             self._save_locked()
 
-    def add_contact(self, id_hex: str, pseudo: str = "") -> bool:
+    def add_contact(self, id_hex: str) -> bool:
         if not _is_id(id_hex):
             return False
         with self._lock:
@@ -192,7 +195,8 @@ class ChatState:
                 return False
             existing = self.contacts.get(id_hex, {})
             self.contacts[id_hex] = {
-                "pseudo": normalize_pseudo(pseudo) or existing.get("pseudo", ""),
+                "pseudo": existing.get("pseudo", "")
+                          or self.known.get(id_hex, {}).get("pseudo", ""),
                 "added": existing.get("added") or time.time(),
                 "bio": existing.get("bio", "") or self.known.get(id_hex, {}).get("bio", ""),
             }
@@ -208,8 +212,10 @@ class ChatState:
             return True
 
     def learn_pseudo(self, id_hex: str, pseudo: str) -> None:
-        """Record a pseudo announced by a peer. Confirmed contacts are updated
-        in place; others go to the bounded 'known' directory (LRU by last seen)."""
+        """Record a pseudo the node verified for ``id_hex``. Confirmed contacts
+        are updated in place; others go to the bounded 'known' directory (LRU by
+        last seen). Only :meth:`ChatApp.refresh_pseudos` calls this — a name
+        never arrives straight from a peer."""
         pseudo = normalize_pseudo(pseudo)
         if not _is_id(id_hex) or not pseudo:
             return
@@ -310,10 +316,6 @@ class ChatState:
                     if needle in rec.get("pseudo", "").casefold():
                         out.append({"id": id_hex, "pseudo": rec["pseudo"], "kind": kind})
         return out
-
-    def matches_my_pseudo(self, pseudo: str) -> bool:
-        with self._lock:
-            return bool(self.pseudo) and _match_key(self.pseudo) == _match_key(pseudo)
 
     def snapshot(self) -> dict:
         with self._lock:

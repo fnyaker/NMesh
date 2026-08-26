@@ -44,27 +44,29 @@ class TestChatStatePersistence:
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
             s = ChatState(store=_store(d, ident))
-            s.set_pseudo("alice")
-            s.add_contact(ID_A, "bob")
-            # A fresh instance on the same drawer reloads it.
+            s.add_contact(ID_A)
+            s.learn_pseudo(ID_A, "bob")
+            # A fresh instance on the same drawer reloads it. Our own pseudo is
+            # not among what is reloaded — the node holds that one.
             s2 = ChatState(store=_store(d, ident))
-            assert s2.pseudo == "alice"
             assert any(c["pseudo"] == "bob" for c in s2.snapshot()["contacts"])
 
     def test_state_encrypted_at_rest(self):
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
-            ChatState(store=_store(d, ident)).set_pseudo("topsecret-pseudo")
+            s = ChatState(store=_store(d, ident))
+            s.add_contact(ID_A)
+            s.learn_pseudo(ID_A, "topsecret-pseudo")
             blob = open(os.path.join(d, CHAT_APP_ID.hex() + ".drawer"), "rb").read()
             assert b"topsecret-pseudo" not in blob
 
     def test_corrupt_drawer_starts_empty(self):
         with tempfile.TemporaryDirectory() as d:
             ident = CryptoIdentity()
-            ChatState(store=_store(d, ident)).set_pseudo("alice")
+            ChatState(store=_store(d, ident)).add_contact(ID_A)
             path = os.path.join(d, CHAT_APP_ID.hex() + ".drawer")
             open(path, "wb").write(os.urandom(200))   # clobber
-            assert ChatState(store=_store(d, ident)).pseudo == ""
+            assert ChatState(store=_store(d, ident)).contacts == {}
 
 
 def _incoming(bridge, src_hex, text):

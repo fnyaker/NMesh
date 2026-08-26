@@ -25,7 +25,7 @@ directory claims, so an app could have the node sign a *certificate body* and
 mint itself membership. Nothing here signs app-supplied bytes. The signed input
 is always ``_DOMAIN ‖ <fixed, bounded, structured fields>``, the app's free-form
 context enters only as a **32-byte hash**, and ``_DOMAIN`` is distinct from every
-other signing domain in the tree (``nmesh-pseudo-dir-v1``,
+other signing domain in the tree (``nmesh-pseudo-v2``,
 ``nmesh-app-release-v1``, the certificate body, the handshake input). An app
 therefore cannot steer the signer outside the app-auth namespace.
 

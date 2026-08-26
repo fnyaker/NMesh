@@ -24,7 +24,6 @@ import time
 import pytest
 
 from src import MeshNode
-from src.app_channel import CHAT_APP_ID
 from src.node import ECHO_REQUEST, _QID_LEN
 from src.packet import Packet
 from src.transport_manager import TransportManager
@@ -121,9 +120,9 @@ class TestBiggerMesh:
             assert got[1] == b"through a crowded relay"
 
             # 4) the pseudo directory rides the same routed control plane
-            await z.publish_pseudo(CHAT_APP_ID, "zoe")
-            hits = await asyncio.wait_for(
-                a.lookup_pseudo(CHAT_APP_ID, "zoe"), timeout=20.0)
+            z.set_pseudo("zoe")
+            await z.publish_pseudo()
+            hits = await asyncio.wait_for(a.lookup_pseudo("zoe"), timeout=20.0)
             assert any(h["id"] == z.id.raw.hex() for h in hits)
         finally:
             for n in [relay] + leaves:

@@ -46,6 +46,7 @@ from .core_release import ReleaseError
 from . import join_ticket
 from . import qr
 from .node import MESSAGE_NAMES
+from .pseudo import MAX_PSEUDO, PseudoError
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
@@ -317,6 +318,31 @@ class WebConsole:
                          "installed": True, "enabled": True, "running": True,
                          "description": ""})
         return apps
+
+    def _pseudo_state(self) -> dict:
+        """This node's name and id, for the field that edits it."""
+        return {"pseudo": self._node.pseudo,
+                "id": self._node.id.raw.hex(),
+                "max": MAX_PSEUDO,
+                "known": len(self._node._pseudo_book)}
+
+    def _persist_pseudo(self, pseudo: str):
+        """Record the adopted pseudo in the configuration file so it survives a
+        restart. Returns ``(saved, problem)`` — never raises: the rename already
+        happened on the node, and this is only about making it stick."""
+        if not self._config_path:
+            return False, "this node was not started from a configuration file"
+        try:
+            values, _problems = node_config.load(self._config_path)
+            merged = node_config.defaults()
+            merged.update(values)
+            merged["pseudo"] = pseudo
+            node_config.save(self._config_path, merged)
+        except OSError as exc:
+            return False, f"could not write the configuration: {exc.strerror or 'error'}"
+        except Exception as exc:
+            return False, str(exc)[:200]
+        return True, None
 
     def _config_snapshot(self) -> dict:
         """The configuration as the settings page needs it: current values,
@@ -646,6 +672,13 @@ def _make_handler(console: WebConsole):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _query(self, name: str):
+            """One query-string value, or None when it was not given."""
+            if "?" not in self.path:
+                return None
+            values = parse_qs(self.path.split("?", 1)[1]).get(name)
+            return values[0] if values else None
+
         def _json(self, code: int, obj, extra_headers: list | None = None) -> None:
             self._send(code, "application/json; charset=utf-8",
                        json.dumps(obj).encode("utf-8"), extra_headers)
@@ -850,6 +883,25 @@ def _make_handler(console: WebConsole):
                 try:
                     self._json(200, console._call(
                         _wrap(console._node.release_overview)))
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
+            if path == "/api/pseudo":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                # `q` searches; without it, this is "what am I called?".
+                query = self._query("q")
+                try:
+                    if query is None:
+                        self._json(200, console._call(_wrap(console._pseudo_state)))
+                    else:
+                        # `wide` also asks the network, which costs a round of
+                        # queries — so it is opt-in, not what typing triggers.
+                        self._json(200, {"results": console._call(
+                            console._node.search_pseudo(query)
+                            if self._query("wide") == "1"
+                            else _wrap(console._node.find_pseudo, query))})
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
@@ -1291,6 +1343,9 @@ def _make_handler(console: WebConsole):
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
+            if path == "/api/pseudo":
+                self._handle_pseudo_save(_parse_json(body))
+                return
             if path == "/api/config":
                 self._handle_config_save(_parse_json(body))
                 return
@@ -1410,6 +1465,34 @@ def _make_handler(console: WebConsole):
                 self._json(200, trace.status())
                 return
             self._json(400, {"error": "action must be start, stop or clear"})
+
+        def _handle_pseudo_save(self, data) -> None:
+            """Rename this node.
+
+            Two writes, deliberately: the node signs a fresh claim and announces
+            it now, and the configuration file records it so a restart keeps the
+            name. If the file cannot be written the rename still stands for this
+            run and the problem is reported — losing the name on restart is
+            worth saying, not worth refusing the rename over."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            wanted = data.get("pseudo", "")
+            if not isinstance(wanted, str):
+                self._json(400, {"error": "pseudo must be text"})
+                return
+            try:
+                adopted = console._call(_wrap(console._node.set_pseudo, wanted))
+            except PseudoError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            except Exception:
+                self._json(503, {"error": "node unavailable"})
+                return
+            saved, problem = console._persist_pseudo(adopted)
+            self._json(200, {"ok": True, "pseudo": adopted,
+                             "saved": saved, "error": problem})
 
         def _handle_release_post(self, path: str, data) -> None:
             """Publishing, pinning and installing mesh-native releases.
@@ -1877,27 +1960,19 @@ def _make_handler(console: WebConsole):
                 elif path == "/api/chat/typing":
                     chat.set_typing(data.get("conv", ""), bool(data.get("active")))
                     self._json(200, {"ok": True})
-                elif path == "/api/chat/pseudo":
-                    pseudo = data.get("pseudo", "")
-                    if not isinstance(pseudo, str):
-                        self._json(400, {"error": "pseudo required"})
-                        return
-                    chat.set_pseudo(pseudo)
-                    self._json(200, {"ok": True})
                 elif path == "/api/chat/profile":
-                    pseudo = data["pseudo"] if isinstance(data.get("pseudo"), str) else None
                     bio = data["bio"] if isinstance(data.get("bio"), str) else None
                     avatar = None
                     if isinstance(data.get("avatar"), str):
                         avatar = base64.b64decode(data["avatar"], validate=True)
-                    chat.set_profile(pseudo=pseudo, bio=bio, avatar=avatar)
+                    chat.set_profile(bio=bio, avatar=avatar)
                     self._json(200, {"ok": True})
                 elif path == "/api/chat/contact":
                     op = data.get("op", "add")
                     if op == "remove":
                         ok = chat.remove_contact(data.get("id", ""))
                     else:
-                        ok = chat.add_contact(data.get("id", ""), data.get("pseudo", ""))
+                        ok = chat.add_contact(data.get("id", ""))
                     self._json(200 if ok else 400, {"ok": bool(ok)})
                 elif path == "/api/chat/group":
                     op = data.get("op", "create")

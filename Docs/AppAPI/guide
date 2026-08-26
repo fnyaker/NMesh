@@ -31,8 +31,7 @@ class ChatBridge:
             [app_api.param("node", "node")]),
         app_api.operation(
             "contact", "Add a node to the address book",
-            [app_api.param("node", "node"),
-             app_api.param("pseudo", "text", required=False, default="")],
+            [app_api.param("node", "node")],
             changes=True),
     )
 
@@ -109,7 +108,7 @@ message is not.
 | app | operation | changes | what it answers |
 |---|---|---|---|
 | `chat` | `peer` | no | pseudo, whether it is a contact, unread count, where the conversation lives |
-| `chat` | `contact` | yes | add a node to the address book (a name for an identity, not a grant) |
+| `chat` | `contact` | yes | add a node to the address book (not a grant, and not a name — that is the node's own, signed) |
 | `fleet` | `relation` | no | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
 | `fleet` | `enrol` | yes | ask a node for the right to manage it |
 | `fleet` | `request` | yes | ask a node already managed for extra rights |

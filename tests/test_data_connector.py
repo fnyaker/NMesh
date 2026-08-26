@@ -347,35 +347,109 @@ class TestAppDHT:
             await client.close(); await conn.stop(); await node.stop()
 
 
-class TestPseudoDir:
-    """Publish/lookup a pseudo over the connector; namespaced by the session app."""
+class TestOneReader:
+    """A request made while the app is waiting for messages must still answer.
 
-    async def test_publish_and_lookup(self):
+    Two coroutines reading one socket is a lost frame: the one parked in
+    ``recv`` swallows a reply meant for the other, which then waits for
+    something already thrown away. That is a hang, not an error, so it gets its
+    own tests."""
+
+    async def test_a_request_answers_while_recv_is_waiting(self):
+        node, _, conn = await _make()
+        node.set_pseudo("alice")
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            waiting = asyncio.create_task(client.recv())
+            await asyncio.sleep(0)          # let it park inside recv()
+            assert await asyncio.wait_for(client.my_pseudo(), timeout=5.0) == "alice"
+            assert await asyncio.wait_for(client.whoami(), timeout=5.0) == node.id
+            waiting.cancel()
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_messages_are_not_lost_to_a_concurrent_request(self):
+        node, _, conn = await _make()
+        node.set_pseudo("alice")
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            for _ in range(5):
+                assert await asyncio.wait_for(client.my_pseudo(), timeout=5.0) == "alice"
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_a_dead_link_wakes_everyone_instead_of_hanging(self):
         node, _, conn = await _make()
         client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
         try:
             await client.connect()
-            key = await client.publish_pseudo("Alice")
-            assert key is not None and len(key) == 20
-            res = await client.lookup_pseudo("alice")   # case-insensitive
-            assert res == [{"id": node.id.raw.hex(), "pseudo": "Alice"}]
+            waiting = asyncio.create_task(client.recv())
+            await asyncio.sleep(0)
+            await conn.stop()
+            with pytest.raises(Exception):
+                await asyncio.wait_for(waiting, timeout=5.0)
+        finally:
+            await client.close(); await node.stop()
+
+
+class TestPseudos:
+    """Reading pseudos over the connector. There is no frame that writes one."""
+
+    async def test_read_own_pseudo_and_search(self):
+        node, _, conn = await _make()
+        node.set_pseudo("Alice Ada")
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            assert await client.my_pseudo() == "Alice Ada"
+            res = await client.lookup_pseudo("ali")   # partial, case-insensitive
+            assert [r["id"] for r in res] == [node.id.raw.hex()]
+            assert res[0]["pseudo"] == "Alice Ada"
             assert await client.lookup_pseudo("nobody") == []
         finally:
             await client.close(); await conn.stop(); await node.stop()
 
-    async def test_namespaced_by_section(self):
+    async def test_resolve_ids_to_names(self):
         node, _, conn = await _make()
+        node.set_pseudo("Alice")
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            unknown = "ff" * 20
+            names = await client.pseudos_of([node.id.raw.hex(), unknown])
+            # An id with no known name is simply absent — the caller shows the id.
+            assert names == {node.id.raw.hex(): "Alice"}
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
+
+    async def test_every_app_sees_the_same_name(self):
+        # The pseudo is the node's, so two apps cannot disagree about it — which
+        # is the whole reason it moved off the app.
+        node, _, conn = await _make()
+        node.set_pseudo("alice")
         alpha = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("alpha"))
         beta = ConnectorClient(conn.host, conn.port, TOKEN, builtin_id("beta"))
         try:
             await alpha.connect(); await beta.connect()
-            await alpha.publish_pseudo("alice")
-            # beta's app has its own pseudo namespace → no hit.
-            assert await beta.lookup_pseudo("alice") == []
-            assert await alpha.lookup_pseudo("alice") != []
+            assert await alpha.my_pseudo() == await beta.my_pseudo() == "alice"
+            assert await beta.lookup_pseudo("alice") == await alpha.lookup_pseudo("alice")
         finally:
             await alpha.close(); await beta.close()
             await conn.stop(); await node.stop()
+
+    async def test_an_app_cannot_rename_the_node(self):
+        node, _, conn = await _make()
+        node.set_pseudo("alice")
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            assert not hasattr(client, "publish_pseudo")
+            assert not hasattr(client, "set_pseudo")
+            assert node.pseudo == "alice"
+        finally:
+            await client.close(); await conn.stop(); await node.stop()
 
 
 # ---------------------------------------------------------------------------

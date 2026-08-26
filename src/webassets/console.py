@@ -165,7 +165,7 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>Active links <span id="active-count" class="badge"></span></h2>
             <div class="sub">Authenticated, currently open</div></div>
             <label class="search"><span class="sr-only">Search active nodes</span>
-              <input id="active-search" type="search" placeholder="Search id, address, transport…" spellcheck="false"></label>
+              <input id="active-search" type="search" placeholder="Search name, id, address, transport…" spellcheck="false"></label>
           </div>
           <div class="card-body tight"><div class="table-wrap"><table id="active-table">
             <thead><tr><th>Node</th><th>State</th><th>Transport</th><th class="num">RTT</th><th>Seen</th><th class="tight"></th></tr></thead>
@@ -176,7 +176,7 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>Known nodes <span id="known-count" class="badge"></span></h2>
             <div class="sub">The routing table — reachable, not necessarily connected</div></div>
             <label class="search"><span class="sr-only">Search known nodes</span>
-              <input id="known-search" type="search" placeholder="Search id or address…" spellcheck="false"></label>
+              <input id="known-search" type="search" placeholder="Search name, id or address…" spellcheck="false"></label>
             <label class="field"><span class="sr-only">Rows per page</span>
               <select id="known-limit" aria-label="Rows per page">
                 <option value="10">10 rows</option>
@@ -388,7 +388,8 @@ INDEX_HTML = """<!doctype html>
             so nothing here is a click away from a graph you were only reading.</p></div>
       </div>
       <nav class="subnav" role="tablist" aria-label="Settings sections">
-        <button role="tab" data-subtab="updates" aria-selected="true">Updates</button>
+        <button role="tab" data-subtab="identity" aria-selected="true">Identity</button>
+        <button role="tab" data-subtab="updates" aria-selected="false">Updates</button>
         <button role="tab" data-subtab="security" aria-selected="false">Security</button>
         <button role="tab" data-subtab="appearance" aria-selected="false">This browser</button>
         <button role="tab" data-subtab="config" aria-selected="false">Configuration</button>
@@ -396,7 +397,45 @@ INDEX_HTML = """<!doctype html>
         <button role="tab" data-subtab="advanced" aria-selected="false">Advanced</button>
       </nav>
 
-      <div data-sub="updates" class="stack">
+      <div data-sub="identity" class="stack">
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>What this node is called</h2>
+            <div class="sub">A name you choose, beside the id you cannot</div></div></div>
+          <div class="card-body">
+            <p class="muted small">The id below is this node's identity: it comes from its
+              signing key and never changes. The name is only a label — it is signed and
+              gossiped so nobody can put it on somebody else's node, but names are not
+              unique, so the id is what you check before you trust anything.</p>
+            <div class="form-grid">
+              <label class="field"><span>Name</span>
+                <input id="pseudo-input" type="text" maxlength="50" autocomplete="off"
+                       placeholder="unnamed" spellcheck="false"></label>
+              <label class="field"><span>Node id</span>
+                <input id="pseudo-id" type="text" class="mono" readonly></label>
+            </div>
+            <div class="btn-row"><button id="pseudo-save" class="primary">Save name</button>
+              <button id="pseudo-clear">Remove the name</button></div>
+            <p id="pseudo-status" class="msg"></p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Find a node by name</h2>
+            <div class="sub">Whole or partial — best match first</div></div>
+            <button id="pseudo-wide" title="Also ask the network for this exact name">Ask the network</button></div>
+          <div class="card-body">
+            <label class="field"><span>Name</span>
+              <input id="pseudo-search" type="search" autocomplete="off"
+                     placeholder="alice" spellcheck="false"></label>
+            <div class="table-wrap"><table class="rows">
+              <thead><tr><th>Name</th><th>Node id</th><th></th></tr></thead>
+              <tbody id="pseudo-results"></tbody></table></div>
+            <p id="pseudo-search-status" class="msg"></p>
+          </div>
+        </article>
+      </div>
+
+      <div data-sub="updates" class="stack" hidden>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Software updates</h2>
             <div class="sub">Checks this project's published releases on GitHub</div></div>
@@ -871,6 +910,7 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "config") loadConfig();
   if(section === "settings" && sub === "diagnostics") loadTrace();
   if(section === "settings" && sub === "updates") refreshReleases();
+  if(section === "settings" && sub === "identity") refreshPseudo();
 }
 async function tick(){
   if(TICKING) return;
@@ -918,8 +958,8 @@ function railState(kind, text){
 // ---- header and metrics ----------------------------------------------------
 function paintHeader(state){
   const peers = state.authenticated_peers || 0;
-  $("self-node").textContent = shortId(state.id);
-  $("self-node").title = state.id;
+  $("self-node").textContent = nodeLabel(state.id, state.pseudo);
+  $("self-node").title = state.pseudo ? state.pseudo + "\n" + state.id : state.id;
   const pill = $("node-state");
   pill.textContent = state.running ? "Running · up " + fmtDuration(state.uptime) : "Stopped";
   pill.className = "badge " + (state.running ? "ok" : "danger");
@@ -1039,11 +1079,16 @@ function edgeLabelAt(from, to, share){
           y:from.y + dy * t + (dx / length) * 9 - 2};
 }
 
+let MAP_NAMES = {};
+
 function renderGraph(svg, state, size){
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
   const topology = state.topology || {}, direct = topology.direct || [], routed = topology.routed || [];
   const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
+  // Node labels are drawn from ids alone deeper in, so collect the names here.
+  MAP_NAMES = {};
+  for(const node of direct.concat(routed)) if(node.pseudo) MAP_NAMES[node.id] = node.pseudo;
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
     const step = Math.PI * 2 / Math.max(1, direct.length);
@@ -1103,7 +1148,8 @@ function renderGraph(svg, state, size){
                                        r:kind === "self" ? size.self : size.r}));
     const text = svgEl("text", {x:point.x,
                                 y:point.y + (kind === "self" ? size.self + 15 : size.r + 11)});
-    text.textContent = kind === "self" ? "this node" : shortId(id);
+    text.textContent = kind === "self" ? "this node"
+                                       : nodeLabel(id, (MAP_NAMES[id] || ""));
     group.appendChild(text);
     if(caption && size.labels){
       const under = svgEl("text", {x:point.x, y:point.y + size.r + 22, class:"elabel"});
@@ -1153,7 +1199,7 @@ function paintMap(){
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
     return '<div class="map-link' + (MAP_PICK === node.id ? " on" : "") +
       '" data-link="' + esc(node.id) + '">' +
-      '<div class="top"><b>' + esc(shortId(node.id)) + "</b>" +
+      '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo)) + "</b>" +
       badge(node.transport || "?", "") +
       (loss ? badge(loss + "%", "warn") : "") + "</div>" +
       '<div class="tiny muted">' +
@@ -1422,7 +1468,7 @@ function groupByNode(items){
   for(const item of items){
     let group = byNode.get(item.id);
     if(!group){
-      group = {id:item.id, links:[], best:null, node:item};
+      group = {id:item.id, pseudo:item.pseudo || "", links:[], best:null, node:item};
       byNode.set(item.id, group);
       order.push(group);
     }
@@ -1445,7 +1491,7 @@ function linkRowHTML(node, kind, inner){
   return '<tr class="link-row"' + (inner ? ' data-inner' : ' data-clickable') +
     ' data-node-id="' + esc(node.id) + '">' +
     '<td class="mono">' + (inner ? '<span class="link-in"></span>' : "") +
-      esc(inner ? (transport + " link") : shortId(node.id)) + "</td>" +
+      esc(inner ? (transport + " link") : nodeLabel(node.id, node.pseudo)) + "</td>" +
     "<td>" + badge(label, tone) +
       (loss ? " " + badge(loss + "% loss", "warn") : "") + "</td>" +
     "<td>" + esc(transport) +
@@ -1471,8 +1517,8 @@ function groupRowHTML(group, unfolded){
     '"><td class="mono">' +
     '<button class="icon sm fold" data-fold="' + esc(group.id) + '" aria-expanded="' +
     (open ? "true" : "false") + '" aria-label="' +
-    (open ? "Hide" : "Show") + ' the links to ' + esc(shortId(group.id)) + '">' +
-    (open ? "▾" : "▸") + "</button>" + esc(shortId(group.id)) + "</td>" +
+    (open ? "Hide" : "Show") + ' the links to ' + esc(nodeLabel(group.id, group.pseudo)) + '">' +
+    (open ? "▾" : "▸") + "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</td>" +
     "<td>" + badge(group.links.length + " link" +
       (group.links.length === 1 ? "" : "s"), "ok") + "</td>" +
     "<td>" + esc(schemes.join(", ")) + "</td>" +
@@ -1555,7 +1601,7 @@ async function openNode(id, seed){
   DETAIL_ID = id;
   const dialog = $("node-dialog");
   if(!dialog.open) dialog.showModal();
-  $("node-dialog-title").textContent = shortId(id);
+  $("node-dialog-title").textContent = nodeLabel(id, (seed && seed.pseudo) || MAP_NAMES[id] || "");
   await NODEVIEW.mount("node-detail", id, {
     selfId: STATE ? STATE.id : null,
     seed,
@@ -2189,6 +2235,81 @@ function publisherRowHTML(entry){
     (entry.auto ? " checked" : "") + '><span class="sr-only">Install automatically</span></label>' +
     '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
 }
+// ---- the node's own name ---------------------------------------------------
+async function refreshPseudo(){
+  try{
+    const {ok, data} = await apiJson("/api/pseudo");
+    if(!ok) return;
+    // Never overwrite a name being typed: this also runs on every tab entry.
+    if(document.activeElement !== $("pseudo-input")) $("pseudo-input").value = data.pseudo || "";
+    $("pseudo-id").value = data.id || "";
+    $("pseudo-input").maxLength = data.max || 50;
+  }catch(_){}
+}
+
+async function savePseudo(wanted){
+  const {ok, data} = await apiJson("/api/pseudo", "POST", {pseudo:wanted});
+  if(!ok){
+    setMessage("pseudo-status", data.error || "The node refused that name.", true);
+    return;
+  }
+  $("pseudo-input").value = data.pseudo || "";
+  // The rename is live either way; only its survival across a restart is at
+  // stake, so a failure to write the file is a warning, not an error.
+  setMessage("pseudo-status", data.pseudo
+    ? "Now called " + data.pseudo + (data.saved ? " — saved for next start." :
+       " — but not saved: " + (data.error || "no configuration file."))
+    : "The name is gone; this node shows only its id.", !data.saved);
+  tick();
+}
+
+$("pseudo-save").addEventListener("click", (event) =>
+  withBusy(event.target, () => savePseudo($("pseudo-input").value)));
+$("pseudo-clear").addEventListener("click", async (event) => {
+  const agreed = await confirmAction({
+    title:"Remove this node's name?",
+    body:'<p class="muted small">It will show as its id everywhere until you give it ' +
+      "another one. Nothing else changes.</p>",
+    confirmLabel:"Remove the name"});
+  if(agreed) await withBusy(event.target, () => savePseudo(""));
+});
+$("pseudo-input").addEventListener("keydown", (event) => {
+  if(event.key === "Enter") $("pseudo-save").click();
+});
+
+function pseudoRowHTML(hit){
+  return '<tr><td><strong>' + esc(hit.pseudo) + "</strong></td>" +
+    '<td class="mono" title="' + esc(hit.id) + '">' + esc(shortId(hit.id)) + "</td>" +
+    '<td class="tight"><button class="sm" data-node-id="' + esc(hit.id) +
+    '">Details</button></td></tr>';
+}
+
+async function searchPseudo(wide){
+  const query = $("pseudo-search").value.trim();
+  if(!query){
+    setHTML("pseudo-results", "");
+    setMessage("pseudo-search-status", "");
+    return;
+  }
+  try{
+    const {ok, data} = await apiJson("/api/pseudo?q=" + encodeURIComponent(query) +
+                                     (wide ? "&wide=1" : ""));
+    if(!ok) return;
+    setHTML("pseudo-results", data.results.map(pseudoRowHTML).join(""));
+    setMessage("pseudo-search-status", data.results.length ? "" :
+      (wide ? "Nobody on this mesh answers to that."
+            : "Nothing here by that name — try asking the network."));
+  }catch(_){}
+}
+
+$("pseudo-search").addEventListener("input", debounce(() => searchPseudo(false), 200));
+$("pseudo-wide").addEventListener("click", (event) =>
+  withBusy(event.target, () => searchPseudo(true)));
+$("pseudo-results").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-node-id]");
+  if(button) openNode(button.dataset.nodeId);
+});
+
 async function refreshReleases(){
   try{
     const {ok, data} = await apiJson("/api/releases");

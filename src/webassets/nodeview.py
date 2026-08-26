@@ -130,7 +130,9 @@ const NODEVIEW = {
   render(node, extras, options){
     const hide = options.hide || [];
     const chat = extras.chat, fleet = extras.fleet;
-    const name = (chat && chat.pseudo) || shortId(node.id);
+    // The node's own pseudo, from its signed claim. The full id sits right
+    // under it, because a name is never proof of who this is.
+    const name = node.pseudo || shortId(node.id);
     const badges = [];
     if(node.self) badges.push(badge("this node", "accent"));
     else if(node.direct) badges.push(badge("direct link", "ok"));
