@@ -121,7 +121,9 @@ CHAT_HTML = """<!doctype html>
         </div>
       </div>
       <label class="field"><span>Display name</span>
-        <input id="set-name" maxlength="32" placeholder="Your name"></label>
+        <input id="set-name" maxlength="50" placeholder="Your name">
+        <small class="hint">This is your node's name, shown everywhere it appears —
+          not just in chat.</small></label>
       <label class="field"><span>Bio</span>
         <textarea id="set-bio" maxlength="1024" rows="3" placeholder="A few words about you"></textarea></label>
       <div class="field"><span>Your node id</span>
@@ -634,7 +636,18 @@ function resizeImage(file,size){return new Promise((res,rej)=>{
 }
 async function saveProfile(){
   setDetailMode($("set-details").value);
-  const body={pseudo:$("set-name").value.trim(),bio:$("set-bio").value};
+  // Two writes, because they belong to two owners: the name is the node's and
+  // is signed by it, the bio and avatar are the chat app's own.
+  const name=$("set-name").value.trim();
+  if(name!==(ST.pseudo||"")){
+    const r=await api("/api/pseudo","POST",{pseudo:name}).catch(()=>null);
+    if(r&&!r.ok){
+      const j=await r.json().catch(()=>({}));
+      alert(j.error||"That name cannot be used.");
+      return;
+    }
+  }
+  const body={bio:$("set-bio").value};
   if(pendingAvatar!==undefined)body.avatar=pendingAvatar;
   await api("/api/chat/profile","POST",body).catch(()=>{});
   $("settings").close(); poll();

@@ -59,7 +59,7 @@ Nothing here signs bytes supplied by the app:
 - the app's free-form context enters only as a **32-byte hash** (`ctx_hash`,
   length-prefixed so one context cannot be re-cut into another);
 - `_DOMAIN = b"nmesh-app-auth-v1"` is **distinct** from every other signing
-  domain in the repository (`nmesh-pseudo-dir-v1`, `nmesh-app-release-v1`, the
+  domain in the repository (`nmesh-pseudo-v2`, `nmesh-app-release-v1`, the
   certificate body, the handshake input).
 
 An app therefore cannot steer the signer outside the app-auth space, nor outside

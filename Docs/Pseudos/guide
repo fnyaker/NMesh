@@ -1,0 +1,142 @@
+# Pseudos — a name you choose, beside the id you cannot
+
+Every node is identified by its `NodeID`: twenty bytes derived from its ML-DSA
+public key. It is unique, unforgeable, and impossible to choose. It is also
+`73b7474e2578749edb2df725030e6e12fce5c453`, which nobody wants to read.
+
+A **pseudo** is the name shown next to it. You pick it, you change it whenever
+you like, and it appears everywhere the node does: the console, chat, fleet.
+
+Code: [`src/pseudo.py`](../../src/pseudo.py) (the form),
+[`src/pseudo_dir.py`](../../src/pseudo_dir.py) (the signed claim and the book),
+the pseudo section of [`src/node.py`](../../src/node.py) (gossip, directory,
+search).
+
+## What a pseudo is not
+
+It is **not an identity**, and treating it as one is the mistake this whole
+design is built to prevent.
+
+- Pseudos are **not unique**. Two nodes may both be called `alice`, and neither
+  is more entitled to it than the other. A search returns them all.
+- A pseudo decides **nothing**. Routing, authentication, trust and permissions
+  all key on the node id. Renaming a node changes what people read and nothing
+  else.
+- So a pseudo is **always shown with its id**. Every list, every dialog, every
+  search result carries both. If you are about to trust a node, check the id.
+
+What a pseudo *does* guarantee is that nobody can put a name on **your** node.
+A name travels as a claim signed by the identity it names, and the id in that
+claim is derived from the key that signed it — so a claim can only ever name its
+own author. Somebody may call themselves `alice`; nobody can make your node say
+it is `alice`.
+
+## Choosing one
+
+**In the console:** Settings → Identity → *What this node is called*. Type it,
+press Save. It takes effect immediately — the node signs a new claim and tells
+the mesh — and it is written to the configuration file so a restart keeps it.
+
+**At startup:** `--pseudo "Alice Ada"`, or in `nmesh.conf`:
+
+```
+pseudo = Alice Ada
+```
+
+**In chat:** the *Display name* field in the settings dialog is the same value.
+There is no separate chat name any more.
+
+**Removing it** leaves the node showing only its id — here. Other nodes keep the
+last name they were told until they forget it: a claim is a statement that this
+node *is* called something, and there is no signed way to say "I am called
+nothing" (an empty name is not a name). If you want the old one gone from other
+people's screens, rename rather than clear — a rename does propagate, because it
+is itself a claim.
+
+### What is allowed
+
+At most **50 characters** (characters, not bytes — accents and CJK cost one
+each). Letters, digits, punctuation, spaces between words, emoji.
+
+Refused, deliberately:
+
+- anything invisible or directional — zero-width spaces and joiners,
+  left-to-right and right-to-left marks, control characters. These exist to make
+  one name render as another;
+- spaces that are not the plain space `U+0020` (no-break, ideographic…), for the
+  same reason;
+- leading, trailing or doubled spaces, and an empty name.
+
+A name with a run of spaces in the middle is tidied to single spaces rather than
+refused: that is a typing slip, not an attack. Everything else is reported back
+to you, unchanged, with what is wrong.
+
+**These rules are checked on both sides.** A node that receives a name in any
+other form does not clean it up — it drops it and counts the sender as
+misbehaving, and cuts the link if it keeps happening. See
+[`Docs/Architecture/security.md`](../Architecture/security.md).
+
+## Finding somebody
+
+Settings → Identity → *Find a node by name*. Type as much as you know:
+
+- `alice ada` — an exact match ranks first;
+- `ali` — anything starting with it;
+- `ada` — a word inside the name;
+- `jose` finds `José`, and case never matters.
+
+Results are ranked best-first and each carries its node id and a link to the
+node's details. The **Active links** and **Known nodes** tables filter on names
+too, so the search box you already use works on them.
+
+This all answers instantly, because it reads names this node has already
+learned. Names spread by gossip: when two nodes connect they exchange the names
+they know, and a rename ripples outward from there. So a mesh you are part of
+fills in on its own.
+
+**Ask the network** does one more thing: a directory lookup for the name exactly
+as typed, which finds somebody whose node you have never met. It costs a round
+of queries, so it is a button rather than something typing triggers.
+
+## For apps
+
+An app talks to the node through the connector. It can read names and search
+them; it **cannot set one**:
+
+```python
+await client.my_pseudo()                    # what is this node called?
+await client.lookup_pseudo("ali")           # ranked, partial, from the local book
+await client.lookup_pseudo("alice", wide=True)   # …and ask the network too
+await client.pseudos_of([id_hex, ...])      # resolve ids to names, in one call
+await client.refresh_names(ids)             # the same, into a cache
+client.name_of(id_hex)                      # read that cache, synchronously
+```
+
+There is deliberately no frame that renames the node. The pseudo is shown in the
+node's console and used by every app on it, so choosing it belongs to whoever
+runs the node — not to an app that happens to hold a connector token. Renaming
+goes through the console (`POST /api/pseudo`), which is authenticated.
+
+`refresh_names` and `name_of` are one cache shared by every app on a client:
+the alternative is each app keeping its own idea of what a node is called, which
+is the thing pseudos exist to stop. Chat and Fleet both use it.
+
+## What it costs
+
+A claim is about 5.3 kB — an ML-DSA-65 public key and signature, which is what
+makes it verifiable by a node that has never met you. Each node keeps a bounded
+book of them (`_MAX_NODES` entries, `_MAX_BOOK_BYTES` bytes, whichever binds
+first), evicting the least recently touched. A freshly connected peer is sent at
+most `_PSEUDO_SYNC_MAX` claims, ours first; the rest arrives by gossip.
+
+Gossip stops on its own: a node passes a claim on **only when it changed what it
+knew**, so a name that has finished spreading stops moving.
+
+## See also
+
+- [`Docs/Architecture/routing.md`](../Architecture/routing.md) — the claim
+  format, the book, and the two planes (gossip and the keyed directory).
+- [`Docs/Architecture/security.md`](../Architecture/security.md) — why the form
+  is part of the protocol, and what happens to a peer that ignores it.
+- [`Docs/WebConsole/guide`](../WebConsole/guide) — the endpoints behind the
+  Identity page.

@@ -637,7 +637,10 @@ SHELL = """
 .topbar .who{display:flex;align-items:center;gap:var(--s-2);min-width:0;overflow:hidden}
 .topbar .who>*{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .topbar .who button{font-family:var(--mono);font-size:var(--fs-xs);min-height:var(--ctl-h-sm);
-  color:var(--text-muted)}
+  /* Left, not the button default of centre: a centred label clips at both ends
+     on a narrow screen, so the node's name would lose its first letters and the
+     ellipsis would never appear. */
+  color:var(--text-muted);text-align:left}
 
 /* -- driving another node ------------------------------------------------ */
 /* Impossible to miss on purpose: every destructive control on the page now
@@ -801,6 +804,10 @@ const $$ = (selector, root) => Array.from((root || document).querySelectorAll(se
 const esc = (value) => String(value == null ? "" : value).replace(/[&<>"']/g,
   (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const shortId = (id) => id ? id.slice(0, 6) + "…" + id.slice(-4) : "unknown";
+// A pseudo is a label somebody chose, not an identity: two nodes may wear the
+// same one, and a lookalike costs an attacker nothing to register. So the id
+// always travels with it — never a name on its own.
+const nodeLabel = (id, pseudo) => pseudo ? pseudo + " · " + shortId(id) : shortId(id);
 function debounce(fn, delay){
   let timer; return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay || 250); };
 }

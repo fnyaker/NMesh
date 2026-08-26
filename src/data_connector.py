@@ -60,8 +60,11 @@ _STORE_DEL = 0x06     # body = key(utf-8)
 _STORE_LIST = 0x07    # body = empty
 _APP_DHT_PUT = 0x08   # body = flag(1) ‖ keylen(2) ‖ enc_key ‖ content
 _APP_DHT_GET = 0x09   # body = keylen(2) ‖ dec_key ‖ content_key(20)
-_PSEUDO_PUB = 0x0A    # body = pseudo(utf-8)    — publish my pseudo→node id
-_PSEUDO_LOOKUP = 0x0B # body = pseudo(utf-8)    — find node ids by pseudo
+_PSEUDO_MINE = 0x0A   # body = empty            — what is this node called?
+_PSEUDO_LOOKUP = 0x0B # body = flags(1) ‖ query(utf-8) — find nodes by pseudo
+_PSEUDO_OF = 0x0E     # body = node_id(20)*n     — what are these nodes called?
+_ID_LEN = 20
+_MAX_NAME_IDS = 512   # ids one resolve call may ask about (bounded, like everything)
 _AUTH_ASSERT = 0x0C   # body = audience(20) ‖ ctx(32) ‖ ttl(4) ‖ purpose(utf-8)
 _AUTH_VERIFY = 0x0D   # body = flags(1) ‖ ctx(32) ‖ plen(2) ‖ purpose ‖ assertion
 # server → client
@@ -74,8 +77,9 @@ _STORE_OK = 0x86      # body = ok(1)                (PUT / DEL reply)
 _STORE_KEYS = 0x87    # body = JSON array of keys   (LIST reply)
 _APP_DHT_KEY = 0x88   # body = content_key(20) or empty on error  (PUT reply)
 _APP_DHT_VALUE = 0x89 # body = present(1) ‖ content                (GET reply)
-_PSEUDO_KEY = 0x8A    # body = dir_key(20) or empty                (PUB reply)
-_PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo}]                (LOOKUP reply)
+_PSEUDO_MINE_RESP = 0x8A  # body = pseudo(utf-8), empty when unnamed  (MINE reply)
+_PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo, ts, match}]     (LOOKUP reply)
+_PSEUDO_NAMES = 0x8E  # body = JSON {id_hex: pseudo}              (OF reply)
 _AUTH_ASSERTION = 0x8C # body = the signed assertion, or empty on refusal
 _AUTH_PRINCIPAL = 0x8D # body = JSON principal, or JSON null when it fails
 
@@ -212,9 +216,9 @@ class DataConnector:
                 elif ftype in (_APP_DHT_PUT, _APP_DHT_GET):
                     # Per-app DHT: same session-bound app_id names the namespace.
                     await self._handle_app_dht(writer, app_id, ftype, body)
-                elif ftype in (_PSEUDO_PUB, _PSEUDO_LOOKUP):
-                    # Pseudo directory, namespaced by this client's app_id.
-                    await self._handle_pseudo(writer, app_id, ftype, body)
+                elif ftype in (_PSEUDO_MINE, _PSEUDO_LOOKUP, _PSEUDO_OF):
+                    # Pseudos are the node's, not the app's — read-only here.
+                    await self._handle_pseudo(writer, ftype, body)
                 elif ftype in (_AUTH_ASSERT, _AUTH_VERIFY):
                     # App-level identity. Same rule as the drawer and the app
                     # DHT: the app id comes from the AUTH session, never the
@@ -374,28 +378,46 @@ class DataConnector:
             await _write_frame(writer, _AUTH_PRINCIPAL,
                                json.dumps(document).encode("utf-8"))
 
-    async def _handle_pseudo(self, writer: asyncio.StreamWriter, app_id: bytes,
+    async def _handle_pseudo(self, writer: asyncio.StreamWriter,
                              ftype: int, body: bytes) -> None:
-        """Publish/lookup a pseudo in this app's directory namespace. Both are
-        network round-trips; any error yields an empty reply (reject by default)."""
-        try:
-            pseudo = body.decode("utf-8")
-        except UnicodeDecodeError:
+        """Read this node's pseudo, or search for other nodes' pseudos.
+
+        Deliberately read-only. The pseudo is the *node's* name, shown in the
+        console and used by every app, so choosing it belongs to whoever runs
+        the node — not to any app that happens to hold a connector token. There
+        is no frame here that renames the node, and that is the point."""
+        if ftype == _PSEUDO_MINE:
+            await _write_frame(writer, _PSEUDO_MINE_RESP,
+                               self._node.pseudo.encode("utf-8"))
             return
-        if ftype == _PSEUDO_PUB:
-            try:
-                key_hex = await self._node.publish_pseudo(app_id, pseudo)
-                key = bytes.fromhex(key_hex)
-            except Exception:
-                key = b""
-            await _write_frame(writer, _PSEUDO_KEY, key)
-        elif ftype == _PSEUDO_LOOKUP:
-            try:
-                results = await self._node.lookup_pseudo(app_id, pseudo)
-            except Exception:
-                results = []
-            await _write_frame(writer, _PSEUDO_RESULTS,
-                               json.dumps(results).encode("utf-8"))
+        if ftype == _PSEUDO_OF:
+            names = {}
+            if len(body) % _ID_LEN == 0:
+                for off in range(0, min(len(body), _ID_LEN * _MAX_NAME_IDS), _ID_LEN):
+                    raw = body[off:off + _ID_LEN]
+                    pseudo = self._node.pseudo_of(raw)
+                    if pseudo:
+                        names[raw.hex()] = pseudo
+            await _write_frame(writer, _PSEUDO_NAMES,
+                               json.dumps(names).encode("utf-8"))
+            return
+        # LOOKUP: flags(1) ‖ query. Bit 0 asks the network as well as the book.
+        if not body:
+            await _write_frame(writer, _PSEUDO_RESULTS, b"[]")
+            return
+        wide = bool(body[0] & 1)
+        try:
+            query = body[1:].decode("utf-8")
+        except UnicodeDecodeError:
+            await _write_frame(writer, _PSEUDO_RESULTS, b"[]")
+            return
+        try:
+            results = (await self._node.search_pseudo(query) if wide
+                       else self._node.find_pseudo(query))
+        except Exception:
+            results = []
+        await _write_frame(writer, _PSEUDO_RESULTS,
+                           json.dumps(results).encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +443,14 @@ class ConnectorClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._inbox: list[tuple[NodeID, bytes]] = []
+        # One task reads the socket; everything else waits to be handed a frame.
+        # See :meth:`_pump` for why there is no second reader.
+        self._pump_task: asyncio.Task | None = None
+        self._waiting: dict[int, list] = {}       # response type -> [futures]
+        self._arrived: asyncio.Event | None = None
+        self._asking: asyncio.Lock | None = None
+        self._dead: Exception | None = None
+        self._names: dict[str, str] = {}    # node id (hex) -> pseudo, bounded
 
     @classmethod
     def from_env(cls, environ=None, app_id: bytes | None = None) -> "ConnectorClient":
@@ -440,15 +470,51 @@ class ConnectorClient:
         ftype, _ = await _read_frame(self._reader)
         if ftype != _AUTH_OK:
             raise ConnectionError("connector authentication failed")
+        self._arrived = asyncio.Event()
+        self._asking = asyncio.Lock()
+        self._dead = None
+        self._pump_task = asyncio.create_task(self._pump())
+
+    async def _pump(self) -> None:
+        """The only reader of the socket.
+
+        Two coroutines reading one stream is a lost frame waiting to happen: an
+        app sitting in :meth:`recv` would swallow the reply to a request made
+        from somewhere else, and that request would then wait for a frame that
+        had already been thrown away — a hang, not an error. So a single task
+        reads, and hands each frame to whoever is owed it."""
+        try:
+            while True:
+                ftype, body = await _read_frame(self._reader)
+                if ftype == _RECV and len(body) >= 20:
+                    self._inbox.append((NodeID(body[:20]), body[20:]))
+                    self._arrived.set()
+                    continue
+                waiters = self._waiting.get(ftype)
+                if waiters:
+                    future = waiters.pop(0)
+                    if not future.done():
+                        future.set_result(body)
+        except (asyncio.IncompleteReadError, ConnectionError, OSError, EOFError) as exc:
+            self._fail(exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._fail(exc)
+
+    def _fail(self, exc: Exception) -> None:
+        """The link is gone: wake everyone waiting rather than leave them there."""
+        self._dead = exc if isinstance(exc, Exception) else ConnectionError("connector closed")
+        for waiters in self._waiting.values():
+            for future in waiters:
+                if not future.done():
+                    future.set_exception(self._dead)
+        self._waiting.clear()
+        if self._arrived is not None:
+            self._arrived.set()
 
     async def whoami(self) -> NodeID:
-        await _write_frame(self._writer, _WHOAMI, b"")
-        while True:
-            ftype, body = await _read_frame(self._reader)
-            if ftype == _WHOAMI_RESP:
-                return NodeID(body)
-            if ftype == _RECV and len(body) >= 20:
-                self._inbox.append((NodeID(body[:20]), body[20:]))  # buffer data
+        return NodeID(await self._roundtrip(_WHOAMI, b"", _WHOAMI_RESP))
 
     async def send(self, target: NodeID, payload: bytes) -> None:
         await _write_frame(self._writer, _SEND, target.raw + payload)
@@ -460,13 +526,27 @@ class ConnectorClient:
 
     async def _roundtrip(self, req_type: int, req_body: bytes,
                          resp_type: int) -> bytes:
-        await _write_frame(self._writer, req_type, req_body)
-        while True:
-            ftype, body = await _read_frame(self._reader)
-            if ftype == resp_type:
-                return body
-            if ftype == _RECV and len(body) >= 20:
-                self._inbox.append((NodeID(body[:20]), body[20:]))  # buffer data
+        """Ask the connector one question and wait for its answer.
+
+        Replies carry no request id, so they can only be matched by order: the
+        lock keeps one question in flight at a time, and the pump hands the
+        answer to the future registered here."""
+        if self._dead is not None:
+            raise self._dead
+        if self._asking is None:
+            raise ConnectionError("connector client is not connected")
+        async with self._asking:
+            if self._dead is not None:
+                raise self._dead
+            future = asyncio.get_event_loop().create_future()
+            self._waiting.setdefault(resp_type, []).append(future)
+            try:
+                await _write_frame(self._writer, req_type, req_body)
+                return await future
+            finally:
+                waiters = self._waiting.get(resp_type)
+                if waiters and future in waiters:
+                    waiters.remove(future)
 
     async def store_put(self, key: str, value: bytes) -> bool:
         kb = key.encode("utf-8")
@@ -516,18 +596,71 @@ class ConnectorClient:
             return None
         return resp[1:]
 
-    # -- pseudo directory (this app's namespace) --------------------------
+    # -- pseudos (read-only: the node's name is the operator's to choose) --
 
-    async def publish_pseudo(self, pseudo: str) -> bytes | None:
-        """Publish a signed claim that ``pseudo`` maps to our node. Returns the
-        directory key, or None if the node refused it."""
-        resp = await self._roundtrip(_PSEUDO_PUB, pseudo.encode("utf-8"), _PSEUDO_KEY)
-        return resp if resp else None
+    async def my_pseudo(self) -> str:
+        """What our own node is called, or "" when it has no pseudo."""
+        resp = await self._roundtrip(_PSEUDO_MINE, b"", _PSEUDO_MINE_RESP)
+        try:
+            return resp.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
 
-    async def lookup_pseudo(self, pseudo: str) -> list[dict]:
-        """Find every node claiming ``pseudo`` network-wide. Returns
-        ``[{"id": hex, "pseudo": str}, …]`` (possibly several)."""
-        resp = await self._roundtrip(_PSEUDO_LOOKUP, pseudo.encode("utf-8"), _PSEUDO_RESULTS)
+    async def pseudos_of(self, ids) -> dict:
+        """The pseudos of a set of node ids (hex strings or bytes), as
+        ``{id_hex: pseudo}``. Ids with no known name are simply absent — a
+        caller shows the id, which is what it should show anyway."""
+        body = bytearray()
+        for one in list(ids)[:_MAX_NAME_IDS]:
+            raw = bytes.fromhex(one) if isinstance(one, str) else bytes(one)
+            if len(raw) == _ID_LEN:
+                body += raw
+        resp = await self._roundtrip(_PSEUDO_OF, bytes(body), _PSEUDO_NAMES)
+        try:
+            out = json.loads(resp.decode("utf-8"))
+        except Exception:
+            return {}
+        return {k: v for k, v in out.items()
+                if isinstance(k, str) and isinstance(v, str)} if isinstance(out, dict) else {}
+
+    def name_of(self, id_hex) -> str:
+        """The last name we read for a node id, or "". Synchronous on purpose:
+        this is what a UI thread calls while rendering a list, and a round trip
+        per row would be absurd."""
+        if isinstance(id_hex, (bytes, bytearray)):
+            id_hex = bytes(id_hex).hex()
+        return self._names.get(id_hex, "")
+
+    async def refresh_names(self, ids) -> dict:
+        """Re-read the names of ``ids`` from the node and cache them.
+
+        One cache, filled from one place, shared by every app on this client:
+        the alternative is each app keeping its own idea of what a node is
+        called, which is the thing pseudos exist to stop."""
+        wanted = [i.hex() if isinstance(i, (bytes, bytearray)) else str(i)
+                  for i in ids][:_MAX_NAME_IDS]
+        if not wanted:
+            return {}
+        names = await self.pseudos_of(wanted)
+        for id_hex in wanted:
+            found = names.get(id_hex)
+            if found:
+                self._names[id_hex] = found
+            else:
+                self._names.pop(id_hex, None)   # renamed to nothing, or gone
+        while len(self._names) > _MAX_NAME_IDS:
+            self._names.pop(next(iter(self._names)))
+        return names
+
+    async def lookup_pseudo(self, query: str, *, wide: bool = False) -> list[dict]:
+        """Find nodes by pseudo, whole or partial, best match first.
+
+        Returns ``[{"id": hex, "pseudo": str, "ts": int, "match": int}, …]`` —
+        several, because pseudos are not unique; ``id`` is the real identity.
+        ``wide`` also asks the network for an exact match, which costs a round
+        of queries: leave it off for search-as-you-type."""
+        body = bytes([1 if wide else 0]) + query.encode("utf-8")
+        resp = await self._roundtrip(_PSEUDO_LOOKUP, body, _PSEUDO_RESULTS)
         try:
             out = json.loads(resp.decode("utf-8"))
         except Exception:
@@ -571,14 +704,23 @@ class ConnectorClient:
         return document if isinstance(document, dict) else None
 
     async def recv(self) -> tuple[NodeID, bytes]:
-        if self._inbox:
-            return self._inbox.pop(0)
         while True:
-            ftype, body = await _read_frame(self._reader)
-            if ftype == _RECV and len(body) >= 20:
-                return NodeID(body[:20]), body[20:]
+            if self._inbox:
+                return self._inbox.pop(0)
+            if self._dead is not None:
+                raise self._dead
+            self._arrived.clear()
+            await self._arrived.wait()
 
     async def close(self) -> None:
+        if self._pump_task is not None:
+            self._pump_task.cancel()
+            try:
+                await self._pump_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pump_task = None
+        self._fail(ConnectionError("connector client closed"))
         if self._writer is not None:
             try:
                 self._writer.close()

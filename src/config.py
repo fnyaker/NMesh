@@ -100,6 +100,19 @@ def _as_host(raw: str) -> str:
     return value
 
 
+def _as_pseudo(raw: str) -> str:
+    """The node's display name. Validated here, in exactly the form the network
+    validates it, so a name the mesh would reject never reaches a running node."""
+    from .pseudo import PseudoError, canonical
+    value = raw.strip()
+    if not value:
+        return ""
+    try:
+        return canonical(value)
+    except PseudoError as exc:
+        raise ConfigError(str(exc)) from None
+
+
 def _as_path(raw: str):
     value = raw.strip()
     if not value:
@@ -144,6 +157,9 @@ SETTINGS = {
     "console_port":    (_as_port, 8787, True, "Web console port"),
     "connector_port":  (_as_optional_port, None, True,
                         "Loopback port exposing the data connector to apps"),
+    "pseudo":          (_as_pseudo, "", True,
+                        "Display name for this node, shown beside its id "
+                        "(at most 50 characters)"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),

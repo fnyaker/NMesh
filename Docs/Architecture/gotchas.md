@@ -108,6 +108,24 @@ with `src/trace.py` (Settings → Protocol trace), locked down by
 `tests/integration/test_idle_chatter.py` — which includes a "discovery still
 works" test, because a bound must not switch off what it protects.
 
+### 8b. Two readers on one socket — the connector request that never answers
+`ConnectorClient` let `recv()` and `_roundtrip()` both read `self._reader`
+directly. An app parked in `recv()` (which every app is, always) read the
+**reply to somebody else's request** and, seeing it was not a `RECV` frame,
+**threw it away**. The requester then waited for a frame that no longer existed.
+
+It stayed invisible while every request happened to run before the receive loop
+started. The moment one ran on a timer — chat re-reading the node's pseudo every
+30 s — the app's name silently stayed empty forever. No error, no traceback: a
+hang inside a coroutine nobody was awaiting with a timeout.
+→ Fix: **one reader**. `_pump()` is the only coroutine that touches the stream;
+`RECV` frames go to the inbox and wake `recv()`, everything else is handed to
+the future a `_roundtrip` registered. Replies carry no request id, so
+`_roundtrip` also takes a lock to keep one question in flight at a time, and a
+dead link fails every waiter instead of leaving them parked.
+**Never add a second `await _read_frame(self._reader)` to that class.**
+Locked down by `TestOneReader` in `tests/test_data_connector.py`.
+
 ## Routing: the "works at 3 nodes, not at 6" bugs
 
 ### 9. A `FOUND_NODE` that does not fit in a packet — Kademlia dies silently

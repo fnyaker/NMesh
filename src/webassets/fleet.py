@@ -487,7 +487,7 @@ function paintNodes(){
   $("nav-managed").textContent = managed.length || "";
   let html = waiting.map((entry) =>
     '<article class="card node-card"><div class="card-head"><div class="grow">' +
-    "<h2>" + esc(entry.label || shortId(entry.id)) + '</h2><div class="sub mono">' +
+    "<h2>" + esc(entry.label || entry.pseudo || shortId(entry.id)) + '</h2><div class="sub mono">' +
     esc(shortId(entry.id)) + "</div></div>" + badge("awaiting answer", "warn") + "</div>" +
     '<div class="card-body"><p class="small muted">Waiting for someone on that node to accept. ' +
     'Nothing runs until they do.</p><div class="btn-row"><button class="danger" data-revoke="' +
@@ -495,7 +495,7 @@ function paintNodes(){
   html += managed.map((node) => {
     const caps = node.caps || [], can = (cap) => caps.includes(cap);
     return '<article class="card node-card"><div class="card-head"><div class="grow">' +
-      "<h2>" + esc(node.label || shortId(node.id)) + '</h2><div class="sub mono truncate">' +
+      "<h2>" + esc(node.label || node.pseudo || shortId(node.id)) + '</h2><div class="sub mono truncate">' +
       esc(node.id) + "</div></div>" + badge("managed", "ok") + "</div>" +
       '<div class="card-body">' +
       '<div class="caps">' + capsList(caps) + "</div>" +
@@ -551,7 +551,7 @@ function paintOperators(){
   setHTML("operators", operators.map((operator) => {
     const held = operator.caps || [];
     return '<article class="card"><div class="card-head"><div class="grow">' +
-      "<h2>" + esc(operator.label || shortId(operator.id)) + '</h2>' +
+      "<h2>" + esc(operator.label || operator.pseudo || shortId(operator.id)) + '</h2>' +
       '<div class="sub mono truncate">' + esc(operator.id) + "</div></div>" +
       badge("controls this node", "warn") + "</div>" +
       '<div class="card-body"><div class="cap-pick" data-ops="' + esc(operator.id) + '">' +
@@ -605,10 +605,10 @@ function rightsDialog(id){
 function paintPickers(){
   const managed = ST.managed || [];
   fill($("shell-node"), managed.filter((node) => (node.caps || []).includes("shell"))
-       .map((node) => [node.id, node.label || shortId(node.id)]));
+       .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)]));
   fill($("scan-from"), [[ST.me, "This node (local LAN)"]].concat(
     managed.filter((node) => (node.caps || []).includes("scan"))
-           .map((node) => [node.id, node.label || shortId(node.id)])));
+           .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)])));
 }
 function fill(select, pairs){
   const keep = select.value;
@@ -656,14 +656,14 @@ function notifications(){
     key: "req:" + request.id,
     kind: "warn",
     title: (request.have || []).length ? "More rights requested" : "Access request",
-    detail: nodeLabel(request.id) + " is waiting on someone here",
+    detail: managedLabel(request.id) + " is waiting on someone here",
     at: request.at || 0,
     tab: "access",
   }));
   (ST.jobs || []).slice(-NOTIF_MAX).forEach((job) => items.push({
     key: job.rid + ":" + job.state,
     kind: job.state === "running" ? "" : (job.state === "ok" ? "ok" : "danger"),
-    title: job.kind + " · " + nodeLabel(job.node),
+    title: job.kind + " · " + managedLabel(job.node),
     detail: job.state === "running" ? "running…"
       : (job.detail || (job.state === "ok" ? "done" : "failed")),
     at: job.at || 0,
@@ -705,11 +705,14 @@ function markNotifRead(){
 }
 
 MENU.onShow.notif = () => { paintNotifList(); markNotifRead(); };
-function nodeLabel(id){
+// How a managed node is named here: the label this operator gave it if there is
+// one, otherwise the node's own signed pseudo — and either way the id, because
+// a name is never what you check before acting on a machine.
+function managedLabel(id){
   if(!id) return "";
   if(id === ST.me) return "this node";
   const node = (ST.managed || []).find((entry) => entry.id === id);
-  return (node && node.label) || shortId(id);
+  return nodeLabel(id, (node && (node.label || node.pseudo)) || "");
 }
 
 // ---- discovery -------------------------------------------------------------

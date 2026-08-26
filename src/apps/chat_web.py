@@ -18,21 +18,20 @@ import json
 import secrets
 import threading
 import time
-from collections import deque, OrderedDict
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from .. import app_api
 from ..node_id import NodeID
 from .chat import (
-    TextMessage, FileReceived, GroupMessage, DirResult, ProfileReceived,
-    Receipt, Typing, Edited, Deleted, Reaction, GroupInvited,
+    TextMessage, FileReceived, GroupMessage,
+    Receipt, Typing, Edited, Deleted, Reaction,
     MSG_ID_LEN, _DELIVERED, _READ,
 )
 
 _MAX_BODY = 64 * 1024
 _MESSAGES_MAX = 2000
-_DIR_RESULTS_MAX = 200
 _CALL_TIMEOUT = 10.0
 _MESSAGES_KEY = "messages"        # drawer key holding the persisted feed
 _MESSAGES_BUDGET = 220 * 1024     # serialised feed ceiling (under the drawer cap)
@@ -80,8 +79,7 @@ class ChatBridge:
             [app_api.param("node", "node")]),
         app_api.operation(
             "contact", "Add a node to the address book",
-            [app_api.param("node", "node"),
-             app_api.param("pseudo", "text", required=False, default="")],
+            [app_api.param("node", "node")],
             changes=True),
     )
 
@@ -96,7 +94,6 @@ class ChatBridge:
         self._files_bytes = 0
         self._unread: dict[str, int] = {}        # conv -> unread count
         self._typing: dict[str, tuple] = {}      # conv -> (sender_hex, expiry)
-        self._dir_results: deque = deque(maxlen=_DIR_RESULTS_MAX)
         self._msg_id = 0                          # stable per-message local id
         self._version = 0                         # change counter (drives polling)
         self._lock = threading.Lock()
@@ -224,9 +221,6 @@ class ChatBridge:
                 self._typing[conv] = (ev.src.raw.hex(), time.time() + _TYPING_TTL)
             else:
                 self._typing.pop(conv, None)
-        elif isinstance(ev, DirResult):
-            self._dir_results.append(
-                {"id": ev.node_id.raw.hex(), "pseudo": ev.pseudo, "t": time.time()})
 
     def _text_rec(self, mid: bytes, text: str, reply: bytes | None) -> dict:
         return {"mid": mid.hex(), "kind": "text", "text": text,
@@ -439,14 +433,11 @@ class ChatBridge:
 
     # -- profile / contacts / groups --------------------------------------
 
-    def set_pseudo(self, pseudo: str) -> None:
-        self._run(self._chat.set_pseudo(pseudo))
+    def set_profile(self, *, bio=None, avatar=None) -> None:
+        self._run(self._chat.set_profile(bio=bio, avatar=avatar))
 
-    def set_profile(self, *, pseudo=None, bio=None, avatar=None) -> None:
-        self._run(self._chat.set_profile(pseudo=pseudo, bio=bio, avatar=avatar))
-
-    def add_contact(self, id_hex: str, pseudo: str = "") -> bool:
-        return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex)), pseudo))
+    def add_contact(self, id_hex: str) -> bool:
+        return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex))))
 
     def remove_contact(self, id_hex: str) -> bool:
         return self._chat.state.remove_contact(id_hex)
@@ -460,22 +451,23 @@ class ChatBridge:
         return gid.hex()
 
     def search_pseudo(self, pseudo: str) -> list:
-        """Local directory + the network DHT directory (anyone who published
-        their pseudo, no prior contact needed) + a 1-hop query to contacts."""
+        """Who answers to this name, whole or partial.
+
+        The node's book of signed claims is the source; it already holds
+        everyone this node has heard of, so a contact and a stranger are found
+        the same way. ``wide`` asks the network too, for an exact name whose
+        owner we have never met."""
         hits = {h["id"]: h for h in self._chat.state.find_by_pseudo(pseudo)}
         try:
-            for r in self._run(self._chat.lookup_pseudo_network(pseudo)):
+            for r in self._run(self._chat.search_pseudo(pseudo, wide=True)):
                 nid = r.get("id")
                 if isinstance(nid, str):
-                    hits.setdefault(nid, {"id": nid, "pseudo": r.get("pseudo", ""),
-                                          "kind": "network"})
+                    hits[nid] = {"id": nid, "pseudo": r.get("pseudo", ""),
+                                 "match": r.get("match", 3)}
         except Exception:
             pass
-        try:
-            self._run(self._chat.dir_query(pseudo))
-        except Exception:
-            pass
-        return list(hits.values())
+        return sorted(hits.values(), key=lambda h: (h.get("match", 3),
+                                                    len(h.get("pseudo", ""))))
 
     # -- the app API (declared in `API` above) -----------------------------
 
@@ -498,10 +490,11 @@ class ChatBridge:
                 "unread": unread,
                 "conversation": "/chat#c/" + node}
 
-    def api_contact(self, node: str, pseudo: str = "") -> dict:
-        """Add someone to the address book. Adding a contact grants nothing —
-        it is a name for an identity this node could already reach."""
-        return {"added": bool(self.add_contact(node, pseudo or ""))}
+    def api_contact(self, node: str) -> dict:
+        """Add someone to the address book. Adding a contact grants nothing, and
+        names nothing: what a node is called is its own to say, in a signed
+        claim. This only says that this node is one we care about."""
+        return {"added": bool(self.add_contact(node))}
 
     def snapshot(self, since: int) -> dict:
         state = self._chat.state.snapshot()
@@ -522,7 +515,6 @@ class ChatBridge:
                 "contacts": state["contacts"],
                 "known": state["known"],
                 "groups": state["groups"],
-                "dir_results": list(self._dir_results),
             }
 
 

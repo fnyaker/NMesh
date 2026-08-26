@@ -262,6 +262,19 @@ that appears only once a step is finished is a summary, not progress):
 elapsed time. The node list shows a bar and the current step, and keeps the last
 outcome once it is done.
 
+## How a node is named here
+
+A managed node's card shows, in order of preference: the **label** this operator
+gave it, then the node's own **pseudo** (its signed name, see
+[`Docs/Pseudos/guide`](../Pseudos/guide)), then its id — and the id is on the
+card regardless, because a name is never what you check before acting on a
+machine. The pseudos are kept fresh by a small poll (`_NAMES_REFRESH`) against
+the node's book of claims; a node the fleet has never met simply has no name.
+
+The label and the pseudo are different things on purpose: the label is *yours*,
+private to this fleet, and says what a machine is to you; the pseudo is the
+node's own, signed by it, and says what it calls itself.
+
 ## Seeing a node as the console sees it
 
 Every card — a managed node, or a node that manages this one — carries a

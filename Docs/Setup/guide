@@ -148,7 +148,15 @@ before.
 fleet = true
 console_port = 8787
 listen = 0.0.0.0:9000
+
+# Display name for this node, shown beside its id (at most 50 characters)
+pseudo = Alice Ada
 ```
+
+`pseudo` is validated exactly as the network validates it, so a name the mesh
+would reject is reported here instead of leaving a node running unnamed — see
+[`Docs/Pseudos/guide`](../Pseudos/guide). It is also editable live from the
+console (Settings → Identity), which writes it back to this file.
 
 - `./install.sh --fleet --console-host 0.0.0.0` writes those settings into the
   file instead of putting them in `ExecStart`; what the file cannot express

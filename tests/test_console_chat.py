@@ -134,17 +134,19 @@ def _post(console, token, path, body):
 
 
 class TestConsoleSocial:
-    async def test_set_pseudo(self):
+    async def test_the_node_names_itself_not_the_chat_app(self):
+        # There is no chat endpoint for a name any more: renaming goes to the
+        # node, which signs the claim the rest of the mesh reads.
         node, console, app = await _make_console_social()
         try:
             _, token = await _login(console)
-            st, _, _, j = await asyncio.to_thread(
+            st, _, _, _ = await asyncio.to_thread(
                 _post, console, token, "/api/chat/pseudo", {"pseudo": "alice"})
-            assert st == 200 and j["ok"] is True
-            assert app.state.pseudo == "alice"
-            _, _, _, snap = await asyncio.to_thread(
-                _request, console, "GET", "/api/chat/messages?since=0", token)
-            assert snap["pseudo"] == "alice" and snap["me"] == ME.raw.hex()
+            assert st == 404
+            st2, _, _, j2 = await asyncio.to_thread(
+                _post, console, token, "/api/pseudo", {"pseudo": "alice"})
+            assert st2 == 200 and j2["pseudo"] == "alice"
+            assert node.pseudo == "alice"
         finally:
             console.stop(); await node.stop()
 
@@ -154,7 +156,7 @@ class TestConsoleSocial:
             _, token = await _login(console)
             st, _, _, j = await asyncio.to_thread(
                 _post, console, token, "/api/chat/contact",
-                {"op": "add", "id": CONTACT.raw.hex(), "pseudo": "bob"})
+                {"op": "add", "id": CONTACT.raw.hex()})
             assert st == 200 and j["ok"] is True
             assert CONTACT.raw.hex() in app.state.contacts
             st2, _, _, j2 = await asyncio.to_thread(
@@ -169,7 +171,7 @@ class TestConsoleSocial:
         node, console, app = await _make_console_social()
         try:
             _, token = await _login(console)
-            app.state.add_contact(CONTACT.raw.hex(), "bob")
+            app.state.add_contact(CONTACT.raw.hex())
             st, _, _, j = await asyncio.to_thread(
                 _post, console, token, "/api/chat/group",
                 {"op": "create", "name": "team", "members": [CONTACT.raw.hex()]})
@@ -189,7 +191,8 @@ class TestConsoleSocial:
         node, console, app = await _make_console_social()
         try:
             _, token = await _login(console)
-            app.state.add_contact(CONTACT.raw.hex(), "Alice")
+            app.state.add_contact(CONTACT.raw.hex())
+            app.state.learn_pseudo(CONTACT.raw.hex(), "Alice")
             st, _, _, j = await asyncio.to_thread(
                 _post, console, token, "/api/chat/search", {"pseudo": "ali"})
             assert st == 200

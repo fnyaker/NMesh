@@ -21,6 +21,9 @@ import struct
 
 import pytest
 
+from src.crypto import CryptoIdentity
+from src.pseudo import is_canonical as _is_canonical, fold as _fold
+from src.pseudo_dir import parse_claim as _parse_claim, CLAIM_VERSION
 from src.node import (
     MeshNode,
     _decode_chain,
@@ -33,7 +36,7 @@ from src.node import (
     _MAX_MALFORMED,
     DATA, PING, PONG, FIND_NODE, FOUND_NODE,
     HANDSHAKE, HANDSHAKE_ACK, CHALLENGE, INVITE, INVITE_ACK,
-    E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, CATALOG_ANNOUNCE, RELEASE_ANNOUNCE,
+    E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, CATALOG_ANNOUNCE, RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE,
 )
 from src.node_id import NodeID
 from src.packet import Packet, PacketError
@@ -49,9 +52,10 @@ _OK_EXC = (ValueError, PacketError, struct.error, UnicodeDecodeError,
 
 _ALL_TYPES = [DATA, PING, PONG, FIND_NODE, FOUND_NODE, HANDSHAKE, HANDSHAKE_ACK,
               CHALLENGE, INVITE, INVITE_ACK, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK,
-              # The two gossip planes: both carry a signed blob a peer chose,
-              # and one of them decides what code this node may run.
-              CATALOG_ANNOUNCE, RELEASE_ANNOUNCE]
+              # The three gossip planes: each carries a signed blob a peer
+              # chose. One decides what code this node may run; another decides
+              # what name a node is shown under.
+              CATALOG_ANNOUNCE, RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE]
 
 
 def _random_bytes(rng: random.Random, max_len: int = 4096) -> bytes:
@@ -139,6 +143,24 @@ class TestCodecFuzz:
         rng = random.Random(0x5EED)
         for _ in range(3000):
             _guard(Certificate.deserialize, _random_bytes(rng, 512))
+
+    def test_pseudo_claim_parser(self):
+        # This one runs a signature verification on attacker-chosen bytes and
+        # decodes attacker-chosen UTF-8, so it gets its own pass.
+        ident = CryptoIdentity()
+        rng = random.Random(0xB0B)
+        for _ in range(2000):
+            _guard(lambda d: _parse_claim(d, ident.verify), _random_bytes(rng, 512))
+        for _ in range(2000):
+            blob = bytes([CLAIM_VERSION]) + _random_bytes(rng, 256)
+            _guard(lambda d: _parse_claim(d, ident.verify), blob)
+
+    def test_canonical_pseudo_never_raises_through_its_gate(self):
+        rng = random.Random(0xF01D)
+        for _ in range(4000):
+            text = _random_bytes(rng, 128).decode("utf-8", "replace")
+            _guard(lambda _d: _is_canonical(text), b"")
+            _guard(lambda _d: _fold(text), b"")
 
 
 # ---------------------------------------------------------------------------

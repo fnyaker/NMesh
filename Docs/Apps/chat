@@ -4,8 +4,9 @@ NMesh's reference messaging app, built on the data connector. A real end-to-end
 messenger: **profiles** (name, bio, avatar), 1:1 **conversations** and
 **groups**, **replies**, **editing**, **deletion**, **emoji reactions**,
 **delivered/read receipts**, a **typing indicator**, **file and media sharing**
-(chunked + verified, images previewed), **finding people by pseudo** (local + the
-network's DHT directory), plus the **real-time stream** of timestamped frames —
+(chunked + verified, images previewed), **finding people by name** (the node's
+signed pseudos, whole or partial), plus the **real-time stream** of timestamped
+frames —
 the primitive a voice/video call would use. Everything stays **E2E encrypted**;
 the node sees nothing but routing metadata.
 
@@ -91,7 +92,7 @@ exchange with the sender.
 | `FILE_OFFER`   | msg_id(16), reply_to(16), transfer_id, total, size, sha256, name |
 | `FILE_CHUNK`   | transfer_id, index, data                                      |
 | `STREAM`       | stream_id, seq, ts_ns, payload                                |
-| `PROFILE`      | pseudo, bio, avatar (announces my profile)                    |
+| `PROFILE`      | bio, avatar (announces my profile — **no name**, see below)    |
 | `GROUP_INVITE` | group_id(16), name, roster (a list of node ids)               |
 | `GROUP_TEXT`   | group_id(16), msg_id(16), reply_to(16), text                  |
 | `RECEIPT`      | kind (delivered/read), scope(16), a list of msg_id            |
@@ -99,16 +100,14 @@ exchange with the sender.
 | `EDIT`         | scope(16), msg_id(16), new text                               |
 | `DELETE`       | scope(16), msg_id(16)                                         |
 | `REACTION`     | scope(16), msg_id(16), emoji (empty removes it)               |
-| `DIR_QUERY`    | query_id(4), pseudo ("who is this pseudo?")                   |
-| `DIR_REPLY`    | query_id(4), node_id(20), pseudo (an answer about oneself)    |
 
 Solidity: every application message is validated and bounded; a malformed one is
 ignored, never fatal (the charter applies at app level too). File integrity is
 verified (SHA-256) before delivery. The sensitive primitives are guarded: a
 **reaction/edit/deletion** only acts if it comes from the message's original
 sender; a peer's `EDIT`/`DELETE` only ever alters its own messages. A profile
-(name/bio/avatar) is **learned** from the peer, but the node_id stays the real
-identity.
+(bio/avatar) is **learned** from the peer; the **name is not in it** — that
+comes from the node's signed claim, and the node_id stays the real identity.
 
 ## Who you are talking to (the details panel)
 
@@ -127,40 +126,43 @@ conversation** (the default), in a **window**, or in a **tab**. Stored in this
 browser, like the theme. Under 1180 px the panel takes the conversation's place;
 under 860 px, the whole screen's.
 
-## The social layer (contacts, pseudo, groups, search)
+## The social layer (contacts, groups, search)
 
 All of it lives **in the app** (the node knows nothing of these notions) and is
 persisted by `src/apps/chat_state.py` (`ChatState`, bounded). The built-in chat
 puts it in the node's **encrypted drawer** (`node.app_storage`, section
-`CHAT_APP_ID`, through `DrawerStore`): contacts and pseudos are **never in the
-clear on disk**, and survive a restart. **Message history** (the web UI's feed,
+`CHAT_APP_ID`, through `DrawerStore`): contacts and the names they go by are
+**never in the clear on disk**, and survive a restart. **Message history** (the web UI's feed,
 `ChatBridge`) is persisted in the same place → it no longer vanishes on a
 refresh or a restart. Without `--data`, the drawer stays in RAM (demos/tests). A
 `ChatState(path=…)` in plain JSON remains available for tests and demos with no
 real data.
 
-- **My identity**: `whoami` gives my node id (to copy and share); I can set a
-  **pseudo** (`set_pseudo`), which is announced to my contacts (`PROFILE`).
-- **Contacts**: `add_contact` / `remove_contact` (node id + pseudo). Adding a
-  contact announces my profile to them.
+- **My identity**: `whoami` gives my node id (to copy and share). My **name is
+  the node's**, not chat's: the *Display name* field in the settings dialog
+  writes it through the console (`POST /api/pseudo`), the node signs a claim for
+  it, and chat mirrors it back with the rest. Chat's own profile is the **bio
+  and avatar**, which it does announce to contacts (`PROFILE`).
+- **Contacts**: `add_contact` / `remove_contact` (a node id — no name is passed,
+  because what a node is called is its own to say). Adding a contact announces
+  my profile to them.
 - **Groups**: `create_group(name, members)` mints a `group_id`, adds me to the
   roster and sends a `GROUP_INVITE` to each member. `send_group_text` **fans**
   the message out to every member (members never relay → no loop, no
   amplification). The mesh has no multicast: a group is purely an application
   notion.
-- **Search by pseudo** — three sources combined:
-  1. `find_by_pseudo`: the **local** directory (contacts + pseudos learned
-     through `PROFILE`).
-  2. **The network's DHT directory** (`lookup_pseudo_network`): finds **anyone**
-     who has published their pseudo, **without already being a contact**.
-     `set_pseudo` automatically publishes a signed `pseudo→node_id` claim into
-     the directory (`node.publish_pseudo`, see
-     `Docs/Architecture/routing.md`); a claim can only bind a pseudo to its own
-     author's node_id (no impersonation).
-  3. `dir_query`: a **one-hop** query to contacts; each answers **about itself
-     only** (`DIR_REPLY`, an id ≠ the sender is rejected), never about its own
-     contacts (privacy). The asynchronous answers land in `dir_results` (the UI
-     polls it).
+- **Names come from the node, always.** `refresh_pseudos` re-reads them from the
+  node every `_NAMES_REFRESH` seconds, and on demand; the node holds the signed
+  claims, chat only mirrors them. A name never arrives in a chat message: an
+  unsigned pseudo in a peer-to-peer profile is a peer telling us what to call
+  it, which is exactly how impersonation works. That field is gone, and so are
+  the old `DIR_QUERY` / `DIR_REPLY` messages it fed.
+- **Search by name** — `search_pseudo(query, wide=…)`, which is the node's own
+  ranked search (exact, then prefix, then a word inside the name, then anywhere;
+  case- and accent-insensitive), merged with `find_by_pseudo` over the contacts
+  already on this screen. `wide=True` also asks the network for the exact name,
+  which finds somebody this node has never met. See
+  [`Docs/Pseudos/guide`](../Pseudos/guide).
 
 All of this is drivable from the console's `/chat` sub-page (identity + copying
 the id, contacts, groups, search). See `Docs/WebConsole/guide`.

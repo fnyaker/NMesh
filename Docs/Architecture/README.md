@@ -11,7 +11,10 @@ guides sit next to security and deserve to be read alongside `security.md`:
 [`Docs/AppAuth/guide`](../AppAuth/guide) (the mesh identity as authentication
 for apps) and [`Docs/Apps/fleet`](../Apps/fleet) (the app that uses it to
 authorise remote execution). [`Docs/Updates/guide`](../Updates/guide) is the
-third: the mesh identity signing the node's **own code**.
+third: the mesh identity signing the node's **own code**. And
+[`Docs/Pseudos/guide`](../Pseudos/guide) is the fourth: the same identity
+signing the **name** a node is shown under — a label that decides nothing, and
+is therefore safe to accept from strangers.
 
 ## Map of the code (`src/`)
 
@@ -27,14 +30,15 @@ third: the mesh identity signing the node's **own code**.
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
 | `app_dht.py` | Per-app DHT (overlay): a namespace per `app_id`, entries public (in the clear) or private (AES-256-GCM under a key the app supplies). |
-| `pseudo_dir.py` | Pseudo directory keyed on Kademlia: self-authenticating signed claims (pseudo→node_id bound to the public key), find-by-pseudo across the network. |
+| `pseudo.py` | The one canonical form of a pseudo (NFC, no invisible or directional characters, at most 50). Deterministic, so a receiver can re-derive it and call a mismatch a lie. |
+| `pseudo_dir.py` | Signed name claims (bound to the public key, so a claim can only name its own author) and the bounded book that holds them — indexed by node id *and* by directory key, so it answers both "what is this called?" and "who is called this?". |
 | `transport.py` / `transport_manager.py` | The `BaseTransport`/`BaseServer` interfaces + a registry by URL scheme. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Concrete transports. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Address tracking, STUN, local IPs, **enumerating the attached networks** (interface + real mask, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, then a fallback), a bounded DNS resolver outside the executor. |
 | `webconsole.py` / `webassets/` | The web management console (HTTPS, stdlib). The assets are a package: `ui.py` carries the design system, one module per page, and `nodeview.py` carries the **node view** — mounted by the console's dialog, by chat, by fleet, *and* served at `/node`. See [`Docs/WebConsole/design`](../WebConsole/design). |
 | `app_channel.py` | App sections: `app_id ‖ payload` framing inside the DATA payload, built-in/deployed ids (connector demultiplexing). |
 | `data_connector.py` / `process_launcher.py` / `apps/` | Plugging apps into the mesh (one section per app). |
-| `apps/chat*.py` | The built-in chat app: messages/files/stream (`chat.py`), the social layer of contacts/pseudos/groups (`chat_state.py`), the console UI (`chat_web.py`). |
+| `apps/chat*.py` | The built-in chat app: messages/files/stream (`chat.py`), the social layer of contacts/groups (`chat_state.py`), the console UI (`chat_web.py`). Names are mirrored from the node, never carried in a chat message. |
 | `app_package.py` | Content-addressed packages + a **signed release** (deployment: app_id bound to the ML-DSA author, a signed `ts` for version ordering). |
 | `app_catalog.py` | App store: the network catalogue (signed releases, gossiped, anti-rollback) + a local registry of installed apps. |
 | `app_storage.py` | A local per-app store (the "drawer"): key→value encrypted at rest (AES-256-GCM, a per-app key derived from the identity), isolated by `app_id`, bounded. |

@@ -144,35 +144,72 @@ with the `app_id` coming from the session — see `Docs/DataConnector/guide`).
 Content bounded by `MAX_CONTENT` (≈ one DHT value). The app keeps its own index
 of content keys.
 
-## Pseudo directory (`pseudo_dir.py`)
+## Pseudos: the directory and the gossip (`pseudo.py`, `pseudo_dir.py`)
 
-Finding a node_id **by pseudo**, across the network — which content addressing
-cannot do (there the key is the hash of the value, not of the pseudo). This is a
-**keyed directory** on top of Kademlia, weakening nothing thanks to
-**self-authenticating** records:
+A node's identity is its `NodeID`. A **pseudo** is the changeable label beside
+it: freely chosen, freely changed, and **not unique** — several nodes may wear
+"alice". Nothing the network decides ever depends on one; wherever a pseudo is
+shown, the id is shown with it.
+
+### The form is part of the protocol (`pseudo.py`)
+
+`canonical()` defines the one accepted spelling: NFC, no character in a `C*`
+category (control, format, surrogate, private-use, unassigned — this is what
+removes zero-width and right-to-left characters), only `U+0020` between words,
+single-spaced, no edges, at most **50 characters**. A receiver re-derives it and
+**refuses anything else**: the gap between what was sent and what renders is
+exactly where impersonation lives, so a non-canonical pseudo is treated as
+hostile rather than tidied up (see `security.md`).
+
+`fold()` derives the search key — case- and accent-insensitive, so `jose` finds
+`José`. It is only ever a key; it never replaces what is displayed.
+
+### The claim (`pseudo_dir.py`)
 
 ```
-key    = sha256(DOMAIN : app_id : normalise(pseudo))[:20]
-claim  = app_id ‖ ts ‖ pubkey ‖ pseudo ‖ ML-DSA signature
+claim = version ‖ ts ‖ pubkey ‖ pseudo ‖ ML-DSA signature
+signed over  "nmesh-pseudo-v2" ‖ node_id ‖ ts ‖ pseudo
+key   = sha256("nmesh-pseudo-v2" : fold(pseudo))[:20]
 ```
 
-- The **claimed node_id is derived from the claim's `pubkey`**
+- The **node id is derived from the claim's own `pubkey`**
   (`NodeID.from_public_key`), and the signature is verified under that pubkey. A
-  claim can therefore only bind a pseudo to **its own author's** node_id — it is
-  impossible to map "alice" onto a victim's node_id (the same closure of
-  poisoning/impersonation as the content-addressed store).
-- The receiver **recomputes the key** from the claim's `app_id` + pseudo → it is
-  impossible to file it under an unrelated key.
-- Pseudos are **not unique**: several may claim "alice". The directory keeps a
-  **bounded set of claims per key** (the most recent per node_id wins); a lookup
-  returns all of them — the node_id remains the real identity.
+  claim can therefore only bind a pseudo to **its author's own** id — mapping
+  "alice" onto a victim's id is impossible, the same closure of
+  poisoning/impersonation as the content-addressed store.
+- The receiver **recomputes the key** from the claim's pseudo → filing it under
+  an unrelated key is impossible.
+- `ts` only moves **forward** per node id, so a relay replaying an old claim
+  cannot roll a name back to one its owner abandoned. A rename inside the same
+  second still advances it (`set_pseudo` uses `max(now, previous + 1)`).
 
-`DIR_STORE` / `DIR_FIND` / `DIR_FOUND` packets, replicated to and queried from
-the `_DIR_K` nodes nearest the key, bounded and rate-limited per link. Node API:
-`publish_pseudo(app_id, pseudo)` / `lookup_pseudo(app_id, pseudo)`. From an app:
-`ConnectorClient.publish_pseudo/lookup_pseudo` (the app_id from the session).
-Chat publishes automatically on `set_pseudo` and searches the network on
-`search`.
+### Two planes, one book
+
+`PseudoBook` holds every verified claim, indexed by node id (what is this node
+called?) and by directory key (who is called this?). Bounded **in entries and in
+bytes** — a claim is ~5.3 kB of ML-DSA, so a count-only bound would still be a
+memory-exhaustion vector.
+
+- **Gossip** (`PSEUDO_ANNOUNCE`, a direct type re-stamped at each hop) spreads a
+  claim to everyone reachable, and a freshly authenticated peer is caught up
+  with `_PSEUDO_SYNC_MAX` claims, ours first. Re-gossiped **only when the view
+  changed**, so the epidemic terminates on its own. This is what makes a
+  *partial* search possible at all: you cannot hash half a name into a DHT key,
+  but you can rank the names you already hold.
+- **The keyed directory** (`DIR_STORE` / `DIR_FIND` / `DIR_FOUND`, replicated to
+  and queried from the `_DIR_K` nodes nearest the key plus our direct peers)
+  covers the rest: an **exact** name whose owner sits beyond the gossip horizon.
+
+Both planes are bounded and rate-limited per ingress link, and both charge a bad
+claim to the peer that sent it (`security.md`).
+
+Node API: `set_pseudo` / `pseudo` / `pseudo_of(id)`, `find_pseudo(query)` (local,
+ranked, instant), `search_pseudo(query)` (the same, widened by one exact
+directory lookup), `publish_pseudo()` (replicate our claim into the directory),
+`lookup_pseudo(pseudo)` (exact, network-wide). From an app:
+`ConnectorClient.my_pseudo` / `lookup_pseudo` / `pseudos_of` / `refresh_names` —
+all **read-only**, because the node's name belongs to whoever runs the node, not
+to an app holding a connector token.
 
 ## Target-neighbourhood maintenance and recovery at startup
 

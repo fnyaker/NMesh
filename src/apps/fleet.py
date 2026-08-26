@@ -131,6 +131,7 @@ CONSOLE_TIMEOUT = 25.0            # a whole call, mesh round trip included
 CONSOLE_PATH_MAX = 512
 MAX_CONSOLE_CALLS = 8             # concurrent proxied calls we host, per node
 _ASSERTION_TTL = 300              # a command signature is good for five minutes
+_NAMES_REFRESH = 30.0             # seconds between re-reading names from the node
 
 _LEN = struct.Struct("!H")
 _WINSIZE = struct.Struct("!HH")
@@ -343,6 +344,7 @@ class FleetApp:
         self._events: asyncio.Queue = asyncio.Queue()
         self._listeners: list = []
         self._task: asyncio.Task | None = None
+        self._names_task: asyncio.Task | None = None
         self._reaper: asyncio.Task | None = None
         self._shells: dict[bytes, _Shell] = {}          # agent side
         self._open_shells: dict[bytes, NodeID] = {}     # operator side
@@ -372,18 +374,19 @@ class FleetApp:
         self.facts                              # detect at install time
         self._task = asyncio.create_task(self._loop())
         self._reaper = asyncio.create_task(self._reap_loop())
+        self._names_task = asyncio.create_task(self._names_loop())
 
     async def stop(self) -> None:
-        for task in (self._task, self._reaper):
+        for task in (self._task, self._reaper, self._names_task):
             if task is not None:
                 task.cancel()
-        for task in (self._task, self._reaper):
+        for task in (self._task, self._reaper, self._names_task):
             if task is not None:
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
-        self._task = self._reaper = None
+        self._task = self._reaper = self._names_task = None
         for job in list(self._jobs):
             job.cancel()
         self._jobs.clear()
@@ -391,6 +394,28 @@ class FleetApp:
             shell.close()
         self._shells.clear()
         await self._client.close()
+
+    async def _names_loop(self) -> None:
+        """Keep the connector's name cache warm for the nodes this fleet knows.
+
+        A managed node is a machine somebody has to recognise before acting on
+        it, so the name it publishes belongs in the list next to the id. It is
+        polled, not pushed: a rename anywhere on the mesh then shows up here
+        within a tick, and a node the fleet has never met simply has no name."""
+        refresh = getattr(self._client, "refresh_names", None)
+        if refresh is None:
+            return
+        while True:
+            try:
+                ids = [entry["id"] for entry in self.state.managed()]
+                ids += [entry["id"] for entry in self.state.operators()]
+                if ids:
+                    await refresh(ids)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(_NAMES_REFRESH)
 
     def add_listener(self, fn) -> None:
         self._listeners.append(fn)

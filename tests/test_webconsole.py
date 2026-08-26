@@ -1461,6 +1461,111 @@ class TestRestartingOntoNewCode:
             console.stop(); await node.stop()
 
 
+class TestPseudoEndpoints:
+    """Naming this node, and finding others by name.
+
+    The console owns no decision here either: the node canonicalises, signs and
+    announces. What this layer owns is that a signed-in operator asked, and that
+    a refusal comes back as a refusal rather than a half-applied rename."""
+
+    async def test_reading_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/pseudo", None)
+            assert status == 401
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/pseudo", None, {"pseudo": "x"})
+            assert status == 401
+            assert node.pseudo == ""
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_reading_reports_the_name_the_id_and_the_limit(self):
+        node, console = await _make_console()
+        node.set_pseudo("Alice Ada")
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/pseudo", token)
+            assert status == 200
+            assert body["pseudo"] == "Alice Ada"
+            assert body["id"] == node.id.raw.hex()
+            assert body["max"] == 50
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_renaming_takes_effect_on_the_node(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/pseudo", token,
+                {"pseudo": "  Alice   Ada  "})
+            assert status == 200 and body["pseudo"] == "Alice Ada"
+            assert node.pseudo == "Alice Ada"
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_an_empty_name_removes_it(self):
+        node, console = await _make_console()
+        node.set_pseudo("alice")
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/pseudo", token, {"pseudo": ""})
+            assert status == 200 and body["pseudo"] == ""
+            assert node.pseudo == "" and node.pseudo_of(node.id) == ""
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_name_the_mesh_would_refuse_is_refused_here(self):
+        node, console = await _make_console()
+        node.set_pseudo("keep me")
+        try:
+            _, token = await _login(console)
+            for bad in ("x" * 51, "ali\u202ece", "bo\u200bb", 42):
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/pseudo", token, {"pseudo": bad})
+                assert status == 400 and body["error"]
+            # …and the rename never half-happened.
+            assert node.pseudo == "keep me"
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_searching_is_ranked_and_partial(self):
+        node, console = await _make_console()
+        node.set_pseudo("Alice Ada")
+        try:
+            _, token = await _login(console)
+            for query in ("ali", "ADA", "alice%20ada"):
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "GET", "/api/pseudo?q=" + query, token)
+                assert status == 200
+                assert [r["id"] for r in body["results"]] == [node.id.raw.hex()]
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/pseudo?q=nobody", token)
+            assert status == 200 and body["results"] == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_name_is_reported_beside_every_node(self):
+        node, console = await _make_console()
+        node.set_pseudo("mine")
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert status == 200 and body["pseudo"] == "mine"
+            # Peers, known nodes and the map all carry the field, so no page has
+            # to guess where a name comes from.
+            assert all("pseudo" in peer for peer in body["peers"])
+            assert all("pseudo" in row for row in body["routing"])
+            assert all("pseudo" in row for row in body["topology"]["direct"])
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestReleaseEndpoints:
     """Publishing, pinning and installing code over the mesh, from the console.
 

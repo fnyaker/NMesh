@@ -32,11 +32,9 @@ _TEXT = 0x01
 _FILE_OFFER = 0x02
 _FILE_CHUNK = 0x03
 _STREAM = 0x04
-_PROFILE = 0x05        # announce my pseudo + bio + avatar
+_PROFILE = 0x05        # announce my bio + avatar (the name comes from the node)
 _GROUP_INVITE = 0x06   # define/join a group (roster)
 _GROUP_TEXT = 0x07     # a message addressed to a group
-_DIR_QUERY = 0x08      # "who is <pseudo>?" (answered only about oneself)
-_DIR_REPLY = 0x09      # "<pseudo> is <node_id>"
 _RECEIPT = 0x0A        # delivered/read receipt for a set of msg ids
 _TYPING = 0x0B         # typing / stopped-typing indicator
 _EDIT = 0x0C           # replace the text of one of my earlier messages
@@ -61,8 +59,8 @@ _MAX_CHUNKS = _MAX_FILE // 1024
 _MAX_TRANSFERS = 64
 _MAX_NAME = 512
 
-_MAX_PSEUDO_BYTES = 256
 _MAX_BIO_BYTES = 1024
+_NAMES_REFRESH = 30.0   # seconds between re-reading names from the node
 _MAX_AVATAR_BYTES = 48 * 1024
 _MAX_GROUP_NAME_BYTES = 256
 _MAX_GROUP_MEMBERS = 256
@@ -109,7 +107,6 @@ class Frame:
 @dataclass
 class ProfileReceived:
     src: NodeID
-    pseudo: str
     bio: str = ""
     avatar: bytes = b""
 
@@ -128,13 +125,6 @@ class GroupInvited:
     group_id: bytes
     name: str
     members: list = field(default_factory=list)   # list[NodeID]
-
-
-@dataclass
-class DirResult:
-    query_id: int
-    node_id: NodeID
-    pseudo: str
 
 
 @dataclass
@@ -218,6 +208,7 @@ class ChatApp:
         self._transfers: dict[tuple[bytes, int], _Transfer] = {}
         self._next_tid = 1
         self._task: asyncio.Task | None = None
+        self._names_task: asyncio.Task | None = None
 
     # -- event fan-out (everything the app receives flows through here) ----
 
@@ -245,15 +236,34 @@ class ChatApp:
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
+        self._names_task = asyncio.create_task(self._names_loop())
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
+        for attr in ("_task", "_names_task"):
+            task = getattr(self, attr, None)
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
-            self._task = None
+            setattr(self, attr, None)
+
+    async def _names_loop(self) -> None:
+        """Keep the mirrored names fresh.
+
+        Pseudos change, and the node learns new ones as it meets nodes; polling
+        the node for them is far cheaper than any push, and it means a rename
+        anywhere on the mesh shows up here within a tick."""
+        while True:
+            try:
+                await self.refresh_pseudos()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(_NAMES_REFRESH)
         await self._client.close()
 
     async def next_event(self):
@@ -328,25 +338,22 @@ class ChatApp:
     # -- social layer: profile, contacts, groups, lookup ------------------
 
     async def send_profile(self, target: NodeID) -> None:
-        pseudo = self.state.pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES]
+        """Send what is genuinely ours to say: a bio and an avatar.
+
+        The **name is not in here**. It used to be, and that was a hole: an
+        unsigned pseudo in a peer-to-peer message is a peer telling us what to
+        call it, which is exactly how you impersonate somebody. Names now come
+        only from the node's signed claims (:mod:`src.pseudo_dir`)."""
         bio = self.state.bio.encode("utf-8")[:_MAX_BIO_BYTES]
         avatar = self.state.avatar[:_MAX_AVATAR_BYTES]
-        body = (bytes([_PROFILE]) + struct.pack("!H", len(pseudo)) + pseudo
-                + struct.pack("!H", len(bio)) + bio + avatar)
+        body = (bytes([_PROFILE]) + struct.pack("!H", len(bio)) + bio + avatar)
         await self._client.send(target, body)
 
-    async def set_pseudo(self, pseudo: str, *, announce: bool = True) -> None:
-        self.state.set_pseudo(pseudo)
-        if announce:
-            await self.announce_profile()
-            await self._publish_pseudo_dir()
-
-    async def set_profile(self, *, pseudo: str | None = None, bio: str | None = None,
+    async def set_profile(self, *, bio: str | None = None,
                          avatar: bytes | None = None, announce: bool = True) -> None:
-        self.state.set_profile(pseudo=pseudo, bio=bio, avatar=avatar)
+        self.state.set_profile(bio=bio, avatar=avatar)
         if announce:
             await self.announce_profile()
-            await self._publish_pseudo_dir()
 
     async def announce_profile(self) -> None:
         for id_hex in [c["id"] for c in self.state.snapshot()["contacts"]]:
@@ -357,21 +364,41 @@ class ChatApp:
                 except Exception:
                     pass  # a dead contact must not stop the announce loop
 
-    async def _publish_pseudo_dir(self) -> None:
-        fn = getattr(self._client, "publish_pseudo", None)
-        if fn is None or not self.state.pseudo:
+    async def refresh_pseudos(self) -> None:
+        """Re-read our own name and our contacts' from the node.
+
+        The node holds the signed claims; chat only mirrors them, so this is the
+        single point where names enter the app. Failures are silent: an app that
+        cannot reach the node for a moment should show the ids it already has,
+        not fall over."""
+        mine = getattr(self._client, "my_pseudo", None)
+        if mine is not None:
+            try:
+                self.state.set_pseudo(await mine())
+            except Exception:
+                pass
+        resolve = getattr(self._client, "refresh_names", None)
+        if resolve is None:
+            return
+        snap = self.state.snapshot()
+        ids = [c["id"] for c in snap["contacts"]] + [k["id"] for k in snap["known"]]
+        if not ids:
             return
         try:
-            await fn(self.state.pseudo)
+            names = await resolve(ids)
         except Exception:
-            pass
+            return
+        for id_hex, pseudo in names.items():
+            self.state.learn_pseudo(id_hex, pseudo)
 
-    async def lookup_pseudo_network(self, pseudo: str) -> list[dict]:
+    async def search_pseudo(self, query: str, *, wide: bool = False) -> list[dict]:
+        """Find nodes by pseudo, whole or partial, best match first. ``wide``
+        also asks the network for an exact match."""
         fn = getattr(self._client, "lookup_pseudo", None)
         if fn is None:
             return []
         try:
-            results = await fn(pseudo)
+            results = await fn(query, wide=wide)
         except Exception:
             return []
         for r in results:
@@ -380,9 +407,12 @@ class ChatApp:
                 self.state.learn_pseudo(nid, ps)
         return results
 
-    async def add_contact(self, target: NodeID, pseudo: str = "",
-                          *, announce: bool = True) -> bool:
-        ok = self.state.add_contact(target.raw.hex(), pseudo)
+    async def add_contact(self, target: NodeID, *, announce: bool = True) -> bool:
+        """Add a contact by id. No name is passed: what this node is called is
+        its own to say, and it says it in a signed claim."""
+        ok = self.state.add_contact(target.raw.hex())
+        if ok:
+            await self.refresh_pseudos()
         if ok and announce and (self.node_id is None or target != self.node_id):
             try:
                 await self.send_profile(target)
@@ -430,18 +460,6 @@ class ChatApp:
                 except Exception:
                     pass
         return mid
-
-    async def dir_query(self, pseudo: str) -> int:
-        qid = secrets.randbits(32)
-        body = bytes([_DIR_QUERY]) + struct.pack("!I", qid) + pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES]
-        for c in self.state.snapshot()["contacts"]:
-            target = NodeID(bytes.fromhex(c["id"]))
-            if self.node_id is None or target != self.node_id:
-                try:
-                    await self._client.send(target, body)
-                except Exception:
-                    pass
-        return qid
 
     # -- receiving --------------------------------------------------------
 
@@ -563,22 +581,14 @@ class ChatApp:
     def _on_profile(self, src: NodeID, body: bytes) -> None:
         if len(body) < 2:
             return
-        (pl,) = struct.unpack_from("!H", body, 0)
+        (bl,) = struct.unpack_from("!H", body, 0)
         off = 2
-        if pl > _MAX_PSEUDO_BYTES or off + pl + 2 > len(body):
-            return
-        pseudo = body[off:off + pl].decode("utf-8", "replace").strip()
-        off += pl
-        (bl,) = struct.unpack_from("!H", body, off)
-        off += 2
         if bl > _MAX_BIO_BYTES or off + bl > len(body):
             return
         bio = body[off:off + bl].decode("utf-8", "replace")
         avatar = body[off + bl:off + bl + _MAX_AVATAR_BYTES]
-        if pseudo:
-            self.state.learn_pseudo(src.raw.hex(), pseudo)
         self.state.learn_profile(src.raw.hex(), bio=bio, avatar=avatar)
-        self._emit(ProfileReceived(src, pseudo, bio, avatar))
+        self._emit(ProfileReceived(src, bio, avatar))
 
     def _on_group_invite(self, src: NodeID, body: bytes) -> None:
         if len(body) < GROUP_ID_LEN + 2:
@@ -611,29 +621,6 @@ class ChatApp:
         text = body[off:off + _MAX_TEXT]
         self._emit(GroupMessage(gid, src, text.decode("utf-8", "replace"), mid, reply))
 
-    def _on_dir_query(self, src: NodeID, body: bytes) -> None:
-        if len(body) < 4 or self.node_id is None:
-            return
-        (qid,) = struct.unpack_from("!I", body, 0)
-        pseudo = body[4:4 + _MAX_PSEUDO_BYTES].decode("utf-8", "replace")
-        if self.state.matches_my_pseudo(pseudo):
-            reply = (bytes([_DIR_REPLY]) + struct.pack("!I", qid) + self.node_id.raw
-                     + self.state.pseudo.encode("utf-8")[:_MAX_PSEUDO_BYTES])
-            asyncio.create_task(self._safe_send(src, reply))
-
-    def _on_dir_reply(self, src: NodeID, body: bytes) -> None:
-        if len(body) < 4 + 20:
-            return
-        (qid,) = struct.unpack_from("!I", body, 0)
-        node_id = NodeID(body[4:24])
-        pseudo = body[24:24 + _MAX_PSEUDO_BYTES].decode("utf-8", "replace").strip()
-        # A peer may only assert its own id → the reply's id must be the sender.
-        if node_id != src:
-            return
-        if pseudo:
-            self.state.learn_pseudo(node_id.raw.hex(), pseudo)
-        self._emit(DirResult(qid, node_id, pseudo))
-
     async def _safe_send(self, target: NodeID, payload: bytes) -> None:
         try:
             await self._client.send(target, payload)
@@ -649,8 +636,6 @@ _HANDLERS = {
     _PROFILE: ChatApp._on_profile,
     _GROUP_INVITE: ChatApp._on_group_invite,
     _GROUP_TEXT: ChatApp._on_group_text,
-    _DIR_QUERY: ChatApp._on_dir_query,
-    _DIR_REPLY: ChatApp._on_dir_reply,
     _RECEIPT: ChatApp._on_receipt,
     _TYPING: ChatApp._on_typing,
     _EDIT: ChatApp._on_edit,

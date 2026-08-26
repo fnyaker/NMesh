@@ -18,8 +18,7 @@ So an app declares what it exposes, once, next to itself:
             operation("peer", "What chat knows about a node",
                       [param("node", "node")]),
             operation("contact", "Add a node to the address book",
-                      [param("node", "node"), param("pseudo", "text", required=False)],
-                      changes=True),
+                      [param("node", "node")], changes=True),
         )
 
         def api_peer(self, node):
