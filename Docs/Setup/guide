@@ -1,148 +1,147 @@
-# Installation — `./install.sh` et `./start.sh`
+# Installation — `./install.sh` and `./start.sh`
 
-Deux scripts, un seul cerveau :
+Two scripts, one brain:
 
-| | Ce que ça fait | Quand |
+| | What it does | When |
 |---|---|---|
-| `./start.sh` | installe les dépendances puis lance le nœud **depuis l'arbre courant** | essai, développement, conteneur |
-| `./install.sh` | copie l'arbre dans un endroit durable, pose un service de démarrage, puis appelle `start.sh` | **méthode recommandée** sur une machine qui doit héberger un nœud |
+| `./start.sh` | installs the dependencies then runs the node **from the current tree** | trying it out, development, a container |
+| `./install.sh` | copies the tree somewhere durable, lays down a startup service, then calls `start.sh` | **the recommended method** on a machine meant to host a node |
 
-`install.sh` ne réimplémente **rien** de `start.sh` : il lui délègue tout le
-travail de dépendances (`NMESH_SETUP_ONLY=1 ./start.sh`) et le service qu'il
-écrit pointe sur `start.sh`, jamais sur `python` directement. Conséquence
-voulue : un nœud qui redémarre revérifie son installation et se répare seul
-après une mise à jour de distro ou un venv cassé. Docker reste possible
-(`docker/`), mais ce n'est plus la voie conseillée pour une machine dédiée.
+`install.sh` reimplements **nothing** from `start.sh`: it delegates all the
+dependency work to it (`NMESH_SETUP_ONLY=1 ./start.sh`), and the service it
+writes points at `start.sh`, never at `python` directly. The intended
+consequence: a node that restarts re-checks its own installation and repairs
+itself after a distro upgrade or a broken venv. Docker is still possible
+(`docker/`), but it is no longer the advised route for a dedicated machine.
 
 ```bash
-./install.sh                        # installe, active au boot, lance
-./install.sh --fleet                # …et active l'app fleet
-./install.sh --prefix /srv/nmesh    # choisir l'emplacement
-./install.sh --no-start             # installe et active, sans lancer
-./install.sh --uninstall            # retire le service et les fichiers
-./install.sh --uninstall --purge    # …et l'identité + l'état du nœud
+./install.sh                        # installs, enables at boot, runs
+./install.sh --fleet                # …and enables the fleet app
+./install.sh --prefix /srv/nmesh    # choose where it lands
+./install.sh --no-start             # installs and enables, without running
+./install.sh --uninstall            # removes the service and the files
+./install.sh --uninstall --purge    # …and the node's identity and state
 ```
 
-Tout autre argument est passé au nœud, exactement comme avec `start.sh`.
+Any other argument is passed to the node, exactly as with `start.sh`.
 
-### Où ça atterrit
+### Where it lands
 
-| | Arbre | État (identité, certs, sessions) |
+| | Tree | State (identity, certs, sessions) |
 |---|---|---|
 | root | `/opt/nmesh` | `/var/lib/nmesh` |
-| utilisateur | `~/.local/share/nmesh` | `~/.local/share/nmesh/data` |
+| user | `~/.local/share/nmesh` | `~/.local/share/nmesh/data` |
 
-Surcharges : `--prefix` / `NMESH_PREFIX`, `--data` / `NMESH_DATA`,
-`--service` / `NMESH_SERVICE` (défaut `nmesh`), `--run-as` / `NMESH_USER`.
+Overrides: `--prefix` / `NMESH_PREFIX`, `--data` / `NMESH_DATA`,
+`--service` / `NMESH_SERVICE` (default `nmesh`), `--run-as` / `NMESH_USER`.
 
-L'arbre copié exclut `.git`, `.venv`, `data/` et les `__pycache__` : ni
-historique, ni environnement virtuel de la machine d'origine, ni état d'un
-autre nœud ne voyagent.
+The copied tree excludes `.git`, `.venv`, `data/` and the `__pycache__`
+directories: neither history, nor the origin machine's virtual environment, nor
+another node's state travels.
 
-### Le nœud a son propre compte
+### The node has an account of its own
 
-Le répertoire d'état contient la **clé d'identité** du nœud, son store de
-sessions chiffré et le hash du mot de passe de la console. Le faire tourner
-sous le compte de la personne qui l'a installé, c'est donner tout ça à
-n'importe quel processus de ce compte — navigateur compris.
+The state directory holds the node's **identity key**, its encrypted session
+store and the console password's hash. Running it under the account of whoever
+installed it hands all of that to every process of that account — the browser
+included.
 
-Une installation **root** crée donc un compte système `nmesh` (pas de shell de
-login, pas de mot de passe, rien d'autre sur la machine ne lui appartient) et
-lui donne l'arbre **et** l'état, tous deux en **mode 700**. Rien hormis ce
-compte et root ne peut lire la clé d'identité.
+A **root** installation therefore creates a system account `nmesh` (no login
+shell, no password, nothing else on the machine belongs to it) and gives it the
+tree **and** the state, both **mode 700**. Nothing but that account and root can
+read the identity key.
 
-- `--run-as root` : ne pas créer de compte, le nœud tourne en root.
-- `--run-as quelquun` : utiliser un compte existant.
-- `NMESH_ACCOUNT=nom` : changer le nom du compte créé.
-- Compte impossible à créer (distro exotique) → avertissement, repli sur le
-  comportement précédent ; l'installation n'échoue pas pour autant.
-- Installation **non-root** : aucun compte ne peut être créé, tout appartient à
-  l'utilisateur courant en 700, et le script le dit clairement.
-- `--uninstall --purge` supprime aussi le compte, puisque plus rien ne lui
-  appartient. Sans `--purge` il est gardé : il possède l'état conservé.
+- `--run-as root`: create no account, the node runs as root.
+- `--run-as someone`: use an existing account.
+- `NMESH_ACCOUNT=name`: change the name of the account created.
+- Account impossible to create (an exotic distro) → a warning, falling back on
+  the previous behaviour; the installation does not fail for it.
+- A **non-root** installation: no account can be created, everything belongs to
+  the current user in 700, and the script says so plainly.
+- `--uninstall --purge` removes the account too, since nothing belongs to it any
+  more. Without `--purge` it is kept: it owns the state being kept.
 
-L'unité systemd générée ajoute `NoNewPrivileges`, `PrivateTmp`,
-`PrivateDevices` et `ProtectSystem=full`.
+The generated systemd unit adds `NoNewPrivileges`, `PrivateTmp`,
+`PrivateDevices` and `ProtectSystem=full`.
 
-**Le confinement suit le droit d'update**, et ce n'est pas une préférence :
-`NoNewPrivileges=yes` fait refuser par le noyau **tout binaire setuid** pour ce
-processus et ses enfants — donc `sudo`, donc le wrapper d'update, avec un
-message qui parle d'un drapeau noyau et n'indique rien à faire. Et
-`ProtectSystem=full` monte `/usr` en lecture seule, où un gestionnaire de
-paquets ne peut rien écrire. Une node installée avec `--allow-update` reçoit
-donc une unité relâchée sur ces trois directives (`PrivateTmp` reste), avec un
-commentaire dans l'unité qui explique pourquoi. Repasser sans le drapeau retire
-la règle sudoers **et** remet l'unité durcie : les deux ne peuvent pas être
-choisis séparément, sinon l'un défait l'autre en silence.
+**The confinement follows the update right**, and that is not a preference:
+`NoNewPrivileges=yes` makes the kernel refuse **every setuid binary** for that
+process and its children — so `sudo`, so the update wrapper, with a message that
+talks about a kernel flag and suggests nothing to do about it. And
+`ProtectSystem=full` mounts `/usr` read-only, where a package manager can write
+nothing. A node installed with `--allow-update` therefore gets a unit relaxed on
+those three directives (`PrivateTmp` stays), with a comment in the unit
+explaining why. Reinstalling without the flag removes the sudoers rule **and**
+restores the hardened unit: the two cannot be chosen separately, or one would
+silently undo the other.
 
-Symptôme et correctif : [`FAQ.md`](../../FAQ.md).
+The symptom and the fix: [`FAQ.md`](../../FAQ.md).
 
-Compromis assumé : l'arbre appartient au compte du nœud et non à root, donc le
-processus peut réécrire son propre code. C'est le prix de l'auto-réparation au
-démarrage et de la mise à jour depuis la console — deux choses qu'un arbre
-root-only casserait.
+An accepted trade-off: the tree belongs to the node's account and not to root,
+so the process can rewrite its own code. That is the price of self-repair at
+startup and of updating from the console — two things a root-only tree would
+break.
 
-### L'installation est autonome
+### The installation stands on its own
 
-`HOME` est épinglé sur le répertoire d'installation, pour le `start.sh` de
-l'installation **comme** pour le service. Conséquence : `liboqs` est construit
-dans `<prefix>/_oqs` au lieu du home de qui installe. C'est ce qui permet au
-nœud — qui tourne sous un compte système sans home utilisable — de retrouver sa
-bibliothèque de crypto au démarrage et de se réparer seul. Le venv est déjà
-dans `<prefix>/.venv` ; l'arbre de build de liboqs est effacé après coup.
+`HOME` is pinned to the installation directory, for the installation's
+`start.sh` **as well as** for the service. The consequence: `liboqs` is built in
+`<prefix>/_oqs` instead of the installer's home. That is what lets the node —
+running under a system account with no usable home — find its crypto library at
+startup and repair itself. The venv is already in `<prefix>/.venv`; the liboqs
+build tree is deleted afterwards.
 
-Un service n'hérite d'aucun environnement de session : ni `HOME`, ni `USER`.
-`start.sh` ne déréférence donc plus jamais `$HOME` nu — sous `set -u` cela
-tuait le script au démarrage (*« HOME : variable sans liaison »*) et le nœud
-repartait en boucle de redémarrage. `node_home()` résout un répertoire
-réellement inscriptible : l'environnement s'il est utilisable, sinon l'entrée
-passwd du compte, sinon le répertoire d'installation. Conséquence pratique :
-un nœud dont l'unité est ancienne (sans `Environment=HOME=`) démarre quand
-même.
+A service inherits no session environment: neither `HOME` nor `USER`. `start.sh`
+therefore never dereferences a bare `$HOME` any more — under `set -u` that
+killed the script at startup (*"HOME: unbound variable"*) and the node went into
+a restart loop. `node_home()` resolves a genuinely writable directory: the
+environment if it is usable, otherwise the account's passwd entry, otherwise the
+installation directory. In practice: a node whose unit is old (with no
+`Environment=HOME=`) still starts.
 
-### liboqs n'est compilé qu'une fois par machine
+### liboqs is compiled once per machine
 
-Compiler liboqs prend plusieurs minutes et produit la même bibliothèque à
-chaque fois. Elle est donc **mise en cache**, indexée par la version du wrapper
-`liboqs-python` :
+Compiling liboqs takes several minutes and produces the same library every time.
+It is therefore **cached**, indexed by the version of the `liboqs-python`
+wrapper:
 
 | | Cache |
 |---|---|
 | root | `/var/cache/nmesh/liboqs-<version>` |
-| utilisateur | `${XDG_CACHE_HOME:-~/.cache}/nmesh/liboqs-<version>` |
+| user | `${XDG_CACHE_HOME:-~/.cache}/nmesh/liboqs-<version>` |
 
-Un nouvel emplacement d'installation (`--prefix` différent, passage d'une
-install utilisateur à `/opt`, second nœud sur la même machine) **réutilise** ce
-cache au lieu de recompiler. `start.sh` regarde aussi les préfixes que
-`install.sh` lui indique (`OQS_REUSE_FROM`, liste séparée par `:`) : le home de
-qui installe, son ancienne install utilisateur, `/opt/nmesh`.
+A new installation location (a different `--prefix`, moving from a user install
+to `/opt`, a second node on the same machine) **reuses** that cache instead of
+recompiling. `start.sh` also looks at the prefixes `install.sh` points it at
+(`OQS_REUSE_FROM`, a `:`-separated list): the installer's home, their old user
+installation, `/opt/nmesh`.
 
-La réutilisation n'est jamais décidée sur un numéro de version ou un nom de
-fichier : le wrapper **charge** réellement la bibliothèque candidate et les deux
-algorithmes requis répondent, sinon on recompile. Après la copie, la
-vérification est refaite **à destination**. Une montée de version du wrapper
-change la clé du cache et force donc un vrai rebuild — wrapper et bibliothèque
-doivent rester appariés.
+Reuse is never decided on a version number or a file name: the wrapper actually
+**loads** the candidate library and both required algorithms answer, or we
+recompile. After the copy, the check is run again **at the destination**. A
+wrapper version bump changes the cache key and therefore forces a real rebuild —
+wrapper and library must stay paired.
 
-Le remplissage du cache est *best effort* : un `/var/cache` en lecture seule ou
-plein coûte un rebuild à la prochaine install, jamais un échec de celle-ci.
+Filling the cache is *best effort*: a read-only or full `/var/cache` costs a
+rebuild at the next install, never a failure of this one.
 
-Réglages : `NMESH_LIBOQS_CACHE=chemin` (emplacement du cache),
-`OQS_REUSE_FROM=a:b:c` (préfixes à examiner), `OQS_INSTALL_PATH` (destination).
+Settings: `NMESH_LIBOQS_CACHE=path` (where the cache lives),
+`OQS_REUSE_FROM=a:b:c` (prefixes to examine), `OQS_INSTALL_PATH` (the
+destination).
 
-Mettre à jour le nœud (console ou réinstallation) ne touche pas à `_oqs` : rien
-n'est recompilé.
+Updating the node (from the console or by reinstalling) does not touch `_oqs`:
+nothing is recompiled.
 
-### Le fichier de configuration
+### The configuration file
 
-Tout ce que le lanceur accepte en option vit dans **`<prefix>/nmesh.conf`**
-(par défaut `/opt/nmesh/nmesh.conf`). C'est ce fichier que `install.sh` écrit et
-que la console édite : les options d'un nœud installé en service ne sont plus
-enterrées dans une unité que personne ne veut ouvrir.
+Everything the launcher accepts as an option lives in **`<prefix>/nmesh.conf`**
+(by default `/opt/nmesh/nmesh.conf`). That is the file `install.sh` writes and
+the console edits: the options of a node installed as a service are no longer
+buried in a unit nobody wants to open.
 
-Ordre de priorité : **ligne de commande > fichier > défaut**. Un drapeau passé
-explicitement gagne toujours, donc une unité existante qui passe des arguments
-continue de se comporter exactement comme avant.
+Precedence: **command line > file > default**. An explicitly passed flag always
+wins, so an existing unit that passes arguments keeps behaving exactly as
+before.
 
 ```
 # Enable the fleet app (remote management, can open a shell)
@@ -151,62 +150,62 @@ console_port = 8787
 listen = 0.0.0.0:9000
 ```
 
-- `./install.sh --fleet --console-host 0.0.0.0` écrit ces réglages dans le
-  fichier au lieu de les mettre dans `ExecStart` ; ce que le fichier ne sait pas
-  exprimer reste sur la ligne de commande, rien n'est perdu en silence.
-  La fusion est faite par le code du nœud (`scripts/nmesh_config.py`), pas
-  réimplémentée en shell : un seul analyseur, un seul validateur.
-- Réinstaller ne l'écrase pas : seules les options réellement redonnées changent.
-- Il survit aux mises à jour (l'updater ne remplace que le code et la doc) et à
-  une réinstallation (`copy_tree` n'efface rien).
-- Emplacement surchargeable : `--config chemin` ou `NMESH_CONFIG`.
-- Écrit en **0600**, atomiquement, comme la clé d'identité.
+- `./install.sh --fleet --console-host 0.0.0.0` writes those settings into the
+  file instead of putting them in `ExecStart`; what the file cannot express
+  stays on the command line, nothing is silently lost. The merge is done by the
+  node's own code (`scripts/nmesh_config.py`), not reimplemented in shell: one
+  parser, one validator.
+- Reinstalling does not overwrite it: only the options actually given again
+  change.
+- It survives updates (the updater replaces only code and documentation) and a
+  reinstallation (`copy_tree` erases nothing).
+- The location can be overridden: `--config path` or `NMESH_CONFIG`.
+- Written **0600**, atomically, like the identity key.
 
-Deux réglages ne sont **pas** éditables depuis la console, délibérément :
+Two settings are deliberately **not** editable from the console:
 
-| | Pourquoi |
+| | Why |
 |---|---|
-| `launch` | il choisit ce que le nœud **exécute** ; ça appartient à qui détient le fichier, pas à un formulaire web. La console l'affiche pour que personne ne soit surpris de ce qui tourne |
-| `data` | c'est l'installeur qui décide où vit l'état |
+| `launch` | it chooses what the node **runs**; that belongs to whoever holds the file, not to a web form. The console displays it so nobody is surprised by what is running |
+| `data` | the installer decides where the state lives |
 
-Le mot de passe de la console n'y figure pas non plus : ce serait un
-identifiant en clair dans un fichier fait pour être lu et édité. Il reste dans
-`$NMESH_CONSOLE_PASSWORD`, ou généré et affiché une fois.
+The console password is not in there either: that would be a credential in the
+clear in a file meant to be read and edited. It stays in
+`$NMESH_CONSOLE_PASSWORD`, or is generated and shown once.
 
-Deux choses que le lanceur ne fait **plus** :
+Two things the launcher no longer does:
 
-- `start.sh` n'injecte plus `--udp 9001 --stun` à chaque lancement. Comme un
-  drapeau bat le fichier par construction, `udp`, `no_udp` et `stun` pouvaient
-  être réglés dans `nmesh.conf` et étaient ignorés en silence — le fichier
-  décrivait un nœud qui se comportait autrement. Ces défauts vivent maintenant
-  dans `src/config.py`, à un seul endroit. `NMESH_UDP_PORT` reste honoré :
-  demander un port par l'environnement est une demande explicite.
-- Conséquence assumée : `stun` vaut **`true`** par défaut, parce que c'est ce
-  que tout nœud lancé par `start.sh` a toujours fait. Lancer
-  `scripts/nmesh_node.py` directement active donc STUN aussi désormais, là où il
-  était éteint — un seul défaut, visible et modifiable, au lieu de deux qui se
-  contredisaient.
+- `start.sh` no longer injects `--udp 9001 --stun` on every run. Since a flag
+  beats the file by construction, `udp`, `no_udp` and `stun` could be set in
+  `nmesh.conf` and were silently ignored — the file described a node that
+  behaved otherwise. Those defaults now live in `src/config.py`, in one place.
+  `NMESH_UDP_PORT` is still honoured: asking for a port through the environment
+  is an explicit request.
+- An accepted consequence: `stun` defaults to **`true`**, because that is what
+  every node launched by `start.sh` has always done. Running
+  `scripts/nmesh_node.py` directly therefore turns STUN on too, where it used to
+  be off — one default, visible and changeable, instead of two that contradicted
+  each other.
 
-Le nœud affiche au démarrage les problèmes du fichier **et** les réglages
-écrasés par la ligne de commande (`Config ⚠`). Un fichier ignoré en silence est
-exactement la panne qu'on veut voir.
+At startup the node prints the file's problems **and** the settings overridden
+by the command line (`Config ⚠`). A silently ignored file is exactly the failure
+you want to see.
 
-Lecture défensive, comme toute entrée du processus : taille et nombre de lignes
-bornés, valeurs validées une par une, clés inconnues signalées et ignorées.
-**Un fichier incompréhensible est signalé puis écarté, jamais fatal** — un nœud
-qui refuse de démarrer est un pire résultat qu'un nœud sur ses valeurs par
-défaut. Les problèmes s'affichent au démarrage *et* dans la console.
+Defensive reading, like every input to the process: size and line count bounded,
+values validated one by one, unknown keys reported and ignored. **An
+incomprehensible file is reported and then set aside, never fatal** — a node
+that refuses to start is a worse outcome than a node on its defaults. The
+problems appear at startup *and* in the console.
 
-Édition depuis la console : **Settings → Configuration**. Le formulaire est
-construit à partir de ce que le nœud déclare, jamais d'une liste codée dans la
-page — un réglage ajouté côté nœud apparaît tout seul, et un réglage que le nœud
-refuse d'exposer ne peut pas être inventé depuis le navigateur. Rien n'est
-appliqué à chaud : les changements prennent effet au redémarrage du nœud, et
-l'interface le dit.
+Editing from the console: **Settings → Configuration**. The form is built from
+what the node declares, never from a list hard-coded in the page — a setting
+added on the node side appears by itself, and a setting the node refuses to
+expose cannot be invented from the browser. Nothing is applied live: changes
+take effect when the node restarts, and the interface says so.
 
-#### Réglages de transport (`schéma.option`)
+#### Transport settings (`scheme.option`)
 
-Le fichier accepte aussi des clés **namespacées**, une section par medium :
+The file also accepts **namespaced** keys, one section per medium:
 
 ```
 tcp.connect_timeout = 6
@@ -215,189 +214,180 @@ udp.keepalive_interval = 40
 spool.poll_interval = 0.5
 ```
 
-Le fichier les porte **en texte et ne les valide pas** : le medium est la seule
-chose qui sait ce qu'il prend. Au démarrage elles sont distribuées avant que
-quoi que ce soit n'écoute ou ne compose ; une valeur refusée ou un schéma inconnu
-sort en `Config ⚠` et reste à son défaut. Côté console : **Network →
-Reachability**, un panneau par transport, rendu à partir de ce que le transport
-déclare. Voir
+The file carries them **as text and does not validate them**: the medium is the
+only thing that knows what it takes. At startup they are distributed before
+anything listens or dials; a refused value or an unknown scheme comes out as
+`Config ⚠` and stays at its default. In the console: **Network → Reachability**,
+one panel per transport, rendered from what the transport declares. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
 
-### Laisser le nœud lancer les mises à jour système
+### Letting the node run system updates
 
 ```bash
-./install.sh --allow-update          # accorde le droit
-./install.sh                         # relancer sans le drapeau le retire
+./install.sh --allow-update          # grants the right
+./install.sh                         # running it again without the flag removes it
 ```
 
-La capability `update` de l'app fleet a besoin de root **sans humain devant**.
-Le droit accordé n'est pas une règle sudo générale — ce serait faire de
-n'importe quel bug du nœud un bug root — mais **un script** que root possède et
-que le nœud ne peut pas réécrire, qui refuse tout argument et exécute une
-séquence figée :
+The fleet app's `update` capability needs root **with no human in front**. The
+right granted is not a general sudo rule — that would make any bug in the node a
+root bug — but **a script** owned by root that the node cannot rewrite, which
+refuses every argument and runs a fixed sequence:
 
 ```
 nmesh ALL=(root) NOPASSWD: /usr/local/lib/nmesh/nmesh-update
 ```
 
-Il est délibérément sous `/usr/local/lib` et pas dans le préfixe
-d'installation : celui-ci appartient au compte du nœud, qui pourrait sinon
-réécrire ce qu'il a le droit de lancer en root. Le fichier sudoers est
-**validé par `visudo` avant installation** — un fichier qui ne parse pas peut
-casser `sudo` pour toute la machine.
+It sits deliberately under `/usr/local/lib` and not in the installation prefix:
+that one belongs to the node's account, which could otherwise rewrite what it is
+allowed to run as root. The sudoers file is **validated by `visudo` before
+installation** — a file that does not parse can break `sudo` for the whole
+machine.
 
-Sans ce droit, le nœud n'a aucune route vers root et `update` échoue. Pour une
-commande root ponctuelle, il y a le shell fleet : `sudo` y demande son mot de
-passe à un humain, ce qui ne laisse aucun accès permanent derrière.
+Without that right, the node has no route to root and `update` fails. For a
+one-off root command there is the fleet shell: `sudo` there asks a human for
+their password, which leaves no permanent access behind.
 
-### Reprendre la main sur la console
+### Getting back into the console
 
 ```bash
-./install.sh --reset-password        # nouveau mot de passe, affiché une fois
+./install.sh --reset-password        # a new password, printed once
 ```
 
-Réécrit le credential dans le répertoire d'état, le redonne au compte du nœud,
-redémarre le service, et **affiche le nouveau mot de passe une seule fois**.
-Ne touche à rien d'autre : ni l'arbre, ni l'identité, ni les certificats. Ça
-marche sur un nœud déjà installé, sans réinstaller.
+Rewrites the credential in the state directory, gives it back to the node's
+account, restarts the service, and **prints the new password once**. It touches
+nothing else: not the tree, not the identity, not the certificates. It works on
+an already installed node, without reinstalling.
 
-Le hachage est fait par le code du nœud (`scripts/nmesh_password.py`), jamais
-réimplémenté en shell : un format de credential qui divergerait entre deux
-écrivains serait un bug d'authentification silencieux. Le script lit un mot de
-passe choisi sur **stdin** (`--stdin`) plutôt qu'en argument, où tout le monde
-le lirait dans `ps`.
+The hashing is done by the node's own code (`scripts/nmesh_password.py`), never
+reimplemented in shell: a credential format that diverged between two writers
+would be a silent authentication bug. The script reads a chosen password from
+**stdin** (`--stdin`) rather than from an argument, where everyone would read it
+in `ps`.
 
-Accès requis : le répertoire d'état, c'est-à-dire root ou le compte du nœud —
-exactement le niveau d'accès qu'une reprise en main doit demander.
+Access required: the state directory, that is root or the node's account —
+exactly the level of access taking back control should demand.
 
-Depuis la console, avec le mot de passe courant :
-**Settings → Console password** (voir
+From the console, with the current password: **Settings → Console password**
+(see [`../WebConsole/guide`](../WebConsole/guide)).
+
+### Reinstalling over the top
+
+Running `./install.sh` again **updates in place**: the tree is replaced, **the
+state is never touched** (identity, certificates, sessions, venv), the service
+is restarted. That is the normal path for a manual update.
+
+### Service managers handled
+
+systemd (system and user), OpenRC, launchd. None of the three → the script says
+so and prints the command to run by hand; it does not fail for it, and the
+installation stays valid.
+
+A trap that is handled: `systemctl` present **without** systemd behind it (the
+case for many container images) would make every call fail with *"Failed to
+connect to bus"*. Detection therefore also requires `/run/systemd/system`, the
+real test of a running systemd. Likewise, a service manager that refuses the
+service does not fail the installation: it is a warning, and the installed tree
+stays runnable by hand.
+
+Every unit written exports `NMESH_SERVICE_MANAGED=1`: that is what allows the
+updater (below) to restart the node, knowing something will bring it back.
+
+The tests source `install.sh` with `NMESH_INSTALL_LIB=1` and exercise init
+detection, privileges, paths, account creation, the generated units and the tree
+copy without installing anything (`tests/test_install_script.py`).
+
+## Updating from GitHub
+
+A node can check whether a newer release exists and install it — **never without
+the operator's explicit confirmation**.
+
+Web console → **Settings → Updates**: *Check for updates* queries GitHub's
+releases API; if a newer version exists it is shown with its notes, and
+*Install* asks for a confirmation that **names the version**. The install
+request repeats that version: if GitHub changed between the display and the
+click, the mismatch is refused rather than installing something nobody has seen.
+
+The matching API: `GET /api/update/check`, `POST /api/update/apply` (see
 [`../WebConsole/guide`](../WebConsole/guide)).
 
-### Réinstaller par-dessus
+What is replaced: **only** the code and documentation directories of the
+installed tree. The node's state, the venv and everything else are left intact.
+The previous tree is moved to `.nmesh-previous` and restored if the replacement
+fails halfway.
 
-Relancer `./install.sh` **met à jour sur place** : l'arbre est remplacé,
-**l'état n'est jamais touché** (identité, certificats, sessions, venv), le
-service est redémarré. C'est le chemin normal d'une mise à jour manuelle.
+Explicit refusals (`updatable()`), rather than breaking an installation:
 
-### Gestionnaires de service gérés
+- the current tree has no `src/`;
+- the installation directory is not writable;
+- the node runs from a container image → update the image, not the tree.
 
-systemd (système et utilisateur), OpenRC, launchd. Aucun des trois → le script
-le dit et affiche la commande à lancer à la main ; il n'échoue pas pour
-autant, l'installation reste valide.
+The trust model, said plainly: trust rests today on TLS, on GitHub, and on the
+people who publish the releases. **There is no release signature verified by the
+node yet** — a known limitation, documented in `src/updater.py`.
 
-Piège traité : `systemctl` présent **sans** systemd derrière (le cas de
-beaucoup d'images de conteneur) ferait échouer chaque appel avec *« Failed to
-connect to bus »*. La détection exige donc aussi `/run/systemd/system`, le
-vrai test d'un systemd démarré. De même, un gestionnaire de service qui refuse
-le service ne fait pas échouer l'installation : c'est un avertissement, et
-l'arbre installé reste lançable à la main.
+The current version: `src/version.py` (a test binds that file to
+`pyproject.toml`, so the two cannot diverge).
 
-Chaque unité écrite exporte `NMESH_SERVICE_MANAGED=1` : c'est ce qui autorise
-l'updater (ci-dessous) à redémarrer le nœud, sachant que quelque chose le
-relancera.
+## What `./start.sh` sorts out on its own
 
-Les tests sourcent `install.sh` avec `NMESH_INSTALL_LIB=1` et exercent la
-détection d'init, les privilèges, les chemins, la création du compte, les
-unités générées et la copie d'arbre sans rien installer
-(`tests/test_install_script.py`).
-
-## Mise à jour depuis GitHub
-
-Un nœud sait vérifier s'il existe une release plus récente et l'installer —
-**jamais sans confirmation explicite de l'opérateur**.
-
-Console web → **Settings → Updates** : *Check for updates* interroge l'API
-GitHub des releases ; si une version plus récente existe, elle est affichée
-avec ses notes, et *Install* demande une confirmation qui **nomme la version**.
-La requête d'installation rappelle cette version : si GitHub a changé entre
-l'affichage et le clic, l'écart est refusé plutôt que d'installer quelque chose
-que personne n'a vu.
-
-API correspondante : `GET /api/update/check`, `POST /api/update/apply`
-(voir [`../WebConsole/guide`](../WebConsole/guide)).
-
-Ce qui est remplacé : **uniquement** les répertoires de code et de doc de
-l'arbre installé. L'état du nœud, le venv et tout le reste sont laissés
-intacts. L'arbre précédent est déplacé dans `.nmesh-previous` et restauré si le
-remplacement échoue en cours de route.
-
-Refus explicites (`updatable()`), plutôt que de casser une installation :
-
-- l'arbre courant n'a pas de `src/` ;
-- le répertoire d'installation n'est pas accessible en écriture ;
-- le nœud tourne depuis une image de conteneur → on met à jour l'image, pas
-  l'arbre.
-
-Modèle de confiance, dit sans détour : la confiance repose aujourd'hui sur TLS,
-sur GitHub et sur les personnes qui publient les releases. **Il n'y a pas
-encore de signature de release vérifiée par le nœud** — c'est une limite
-connue, documentée dans `src/updater.py`.
-
-Version courante : `src/version.py` (un test lie ce fichier à
-`pyproject.toml`, les deux ne peuvent pas diverger).
-
-## Ce que `./start.sh` règle tout seul
-
-`./start.sh` doit démarrer un nœud sur une machine **neuve**, sans rien
-demander. Les distributions ne sont d'accord sur rien : ni sur la présence de
-`pip`, ni sur le droit d'installer quoi que ce soit hors venv, ni sur les noms
-de paquets. Ce document liste les cas réels traités par le script — si tu
-changes un de ces comportements, mets ce fichier à jour dans le même commit.
+`./start.sh` has to start a node on a **fresh** machine, asking for nothing.
+Distributions agree on nothing: not on `pip` being present, not on the right to
+install anything outside a venv, not on package names. This document lists the
+real cases the script handles — if you change one of these behaviours, update
+this file in the same commit.
 
 ```bash
-./start.sh                     # installe tout puis lance le nœud
-NMESH_SETUP_ONLY=1 ./start.sh  # installe et vérifie, sans lancer le nœud (CI)
+./start.sh                     # installs everything then runs the node
+NMESH_SETUP_ONLY=1 ./start.sh  # installs and verifies, without running the node (CI)
 ```
 
-## Les pièges par distribution
+## The traps, per distribution
 
-| Cas | Où ça mord | Traitement |
+| Case | Where it bites | Handling |
 |---|---|---|
-| **Pas de `pip` du tout** | Ubuntu/Debian : `python3` est livré sans `ensurepip`, `python3 -m venv` meurt sur *« ensurepip is not available »* | Sonde `venv_capable()` (crée un venv jetable **et** vérifie que `pip` y répond), puis installe `python3-venv python3-pip` |
-| **`pip` dans un paquet séparé** | Alpine (`py3-pip`), Arch (`python-pip`), Fedora/openSUSE/Void (`python3-pip`) | Même sonde, nom de paquet par famille (`pkg_names pipvenv`) |
-| **Environnement « externally managed » (PEP 668)** | Debian ≥12, Ubuntu ≥23.04, Fedora ≥38, Arch, openSUSE, Homebrew : `pip install` refuse de toucher au système | On n'installe **jamais** dans le système : tout passe par le venv. Aucun `--break-system-packages` |
-| **`python3-venv` pointe sur le mauvais interpréteur** | Debian/Ubuntu avec plusieurs Python (deadsnakes) | Repli sur `python<X.Y>-venv`, puis `python3-full` |
-| **`venv` définitivement indisponible** | Images Python amputées | Repli sur `virtualenv` (qui embarque son propre pip), paquet distro puis binaire |
-| **Pas de Python ≥ 3.10** | Debian minimal, RHEL ancien | Installe le paquet `python` de la famille, puis re-cherche (du plus récent au plus ancien) |
-| **Pas de `sudo`** | Conteneurs (souvent root), Termux | root → préfixe vide ; ni root ni `sudo` → message explicite, on n'essaie pas |
-| **`sudo` sans mot de passe possible** | Job non interactif | Détecté (`sudo -n` + absence de TTY) : on affiche la commande à lancer à la main au lieu de bloquer sur un prompt |
-| **`apt` interactif** | Debian/Ubuntu | `DEBIAN_FRONTEND=noninteractive` |
-| **Mise à jour partielle** | Arch (`pacman -Sy` puis install = système cassé) | `pacman -Syu --needed` avant tout install |
-| **Nom de paquet inconnu de cette release** | `ninja` vs `ninja-build`, `python3-dev` vs `python3-devel` | Le lot est retenté **paquet par paquet** : un nom inconnu n'annule pas les autres |
-| **`cmake` trop vieux** | CentOS 7 & co (2.8) — liboqs ne configure pas | Version vérifiée (≥ 3.18), sinon `pip install cmake ninja` dans le venv |
-| **Distro inconnue** | Dérivées exotiques | `ID`/`ID_LIKE` d'abord, sinon le gestionnaire réellement installé ; en dernier recours cmake/ninja par pip |
-| **Distros déclaratives** | NixOS, Gentoo | On n'installe rien dans le dos de l'utilisateur : commande `nix-shell` / `emerge` affichée |
-| **Pas de wheel pour la plateforme** | musl, ARM 32 bits, RISC-V : `cryptography` se compile | Sur échec de `pip install`, installe Rust + headers OpenSSL/FFI (`pkg_names native`) et retente |
-| **Pas de `git`** | Images minimales | Les sources liboqs sont récupérées en tarball (même ref, même origine) via `curl` |
-| **venv hérité cassé** | Upgrade de distro qui supprime l'interpréteur, venv créé sans pip | `venv_broken()` le détecte à chaque lancement et le recrée |
-| **Peu de RAM, beaucoup de cœurs** | Build liboqs OOM-killé (~1,5 Go par unité de compilation) | Parallélisme plafonné par `MemAvailable` |
+| **No `pip` at all** | Ubuntu/Debian: `python3` ships without `ensurepip`, `python3 -m venv` dies on *"ensurepip is not available"* | The `venv_capable()` probe (creates a throwaway venv **and** checks `pip` answers in it), then installs `python3-venv python3-pip` |
+| **`pip` in a separate package** | Alpine (`py3-pip`), Arch (`python-pip`), Fedora/openSUSE/Void (`python3-pip`) | The same probe, package name per family (`pkg_names pipvenv`) |
+| **An "externally managed" environment (PEP 668)** | Debian ≥12, Ubuntu ≥23.04, Fedora ≥38, Arch, openSUSE, Homebrew: `pip install` refuses to touch the system | We **never** install into the system: everything goes through the venv. No `--break-system-packages` |
+| **`python3-venv` points at the wrong interpreter** | Debian/Ubuntu with several Pythons (deadsnakes) | Falls back to `python<X.Y>-venv`, then `python3-full` |
+| **`venv` definitively unavailable** | Trimmed-down Python images | Falls back to `virtualenv` (which brings its own pip), the distro package then the binary |
+| **No Python ≥ 3.10** | Minimal Debian, old RHEL | Installs the family's `python` package, then looks again (newest to oldest) |
+| **No `sudo`** | Containers (often root), Termux | root → an empty prefix; neither root nor `sudo` → an explicit message, we do not try |
+| **`sudo` with no password possible** | A non-interactive job | Detected (`sudo -n` + no TTY): the command to run by hand is printed instead of blocking on a prompt |
+| **Interactive `apt`** | Debian/Ubuntu | `DEBIAN_FRONTEND=noninteractive` |
+| **A partial upgrade** | Arch (`pacman -Sy` then install = a broken system) | `pacman -Syu --needed` before any install |
+| **A package name this release does not know** | `ninja` vs `ninja-build`, `python3-dev` vs `python3-devel` | The batch is retried **package by package**: one unknown name does not cancel the others |
+| **`cmake` too old** | CentOS 7 and friends (2.8) — liboqs will not configure | The version is checked (≥ 3.18), otherwise `pip install cmake ninja` inside the venv |
+| **An unknown distro** | Exotic derivatives | `ID`/`ID_LIKE` first, otherwise the package manager actually installed; as a last resort cmake/ninja through pip |
+| **Declarative distros** | NixOS, Gentoo | We install nothing behind the user's back: a `nix-shell` / `emerge` command is printed |
+| **No wheel for the platform** | musl, 32-bit ARM, RISC-V: `cryptography` compiles | On a `pip install` failure, installs Rust + the OpenSSL/FFI headers (`pkg_names native`) and retries |
+| **No `git`** | Minimal images | The liboqs sources are fetched as a tarball (same ref, same origin) with `curl` |
+| **An inherited broken venv** | A distro upgrade that removes the interpreter, a venv created without pip | `venv_broken()` detects it on every run and recreates it |
+| **Little RAM, many cores** | The liboqs build gets OOM-killed (~1.5 GB per compilation unit) | Parallelism capped by `MemAvailable` |
 
-## Familles gérées
+## Families handled
 
 `apt` (Debian, Ubuntu, Mint, Pop!\_OS, Kali, Raspbian…), `dnf`/`yum` (Fedora,
 RHEL, Rocky, Alma, Amazon Linux, CentOS 7), `pacman` (Arch, Manjaro,
 EndeavourOS…), `zypper` (openSUSE, SLES), `apk` (Alpine), `xbps` (Void),
-Homebrew (macOS), `pkg` (FreeBSD), `pkg` (Termux/Android), plus les cas
-déclaratifs NixOS et Gentoo (instructions seulement).
+Homebrew (macOS), `pkg` (FreeBSD), `pkg` (Termux/Android), plus the declarative
+NixOS and Gentoo cases (instructions only).
 
-## Structure du script
+## The script's structure
 
-Tout ce qui précède la bannière `MAIN` n'est que des **définitions** ; la suite
-est le déroulé (Python → venv/pip → outils de build → venv → dépendances →
-vérification → lancement). La suite de tests source le fichier avec
-`NMESH_START_LIB=1` : elle exerce la détection, les noms de paquets, `sudo`, la
-sonde venv et la vérification de `cmake` avec un `PATH` isolé et de faux
-gestionnaires de paquets, sans jamais rien installer
-(`tests/test_start_script.py`).
+Everything before the `MAIN` banner is nothing but **definitions**; what follows
+is the sequence (Python → venv/pip → build tools → venv → dependencies →
+verification → launch). The test suite sources the file with
+`NMESH_START_LIB=1`: it exercises detection, package names, `sudo`, the venv
+probe and the `cmake` check with an isolated `PATH` and fake package managers,
+without ever installing anything (`tests/test_start_script.py`).
 
-## Pourquoi liboqs est compilé
+## Why liboqs is compiled
 
-Aucune distro ne fournit un liboqs digne de confiance : Debian/Ubuntu n'en ont
-jamais eu (retiré d'unstable en avril 2025), Fedora reste sur 0.10.0 — trop
-vieux pour garantir ML-KEM-768 / ML-DSA-65. Le script compile donc la **release
-correspondant exactement au wrapper `liboqs-python` installé**, dans
-`$OQS_INSTALL_PATH` (défaut `~/_oqs`), seul endroit où le wrapper cherche.
-Sur macOS, la formule Homebrew officielle est acceptée après vérification des
-deux algorithmes requis. Détail des pièges liboqs :
+No distribution ships a liboqs worth trusting: Debian/Ubuntu never had one
+(removed from unstable in April 2025), Fedora sits on 0.10.0 — too old to
+guarantee ML-KEM-768 / ML-DSA-65. The script therefore compiles the **release
+matching exactly the `liboqs-python` wrapper installed**, into
+`$OQS_INSTALL_PATH` (default `~/_oqs`), the only place the wrapper looks. On
+macOS the official Homebrew formula is accepted after both required algorithms
+are checked. The liboqs traps in detail:
 [`../Architecture/gotchas.md`](../Architecture/gotchas.md).
