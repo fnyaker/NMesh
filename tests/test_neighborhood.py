@@ -1,9 +1,9 @@
-"""Maintien du voisinage : plancher de 3 liens, promotion d'une node vue en
-transit, keepalive prioritaire.
+"""Neighbourhood maintenance: a floor of 3 links, promoting a node seen in
+transit, a prioritised keepalive.
 
-Un nœud cherche activement tant qu'il tient moins de `_NEIGHBOR_FLOOR` liens ;
-au-dessus il se tait. S'il voit passer du trafic d'une node XOR-plus-proche que
-son plus mauvais créneau, il la découvre et la maintient à sa place. Voir
+A node searches actively while it holds fewer than `_NEIGHBOR_FLOOR` links;
+above that it goes quiet. If it sees traffic from a node XOR-closer than its
+worst slot, it discovers it and maintains it in that slot's place. See
 `Docs/Architecture/routing.md`.
 """
 import asyncio
@@ -27,10 +27,10 @@ async def _node() -> MeshNode:
 
 
 def _id_at_distance(node: MeshNode, prefix_bits_shared: int) -> NodeID:
-    """Une identité qui partage `prefix_bits_shared` bits de tête avec `node`.
+    """An identity sharing `prefix_bits_shared` leading bits with `node`.
 
-    Plus le préfixe est long, plus la distance XOR est courte : c'est le seul
-    critère de maintien de table (cf. routing.md).
+    The longer the prefix, the shorter the XOR distance: that is the only
+    criterion for keeping a slot (see routing.md).
     """
     raw = bytearray(os.urandom(20))
     own = node.id.raw
@@ -41,7 +41,7 @@ def _id_at_distance(node: MeshNode, prefix_bits_shared: int) -> NodeID:
             raw[byte] |= mask
         else:
             raw[byte] &= 0xFF ^ mask
-    # Le bit suivant diffère : la distance est bornée par ce préfixe exactement.
+    # The next bit differs: the distance is bounded by exactly this prefix.
     byte, offset = divmod(prefix_bits_shared, 8)
     mask = 1 << (7 - offset)
     raw[byte] = (raw[byte] & (0xFF ^ mask)) | (mask if not own[byte] & mask else 0)
@@ -49,7 +49,7 @@ def _id_at_distance(node: MeshNode, prefix_bits_shared: int) -> NodeID:
 
 
 async def _attach_peer(node: MeshNode, node_id: NodeID) -> object:
-    """Un pair authentifié factice (lien vivant, sans crypto réelle)."""
+    """A fake authenticated peer (a live link, with no real crypto)."""
     fake = FakeTransport()
     peer = await node._inject_peer(fake)
     if peer is None:
@@ -59,11 +59,11 @@ async def _attach_peer(node: MeshNode, node_id: NodeID) -> object:
     return peer
 
 
-# ── régimes de découverte ────────────────────────────────────────────────────
+# ── discovery regimes ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_searches_while_below_the_floor(monkeypatch):
-    """Moins de 3 liens : on cherche (lookup + dial) à chaque cycle."""
+    """Fewer than 3 links: we search (lookup + dial) on every cycle."""
     node = await _node()
     for index in range(_NEIGHBOR_FLOOR - 1):
         await _attach_peer(node, _id_at_distance(node, 8))
@@ -78,7 +78,7 @@ async def test_searches_while_below_the_floor(monkeypatch):
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     await node._maintain_neighbors()
-    assert attempted, "un nœud sous le plancher doit continuer à chercher"
+    assert attempted, "a node below the floor must keep searching"
     await node.stop()
 
 
@@ -112,7 +112,7 @@ async def test_quiet_once_the_floor_is_reached(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_force_searches_even_when_satisfied(monkeypatch):
-    """Le bootstrap force un cycle complet quoi qu'on tienne déjà."""
+    """The bootstrap forces a full cycle whatever we already hold."""
     node = await _node()
     for _ in range(_NEIGHBOR_FLOOR):
         await _attach_peer(node, _id_at_distance(node, 8))
@@ -127,13 +127,13 @@ async def test_force_searches_even_when_satisfied(monkeypatch):
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", lambda *a, **k: asyncio.sleep(0))
     await node._maintain_neighbors(force=True)
-    assert attempted, "force=True doit relancer une recherche complète"
+    assert attempted, "force=True must restart a full search"
     await node.stop()
 
 
 @pytest.mark.asyncio
 async def test_losing_a_slot_resumes_the_search(monkeypatch):
-    """Perdre un des 3 liens remet le nœud en recherche."""
+    """Losing one of the 3 links puts the node back into searching."""
     node = await _node()
     peers = [await _attach_peer(node, _id_at_distance(node, 8))
              for _ in range(_NEIGHBOR_FLOOR)]
@@ -174,7 +174,7 @@ async def test_closer_node_seen_in_transit_is_watched():
 
 @pytest.mark.asyncio
 async def test_farther_node_seen_in_transit_is_ignored():
-    """Le critère est la distance XOR : plus loin que notre pire créneau = non."""
+    """The criterion is XOR distance: farther than our worst slot = no."""
     node = await _node()
     for _ in range(_NEIGHBOR_FLOOR):
         await _attach_peer(node, _id_at_distance(node, 32))
@@ -187,7 +187,7 @@ async def test_farther_node_seen_in_transit_is_ignored():
 
 @pytest.mark.asyncio
 async def test_relayed_packet_feeds_the_watch_list():
-    """Le hook réel : un paquet routé traversant le nœud désigne son émetteur."""
+    """The real hook: a routed packet crossing the node names its sender."""
     node = await _node()
     relay_id = _id_at_distance(node, 4)
     relay = await _attach_peer(node, relay_id)
@@ -227,7 +227,8 @@ async def test_promotion_is_dialled_even_when_satisfied(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_promoted_node_takes_the_worst_slot():
-    """Une fois le lien établi, la promue entre dans le set, la pire en sort."""
+    """Once the link is up, the promoted node enters the set and the worst one
+    leaves."""
     node = await _node()
     worst = _id_at_distance(node, 4)
     await _attach_peer(node, worst)
@@ -249,7 +250,7 @@ async def test_promoted_node_takes_the_worst_slot():
 
 @pytest.mark.asyncio
 async def test_watch_list_is_cleaned_and_bounded():
-    """Aucune entrée périmée, aucune croissance sans fin (pair qui relaie tout)."""
+    """No stale entry, no endless growth (a peer that relays everything)."""
     node = await _node()
     for _ in range(_NEIGHBOR_FLOOR):
         await _attach_peer(node, _id_at_distance(node, 4))
@@ -291,7 +292,7 @@ async def test_own_id_and_live_peers_are_never_watched():
 
 @pytest.mark.asyncio
 async def test_watching_never_wakes_the_loop():
-    """Un src_id n'est pas authentifié : il ne doit pas piloter notre cadence."""
+    """A src_id is not authenticated: it must not drive our cadence."""
     node = await _node()
     node._running = True
     node._neighbor_wakeup.clear()
@@ -333,7 +334,8 @@ async def _run_keepalive_once(node, monkeypatch, expected: int) -> list:
 
 @pytest.mark.asyncio
 async def test_keepalive_pings_the_maintained_slots_first(monkeypatch):
-    """Les 3 liens tenus passent avant les autres : jamais affamés par un lent."""
+    """The 3 maintained links come before the others: never starved by a slow
+    one."""
     node = await _node()
     far = [await _attach_peer(node, _id_at_distance(node, 2)) for _ in range(3)]
     near = [await _attach_peer(node, _id_at_distance(node, 40))
@@ -362,7 +364,7 @@ async def test_keepalive_pings_every_peer_when_below_the_floor(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_keepalive_rearms_the_search_when_short(monkeypatch):
-    """Sous le plancher après un cycle de keepalive : la recherche est relancée."""
+    """Below the floor after a keepalive cycle: the search is restarted."""
     node = await _node()
     await _attach_peer(node, _id_at_distance(node, 8))
 

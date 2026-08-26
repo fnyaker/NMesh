@@ -1,13 +1,13 @@
 """
-Mise à jour depuis GitHub — comparaison de versions et application.
+Updating from GitHub — comparing versions and applying one.
 
-C'est une surface de chaîne d'approvisionnement : du code téléchargé remplace le
-code qui tourne. Les tests portent donc surtout sur ce qui doit **refuser** —
-une version illisible qui n'est jamais « plus récente », une archive qui tente
-de sortir de sa destination, un arbre qui ne ressemble pas à NMesh, un échec en
-cours de remplacement qui doit laisser le nœud sur sa version d'avant.
+This is a supply-chain surface: downloaded code replaces the running code. The
+tests are therefore mostly about what must **refuse** — an unreadable version
+that is never "newer", an archive trying to escape its destination, a tree that
+does not look like NMesh, a failure mid-replacement that must leave the node on
+its previous version.
 
-Aucun test ne touche le réseau : les téléchargements sont simulés.
+No test touches the network: the downloads are simulated.
 """
 import io
 import json
@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class TestVersionComparison:
     def test_matches_pyproject(self):
-        """Deux sources de vérité qui divergent, c'est une version fausse
-        affichée à l'opérateur."""
+        """Two sources of truth drifting apart means a wrong version shown to
+        the operator."""
         with open(ROOT / "pyproject.toml", "rb") as handle:
             assert tomllib.load(handle)["project"]["version"] == __version__
 
@@ -46,8 +46,8 @@ class TestVersionComparison:
         assert is_newer("v0.2.0", "0.2.0-rc1") is True
 
     def test_unparseable_is_never_newer(self):
-        """Un tag qu'on ne sait pas lire ne doit jamais déclencher une mise à
-        jour vers quelque chose qu'on n'identifie pas."""
+        """A tag we cannot read must never trigger an update towards something
+        we cannot identify."""
         for junk in ("nightly", "latest", "", None, 42, "v", "release-2024"):
             assert is_newer(junk, "0.1.0") is False
 
@@ -133,8 +133,8 @@ class TestApply:
         assert (root / "start.sh").read_text() == "#!/bin/sh\necho new\n"
 
     def test_never_touches_state_or_the_virtualenv(self, tmp_path, monkeypatch):
-        """L'identité du nœud, c'est ce qui fait que c'est *ce* nœud sur le
-        mesh. Une mise à jour ne doit jamais y toucher."""
+        """The node's identity is what makes it *this* node on the mesh. An
+        update must never touch it."""
         root = self._install(tmp_path)
         archive = _make_release_tarball({"src/node.py": "new\n", "start.sh": "x\n"})
         self._apply(monkeypatch, root, archive)
@@ -161,7 +161,7 @@ class TestApply:
         archive = _make_release_tarball({"README.md": "hello\n"})
         with pytest.raises(updater.UpdateError):
             self._apply(monkeypatch, root, archive)
-        # …et rien n'a bougé.
+        # …and nothing moved.
         assert (root / "src" / "node.py").read_text() == "old node\n"
 
     def test_a_junk_archive_is_refused(self, tmp_path, monkeypatch):
@@ -183,8 +183,8 @@ class TestApply:
             self._apply(monkeypatch, root, buffer.getvalue())
 
     def test_path_traversal_is_refused(self, tmp_path, monkeypatch):
-        """Une archive qui vise l'extérieur de sa destination est rejetée, pas
-        assainie en silence."""
+        """An archive aiming outside its destination is rejected, not silently
+        sanitised."""
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             info = tarfile.TarInfo("NMesh/../../escaped.txt")
@@ -196,7 +196,7 @@ class TestApply:
         assert not (tmp_path.parent / "escaped.txt").exists()
 
     def test_a_failed_swap_restores_the_previous_tree(self, tmp_path, monkeypatch):
-        """Le seul résultat à exclure absolument : un arbre à moitié remplacé."""
+        """The one outcome to rule out absolutely: a half-replaced tree."""
         root = self._install(tmp_path)
         archive = _make_release_tarball({"src/node.py": "new\n", "start.sh": "x\n"})
         real_copy = updater.shutil.copytree
@@ -247,7 +247,7 @@ class TestGuards:
         assert os.path.isdir(os.path.join(updater.install_root(), "src"))
 
     async def test_bounded_call_gives_up(self):
-        """Un appel qui ne rend jamais la main ne doit pas bloquer le nœud."""
+        """A call that never returns must not block the node."""
         import threading
         with pytest.raises(updater.UpdateError, match="timed out"):
             await updater._bounded(lambda: threading.Event().wait(30), 0.2)
@@ -261,8 +261,8 @@ class TestGuards:
 
 
 class TestArchiveSafety:
-    """Le refus ne doit pas dépendre du filtre `tarfile` de l'interpréteur :
-    les membres sont contrôlés avant toute extraction."""
+    """The refusal must not depend on the interpreter's `tarfile` filter: the
+    members are checked before any extraction."""
 
     def _extract(self, tmp_path, build):
         buffer = io.BytesIO()
