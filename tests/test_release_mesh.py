@@ -389,6 +389,28 @@ class TestPinsOnTheNode:
         finally:
             await publisher.stop(); await node.stop()
 
+    async def test_a_stale_trusted_flag_never_authorises_an_install(self, tmp_path):
+        """The flag on a catalogue entry is for display. What authorises an
+        install is the pin, read at the moment it is asked."""
+        publisher, node = _node(), _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            blob = await publisher.dht_get(bytes.fromhex(info["release_id"]))
+            node.trust_publisher(publisher._identity.dsa_public_key.hex())
+            node._releases.offer(blob, node._identity.verify,
+                                 node._trusts_publisher)
+            entry = node._releases.get(info["publisher_id"])
+            assert entry["trusted"] is True
+
+            # Drop the pin behind the catalogue's back, leaving the flag set.
+            node._publishers.remove(cr.publisher_id(
+                publisher._identity.dsa_public_key).hex())
+            assert entry["trusted"] is True
+            with pytest.raises(cr.ReleaseError, match="not trusted"):
+                await node.install_release(info["publisher_id"])
+        finally:
+            await publisher.stop(); await node.stop()
+
     async def test_a_key_that_is_not_a_key_is_refused(self):
         node = _node()
         try:

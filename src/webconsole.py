@@ -809,7 +809,13 @@ def _make_handler(console: WebConsole):
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
                     return
-                self._json(200, console._node.release_overview())
+                # Marshalled onto the loop like every other node read: the
+                # node's state is never touched from an HTTP thread.
+                try:
+                    self._json(200, console._call(
+                        _wrap(console._node.release_overview)))
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
                 return
             if path == "/api/config":
                 if not self._authed():
@@ -1408,9 +1414,10 @@ def _make_handler(console: WebConsole):
                         self._json(400, {"error": "key required"})
                         return
                     name = data.get("name")
-                    entry = node.trust_publisher(
-                        key.strip(), name if isinstance(name, str) else "",
-                        data.get("auto") is True)
+                    entry = console._call(_wrap(
+                        node.trust_publisher, key.strip(),
+                        name if isinstance(name, str) else "",
+                        data.get("auto") is True))
                     self._json(200, {"ok": True, "publisher": entry})
                     return
                 if path == "/api/releases/untrust":
@@ -1418,15 +1425,16 @@ def _make_handler(console: WebConsole):
                     if not isinstance(publisher, str):
                         self._json(400, {"error": "publisher_id required"})
                         return
-                    self._json(200, {"ok": node.untrust_publisher(publisher)})
+                    self._json(200, {"ok": console._call(
+                        _wrap(node.untrust_publisher, publisher))})
                     return
                 if path == "/api/releases/auto":
                     publisher = data.get("publisher_id")
                     if not isinstance(publisher, str):
                         self._json(400, {"error": "publisher_id required"})
                         return
-                    ok = node.set_publisher_auto(publisher,
-                                                 data.get("auto") is True)
+                    ok = console._call(_wrap(node.set_publisher_auto, publisher,
+                                             data.get("auto") is True))
                     self._json(200 if ok else 404, {"ok": ok})
                     return
             except ReleaseError as exc:

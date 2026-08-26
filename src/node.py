@@ -4992,8 +4992,15 @@ class MeshNode:
 
     def _release_state(self, entry: dict) -> tuple[str, str | None]:
         """What this node can do with a release, decided here rather than in a
-        page: unpinned publisher → nothing, older or equal version → nothing."""
-        if not entry["trusted"]:
+        page: unpinned publisher → nothing, older or equal version → nothing.
+
+        Takes a **catalogue entry** (`publisher` as bytes), never the hex-ified
+        row `ReleaseCatalog.list()` renders for a UI.
+
+        Trust is read from the pins **now**, not from the flag cached on the
+        entry when it arrived: that flag exists to be displayed, and a stale one
+        must never be what authorises an install."""
+        if not self._trusts_publisher(entry["publisher"]):
             return "untrusted", None
         if entry["version"] == _running_version():
             return "running", None
@@ -5004,9 +5011,13 @@ class MeshNode:
     def release_overview(self) -> dict:
         """Everything a UI needs, with every decision already made here."""
         releases = []
-        for entry in self._releases.list():
+        for listed in self._releases.list():
+            entry = self._releases.get(listed["publisher_id"])
+            if entry is None:
+                continue
             state, action = self._release_state(entry)
-            releases.append({**entry, "state": state, "action": action})
+            releases.append({**listed, "state": state, "action": action,
+                             "trusted": state != "untrusted"})
         from . import updater
         ok, reason = updater.updatable()
         return {
