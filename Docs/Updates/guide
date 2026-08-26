@@ -1,8 +1,9 @@
 # Updates — releases published by nodes, signed
 
-A node publishes **its own code** as a signed, content-addressed package; other
-nodes hear about it over the mesh and, if their operator has pinned that
-publisher's key, fetch it, verify it and install it — optionally on their own.
+A node publishes **its own code** as one signed package; it announces that it
+has it, and hands it over to whoever asks. A node that received it keeps it and
+becomes somewhere else to ask. If the operator pinned that publisher's key, the
+release can be installed — optionally on its own.
 
 Code: [`src/core_release.py`](../../src/core_release.py) (the format, the pins,
 the catalogue), the release section of [`src/node.py`](../../src/node.py)
@@ -23,29 +24,43 @@ from a key the operator chose to accept.
 The GitHub path is still there ([`../Setup/guide`](../Setup/guide)) — it is how
 a node with no peers yet gets its first version. It is no longer the only way.
 
+## Publishing costs nothing
+
+Publishing is **signing and announcing**. The tree is packed into one
+deterministic `tar.gz`, hashed, and a descriptor naming that hash is signed and
+gossiped. No network at all: a node with no peers can publish, and 1.8 MB of
+source becomes about 0.5 MB that only moves when somebody wants it.
+
+The first cut of this pushed the tree onto the DHT as ~120 content-addressed
+chunks, each costing a Kademlia lookup **at publish time**. That is a hundred
+round trips paid up front, for nodes that may never ask — minutes of an operator
+watching a spinner on a real mesh. Measured on this repository: **119 lookups
+before, 0 now, 0.18 s to publish.**
+
 ## The three separate things
 
 They are deliberately not merged, and each is worth naming:
 
 | | What it proves | What it does not |
 |---|---|---|
-| **the content** (hash) | these are exactly the bytes the root names | who made them |
-| **the descriptor** (ML-DSA signature) | *this publisher* published *that content*, at *that time* | that you want their code |
+| **the package** (SHA-256) | these are exactly the bytes the descriptor names | who made them |
+| **the descriptor** (ML-DSA signature) | *this publisher* published *those bytes*, at *that time* | that you want their code |
 | **the pin** (an operator's decision) | this node accepts that publisher | anything about the content |
 
-Content addressing means a relay can neither substitute nor corrupt a package:
-you ask for a key, and check that what comes back hashes to it. The signature is
-what makes "who published this" a question with an answer. And the pin is the
-only one of the three that cannot arrive over the network.
+The hash means a relay can neither substitute nor corrupt a package: whoever
+hands the bytes over, they either match what was signed or they are dropped. The
+signature is what makes "who published this" a question with an answer. And the
+pin is the only one of the three that cannot arrive over the network.
 
 ## The descriptor
 
 ```
-{v, version, root_key, root_sha256, publisher, ts, notes, sig}
+{v, version, size, sha256, publisher, ts, notes, sig}
 ```
 
-- `root_key` / `root_sha256` — the content root of the package (chunks +
-  manifest, exactly as in [`../AppSharing/guide`](../AppSharing/guide)).
+- `size` / `sha256` — the package: how many bytes to expect, and what they must
+  hash to. A release is named by that hash, so two nodes holding the same
+  release agree on what to ask each other for.
 - `publisher` — the publisher's ML-DSA public key. The **publisher id** is
   `sha256(key)[:20]`, derived and never carried: an id that does not follow from
   the key presented is not a mismatch to resolve, it is a forgery.
@@ -76,8 +91,11 @@ info = await node.publish_release(notes="what changed")
 
 The tree that is installed here is read (`src`, `scripts`, `start.sh`,
 `install.sh`, `requirements.txt`, `pyproject.toml`, `Docs`, `docker`,
-`README.md`, `CLAUDE.md` — the same set the updater swaps in), chunked onto the
-DHT, and signed. What is **not** carried: the node's state, its virtualenv, the
+`README.md`, `CLAUDE.md` — the same set the updater swaps in), packed and
+signed. The archive is **deterministic** — sorted paths, no mtimes, no uid/gid,
+a fixed mode, and gzip's own header timestamp pinned — so the same tree packs to
+the same bytes on any machine: a rebuild is not a new release, and two
+publishers of the same source agree on the hash. What is **not** carried: the node's state, its virtualenv, the
 liboqs build, `__pycache__`, and **symlinks** — a release is regular files, and
 a link is a way of pointing the extraction somewhere it was never meant to
 write.
@@ -86,17 +104,8 @@ The publisher key to hand out is shown on that same card. Give it to people over
 a channel you trust: **anyone who can change that string on its way to them can
 ship them code.**
 
-Publishing is around 120 values onto the DHT — a chunk per file, plus the
-manifest's own chunks, the root and the descriptor — and each one is a Kademlia
-lookup. They go out `_PUBLISH_CONCURRENCY` at a time rather than one after
-another, which is the difference between a few seconds and a couple of minutes
-on a busy mesh, and bounded rather than all at once, because "publish everything
-simultaneously" is how a publish becomes a flood.
-
-Replication is **best effort**. Every value is in the publisher's own store
-before its lookup even starts, so a mesh that answers nothing costs reach, not
-the publish: the release still exists, still verifies, and the publisher serves
-its own chunks to whoever fetches it.
+The publisher keeps the package (`<data>/packages/`) so it has something to
+hand over. Everything else happens on demand.
 
 ## Pinning a publisher
 
@@ -140,6 +149,43 @@ Announces are rate-limited per ingress link (`_RELEASE_RATE_MAX` per window):
 verifying an ML-DSA signature is work, and a peer does not get to ask for it
 without end.
 
+## Moving the package
+
+`RELEASE_ANNOUNCE` carries `have(1) ‖ descriptor`: the byte says whether the
+node **sending it** holds the package, re-answered at every hop, because the
+answer is about the sender and not about the release. A node that hears it
+remembers who claimed to have what — a hint only, bounded on both axes, and one
+that costs at most a wasted request if it is a lie, because the hash is what
+decides.
+
+Fetching then asks, nearest hint first and the publisher last:
+
+- `RELEASE_FETCH` — `release_id(20) ‖ offset(4)`, routed, so a holder several
+  hops away is reachable;
+- `RELEASE_DATA` — `release_id(20) ‖ offset(4) ‖ slice`, up to
+  `_RELEASE_SLICE` bytes.
+
+A release is public code, signed: there is nothing to authorise in serving it
+beyond not letting one peer pull without end, which is what
+`_RELEASE_SERVE_MAX` per window does. A node that does not hold the package
+stays silent rather than answering "no" — one less thing to forge.
+
+The bytes are checked against the signed SHA-256 **before** anything is
+unpacked. What comes back either matches or is dropped and the next source is
+tried, so it does not matter who handed it over.
+
+### Then it is a swarm
+
+Whatever a node ends up holding, it keeps (`ReleaseStore`, bounded to
+`MAX_HELD_PACKAGES`, on disk so a restart does not undo it) and starts
+answering for. One publisher becomes a swarm as the release spreads, and a
+publisher that goes offline stops being necessary — there is an integration
+test for exactly that: the publisher is stopped, and a third node still gets
+the release from the node that kept a copy.
+
+A store that hands out what it was not given is worse than an empty one, so a
+package is re-hashed when it is read back, not only when it is written.
+
 ## Installing
 
 Three gates, in this order — the cheap ones first:
@@ -147,8 +193,8 @@ Three gates, in this order — the cheap ones first:
 1. **the publisher is pinned** here;
 2. **the version is strictly newer** than the one running (`is_newer`), so a
    signed older release is not an install path;
-3. **every byte verifies** against the signed root, and the tree's own version
-   matches what the descriptor announced.
+3. **every byte verifies** against the signed SHA-256, and the tree's own
+   version matches what the descriptor announced.
 
 Only then does anything touch disk, and even then the previous tree is moved
 aside and restored if the swap fails part-way — a half-replaced install is the
@@ -206,8 +252,13 @@ rule that lives in Python.
 
 | Constant | Value | Why |
 |---|---|---|
-| `MAX_TREE_BYTES` | 64 MB | a release is source code, not a disk image |
+| `MAX_TREE_BYTES` | 64 MB | a release is source code, not a disk image — applied **while** unpacking, since decompression is where a small blob becomes a large one |
+| `MAX_PACKAGE_BYTES` | 32 MB | the blob that carries it |
 | `MAX_FILES` | 8192 | ditto |
+| `MAX_HELD_PACKAGES` | 4 | helping the network is not unbounded storage |
+| `_RELEASE_SLICE` | 48 KB | package bytes per packet |
+| `_RELEASE_SERVE_MAX` | 64 / 10 s | slices one link may pull from us |
+| `_RELEASE_SOURCES_MAX` | 8 | nodes remembered as holding a release |
 | `MAX_NOTES_LEN` | 4000 | notes are shown in a page |
 | `MAX_PUBLISHERS` | 32 | pinned keys an operator may hold |
 | `MAX_CATALOG` | 64 | publishers tracked, trusted-first |

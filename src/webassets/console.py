@@ -418,7 +418,8 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>From the mesh</h2>
             <div class="sub">Releases published by nodes, signed — no web host in the way</div></div></div>
           <div class="card-body stack">
-            <p class="muted small">A node publishes its own code, signed with its identity. You
+            <p class="muted small">A node publishes its own code, signed with its identity, and
+              hands the package to whoever asks — publisher or any node that kept a copy. You
               decide whose signature this node accepts: nothing arriving from the network can add
               a publisher, and a release from anyone you have not pinned is shown but never
               installed.</p>
@@ -464,9 +465,11 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>Publish this node's code</h2>
             <div class="sub">Sign what is installed here and offer it to the mesh</div></div></div>
           <div class="card-body stack">
-            <p class="muted small">Everyone who pinned <strong>this node's</strong> key can then
-              fetch it. The version comes from the tree itself, so a release cannot announce one
-              version and carry another.</p>
+            <p class="muted small">Publishing signs the tree and announces it — nothing is sent
+              anywhere. The package moves only when someone who pinned <strong>this node's</strong>
+              key asks for it, and whoever receives it keeps it and can serve the next node. The
+              version comes from the tree itself, so a release cannot announce one version and
+              carry another.</p>
             <label class="field"><span>Release notes</span>
               <textarea id="publish-notes" rows="3" placeholder="what changed"></textarea></label>
             <div class="kv"><div>This node's publisher key</div>
@@ -2168,8 +2171,12 @@ function releaseRowHTML(entry){
   const action = entry.action === "install"
     ? '<button class="sm primary" data-install="' + esc(entry.publisher_id) + '">Install</button>'
     : '<span class="muted small">' + esc(words[entry.state] || entry.state) + "</span>";
+  // The size belongs with the version: it is how much this release costs to
+  // fetch, not a fact about the publisher.
+  const aside = [entry.size ? fmtBytes(entry.size) : "",
+                 entry.notes ? esc(entry.notes.slice(0, 140)) : ""].filter(Boolean);
   return "<tr><td><strong>" + esc(entry.version) + "</strong>" +
-    (entry.notes ? '<div class="tiny muted">' + esc(entry.notes.slice(0, 160)) + "</div>" : "") +
+    (aside.length ? '<div class="tiny muted">' + aside.join(" · ") + "</div>" : "") +
     "</td><td><code>" + esc(shortId(entry.publisher_id)) + "</code>" +
     (entry.trusted ? ' <span class="badge ok">pinned</span>'
                    : ' <span class="badge">unpinned</span>') +
@@ -2212,7 +2219,7 @@ $("release-rows").addEventListener("click", async (event) => {
     confirmLabel:"Install " + version});
   if(!agreed) return;
   await withBusy(button, async () => {
-    setMessage("release-status", "Fetching and verifying…");
+    setMessage("release-status", "Asking a node that has it, and verifying…");
     try{
       const {ok, data} = await apiJson("/api/releases/install", "POST",
         {publisher_id:button.dataset.install, confirm:true});
@@ -2277,7 +2284,8 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
     const {ok, data} = await apiJson("/api/releases/publish", "POST",
       {notes:$("publish-notes").value});
     setMessage("publish-status", ok
-      ? "Published " + data.version + " (" + data.files + " files, " + fmtBytes(data.bytes) + ")."
+      ? "Published " + data.version + " — " + data.files + " files, "
+        + fmtBytes(data.package_bytes) + " to send when someone asks."
       : (data.error || "Publish failed"), !ok);
     if(ok) await refreshReleases();
   }catch(_){

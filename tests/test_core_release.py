@@ -20,9 +20,12 @@ from src.app_package import build_release as build_app_release
 from src.crypto import CryptoIdentity
 
 
-def _release(identity, version="0.2.0", ts=1000, notes="",
-             root=b"\x11" * 20, sha="a" * 64):
-    return cr.build_release(root, sha, version, identity.dsa_public_key,
+PACKAGE = cr.build_package({"src/version.py": b'__version__ = "0.2.0"\n',
+                           "start.sh": b"#!/bin/sh\n"})
+
+
+def _release(identity, version="0.2.0", ts=1000, notes="", package=PACKAGE):
+    return cr.build_release(package, version, identity.dsa_public_key,
                             identity.sign, ts, notes)
 
 
@@ -49,11 +52,11 @@ class TestTheDescriptor:
         with pytest.raises(cr.ReleaseError):
             cr.parse_release(json.dumps(doc).encode(), idn.verify)
 
-    def test_a_tampered_root_breaks_the_signature(self):
-        """The root is the whole point: change it and you change the code."""
+    def test_a_tampered_hash_breaks_the_signature(self):
+        """The hash is the whole point: change it and you change the code."""
         idn = CryptoIdentity()
         doc = json.loads(_release(idn))
-        doc["root_key"] = (b"\x22" * 20).hex()
+        doc["sha256"] = "b" * 64
         with pytest.raises(cr.ReleaseError):
             cr.parse_release(json.dumps(doc).encode(), idn.verify)
 
@@ -71,7 +74,7 @@ class TestTheDescriptor:
         idn = CryptoIdentity()
         blob, _app_id = build_app_release(b"\x11" * 20, "a" * 64, "widget",
                                           "0.2.0", idn.dsa_public_key,
-                                          idn.sign, 1000)
+                                          idn.sign, 1000)   # an app release
         with pytest.raises(cr.ReleaseError):
             cr.parse_release(blob, idn.verify)
 
@@ -84,17 +87,14 @@ class TestTheDescriptor:
         with pytest.raises(cr.ReleaseError):
             cr.parse_release(json.dumps(body).encode(), idn.verify)
 
-    def test_building_refuses_an_unusable_version_or_root(self):
+    def test_building_refuses_an_unusable_version_or_package(self):
         idn = CryptoIdentity()
         with pytest.raises(cr.ReleaseError):
-            cr.build_release(b"\x11" * 20, "a" * 64, "", idn.dsa_public_key,
-                             idn.sign)
+            cr.build_release(PACKAGE, "", idn.dsa_public_key, idn.sign)
         with pytest.raises(cr.ReleaseError):
-            cr.build_release(b"\x11" * 3, "a" * 64, "1.0.0",
-                             idn.dsa_public_key, idn.sign)
+            cr.build_release(b"", "1.0.0", idn.dsa_public_key, idn.sign)
         with pytest.raises(cr.ReleaseError):
-            cr.build_release(b"\x11" * 20, "short", "1.0.0",
-                             idn.dsa_public_key, idn.sign)
+            cr.build_release("not bytes", "1.0.0", idn.dsa_public_key, idn.sign)
 
     def test_notes_are_bounded_at_signing_time(self):
         idn = CryptoIdentity()
@@ -103,14 +103,15 @@ class TestTheDescriptor:
 
     @pytest.mark.parametrize("blob", [
         b"", b"{", b"[]", b"null", b"not json at all",
-        json.dumps({"v": 2}).encode(),
-        json.dumps({"v": 1, "version": "1.0.0"}).encode(),
-        json.dumps({"v": 1, "version": "1.0.0", "root_key": "zz",
-                    "root_sha256": "a" * 64, "publisher": "aa",
-                    "sig": "bb", "ts": 1}).encode(),
-        json.dumps({"v": 1, "version": "1.0.0", "root_key": "11" * 20,
-                    "root_sha256": "a" * 64, "publisher": "aa",
-                    "sig": "bb", "ts": "soon"}).encode(),
+        json.dumps({"v": 1}).encode(),          # the chunked format, gone
+        json.dumps({"v": 3}).encode(),
+        json.dumps({"v": 2, "version": "1.0.0"}).encode(),
+        json.dumps({"v": 2, "version": "1.0.0", "size": 10, "sha256": "zz",
+                    "publisher": "aa", "sig": "bb", "ts": 1}).encode(),
+        json.dumps({"v": 2, "version": "1.0.0", "size": 0, "sha256": "a" * 64,
+                    "publisher": "aa", "sig": "bb", "ts": 1}).encode(),
+        json.dumps({"v": 2, "version": "1.0.0", "size": 10, "sha256": "a" * 64,
+                    "publisher": "aa", "sig": "bb", "ts": "soon"}).encode(),
         b"x" * 200_000,
     ])
     def test_hostile_blobs_raise_nothing_but_release_error(self, blob):
@@ -199,6 +200,127 @@ class TestReadingATree:
         monkeypatch.setattr(cr, "MAX_TREE_BYTES", 1024)
         with pytest.raises(cr.ReleaseError):
             cr.read_tree(str(root))
+
+
+class TestThePackage:
+    """One blob, not a hundred chunks: publishing costs no network, and what
+    arrives is checked against a hash before anything is unpacked."""
+
+    def test_a_tree_round_trips_through_a_package(self):
+        files = {"src/version.py": b'__version__ = "1.0.0"\n',
+                 "start.sh": b"#!/bin/sh\n",
+                 "Docs/deep/thing.md": b"# hello\n"}
+        assert cr.open_package(cr.build_package(files)) == files
+
+    def test_the_same_tree_packs_to_the_same_bytes(self):
+        """Deterministic, so a rebuild is not a new release and two publishers
+        of the same source agree on the hash. gzip stamps the time into its own
+        header, so this is a real trap, not a theoretical one."""
+        files = {"src/version.py": b'__version__ = "1.0.0"\n',
+                 "start.sh": b"#!/bin/sh\n"}
+        assert cr.build_package(files) == cr.build_package(files)
+
+    def test_a_package_is_named_by_its_bytes(self):
+        first = cr.build_package({"src/version.py": b"a", "start.sh": b"b"})
+        second = cr.build_package({"src/version.py": b"a", "start.sh": b"c"})
+        assert cr.release_id(first) != cr.release_id(second)
+
+    def test_packing_refuses_a_path_that_reaches_outside(self):
+        for bad in ("../escape.py", "/etc/passwd", "a/../../b"):
+            with pytest.raises(cr.ReleaseError):
+                cr.build_package({bad: b"x"})
+
+    def test_an_empty_or_absurd_package_is_refused(self):
+        with pytest.raises(cr.ReleaseError):
+            cr.build_package({})
+        for bad in (b"", b"not a tarball", os.urandom(500), "not bytes"):
+            with pytest.raises(cr.ReleaseError):
+                cr.open_package(bad)
+
+    def test_opening_refuses_a_path_that_reaches_outside(self):
+        """A signature says who sent it, never that what they sent is sane."""
+        import io, tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            info = tarfile.TarInfo("../escaped.py")
+            info.size = 3
+            tar.addfile(info, io.BytesIO(b"pwn"))
+        with pytest.raises(cr.ReleaseError):
+            cr.open_package(buffer.getvalue())
+
+    def test_opening_refuses_a_link(self):
+        import io, tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            info = tarfile.TarInfo("link.py")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        with pytest.raises(cr.ReleaseError):
+            cr.open_package(buffer.getvalue())
+
+    def test_a_bomb_is_stopped_while_unpacking_not_after(self, monkeypatch):
+        """Decompression is where a small blob becomes a large one, so the
+        bound has to apply on the way in."""
+        monkeypatch.setattr(cr, "MAX_TREE_BYTES", 4096)
+        big = cr.build_package({"src/version.py": b"x" * 200_000,
+                                "start.sh": b"#!/bin/sh\n"})
+        assert len(big) < 4096          # it really is small until you open it
+        with pytest.raises(cr.ReleaseError, match="more than we accept"):
+            cr.open_package(big)
+
+
+class TestHoldingPackagesToServeThem:
+    """A node that fetched a release keeps it and becomes somewhere else to
+    ask. A cache that hands out what it was not given is worse than none."""
+
+    def _package(self, body=b"a package"):
+        import hashlib
+        return body, cr.release_id(body).hex(), hashlib.sha256(body).hexdigest()
+
+    def test_what_goes_in_comes_back(self, tmp_path):
+        store = cr.ReleaseStore(str(tmp_path))
+        package, ident, digest = self._package()
+        assert store.put(ident, package, digest) is True
+        assert store.get(ident) == package
+        assert store.has(ident) and store.ids() == [ident]
+
+    def test_a_package_that_is_not_what_it_claims_is_refused(self, tmp_path):
+        store = cr.ReleaseStore(str(tmp_path))
+        package, ident, _digest = self._package()
+        assert store.put(ident, package, "a" * 64) is False
+        assert store.get(ident) is None
+
+    def test_a_file_filed_under_the_wrong_id_is_not_served(self, tmp_path):
+        """Re-checked on the way out: whatever put it there, it is only handed
+        over if it hashes to the id it is filed under."""
+        store = cr.ReleaseStore(str(tmp_path))
+        (tmp_path / ("cc" * 20 + ".pkg")).write_bytes(b"something else")
+        assert store.get("cc" * 20) is None
+
+    def test_it_survives_a_restart(self, tmp_path):
+        package, ident, digest = self._package()
+        cr.ReleaseStore(str(tmp_path)).put(ident, package, digest)
+        assert cr.ReleaseStore(str(tmp_path)).get(ident) == package
+
+    def test_holding_is_bounded(self, tmp_path):
+        store = cr.ReleaseStore(str(tmp_path), max_packages=2)
+        for index in range(5):
+            package, ident, digest = self._package(f"package {index}".encode())
+            store.put(ident, package, digest)
+        assert len(store) == 2
+
+    def test_with_nowhere_to_write_it_holds_nothing_and_says_so(self):
+        store = cr.ReleaseStore(None)
+        package, ident, digest = self._package()
+        assert store.put(ident, package, digest) is True   # in memory
+        assert store.get(ident) == package
+        assert cr.ReleaseStore("/proc/nope/nowhere").get(ident) is None
+
+    def test_an_unreadable_id_finds_nothing(self, tmp_path):
+        store = cr.ReleaseStore(str(tmp_path))
+        for bad in ("", "zz", "../escape", None):
+            assert store.get(bad) is None
 
 
 class TestPinnedPublishers:

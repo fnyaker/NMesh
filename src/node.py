@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -36,11 +37,16 @@ from .app_package import (
 from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .app_catalog import AppCatalog, InstalledApps
 from .version import is_newer as _is_newer
-from .core_release import (ReleaseCatalog, TrustedPublishers, ReleaseError,
+from .core_release import (ReleaseCatalog, ReleaseStore, TrustedPublishers,
+                           ReleaseError, PUBLISHER_ID_LEN as _RELEASE_ID_LEN,
+                           build_package as _core_build_package,
                            build_release as _core_build_release,
                            check_tree as _core_check_tree,
+                           open_package as _core_open_package,
+                           parse_release as _core_parse_release,
                            publisher_id as _core_publisher_id,
                            read_tree as _core_read_tree,
+                           release_id as _core_release_id,
                            version_of as _core_version_of)
 from .pseudo_dir import (PseudoStore, dir_key as _dir_key,
                          build_claim as _dir_build_claim,
@@ -92,6 +98,8 @@ DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
 ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
 ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
 RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
+RELEASE_FETCH     = 0x1F   # "send me this release's package, from here"
+RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -152,14 +160,23 @@ _RELEASE_RATE_WINDOW = 10.0     # seconds
 _RELEASE_RATE_MAX    = 32       # release announces one link may push per window
 _RELEASE_TICK        = 300.0    # seconds between auto-install passes
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
-_PUBLISH_CONCURRENCY = 8        # DHT stores in flight while publishing
+_RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
+_RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
+_RELEASE_SERVE_WINDOW  = 10.0   # seconds
+_RELEASE_SERVE_MAX     = 64     # slices one link may pull from us per window
+_RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
+_PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
+_HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
                     FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
-                    DIR_STORE, DIR_FIND, DIR_FOUND}
+                    DIR_STORE, DIR_FIND, DIR_FOUND,
+                    # A package comes from whoever has it, which may be several
+                    # hops away — the publisher, or any node that kept a copy.
+                    RELEASE_FETCH, RELEASE_DATA}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -1149,7 +1166,13 @@ class MeshNode:
         self._publishers = TrustedPublishers(
             os.path.join(release_dir, "publishers.json") if release_dir else None)
         self._releases = ReleaseCatalog()
+        # The packages we hold and can serve, and who else said they hold one.
+        self._packages = ReleaseStore(
+            os.path.join(release_dir, "packages") if release_dir else None)
+        self._release_sources: OrderedDict[str, list] = OrderedDict()
+        self._pending_slices: dict[tuple, asyncio.Future] = {}
         self._release_rate: OrderedDict[int, tuple] = OrderedDict()
+        self._release_serve_rate: OrderedDict[int, tuple] = OrderedDict()
         self._release_task: asyncio.Task | None = None
         self._release_tried: OrderedDict[bytes, str] = OrderedDict()
         self._release_log: list[dict] = []
@@ -4100,6 +4123,8 @@ class MeshNode:
             REACH_PROBE_ACK:   self._handle_reach_probe_ack,
             CATALOG_ANNOUNCE:  self._handle_catalog_announce,
             RELEASE_ANNOUNCE:  self._handle_release_announce,
+            RELEASE_FETCH:     self._handle_release_fetch,
+            RELEASE_DATA:      self._handle_release_data,
             DIR_STORE:         self._handle_dir_store,
             DIR_FIND:          self._handle_dir_find,
             DIR_FOUND:         self._handle_dir_found,
@@ -4911,9 +4936,23 @@ class MeshNode:
         from .dht import MAX_VALUE
         if not self._release_allowed(peer):
             return
-        release_bytes = packet.payload
+        payload = packet.payload
+        # `have(1) ‖ descriptor`: the sender says whether it holds the package
+        # too, so the next node to want it has somewhere nearer to ask than the
+        # publisher. A hint only — the hash is what decides.
+        if not payload:
+            return
+        holder, release_bytes = payload[0] == 1, payload[1:]
         if not release_bytes or len(release_bytes) > MAX_VALUE:
             return
+        if holder and peer.authenticated_id is not None:
+            try:
+                doc = _core_parse_release(release_bytes, self._identity.verify)
+                self._note_release_source(
+                    bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex(),
+                    peer.authenticated_id)
+            except Exception:
+                pass
         # An untrusted publisher's release is still carried and re-gossiped:
         # refusing to relay what we would not install ourselves would break
         # discovery for every other operator. It is flagged, never acted on.
@@ -4922,10 +4961,21 @@ class MeshNode:
         if outcome:
             await self._gossip_release(release_bytes, exclude=peer)
 
+    def _release_have_byte(self, release_bytes: bytes) -> bytes:
+        """Do we hold this release's package? Re-answered at every hop, because
+        the answer is about the node doing the sending, not about the release."""
+        try:
+            doc = _core_parse_release(release_bytes, self._identity.verify)
+        except Exception:
+            return b"\x00"
+        held = self._packages.has(
+            bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex())
+        return b"\x01" if held else b"\x00"
+
     async def _gossip_release(self, release_bytes: bytes,
                               exclude: '_Peer | None' = None) -> None:
         pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
-                            release_bytes)
+                            self._release_have_byte(release_bytes) + release_bytes)
         for p in list(self._peers):
             if p is exclude or p.authenticated_id is None or p.session is None:
                 continue
@@ -4940,8 +4990,9 @@ class MeshNode:
             if peer.authenticated_id is None or peer.session is None:
                 return
             try:
-                await peer.send(Packet.create(RELEASE_ANNOUNCE, self._id.raw,
-                                              _BROADCAST_ID, release_bytes))
+                await peer.send(Packet.create(
+                    RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
+                    self._release_have_byte(release_bytes) + release_bytes))
             except Exception:
                 return
 
@@ -4966,22 +5017,19 @@ class MeshNode:
         files = _core_read_tree(root or updater.install_root())
         version = _core_version_of(files)
         _core_check_tree(files, version)          # what we sign is what we carry
-        _, manifest, chunks = _app_build("nmesh", version, files)
-        await self.dht_put_many(list(chunks.values()))
-        root_bytes, manifest_chunks = _app_pack_root(manifest)
-        if len(root_bytes) > MAX_VALUE:
-            raise ReleaseError("this tree has too many files to publish")
-        await self.dht_put_many(list(manifest_chunks.values()))
-        # Through the same best-effort path as the chunks: a mesh that answers
-        # nothing must cost reach, not the publish. Everything is in our own
-        # store, and we are the one serving it.
-        root_key = (await self.dht_put_many([root_bytes]))[0]
+        package = _core_build_package(files)
         release_bytes = _core_build_release(
-            root_key, hashlib.sha256(root_bytes).hexdigest(), version,
-            self._identity.dsa_public_key, self._identity.sign, ts, notes)
+            package, version, self._identity.dsa_public_key,
+            self._identity.sign, ts, notes)
         if len(release_bytes) > MAX_VALUE:
             raise ReleaseError("release descriptor too large")
-        release_id = (await self.dht_put_many([release_bytes]))[0]
+        release_id = _core_release_id(package)
+        if not self._packages.put(release_id.hex(), package,
+                                  hashlib.sha256(package).hexdigest()):
+            raise ReleaseError("could not keep the package to serve it")
+        # Publishing is signing and announcing. Nothing is pushed anywhere: the
+        # bytes move when somebody actually wants them, from us or from anyone
+        # who kept a copy. A publisher with no peers still publishes.
         if self._releases.offer(release_bytes, self._identity.verify,
                                 self._trusts_publisher):
             await self._gossip_release(release_bytes)
@@ -4992,22 +5040,136 @@ class MeshNode:
                 self._identity.dsa_public_key).hex(),
             "files": len(files),
             "bytes": sum(len(value) for value in files.values()),
+            "package_bytes": len(package),
         }
 
-    async def fetch_release(self, publisher_id_hex: str):
-        """Fetch a release from the catalogue, verified end to end.
+    # -- moving the package: ask whoever has it, then be one of them -------
 
-        Returns ``(entry, files)`` or None. Every chunk is checked against the
-        signed root, and the version the descriptor announces is checked against
-        the one the tree carries — so what comes back is what was signed, or
-        nothing at all."""
+    def _release_serve_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._release_serve_rate, peer,
+                                    _RELEASE_SERVE_WINDOW, _RELEASE_SERVE_MAX)
+
+    def _note_release_source(self, release_id_hex: str, node_id: NodeID) -> None:
+        """Remember that this node said it holds that release.
+
+        Bounded on both axes, and it is only ever a hint: a node that claims to
+        have a package and does not simply wastes one request, because what
+        decides the bytes are good is the hash the publisher signed."""
+        if not _HEX_RELEASE.fullmatch(release_id_hex or ""):
+            return
+        sources = self._release_sources.setdefault(release_id_hex, [])
+        if node_id in sources:
+            sources.remove(node_id)
+        sources.append(node_id)
+        del sources[:-_RELEASE_SOURCES_MAX]
+        while len(self._release_sources) > _RELEASE_SOURCES_MAX:
+            self._release_sources.popitem(last=False)
+
+    async def _handle_release_fetch(self, peer: '_Peer', packet: Packet) -> None:
+        """Hand a slice of a package to whoever asked, if we have it.
+
+        A release is public code, signed: there is nothing here to authorise
+        beyond not letting one peer pull without end, which the rate limit
+        does. If we do not hold it, we say nothing — an empty answer would be
+        one more thing to forge."""
+        if not self._release_serve_allowed(peer):
+            return
+        payload = packet.payload
+        if len(payload) != _RELEASE_ID_LEN + 4:
+            return
+        release_id_hex = payload[:_RELEASE_ID_LEN].hex()
+        offset = int.from_bytes(payload[_RELEASE_ID_LEN:], "big")
+        package = self._packages.get(release_id_hex)
+        if package is None or offset >= len(package):
+            return
+        slice_ = package[offset:offset + _RELEASE_SLICE]
+        await self._route_outbound(Packet.create(
+            RELEASE_DATA, self._id.raw, packet.src_id,
+            payload[:_RELEASE_ID_LEN] + offset.to_bytes(4, "big") + slice_))
+
+    async def _handle_release_data(self, peer: '_Peer', packet: Packet) -> None:
+        payload = packet.payload
+        if len(payload) <= _RELEASE_ID_LEN + 4:
+            return
+        key = (payload[:_RELEASE_ID_LEN].hex(),
+               int.from_bytes(payload[_RELEASE_ID_LEN:_RELEASE_ID_LEN + 4], "big"))
+        future = self._pending_slices.get(key)
+        if future is not None and not future.done():
+            future.set_result(payload[_RELEASE_ID_LEN + 4:])
+
+    async def _pull_slice(self, source: NodeID, release_id: bytes,
+                          offset: int) -> bytes | None:
+        key = (release_id.hex(), offset)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_slices[key] = future
+        try:
+            await self._route_outbound(Packet.create(
+                RELEASE_FETCH, self._id.raw, source.raw,
+                release_id + offset.to_bytes(4, "big")))
+            return await asyncio.wait_for(asyncio.shield(future),
+                                          _RELEASE_SLICE_TIMEOUT)
+        except Exception:
+            return None
+        finally:
+            self._pending_slices.pop(key, None)
+            if not future.done():
+                future.cancel()
+
+    async def _pull_package(self, source: NodeID, entry: dict) -> bytes | None:
+        """Pull a whole package from one node, slice by slice."""
+        release_id = entry["release_id"]
+        size = entry["size"]
+        parts, offset = bytearray(), 0
+        while offset < size:
+            slice_ = await self._pull_slice(source, release_id, offset)
+            if not slice_:
+                return None                    # this source stopped answering
+            parts.extend(slice_)
+            offset += len(slice_)
+            if len(parts) > size:
+                return None                    # more than was signed for
+        return bytes(parts)
+
+    def _release_sources_for(self, entry: dict) -> list[NodeID]:
+        """Who to ask, nearest hint first, the publisher last.
+
+        Neighbours that said they hold it are tried before the publisher: that
+        is what makes this a swarm rather than one machine serving everybody."""
+        sources = list(reversed(
+            self._release_sources.get(entry["release_id"].hex(), [])))
+        publisher = NodeID(_core_publisher_id(entry["publisher"]))
+        if publisher not in sources:
+            sources.append(publisher)
+        return [node_id for node_id in sources if node_id != self._id]
+
+    async def fetch_release(self, publisher_id_hex: str):
+        """Get a release's package and open it, verified end to end.
+
+        Returns ``(entry, files)`` or None. The bytes are checked against the
+        SHA-256 the publisher signed before anything is unpacked, and the
+        version the descriptor announces against the one the tree carries — so
+        what comes back is what was signed, or nothing at all.
+
+        Whatever we end up holding, we keep: the next node to want this release
+        can ask us instead of the publisher."""
         entry = self._releases.get(publisher_id_hex)
         if entry is None:
             return None
-        result = await self.fetch_app(entry["root_key"])   # content-verified
-        if result is None:
+        release_id_hex = entry["release_id"].hex()
+        package = self._packages.get(release_id_hex)
+        if package is None:
+            for source in self._release_sources_for(entry):
+                package = await self._pull_package(source, entry)
+                if package is None:
+                    continue
+                if not self._packages.put(release_id_hex, package,
+                                          entry["sha256"]):
+                    package = None     # not what was signed — try someone else
+                    continue
+                break
+        if package is None:
             return None
-        _, files = result
+        files = _core_open_package(package)
         _core_check_tree(files, entry["version"])
         return entry, files
 
@@ -5319,13 +5481,11 @@ class MeshNode:
         can have arbitrarily many files."""
         _, manifest, chunks = _app_build(name, version, files)
         from .dht import MAX_VALUE
-        for value in chunks.values():
-            await self.dht_put(value)
+        await self.dht_put_many(list(chunks.values()))
         root_bytes, manifest_chunks = _app_pack_root(manifest)
         if len(root_bytes) > MAX_VALUE:
             raise AppPackageError("app has too many files even after chunking")
-        for value in manifest_chunks.values():
-            await self.dht_put(value)
+        await self.dht_put_many(list(manifest_chunks.values()))
         return await self.dht_put(root_bytes)
 
     async def publish_signed_app(self, name: str, version: str,

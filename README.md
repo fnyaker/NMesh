@@ -130,11 +130,12 @@ The node can also update itself from GitHub: web console →
 that names the version, and nothing is ever installed without that click.
 Details: [`Docs/Setup/guide`](Docs/Setup/guide).
 
-Better: **updates over the mesh itself**. A node publishes its own code as a
-content-addressed package signed with its ML-DSA identity; nodes whose operator
-pinned that publisher's key fetch it, verify every byte against the signature,
-and install it — automatically if asked. No web host in the trusted set. Same
-page in the console; the mechanism is in
+Better: **updates over the mesh itself**. A node signs its own code into one
+package and announces it — publishing touches no network at all. Whoever pinned
+that publisher's key asks for the package, from the publisher or from any node
+that already kept a copy, checks every byte against the signature, and installs
+it — automatically if asked. One publisher becomes a swarm, and no web host is
+in the trusted set. Same page in the console; the mechanism is in
 [`Docs/Updates/guide`](Docs/Updates/guide).
 
 Docker is still possible (`docker/`), but it is no longer the recommended route
