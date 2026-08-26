@@ -41,6 +41,15 @@ class TestVersionComparison:
         assert is_newer("v0.0.9", "0.1.0") is False
         assert is_newer("v0.1.0", "0.2.0") is False
 
+    def test_the_patch_number_is_not_capped_at_nine(self):
+        """The project counts the patch number up freely (CLAUDE.md), so it is
+        compared as a number, never as a character: 0.1.100 is newer than
+        0.1.99, and a minor bump still beats any patch count."""
+        assert is_newer("v0.1.10", "0.1.9") is True
+        assert is_newer("v0.1.100", "0.1.99") is True
+        assert is_newer("v0.1.99", "0.1.100") is False
+        assert is_newer("v0.2.0", "0.1.100") is True
+
     def test_prerelease_sorts_before_its_release(self):
         assert is_newer("v0.2.0-rc1", "0.2.0") is False
         assert is_newer("v0.2.0", "0.2.0-rc1") is True
