@@ -1,13 +1,13 @@
 """
-Tests d'intégration de l'app Fleet — deux nœuds réels, vrai mesh.
+Integration tests for the Fleet app — two real nodes, a real mesh.
 
-Les tests unitaires (`tests/test_fleet.py`) branchent les dispatchers l'un sur
-l'autre. Ici tout est réel : invitation, handshake post-quantique, session E2E,
-connecteur de données, cadrage par section. On vérifie que la chaîne complète
-tient — enrôlement avec décision humaine, puis commandes autorisées — et
-surtout qu'un opérateur non enrôlé n'obtient rien à travers un mesh authentique.
+The unit tests (`tests/test_fleet.py`) wire the dispatchers into each other.
+Here everything is real: the invitation, the post-quantum handshake, the E2E
+session, the data connector, the per-section framing. We check that the whole
+chain holds — enrolment with a human decision, then authorised commands — and
+above all that an unenrolled operator gets nothing through a genuine mesh.
 
-Exclus de la suite par défaut ; lancer explicitement :
+Excluded from the default suite; run it explicitly:
     pytest tests/integration/test_fleet.py -q
 """
 import asyncio
@@ -38,7 +38,7 @@ def _mgr() -> TransportManager:
 
 
 class Party:
-    """Un nœud réel, son connecteur, et l'app Fleet branchée dessus."""
+    """A real node, its connector, and the Fleet app plugged into it."""
 
     def __init__(self, node, connector, app):
         self.node = node
@@ -59,7 +59,7 @@ class Party:
         await self.node.stop()
 
     async def wait_for(self, kind, timeout=20.0):
-        """Attend un événement d'un type donné (jamais un sleep arbitraire)."""
+        """Wait for an event of a given kind (never an arbitrary sleep)."""
         async with asyncio.timeout(timeout):
             while True:
                 event = await self.app.next_event()
@@ -80,10 +80,10 @@ async def _party(node, *, mesh_invite=None) -> Party:
 
 
 async def _linked_pair(port: int):
-    """Deux nœuds joints par invitation, avec une session E2E établie.
+    """Two nodes joined by invitation, with an E2E session established.
 
-    Un port fixe **unique par test** (cf. `Docs/Architecture/gotchas.md` : un
-    port partagé entre tests entrerait en collision entre workers xdist)."""
+    A fixed port, **unique per test** (see `Docs/Architecture/gotchas.md`: a port
+    shared between tests would collide across xdist workers)."""
     host = MeshNode(_mgr())
     guest = MeshNode(_mgr())
     code = host.generate_invite()
@@ -103,7 +103,7 @@ class TestEnrolmentOverRealMesh:
             request = await agent.wait_for(EnrolRequested)
             assert request.src == operator.id
             assert request.caps == ["status"]
-            # Rien n'est accordé tant qu'un humain n'a pas répondu.
+            # Nothing is granted until a human has answered.
             assert agent.app.state.allows(operator.hex, "status") is False
 
             assert await agent.app.approve_enrolment(operator.hex) is True
@@ -121,8 +121,8 @@ class TestEnrolmentOverRealMesh:
             await agent.close()
 
     async def test_unenrolled_operator_gets_nothing(self):
-        """La porte du ledger tient à travers un mesh réel, pas seulement en
-        test unitaire : la session E2E authentifie, elle n'autorise pas."""
+        """The ledger gate holds across a real mesh, not only in a unit test:
+        the E2E session authenticates, it does not authorise."""
         operator, agent = await _linked_pair(19311)
         try:
             await operator.app.request_status(agent.id)
@@ -143,7 +143,7 @@ class TestEnrolmentOverRealMesh:
                 while operator.app.state.managed_one(agent.hex) is None:
                     await asyncio.sleep(0.05)
 
-            # « status » passe, « update » (jamais accordé) est refusé.
+            # "status" goes through, "update" (never granted) is refused.
             await operator.app.request_status(agent.id)
             await operator.wait_for(StatusReceived)
             await operator.app.request_update(agent.id)
@@ -178,9 +178,8 @@ class TestEnrolmentOverRealMesh:
 
 class TestRightsOverRealMesh:
     async def test_asking_for_more_waits_for_a_human(self):
-        """La demande de droit supplémentaire traverse un mesh réel sans rien
-        accorder : c'est l'approbation locale qui ouvre la porte, pas la
-        demande."""
+        """Asking for one more right crosses a real mesh granting nothing: it is
+        the local approval that opens the gate, not the request."""
         operator, agent = await _linked_pair(19318)
         try:
             await operator.app.request_enrolment(agent.id, caps=["status"])
@@ -198,7 +197,7 @@ class TestRightsOverRealMesh:
             failure = await operator.wait_for(Failure)
             assert "not authorised for update" in failure.error
 
-            # Un humain accepte : la porte s'ouvre, et l'opérateur l'apprend.
+            # A human accepts: the gate opens, and the operator learns of it.
             assert await agent.app.approve_enrolment(operator.hex) is True
             assert agent.app.state.allows(operator.hex, "update") is True
             async with asyncio.timeout(20.0):
@@ -235,8 +234,8 @@ class TestRightsOverRealMesh:
 
 
 class StubConsole:
-    """Le vrai console loopback n'a pas sa place ici : ce qu'on veut prouver,
-    c'est que l'appel traverse un mesh réel et revient intact."""
+    """The real loopback console has no place here: what we want to prove is
+    that the call crosses a real mesh and comes back intact."""
 
     def __init__(self):
         self.calls = []
@@ -249,8 +248,8 @@ class StubConsole:
 
 class TestRemoteConsoleOverRealMesh:
     async def test_a_console_call_crosses_the_mesh_and_comes_back(self):
-        """Réponse plus grande qu'une frame : le découpage et le réassemblage
-        passent par un vrai lien, pas par un stub de transport."""
+        """A response larger than one frame: the splitting and the reassembly go
+        over a real link, not a transport stub."""
         operator, agent = await _linked_pair(19340)
         console = StubConsole()
         agent.app._local_console = console
@@ -296,8 +295,8 @@ class TestRemoteConsoleOverRealMesh:
 
 class TestSectionIsolation:
     async def test_fleet_traffic_stays_in_its_section(self):
-        """Une app branchée sur une autre section ne voit rien du trafic Fleet
-        (le connecteur démultiplexe par app_id)."""
+        """An app plugged into another section sees nothing of Fleet's traffic
+        (the connector demultiplexes by app_id)."""
         operator, agent = await _linked_pair(19314)
         other = ConnectorClient(agent.connector.host, agent.connector.port,
                                 agent.connector.token, b"\x09" * 8)
@@ -315,17 +314,17 @@ class TestSectionIsolation:
 
 
 # ---------------------------------------------------------------------------
-# L'intégration au réseau d'une machine provisionnée
+# How a provisioned machine joins the network
 # ---------------------------------------------------------------------------
 
 class TestProvisionedNodeJoinsTheMesh:
-    """Une machine provisionnée doit finir **membre du réseau**, avec un
-    certificat émis par la node qui a lancé le scan. C'est le flux d'invitation
-    ordinaire — invitation → handshake → `issue_cert` — simplement automatisé.
+    """A provisioned machine has to end up a **member of the network**, with a
+    certificate issued by the node that ran the scan. It is the ordinary
+    invitation flow — invitation → handshake → `issue_cert` — simply automated.
 
-    Le transfert SSH n'est pas rejouable ici (pas de machine cible), mais tout ce
-    qui suit l'est : l'invitation que le provisionneur dépose, sa redemption par
-    la nouvelle node, et la chaîne de certificats qui en résulte."""
+    The SSH transfer cannot be replayed here (there is no target machine), but
+    everything after it can: the invitation the provisioner leaves, its
+    redemption by the new node, and the certificate chain that results."""
 
     async def test_certificate_is_issued_by_the_scanning_node(self):
         provisioner = MeshNode(_mgr())
@@ -336,29 +335,29 @@ class TestProvisionedNodeJoinsTheMesh:
                                  "code": provisioner.generate_invite(3600)})
         newcomer = MeshNode(_mgr())
         try:
-            # Ce que le provisioning dépose sur la machine neuve.
+            # What provisioning leaves on the new machine.
             uris, code = party.app._fresh_invitation([], "")
             assert uris and code
 
-            # Ce que la machine neuve en fait à son premier démarrage.
+            # What the new machine does with it on its first start.
             await newcomer.join(uris[0], code)
             await newcomer.wait_for_session(timeout=20.0)
             await provisioner.wait_for_session(timeout=20.0)
 
-            # Le certificat de la nouvelle node est émis par le provisionneur.
+            # The new node's certificate is issued by the provisioner.
             chain = newcomer._cert_store.get_chain_to_root(newcomer.id)
-            assert chain, "la nouvelle node n'a pas de chaîne de certificats"
+            assert chain, "the new node has no certificate chain"
             assert chain[0].subject_id == newcomer.id
             assert chain[0].issuer_id == provisioner.id
-            # Et cette chaîne remonte bien à une racine que le réseau reconnaît.
+            # And that chain really walks up to a root the network recognises.
             assert newcomer._cert_store.verify_chain(chain) is not None
         finally:
             await party.close()
             await newcomer.stop()
 
     async def test_the_invitation_is_single_use(self):
-        """Deux machines ne partagent jamais un code : le premier qui l'utilise
-        le consomme, et un second essai échoue."""
+        """Two machines never share a code: the first to use it consumes it, and
+        a second attempt fails."""
         provisioner = MeshNode(_mgr())
         await provisioner.start(["tcp://127.0.0.1:19321"])
         party = await _party(
@@ -381,7 +380,7 @@ class TestProvisionedNodeJoinsTheMesh:
             await second.stop()
 
     async def test_each_machine_gets_its_own_invitation(self):
-        """Une invitation par machine : l'échec de l'une ne brûle pas l'autre."""
+        """One invitation per machine: one failing does not burn the other."""
         provisioner = MeshNode(_mgr())
         await provisioner.start(["tcp://127.0.0.1:19322"])
         party = await _party(
@@ -396,8 +395,8 @@ class TestProvisionedNodeJoinsTheMesh:
             await party.close()
 
     async def test_without_a_provider_the_caller_sees_no_invitation(self):
-        """Sans moyen d'inviter, la machine serait installée sans rejoindre
-        quoi que ce soit — le résultat doit le dire, pas le cacher."""
+        """With no way to invite, the machine would be installed without joining
+        anything — the result must say so, not hide it."""
         node = MeshNode(_mgr())
         party = await _party(node, mesh_invite=None)
         try:
@@ -420,13 +419,13 @@ class TestProvisionedNodeJoinsTheMesh:
 
 
 # ---------------------------------------------------------------------------
-# Le scan **distant** : la panne que l'utilisateur a rencontrée
+# The **remote** scan: the failure the user ran into
 # ---------------------------------------------------------------------------
 
 class TestRemoteScan:
-    """Un scan demandé à une node distante doit revenir jusqu'au pont console.
-    C'est le chemin complet : requête signée → autorisation → balayage sur
-    l'autre machine → réponse routée → état visible par l'interface."""
+    """A scan asked of a remote node has to come all the way back to the console
+    bridge. That is the whole path: a signed request → authorisation → the sweep
+    on the other machine → a routed reply → state the interface can see."""
 
     async def _ssh_listener(self):
         async def handle(reader, writer):
@@ -464,11 +463,11 @@ class TestRemoteScan:
             assert event.src == agent.id
             assert [(h["ip"], h["port"]) for h in event.hosts] == [("127.0.0.1", port)]
 
-            # Ce que l'interface lit réellement : le snapshot du pont.
+            # What the interface actually reads: the bridge's snapshot.
             snapshot = await self._via_thread(bridge.snapshot)
             stored = snapshot["scans"][agent.hex]
             assert [h["port"] for h in stored["hosts"]] == [port]
-            # …et l'opération est marquée terminée, pas « en cours » à vie.
+            # …and the operation is marked finished, not "in progress" forever.
             job = next(j for j in snapshot["jobs"] if j["rid"] == rid)
             assert job["state"] == "ok" and job["kind"] == "scan"
         finally:
