@@ -181,6 +181,14 @@ Two security invariants, not to be broken:
 The signer's identity is not a separate field: `NodeID` derives from the key
 presented, so there is no id to lie about (the same invariant as the handshake).
 
+**The signing domains, in one place.** One identity key signs everything, so
+each use gets its own domain and none of them can be replayed as another:
+`nmesh-app-auth-v1` (assertions), `nmesh-app-release-v1` (app packages),
+`nmesh-core-release-v1` (a release of the node's own code — see
+[`Docs/Updates/guide`](../Updates/guide)), `nmesh-pseudo-dir-v1` (directory
+claims), plus the certificate body and the handshake input. Adding a seventh use
+means adding a seventh domain, not reusing the nearest one.
+
 `verify_assertion` orders its checks from cheapest to most expensive and burns
 the anti-replay nonce **only after** the cheap ones — otherwise a flood of
 invalid assertions would evict live entries from a bounded cache.

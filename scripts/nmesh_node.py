@@ -257,6 +257,9 @@ async def main() -> None:
         session_store_path=os.path.join(args.data, "node.sessions") if args.data else None,
         app_storage_path=os.path.join(args.data, "app_store") if args.data else None,
         app_store_dir=os.path.join(args.data, "appstore") if args.data else None,
+        # Pinned release publishers live with the node's state: what may
+        # replace this node's code is not something to forget on restart.
+        release_dir=args.data if args.data else None,
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

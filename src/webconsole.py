@@ -42,6 +42,7 @@ from . import app_api
 from . import updater
 from . import config as node_config
 from . import console_auth
+from .core_release import ReleaseError
 from . import join_ticket
 from . import qr
 from .node import MESSAGE_NAMES
@@ -804,6 +805,12 @@ def _make_handler(console: WebConsole):
                 result["blocked"] = reason
                 self._json(200, result)
                 return
+            if path == "/api/releases":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                self._json(200, console._node.release_overview())
+                return
             if path == "/api/config":
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
@@ -1239,6 +1246,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/update/apply":
                 self._handle_update_apply(_parse_json(body))
                 return
+            if path.startswith("/api/releases/"):
+                self._handle_release_post(path, _parse_json(body))
+                return
             if path == "/api/config":
                 self._handle_config_save(_parse_json(body))
                 return
@@ -1358,6 +1368,77 @@ def _make_handler(console: WebConsole):
                 self._json(200, trace.status())
                 return
             self._json(400, {"error": "action must be start, stop or clear"})
+
+        def _handle_release_post(self, path: str, data) -> None:
+            """Publishing, pinning and installing mesh-native releases.
+
+            The console decides nothing here: pinning a key, installing a
+            release and turning automatic installation on all end in the node,
+            which owns the gates. What this layer owns is that a signed-in
+            operator asked."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            node = console._node
+            try:
+                if path == "/api/releases/publish":
+                    notes = data.get("notes")
+                    result = console._call(
+                        node.publish_release(
+                            notes=notes if isinstance(notes, str) else ""),
+                        timeout=300.0)
+                    self._json(200, {"ok": True, **result})
+                    return
+                if path == "/api/releases/install":
+                    publisher = data.get("publisher_id")
+                    if not isinstance(publisher, str):
+                        self._json(400, {"error": "publisher_id required"})
+                        return
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    result = console._call(node.install_release(publisher),
+                                           timeout=400.0)
+                    self._json(200, {"ok": True, **result})
+                    return
+                if path == "/api/releases/trust":
+                    key = data.get("key")
+                    if not isinstance(key, str):
+                        self._json(400, {"error": "key required"})
+                        return
+                    name = data.get("name")
+                    entry = node.trust_publisher(
+                        key.strip(), name if isinstance(name, str) else "",
+                        data.get("auto") is True)
+                    self._json(200, {"ok": True, "publisher": entry})
+                    return
+                if path == "/api/releases/untrust":
+                    publisher = data.get("publisher_id")
+                    if not isinstance(publisher, str):
+                        self._json(400, {"error": "publisher_id required"})
+                        return
+                    self._json(200, {"ok": node.untrust_publisher(publisher)})
+                    return
+                if path == "/api/releases/auto":
+                    publisher = data.get("publisher_id")
+                    if not isinstance(publisher, str):
+                        self._json(400, {"error": "publisher_id required"})
+                        return
+                    ok = node.set_publisher_auto(publisher,
+                                                 data.get("auto") is True)
+                    self._json(200 if ok else 404, {"ok": ok})
+                    return
+            except ReleaseError as exc:
+                self._json(400, {"error": str(exc)[:256]})
+                return
+            except updater.UpdateError as exc:
+                self._json(502, {"error": str(exc)[:256]})
+                return
+            except Exception as exc:
+                self._json(500, {"error": f"release failed: {type(exc).__name__}"})
+                return
+            self._json(404, {"error": "not found"})
 
         def _handle_app_call(self, data) -> None:
             """Invoke one declared operation on one running app.

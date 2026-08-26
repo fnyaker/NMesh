@@ -1400,6 +1400,143 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
 
+class TestReleaseEndpoints:
+    """Publishing, pinning and installing code over the mesh, from the console.
+
+    The console owns none of the decisions — the node does — so these check the
+    door: a session is required, a key that is not a key is refused, and
+    installing needs both a pinned publisher and an explicit confirmation."""
+
+    def _tree(self, root):
+        os.makedirs(os.path.join(root, "src"), exist_ok=True)
+        with open(os.path.join(root, "src", "version.py"), "w") as handle:
+            handle.write('__version__ = "9.9.9"\n')
+        with open(os.path.join(root, "start.sh"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        return root
+
+    async def test_reading_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/releases", None)
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_every_write_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            for path in ("/api/releases/publish", "/api/releases/install",
+                         "/api/releases/trust", "/api/releases/untrust",
+                         "/api/releases/auto"):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", path, None, {})
+                assert status == 401, path
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_overview_says_what_this_node_can_do(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/releases", token)
+            assert status == 200
+            assert body["publishers"] == [] and body["releases"] == []
+            # The key an operator hands to whoever wants to accept our releases.
+            assert body["publisher_key"] and body["current"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_pinning_a_publisher_and_taking_it_back(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            key = node._identity.dsa_public_key.hex()
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/trust", token,
+                {"key": key, "name": "me", "auto": True})
+            assert status == 200 and body["publisher"]["auto"] is True
+            publisher_id = body["publisher"]["id"]
+
+            _, _, _, overview = await asyncio.to_thread(
+                _request, console, "GET", "/api/releases", token)
+            assert [p["name"] for p in overview["publishers"]] == ["me"]
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/auto", token,
+                {"publisher_id": publisher_id, "auto": False})
+            assert status == 200 and body["ok"] is True
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/untrust", token,
+                {"publisher_id": publisher_id})
+            assert status == 200 and body["ok"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_key_that_is_not_a_key_is_refused_with_a_reason(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({}, {"key": ""}, {"key": "zz"}, {"key": 5}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/releases/trust", token,
+                    payload)
+                assert status == 400, payload
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_publishing_signs_the_tree_and_lists_it(self, tmp_path):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            from src import updater
+            root = self._tree(str(tmp_path))
+            original = updater.install_root
+            updater.install_root = lambda: root
+            try:
+                status, _, _, body = await asyncio.to_thread(
+                    _request, console, "POST", "/api/releases/publish", token,
+                    {"notes": "hello"})
+            finally:
+                updater.install_root = original
+            assert status == 200 and body["version"] == "9.9.9"
+            _, _, _, overview = await asyncio.to_thread(
+                _request, console, "GET", "/api/releases", token)
+            assert overview["releases"][0]["notes"] == "hello"
+            # Publishing is not pinning: our own release is not installable
+            # until this operator says that key is one they accept.
+            assert overview["releases"][0]["state"] == "untrusted"
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_installing_needs_a_publisher_and_a_confirmation(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({}, {"publisher_id": 5},
+                            {"publisher_id": "aa" * 20}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/releases/install", token,
+                    payload)
+                assert status == 400, payload
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_installing_something_nobody_announced_says_so(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/install", token,
+                {"publisher_id": "aa" * 20, "confirm": True})
+            assert status == 400 and "no such release" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestAddressRetryEndpoints:
     """The two routes added for addresses: replaying, and steering on latency.
     They return usable words, and refuse everything else."""
