@@ -8,6 +8,7 @@ verification (a seek must be signed by the key whose hash is the inviter id),
 the relay routing, the bounded rendezvous (reverse-path) table, the per-link
 rate limit, dedup and TTL — all the hostile-input surface.
 """
+import os
 import time
 
 import pytest
@@ -236,3 +237,34 @@ class TestDispatch:
         node, _ = await make_node()
         snap = await node.console_snapshot()
         assert snap["pending_seeks"] == 0
+
+
+class TestPreAuthOrdering:
+    """`_is_seen` is not a query — it inserts. Both pre-auth handlers therefore
+    take their rate limit first: with the order the other way round, any socket
+    that connected could flush the node-wide replay window at line rate, and
+    dedup is what stops a routed packet looping and a relay re-injecting the
+    same payload."""
+
+    async def test_a_seek_flood_cannot_flush_the_dedup_window(self):
+        from src.node import _SEEK_RATE_MAX, INVITE_SEEK
+        node, fake = await make_node()
+        peer = node._peers[0]
+        assert peer.authenticated_id is None       # pre-auth, on purpose
+        for _ in range(_SEEK_RATE_MAX * 20):
+            packet = Packet.create(INVITE_SEEK, os.urandom(20), node.id.raw,
+                                   os.urandom(64), ttl=8)
+            await node._handle_invite_seek(peer, packet)
+        assert len(node._seen_msgs) <= _SEEK_RATE_MAX
+        await node.stop()
+
+    async def test_a_carry_flood_cannot_flush_the_dedup_window(self):
+        from src.node import _CARRY_RATE_MAX, RELAY_CARRY
+        node, fake = await make_node()
+        peer = node._peers[0]
+        for _ in range(_CARRY_RATE_MAX * 4):
+            packet = Packet.create(RELAY_CARRY, os.urandom(20), os.urandom(20),
+                                   os.urandom(64), ttl=8)
+            await node._handle_relay_carry(peer, packet)
+        assert len(node._seen_msgs) <= _CARRY_RATE_MAX
+        await node.stop()

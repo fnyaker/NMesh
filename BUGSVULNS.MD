@@ -249,6 +249,10 @@ ceiling, and an idle TTL), and evict the companion tables with it —
 
 ## 3 — high — Pre-auth packets poison the replay-dedup cache before any rate limit
 
+> **Status — fixed.** `_seek_allowed` / `_carry_allowed` now run above
+> `_is_seen` in both handlers; `msg_id` verification still precedes dedup and
+> the ML-DSA check is still last.
+
 **Where** — `src/node.py`, `MeshNode._handle_invite_seek` and
 `MeshNode._handle_relay_carry`; the cache is `MeshNode._is_seen`.
 
@@ -783,6 +787,11 @@ does not pick it again.
 
 ## 17 — medium — Pre-auth `HANDSHAKE` may be retried without limit on one connection
 
+> **Status — fixed.** `_split_handshake` separates slicing from verifying, so
+> the SHA-256 identity test runs before any signature work; the chain is parsed
+> only once the packet has earned it; and `_MAX_HANDSHAKE_ATTEMPTS` bounds the
+> tries one link gets.
+
 **Where** — `src/node.py`, `MeshNode._handle_handshake`; `_decode_handshake` →
 `_decode_chain` → `Certificate.deserialize` → `Certificate._build` →
 `_verify_dsa`.
@@ -945,6 +954,8 @@ check where it is: it is the only thing that decides the bytes are good.
 ---
 
 ## 22 — low — `_decode_chain` does not bound the certificate count
+
+> **Status — fixed.** `count > _ENTRY_CHAIN_MAX` is refused before the loop.
 
 **Where** — `src/node.py`, `_decode_chain` (`count = data[0]`, up to 255).
 
@@ -1347,6 +1358,9 @@ process.
 
 ## 33 — medium — `verify_assertion` burns the anti-replay nonce before checking the signature
 
+> **Status — fixed.** `nonces.claim` moved below the signature check; a
+> forged assertion now consumes no cache slot.
+
 **Where** — `src/app_auth.py`, `verify_assertion`.
 
 **What happens** — the function's own comment states the intent:
@@ -1382,6 +1396,12 @@ right and needs no change.
 ---
 
 ## 34 — medium — The console reads an unauthenticated body of up to 64 MiB
+
+> **Status — fixed.** `do_POST` checks the session before reading anything
+> larger than `_MAX_BODY`, and `/api/login` — the one route that cannot be
+> authorised first — is held to `_MAX_BODY`. The login throttle now decides and
+> counts under one lock, with `_LOGIN_MAX_INFLIGHT` bounding concurrent scrypt
+> work. The TLS-key `chmod` half is in the console pass.
 
 **Where** — `src/webconsole.py`, `Handler.do_POST`.
 

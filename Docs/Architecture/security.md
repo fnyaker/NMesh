@@ -109,11 +109,22 @@ Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
    public key + ML-DSA public key + certificate chain +
    `sign(challenge‖kem_pub‖dsa_pub)`. If the client was joining by invitation,
    the HMAC response to the challenge proves the code.
-3. The server (`_handle_handshake`) verifies the signature, verifies
-   `claimed_id`, verifies the chain (or issues a cert if `invite_accepted`),
+3. The server (`_handle_handshake`) verifies `claimed_id`, verifies the
+   signature, verifies the chain (or issues a cert if `invite_accepted`),
    encapsulates ML-KEM → `HANDSHAKE_ACK` = ML-KEM ciphertext + its DSA key + its
    chain + the issued cert + a signature. `peer.session =
    SessionKey(shared_secret)`.
+
+   **In that order, and it matters.** This handler is reachable on an
+   unauthenticated link, and a failed attempt clears neither of its guards, so
+   the same connection may try again. `claimed_id != NodeID(src_id)` is two
+   SHA-256s and rules the packet out; the handshake signature is one ML-DSA
+   verification; parsing the chain is one *per certificate* in it. So the
+   payload is sliced without parsing the chain (`_split_handshake`), the cheap
+   test runs first, and `_decode_chain` — which verifies as it builds — runs
+   only once the packet has earned it. `_MAX_HANDSHAKE_ATTEMPTS` bounds how
+   many tries one link gets at all, and `_decode_chain` refuses a chain longer
+   than `_ENTRY_CHAIN_MAX`.
 4. The client (`_handle_handshake_ack`) verifies and decapsulates → the same
    `SessionKey`.
 
@@ -217,9 +228,13 @@ each use gets its own domain and none of them can be replayed as another:
 a name — see below), plus the certificate body and the handshake input. Adding a
 seventh use means adding a seventh domain, not reusing the nearest one.
 
-`verify_assertion` orders its checks from cheapest to most expensive and burns
-the anti-replay nonce **only after** the cheap ones — otherwise a flood of
-invalid assertions would evict live entries from a bounded cache.
+`verify_assertion` orders its checks from cheapest to most expensive, and burns
+the anti-replay nonce **after the signature**, not before it. Everything ahead of
+the signature is structural — an attacker copies the app id, the audience, the
+purpose and the ctx off a legitimate assertion and picks a fresh timestamp — so
+claiming the nonce there let unsigned rubbish evict live entries from the
+bounded cache, which reopens the replay window the cache exists to close. A
+claim is a mutation, and mutations go after the last gate.
 
 **Authentication is not authorisation.** An assertion proves "who, for what";
 deciding whether that "who" is allowed remains the app's job. The Fleet app
