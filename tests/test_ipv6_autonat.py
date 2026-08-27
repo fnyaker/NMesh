@@ -145,10 +145,52 @@ class TestAutoNAT:
         peer = node._peers[0]
         peer.authenticated_id = NodeID(b"\x02" * 20)
         assert "tcp" not in node._inbound_schemes
+        node._note_reach_probe(peer.authenticated_id, "tcp")   # we asked
         ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
                             struct.pack("!BB", 3, 1) + b"tcp")
         await node._handle_reach_probe_ack(peer, ack)
         assert "tcp" in node._inbound_schemes
+
+    async def test_an_unsolicited_ack_confirms_nothing(self):
+        """`_inbound_schemes` decides what we advertise and whether we offer
+        ourselves as a relay. An answer to a question we never asked would let
+        one peer make a NATted node announce itself as reachable — a black hole
+        for everyone who then routes through it."""
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
+
+    async def test_an_ack_from_a_peer_we_did_not_ask_confirms_nothing(self):
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        node._note_reach_probe(NodeID(b"\x03" * 20), "tcp")   # asked somebody else
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
+
+    async def test_an_ack_is_good_once(self):
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        node._note_reach_probe(peer.authenticated_id, "tcp")
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        node._inbound_schemes.clear()
+        await node._handle_reach_probe_ack(peer, ack)   # replayed
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
 
     async def test_ack_failure_does_not_confirm(self):
         node, _ = await make_node()

@@ -296,6 +296,11 @@ the routed one, so a pre-auth flood cannot reach post-auth state at all.
 
 ## 4 — high — Unauthenticated links hold every peer slot for ever
 
+> **Status — fixed.** `_MAX_UNAUTH_PEERS` gives unauthenticated links their
+> own, smaller ceiling, and `_reap_stale_unauthenticated` cuts one past
+> `_HANDSHAKE_DEADLINE`. Relayed virtual peers are exempt, as a relayed join
+> needs them.
+
 **Where** — `src/node.py`, `MeshNode._on_new_transport`; the ceiling is
 `_MAX_PEERS = 128`.
 
@@ -335,6 +340,10 @@ grace or exempt them explicitly, or relayed joins will start failing.
 ---
 
 ## 5 — high — `UDPServer._transports` is never pruned
+
+> **Status — fixed.** `remove_transport` is called on close and on the
+> keepalive's death verdict, and `_reap_closed` sweeps when the table is read,
+> so the ceiling counts live transports.
 
 **Where** — `src/udp_transport.py`, `UDPServer._dispatch_datagram` /
 `UDPServer.remove_transport`.
@@ -658,6 +667,13 @@ is correct and documented — do not turn it back into a `chmod`.
 
 ## 13 — medium — The UDP reliability layer is unauthenticated
 
+> **Status — mitigated, not closed.** Sequence numbers start random and the
+> receiver learns the peer's from the first frame, so the cursor is no longer a
+> free guess; an undelivered-but-delivered payload is counted (`undecodable`)
+> instead of vanishing. The header is still unauthenticated — closing that
+> means carrying the link session down into the transport, which is a design
+> change, not a fix.
+
 **Where** — `src/udp_transport.py`, `_ReliableLink.process_incoming` /
 `process_ack`, `UDPTransport._process_frame`.
 
@@ -876,6 +892,10 @@ answer get home.
 
 ## 19 — medium — One peer's word sets `_inbound_schemes`
 
+> **Status — fixed.** `_note_reach_probe` records `(peer, scheme)` with a TTL
+> and `_handle_reach_probe_ack` requires a match, consumes it, and ignores
+> anything else.
+
 **Where** — `src/node.py`, `MeshNode._handle_reach_probe_ack`.
 
 **What happens** — the AutoNAT reply is taken at face value:
@@ -943,6 +963,9 @@ LoRa link can honour.
 ---
 
 ## 21 — medium — `RELEASE_DATA` slices are accepted from anyone
+
+> **Status — fixed.** `_pending_slices` is keyed on the source as well, and a
+> slice from anyone else is charged as abuse.
 
 **Where** — `src/node.py`, `MeshNode._handle_release_data` / `_pull_slice`.
 
@@ -2153,6 +2176,9 @@ dial amplifier aimed at a victim. Only the rate is missing.
 catalog/release/directory planes are.
 
 ## 45 — low — Fire-and-forget tasks that are neither tracked nor bounded
+
+> **Status — fixed.** All seven go through `_spawn_bounded`; the punch state
+> is left alone when the ceiling refuses one, per gotchas.
 
 **Where** — `src/node.py`: `_schedule_catalog_sync`, `_schedule_release_sync`,
 `_schedule_pseudo_sync` (`asyncio.create_task(...)` with the result discarded),

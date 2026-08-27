@@ -1,11 +1,12 @@
 import asyncio
+import os
 import pytest
 from src.node import MeshNode, PING, PONG, FIND_NODE, FOUND_NODE, _encode_entries, _encode_addresses
 from src.node_id import NodeID
 from src.routing import NodeEntry
 from src.packet import Packet
 from src.crypto import CryptoIdentity
-from tests.conftest import FakeTransport, make_node
+from tests.conftest import FakeTransport, make_manager, make_node
 
 
 def _make_entry(address: str, issuer_node: 'MeshNode | None' = None) -> NodeEntry:
@@ -175,3 +176,46 @@ class TestBootstrap:
         await node.find_node(node.id)
         await node.stop()
         assert fake.sent[0].payload[:20] == node.id.raw
+
+
+class TestAdmission:
+    """A link that never authenticates must not be able to take the node's
+    place in the mesh. `_dial_uri` refuses to dial once `_peers` is full, so an
+    exhausted table is a node that cannot even re-join."""
+
+    async def test_unauthenticated_links_have_their_own_ceiling(self):
+        from src.node import _MAX_PEERS, _MAX_UNAUTH_PEERS
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        accepted = 0
+        for _ in range(_MAX_PEERS + 20):
+            transport = FakeTransport()
+            before = len(node._peers)
+            await node._on_new_transport(transport)
+            accepted += len(node._peers) - before
+        assert accepted <= _MAX_UNAUTH_PEERS
+        assert len(node._peers) <= _MAX_UNAUTH_PEERS
+        await node.stop()
+
+    async def test_a_link_past_its_deadline_is_swept(self):
+        from src.node import _HANDSHAKE_DEADLINE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(FakeTransport())
+        stale = node._peers[0]
+        stale.connected_at -= _HANDSHAKE_DEADLINE + 1
+        node._reap_stale_unauthenticated()
+        assert stale not in node._peers
+        await node.stop()
+
+    async def test_an_authenticated_link_is_never_swept(self):
+        from src.node import _HANDSHAKE_DEADLINE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(FakeTransport())
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(os.urandom(20))
+        peer.connected_at -= _HANDSHAKE_DEADLINE * 10
+        node._reap_stale_unauthenticated()
+        assert peer in node._peers
+        await node.stop()
