@@ -314,6 +314,21 @@ coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
    automatically triggers an attempt at a direct link (rate-limited per target,
    `_UPGRADE_COOLDOWN`).
 
+### What a punch probe signs
+
+`magic ‖ src_id ‖ dst_id ‖ nonce ‖ minute` — the **recipient** and the minute,
+not just the sender. Signing `magic ‖ src ‖ nonce` alone made every probe a
+bearer token: captured once, it verified at any node that knew the sender, for
+ever, and each replay bought a signature and a ~3.4 kB ack sent to whatever
+source address the replayer forged. The receiver accepts the current minute or
+the previous one, so a probe crossing a boundary is not treated as a replay.
+
+Raw punch datagrams are also metered per **source address**
+(`_punch_datagram_allowed`) before any verification — there is no peer and no
+identity to key on, and they are the only expensive thing reachable with no link
+at all. A spoofed source therefore spends only the budget of the address it
+forged.
+
 ## Address discovery & reachability
 
 - `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it

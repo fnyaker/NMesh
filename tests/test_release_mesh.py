@@ -244,7 +244,11 @@ class TestGossip:
                 await node._handle_release_announce(ingress, packet)
                 await settle(node)
             from src.node import _RELEASE_RATE_MAX
-            assert node._release_rate[id(ingress)][0] <= _RELEASE_RATE_MAX
+            # Keyed on the peer's identity, not on id(peer): the object's
+            # address is reused after collection, and these tables are pruned
+            # by window expiry rather than by peer lifetime.
+            key = node._rate_key(ingress)
+            assert node._release_rate[key][0] <= _RELEASE_RATE_MAX
         finally:
             await publisher.stop(); await node.stop()
 

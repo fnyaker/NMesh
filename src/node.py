@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import socket
 import ssl
@@ -242,6 +243,11 @@ _E2E_REKEY_MAX = 64          # distinct peers with a pending re-key candidate
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
+# Peers one gossip hop reaches. An epidemic still covers a connected mesh at
+# this width; sending to *every* peer instead made one accepted claim cost
+# (peers − 1) transmissions of ~5.3 kB, and an adversary that mints identities
+# offline can make every claim it sends genuinely new.
+_GOSSIP_FANOUT         = 6
 # A bounded XOR-nearest link set is recovered at startup and refreshed while
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
@@ -338,6 +344,23 @@ _FIND_NODE_SCAN           = 64
 # very failure mode this file is trying to remove.
 _QUERY_RATE_WINDOW        = 10.0
 _QUERY_RATE_MAX           = 512
+# Storing is cheap for us and cheap for the sender, but the store it fills is
+# where app chunks and release content live and eviction is one global LRU — so
+# a peer that can spray STOREs can evict the distribution layer. Well above any
+# legitimate publish (`dht_put_many` sends `_PUBLISH_CONCURRENCY` at a time).
+_STORE_RATE_WINDOW        = 10.0
+_STORE_RATE_MAX           = 256
+# One PUNCH_REQUEST costs us two packets, one of them on a link the requester
+# does not pay for. A punch is a handful of requests, never a stream.
+_PUNCH_REQ_WINDOW         = 10.0
+_PUNCH_REQ_MAX            = 32
+# Raw punch datagrams, per source address. A punch is `_PUNCH_PROBE_COUNT`
+# probes and an ack, repeated at most `_PUNCH_MAX_RETRIES` times, so this is far
+# above anything legitimate and still far below what an unmetered verification
+# flood would cost.
+_PUNCH_DGRAM_WINDOW       = 10.0
+_PUNCH_DGRAM_MAX          = 64
+_PUNCH_DGRAM_TRACKED      = 256
 
 # Invite blocks (base64 join bundles: advertised URIs + invite code)
 _JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
@@ -744,6 +767,27 @@ def _decode_punch_relay(data: bytes) -> tuple[bytes, str, str] | None:
         return None
     observed_addr = data[offset:offset + oa_len].decode('utf-8')
     return peer_id, peer_addr, observed_addr
+
+
+def _punch_signed_blob(magic: bytes, src: bytes, dst: bytes, nonce: bytes,
+                       minute: int) -> bytes:
+    """What a punch probe or ack actually signs.
+
+    It names the **recipient** and the minute it was made. Signing only
+    ``magic ‖ src ‖ nonce`` made every probe a token valid anywhere, for ever:
+    one captured datagram could be replayed at any node that knew the sender,
+    and each replay bought a signature and a ~3.4 kB answer sent to whatever
+    source address the replayer forged."""
+    return magic + src + dst + nonce + struct.pack("!Q", minute)
+
+
+def _punch_minutes(now: float | None = None) -> tuple[int, ...]:
+    """The minute stamps a fresh probe may carry: this one and the last.
+
+    Two, not one, because a probe crossing a minute boundary is not a replay —
+    and not more, because the window is the whole freshness guarantee."""
+    minute = int((now if now is not None else time.time()) // 60)
+    return (minute, minute - 1)
 
 
 def _build_punch_probe(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
@@ -1200,12 +1244,12 @@ class MeshNode:
         self._inbound_schemes: set[str] = set()
         # Relayed-invitation state (INVITE_SEEK). All bounded.
         self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
-        self._seek_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer) -> (count, window)
+        self._seek_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer) -> (count, window)
         self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
-        self._carry_rate: OrderedDict[int, tuple] = OrderedDict()     # id(peer) -> (count, window)
+        self._carry_rate: OrderedDict[bytes, tuple] = OrderedDict()     # _rate_key(peer) -> (count, window)
         self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
         self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
-        self._reach_probe_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._reach_probe_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer)->(n,win)
         self._reach_dials_active = 0                   # concurrent dial-backs (bounded)
         self._running = False
         self._peers: list[_Peer] = []
@@ -1249,7 +1293,7 @@ class MeshNode:
                           if app_store_dir else None)
         apps_dir = os.path.join(app_store_dir, "apps") if app_store_dir else None
         self._installed = InstalledApps(installed_path, apps_dir)
-        self._catalog_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._catalog_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer)->(n,win)
         # Mesh-native releases: what the network offers (gossiped, in-memory)
         # and whose signature this operator accepts (pinned, persisted). The
         # pins are the only thing that decides what may replace this node's own
@@ -1262,8 +1306,8 @@ class MeshNode:
             os.path.join(release_dir, "packages") if release_dir else None)
         self._release_sources: OrderedDict[str, list] = OrderedDict()
         self._pending_slices: dict[tuple, asyncio.Future] = {}
-        self._release_rate: OrderedDict[int, tuple] = OrderedDict()
-        self._release_serve_rate: OrderedDict[int, tuple] = OrderedDict()
+        self._release_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        self._release_serve_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._release_task: asyncio.Task | None = None
         self._release_tried: OrderedDict[bytes, str] = OrderedDict()
         self._release_log: list[dict] = []
@@ -1275,8 +1319,8 @@ class MeshNode:
         self._pseudo = ""
         self._pseudo_claim: bytes | None = None
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
-        self._dir_rate: OrderedDict[int, tuple] = OrderedDict()      # id(peer)->(n,win)
-        self._pseudo_rate: OrderedDict[int, tuple] = OrderedDict()   # id(peer)->(n,win)
+        self._dir_rate: OrderedDict[bytes, tuple] = OrderedDict()      # _rate_key(peer)->(n,win)
+        self._pseudo_rate: OrderedDict[bytes, tuple] = OrderedDict()   # _rate_key(peer)->(n,win)
         self._detached: set = set()   # fire-and-forget tasks, bounded
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
@@ -1342,7 +1386,12 @@ class MeshNode:
         self._transport_balance: int = _BALANCE_DEFAULT
         # Background route acquisitions started from a receive loop (bounded).
         self._deferred_routes: set = set()
-        self._query_rate: OrderedDict[int, tuple] = OrderedDict()  # id(peer)->(n,win)
+        self._query_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer)->(n,win)
+        self._store_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        self._punch_req_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        # Raw UDP punch datagrams, keyed by source address: they arrive with no
+        # link, no session and no handshake, so there is no peer to key on.
+        self._punch_dgram_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._last_announced: tuple[str, ...] | None = None
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
@@ -4380,6 +4429,28 @@ class MeshNode:
     # Relayed invitation (INVITE_SEEK)
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _rate_key(peer: '_Peer') -> bytes:
+        """What a rate-limit table counts against.
+
+        The authenticated identity where there is one, the remote address
+        otherwise (the pre-auth planes have nothing better). Never ``id(peer)``:
+        that is the object's address, CPython reuses it as soon as the object is
+        collected, and the tables are pruned by window expiry rather than by
+        peer lifetime — so an entry outlived the peer it described and a fresh
+        `_Peer` landing on a freed address inherited its count. Both directions
+        were wrong: an honest peer born already throttled, and an adversary
+        shedding an exhausted budget by reconnecting, which made every one of
+        these a per-connection limit rather than a per-peer one."""
+        if peer.authenticated_id is not None:
+            return peer.authenticated_id.raw
+        try:
+            remote = peer.transport.remote_ip()
+        except Exception:
+            remote = None
+        return (b"ip:" + remote.encode("utf-8", "replace")) if remote \
+            else b"anon:%d" % id(peer)
+
     def _seek_allowed(self, peer: '_Peer') -> bool:
         """Per-ingress-link rate limit: bound how many seeks one link can make
         us process (and verify) in a window. Table is bounded and pruned."""
@@ -4389,7 +4460,7 @@ class MeshNode:
             del self._seek_rate[k]
         while len(self._seek_rate) > _RDV_MAX:
             self._seek_rate.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = self._seek_rate.get(key, (0, now))
         if now - ws > _SEEK_RATE_WINDOW:
             cnt, ws = 0, now
@@ -4521,7 +4592,7 @@ class MeshNode:
             del self._carry_rate[k]
         while len(self._carry_rate) > _RDV_MAX:
             self._carry_rate.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = self._carry_rate.get(key, (0, now))
         if now - ws > _SEEK_RATE_WINDOW:
             cnt, ws = 0, now
@@ -4630,7 +4701,7 @@ class MeshNode:
             del self._reach_probe_rate[k]
         while len(self._reach_probe_rate) > _RDV_MAX:
             self._reach_probe_rate.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = self._reach_probe_rate.get(key, (0, now))
         if now - ws > _SEEK_RATE_WINDOW:
             cnt, ws = 0, now
@@ -4784,7 +4855,7 @@ class MeshNode:
             del self._query_rate[k]
         while len(self._query_rate) > _MAX_PEERS:
             self._query_rate.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = self._query_rate.get(key, (0, now))
         if now - ws > _QUERY_RATE_WINDOW:
             cnt, ws = 0, now
@@ -4885,9 +4956,20 @@ class MeshNode:
         # payload: key(20) || value ; stored only if key == hash(value)
         if len(packet.payload) < 20:
             return
+        # Content addressing stops a peer *choosing* a key, which is what closes
+        # the poisoning vector — but it does not stop them filling the store:
+        # random bytes hash to random keys and every one is accepted. Eviction
+        # is a single global LRU over the app chunks and release content that
+        # actually matter, so an unmetered STORE is an eviction lever.
+        if not self._store_allowed(peer):
+            return
         key = packet.payload[:20]
         value = packet.payload[20:]
         self._dht_store.put(key, value)  # put() rejects non-content-addressed data
+
+    def _store_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._store_rate, peer,
+                                    _STORE_RATE_WINDOW, _STORE_RATE_MAX)
 
     async def _handle_observed_addr(self, peer: _Peer, packet: Packet) -> None:
         # A peer that accepted our connection tells us the source IP it saw —
@@ -5024,7 +5106,7 @@ class MeshNode:
 
     # -- app store: shared catalog (gossiped) + installed set -------------
 
-    def _gossip_allowed(self, table: 'OrderedDict[int, tuple]', peer: '_Peer',
+    def _gossip_allowed(self, table: 'OrderedDict[bytes, tuple]', peer: '_Peer',
                         window: float, maximum: int) -> bool:
         """Per-ingress-link rate limit for a gossip plane (bounded, pruned) — a
         peer cannot make us verify signatures without end. One implementation:
@@ -5034,7 +5116,7 @@ class MeshNode:
             del table[k]
         while len(table) > _MAX_PEERS:
             table.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = table.get(key, (0, now))
         if now - ws > window:
             cnt, ws = 0, now
@@ -5069,9 +5151,7 @@ class MeshNode:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(CATALOG_ANNOUNCE, self._id.raw, _BROADCAST_ID, release_bytes)
-        for p in list(self._peers):
-            if p is exclude or p.authenticated_id is None or p.session is None:
-                continue
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5244,9 +5324,7 @@ class MeshNode:
                               exclude: '_Peer | None' = None) -> None:
         pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
                             self._release_have_byte(release_bytes) + release_bytes)
-        for p in list(self._peers):
-            if p is exclude or p.authenticated_id is None or p.session is None:
-                continue
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5728,14 +5806,29 @@ class MeshNode:
         if self._absorb_claim(peer, packet.payload) is not None:
             self._spawn_bounded(self._gossip_pseudo(packet.payload, exclude=peer))
 
+    def _gossip_targets(self, exclude: '_Peer | None', fanout: int) -> list['_Peer']:
+        """Which peers an epidemic goes to next — a bounded sample, not all.
+
+        Sending to every peer turns one accepted claim into (peers − 1)
+        transmissions, and a claim is ~5.3 kB. The terminating rule ("only
+        re-gossip when our view changed") stops it circulating for ever, but it
+        does not stop the *width*: an adversary mints identities offline, so
+        every one of its claims is genuinely new. A bounded fan-out keeps the
+        epidemic reaching everyone — that is what an epidemic does — while
+        costing a fixed amount per hop."""
+        live = [p for p in self._peers
+                if p is not exclude and p.authenticated_id is not None
+                and p.session is not None]
+        if len(live) <= fanout:
+            return live
+        return random.sample(live, fanout)
+
     async def _gossip_pseudo(self, raw: bytes,
                              exclude: '_Peer | None' = None) -> None:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(PSEUDO_ANNOUNCE, self._id.raw, _BROADCAST_ID, raw)
-        for p in list(self._peers):
-            if p is exclude or p.authenticated_id is None or p.session is None:
-                continue
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5775,7 +5868,7 @@ class MeshNode:
             del self._dir_rate[k]
         while len(self._dir_rate) > _MAX_PEERS:
             self._dir_rate.popitem(last=False)
-        key = id(peer)
+        key = self._rate_key(peer)
         cnt, ws = self._dir_rate.get(key, (0, now))
         if now - ws > _DIR_RATE_WINDOW:
             cnt, ws = 0, now
@@ -5794,6 +5887,12 @@ class MeshNode:
 
     async def _handle_dir_find(self, peer: '_Peer', packet: Packet) -> None:
         if len(packet.payload) != 20 + _QID_LEN:
+            return
+        # Same valve as FIND_NODE / FIND_VALUE, and for the same reason: 28
+        # bytes of question buy up to `_FOUND_BUDGET` of signed claims, routed
+        # to a src_id nothing has verified. `_dir_allowed` covered DIR_STORE
+        # only, so this plane had no ceiling at all.
+        if not self._query_allowed(peer):
             return
         key = packet.payload[:20]
         query_id = packet.payload[20:]
@@ -6363,6 +6462,11 @@ class MeshNode:
         """
         if not self._punch_enabled:
             return
+        # Every request makes us emit two packets, one of them over a *different*
+        # link than the one that paid for it. Every other plane that spends our
+        # bandwidth on a peer's say-so has a valve; this one had none.
+        if not self._punch_request_allowed(peer):
+            return
         decoded = _decode_punch_request(packet.payload)
         if decoded is None:
             return
@@ -6409,6 +6513,10 @@ class MeshNode:
         requester_pkt = Packet.create(PUNCH_RELAY, self._id.raw,
                                       packet.src_id, requester_payload)
         await peer.send(requester_pkt)
+
+    def _punch_request_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._punch_req_rate, peer,
+                                    _PUNCH_REQ_WINDOW, _PUNCH_REQ_MAX)
 
     async def _handle_punch_relay(self, peer: '_Peer', packet: Packet) -> None:
         """We received relay info about a peer we want to punch to.
@@ -6506,9 +6614,9 @@ class MeshNode:
             if time.monotonic() > state.deadline:
                 break
             nonce = os.urandom(16)
-            signature = self._identity.sign(
-                _PUNCH_PROBE_MAGIC + self._id.raw + nonce
-            )
+            signature = self._identity.sign(_punch_signed_blob(
+                _PUNCH_PROBE_MAGIC, self._id.raw, state.target.raw, nonce,
+                _punch_minutes()[0]))
             probe = _build_punch_probe(self._id.raw, nonce, signature)
             try:
                 sock.sendto(probe, target_addr)
@@ -6532,6 +6640,13 @@ class MeshNode:
             return
         if not self._punch_enabled:
             return  # punching disabled — ignore probes and acks entirely
+        # Before any crypto. These datagrams arrive with no link, no session and
+        # no handshake — the cheapest thing an attacker can send — and each one
+        # that names a node we know buys a full ML-DSA verification, plus a
+        # *signature* if it verifies. Every other expensive plane in this file
+        # has a valve; this was the only one reachable with no link at all.
+        if not self._punch_datagram_allowed(addr):
+            return
         # Try to parse as a punch probe
         probe = _parse_punch_probe(data)
         if probe is not None:
@@ -6550,6 +6665,31 @@ class MeshNode:
         # The UDPTransport handles reliable frames via its own feed_datagram.
         # This method is only called for datagrams that don't match any
         # known transport in the server's dispatch table.
+
+    def _punch_datagram_allowed(self, addr: tuple[str, int]) -> bool:
+        """Per-source-address ceiling on raw punch datagrams.
+
+        Keyed on the address because there is nothing else: no peer, no
+        identity, nothing authenticated. A spoofed source therefore only spends
+        the budget of the address it forged, which is the honest bound — and the
+        table itself is bounded and pruned, so spraying addresses costs memory
+        that is capped rather than memory that grows."""
+        now = time.monotonic()
+        table = self._punch_dgram_rate
+        for k in [k for k, (_, ws) in table.items()
+                  if now - ws > _PUNCH_DGRAM_WINDOW]:
+            del table[k]
+        while len(table) > _PUNCH_DGRAM_TRACKED:
+            table.popitem(last=False)
+        key = f"{addr[0]}:{addr[1]}".encode("utf-8", "replace")
+        cnt, ws = table.get(key, (0, now))
+        if now - ws > _PUNCH_DGRAM_WINDOW:
+            cnt, ws = 0, now
+        if cnt >= _PUNCH_DGRAM_MAX:
+            table[key] = (cnt, ws)
+            return False
+        table[key] = (cnt + 1, ws)
+        return True
 
     def _handle_stun_keepalive_response(self, data: bytes) -> None:
         """Parse a STUN Binding Response received on the listener socket and
@@ -6581,17 +6721,20 @@ class MeshNode:
         if entry is None or not entry.dsa_pub:
             return
 
-        # Verify the probe signature
-        if not self._identity.verify(
-            _PUNCH_PROBE_MAGIC + node_id_raw + nonce, signature, entry.dsa_pub
-        ):
-            return  # invalid signature — hostile probe, ignore
+        # Verify the probe signature. It has to name *us* and a recent minute,
+        # or a probe captured once is a token good at every node for ever.
+        if not any(self._identity.verify(
+                _punch_signed_blob(_PUNCH_PROBE_MAGIC, node_id_raw,
+                                   self._id.raw, nonce, minute),
+                signature, entry.dsa_pub)
+                for minute in _punch_minutes()):
+            return  # invalid, stale, or addressed elsewhere — ignore
 
         # Send a punch ACK back via UDP to confirm the hole is punched
         ack_nonce = os.urandom(16)
-        ack_sig = self._identity.sign(
-            _PUNCH_ACK_MAGIC + self._id.raw + ack_nonce
-        )
+        ack_sig = self._identity.sign(_punch_signed_blob(
+            _PUNCH_ACK_MAGIC, self._id.raw, node_id_raw, ack_nonce,
+            _punch_minutes()[0]))
         ack = _build_punch_ack(self._id.raw, ack_nonce, ack_sig)
         if self._udp_server is not None and self._udp_server._sock is not None:
             try:
@@ -6623,9 +6766,11 @@ class MeshNode:
         if entry is None or not entry.dsa_pub:
             return
 
-        if not self._identity.verify(
-            _PUNCH_ACK_MAGIC + node_id_raw + nonce, signature, entry.dsa_pub
-        ):
+        if not any(self._identity.verify(
+                _punch_signed_blob(_PUNCH_ACK_MAGIC, node_id_raw,
+                                   self._id.raw, nonce, minute),
+                signature, entry.dsa_pub)
+                for minute in _punch_minutes()):
             return
 
         state = self._punch_pending.get(src_id)
