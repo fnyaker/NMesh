@@ -372,3 +372,39 @@ async def test_keepalive_rearms_the_search_when_short(monkeypatch):
     await _run_keepalive_once(node, monkeypatch, 1)
     assert node._neighbor_wakeup.is_set()
     await node.stop()
+
+
+@pytest.mark.asyncio
+async def test_keepalive_pings_concurrently_not_sequentially(monkeypatch):
+    """One slow link must not delay the pings to the others.
+
+    Sequentially, a single slow peer would hold up every ping behind it; a
+    gather runs them together so the healthy links are refreshed on time."""
+    node = await _node()
+    peers = [await _attach_peer(node, _id_at_distance(node, 8)) for _ in range(3)]
+    slow = peers[0]
+
+    pinged = []
+
+    async def fake_ping(peer):
+        if peer is slow:
+            await asyncio.sleep(0.5)
+        pinged.append(peer.authenticated_id)
+
+    monkeypatch.setattr(node, "ping", fake_ping)
+    monkeypatch.setattr(src.node, "_LINK_KEEPALIVE_INTERVAL", 0)
+
+    node._running = True
+    task = asyncio.create_task(node._link_keepalive_loop())
+    for _ in range(200):
+        if len(pinged) >= len(peers) - 1:
+            break
+        await asyncio.sleep(0)
+    assert len(pinged) >= len(peers) - 1, "fast peers pinged while slow one sleeps"
+    node._running = False
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    await node.stop()

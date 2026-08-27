@@ -407,3 +407,12 @@ maintenance is woken immediately. Both ends do this → traffic in both
 directions; any incoming frame rearms the timeout. Started in `start()`/`join()`,
 stopped in `stop()`. Never raises. (That PING also carries `advertised_uris` →
 address gossip, see `routing.md`.)
+
+The pings of a pass are **concurrent**, not sequential: the keepalive loop,
+`_announce_addresses` and the console ping all fan out with
+`asyncio.gather(*(self.ping(p) for p in targets), return_exceptions=True)`, so
+one slow or dead peer delays only its own ping instead of starving the whole
+pass (see `gotchas.md` §3d). And when the machine's own addresses change (a
+network handover), `_reap_dead_endpoint_links` reaps only the links whose local
+endpoint host has vanished (`set(old) - set(new)`), rather than tearing the
+mesh down (see `gotchas.md` §13).

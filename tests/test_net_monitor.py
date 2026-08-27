@@ -10,12 +10,14 @@ touches the network.
 """
 import asyncio
 import json
+import os
 
 import pytest
 
 from src.net_monitor import NetMonitor
 from src.node import MeshNode
-from tests.conftest import make_manager
+from src.node_id import NodeID
+from tests.conftest import FakeTransport, make_manager, settle
 
 
 class _Probes:
@@ -189,6 +191,44 @@ class TestNodeIntegration:
         assert node._local_ips == ["192.168.1.5"]
         assert "203.0.113.7" not in node._extra_addrs  # stale public IP dropped
         assert "198.51.100.9" in node._extra_addrs
+
+    async def test_network_change_reaps_links_on_a_vanished_local_ip(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._local_ips = ["10.0.0.2", "192.168.1.5"]
+
+        class _LocalTransport(FakeTransport):
+            def endpoints(self):
+                return {"local": "udp://192.168.1.5:40000", "remote": None}
+
+        peer = await node._inject_peer(_LocalTransport())
+        peer.authenticated_id = NodeID(os.urandom(20))
+        assert peer in node._peers
+
+        node._on_network_change(
+            {"local_ips": ["10.0.0.2"]},
+            {"local_ips": (["10.0.0.2", "192.168.1.5"], ["10.0.0.2"])},
+        )
+        await settle(node)
+        assert peer not in node._peers
+
+    async def test_network_change_keeps_links_on_a_surviving_local_ip(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._local_ips = ["10.0.0.2", "192.168.1.5"]
+
+        class _LocalTransport(FakeTransport):
+            def endpoints(self):
+                return {"local": "udp://10.0.0.2:40000", "remote": None}
+
+        peer = await node._inject_peer(_LocalTransport())
+        peer.authenticated_id = NodeID(os.urandom(20))
+        assert peer in node._peers
+
+        node._on_network_change(
+            {"local_ips": ["10.0.0.2"]},
+            {"local_ips": (["10.0.0.2", "192.168.1.5"], ["10.0.0.2"])},
+        )
+        await settle(node)
+        assert peer in node._peers  # surviving endpoint is never torn down
 
     async def test_snapshot_has_network_and_transport_details(self):
         node = MeshNode(transport_manager=make_manager())
