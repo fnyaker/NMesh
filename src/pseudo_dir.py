@@ -210,8 +210,15 @@ class PseudoBook:
         self._bytes += len(raw)
         bucket = self._by_key.setdefault(claim["key"], [])
         bucket.append(node_id)
+        # Pop first, then forget. `forget` shrinks the bucket only through
+        # `_unindex`, which removes from `self._by_key[entry["key"]]` — the
+        # *entry's* key, not this list. The two are the same today because
+        # `offer` always unindexes before re-indexing, so the loop terminated;
+        # but a `while` whose progress depends on an invariant maintained three
+        # methods away, on the path that absorbs claims from strangers, is not
+        # a loop to leave standing.
         while len(bucket) > self._max_per_key:
-            self.forget(bucket[0])
+            self.forget(bucket.pop(0))
         self._enforce_bounds()
         # Whether it *survived* the bounds, not merely whether it was accepted:
         # a claim evicted on the way in is one we do not hold, and saying we

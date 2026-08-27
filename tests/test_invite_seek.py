@@ -16,7 +16,7 @@ import pytest
 from src.node import (
     MeshNode, INVITE_SEEK, _make_invite_seek, _encode_seek, _decode_seek,
     _h_code, _seek_signed_blob, _SEEK_RATE_MAX, _RDV_MAX, _SEEK_MAX_PAYLOAD,
-    _SEEK_TTL,
+    _SEEK_TTL, _SEEK_TTL_PREAUTH,
 )
 from src.node_id import NodeID
 from src.crypto import SessionKey, CryptoIdentity
@@ -144,7 +144,9 @@ class TestRelay:
         await relay._handle_invite_seek(ingress, seek)
         fwd = [p for p in link.transport.sent if p.type == INVITE_SEEK]
         assert len(fwd) == 1
-        assert fwd[0].ttl == seek.ttl - 1              # TTL decremented
+        # The ingress link has not authenticated — that is the whole point of
+        # this plane — so its budget is `_SEEK_TTL_PREAUTH`, then decremented.
+        assert fwd[0].ttl == _SEEK_TTL_PREAUTH - 1
         assert fwd[0].dst_id == inviter_id.raw
         # reverse path was recorded for the seeker
         assert relay._rdv_lookup(b"\x09" * 20) is ingress
@@ -237,6 +239,40 @@ class TestDispatch:
         node, _ = await make_node()
         snap = await node.console_snapshot()
         assert snap["pending_seeks"] == 0
+
+
+class TestPreAuthBudget:
+    """A seek from a link that has not authenticated is carried by links that
+    have. One packet handed to the edge of the mesh should not buy the mesh's
+    whole diameter — a joiner needs enough hops to find an inviter."""
+
+    async def test_an_unauthenticated_seek_gets_the_shorter_budget(self):
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        inviter_id = NodeID.from_public_key(inviter.dsa_public_key)
+        link = await _authed_peer_to(relay, inviter_id)
+        ingress = await _ingress(relay)
+        seek = _make_invite_seek(inviter, NodeID(b"\x09" * 20), "abc1234567",
+                                 _exp(), ttl=_SEEK_TTL)
+        await relay._handle_invite_seek(ingress, seek)
+        fwd = next(p for p in link.transport.sent if p.type == INVITE_SEEK)
+        assert fwd.ttl == _SEEK_TTL_PREAUTH - 1
+        await relay.stop()
+
+    async def test_a_member_relaying_onward_keeps_the_full_budget(self):
+        """Between members the seek is ordinary mesh traffic: clamping there
+        would cut off inviters that are simply far away."""
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        inviter_id = NodeID.from_public_key(inviter.dsa_public_key)
+        link = await _authed_peer_to(relay, inviter_id)
+        ingress = await _authed_peer_to(relay, NodeID(b"\x33" * 20))
+        seek = _make_invite_seek(inviter, NodeID(b"\x09" * 20), "abc1234567",
+                                 _exp(), ttl=_SEEK_TTL)
+        await relay._handle_invite_seek(ingress, seek)
+        fwd = next(p for p in link.transport.sent if p.type == INVITE_SEEK)
+        assert fwd.ttl == _SEEK_TTL - 1
+        await relay.stop()
 
 
 class TestPreAuthOrdering:

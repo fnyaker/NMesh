@@ -24,8 +24,13 @@ from .app_channel import APP_ID_LEN, deployed_id
 CHUNK_SIZE = 49_152            # 48 KiB — comfortably under the 60 KB payload cap
 KEY_LEN = 20
 _MAX_FILES = 4096
-_MAX_CHUNKS_PER_FILE = 1_000_000
 _MAX_TOTAL_BYTES = 512 * 1024 * 1024   # ceiling on a reassembled package
+# Chunks one file may declare. Derived from the ceiling and the chunk size, not
+# picked round: at 1 000 000 a manifest could declare a chunk list far longer
+# than `_MAX_TOTAL_BYTES` allows, and `reassemble` bounds the *result* while the
+# number of DHT **lookups** — a Kademlia round each, `_DHT_QUERY_TIMEOUT` when
+# one is missing — followed the list. One click on "install" then ran for days.
+_MAX_CHUNKS_PER_FILE = -(-_MAX_TOTAL_BYTES // CHUNK_SIZE)
 
 
 class AppPackageError(Exception):

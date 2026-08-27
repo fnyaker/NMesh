@@ -6,19 +6,41 @@ from .node_id import NodeID
 from .cert import Certificate
 
 
+# Bounds. Certificates arrive from the network — three handlers absorb them
+# (`_handle_handshake`, `_handle_handshake_ack`, `_handle_found_node`) — and a
+# post-quantum certificate is ~7 kB. Unbounded, the store grew on demand, and
+# `get_chain_to_root` is a BFS over it called once per candidate entry of every
+# FIND_NODE: a 28-byte packet buying an unbounded graph walk.
+MAX_SUBJECTS = 4096          # distinct subjects we keep certificates for
+MAX_PER_SUBJECT = 8          # certificates kept for one subject
+
+
 class CertStore:
     """
     Holds the known certificates and the trusted roots.
     Replaces TrustTable in a self-rooted P2P PKI model.
     """
 
-    def __init__(self, own_id: NodeID) -> None:
+    def __init__(self, own_id: NodeID,
+                 max_subjects: int = MAX_SUBJECTS,
+                 max_per_subject: int = MAX_PER_SUBJECT) -> None:
         self._own_id = own_id
+        # Insertion-ordered, oldest first: eviction takes the subject nobody has
+        # mentioned for longest. Roots and our own chain are pinned (see
+        # `_evict_subject`) — a bound that can make us unable to authenticate is
+        # not a bound, it is an outage.
         self._certs: dict[bytes, list[Certificate]] = {}  # subject_id.raw → [Certificate]
         self._roots: set[bytes] = {own_id.raw}
+        self._max_subjects = max_subjects
+        self._max_per_subject = max_per_subject
+        # `get_chain_to_root` memoised per subject. Cleared on any change: a
+        # stale chain is a chain that no longer verifies, which is worse than
+        # recomputing one.
+        self._chains: dict[bytes, list[Certificate] | None] = {}
 
     def add_root(self, node_id: NodeID) -> None:
         self._roots.add(node_id.raw)
+        self._chains.clear()
 
     def is_root(self, node_id: NodeID) -> bool:
         return node_id.raw in self._roots
@@ -28,9 +50,41 @@ class CertStore:
         existing = self._certs.setdefault(key, [])
         for e in existing:
             if e.signature == cert.signature:
+                self._touch(key)
                 return True  # already present
         existing.append(cert)
+        # Oldest first within a subject: a peer presenting chain after chain
+        # cannot make one subject's list grow without end.
+        while len(existing) > self._max_per_subject:
+            existing.pop(0)
+        self._touch(key)
+        self._enforce_bounds()
+        self._chains.clear()
         return True
+
+    def _touch(self, key: bytes) -> None:
+        entry = self._certs.pop(key, None)
+        if entry is not None:
+            self._certs[key] = entry
+
+    def _pinned(self, key: bytes) -> bool:
+        """Subjects eviction may never take: the roots, and ourselves.
+
+        Losing a root means every chain anchored there stops verifying; losing
+        our own certificates means we can no longer present a chain at all."""
+        return key in self._roots or key == self._own_id.raw
+
+    def _enforce_bounds(self) -> None:
+        while len(self._certs) > self._max_subjects:
+            victim = next((k for k in self._certs if not self._pinned(k)), None)
+            if victim is None:
+                return          # everything left is load-bearing
+            del self._certs[victim]
+
+    def add_all(self, certs) -> None:
+        """Absorb a chain in one go — one bound check, one cache clear."""
+        for cert in certs:
+            self.add(cert)
 
     def get_chain_to_root(self, target: NodeID) -> list[Certificate] | None:
         """
@@ -45,7 +99,20 @@ class CertStore:
         fallback.
 
         Returns [cert_target, ..., cert_root_self_signed] or None.
+
+        Memoised per subject: this is a BFS over the issuance graph and
+        `_handle_find_node` runs it once per candidate it considers (up to
+        `_FIND_NODE_SCAN`), so recomputing it per query made one small packet
+        buy a great deal of walking. The cache is dropped whenever the graph or
+        the root set changes.
         """
+        if target.raw in self._chains:
+            return self._chains[target.raw]
+        chain = self._build_chain_to_root(target)
+        self._chains[target.raw] = chain
+        return chain
+
+    def _build_chain_to_root(self, target: NodeID) -> list[Certificate] | None:
         target_certs = self._certs.get(target.raw)
         if not target_certs:
             return None

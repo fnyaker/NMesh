@@ -65,7 +65,15 @@ class RoutingTable:
         self._buckets: list[KBucket] = [KBucket() for _ in range(160)]
 
     def _bucket_index(self, node_id: NodeID) -> int:
-        return self._own_id.distance(node_id).bit_length() - 1
+        """Which bucket an id belongs in, or -1 for our own.
+
+        Our own id is at distance 0, whose `bit_length()` is 0 — so the naive
+        expression yielded -1, which Python resolves to the *last* bucket.
+        `add` guarded against it, `get`/`remove`/`contains` did not, so they
+        silently interrogated bucket 159. Harmless only because `add` refuses
+        to store us; an accident, not a decision."""
+        distance = self._own_id.distance(node_id)
+        return distance.bit_length() - 1 if distance else -1
 
     def add(self, node_id: NodeID, addresses: list[str], dsa_pub: bytes = b"") -> NodeEntry | None:
         if node_id == self._own_id:
@@ -81,11 +89,15 @@ class RoutingTable:
         )
 
     def evict_and_add(self, node_id: NodeID, addresses: list[str], dsa_pub: bytes = b"") -> None:
-        idx = self._bucket_index(node_id)
-        self._buckets[idx].evict_oldest(NodeEntry(node_id, addresses, dsa_pub))
+        index = self._bucket_index(node_id)
+        if index < 0:
+            return
+        self._buckets[index].evict_oldest(NodeEntry(node_id, addresses, dsa_pub))
 
     def remove(self, node_id: NodeID) -> None:
-        self._buckets[self._bucket_index(node_id)].remove(node_id)
+        index = self._bucket_index(node_id)
+        if index >= 0:
+            self._buckets[index].remove(node_id)
 
     def all_entries(self) -> list[NodeEntry]:
         entries: list[NodeEntry] = []
@@ -99,8 +111,13 @@ class RoutingTable:
         return all_entries[:count]
 
     def get(self, node_id: NodeID) -> NodeEntry | None:
-        idx = self._bucket_index(node_id)
-        return self._buckets[idx].get(node_id)
+        index = self._bucket_index(node_id)
+        # Our own id is never stored (see `add`), so `contains(self._id)` is
+        # false for ever — which `_handle_found_node` relies on (gotchas §12).
+        # It is stated here now rather than falling out of a negative index.
+        if index < 0:
+            return None
+        return self._buckets[index].get(node_id)
 
     def contains(self, node_id: NodeID) -> bool:
         return self.get(node_id) is not None

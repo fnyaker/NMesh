@@ -458,6 +458,10 @@ delivery guarantee and the app layer already has to tolerate loss.
 
 ## 8 — high — `CertStore` is unbounded and re-writes its whole file per certificate
 
+> **Status — fixed.** Bounded by subject and per subject (LRU, roots and our
+> own subject pinned), `get_chain_to_root` memoised with the cache dropped on
+> any change, and the persistence batched — the write half is **P9**.
+
 **Where** — `src/cert_store.py`, `CertStore.add` / `CertStore.save`;
 `src/node.py`, `MeshNode._cert_add`.
 
@@ -629,6 +633,10 @@ sender's link. `_spawn_bounded` already exists for exactly this and is used by
 ---
 
 ## 12 — medium — A corrupt identity file is silently replaced, then overwritten
+
+> **Status — fixed.** `CryptoIdentity.load` raises `CryptoError` for a file
+> that exists and cannot be used, and self-tests the pair; only a missing file
+> generates.
 
 **Where** — `src/crypto.py`, `CryptoIdentity.load`; `src/node.py`,
 `MeshNode.__init__`.
@@ -857,6 +865,13 @@ one attempt in the invite flow (`_handle_invite` → `INVITE_ACK` →
 
 ## 18 — medium — `RELAY_CARRY` / `INVITE_SEEK` give an unauthenticated peer a mesh injector
 
+> **Status — mitigated.** A seek arriving on an unauthenticated link is
+> clamped to `_SEEK_TTL_PREAUTH` before it is forwarded, so one packet handed
+> to the edge no longer buys the mesh's diameter; the rate limits now key on
+> something the sender cannot cycle (**15**), and `RelayedTransport`'s queue is
+> bounded (**43**). The plane still exists pre-auth by design — a joiner has no
+> link yet.
+
 **Where** — `src/node.py`, `_handle_relay_carry` → `_forward_seek`, and
 `_handle_invite_seek` → `_forward_seek`.
 
@@ -1011,6 +1026,10 @@ both sides.
 
 ## 23 — low — `RoutingTable._bucket_index(own_id)` indexes bucket `-1`
 
+> **Status — fixed.** `_bucket_index` returns -1 explicitly for our own id and
+> every caller guards it, so `contains(self._id) is False` is now stated rather
+> than an artefact (gotchas §12 depends on it).
+
 **Where** — `src/routing.py`, `RoutingTable._bucket_index`
 (`return self._own_id.distance(node_id).bit_length() - 1`).
 
@@ -1049,6 +1068,8 @@ controls both.
 
 ## 25 — low — `_note_release_source` bounds the outer table with the inner constant
 
+> **Status — fixed.** `_RELEASE_SOURCES_TRACKED` names the outer bound.
+
 **Where** — `src/node.py`, `MeshNode._note_release_source`.
 
 ```python
@@ -1068,6 +1089,9 @@ then count the thing" rule in `CLAUDE.md`: one constant, two meanings.
 ---
 
 ## 26 — low — `PseudoBook.offer` drains a bucket with an unbounded `while`
+
+> **Status — fixed.** The drain pops from the bucket and then forgets, so
+> progress is structural.
 
 **Where** — `src/pseudo_dir.py`, `PseudoBook.offer`.
 
@@ -1209,6 +1233,11 @@ touch that state.
 ---
 
 ## 29 — high — Any datagram with the STUN magic cookie rewrites our public address
+
+> **Status — fixed.** `_note_stun_request` records the transaction id and the
+> server; the handler requires both and consumes the entry. The lookup uses
+> `bounded_getaddrinfo` (gotchas §2) — this was the last `loop.getaddrinfo` in
+> the tree.
 
 **Where** — `src/node.py`, `_handle_stun_keepalive_response`, and
 `_send_nat_keepalive` which never records the transaction id it sent.
@@ -1363,6 +1392,10 @@ pinning path: it is the thing that makes a confirmed host safe.
 ---
 
 ## 32 — medium — The invitation lockout is per connection, not per node
+
+> **Status — fixed.** `_handle_invite` calls `InviteManager.record_failure`
+> alongside the per-link counter, and `live_codes()` expires the pool wherever
+> it is read. `security.md` updated to describe both levels.
 
 **Where** — `src/invite.py` (`record_failure`, `is_locked_out`);
 `src/node.py`, `_handle_invite` (`peer._invite_failures`).
@@ -1658,6 +1691,10 @@ pair was actually loaded.
 ---
 
 ## 40 — low — A signed app release can declare a million chunks
+
+> **Status — fixed.** `_MAX_CHUNKS_PER_FILE` is derived from
+> `_MAX_TOTAL_BYTES` and `CHUNK_SIZE`, so a declared chunk list cannot exceed
+> what the size ceiling allows.
 
 **Where** — `src/app_package.py`, `parse_manifest` / `parse_root`
 (`_MAX_CHUNKS_PER_FILE = 1_000_000`); `src/node.py`, `fetch_app` → `dht_get`.

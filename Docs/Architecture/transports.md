@@ -347,6 +347,17 @@ forged.
 
 ## Address discovery & reachability
 
+**A STUN response is only believed if we sent that request.**
+`_send_nat_keepalive` records the transaction id it generated and the server it
+went to (`_note_stun_request`); `_handle_stun_keepalive_response` requires both
+to match and consumes the entry. `stun._parse_binding_response` *does* compare
+the transaction id — but it was handed `data[8:20]`, the id out of the datagram
+being checked, which makes the comparison a tautology. The listener socket is
+unconnected, so that left any host able to set the address this node believes it
+has, and then advertises to the mesh. The lookup also goes through
+`ip_utils.bounded_getaddrinfo`, not `loop.getaddrinfo`: this was the one call
+site in the tree still using the executor asyncio joins at shutdown (gotchas §2).
+
 **An AutoNAT answer is only believed if we asked the question.** `probe_reachability`
 records `(peer id, scheme)` with a short TTL (`_note_reach_probe`), and
 `_handle_reach_probe_ack` requires a match, consumes it, and ignores anything

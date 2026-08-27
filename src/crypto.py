@@ -1,3 +1,4 @@
+import os
 import time
 import oqs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -81,24 +82,48 @@ class CryptoIdentity:
 
     @classmethod
     def load(cls, path: str) -> 'CryptoIdentity':
-        """Load an identity from disk. Creates a new one if there is none."""
+        """Load an identity from disk, or make one if there is none.
+
+        A file that is **there and unreadable** raises. It used to generate a
+        fresh key pair instead — and the caller writes what it gets straight
+        back over the file, so one truncated write, one bad sector, one
+        half-restored backup destroyed the node's identity permanently: its
+        certificates, its memberships, its place in every peer's routing table,
+        all gone, and the symptom looks like a network fault. It is also a
+        destruction primitive for anyone who can touch the state directory.
+
+        The pair is checked against itself before it is trusted. Nothing
+        verified that the stored public half belonged to the stored secret, so a
+        mismatched file produced a node whose signatures nobody could verify and
+        whose id nobody would accept — with no diagnostic anywhere."""
         import struct
         identity = cls.__new__(cls)
+        if not os.path.exists(path):
+            identity._signer = oqs.Signature(DSA_ALG)
+            identity._dsa_public = identity._signer.generate_keypair()
+            return identity
         try:
             with open(path, 'rb') as f:
                 data = f.read()
             if len(data) < 4:
                 raise ValueError("identity file too short")
             pub_len, secret_len = struct.unpack_from('!HH', data, 0)
+            if not pub_len or not secret_len:
+                raise ValueError("identity file has an empty key")
             if 4 + pub_len + secret_len > len(data):
                 raise ValueError("identity file truncated")
             pub    = data[4:4 + pub_len]
             secret = data[4 + pub_len:4 + pub_len + secret_len]
             identity._signer = oqs.Signature(DSA_ALG, secret)
             identity._dsa_public = pub
-        except (FileNotFoundError, Exception):
-            identity._signer = oqs.Signature(DSA_ALG)
-            identity._dsa_public = identity._signer.generate_keypair()
+            probe = identity.sign(b"nmesh-identity-self-test")
+            if not identity.verify(b"nmesh-identity-self-test", probe, pub):
+                raise ValueError("the stored public key does not match the secret")
+        except Exception as exc:
+            raise CryptoError(
+                f"{path} exists but is not a usable identity ({exc}). Refusing "
+                f"to replace it — move it aside deliberately to start fresh."
+            ) from None
         return identity
 
     def self_signed_cert(self) -> Certificate:
