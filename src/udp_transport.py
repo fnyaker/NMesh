@@ -123,9 +123,6 @@ class _ReliableLink:
         self._unacked: dict[int, tuple[bytes, float]] = {}  # seq → (frame, rto_deadline)
         self._send_queue: asyncio.Queue[Packet | None] = asyncio.Queue(_MAX_SEND_QUEUE)
         self._send_event: asyncio.Event = asyncio.Event()
-        # Set when an ACK frees a slot in the retransmit window, so a send held
-        # by backpressure (window full) can proceed. See _send_loop.
-        self._unacked_event: asyncio.Event = asyncio.Event()
         self._rto: float = _RTO_MIN
 
         # Receive side. Set from the first frame that arrives, so the peer's
@@ -236,10 +233,6 @@ class _ReliableLink:
             self._rto = _RTO_MIN
         elif self._rto > _RTO_MIN:
             self._rto = max(_RTO_MIN, self._rto * 0.5)
-
-        # A freed slot lets a send held by backpressure proceed.
-        if len(self._unacked) < _MAX_UNACKED:
-            self._unacked_event.set()
 
     def get_retransmit_frames(self) -> list[bytes]:
         """Return frames that have exceeded their RTO deadline for retransmit."""
@@ -574,26 +567,13 @@ class UDPTransport(BaseTransport):
     async def _send_loop(self) -> None:
         """Background task: dequeue packets and send them as reliable frames."""
         while not self._closed:
-            # asyncio.timeout (not wait_for): wait_for can swallow the outer
-            # cancellation when the inner get() completes in the same loop
-            # step, leaving the task half-cancelled (gotchas 3b).
             try:
-                async with asyncio.timeout(0.5):
-                    packet = await self._link._send_queue.get()
+                packet = await asyncio.wait_for(
+                    self._link._send_queue.get(), timeout=0.5
+                )
             except asyncio.TimeoutError:
                 continue
             if packet is None:
-                break
-            # Hold the send while the retransmit window is full: a frame sent
-            # beyond the cap would not be tracked, so it could never be
-            # retransmitted. Clear-then-recheck avoids a missed wakeup between
-            # the check and the wait.
-            while not self._closed and len(self._link._unacked) >= _MAX_UNACKED:
-                self._link._unacked_event.clear()
-                if len(self._link._unacked) < _MAX_UNACKED:
-                    break
-                await self._link._unacked_event.wait()
-            if self._closed:
                 break
             frame = self._link.build_frame(packet)
             self._send_raw(frame)

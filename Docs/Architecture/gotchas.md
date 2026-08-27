@@ -273,25 +273,6 @@ already "seen").
 cursor: in order → deliver; ahead → a bounded buffer (`_MAX_REORDER`); behind →
 a duplicate, re-ACK. No set, bounded state by construction.
 
-### 8c. A full retransmit window sent frames *untracked* (silent loss)
-`build_frame` tracked a frame in `_unacked` only while `len(_unacked) <
-_MAX_UNACKED`; beyond the cap it returned the frame anyway, **untracked**. A
-frame that is not tracked is never retransmitted and never ACKed, so under
-sustained load (or a peer that stops ACKing) every frame past the window was
-silently lost — no error, no counter, just dropped data.
-→ Fix: **backpressure**, not overflow. The send loop holds a new frame while the
-window is full, waiting on an `asyncio.Event` that `process_ack` sets when a slot
-frees (clear-then-recheck-then-wait, so a wake-up that lands between the check
-and the clear is not missed). The window stays a hard bound; nothing is ever
-sent untracked. **A bounded queue must backpressure, never overflow silently.**
-
-### 3c. The UDP send loop used `wait_for` on a cancellable path
-The same trap as 3b, in `_send_loop`: `asyncio.wait_for(self._send_queue.get(),
-timeout=0.5)` can swallow the enclosing task's cancellation when the `get()`
-completes in the same loop step, leaving the send task half-cancelled and the
-transport unable to close cleanly. → `async with asyncio.timeout(0.5)` instead.
-**Every `wait_for` on a path that must stay cancellable is a trap — see 3b.**
-
 ## Hole punching (see also `transports.md`)
 
 - **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a
