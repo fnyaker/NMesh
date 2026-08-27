@@ -264,6 +264,7 @@ async def main() -> None:
         # replace this node's code is not something to forget on restart.
         release_dir=args.data if args.data else None,
         pseudo=getattr(args, "pseudo", "") or None,
+        dht_max_bytes=getattr(args, "dht_max_mb", 0) * 1024 * 1024 or None,
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

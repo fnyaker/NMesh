@@ -16,7 +16,12 @@ from .app_package import content_key, KEY_LEN
 
 MAX_VALUE = 60_000                       # fits one packet payload
 _MAX_ENTRIES = 8192
-_MAX_BYTES = 128 * 1024 * 1024           # 128 MiB
+# What the node caches for the network by default. This store is filled
+# entirely by what peers STORE, so it is memory given away — and 128 MiB is a
+# number sized for a server, in a project whose point is running over BLE, LoRa
+# and a USB stick. The operator can raise it (`dht_max_mb` in nmesh.conf); the
+# default is what a small machine can afford to lose.
+_MAX_BYTES = 32 * 1024 * 1024
 
 
 class ContentStore:

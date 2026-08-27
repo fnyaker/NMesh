@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import heapq
 import hmac
 import json
 import os
@@ -888,8 +889,11 @@ class _EntryPacker:
             blob += _ADDR_LEN.pack(len(b)) + b
         added: list[bytes] = []
         cost = len(blob) + _POOL_INDEX.size * len(entry.cert_chain)
-        for cert in entry.cert_chain:
-            raw = cert.serialize()
+        # Serialised once each. `serialize()` rebuilds a ~7 kB blob every call,
+        # and this ran it twice per certificate — the second time only to use it
+        # as a dictionary key — for up to `_FIND_NODE_SCAN` candidates a query.
+        raws = [cert.serialize() for cert in entry.cert_chain]
+        for raw in raws:
             if raw not in self._index and raw not in added:
                 if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
                     return False
@@ -900,8 +904,8 @@ class _EntryPacker:
         for raw in added:
             self._index[raw] = len(self._pool)
             self._pool.append(raw)
-        for cert in entry.cert_chain:
-            blob += _POOL_INDEX.pack(self._index[cert.serialize()])
+        for raw in raws:
+            blob += _POOL_INDEX.pack(self._index[raw])
         self._entries.append(blob)
         self._used += cost
         return True
@@ -1251,7 +1255,8 @@ class MeshNode:
                  app_storage_path: str | None = None,
                  app_store_dir: str | None = None,
                  release_dir: str | None = None,
-                 pseudo: str | None = None) -> None:
+                 pseudo: str | None = None,
+                 dht_max_bytes: int | None = None) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1284,7 +1289,7 @@ class MeshNode:
         self._cert_store = (CertStore.load(cert_store_path, self._id)
                             if cert_store_path else CertStore(self._id))
         self._cert_store.add(self._identity.self_signed_cert())
-        self._seen_msgs: OrderedDict[int, float] = OrderedDict()
+        self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
         self._e2e_sessions: dict[NodeID, SessionKey] = {}
@@ -1306,7 +1311,11 @@ class MeshNode:
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
-        self._dht_store = ContentStore()
+        # What this node caches for the network. Filled entirely by what peers
+        # STORE, so it is memory given away — the operator decides how much
+        # (`dht_max_mb`), and the default is what a small machine can lose.
+        self._dht_store = (ContentStore(max_bytes=dht_max_bytes)
+                           if dht_max_bytes else ContentStore())
         self._pending_values: dict[bytes, asyncio.Future] = {}
         # Per-app local secure store ("drawers"). Encryption keys derive from the
         # identity; persistence is opt-in (RAM-only without a path).
@@ -2676,12 +2685,15 @@ class MeshNode:
 
     def _route_candidates(self, target: NodeID,
                           exclude: _Peer | None = None) -> list[_Peer]:
-        peers = self._authenticated_peers(exclude=exclude)
-        peers.sort(key=lambda peer: (
-            0 if peer.authenticated_id == target else 1,
-            target.distance(peer.authenticated_id),
-        ))
-        peers = peers[:_ROUTE_SEND_FANOUT]
+        # nsmallest, not a full sort: this runs per forwarded packet, and the
+        # ordering rules below are what matter — a direct link to the target
+        # leads, then observed traffic, then XOR proximity (gotchas §11).
+        peers = heapq.nsmallest(
+            _ROUTE_SEND_FANOUT, self._authenticated_peers(exclude=exclude),
+            key=lambda peer: (
+                0 if peer.authenticated_id == target else 1,
+                target.distance(peer.authenticated_id),
+            ))
         # A direct link to the target is the shortest path that exists and keeps
         # the lead; otherwise observed traffic beats XOR proximity.
         if not peers or peers[0].authenticated_id != target:
@@ -4418,11 +4430,15 @@ class MeshNode:
             pass          # a disk problem must not take the node down
 
     def _is_seen(self, msg_id: int) -> bool:
+        """Have we handled this exact packet already? Records it if not.
+
+        A set of ids, FIFO-evicted. It used to store `time.monotonic()` against
+        each one — a value nothing ever read, paid for on every routable packet."""
         if msg_id in self._seen_msgs:
             return True
         if len(self._seen_msgs) >= _MSG_DEDUP_MAX:
             self._seen_msgs.popitem(last=False)
-        self._seen_msgs[msg_id] = time.monotonic()
+        self._seen_msgs[msg_id] = None
         return False
 
     async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
@@ -4473,41 +4489,9 @@ class MeshNode:
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
                 await self._forward_packet(peer, packet)
                 return
-        handlers = {
-            DATA:              self._handle_data,
-            PING:              self._handle_ping,
-            PONG:              self._handle_pong,
-            FIND_NODE:         self._handle_find_node,
-            FOUND_NODE:        self._handle_found_node,
-            FIND_VALUE:        self._handle_find_value,
-            FOUND_VALUE:       self._handle_found_value,
-            STORE:             self._handle_store,
-            OBSERVED_ADDR:     self._handle_observed_addr,
-            HANDSHAKE:         self._handle_handshake,
-            HANDSHAKE_ACK:     self._handle_handshake_ack,
-            CHALLENGE:         self._handle_challenge,
-            INVITE:            self._handle_invite,
-            INVITE_ACK:        self._handle_invite_ack,
-            E2E_HANDSHAKE:     self._handle_e2e_handshake,
-            E2E_HANDSHAKE_ACK: self._handle_e2e_handshake_ack,
-            PUNCH_REQUEST:     self._handle_punch_request,
-            PUNCH_RELAY:       self._handle_punch_relay,
-            REACH_PROBE:       self._handle_reach_probe,
-            REACH_PROBE_ACK:   self._handle_reach_probe_ack,
-            CATALOG_ANNOUNCE:  self._handle_catalog_announce,
-            PSEUDO_ANNOUNCE:   self._handle_pseudo_announce,
-            RELEASE_ANNOUNCE:  self._handle_release_announce,
-            RELEASE_FETCH:     self._handle_release_fetch,
-            RELEASE_DATA:      self._handle_release_data,
-            DIR_STORE:         self._handle_dir_store,
-            DIR_FIND:          self._handle_dir_find,
-            DIR_FOUND:         self._handle_dir_found,
-            ECHO_REQUEST:      self._handle_echo_request,
-            ECHO_REPLY:        self._handle_echo_reply,
-        }
-        handler = handlers.get(packet.type)
+        handler = _HANDLERS.get(packet.type)
         if handler:
-            await handler(peer, packet)
+            await handler(self, peer, packet)
 
     # -----------------------------------------------------------------------
     # Relayed invitation (INVITE_SEEK)
@@ -5415,21 +5399,28 @@ class MeshNode:
         holder, release_bytes = payload[0] == 1, payload[1:]
         if not release_bytes or len(release_bytes) > MAX_VALUE:
             return
+        # Parsed once. Verifying an ML-DSA signature is the cost here, and the
+        # same bytes used to be parsed three times per announce: for the holder
+        # hint, inside `offer`, and again in `_release_have_byte` on the way
+        # out.
+        try:
+            doc = _core_parse_release(release_bytes, self._identity.verify)
+        except Exception:
+            return
         if holder and peer.authenticated_id is not None:
-            try:
-                doc = _core_parse_release(release_bytes, self._identity.verify)
-                self._note_release_source(
-                    bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex(),
-                    peer.authenticated_id)
-            except Exception:
-                pass
+            self._note_release_source(
+                bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex(),
+                peer.authenticated_id)
         # An untrusted publisher's release is still carried and re-gossiped:
         # refusing to relay what we would not install ourselves would break
         # discovery for every other operator. It is flagged, never acted on.
         outcome = self._releases.offer(release_bytes, self._identity.verify,
                                        self._trusts_publisher)
         if outcome:
-            self._spawn_bounded(self._gossip_release(release_bytes, exclude=peer))
+            held = self._packages.has(
+                bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex())
+            self._spawn_bounded(self._gossip_release(
+                release_bytes, exclude=peer, have=held))
 
     def _release_have_byte(self, release_bytes: bytes) -> bytes:
         """Do we hold this release's package? Re-answered at every hop, because
@@ -5443,9 +5434,14 @@ class MeshNode:
         return b"\x01" if held else b"\x00"
 
     async def _gossip_release(self, release_bytes: bytes,
-                              exclude: '_Peer | None' = None) -> None:
+                              exclude: '_Peer | None' = None,
+                              have: bool | None = None) -> None:
+        # `have` lets a caller that has already parsed the descriptor say so,
+        # rather than making `_release_have_byte` verify the signature again.
+        flag = (b"\x01" if have else b"\x00") if have is not None \
+            else self._release_have_byte(release_bytes)
         pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
-                            self._release_have_byte(release_bytes) + release_bytes)
+                            flag + release_bytes)
         for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
             try:
                 await p.send(pkt)
@@ -7031,3 +7027,46 @@ class MeshNode:
             transport._send_raw(transport._link.build_keepalive())
             if i < _PUNCH_KICK_COUNT - 1:
                 await asyncio.sleep(_PUNCH_KICK_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# Packet dispatch
+# ---------------------------------------------------------------------------
+# Built once, from the unbound methods, rather than as a dict literal inside
+# `_handle_packet`. That literal allocated a thirty-entry dict and thirty bound
+# methods for **every packet the node received** — the hottest path there is —
+# and threw them away again. Nothing about the dispatch changes; only the moment
+# the table is built.
+
+_HANDLERS = {
+    DATA:              MeshNode._handle_data,
+    PING:              MeshNode._handle_ping,
+    PONG:              MeshNode._handle_pong,
+    FIND_NODE:         MeshNode._handle_find_node,
+    FOUND_NODE:        MeshNode._handle_found_node,
+    FIND_VALUE:        MeshNode._handle_find_value,
+    FOUND_VALUE:       MeshNode._handle_found_value,
+    STORE:             MeshNode._handle_store,
+    OBSERVED_ADDR:     MeshNode._handle_observed_addr,
+    HANDSHAKE:         MeshNode._handle_handshake,
+    HANDSHAKE_ACK:     MeshNode._handle_handshake_ack,
+    CHALLENGE:         MeshNode._handle_challenge,
+    INVITE:            MeshNode._handle_invite,
+    INVITE_ACK:        MeshNode._handle_invite_ack,
+    E2E_HANDSHAKE:     MeshNode._handle_e2e_handshake,
+    E2E_HANDSHAKE_ACK: MeshNode._handle_e2e_handshake_ack,
+    PUNCH_REQUEST:     MeshNode._handle_punch_request,
+    PUNCH_RELAY:       MeshNode._handle_punch_relay,
+    REACH_PROBE:       MeshNode._handle_reach_probe,
+    REACH_PROBE_ACK:   MeshNode._handle_reach_probe_ack,
+    CATALOG_ANNOUNCE:  MeshNode._handle_catalog_announce,
+    PSEUDO_ANNOUNCE:   MeshNode._handle_pseudo_announce,
+    RELEASE_ANNOUNCE:  MeshNode._handle_release_announce,
+    RELEASE_FETCH:     MeshNode._handle_release_fetch,
+    RELEASE_DATA:      MeshNode._handle_release_data,
+    DIR_STORE:         MeshNode._handle_dir_store,
+    DIR_FIND:          MeshNode._handle_dir_find,
+    DIR_FOUND:         MeshNode._handle_dir_found,
+    ECHO_REQUEST:      MeshNode._handle_echo_request,
+    ECHO_REPLY:        MeshNode._handle_echo_reply,
+}

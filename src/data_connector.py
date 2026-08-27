@@ -316,13 +316,19 @@ class DataConnector:
                             ftype: int, body: bytes) -> None:
         """Serve one local-store request against this client's drawer. Every
         malformed frame is dropped silently (reject by default); the node's
-        AppStorage enforces all bounds and returns False on any breach."""
+        AppStorage enforces all bounds and returns False on any breach.
+
+        Off the loop thread: a drawer write serialises up to `MAX_DRAWER_BYTES`,
+        base64s it, encrypts it and `fsync`s — so an app writing at any rate
+        stalled the whole node once per write. `AppStorage` holds its own lock,
+        so it is safe to call from a worker."""
         if ftype == _STORE_GET:
             try:
                 key = body.decode("utf-8")
             except UnicodeDecodeError:
                 return
-            value = self._node.app_store_get(app_id, key)
+            value = await asyncio.to_thread(
+                self._node.app_store_get, app_id, key)
             present = b"\x01" if value is not None else b"\x00"
             await _write_frame(writer, _STORE_VALUE, present + (value or b""))
         elif ftype == _STORE_PUT:
@@ -336,17 +342,19 @@ class DataConnector:
                 key = body[off:off + klen].decode("utf-8")
             except UnicodeDecodeError:
                 return
-            ok = self._node.app_store_put(app_id, key, body[off + klen:])
+            ok = await asyncio.to_thread(
+                self._node.app_store_put, app_id, key, body[off + klen:])
             await _write_frame(writer, _STORE_OK, b"\x01" if ok else b"\x00")
         elif ftype == _STORE_DEL:
             try:
                 key = body.decode("utf-8")
             except UnicodeDecodeError:
                 return
-            ok = self._node.app_store_delete(app_id, key)
+            ok = await asyncio.to_thread(
+                self._node.app_store_delete, app_id, key)
             await _write_frame(writer, _STORE_OK, b"\x01" if ok else b"\x00")
         elif ftype == _STORE_LIST:
-            keys = self._node.app_store_list(app_id)
+            keys = await asyncio.to_thread(self._node.app_store_list, app_id)
             blob = json.dumps(keys).encode("utf-8")
             # The reply must fit one frame; hand back as many keys as fit. Apps
             # with huge key spaces should keep their own index in a value.

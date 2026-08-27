@@ -1,3 +1,4 @@
+import heapq
 import time
 from dataclasses import dataclass, field
 from .node_id import NodeID
@@ -106,9 +107,18 @@ class RoutingTable:
         return entries
 
     def get_closest(self, target: NodeID, count: int = 20) -> list[NodeEntry]:
-        all_entries = self.all_entries()
-        all_entries.sort(key=lambda e: target.distance(e.node_id))
-        return all_entries[:count]
+        """The ``count`` entries nearest ``target`` by XOR distance.
+
+        `nsmallest`, not a full sort of a materialised copy of the table:
+        `_handle_find_node` calls this for every FIND_NODE, which an
+        authenticated peer may send `_QUERY_RATE_MAX` times a window, and the
+        table can hold 160 × K entries. Same answer, same order."""
+        return heapq.nsmallest(
+            count, self._iter_entries(), key=lambda e: target.distance(e.node_id))
+
+    def _iter_entries(self):
+        for bucket in self._buckets:
+            yield from bucket.entries
 
     def get(self, node_id: NodeID) -> NodeEntry | None:
         index = self._bucket_index(node_id)
