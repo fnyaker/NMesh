@@ -1498,11 +1498,7 @@ class MeshNode:
         """Applied when the monitor sees our addressing move: refresh the
         addresses we advertise and drop a stale public IP."""
         if "local_ips" in changes:
-            old, _new = changes["local_ips"]
             self._local_ips = list(status["local_ips"])
-            vanished = set(old) - set(self._local_ips)
-            if vanished:
-                self._reap_dead_endpoint_links(vanished)
         if "public_ip" in changes:
             old, new = changes["public_ip"]
             if old in self._extra_addrs:
@@ -1512,24 +1508,6 @@ class MeshNode:
                     and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
                 self._extra_addrs.append(new)
         self._announce_addresses_soon("network-change")
-
-    def _reap_dead_endpoint_links(self, vanished: set[str]) -> None:
-        """Drop links whose local endpoint is an address we no longer hold.
-
-        A link bound to a Wi-Fi address that has gone is unreachable: the remote
-        cannot dial back to it. Reap only those links — never a mass teardown —
-        and let on-demand routing rebuild any that are still needed."""
-        for peer in list(self._peers):
-            local = peer.transport.endpoints().get("local")
-            if local is None:
-                continue
-            parsed = _validate_uri(local)
-            if parsed is None:
-                continue
-            hp = split_host_port(parsed[1])
-            if hp is None or hp[0] not in vanished:
-                continue
-            self._spawn_bounded(self._reap_peer(peer))
 
     def _poke_net(self, reason: str) -> None:
         if self._net_monitor is not None:
@@ -2010,9 +1988,11 @@ class MeshNode:
         if current == self._last_announced:
             return
         self._last_announced = current
-        targets = self._recent_authed_peers(_ANNOUNCE_FANOUT)
-        await asyncio.gather(*(self.ping(p) for p in targets),
-                             return_exceptions=True)
+        for peer in self._recent_authed_peers(_ANNOUNCE_FANOUT):
+            try:
+                await self.ping(peer)
+            except Exception:
+                pass
 
     def _announce_addresses_soon(self, reason: str) -> None:
         """Fire-and-forget address announce for sync contexts (the network-change
@@ -2029,11 +2009,14 @@ class MeshNode:
         liveness). Returns how many pings were sent; per-peer RTT surfaces in the
         next snapshot."""
         sent = 0
-        targets = [p for p in self._peers
-                   if p.authenticated_id is not None and p.session is not None]
-        results = await asyncio.gather(*(self.ping(p) for p in targets),
-                                       return_exceptions=True)
-        sent = sum(1 for r in results if not isinstance(r, Exception))
+        for peer in list(self._peers):
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            try:
+                await self.ping(peer)
+                sent += 1
+            except Exception:
+                pass
         return {"sent": sent}
 
     async def console_ping_node(self, node_id_hex: str) -> dict:
@@ -2169,18 +2152,20 @@ class MeshNode:
 
         The maintained set (`_neighbor_slots`) is pinged first: those are the
         links the node commits to, so they must never be the ones starved by a
-        slow or dead peer earlier in the list. Pings run concurrently, so one
-        slow link cannot delay the rest. Dropping below the floor puts
+        slow or dead peer earlier in the list. Dropping below the floor puts
         maintenance back into its searching regime immediately."""
         while self._running:
             await asyncio.sleep(_LINK_KEEPALIVE_INTERVAL)
             slots = self._neighbor_slots()
             peers = sorted(self._peers,
                            key=lambda p: 0 if p.authenticated_id in slots else 1)
-            targets = [p for p in peers
-                       if p.authenticated_id is not None and p.session is not None]
-            await asyncio.gather(*(self.ping(p) for p in targets),
-                                 return_exceptions=True)
+            for peer in peers:
+                if peer.authenticated_id is None or peer.session is None:
+                    continue
+                try:
+                    await self.ping(peer)
+                except Exception:
+                    pass
             # Only nudge maintenance while it is still finding things. A mesh
             # smaller than the floor is below it permanently, and nudging every
             # keepalive there means a certificate-carrying lookup every 20 s
