@@ -911,6 +911,9 @@ is a different plane.
 
 ## 20 — medium — `_handle_store` has no rate limit, and 128 MiB of LRU is an eviction lever
 
+> **Status — fixed.** `_store_allowed` (`_STORE_RATE_MAX` per window per
+> link). The content-addressing check is untouched.
+
 **Where** — `src/node.py`, `MeshNode._handle_store`; `src/dht.py`,
 `ContentStore` (`_MAX_ENTRIES = 8192`, `_MAX_BYTES = 128 MiB`).
 
@@ -1129,6 +1132,11 @@ source: `(src.raw, tid)` with an attacker-chosen `tid` lets one peer occupy all
 ---
 
 ## 28 — high — Raw UDP punch probes buy an ML-DSA verify *and* a signature, unmetered
+
+> **Status — fixed.** `_punch_datagram_allowed` meters per source address
+> *before* any crypto, and `_punch_signed_blob` binds a probe to its recipient
+> and to a minute, so a captured one is no longer a token good anywhere for
+> ever.
 
 **Where** — `src/node.py`, `handle_udp_datagram` →
 `_handle_punch_probe_datagram` / `_handle_punch_ack_datagram`.
@@ -2065,6 +2073,10 @@ epidemic and it is correct.
 
 ## 42 — medium — Enrolment requests are unmetered and can fill the pending table
 
+> **Status — fixed.** `FleetApp._request_allowed` meters every
+> `_SIGNED_INBOUND` frame per sender, before `_open_signed` spends a
+> verification on it.
+
 **Where** — `src/apps/fleet.py`, `_on_enrol_request`; `src/apps/fleet_state.py`,
 `add_pending_in` (`MAX_PENDING = 256`).
 
@@ -2121,6 +2133,9 @@ bound is the last resort, not the design.
 `async with asyncio.timeout(...)` as `TCPTransport.receive` does.
 
 ## 44 — low — `PUNCH_REQUEST` is unmetered and sends two packets per request
+
+> **Status — fixed.** `_punch_request_allowed`, through the shared
+> `_gossip_allowed`.
 
 **Where** — `src/node.py`, `_handle_punch_request`.
 

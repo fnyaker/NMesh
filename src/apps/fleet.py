@@ -113,6 +113,13 @@ MAX_ASSERTION = 32 * 1024
 SID_LEN = 16
 RID_LEN = 8
 MAX_SHELLS = 4                    # concurrent shells this node will host
+# Signed requests one sender may make us verify per window. Every frame in
+# `_SIGNED_INBOUND` costs an ML-DSA verification before a handler sees it, and a
+# node id is free to mint. Far above any real operator (a status refresh, an
+# update, a shell, a scan) and far below a flood.
+MAX_REQUESTS = 64
+REQUEST_WINDOW = 10.0
+MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
 SHELL_CHUNK = 8192
 SHELL_INPUT_MAX = 8192
@@ -355,6 +362,8 @@ class FleetApp:
         self._local_console = local_console
         self._console_calls: dict[str, dict] = {}       # operator side, by rid
         self._console_hosted: dict[str, int] = {}       # agent side, per peer
+        # node id -> (count, window start). See _request_allowed.
+        self._request_rate: dict[bytes, tuple[int, float]] = {}
 
     # -- lifecycle --------------------------------------------------------
 
@@ -488,6 +497,9 @@ class FleetApp:
             self._dispatch_shell_stream(src, kind, body)
             return
         if kind in _SIGNED_INBOUND:
+            # Before the signature check, not after: verifying is the cost.
+            if not self._request_allowed(src):
+                return
             parsed = self._open_signed(src, kind, body)
             if parsed is None:
                 return
@@ -556,6 +568,31 @@ class FleetApp:
         self._reply(target, ERROR, {"rid": rid, "error": error[:256]})
 
     # -- authorisation ----------------------------------------------------
+
+    def _request_allowed(self, src: NodeID) -> bool:
+        """Per-sender ceiling on signed requests.
+
+        Every one of these costs an ML-DSA verification in `_open_signed`
+        before any handler sees it, and node ids are free to mint — so without a
+        ceiling a stranger can spend our CPU without limit and, on the enrolment
+        plane, fill the queue a human is supposed to read. Bounded and pruned,
+        like the node's own gossip valves."""
+        now = time.monotonic()
+        table = self._request_rate
+        for key in [k for k, (_, ws) in table.items()
+                    if now - ws > REQUEST_WINDOW]:
+            del table[key]
+        while len(table) > MAX_REQUEST_SENDERS:
+            table.pop(next(iter(table)), None)
+        key = src.raw
+        count, window = table.get(key, (0, now))
+        if now - window > REQUEST_WINDOW:
+            count, window = 0, now
+        if count >= MAX_REQUESTS:
+            table[key] = (count, window)
+            return False
+        table[key] = (count + 1, window)
+        return True
 
     def _authorised(self, src: NodeID, capability: str, rid: str) -> bool:
         """Gate 2: the ledger. Gate 3 (the signature) already passed by the time

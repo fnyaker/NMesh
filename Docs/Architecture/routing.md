@@ -366,3 +366,19 @@ direct message). Wide diffusion stays lazy through Kademlia. A freshly
 authenticated peer therefore does not *instantly* have all our addresses; they
 arrive with the first gossip or keepalive. Do not write a hard dependency on
 "an authenticated peer ⟹ all its addresses known at instant T".
+
+
+## Gossip fan-out is bounded
+
+The three epidemic planes (`PSEUDO_ANNOUNCE`, `CATALOG_ANNOUNCE`,
+`RELEASE_ANNOUNCE`) re-send to a **bounded random sample** of peers
+(`_GOSSIP_FANOUT`), not to all of them. The terminating rule — re-gossip only
+when our view actually changed — stops an announce circulating for ever, but it
+does not bound the *width*: an adversary mints node ids offline, so every claim
+it sends is genuinely new, and sending to every peer turned one accepted claim
+into (peers − 1) transmissions of ~5.3 kB. An epidemic still covers a connected
+mesh at this width; that is what an epidemic does.
+
+The fan-out also runs off the receive loop (`_spawn_bounded`): awaiting a send to
+every peer meant one peer with a full send buffer stalled the link the announce
+had arrived on.
