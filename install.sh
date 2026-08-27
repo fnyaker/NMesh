@@ -19,11 +19,6 @@
 #
 # Any other argument is passed to the node, exactly like `start.sh`.
 #
-# On Android (Termux) — no init system, no root, no sudo — the service is a
-# supervise loop (termux-service.sh in the install tree), started at boot from
-# ~/.termux/boot by the Termux:Boot companion app and right after an install by
-# this script.
-#
 # Where things go, unless overridden:
 #
 #   as root          /opt/nmesh          state in /var/lib/nmesh
@@ -115,12 +110,6 @@ default_data() {
 # is what a non-root install gets: a unit under ~/.config/systemd/user, which
 # needs lingering enabled to start without a login session.
 detect_init() {
-    # Termux (Android) before anything: no systemd, no sudo, its own prefix.
-    # This script reuses the name PREFIX for the install directory, so read the
-    # one MAIN captured before that assignment — in library mode there is no
-    # assignment and PREFIX is still the environment's.
-    local tprefix="${ENV_PREFIX:-${PREFIX:-}}"
-    if [ -n "$tprefix" ] && [ -x "$tprefix/bin/pkg" ]; then echo "termux"; return; fi
     # `systemctl` on PATH proves nothing: plenty of container images ship it
     # with no systemd behind it, and every call then fails with "Failed to
     # connect to bus". /run/systemd/system is the documented test for a booted
@@ -375,61 +364,6 @@ launchd_plist() {
     }
 }
 
-# ── Termux (Android) ─────────────────────────────────────────────────────────
-# No init system, no root, no sudo: the service is a supervise loop living in
-# the install tree, started at boot by a hook in ~/.termux/boot (the Termux:Boot
-# companion app runs every script there) and right after an install by this
-# script. The loop is the Restart=always of the other units — including for an
-# update, where the node exits on purpose to come back on the new code.
-termux_service() {
-    local prefix="$1" data="$2" args="$3"
-    local tprefix="${4:-/data/data/com.termux/files/usr}"
-    cat <<EOF
-#!$tprefix/bin/sh
-# NMesh node — Termux service, written by install.sh.
-export NMESH_DATA="$data"
-export HOME="$prefix"
-export OQS_INSTALL_PATH="$prefix/_oqs"
-# The updater restarts the node only when something brings it back: this loop.
-export NMESH_SERVICE_MANAGED=1
-# install.sh's own PREFIX variable hides the one Termux exports (an assignment
-# keeps the export flag); start.sh needs the real one to recognise Android.
-export PREFIX="$tprefix"
-
-# Android freezes a dozing process; the wakelock needs the Termux:API app.
-command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock 2>/dev/null || true
-
-while :; do
-    # Bounded log: past 1 MiB, keep the last 512 KiB.
-    if [ -f "$data/service.log" ] && [ "\$(wc -c < "$data/service.log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
-        tail -c 524288 "$data/service.log" > "$data/service.log.tmp" \\
-            && mv "$data/service.log.tmp" "$data/service.log"
-    fi
-    "$prefix/start.sh" $args >> "$data/service.log" 2>&1
-    sleep 5
-done
-EOF
-}
-
-# Termux:Boot runs the scripts of ~/.termux/boot one after another: a loop that
-# never exits must not block the ones behind it.
-termux_boot_hook() {
-    local prefix="$1" tprefix="${2:-/data/data/com.termux/files/usr}"
-    cat <<EOF
-#!$tprefix/bin/sh
-# NMesh — start the node at device boot.
-"$prefix/termux-service.sh" >/dev/null 2>&1 &
-EOF
-}
-
-# The supervisor first: kill the node while it lives and it comes straight back.
-termux_stop() {
-    command -v pkill >/dev/null 2>&1 || return 0
-    pkill -f "$1/termux-service.sh" 2>/dev/null || true
-    pkill -f "nmesh_node.py --data $2" 2>/dev/null || true
-    return 0
-}
-
 # ── printing ─────────────────────────────────────────────────────────────────
 service_hint() {
     case "$1" in
@@ -437,23 +371,8 @@ service_hint() {
         systemd-user)   echo "systemctl --user status $2 · journalctl --user -u $2 -f";;
         openrc)         echo "rc-service $2 status · tail -f /var/log/$2.log";;
         launchd)        echo "launchctl list | grep $2";;
-        termux)         echo "tail -f $3/service.log";;
         *)              echo "(no service installed)";;
     esac
-}
-
-# A tree the installer just built belongs to whoever ran it: chown only when
-# the node's account is someone else. Where there is no way up at all (Termux:
-# no root, no sudo) the files already belong to the node's account, and a chown
-# to oneself is a no-op that used to *fail* the whole install.
-lock_down() {
-    local path="$1"
-    [ -d "$path" ] || return 0
-    if [ -n "$RUN_USER" ] && [ "$RUN_USER" != "$(id -un)" ]; then
-        run_priv chown -R "$OWNER" "$path" 2>/dev/null \
-            || warn "Could not give $path to $OWNER"
-    fi
-    chmod 700 "$path" 2>/dev/null || run_priv chmod 700 "$path" 2>/dev/null || true
 }
 
 # The test-suite sources everything above and stops here.
@@ -462,11 +381,6 @@ if [ -n "${NMESH_INSTALL_LIB:-}" ]; then return 0 2>/dev/null || exit 0; fi
 # ─────────────────────────────── MAIN ────────────────────────────────────────
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Termux exports PREFIX (its own prefix) — the very name this script uses for
-# the install directory, and in bash an assignment keeps the export flag. Keep
-# the original aside before that happens: detect_init reads it, and every place
-# that runs start.sh hands it back, or Android stops being recognised.
-ENV_PREFIX="${PREFIX:-}"
 SERVICE="${NMESH_SERVICE:-nmesh}"
 PREFIX="${NMESH_PREFIX:-}"
 DATA="${NMESH_DATA:-}"
@@ -514,7 +428,6 @@ case "$INIT" in
     systemd-user)   UNIT_PATH="${XDG_CONFIG_HOME:-$(caller_home)/.config}/systemd/user/$SERVICE.service";;
     openrc)         UNIT_PATH="/etc/init.d/$SERVICE";;
     launchd)        UNIT_PATH="$(caller_home)/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
-    termux)         UNIT_PATH="$(caller_home)/.termux/boot/$SERVICE";;
 esac
 
 # ── reset the console password ───────────────────────────────────────────────
@@ -558,12 +471,6 @@ if [ "$RESET_PASSWORD" = true ]; then
                         launchctl load "$UNIT_PATH" >/dev/null 2>&1 \
                             && ok "Node restarted" \
                             || warn "Restart the node for it to take effect";;
-        termux)         if command -v pkill >/dev/null 2>&1 \
-                           && pkill -f "nmesh_node.py --data $DATA" 2>/dev/null; then
-                            ok "Node restarting (the Termux service brings it back)"
-                        else
-                            warn "Restart the node for it to take effect"
-                        fi;;
         *)              warn "Restart the node for it to take effect";;
     esac
     exit 0
@@ -587,9 +494,6 @@ if [ "$UNINSTALL" = true ]; then
             run_priv rm -f "$UNIT_PATH";;
         launchd)
             launchctl unload "$UNIT_PATH" >/dev/null 2>&1 || true
-            rm -f "$UNIT_PATH";;
-        termux)
-            termux_stop "$PREFIX" "$DATA"
             rm -f "$UNIT_PATH";;
         *) warn "No service to remove (none was installed)";;
     esac
@@ -714,11 +618,7 @@ reuse_prefixes() {
 # node must find the same library at boot as the one built here, and a system
 # account has no home of its own to find it in.
 info "Installing dependencies (this is start.sh doing its usual work)…"
-INST="$PREFIX"
-if ! ( cd "$INST" || exit 1
-       # Hand Termux's own PREFIX back to start.sh (see ENV_PREFIX above).
-       [ -z "$ENV_PREFIX" ] || export PREFIX="$ENV_PREFIX"
-       HOME="$INST" OQS_INSTALL_PATH="$INST/_oqs" \
+if ! ( cd "$PREFIX" && HOME="$PREFIX" OQS_INSTALL_PATH="$PREFIX/_oqs" \
        OQS_REUSE_FROM="$(reuse_prefixes)" \
        NMESH_LIBOQS_CACHE="$(liboqs_cache_root)" \
        NMESH_SETUP_ONLY=1 ./start.sh ); then
@@ -809,6 +709,15 @@ fi
 # live inside the install directory. Both trees go to the node's account, mode
 # 700 — nothing else on the machine can read its identity key, and the node can
 # still repair and update itself.
+lock_down() {
+    local path="$1"
+    [ -d "$path" ] || return 0
+    if [ "$OWNER" != "$(id -u):$(id -g)" ]; then
+        run_priv chown -R "$OWNER" "$path" 2>/dev/null \
+            || warn "Could not give $path to $OWNER"
+    fi
+    chmod 700 "$path" 2>/dev/null || run_priv chmod 700 "$path" 2>/dev/null || true
+}
 lock_down "$PREFIX"
 lock_down "$DATA"
 if [ -n "$RUN_USER" ]; then
@@ -876,22 +785,6 @@ case "$INIT" in
         mkdir -p "$(dirname "$UNIT_PATH")"
         launchd_plist "$PREFIX" "$DATA" "org.nmesh.$SERVICE" "$ARGS" > "$UNIT_PATH"
         ok "Agent org.nmesh.$SERVICE will start at login";;
-    termux)
-        info "Installing Termux service $PREFIX/termux-service.sh"
-        termux_service "$PREFIX" "$DATA" "$ARGS" "$ENV_PREFIX" > "$PREFIX/termux-service.sh"
-        chmod +x "$PREFIX/termux-service.sh"
-        mkdir -p "$(dirname "$UNIT_PATH")"
-        termux_boot_hook "$PREFIX" "$ENV_PREFIX" > "$UNIT_PATH"
-        chmod +x "$UNIT_PATH"
-        ok "The node restarts on its own if it stops"
-        if [ -d /data/data/com.termux.boot ]; then
-            ok "Service $SERVICE will start at boot"
-        else
-            warn "Start at boot needs the Termux:Boot app (F-Droid) — without it the node only starts when you run $PREFIX/termux-service.sh"
-        fi
-        warn "Exempt Termux from Android's battery optimisation or the system will kill the node"
-        command -v termux-wake-lock >/dev/null 2>&1 \
-            || info "pkg install termux-api (plus the Termux:API app) lets the node hold a wakelock";;
     *)
         warn "No supported init system found — nothing will start automatically."
         if [ -n "$RUN_USER" ]; then
@@ -912,17 +805,13 @@ if [ "$DO_START" = true ]; then
                             || run_priv rc-service "$SERVICE" start || STARTED=false;;
         launchd)        launchctl unload "$UNIT_PATH" >/dev/null 2>&1 || true
                         launchctl load "$UNIT_PATH" || STARTED=false;;
-        termux)         termux_stop "$PREFIX" "$DATA"
-                        nohup sh "$PREFIX/termux-service.sh" >/dev/null 2>&1 &
-                        sleep 2
-                        kill -0 $! 2>/dev/null || STARTED=false;;
         *)              STARTED=false
                         warn "Not starting: no service manager";;
     esac
     if [ "$STARTED" = true ] && [ "$INIT" != none ]; then
         ok "NMesh is running"
     elif [ "$INIT" != none ]; then
-        warn "The service did not start — see: $(service_hint "$INIT" "$SERVICE" "$DATA")"
+        warn "The service did not start — see: $(service_hint "$INIT" "$SERVICE")"
     fi
 else
     info "Not starting now (--no-start)"
@@ -934,7 +823,7 @@ echo "  Installed in : $PREFIX"
 echo "  State in     : $DATA"
 echo "  Runs as      : ${RUN_USER:-root} (files mode 700)"
 echo "  Service      : $SERVICE ($INIT)"
-echo "  Follow it    : $(service_hint "$INIT" "$SERVICE" "$DATA")"
+echo "  Follow it    : $(service_hint "$INIT" "$SERVICE")"
 echo ""
 echo "  The console prints its URL and a generated password on first"
 echo "  start — read them from the service log above."
