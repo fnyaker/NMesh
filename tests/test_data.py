@@ -97,3 +97,70 @@ class TestReceiveData:
         await node_a.stop()
         await node_b.stop()
         assert received == messages
+
+
+class TestBounds:
+    """What a peer may cost us in memory once an E2E session exists."""
+
+    async def test_data_queue_drops_instead_of_growing(self):
+        """A node relaying with no app attached never drains this queue.
+
+        Dropping is the only honest thing a full one can do: `_handle_data`
+        runs inside the peer's receive loop, so awaiting a full queue would
+        freeze the link, and the E2E plane promises no delivery anyway."""
+        from src.node import _MAX_DATA_QUEUE
+        node_a, fake_a, node_b, fake_b = await make_connected_pair()
+        session = node_b._e2e_sessions[node_a.id]
+        for _ in range(_MAX_DATA_QUEUE + 50):
+            packet = Packet.create_encrypted(
+                DATA, node_a.id.raw, node_b.id.raw, b"x" * 100, session)
+            await node_b._handle_data(node_b._peers[0], packet)
+        assert node_b._data_queue.qsize() <= _MAX_DATA_QUEUE
+        assert node_b._metrics.total.dropped > 0
+        await node_a.stop()
+        await node_b.stop()
+
+    async def test_e2e_session_table_is_bounded(self):
+        """`src_id` is proven against the key inside the handshake, not against
+        the link, so a fresh identity per handshake used to buy a permanent
+        entry — and re-wrote the whole session store on the way."""
+        from src.node import _MAX_E2E_SESSIONS
+        from src.crypto import SessionKey
+        node, fake = await make_node()
+        for _ in range(_MAX_E2E_SESSIONS + 20):
+            node._keep_e2e_session(NodeID(os.urandom(20)),
+                                   SessionKey(os.urandom(32)))
+        assert len(node._e2e_sessions) <= _MAX_E2E_SESSIONS
+        await node.stop()
+
+    async def test_eviction_forgets_a_destination_whole(self):
+        """The four tables describe one relationship; forgetting one and not
+        the others left an ML-KEM secret and a nonce behind for a target
+        nothing would ever mention again."""
+        node, fake = await make_node()
+        target = NodeID(os.urandom(20))
+        node._e2e_pending_kem[target] = b"k" * 32
+        node._e2e_pending_nonce[target] = b"n" * 32
+        node._e2e_pending_data[target] = [b"queued"]
+        node._e2e_attempt[target] = 0.0
+        node._forget_e2e(target)
+        assert target not in node._e2e_pending_kem
+        assert target not in node._e2e_pending_nonce
+        assert target not in node._e2e_pending_data
+        assert target not in node._e2e_attempt
+        await node.stop()
+
+    async def test_a_session_with_queued_data_is_not_the_one_evicted(self):
+        """Evicting it would strand the backlog and the retry loop would
+        re-handshake for it immediately."""
+        from src.node import _MAX_E2E_SESSIONS
+        from src.crypto import SessionKey
+        node, fake = await make_node()
+        keeper = NodeID(os.urandom(20))
+        node._keep_e2e_session(keeper, SessionKey(os.urandom(32)))
+        node._e2e_pending_data[keeper] = [b"queued"]
+        for _ in range(_MAX_E2E_SESSIONS + 10):
+            node._keep_e2e_session(NodeID(os.urandom(20)),
+                                   SessionKey(os.urandom(32)))
+        assert keeper in node._e2e_sessions
+        await node.stop()

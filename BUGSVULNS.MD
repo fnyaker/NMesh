@@ -196,6 +196,11 @@ Watch out for two related paths while fixing:
 
 ## 2 — high — `_e2e_sessions` is unbounded, and each new entry re-writes the store
 
+> **Status — partly fixed.** `_keep_e2e_session` bounds the table
+> (`_MAX_E2E_SESSIONS`, LRU, never evicting a target with data queued) and
+> `_forget_e2e` drops all four tables together. The persistence half — the
+> synchronous fsync per handshake — is **P8**, in the receive-loop pass.
+
 **Where** — `src/node.py`, `MeshNode._handle_e2e_handshake` /
 `_handle_e2e_handshake_ack` / `_handle_data`, and `MeshNode._persist_state`.
 
@@ -368,6 +373,11 @@ its expectations before changing the table's lifetime.
 
 ## 6 — high — UDP decode queue unbounded; reorder buffer bounded in frames, not bytes
 
+> **Status — fixed.** `_MAX_REORDER_BYTES` and `_MAX_DECODED_BYTES` bound both
+> buffers in bytes; overflow drops (the callback is synchronous and must not
+> block). `receive()` now waits on an event instead of polling, which also
+> closes **P4**.
+
 **Where** — `src/udp_transport.py`, `UDPTransport._process_frame` (appends to
 `self._decoded`) and `_ReliableLink.process_incoming` (fills `self._reorder`).
 
@@ -404,6 +414,10 @@ existing shape (and fixes the `pop(0)` cost noted in **P4**).
 ---
 
 ## 7 — high — `MeshNode._data_queue` is unbounded
+
+> **Status — fixed.** `maxsize=_MAX_DATA_QUEUE`, and `_handle_data` drops with
+> `Counters.on_drop()` rather than awaiting — awaiting a full queue inside the
+> receive loop would freeze the link.
 
 **Where** — `src/node.py`, `MeshNode.__init__`
 (`self._data_queue: asyncio.Queue = asyncio.Queue()`) and `_handle_data`.
@@ -968,6 +982,9 @@ just make it explicit rather than an artefact of a negative index.
 
 ## 24 — low — `SpoolServer` has no peer cap and an unbounded `_seen` set
 
+> **Status — fixed.** `_MAX_SESSIONS` live links, `_MAX_SEEN` remembered
+> names, and `_SESSION_RE` so only a name `connect` would write is a session.
+
 **Where** — `src/spool_transport.py`, `SpoolServer._accept_loop`.
 
 **What happens** — every `sess-*` directory found in the link directory becomes
@@ -1027,6 +1044,12 @@ pressure — keep it.
 ---
 
 ## 27 — critical — A chat file transfer can buffer gigabytes per peer
+
+> **Status — fixed.** `_MAX_CHUNKS` is derived from `FILE_CHUNK_SIZE` rather
+> than from 1024; an offer whose chunk count contradicts its size is refused;
+> `_Transfer.accept` bounds each chunk and the running total against the
+> declared size; and `_MAX_TRANSFERS_PER_PEER` stops one sender owning every
+> slot.
 
 **Where** — `src/apps/chat.py`, `_on_offer` / `_on_chunk` / `_Transfer`.
 
@@ -1445,6 +1468,10 @@ every sibling. More generally: values crossing the remote-console proxy are
 ---
 
 ## 36 — medium — `_e2e_pending_kem` / `_e2e_pending_nonce` / `_e2e_attempt` are unbounded
+
+> **Status — fixed.** `_forget_e2e` is the one place a destination is
+> forgotten, and `send_data`'s eviction calls it instead of dropping the queue
+> alone.
 
 **Where** — `src/node.py`, `_initiate_e2e_handshake`, `_e2e_retry_loop`.
 
@@ -1955,6 +1982,10 @@ the order they were found in; severity is stated per entry as above.
 
 ## 41 — high — The app-store catalogue can be filled and held for ever
 
+> **Status — fixed.** `AppCatalog._make_room` evicts instead of refusing, with
+> a per-author share (`MIN_AUTHORS`) so one key cannot own the table, and
+> `_touch` keeps the least recently announced app at the front.
+
 **Where** — `src/app_catalog.py`, `AppCatalog.offer`
 (`MAX_APPS = 1024`); reached from `src/node.py`, `_handle_catalog_announce`.
 
@@ -2015,6 +2046,9 @@ automatic accept or expiry that could approve something: the invariant in
 machine that bears it" — must survive.
 
 ## 43 — medium — `RelayedTransport`'s inbox is unbounded and its `receive` uses `wait_for`
+
+> **Status — fixed.** `maxsize=_RELAY_QUEUE_MAX`, dropping on overflow, and
+> `asyncio.timeout` in place of `wait_for` (gotchas §3b).
 
 **Where** — `src/node.py`, `RelayedTransport.feed` / `receive`.
 

@@ -30,9 +30,10 @@ import os
 import socket
 import struct
 import time
+from collections import deque
 
 from .transport import BaseTransport, BaseServer, option
-from .packet import Packet
+from .packet import HEADER_SIZE, Packet
 from .ip_utils import split_host_port
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,12 @@ FLAG_FIN = 0x08
 _MAX_PAYLOAD = 60000
 _MAX_UNACKED = 256          # max unacknowledged frames in retransmit buffer
 _MAX_REORDER = 256          # max out-of-order frames buffered
+# A frame count is not a memory bound: a frame carries up to _MAX_PAYLOAD, so
+# 256 of them is 15 MB per link and an attacker chooses every byte by sending
+# sequence numbers ahead of the cursor and never filling the gap. Both buffers
+# are therefore bounded in bytes as well as in entries — whichever binds first.
+_MAX_REORDER_BYTES = 2 * 1024 * 1024    # out-of-order frames held, in bytes
+_MAX_DECODED_BYTES = 2 * 1024 * 1024    # decoded packets waiting for receive()
 _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
 _RTO_MIN = 0.050            # initial retransmit timeout, seconds
 _RTO_MAX = 2.0              # max retransmit timeout after backoff
@@ -71,6 +78,9 @@ _KEEPALIVE_INTERVAL = 25.0  # NAT mapping refresh, seconds
 _KEEPALIVE_TIMEOUT = 75.0   # 3 missed keepalives → dead link
 _ACK_DELAY = 0.010          # max delay before sending a standalone ACK
 _RECV_TIMEOUT = 120.0       # overall receive inactivity timeout
+# A waiting receive() is woken by the arrival event; this only bounds how long
+# it sits there before re-reading `_closed`, which nothing signals.
+_RECV_WAKE = 0.5
 
 
 def _host_port(address: str) -> tuple[str, int]:
@@ -112,6 +122,7 @@ class _ReliableLink:
         # Receive side
         self._recv_next: int = 0          # next expected seq to deliver in-order
         self._reorder: dict[int, bytes] = {}  # seq → payload (out-of-order buffer)
+        self._reorder_bytes: int = 0      # what that buffer is actually holding
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -244,7 +255,9 @@ class _ReliableLink:
             delivered: list[bytes] = [payload]
             # Flush consecutive buffered frames
             while self._recv_next in self._reorder:
-                delivered.append(self._reorder.pop(self._recv_next))
+                buffered = self._reorder.pop(self._recv_next)
+                self._reorder_bytes -= len(buffered)
+                delivered.append(buffered)
                 self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
             self._schedule_ack()
             return delivered
@@ -253,8 +266,10 @@ class _ReliableLink:
             # Ahead of the cursor: out-of-order. A seq already buffered is a
             # retransmit — drop it but re-ACK so the sender stops resending.
             if (seq not in self._reorder
-                    and len(self._reorder) < UDPTransport.setting("max_reorder")):
+                    and len(self._reorder) < UDPTransport.setting("max_reorder")
+                    and self._reorder_bytes + len(payload) <= _MAX_REORDER_BYTES):
                 self._reorder[seq] = payload
+                self._reorder_bytes += len(payload)
                 self.reordered += 1
             self._schedule_ack()
             return []
@@ -330,7 +345,16 @@ class UDPTransport(BaseTransport):
         self._sock: asyncio.DatagramTransport | None = sock
         self._remote: tuple[str, int] | None = remote_addr
         self._link = _ReliableLink()
-        self._decoded: list[Packet] = []
+        # Decoded packets waiting for receive(). A deque because the consumer
+        # takes from the front, and bounded in bytes because nothing couples
+        # arrival to consumption: a sender faster than _Peer._loop — or a
+        # transport whose consumer never started — grew this without limit.
+        self._decoded: deque[Packet] = deque()
+        self._decoded_bytes: int = 0
+        # Set when a packet lands, cleared when the queue empties. receive()
+        # waits on it instead of polling: the poll cost 10 ms of latency per
+        # packet and 100 wakeups a second per link, at rest, for nothing.
+        self._arrived: asyncio.Event = asyncio.Event()
         self._closed: bool = False
         self._rtx_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
@@ -454,9 +478,18 @@ class UDPTransport(BaseTransport):
             delivered = self._link.process_incoming(seq, flags, payload)
             for raw in delivered:
                 try:
-                    self._decoded.append(Packet.unpack(raw))
+                    packet = Packet.unpack(raw)
                 except Exception:
-                    pass  # hostile payload — drop, keep the link alive
+                    continue  # hostile payload — drop, keep the link alive
+                # Dropped, not awaited: this runs inside datagram_received, a
+                # synchronous protocol callback that must never block. UDP
+                # offers no delivery guarantee, so a consumer that has fallen
+                # this far behind loses packets rather than memory.
+                if self._decoded_bytes + len(raw) > _MAX_DECODED_BYTES:
+                    continue
+                self._decoded.append(packet)
+                self._decoded_bytes += len(raw)
+                self._arrived.set()
 
         # Send a piggybacked or standalone ACK if needed
         if self._link.needs_ack():
@@ -513,16 +546,28 @@ class UDPTransport(BaseTransport):
             self._send_raw(self._link.build_keepalive())
             if not self._link.is_alive():
                 self._closed = True
+                self._arrived.set()    # a parked receive() must not wait it out
                 break
 
     async def receive(self) -> Packet:
         """Block until a packet is received and return it."""
         while True:
             if self._decoded:
-                return self._decoded.pop(0)
+                packet = self._decoded.popleft()
+                self._decoded_bytes -= HEADER_SIZE + len(packet.payload)
+                if not self._decoded:
+                    self._arrived.clear()
+                return packet
             if self._closed:
                 raise ConnectionError("udp transport closed")
-            await asyncio.sleep(0.01)
+            self._arrived.clear()
+            if self._decoded or self._closed:
+                continue          # raced with a datagram landing — go round
+            try:
+                async with asyncio.timeout(_RECV_WAKE):
+                    await self._arrived.wait()
+            except asyncio.TimeoutError:
+                pass              # re-check _closed, which nothing signals
 
     def remote_ip(self) -> str | None:
         """The peer's source IP as observed locally."""
@@ -542,6 +587,7 @@ class UDPTransport(BaseTransport):
         if self._closed:
             return
         self._closed = True
+        self._arrived.set()        # wake a parked receive() so it can raise
         # Send FIN to signal graceful close
         if self._sock is not None and self._remote is not None:
             try:
