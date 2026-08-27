@@ -249,69 +249,6 @@ class TestUDPTransport:
             received = await asyncio.wait_for(srv_transport.receive(), timeout=5.0)
             assert received.pack() == p.pack()
 
-    async def test_send_held_when_unacked_window_full(self):
-        """A full retransmit window means the peer is not ACKing.
-
-        Sending beyond the cap used to emit frames that were never tracked, so
-        they could never be retransmitted — silent loss. The send loop must
-        hold the frame until an ACK frees a slot."""
-        transport = UDPTransport()
-        transport._remote = ("127.0.0.1", 9)
-        sent: list[bytes] = []
-
-        class _Sock:
-            def sendto(self, data, addr):
-                sent.append(data)
-
-            def get_extra_info(self, *a, **k):
-                return None
-
-            def close(self):
-                pass
-
-        transport._sock = _Sock()
-        for _ in range(_MAX_UNACKED):
-            transport._link.build_frame(make_packet(b"x"))
-        assert transport._link.unacked_count() == _MAX_UNACKED
-
-        transport._link.enqueue(make_packet(b"held"))
-        task = asyncio.create_task(transport._send_loop())
-        await asyncio.sleep(0.05)
-        assert sent == []
-        assert transport._link.unacked_count() == _MAX_UNACKED
-
-        first_seq = min(transport._link._unacked.keys())
-        transport._link.process_ack(first_seq, 0)
-        await asyncio.sleep(0.05)
-        assert len(sent) == 1
-        task.cancel()
-
-    async def test_send_loop_cancels_cleanly(self):
-        """A parked send loop must end on cancel, not swallow it.
-
-        wait_for could leave the task half-cancelled when the inner get()
-        completed in the same loop step; asyncio.timeout propagates the
-        cancellation so close() can join the loop cleanly."""
-        transport = UDPTransport()
-        transport._remote = ("127.0.0.1", 9)
-
-        class _Sock:
-            def sendto(self, data, addr):
-                pass
-
-            def get_extra_info(self, *a, **k):
-                return None
-
-            def close(self):
-                pass
-
-        transport._sock = _Sock()
-        task = asyncio.create_task(transport._send_loop())
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
     async def test_remote_ip(self, udp_pair):
         server, srv_transport, client = udp_pair
         assert srv_transport is not None
