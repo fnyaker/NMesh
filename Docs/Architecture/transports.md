@@ -274,7 +274,23 @@ UDP is connectionless and unreliable → a **reliability layer**:
 - `UDPServer`: **one shared socket**, multiplexed by source `(ip, port)`. A
   datagram from an unknown source creates a `UDPTransport` +
   `on_new_connection` — like a TCP accept. `NPPB`/`NPAK`/STUN datagrams are
-  routed to `on_raw_datagram` (hole punch), not to a reliable transport.
+  routed to `on_raw_datagram` (hole punch), not to a reliable transport. The
+  dispatch table counts **live** transports: a closed one releases its slot
+  (`remove_transport` on close and on the keepalive's death verdict,
+  `_reap_closed` when the table is read), because counting the dead meant 128
+  datagrams from 128 source ports disabled UDP for the life of the process,
+  including for a known peer whose link had died and wanted to come back.
+- **Sequence numbers start random**, and the receiver learns the peer's starting
+  point from the first frame of any kind — which is the keepalive `connect()`
+  sends before any data, so the cursor is set before a data frame can arrive.
+  The frame header is *not* authenticated (only the mesh Packet inside it is)
+  and a link's endpoints are public gossip, so a cursor starting at zero was a
+  free target: one spoofed frame at the next expected sequence advanced it, and
+  the real peer's next frame was then dropped as a duplicate. Randomising does
+  not make the header authentic — that would be a design change — it removes the
+  guess. A delivered payload that is not a decodable packet is counted
+  (`undecodable`, visible in `stats()`): a real peer's frames decode, so it is a
+  fault worth seeing rather than silence.
 
 ## Store-and-forward (`spool_transport.py`)
 
@@ -330,6 +346,16 @@ at all. A spoofed source therefore spends only the budget of the address it
 forged.
 
 ## Address discovery & reachability
+
+**An AutoNAT answer is only believed if we asked the question.** `probe_reachability`
+records `(peer id, scheme)` with a short TTL (`_note_reach_probe`), and
+`_handle_reach_probe_ack` requires a match, consumes it, and ignores anything
+else. `_inbound_schemes` decides what the node advertises and whether it offers
+itself as a relay, so an unsolicited "yes" from one peer could make a NATted node
+announce itself as reachable — a black hole for everyone who then routes through
+it. Contrast the *passive* signal in `_handle_handshake`: an inbound connection
+that authenticated is proof, not a claim.
+
 
 - `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it
   sees → our public address as seen from there (bounded addition to

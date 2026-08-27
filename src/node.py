@@ -191,6 +191,14 @@ _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
 _BROADCAST_ID    = b"\xff" * 20
 _MSG_DEDUP_MAX         = 10_000
 _MAX_PEERS             = 128    # open links, not distinct nodes: a node may hold several
+# Of those, how many may be links that have not authenticated yet. They must
+# never be able to crowd out the ones that have: a full `_peers` also stops
+# `_dial_uri` dialling, so the node cannot re-join the mesh it was pushed out of.
+_MAX_UNAUTH_PEERS      = 32
+# How long a link has to finish its handshake before the sweep above cuts it.
+# Generous: a relayed join crosses the mesh, and a slow medium is the normal
+# case here, not the exception.
+_HANDSHAKE_DEADLINE    = 60.0
 _MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
 _MAX_HANDSHAKE_ATTEMPTS = 8     # handshakes one link may make us verify
 _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
@@ -385,6 +393,11 @@ _CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per wi
 _REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
 _REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
 _REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
+# How long an answer to a probe we sent is still worth believing, and how many
+# outstanding probes we track. A dial-back is bounded by _REACH_DIAL_TIMEOUT
+# twice over, so anything much later than this is not an answer to our question.
+_REACH_PENDING_TTL    = 30.0
+_REACH_PENDING_MAX    = 64
 _RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
 _RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
 _RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
@@ -1251,6 +1264,9 @@ class MeshNode:
         self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
         self._reach_probe_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer)->(n,win)
         self._reach_dials_active = 0                   # concurrent dial-backs (bounded)
+        # (peer id, scheme) -> expiry: probes we sent and are still willing to
+        # believe an answer to. See _note_reach_probe.
+        self._reach_pending: OrderedDict[tuple, float] = OrderedDict()
         self._running = False
         self._peers: list[_Peer] = []
         self._invite = InviteManager()
@@ -1766,7 +1782,8 @@ class MeshNode:
         keepalive burst to open our mapping and prod the peer to accept."""
         from .udp_transport import UDPTransport
         addr = (host, port)
-        transport = UDPTransport._from_server(self._udp_server._sock, addr)
+        transport = UDPTransport._from_server(self._udp_server._sock, addr,
+                                              self._udp_server)
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
         asyncio.create_task(self._udp_join_bridge(transport))
@@ -2840,6 +2857,16 @@ class MeshNode:
         if len(self._peers) >= _MAX_PEERS:
             await transport.close()
             return
+        # Unauthenticated links get their own, smaller ceiling. Without it, 128
+        # sockets that never finish a handshake take every slot — and `_dial_uri`
+        # refuses to dial at all once `_peers` is full, so the node cannot even
+        # re-join the mesh. The transport read timeout is no defence: any packet
+        # resets it, including one the gates drop at the first test.
+        if self._unauthenticated_peers() >= _MAX_UNAUTH_PEERS:
+            self._reap_stale_unauthenticated()
+            if self._unauthenticated_peers() >= _MAX_UNAUTH_PEERS:
+                await transport.close()
+                return
         peer = _Peer(transport, is_client_side=False)
         peer.on_dead = self._reap_peer
         peer.total = self._metrics.total
@@ -2852,6 +2879,31 @@ class MeshNode:
         packet = Packet.create(CHALLENGE, self._id.raw,
                                NodeID(b"\xff" * 20).raw, challenge)
         await peer.send(packet)
+
+    def _unauthenticated_peers(self) -> int:
+        """Links that have not proved who they are yet — virtual relay peers
+        excluded, because a relayed invitation legitimately sits here for the
+        length of a join."""
+        return sum(1 for p in self._peers
+                   if p.authenticated_id is None
+                   and not isinstance(p.transport, RelayedTransport))
+
+    def _reap_stale_unauthenticated(self) -> None:
+        """Cut links that have had long enough to authenticate and have not.
+
+        A sweep rather than a timer per peer: one bounded pass when the pressure
+        is felt costs nothing at rest, and there is nothing to cancel."""
+        now = time.monotonic()
+        for peer in list(self._peers):
+            if peer.authenticated_id is not None:
+                continue
+            if isinstance(peer.transport, RelayedTransport):
+                continue
+            if now - peer.connected_at < _HANDSHAKE_DEADLINE:
+                continue
+            if peer in self._peers:
+                self._peers.remove(peer)
+            self._spawn_bounded(self._safe_stop_peer(peer))
 
     async def _dial_uri(self, node_id: NodeID, uri: str,
                         timeout: float) -> _Peer | None:
@@ -4554,7 +4606,7 @@ class MeshNode:
             "peer": peer, "at": time.monotonic(),
         }
         if recognized and seeker.raw not in self._relay_peers:
-            asyncio.ensure_future(self._start_relay_invite(seeker, peer))
+            self._spawn_bounded(self._start_relay_invite(seeker, peer))
 
     async def _start_relay_invite(self, seeker: NodeID, via: '_Peer') -> None:
         """Inviter side: challenge the seeker over a relayed virtual peer,
@@ -4689,10 +4741,26 @@ class MeshNode:
             try:
                 await peer.send(Packet.create(REACH_PROBE, self._id.raw,
                                               peer.authenticated_id.raw, payload))
+                self._note_reach_probe(peer.authenticated_id, parsed[0])
                 sent += 1
             except Exception:
                 pass
         return sent
+
+    def _note_reach_probe(self, asked: NodeID, scheme: str) -> None:
+        """Remember that we asked *this* peer about *this* scheme.
+
+        Without it the ACK is an unsolicited claim any authenticated peer can
+        make at any time — and `_inbound_schemes` decides what we advertise and
+        whether we offer ourselves as a relay, so one peer could make a NATted
+        node announce itself as reachable and become a black hole for everyone
+        routing through it."""
+        now = time.monotonic()
+        for key in [k for k, exp in self._reach_pending.items() if exp <= now]:
+            del self._reach_pending[key]
+        while len(self._reach_pending) >= _REACH_PENDING_MAX:
+            self._reach_pending.popitem(last=False)
+        self._reach_pending[(asked.raw, scheme)] = now + _REACH_PENDING_TTL
 
     def _reach_probe_allowed(self, peer: '_Peer') -> bool:
         now = time.monotonic()
@@ -4781,7 +4849,15 @@ class MeshNode:
             scheme = packet.payload[2:2 + slen].decode("ascii")
         except Exception:
             return
-        if ok and scheme and self._transport_manager.is_supported(scheme):
+        if not ok or not scheme or peer.authenticated_id is None:
+            return
+        # Only from the peer we asked, only about the scheme we asked about, and
+        # only inside the window. An answer nobody asked for says nothing.
+        key = (peer.authenticated_id.raw, scheme)
+        expiry = self._reach_pending.pop(key, None)
+        if expiry is None or expiry <= time.monotonic():
+            return
+        if self._transport_manager.is_supported(scheme):
             if scheme not in self._inbound_schemes:
                 self._inbound_schemes.add(scheme)   # confirmed reachable → relay-capable
                 self._poke_net("autonat-confirmed")
@@ -5173,7 +5249,7 @@ class MeshNode:
         if not self._catalog.releases():
             return
         try:
-            asyncio.create_task(self._sync_catalog_to(peer))
+            self._spawn_bounded(self._sync_catalog_to(peer))
         except RuntimeError:
             pass  # no running loop (e.g. teardown) — nothing to sync
 
@@ -5346,7 +5422,7 @@ class MeshNode:
         if not self._releases.releases():
             return
         try:
-            asyncio.create_task(self._sync_releases_to(peer))
+            self._spawn_bounded(self._sync_releases_to(peer))
         except RuntimeError:
             pass  # no running loop (e.g. teardown) — nothing to sync
 
@@ -5443,15 +5519,24 @@ class MeshNode:
         payload = packet.payload
         if len(payload) <= _RELEASE_ID_LEN + 4:
             return
-        key = (payload[:_RELEASE_ID_LEN].hex(),
+        # Keyed on the source too. The release id is public gossip and the
+        # offsets are 0, _RELEASE_SLICE, 2×… — so without this any authenticated
+        # peer could race the real answer with rubbish. The final SHA-256 still
+        # catches it, which is why this was denial rather than corruption: every
+        # download of a given release could be made to fail, for ever, at one
+        # packet per slice. Updates are a security mechanism.
+        key = (NodeID(packet.src_id), payload[:_RELEASE_ID_LEN].hex(),
                int.from_bytes(payload[_RELEASE_ID_LEN:_RELEASE_ID_LEN + 4], "big"))
         future = self._pending_slices.get(key)
-        if future is not None and not future.done():
+        if future is None:
+            self._charge_abuse(peer)   # answering a question we did not ask
+            return
+        if not future.done():
             future.set_result(payload[_RELEASE_ID_LEN + 4:])
 
     async def _pull_slice(self, source: NodeID, release_id: bytes,
                           offset: int) -> bytes | None:
-        key = (release_id.hex(), offset)
+        key = (source, release_id.hex(), offset)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_slices[key] = future
         try:
@@ -5857,7 +5942,7 @@ class MeshNode:
         if not len(self._pseudo_book):
             return
         try:
-            asyncio.create_task(self._sync_pseudos_to(peer))
+            self._spawn_bounded(self._sync_pseudos_to(peer))
         except RuntimeError:
             pass  # no running loop (e.g. teardown) — nothing to sync
 
@@ -6569,7 +6654,11 @@ class MeshNode:
         self._punch_stats["attempted"] += 1
 
         # Start sending probes
-        asyncio.create_task(self._send_punch_probes(state))
+        # Bounded and tracked, like every other detached task — but the punch
+        # state stays whatever happens: `gotchas.md` warns that deleting
+        # `_punch_pending` early blocks the punch deterministically, and a task
+        # the ceiling refuses must not take that state with it.
+        self._spawn_bounded(self._send_punch_probes(state))
 
     def _prune_punch_pending(self) -> None:
         """Drop hole-punch attempts past their deadline (counted as failed)."""
@@ -6843,7 +6932,8 @@ class MeshNode:
         # Initiator: open the transport, register it in the server dispatch
         # table so the peer's frames route to it, and send an initial keepalive
         # to trigger the responder's accept + challenge.
-        transport = UDPTransport._from_server(self._udp_server._sock, addr)
+        transport = UDPTransport._from_server(self._udp_server._sock, addr,
+                                              self._udp_server)
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
         peer = _Peer(transport, is_client_side=True)
@@ -6856,8 +6946,8 @@ class MeshNode:
         existing = self._routing.get(state.target)
         self._routing.add(state.target, [peer.remote_addr],
                           existing.dsa_pub if existing else b"")
-        asyncio.create_task(peer.start(self._handle_packet))
-        asyncio.create_task(self._kick_punched_link(peer, transport))
+        self._spawn_bounded(peer.start(self._handle_packet))
+        self._spawn_bounded(self._kick_punched_link(peer, transport))
 
     async def _kick_punched_link(self, peer: '_Peer',
                                  transport: 'UDPTransport') -> None:

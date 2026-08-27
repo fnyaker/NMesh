@@ -98,6 +98,22 @@ address **and** the code, for a QR code or for reading aloud.
 - Decoding is treated as hostile input: bounded length, every field validated
   before use, and nothing but a `TicketError` can come out.
 
+## Admission: a link that never proves itself does not keep its place
+
+`_MAX_PEERS` bounds open links, and `_MAX_UNAUTH_PEERS` bounds how many of them
+may still be unauthenticated. Past `_HANDSHAKE_DEADLINE` an unauthenticated link
+is swept (`_reap_stale_unauthenticated`, a bounded pass run when the pressure is
+felt, not a timer per peer).
+
+The transport read timeout is no defence on its own: any packet resets it,
+including one the gates drop at the first test, so a byte every thirty seconds
+held a slot indefinitely. And a full `_peers` also stops `_dial_uri` dialling —
+so 128 idle sockets did not merely block new peers, they left the node unable to
+re-join the mesh they had pushed it out of.
+
+Relayed virtual peers are exempt from the sweep: a relayed invitation
+legitimately sits unauthenticated for the length of a join.
+
 ## Per-hop handshake (establishing a session between two direct peers)
 
 Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
