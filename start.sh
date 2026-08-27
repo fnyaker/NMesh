@@ -218,7 +218,7 @@ pkg_names() {
         termux:pipvenv)  echo "python-pip";;
         termux:build)    echo "cmake clang make git";;
         termux:optional) echo "ninja binutils";;
-        termux:native)   echo "openssl libffi rust";;
+        termux:native)   echo "openssl libffi rust pkg-config";;
 
         *) echo "";;
     esac

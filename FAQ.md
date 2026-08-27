@@ -113,6 +113,30 @@ A new password is generated and printed **once**. This is deliberately the only
 route: it requires access to the state directory, which is exactly the level of
 privilege such a power deserves.
 
+### My Android node dies when the screen turns off
+
+**When:** the node runs under Termux and vanishes minutes after the screen
+locks.
+
+**What is happening.** Android's battery optimisation kills Termux's processes.
+A wakelock helps only while the process lives; it does not exempt the app.
+
+**The fix.** Exempt Termux from battery optimisation (Android Settings → Apps →
+Termux → Battery → Unrestricted; the exact path varies by vendor), and install
+the Termux:API app so the service can hold a wakelock.
+
+### The node does not start when the phone boots
+
+**When:** an Android/Termux installation runs only while a Termux session is
+open.
+
+**What is happening.** Starting at boot is the Termux:Boot app's job, and it is
+a separate install. Without it the hook in `~/.termux/boot/` is never run.
+
+**The fix.** Install Termux:Boot **from F-Droid** (the Play Store build of
+Termux is abandoned and its add-ons do not match), open it once so Android
+grants it boot permission, and reboot.
+
 ---
 
 ## Network & reachability
