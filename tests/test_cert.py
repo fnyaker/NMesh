@@ -224,3 +224,59 @@ class TestFoundNodeChainValidation:
         await asyncio.sleep(0.1)
         await node.stop()
         assert node._routing.get(victim_id) is not None
+
+
+class TestStoreBounds:
+    """Certificates arrive from the network — three handlers absorb them — and
+    one is ~7 kB. `get_chain_to_root` is a BFS over the store and
+    `_handle_find_node` runs it once per candidate, so an unbounded store made
+    a 28-byte packet buy an unbounded graph walk."""
+
+    def test_subjects_are_bounded(self):
+        root = CryptoIdentity()
+        store = CertStore(NodeID.from_public_key(root.dsa_public_key),
+                          max_subjects=8)
+        for _ in range(64):
+            subject = CryptoIdentity()
+            store.add(root.issue_cert(
+                NodeID.from_public_key(subject.dsa_public_key),
+                subject.dsa_public_key))
+        assert len(store._certs) <= 8
+
+    def test_certificates_per_subject_are_bounded(self):
+        subject = CryptoIdentity()
+        subject_id = NodeID.from_public_key(subject.dsa_public_key)
+        store = CertStore(subject_id, max_per_subject=3)
+        for _ in range(20):
+            issuer = CryptoIdentity()
+            store.add(issuer.issue_cert(subject_id, subject.dsa_public_key))
+        assert len(store._certs[subject_id.raw]) <= 3
+
+    def test_a_root_is_never_evicted(self):
+        """Losing a root means every chain anchored there stops verifying — a
+        bound that can do that is an outage, not a bound."""
+        me, anchor = CryptoIdentity(), CryptoIdentity()
+        anchor_id = NodeID.from_public_key(anchor.dsa_public_key)
+        store = CertStore(NodeID.from_public_key(me.dsa_public_key),
+                          max_subjects=4)
+        store.add(anchor.self_signed_cert())
+        store.add_root(anchor_id)
+        for _ in range(50):
+            subject = CryptoIdentity()
+            store.add(anchor.issue_cert(
+                NodeID.from_public_key(subject.dsa_public_key),
+                subject.dsa_public_key))
+        assert anchor_id.raw in store._certs
+
+    def test_the_chain_cache_follows_the_graph(self):
+        """A memoised chain that outlived its graph is a chain that no longer
+        verifies."""
+        root, subject = CryptoIdentity(), CryptoIdentity()
+        root_id = NodeID.from_public_key(root.dsa_public_key)
+        subject_id = NodeID.from_public_key(subject.dsa_public_key)
+        store = CertStore(root_id)
+        store.add(root.self_signed_cert())
+        assert store.get_chain_to_root(subject_id) is None      # cached None
+        store.add(root.issue_cert(subject_id, subject.dsa_public_key))
+        chain = store.get_chain_to_root(subject_id)
+        assert chain and store.verify_chain(chain) == root_id

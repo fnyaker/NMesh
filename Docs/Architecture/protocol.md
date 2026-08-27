@@ -22,6 +22,28 @@ payload.
 > **Correction.** The old "75 bytes / CRC32" note is wrong: it is 79 bytes and a uint64
 > `msg_id` derived from sha256.
 
+### Every expensive plane has a valve
+
+Answering costs more than asking, everywhere: a `FIND_NODE` buys a chain-building
+sweep, a `DIR_FIND` buys up to 56 kB of signed claims, a `RELEASE_FETCH` buys a
+48 kB slice, a `STORE` buys a slot in a store whose eviction is one global LRU,
+a `PUNCH_REQUEST` buys two packets — one of them on a link the requester does not
+pay for — and a raw punch datagram buys an ML-DSA verification with no link at
+all. So each of them is metered per ingress link, through one implementation
+(`_gossip_allowed`), with the constants stated next to what they protect.
+
+Two rules about those meters:
+
+- **They are keyed on the peer's identity** (`_rate_key`), or on the remote
+  address for the pre-auth planes — never on `id(peer)`. That is the object's
+  address, CPython reuses it once the object is collected, and these tables are
+  pruned by window expiry rather than by peer lifetime: an entry outlived the
+  peer it described, so an honest peer could be born already throttled and an
+  adversary could shed an exhausted budget by reconnecting.
+- **A bound set at the legitimate peak breaks legitimate traffic** — see
+  `gotchas.md` §12, which is why `_QUERY_RATE_MAX` is 512 and not 64. These are
+  flood valves, not traffic shaping.
+
 ### `msg_id` (anti-replay / anti-amplification)
 
 `msg_id = int(sha256(version‖type‖src‖dst‖nonce‖gcm_tag‖payload)[:8])`
@@ -107,6 +129,15 @@ The exact order applied to every packet received:
 1. `INVITE_SEEK` → dedicated pre-auth handler (rate-limited per link, bounded).
    Return.
 2. `RELAY_CARRY` → dedicated handler. Return.
+
+> **Order inside the two pre-auth handlers.** TTL, then the **rate limit**, then
+> `msg_id`, then dedup, then the signature. The rate limit sits above `_is_seen`
+> because `_is_seen` is not a query — it *inserts*, into the node-wide dedup
+> table. These handlers run before every authentication gate, so any socket that
+> connects reaches them; with the limit below the insert, an unauthenticated
+> peer could flush the whole replay window (`_MSG_DEDUP_MAX`, FIFO) at line
+> rate, and dedup is what stops a routed packet looping and a relay
+> re-injecting the same payload. The expensive ML-DSA verification stays last.
 3. If `type ∈ _DIRECT_TYPES`: reject if the peer is not authenticated, or if
    `src_id != authenticated_id`. ("reject by default".)
 4. If `type ∈ _ROUTABLE_TYPES`:

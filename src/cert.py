@@ -1,17 +1,17 @@
 import struct
 import time
-import oqs
 from .node_id import NodeID
 
-_DSA_ALG = "ML-DSA-65"
 _CERT_HEADER = struct.Struct('!20sH20sHQQH')
 # subject_id(20) | subject_pub_len(H) | issuer_id(20) | issuer_pub_len(H)
 # | issued_at(Q) | expires_at(Q) | sig_len(H)
 
 
 def _verify_dsa(message: bytes, signature: bytes, public_key: bytes) -> bool:
-    with oqs.Signature(_DSA_ALG) as v:
-        return v.verify(message, signature, public_key)
+    # Through the shared, thread-local verifier: this runs once per certificate
+    # built, and one FOUND_NODE with a full pool builds 32 of them.
+    from .crypto import verify_signature
+    return verify_signature(message, signature, public_key)
 
 
 class Certificate:

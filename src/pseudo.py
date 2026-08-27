@@ -118,7 +118,16 @@ def rank(query: str, pseudo: str):
     """How well ``pseudo`` matches ``query`` — one of the constants above, or
     ``None`` when it does not match at all. Both are folded here, so callers
     pass what the user typed and what the claim carried."""
-    q, p = fold(query), fold(pseudo)
+    return rank_folded(fold(query), fold(pseudo))
+
+
+def rank_folded(q: str, p: str):
+    """:func:`rank` on two already-folded strings.
+
+    Folding is NFC, casefold, NFD, a filter and NFC again — one of the more
+    expensive things in the standard library, and a caller ranking a query
+    against a whole book folds the same query once per entry and re-folds
+    entries that never change. Both are worth doing once."""
     if not q or not p:
         return None
     if q == p:

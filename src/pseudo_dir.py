@@ -41,7 +41,7 @@ import time
 from collections import OrderedDict
 
 from .node_id import NodeID
-from .pseudo import MAX_PSEUDO, fold, is_canonical, rank
+from .pseudo import MAX_PSEUDO, fold, is_canonical, rank_folded
 
 _DOMAIN = b"nmesh-pseudo-v2"
 KEY_LEN = 20
@@ -204,14 +204,26 @@ class PseudoBook:
             if ts <= current["ts"]:
                 return False          # older or replayed — the name stands
             self._unindex(node_id, current)
-        entry = {"ts": ts, "pseudo": claim["pseudo"], "key": claim["key"], "raw": raw}
+        # `folded` is computed here, once, because `search` runs `rank` over
+        # every entry and `rank` folds both sides — NFC, casefold, NFD, filter,
+        # NFC — so a console field searching as somebody types was ~2 000
+        # Unicode normalisations a keystroke.
+        entry = {"ts": ts, "pseudo": claim["pseudo"], "key": claim["key"],
+                 "raw": raw, "folded": fold(claim["pseudo"])}
         self._by_node[node_id] = entry
         self._by_node.move_to_end(node_id)
         self._bytes += len(raw)
         bucket = self._by_key.setdefault(claim["key"], [])
         bucket.append(node_id)
+        # Pop first, then forget. `forget` shrinks the bucket only through
+        # `_unindex`, which removes from `self._by_key[entry["key"]]` — the
+        # *entry's* key, not this list. The two are the same today because
+        # `offer` always unindexes before re-indexing, so the loop terminated;
+        # but a `while` whose progress depends on an invariant maintained three
+        # methods away, on the path that absorbs claims from strangers, is not
+        # a loop to leave standing.
         while len(bucket) > self._max_per_key:
-            self.forget(bucket[0])
+            self.forget(bucket.pop(0))
         self._enforce_bounds()
         # Whether it *survived* the bounds, not merely whether it was accepted:
         # a claim evicted on the way in is one we do not hold, and saying we
@@ -283,9 +295,12 @@ class PseudoBook:
         Ranked by how the match was found (exact, then prefix, then a word
         inside the pseudo, then anywhere), and within a rank by the shortest
         pseudo — the closest thing to what was typed."""
+        folded_query = fold(query)
+        if not folded_query:
+            return []
         hits = []
         for node_id, entry in self._by_node.items():
-            score = rank(query, entry["pseudo"])
+            score = rank_folded(folded_query, entry["folded"])
             if score is None:
                 continue
             hits.append((score, len(entry["pseudo"]), entry["pseudo"],

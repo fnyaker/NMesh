@@ -13,6 +13,13 @@ Source: `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
   version. The state directory itself is 700 and belongs to the node's
   dedicated account when `install.sh` put it there (see
   [`../Setup/guide`](../Setup/guide)).
+- **A file that is there and unreadable raises**; only a missing one means
+  "generate". `load` used to answer any failure with a fresh key pair, and the
+  caller writes back what it gets — so one truncated write, one bad sector, one
+  half-restored backup destroyed the identity permanently, and the symptom
+  looked like a network fault. `load` also **checks the pair against itself**:
+  nothing verified that the stored public half belonged to the stored secret,
+  and a mismatched file produced a node whose signatures nobody could verify.
 - `NodeID = sha256(DSA_public_key)[:20]` (`NodeID.from_public_key`). So **the ID
   is derivable from the key**: a `NodeID` that does not match the key presented
   is a lie → reject (`claimed_id != NodeID(packet.src_id)`).
@@ -51,6 +58,12 @@ propagates through certificate chains.
   - `verify_chain(chain)`: continuous issuance links + a self-signed last cert +
     the last `subject_id ∈ roots` + nothing expired → returns the anchor,
     otherwise None.
+  - **Bounded** (`MAX_SUBJECTS`, `MAX_PER_SUBJECT`, LRU), with the roots and our
+    own subject pinned — a bound that can leave us unable to authenticate is an
+    outage, not a bound. `get_chain_to_root` is **memoised per subject** and the
+    cache is dropped on any change: it is a BFS, `_handle_find_node` runs it
+    once per candidate it considers, and an unbounded store made a 28-byte
+    packet buy an unbounded graph walk.
 - `TrustTable` (`trust.py`): **TOFU** `NodeID → DSA key`. First sighting →
   store; a later sighting with a **different key** → `False` (compromise or
   impersonation).
@@ -65,7 +78,17 @@ Joining = proving knowledge of a code **without sending it in the clear**.
   (`compute_response`). `verify_response` compares in **constant time**
   (`hmac.compare_digest`) and purges expired codes.
 - **Single use**: `consume(challenge, response)` deletes the code that matched.
-- Anti-bruteforce: `_MAX_FAILURES = 3` → a `_LOCKOUT_TTL = 60 s` lockout.
+- Anti-bruteforce, at **two** levels: `peer._invite_failures` cuts one abusive
+  link (three tries, then 60 s), and `InviteManager.record_failure` counts
+  node-wide — `_MAX_FAILURES = 3` → a `_LOCKOUT_TTL = 60 s` lockout across every
+  link. The node-wide one existed and nothing ever called it, so dropping the
+  connection and reconnecting bought three fresh attempts at no cost. The
+  per-link counter stays because it is what lets an abusive link be cut without
+  locking out an honest joiner.
+- **Expiry is enforced wherever the pool is read**, not only in
+  `verify_response`: `live_codes()` purges on the way past, so an expired code
+  cannot look recognised to `_recognize_seek` and start a relayed invite that
+  could never be redeemed.
 - **TTL per code.** `generate_code(ttl)` widens the window of one specific code,
   bounded by `_MAX_TTL` (6 h). This is for invitations that are not typed by
   hand: the one a node leaves on a machine being provisioned is only redeemed
@@ -98,6 +121,22 @@ address **and** the code, for a QR code or for reading aloud.
 - Decoding is treated as hostile input: bounded length, every field validated
   before use, and nothing but a `TicketError` can come out.
 
+## Admission: a link that never proves itself does not keep its place
+
+`_MAX_PEERS` bounds open links, and `_MAX_UNAUTH_PEERS` bounds how many of them
+may still be unauthenticated. Past `_HANDSHAKE_DEADLINE` an unauthenticated link
+is swept (`_reap_stale_unauthenticated`, a bounded pass run when the pressure is
+felt, not a timer per peer).
+
+The transport read timeout is no defence on its own: any packet resets it,
+including one the gates drop at the first test, so a byte every thirty seconds
+held a slot indefinitely. And a full `_peers` also stops `_dial_uri` dialling —
+so 128 idle sockets did not merely block new peers, they left the node unable to
+re-join the mesh they had pushed it out of.
+
+Relayed virtual peers are exempt from the sweep: a relayed invitation
+legitimately sits unauthenticated for the length of a join.
+
 ## Per-hop handshake (establishing a session between two direct peers)
 
 Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
@@ -109,17 +148,56 @@ Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
    public key + ML-DSA public key + certificate chain +
    `sign(challenge‖kem_pub‖dsa_pub)`. If the client was joining by invitation,
    the HMAC response to the challenge proves the code.
-3. The server (`_handle_handshake`) verifies the signature, verifies
-   `claimed_id`, verifies the chain (or issues a cert if `invite_accepted`),
+3. The server (`_handle_handshake`) verifies `claimed_id`, verifies the
+   signature, verifies the chain (or issues a cert if `invite_accepted`),
    encapsulates ML-KEM → `HANDSHAKE_ACK` = ML-KEM ciphertext + its DSA key + its
    chain + the issued cert + a signature. `peer.session =
    SessionKey(shared_secret)`.
+
+   **In that order, and it matters.** This handler is reachable on an
+   unauthenticated link, and a failed attempt clears neither of its guards, so
+   the same connection may try again. `claimed_id != NodeID(src_id)` is two
+   SHA-256s and rules the packet out; the handshake signature is one ML-DSA
+   verification; parsing the chain is one *per certificate* in it. So the
+   payload is sliced without parsing the chain (`_split_handshake`), the cheap
+   test runs first, and `_decode_chain` — which verifies as it builds — runs
+   only once the packet has earned it. `_MAX_HANDSHAKE_ATTEMPTS` bounds how
+   many tries one link gets at all, and `_decode_chain` refuses a chain longer
+   than `_ENTRY_CHAIN_MAX`.
 4. The client (`_handle_handshake_ack`) verifies and decapsulates → the same
    `SessionKey`.
 
 From then on `peer.authenticated_id` is set on both sides and all traffic on the
 link is AES-256-GCM encrypted. Trust is **mutual** (each side challenges the
 other).
+
+### Adopting a root: the joiner decides, not the answer
+
+Step 4 is where a node can gain a **new trust root** — the host's self-signed
+certificate, arriving at the end of a join. From then on every chain anchored
+there authenticates, so this is the single most consequential thing a handshake
+does, and it is the one branch that must never be chosen by the remote side.
+
+It is not. The branch is gated on `peer.joined_by_invite`, which only
+`_handle_invite_ack` sets, and only on an `_ACK_ACCEPTED` — that is, only when
+**we** presented a code on **this link** and it was accepted. The `issued_cert`
+field in the answer is not evidence of anything: the peer writes it, and it has
+our public key (we sent it in the HANDSHAKE one step earlier), so it can always
+mint a certificate naming us.
+
+Without that gate, every address we dial is a trust anchor waiting to be
+planted — and we dial addresses learned from gossip (`_maintain_neighbors`,
+`_address_retry_loop`, the console's manual retry, latency steering). A single
+peer answering an ordinary reconnect could have made itself a root and then
+minted memberships for identities it generated on the spot, which is the whole
+invitation gate removed. Locked down by
+`tests/test_invite_to_handshake.py::test_dialled_peer_cannot_plant_a_trust_root`,
+with its counterpart `test_joining_by_invite_still_adopts_the_host_root` so the
+bound cannot close the door it exists to open.
+
+A link that presents no code takes the other branch and is held to the ordinary
+rule: its chain must verify to a root we already hold, or the link does not
+authenticate at all.
 
 > **Address invariant note**: the handshake does **not** yet carry the peer's
 > full set of announced addresses. After authentication we only know the address
@@ -189,9 +267,13 @@ each use gets its own domain and none of them can be replayed as another:
 a name — see below), plus the certificate body and the handshake input. Adding a
 seventh use means adding a seventh domain, not reusing the nearest one.
 
-`verify_assertion` orders its checks from cheapest to most expensive and burns
-the anti-replay nonce **only after** the cheap ones — otherwise a flood of
-invalid assertions would evict live entries from a bounded cache.
+`verify_assertion` orders its checks from cheapest to most expensive, and burns
+the anti-replay nonce **after the signature**, not before it. Everything ahead of
+the signature is structural — an attacker copies the app id, the audience, the
+purpose and the ctx off a legitimate assertion and picks a fresh timestamp — so
+claiming the nonce there let unsigned rubbish evict live entries from the
+bounded cache, which reopens the replay window the cache exists to close. A
+claim is a mutation, and mutations go after the last gate.
 
 **Authentication is not authorisation.** An assertion proves "who, for what";
 deciding whether that "who" is allowed remains the app's job. The Fleet app

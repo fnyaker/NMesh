@@ -79,6 +79,10 @@ _APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
+# Password checks allowed to run at once. One scrypt is 16 MiB and a slice of
+# CPU by design, so a burst of parallel logins costs the node far more than it
+# costs whoever sent them.
+_LOGIN_MAX_INFLIGHT = 4
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
 _LIST_DEFAULT_LIMIT = 20
 _LIST_MAX_LIMIT = 100
@@ -141,9 +145,19 @@ class WebConsole:
         self._tokens: dict[str, float] = {}
         self._tokens_lock = threading.Lock()
 
-        # Login throttling.
+        # Login throttling. Under its own lock: the HTTP server is threaded, so
+        # without one every concurrent attempt passes `_locked_out()` before any
+        # of them records a failure, and `+= 1` loses increments — turning "5
+        # failures then 60 s" into "as many parallel attempts as the attacker
+        # opens". Each of those attempts is one scrypt (16 MiB and a slice of
+        # CPU), so it is a work lever as much as a throttle bypass.
         self._fail_count = 0
         self._lockout_until = 0.0
+        self._login_lock = threading.Lock()
+        # Password checks running right now. scrypt is deliberately expensive,
+        # so the count of them in flight is its own bound: without it a burst of
+        # parallel logins is a memory and CPU lever regardless of the lockout.
+        self._attempts_in_flight = 0
 
         self.generated_password: str | None = None
         self._salt, self._pw_hash = self._load_or_create_credentials(password)
@@ -201,7 +215,7 @@ class WebConsole:
     # -- TLS --------------------------------------------------------------
 
     def _build_ssl_context(self) -> ssl.SSLContext:
-        cert_pem, key_pem = self._load_or_create_cert()
+        cert_pem, key_pem, loaded = self._load_or_create_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         # load_cert_chain needs files; use a temp dir only if we have no state dir.
@@ -209,23 +223,30 @@ class WebConsole:
         d = self._state_dir or tempfile.mkdtemp(prefix="nmesh-console-")
         cert_path = os.path.join(d, "console_cert.pem")
         key_path = os.path.join(d, "console_key.pem")
-        if not os.path.exists(cert_path):
-            with open(cert_path, "wb") as f:
-                f.write(cert_pem)
-        if not os.path.exists(key_path):
-            with open(key_path, "wb") as f:
-                f.write(key_pem)
-            try:
-                os.chmod(key_path, 0o600)
-            except OSError:
-                pass
+        if not loaded:
+            # Both, or neither. Writing each only "if it does not exist" meant a
+            # state directory with the certificate but no key kept the stale
+            # certificate and wrote a fresh key beside it — a mismatched pair,
+            # and a console that fails to start with an opaque TLS error.
+            self._write_private(cert_path, cert_pem)
+            self._write_private(key_path, key_pem)
         ctx.load_cert_chain(cert_path, key_path)
         self.cert_fingerprint = hashlib.sha256(
             ssl.PEM_cert_to_DER_cert(cert_pem.decode())
         ).hexdigest()
         return ctx
 
-    def _load_or_create_cert(self) -> tuple[bytes, bytes]:
+    @staticmethod
+    def _write_private(path: str, data: bytes) -> None:
+        """Create 0600 at open time, not by a chmod afterwards — the private
+        half of a TLS pair must never exist world-readable, however briefly
+        (the rule CLAUDE.md states for the identity file)."""
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+
+    def _load_or_create_cert(self) -> tuple[bytes, bytes, bool]:
+        """``(cert, key, loaded_from_disk)``."""
         if self._state_dir:
             cp = os.path.join(self._state_dir, "console_cert.pem")
             kp = os.path.join(self._state_dir, "console_key.pem")
@@ -234,8 +255,9 @@ class WebConsole:
                     cert_pem = f.read()
                 with open(kp, "rb") as f:
                     key_pem = f.read()
-                return cert_pem, key_pem
-        return _generate_self_signed(self.host)
+                return cert_pem, key_pem, True
+        cert_pem, key_pem = _generate_self_signed(self.host)
+        return cert_pem, key_pem, False
 
     # -- token sessions ---------------------------------------------------
 
@@ -269,17 +291,33 @@ class WebConsole:
 
     # -- login throttle ---------------------------------------------------
 
+    def _begin_login(self) -> bool:
+        """Claim one attempt, or refuse. Deciding and counting happen under the
+        same lock, so parallel attempts cannot all slip through the gap between
+        them."""
+        with self._login_lock:
+            if time.monotonic() < self._lockout_until:
+                return False
+            self._attempts_in_flight += 1
+            if self._attempts_in_flight > _LOGIN_MAX_INFLIGHT:
+                self._attempts_in_flight -= 1
+                return False
+            return True
+
     def _locked_out(self) -> bool:
-        return time.monotonic() < self._lockout_until
+        with self._login_lock:
+            return time.monotonic() < self._lockout_until
 
     def _record_login_result(self, ok: bool) -> None:
-        if ok:
-            self._fail_count = 0
-            return
-        self._fail_count += 1
-        if self._fail_count >= _LOGIN_MAX_FAILURES:
-            self._lockout_until = time.monotonic() + _LOGIN_LOCKOUT
-            self._fail_count = 0
+        with self._login_lock:
+            self._attempts_in_flight = max(0, self._attempts_in_flight - 1)
+            if ok:
+                self._fail_count = 0
+                return
+            self._fail_count += 1
+            if self._fail_count >= _LOGIN_MAX_FAILURES:
+                self._lockout_until = time.monotonic() + _LOGIN_LOCKOUT
+                self._fail_count = 0
 
     # -- loop marshalling -------------------------------------------------
 
@@ -1042,17 +1080,26 @@ def _make_handler(console: WebConsole):
                 cap = _MAX_KEY_UPLOAD
             else:
                 cap = _MAX_BODY
+            remote = self._remote_node()
+            # The session is checked before a large body is read into memory.
+            # The upload caps are generous — 64 MiB for a chat file — and the
+            # server is threaded with no ceiling on connections, so reading
+            # first meant any stranger who could reach the port could hold that
+            # much per request. /api/login is the one route that must read its
+            # (small) body before it can possibly be authorised.
+            if path != "/api/login" or remote is not None:
+                if not self._authed():
+                    self.close_connection = True
+                    self._json(401, {"error": "unauthorized"})
+                    return
+            elif cap > _MAX_BODY:
+                cap = _MAX_BODY
             body = self._read_body(cap)
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
                 return
-            remote = self._remote_node()
             if path == "/api/login" and remote is None:
                 self._handle_login(body)
-                return
-            # everything below requires auth
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
                 return
             if remote is not None:
                 if not remote:
@@ -2119,12 +2166,16 @@ def _make_handler(console: WebConsole):
                 self._json(400, {"ok": False, "error": str(exc)[:200]})
 
         def _handle_login(self, body: bytes) -> None:
-            if console._locked_out():
+            if not console._begin_login():
                 self._json(429, {"error": "too many attempts, locked out"})
                 return
-            data = _parse_json(body)
-            password = (data or {}).get("password")
-            ok = bool(password) and console._check_password(password)
+            try:
+                data = _parse_json(body)
+                password = (data or {}).get("password")
+                ok = bool(password) and console._check_password(password)
+            except BaseException:
+                console._record_login_result(False)
+                raise
             console._record_login_result(ok)
             if not ok:
                 self._json(401, {"error": "invalid password"})

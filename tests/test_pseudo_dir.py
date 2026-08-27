@@ -305,3 +305,44 @@ class TestNodeDirectory:
             assert allowed == _DIR_RATE_MAX
         finally:
             await node.stop()
+
+
+async def _node_with_peer():
+    node = MeshNode(transport_manager=make_manager())
+    peer = _FakePeer()
+    node._peers.append(peer)
+    return node, peer
+
+
+class TestPlaneCeilings:
+    """Every plane that spends our CPU or our bandwidth on a peer's say-so has
+    a valve. These are the ones that were missing one."""
+
+    async def test_dir_find_is_rate_limited(self):
+        """28 bytes of question buy up to `_FOUND_BUDGET` of signed claims,
+        routed to a src_id nothing has verified. `_dir_allowed` covered
+        DIR_STORE only."""
+        from src.node import DIR_FIND, _QUERY_RATE_MAX
+        node, peer = await _node_with_peer()
+        payload = os.urandom(20) + os.urandom(8)
+        for _ in range(_QUERY_RATE_MAX + 200):
+            await node._handle_dir_find(
+                peer, Packet.create(DIR_FIND, peer.authenticated_id.raw,
+                                    node.id.raw, payload))
+        assert node._query_rate[node._rate_key(peer)][0] <= _QUERY_RATE_MAX
+        await node.stop()
+
+    async def test_store_is_rate_limited(self):
+        """Content addressing stops a peer choosing a key; it does not stop
+        them filling the store, and eviction is one global LRU over the app
+        chunks and release content that matter."""
+        from src.node import STORE, _STORE_RATE_MAX
+        from src.app_package import content_key
+        node, peer = await _node_with_peer()
+        for i in range(_STORE_RATE_MAX + 100):
+            value = b"junk%d" % i
+            await node._handle_store(
+                peer, Packet.create(STORE, peer.authenticated_id.raw,
+                                    node.id.raw, content_key(value) + value))
+        assert len(node._dht_store) <= _STORE_RATE_MAX
+        await node.stop()

@@ -18,7 +18,7 @@ from src.crypto import CryptoIdentity
 from src.node import MeshNode, CATALOG_ANNOUNCE
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_manager
+from tests.conftest import make_manager, settle
 
 ROOT_KEY = os.urandom(20)
 ROOT_SHA = "a" * 64
@@ -75,14 +75,36 @@ class TestAppCatalog:
         assert len(cat) == 0
 
     def test_capacity_bounded(self):
+        """Full means "something goes", not "nothing new ever again".
+
+        Publishing is free — a release is signed by the key it names and any
+        node can sign its own — so a catalogue that refuses newcomers when full
+        is one a single peer fills and holds for the life of the process, after
+        which no app on the network is discoverable here. It stays bounded by
+        making room."""
         cat = AppCatalog(max_apps=3)
         idn = CryptoIdentity()
         for i in range(3):
             blob, _ = _release(idn, name=f"app{i}")
             assert cat.offer(blob, idn.verify) == "new"
         blob, _ = _release(idn, name="overflow")
-        assert cat.offer(blob, idn.verify) is None
+        assert cat.offer(blob, idn.verify) == "new"
         assert len(cat) == 3
+        assert "overflow" in [e["name"] for e in cat.list()]
+
+    def test_one_author_cannot_hold_the_whole_catalogue(self):
+        """A flood from one key evicts only that key's own entries."""
+        cat = AppCatalog(max_apps=4)
+        mine, theirs = CryptoIdentity(), CryptoIdentity()
+        cat.offer(_release(theirs, name="wanted")[0], theirs.verify)
+        for i in range(40):
+            blob, _ = _release(mine, name=f"spam{i}")
+            cat.offer(blob, mine.verify)
+        names = [e["name"] for e in cat.list()]
+        assert len(cat) == 4
+        assert "wanted" in names, (
+            "one publisher pushed every other author out of the catalogue"
+        )
 
     def test_list_sorted_newest_first(self):
         idn = CryptoIdentity()
@@ -218,6 +240,7 @@ class TestCatalogGossip:
             pkt = Packet.create(CATALOG_ANNOUNCE, ingress.authenticated_id.raw,
                                 b"\xff" * 20, release_bytes)
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             # Catalog learned the app…
             assert any(e["app_id"] == app_id for e in node.catalog_list())
             # …and re-gossiped it downstream, but not back to the sender.
@@ -236,9 +259,11 @@ class TestCatalogGossip:
             pkt = Packet.create(CATALOG_ANNOUNCE, ingress.authenticated_id.raw,
                                 b"\xff" * 20, release_bytes)
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             downstream.sent.clear()
             # Second time: already known → must NOT re-gossip (epidemic ends).
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             assert downstream.sent == []
         finally:
             await author.stop(); await node.stop()

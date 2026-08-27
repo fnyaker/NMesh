@@ -10,6 +10,8 @@ import pytest
 
 from src.apps.chat import (
     ChatApp, TextMessage, FileReceived, Frame, FILE_CHUNK_SIZE,
+    _MAX_CHUNKS, _MAX_TRANSFERS, _MAX_TRANSFERS_PER_PEER, _CHUNK, _OFFER,
+    GROUP_ID_LEN,
     Edited, Deleted, Reaction, Receipt, Typing, ProfileReceived, new_mid,
     _DELIVERED, _READ,
 )
@@ -43,6 +45,15 @@ def _drain(app: ChatApp):
 
 SRC = NodeID(os.urandom(20))
 DST = NodeID(os.urandom(20))
+
+
+def _offer_body(*, tid: int, total: int, size: int, name: bytes = b"f") -> bytes:
+    """A FILE_OFFER body, straight onto the wire format — so a test can state a
+    count and a size that do not agree, which a sender never would."""
+    import hashlib
+    return (new_mid() + b"\x00" * GROUP_ID_LEN
+            + _OFFER.pack(tid, total, size, hashlib.sha256(b"").digest(),
+                          len(name)) + name)
 
 
 class TestText:
@@ -102,6 +113,45 @@ class TestFile:
         a = ChatApp(StubClient())
         with pytest.raises(ValueError):
             await a.send_file(DST, "big", b"x" * (256 * 1024 * 1024 + 1))
+
+    # -- what an offer may cost us before anything is verified ------------
+    # The sha256 can only speak once the whole file is in memory, so it is not
+    # a bound. The declared size is, and it has to hold while chunks arrive.
+
+    async def test_offer_whose_count_contradicts_its_size_is_refused(self):
+        """A one-byte file does not need 5 593 chunks.
+
+        Without this the chunk count and the size describe different files, and
+        the per-chunk bound below has nothing to measure against — which is how
+        a one-byte offer bought gigabytes of buffer."""
+        b = ChatApp(StubClient())
+        b._on_offer(SRC, _offer_body(tid=1, total=_MAX_CHUNKS, size=1))
+        assert (SRC.raw, 1) not in b._transfers
+
+    async def test_chunk_larger_than_the_sender_uses_is_refused(self):
+        b = ChatApp(StubClient())
+        size = FILE_CHUNK_SIZE * 2
+        b._on_offer(SRC, _offer_body(tid=2, total=2, size=size))
+        transfer = b._transfers[(SRC.raw, 2)]
+        b._on_chunk(SRC, _CHUNK.pack(2, 0) + b"A" * (FILE_CHUNK_SIZE + 1))
+        assert transfer.held == 0 and transfer.chunks == {}
+
+    async def test_buffer_never_exceeds_the_declared_size(self):
+        b = ChatApp(StubClient())
+        size = FILE_CHUNK_SIZE + 100
+        b._on_offer(SRC, _offer_body(tid=3, total=2, size=size))
+        transfer = b._transfers[(SRC.raw, 3)]
+        # Two full chunks would be 96 000 bytes for a 48 100-byte file.
+        b._on_chunk(SRC, _CHUNK.pack(3, 0) + b"A" * FILE_CHUNK_SIZE)
+        b._on_chunk(SRC, _CHUNK.pack(3, 1) + b"B" * FILE_CHUNK_SIZE)
+        assert transfer.held <= size
+
+    async def test_one_peer_cannot_hold_every_transfer_slot(self):
+        b = ChatApp(StubClient())
+        for tid in range(_MAX_TRANSFERS + 4):
+            b._on_offer(SRC, _offer_body(tid=tid, total=1, size=10))
+        mine = [k for k in b._transfers if k[0] == SRC.raw]
+        assert len(mine) <= _MAX_TRANSFERS_PER_PEER
 
 
 class TestStream:

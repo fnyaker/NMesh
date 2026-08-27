@@ -191,8 +191,12 @@ const NODEVIEW = {
     const counters = node.counters || {};
     if(!quality.probes && node.rtt_ms == null && !counters.bytes_in) return "";
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+    // esc() on the value like everywhere else. These read as "obviously
+    // numbers", and they are when the JSON comes from this node — but under a
+    // remote context the console proxies the request to *another* node's
+    // console and returns its answer verbatim, so they are network input.
     const cell = (label, value, extra) =>
-      '<div class="stat sm"><span class="v">' + value + '</span><span class="k">' +
+      '<div class="stat sm"><span class="v">' + esc(value) + '</span><span class="k">' +
       esc(label) + "</span>" + (extra || "") + "</div>";
     return '<div class="stats">' +
       cell("Round trip",

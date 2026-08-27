@@ -3,7 +3,7 @@ import hmac
 import hashlib
 from unittest.mock import patch
 import pytest
-from src.invite import InviteManager, compute_response
+from src.invite import time as invite_time, InviteManager, compute_response
 
 
 class TestGenerateCode:
@@ -132,3 +132,24 @@ class TestRateLimit:
         challenge = im.generate_challenge()
         response = compute_response(code, challenge)
         assert not im.verify_response(challenge, response)
+
+
+class TestExpiryIsEnforcedEverywhere:
+    """The pool was pruned only inside `verify_response`, so expired codes
+    accumulated for the life of the process and anything else looking at
+    `_codes` saw them as live."""
+
+    def test_live_codes_purges_what_has_run_out(self, monkeypatch):
+        manager = InviteManager()
+        code = manager.generate_code(ttl=1)
+        assert manager.live_codes() == [code]
+        monkeypatch.setattr("src.invite.time", lambda: invite_time() + 3600)
+        assert manager.live_codes() == []
+        assert manager._codes == {}          # forgotten, not merely hidden
+
+    def test_has_code_asks_the_same_question(self, monkeypatch):
+        manager = InviteManager()
+        manager.generate_code(ttl=1)
+        assert manager.has_code()
+        monkeypatch.setattr("src.invite.time", lambda: invite_time() + 3600)
+        assert not manager.has_code()

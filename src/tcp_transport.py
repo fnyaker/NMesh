@@ -141,7 +141,12 @@ class TCPTransport(BaseTransport):
         if self._writer is None:
             raise ConnectionError("not connected")
         data = packet.pack()
-        self._writer.write(_FRAME.pack(len(data)) + data)
+        # writelines, not `prefix + data`: the concatenation copied the whole
+        # payload — up to 60 kB — once more per packet, for the sake of a
+        # two-byte length. The asyncio transport gathers these without an
+        # intermediate buffer, and TCP_NODELAY is already set so this does not
+        # cost an extra segment.
+        self._writer.writelines((_FRAME.pack(len(data)), data))
         await self._writer.drain()
 
     async def receive(self) -> Packet:

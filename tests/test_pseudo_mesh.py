@@ -17,7 +17,7 @@ from src.node_id import NodeID
 from src.packet import Packet
 from src.pseudo import MAX_PSEUDO, PseudoError
 from src.pseudo_dir import build_claim, parse_claim, _HDR, _signing_input, CLAIM_VERSION
-from tests.conftest import make_manager
+from tests.conftest import make_manager, settle
 
 
 def _claim(ident, pseudo="alice", ts=1000):
@@ -115,6 +115,7 @@ class TestOwnPseudo:
             attacker = CryptoIdentity()
             peer = _FakePeer()
             await node._handle_pseudo_announce(peer, _announce(peer, _claim(attacker, "theirs")))
+            await settle(node)
             assert node.pseudo_of(node.id) == "mine"
         finally:
             await node.stop()
@@ -131,6 +132,7 @@ class TestGossip:
             node._peers.append(sender)
             raw = _claim(author, "carol")
             await node._handle_pseudo_announce(sender, _announce(sender, raw))
+            await settle(node)
             assert node.pseudo_of(NodeID.from_public_key(author.dsa_public_key)) == "carol"
             # Re-gossiped to everyone but the peer it came from.
             assert [p.payload for p in listener.sent] == [raw]
@@ -150,6 +152,7 @@ class TestGossip:
             raw = _claim(author, "carol")
             for _ in range(5):
                 await node._handle_pseudo_announce(sender, _announce(sender, raw))
+                await settle(node)
             assert len(listener.sent) == 1
         finally:
             await node.stop()
@@ -162,7 +165,9 @@ class TestGossip:
             node._peers.append(listener)
             sender = _FakePeer()
             await node._handle_pseudo_announce(sender, _announce(sender, _claim(author, "one", 10)))
+            await settle(node)
             await node._handle_pseudo_announce(sender, _announce(sender, _claim(author, "two", 20)))
+            await settle(node)
             assert len(listener.sent) == 2
             assert node.pseudo_of(NodeID.from_public_key(author.dsa_public_key)) == "two"
         finally:
@@ -175,6 +180,7 @@ class TestGossip:
             sender = _FakePeer()
             old = _claim(author, "one", 10)
             await node._handle_pseudo_announce(sender, _announce(sender, _claim(author, "two", 20)))
+            await settle(node)
             await node._handle_pseudo_announce(sender, _announce(sender, old))
             assert node.pseudo_of(NodeID.from_public_key(author.dsa_public_key)) == "two"
         finally:
@@ -224,6 +230,7 @@ class TestGossip:
 class TestHostilePeers:
     async def _feed(self, node, peer, payload):
         await node._handle_pseudo_announce(peer, _announce(peer, payload))
+        await settle(node)
 
     async def test_garbage_is_charged_to_the_sender(self):
         node = await _node()

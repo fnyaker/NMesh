@@ -30,9 +30,10 @@ import os
 import socket
 import struct
 import time
+from collections import deque
 
 from .transport import BaseTransport, BaseServer, option
-from .packet import Packet
+from .packet import HEADER_SIZE, Packet
 from .ip_utils import split_host_port
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,12 @@ FLAG_FIN = 0x08
 _MAX_PAYLOAD = 60000
 _MAX_UNACKED = 256          # max unacknowledged frames in retransmit buffer
 _MAX_REORDER = 256          # max out-of-order frames buffered
+# A frame count is not a memory bound: a frame carries up to _MAX_PAYLOAD, so
+# 256 of them is 15 MB per link and an attacker chooses every byte by sending
+# sequence numbers ahead of the cursor and never filling the gap. Both buffers
+# are therefore bounded in bytes as well as in entries — whichever binds first.
+_MAX_REORDER_BYTES = 2 * 1024 * 1024    # out-of-order frames held, in bytes
+_MAX_DECODED_BYTES = 2 * 1024 * 1024    # decoded packets waiting for receive()
 _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
 _RTO_MIN = 0.050            # initial retransmit timeout, seconds
 _RTO_MAX = 2.0              # max retransmit timeout after backoff
@@ -71,6 +78,9 @@ _KEEPALIVE_INTERVAL = 25.0  # NAT mapping refresh, seconds
 _KEEPALIVE_TIMEOUT = 75.0   # 3 missed keepalives → dead link
 _ACK_DELAY = 0.010          # max delay before sending a standalone ACK
 _RECV_TIMEOUT = 120.0       # overall receive inactivity timeout
+# A waiting receive() is woken by the arrival event; this only bounds how long
+# it sits there before re-reading `_closed`, which nothing signals.
+_RECV_WAKE = 0.5
 
 
 def _host_port(address: str) -> tuple[str, int]:
@@ -102,16 +112,26 @@ class _ReliableLink:
     """
 
     def __init__(self) -> None:
-        # Send side
-        self._send_seq: int = 0
+        # Send side. The initial sequence is random, not zero: the frame header
+        # is not authenticated (only the mesh Packet inside it is), and the
+        # endpoints of a link are public — they are gossiped in
+        # `advertised_uris` and in FOUND_NODE. A predictable cursor let anyone
+        # who knew both addresses spoof a frame at exactly the next expected
+        # sequence, so the real peer's next frame looked like a duplicate and
+        # was dropped. Randomising costs nothing and removes the guess.
+        self._send_seq: int = int.from_bytes(os.urandom(4), "big")
         self._unacked: dict[int, tuple[bytes, float]] = {}  # seq → (frame, rto_deadline)
         self._send_queue: asyncio.Queue[Packet | None] = asyncio.Queue(_MAX_SEND_QUEUE)
         self._send_event: asyncio.Event = asyncio.Event()
         self._rto: float = _RTO_MIN
 
-        # Receive side
+        # Receive side. Set from the first frame that arrives, so the peer's
+        # random initial sequence is adopted rather than assumed to be zero.
         self._recv_next: int = 0          # next expected seq to deliver in-order
+        self._recv_started: bool = False
         self._reorder: dict[int, bytes] = {}  # seq → payload (out-of-order buffer)
+        self._reorder_bytes: int = 0      # what that buffer is actually holding
+        self._sack: int = 0               # selective-ack bitmap, kept in step
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -166,15 +186,24 @@ class _ReliableLink:
         return _MAGIC + header
 
     def _build_ack(self) -> tuple[int, int]:
-        """Build cumulative ack + selective ack bitmap."""
-        ack = (self._recv_next - 1) & 0xFFFFFFFF
+        """Build cumulative ack + selective ack bitmap.
+
+        The bitmap is maintained as frames land rather than rebuilt here: this
+        is called for every frame built *and* every standalone ACK, which
+        `_process_frame` emits after every data frame, and it used to walk the
+        whole reorder buffer each time — up to 1 024 entries at the maximum
+        setting."""
+        return (self._recv_next - 1) & 0xFFFFFFFF, self._sack
+
+    def _recompute_sack(self) -> None:
+        """Rebuild the bitmap from the buffer. Only when the cursor moves."""
         sack = 0
         base = self._recv_next
         for seq in self._reorder:
             offset = (seq - base) & 0xFFFFFFFF
             if 0 < offset <= 32:
                 sack |= (1 << (offset - 1))
-        return ack, sack
+        self._sack = sack
 
     def process_ack(self, ack: int, sack: int) -> None:
         """Process incoming ACK + SACK, removing acknowledged frames.
@@ -183,10 +212,14 @@ class _ReliableLink:
         We use unsigned wraparound distance: a frame s is cumulatively ACKed
         if the forward distance (ack - s) mod 2^32 is small (< _MAX_UNACKED).
         """
+        # Sequence numbers are issued in order, so `_unacked` is in order too:
+        # the cumulative ack clears a *prefix*. Walking the whole window (and
+        # copying its key list) on every incoming frame was O(window) per
+        # datagram, for a window of up to `_MAX_UNACKED`.
         for s in list(self._unacked.keys()):
-            dist = (ack - s) & 0xFFFFFFFF
-            if dist < _MAX_UNACKED:
-                del self._unacked[s]
+            if ((ack - s) & 0xFFFFFFFF) >= _MAX_UNACKED:
+                break
+            del self._unacked[s]
 
         # Selective ACK: bits indicate seqs received above the cumulative ack
         base = (ack + 1) & 0xFFFFFFFF
@@ -233,6 +266,17 @@ class _ReliableLink:
         self._last_recv_time = time.monotonic()
         self._keepalive_misses = 0
 
+        # The peer's starting sequence is learned from the FIRST frame of any
+        # kind — which on a real link is the keepalive `connect()` sends before
+        # any data, so the cursor is set before a data frame can arrive. Adopting
+        # it from the first *data* frame instead would mean a reordered opening
+        # frame moved the cursor past its predecessors, and those would then be
+        # dropped as duplicates for ever: a stalled link, which is worse than
+        # what randomising protects against.
+        if not self._recv_started:
+            self._recv_started = True
+            self._recv_next = seq
+
         if flags & (FLAG_ACK_ONLY | FLAG_KEEPALIVE | FLAG_FIN):
             return []  # no data payload to deliver
 
@@ -244,8 +288,11 @@ class _ReliableLink:
             delivered: list[bytes] = [payload]
             # Flush consecutive buffered frames
             while self._recv_next in self._reorder:
-                delivered.append(self._reorder.pop(self._recv_next))
+                buffered = self._reorder.pop(self._recv_next)
+                self._reorder_bytes -= len(buffered)
+                delivered.append(buffered)
                 self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
+            self._recompute_sack()        # the cursor moved
             self._schedule_ack()
             return delivered
 
@@ -253,9 +300,14 @@ class _ReliableLink:
             # Ahead of the cursor: out-of-order. A seq already buffered is a
             # retransmit — drop it but re-ACK so the sender stops resending.
             if (seq not in self._reorder
-                    and len(self._reorder) < UDPTransport.setting("max_reorder")):
+                    and len(self._reorder) < UDPTransport.setting("max_reorder")
+                    and self._reorder_bytes + len(payload) <= _MAX_REORDER_BYTES):
                 self._reorder[seq] = payload
+                self._reorder_bytes += len(payload)
                 self.reordered += 1
+                offset = (seq - self._recv_next) & 0xFFFFFFFF
+                if 0 < offset <= 32:
+                    self._sack |= (1 << (offset - 1))
             self._schedule_ack()
             return []
 
@@ -330,7 +382,16 @@ class UDPTransport(BaseTransport):
         self._sock: asyncio.DatagramTransport | None = sock
         self._remote: tuple[str, int] | None = remote_addr
         self._link = _ReliableLink()
-        self._decoded: list[Packet] = []
+        # Decoded packets waiting for receive(). A deque because the consumer
+        # takes from the front, and bounded in bytes because nothing couples
+        # arrival to consumption: a sender faster than _Peer._loop — or a
+        # transport whose consumer never started — grew this without limit.
+        self._decoded: deque[Packet] = deque()
+        self._decoded_bytes: int = 0
+        # Set when a packet lands, cleared when the queue empties. receive()
+        # waits on it instead of polling: the poll cost 10 ms of latency per
+        # packet and 100 wakeups a second per link, at rest, for nothing.
+        self._arrived: asyncio.Event = asyncio.Event()
         self._closed: bool = False
         self._rtx_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
@@ -338,8 +399,13 @@ class UDPTransport(BaseTransport):
         # When True, this transport owns its socket (connect path) and must
         # close it. When False, the socket is shared (server path).
         self._owns_socket: bool = False
+        # The server whose dispatch table holds us, so closing can say so
+        # rather than leaving a dead entry to be swept later.
+        self._server: "UDPServer | None" = None
         # Callback set by the server to feed raw datagrams into this transport
         self._on_datagram = None
+        # Delivered payloads that were not decodable packets. See _process_frame.
+        self.undecodable: int = 0
 
     def endpoints(self) -> dict:
         local = None
@@ -365,14 +431,17 @@ class UDPTransport(BaseTransport):
             "reorder buffer": len(link._reorder),
             "rto ms": round(link._rto * 1000, 1),
             "keepalive misses": link._keepalive_misses,
+            "undecodable": self.undecodable,
         }
 
     @classmethod
     def _from_server(cls, sock: asyncio.DatagramTransport,
-                     remote_addr: tuple[str, int]) -> "UDPTransport":
+                     remote_addr: tuple[str, int],
+                     server: "UDPServer | None" = None) -> "UDPTransport":
         """Create a transport for an incoming connection accepted by the server."""
         t = cls(sock, remote_addr)
         t._owns_socket = False
+        t._server = server
         return t
 
     async def connect(self, address: str) -> None:
@@ -454,9 +523,23 @@ class UDPTransport(BaseTransport):
             delivered = self._link.process_incoming(seq, flags, payload)
             for raw in delivered:
                 try:
-                    self._decoded.append(Packet.unpack(raw))
+                    packet = Packet.unpack(raw)
                 except Exception:
-                    pass  # hostile payload — drop, keep the link alive
+                    # A delivered payload that is not a packet is a fault, not
+                    # noise: a real peer's frames decode. Counting it is what
+                    # lets an operator see a link being interfered with rather
+                    # than one that has mysteriously gone quiet.
+                    self.undecodable += 1
+                    continue
+                # Dropped, not awaited: this runs inside datagram_received, a
+                # synchronous protocol callback that must never block. UDP
+                # offers no delivery guarantee, so a consumer that has fallen
+                # this far behind loses packets rather than memory.
+                if self._decoded_bytes + len(raw) > _MAX_DECODED_BYTES:
+                    continue
+                self._decoded.append(packet)
+                self._decoded_bytes += len(raw)
+                self._arrived.set()
 
         # Send a piggybacked or standalone ACK if needed
         if self._link.needs_ack():
@@ -513,16 +596,30 @@ class UDPTransport(BaseTransport):
             self._send_raw(self._link.build_keepalive())
             if not self._link.is_alive():
                 self._closed = True
+                self._arrived.set()    # a parked receive() must not wait it out
+                if self._server is not None and self._remote is not None:
+                    self._server.remove_transport(self._remote)
                 break
 
     async def receive(self) -> Packet:
         """Block until a packet is received and return it."""
         while True:
             if self._decoded:
-                return self._decoded.pop(0)
+                packet = self._decoded.popleft()
+                self._decoded_bytes -= HEADER_SIZE + len(packet.payload)
+                if not self._decoded:
+                    self._arrived.clear()
+                return packet
             if self._closed:
                 raise ConnectionError("udp transport closed")
-            await asyncio.sleep(0.01)
+            self._arrived.clear()
+            if self._decoded or self._closed:
+                continue          # raced with a datagram landing — go round
+            try:
+                async with asyncio.timeout(_RECV_WAKE):
+                    await self._arrived.wait()
+            except asyncio.TimeoutError:
+                pass              # re-check _closed, which nothing signals
 
     def remote_ip(self) -> str | None:
         """The peer's source IP as observed locally."""
@@ -542,6 +639,9 @@ class UDPTransport(BaseTransport):
         if self._closed:
             return
         self._closed = True
+        self._arrived.set()        # wake a parked receive() so it can raise
+        if self._server is not None and self._remote is not None:
+            self._server.remove_transport(self._remote)
         # Send FIN to signal graceful close
         if self._sock is not None and self._remote is not None:
             try:
@@ -673,9 +773,14 @@ class UDPServer(BaseServer):
             # New peer — create a transport and notify
             if self._closed or self.on_new_connection is None:
                 return
+            # Count the *live* ones. A closed transport left in the table is not
+            # a peer, and counting it meant 128 datagrams from 128 source ports
+            # disabled UDP for the life of the process — including for a known
+            # peer whose link had simply died and wanted to come back.
+            self._reap_closed()
             if len(self._transports) >= _MAX_PEERS_UDP:
                 return  # bounded — reject new peers when full
-            transport = UDPTransport._from_server(self._sock, addr)
+            transport = UDPTransport._from_server(self._sock, addr, self)
             self._transports[addr] = transport
             transport._start_tasks()
             asyncio.create_task(self._safe_on_new_connection(transport))
@@ -691,6 +796,16 @@ class UDPServer(BaseServer):
     def remove_transport(self, addr: tuple[str, int]) -> None:
         """Remove a transport from the dispatch table (called on close)."""
         self._transports.pop(addr, None)
+
+    def _reap_closed(self) -> None:
+        """Drop entries whose transport has gone.
+
+        A transport closes for three reasons — `close()`, the keepalive's death
+        verdict, and the node reaping the peer — and only the first of them can
+        reasonably call `remove_transport`. So the table is swept where it is
+        read, which covers all three."""
+        for addr in [a for a, t in self._transports.items() if t._closed]:
+            del self._transports[addr]
 
     async def close(self) -> None:
         """Stop accepting connections and release resources."""
