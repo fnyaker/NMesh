@@ -1268,6 +1268,11 @@ does not use it.
 
 ## 30 — high — Argument injection into `ssh` from a fleet provisioning request
 
+> **Status — fixed.** `_ACCOUNT_RE` holds a username (and `sudo_user`) to a
+> real account name, `_usable_key_path` refuses a `-i` value that would lead an
+> argv element, and the destination is passed as `-l user host` rather than
+> glued.
+
 **Where** — `src/apps/fleet_ssh.py`, `run()`
 (`argv += [f"{creds.username}@{host}", "--"] + list(command)`) and
 `_base_options` (`options += ["-i", key_path, ...]`);
@@ -1323,6 +1328,10 @@ keeps the password out of `argv` is correct and must be preserved.
 ---
 
 ## 31 — medium — Scan results choose where the operator's SSH password goes
+
+> **Status — fixed.** `_is_literal_address` gates `ip` both where a scan
+> reply arrives (`_clean_scan_hosts`) and where a target is used
+> (`_clean_targets`), so the console never offers a row naming somewhere else.
 
 **Where** — `src/apps/fleet.py`, `_clean_targets`; the scan reply path
 `_on_scan_report` → `ScanReceived`; `provision_local` / `request_provision`.
@@ -1498,6 +1507,9 @@ in `DataConnector.start`, which binds a Unix socket and then chmods it to 0600.
 
 ## 35 — medium — HTML injection into the node view from a remote console
 
+> **Status — fixed.** `esc()` on the value in `nodeview.glanceHTML` and in
+> `fleet.statusHTML` — both render documents that crossed the mesh.
+
 **Where** — `src/webassets/nodeview.py`, `glanceHTML`.
 
 ```js
@@ -1567,6 +1579,11 @@ self-heal.
 
 ## 37 — medium — `DataConnector` counts only authenticated clients
 
+> **Status — fixed.** Connections are counted from accept
+> (`_MAX_PENDING_CLIENTS`) with an `_AUTH_DEADLINE`; each client has its own
+> bounded outbox and writer task, so a slow app no longer stalls the pump; and
+> the pump survives an unexpected exception.
+
 **Where** — `src/data_connector.py`, `_handle_client`, `_pump`.
 
 **What happens** — `if len(self._clients) >= _MAX_CLIENTS: writer.close()` runs
@@ -1602,6 +1619,9 @@ Key the eviction on sections with no connected client.
 
 ## 38 — low — A corrupt console credential silently resets the password
 
+> **Status — fixed.** `console_auth.read` raises `CredentialError` when a
+> file is present and unreadable; only "no file" means generate.
+
 **Where** — `src/console_auth.py`, `read`; `src/webconsole.py`,
 `_load_or_create_credentials`.
 
@@ -1619,6 +1639,9 @@ credential rotation.
 ---
 
 ## 39 — low — `_build_ssl_context` can pair a stale certificate with a fresh key
+
+> **Status — fixed.** The pair is written as a unit when it was not loaded as
+> one, and both files are created 0600 at open time.
 
 **Where** — `src/webconsole.py`, `_load_or_create_cert` / `_build_ssl_context`.
 

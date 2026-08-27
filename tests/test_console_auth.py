@@ -55,30 +55,49 @@ class TestHashing:
 
 
 class TestCorruptFiles:
+    """"No credential" and "a credential we cannot read" are different answers.
+
+    The first is first run: generate one. The second is a disk fault, and
+    answering it with a fresh random password silently locks the operator out
+    of their own console — the new one is printed once, to a log nobody may be
+    watching. So a file that is there and unreadable raises, and the caller
+    refuses to start rather than replacing it."""
+
     def test_a_missing_file_is_not_a_credential(self, tmp_path):
         assert console_auth.read(str(tmp_path / "absent.cred")) is None
 
-    def test_garbage_is_not_a_credential(self, tmp_path):
+    def test_garbage_is_refused_not_replaced(self, tmp_path):
         path = tmp_path / "console.cred"
         path.write_text("this is not a credential")
-        assert console_auth.read(str(path)) is None
+        with pytest.raises(console_auth.CredentialError):
+            console_auth.read(str(path))
 
     def test_an_unknown_algorithm_is_refused(self, tmp_path):
         """The day we change KDF, an old file must not be read as if it were
-        the new one."""
+        the new one — nor quietly overwritten with a password nobody chose."""
         path = tmp_path / "console.cred"
         path.write_text("md5$aabb$ccdd")
-        assert console_auth.read(str(path)) is None
+        with pytest.raises(console_auth.CredentialError):
+            console_auth.read(str(path))
 
     def test_non_hex_fields_are_refused(self, tmp_path):
         path = tmp_path / "console.cred"
         path.write_text("scrypt$zzzz$yyyy")
-        assert console_auth.read(str(path)) is None
+        with pytest.raises(console_auth.CredentialError):
+            console_auth.read(str(path))
 
     def test_an_enormous_file_does_not_hang_the_read(self, tmp_path):
         path = tmp_path / "console.cred"
         path.write_text("scrypt$" + "a" * (2 * 1024 * 1024))
-        assert console_auth.read(str(path)) is None
+        with pytest.raises(console_auth.CredentialError):
+            console_auth.read(str(path))
+
+    def test_the_refusal_names_the_file(self, tmp_path):
+        path = tmp_path / "console.cred"
+        path.write_text("nonsense")
+        with pytest.raises(console_auth.CredentialError) as raised:
+            console_auth.read(str(path))
+        assert str(path) in str(raised.value)
 
 
 class TestValidation:

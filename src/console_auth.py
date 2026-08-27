@@ -74,17 +74,29 @@ def validate(password) -> str:
 
 
 def read(path: str | None):
-    """``(salt, hash)`` for a stored credential, or ``None``."""
+    """``(salt, hash)`` for a stored credential, or ``None`` when there is none.
+
+    Raises :class:`CredentialError` when a file **is** there and cannot be read.
+    The two are different answers and the caller acts on them differently: "no
+    credential" is first run and means generate one, while "unreadable
+    credential" is a disk fault — and answering that with a fresh random
+    password silently locks the operator out of their own console, with the new
+    one printed once to a log nobody may be watching."""
     if not path or not os.path.exists(path):
         return None
     try:
         with open(path) as handle:
             tag, salt_hex, hash_hex = handle.read(4096).strip().split("$")
         if tag != "scrypt":
-            return None
+            raise ValueError("unknown credential format")
         return bytes.fromhex(salt_hex), bytes.fromhex(hash_hex)
-    except Exception:
-        return None          # unreadable or corrupt — the caller regenerates
+    except CredentialError:
+        raise
+    except Exception as exc:
+        raise CredentialError(
+            f"{path} exists but cannot be read ({exc}). Refusing to replace it "
+            f"— reset the password deliberately if that is what you want."
+        ) from None
 
 
 def write(path: str, password: str) -> tuple[bytes, bytes]:
