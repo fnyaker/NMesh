@@ -18,7 +18,7 @@ from src.crypto import CryptoIdentity
 from src.node import MeshNode, CATALOG_ANNOUNCE
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_manager
+from tests.conftest import make_manager, settle
 
 ROOT_KEY = os.urandom(20)
 ROOT_SHA = "a" * 64
@@ -240,6 +240,7 @@ class TestCatalogGossip:
             pkt = Packet.create(CATALOG_ANNOUNCE, ingress.authenticated_id.raw,
                                 b"\xff" * 20, release_bytes)
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             # Catalog learned the app…
             assert any(e["app_id"] == app_id for e in node.catalog_list())
             # …and re-gossiped it downstream, but not back to the sender.
@@ -258,9 +259,11 @@ class TestCatalogGossip:
             pkt = Packet.create(CATALOG_ANNOUNCE, ingress.authenticated_id.raw,
                                 b"\xff" * 20, release_bytes)
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             downstream.sent.clear()
             # Second time: already known → must NOT re-gossip (epidemic ends).
             await node._handle_catalog_announce(ingress, pkt)
+            await settle(node)
             assert downstream.sent == []
         finally:
             await author.stop(); await node.stop()

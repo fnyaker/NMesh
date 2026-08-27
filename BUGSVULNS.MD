@@ -497,6 +497,9 @@ peer.
 
 ## 9 — high — `RELEASE_FETCH` blocks the receive loop and reflects 48 KB to an unverified id
 
+> **Status — partly fixed.** `blocking=False`, as every sibling handler does,
+> so the link no longer freezes. The reflection half is in the rate-limit pass.
+
 **Where** — `src/node.py`, `MeshNode._handle_release_fetch`.
 
 **Reach** — `_handle_packet` → `_ROUTABLE_TYPES` → `_handle_release_fetch`
@@ -699,6 +702,10 @@ advance the cursor silently). Keep the modular-distance reasoning in
 
 ## 14 — medium — `_handle_reach_probe` dials back inside the receive loop
 
+> **Status — fixed.** The dial-back moved to `_reach_probe_answer`, run via
+> `_spawn_bounded`. It still dials only `peer.transport.remote_ip()`, which is
+> what stops it becoming a dial amplifier.
+
 **Where** — `src/node.py`, `MeshNode._handle_reach_probe` → `_dial_back`.
 
 **Reach** — `_handle_packet` → `_DIRECT_TYPES` → `_handle_reach_probe`
@@ -756,6 +763,10 @@ place to get a bound wrong"); fix it there and the four gossip planes follow.
 ---
 
 ## 16 — medium — A failed forward tears the target peer down inside the ingress loop
+
+> **Status — fixed.** `_drop_failed_peer` is synchronous: it removes the peer
+> from `self._peers` and the route hints at once (so the next
+> `_route_candidates` cannot pick it), and hands `stop()` to `_spawn_bounded`.
 
 **Where** — `src/node.py`, `_send_to_candidates` → `_drop_failed_peer` →
 `_Peer.stop()`.
@@ -1748,6 +1759,10 @@ random 96-bit nonce per packet stays as it is.
 
 ## P8 — Persisting session state is a synchronous fsync on the event loop
 
+**Status — fixed.** `_persist_state` marks dirty; `_state_writer_loop` writes
+at most every `_STATE_WRITE_INTERVAL`, off the loop thread, and `stop()` flushes.
+
+
 **Where** — `src/node.py`, `_persist_state`; `src/session_store.py`, `save`.
 
 `save()` serialises every E2E session, every pending handshake, every queued
@@ -1765,6 +1780,9 @@ off the loop, at most every few seconds and on shutdown. Keep the 0600-at-open
 and atomic-replace behaviour exactly as it is.
 
 ## P9 — The certificate store is rewritten in full for every certificate
+
+**Status — fixed.** Same mechanism as P8, sharing the one writer task.
+
 
 **Where** — `src/node.py`, `_cert_add`; `src/cert_store.py`, `save`.
 
@@ -1888,6 +1906,10 @@ proximity — must be preserved exactly; `gotchas.md` §11 explains why the hint
 beats a fresh guess and why a direct link always keeps the lead.
 
 ## P17 — Gossip fan-out runs inside the ingress receive loop
+
+**Status — fixed.** The three announce handlers hand the fan-out to
+`_spawn_bounded`.
+
 
 **Where** — `src/node.py`, `_gossip_pseudo`, `_gossip_catalog`,
 `_gossip_release`, `_sync_*_to`.
