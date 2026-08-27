@@ -39,6 +39,7 @@ import struct
 
 from .app_auth import CTX_LEN, MAX_PURPOSE_LEN
 from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
+from .ip_utils import wait_closed_bounded
 from .node_id import NodeID
 
 _LEN = struct.Struct("!I")
@@ -168,13 +169,14 @@ class DataConnector:
             except (asyncio.CancelledError, Exception):
                 pass
             self._pump_task = None
-        if self._server is not None:
-            self._server.close()
-            try:
-                await self._server.wait_closed()
-            except Exception:
-                pass
-            self._server = None
+        # The clients go first, and that order is the whole point. Since Python
+        # 3.12 ``Server.wait_closed()`` waits for every accepted connection to
+        # finish as well as for the listening socket, so awaiting it while a
+        # client is still parked in its handler is a deadlock: the wait needs
+        # the handlers to end, and the only thing that ends them is the close
+        # below. On 3.11 it returned immediately and the ordering never showed.
+        # Closing the writer shuts the transport both ways, so the handler's
+        # read returns EOF and it unwinds on its own.
         for task in list(self._writers.values()):
             task.cancel()
         self._writers.clear()
@@ -185,6 +187,10 @@ class DataConnector:
             except Exception:
                 pass
         self._clients.clear()
+        if self._server is not None:
+            self._server.close()
+            await wait_closed_bounded(self._server)
+            self._server = None
         if self._unix_path and os.path.exists(self._unix_path):
             try:
                 os.unlink(self._unix_path)

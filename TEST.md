@@ -62,6 +62,35 @@ test on the exact runtime the app ships with (Python 3.13). If the base image is
 not reachable (first bootstrap, or a fork PR with no package access), CI builds
 it once locally to stay green — the same fallback as the `docker` job.
 
+### `[gwN] node down: Not properly terminated`
+
+This is **not** a test failure and not flaky infrastructure. It means a
+pytest-xdist worker *process* died without finishing its side of the protocol,
+and in this repository there is one way that happens: a test hung, and
+`--timeout=120 --timeout-method=thread` answered the hang with `os._exit(1)`.
+The stack dump the plugin writes on its way out is usually lost with the
+process, which is why the line arrives with no traceback and no test named.
+
+To find the test, re-run with the timeout raising an exception instead of
+killing the worker:
+
+```bash
+pytest -q --timeout=60 --timeout-method=signal
+```
+
+That reports the hang as an ordinary failure, with the traceback pointing at
+whatever the loop was parked on.
+
+**Reproduce on the CI interpreter, not yours.** CI runs Python 3.13; the suite
+passing on an older local Python proves less than it looks. `wait_closed()`
+changed semantics in 3.12 and deadlocked the data connector's shutdown on 3.13
+while staying green 3.11 (`gotchas.md` §1). Either run the base image, or point
+a 3.13 interpreter at the tree:
+
+```bash
+docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest -q
+```
+
 ---
 
 ## Where the tests are

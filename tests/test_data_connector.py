@@ -394,6 +394,50 @@ class TestOneReader:
             await client.close(); await node.stop()
 
 
+class TestShutdown:
+    """Stopping the connector while apps are still attached.
+
+    The trap is a version change, not a race. Python 3.12 made
+    ``asyncio.Server.wait_closed()`` wait for every *accepted connection* to
+    finish, not only for the listening socket to shut. Awaiting it before
+    dropping the clients is then a deadlock — the wait needs the handlers to
+    end, and the only thing that ends them is the close that comes after. On
+    3.11 it returned at once, so the ordering read as correct for as long as
+    the interpreter stayed still, and the symptom when it moved was a test run
+    that hung until the timeout killed the worker."""
+
+    async def test_stop_returns_with_a_client_still_attached(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+        try:
+            await client.connect()
+            parked = asyncio.create_task(client.recv())
+            await asyncio.sleep(0)          # let the handler park on the read
+            await asyncio.wait_for(conn.stop(), timeout=5.0)
+            parked.cancel()
+        finally:
+            await client.close(); await node.stop()
+
+    async def test_stop_returns_with_several_clients_attached(self):
+        """One straggler must not hold the shutdown for the others either."""
+        node, _, conn = await _make()
+        clients = [ConnectorClient(conn.host, conn.port, TOKEN, GENERIC_APP_ID)
+                   for _ in range(4)]
+        parked = []
+        try:
+            for client in clients:
+                await client.connect()
+                parked.append(asyncio.create_task(client.recv()))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(conn.stop(), timeout=5.0)
+            for task in parked:
+                task.cancel()
+        finally:
+            for client in clients:
+                await client.close()
+            await node.stop()
+
+
 class TestPseudos:
     """Reading pseudos over the connector. There is no frame that writes one."""
 

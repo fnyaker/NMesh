@@ -28,10 +28,15 @@
 
 ## Where this stands
 
-65 findings: 45 security, 20 performance. All 65 are addressed. Sixty are
+66 findings: 46 security, 20 performance. All 66 are addressed. Sixty-one are
 closed outright; five are recorded below as *partly* closed, and it is worth
 being precise about why, because "mitigated" here does not mean "we ran out of
 time" — in each case the remainder is a design decision, not a patch.
+
+Finding **46** was not found by reading the code: it was found by CI, after the
+audit was written, when the base image's Python moved to 3.13. It is in the
+list because it belongs there, and because what it says about the audit is
+worth keeping — see its "Why the audit missed it".
 
 | # | What is left, and why |
 |---|---|
@@ -118,6 +123,7 @@ like the regression.
 | 29 | **high** | Any datagram with the STUN magic cookie rewrites our public address |
 | 30 | **high** | Argument injection into `ssh` from a fleet provisioning request |
 | 41 | **high** | The app-store catalogue can be filled and held for ever |
+| 46 | **high** | `DataConnector.stop()` deadlocks on Python 3.12+ while an app is attached |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2397,6 +2403,64 @@ must leave that state alone.
 ---
 
 ---
+
+## 46 — high — `DataConnector.stop()` deadlocks on Python 3.12+ while an app is attached
+
+> **Status — fixed.** `stop()` drops the clients it owns *before* closing the
+> server, and the wait is bounded through the shared
+> `ip_utils.wait_closed_bounded`. `tcp_transport`'s private copy of that helper
+> moved to `ip_utils` so both callers share one implementation. Two regression
+> tests (`TestShutdown`) fail in 10 s on the old ordering instead of hanging
+> for the full timeout.
+
+**Where** — `src/data_connector.py`, `DataConnector.stop()`.
+
+**Reach** — every shutdown: `scripts/nmesh_node.py` on SIGTERM, the console's
+restart-for-update path, and `conn.stop()` in ~35 tests.
+
+**What happens** — `stop()` closed the listening server and awaited
+`self._server.wait_closed()` *before* closing the client writers it owns.
+Python 3.12 changed `wait_closed()` to block until **every accepted connection**
+has finished, not just until the listening socket is shut. So the wait needs the
+client handlers to end, and the only thing that ends them is the `w.close()`
+loop that comes after the wait. The two halves face each other and neither
+moves.
+
+On Python 3.11 `wait_closed()` returned immediately, so the ordering read as
+correct for as long as CI stayed on 3.11. Proven across versions:
+
+```
+python 3.11: wait_closed() RETURNED with a live connection
+python 3.12: wait_closed() BLOCKED on the live connection  <-- deadlock
+python 3.13: wait_closed() BLOCKED on the live connection  <-- deadlock
+```
+
+**Impact** — a node with an app attached to the connector never finishes
+shutting down. Under systemd that becomes a SIGKILL after the stop timeout,
+which is the one path that skips every flush the node does on the way out
+(session store, certificate store). In the suite it hung one worker for the
+full `--timeout=120`, and pytest-timeout's thread method answers a hang with
+`os._exit(1)` — reported by xdist as `[gwN] node down: Not properly
+terminated`, with no traceback and no failing test named. It reproduces 3/3 on
+Python 3.13 and 0/4 on 3.11.
+
+**Why the audit missed it** — the audit read the code on a tree whose test
+environment was Python 3.11, where the defect is unreachable. It is a reminder
+that "the suite is green" is a statement about one interpreter, and that
+`Docs/Architecture/gotchas.md` §1 had already written this rule down — with
+`tcp_transport` fixed and this caller left bare. A rule recorded in prose is not
+a rule applied; the second copy of a helper is the second chance to miss its
+fix.
+
+**Fixing it without breaking something** — the client writers must be closed
+before the server is awaited, not after: closing a `StreamWriter` shuts the
+transport both ways, so the handler's read returns EOF and it unwinds on its
+own. The bounded wait stays as defence against a handler that ignores its
+close, never as the mechanism. Do not simply drop the `wait_closed()` call: on
+a Unix socket the path is unlinked immediately after, and unlinking under a
+listener that has not finished closing is how you get a connector that cannot
+be restarted.
+
 
 # Verified by running it
 
