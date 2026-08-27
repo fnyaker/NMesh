@@ -168,6 +168,7 @@ _RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
 _RELEASE_SERVE_WINDOW  = 10.0   # seconds
 _RELEASE_SERVE_MAX     = 64     # slices one link may pull from us per window
 _RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
+_RELEASE_SOURCES_TRACKED = 64   # releases we remember any sources for at all
 _PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
 _HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
 _DIR_RATE_WINDOW     = 10.0     # seconds
@@ -382,6 +383,11 @@ _SEEK_TAG          = b"NMESH-INVITE-SEEK-v1"  # domain separation for the token
 _SEEK_MAX_PAYLOAD  = 8192      # cert + token, bounded before any parse
 _SEEK_MAX_FUTURE   = 3600.0    # exp accepted at most this far ahead (replay window)
 _SEEK_TTL          = 16        # max hops a seek travels
+# …and what an *unauthenticated* link's seek is worth. One packet handed to the
+# edge of the mesh was carried by up to _SEEK_TTL authenticated links, by
+# somebody who had not joined it; a joiner needs enough hops to find an inviter,
+# not the diameter of the network.
+_SEEK_TTL_PREAUTH  = 6
 _RDV_MAX           = 512       # bounded reverse-path (rendezvous) table
 _RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
 _SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
@@ -420,6 +426,10 @@ _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
 _PUNCH_KICK_COUNT      = 8     # keepalive kicks to open the punched link
 _PUNCH_KICK_INTERVAL   = 0.3   # seconds between kicks (burst spans ~2.4s)
 _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
+# STUN requests we remember having sent. A binding response arrives in
+# milliseconds; anything much later is not an answer to our question.
+_STUN_PENDING_TTL         = 15.0
+_STUN_PENDING_MAX         = 8
 # Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
 # public UDP endpoint an operator supplies by hand — no relay needed.
 _HOLE_OPEN_MAGIC    = b"NHOL"  # ignored by the receiver; only opens our mapping
@@ -1411,6 +1421,9 @@ class MeshNode:
         self._last_announced: tuple[str, ...] | None = None
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
+        # STUN transaction id -> (server ip, expiry). Requests we sent and are
+        # still willing to believe an answer to. See _note_stun_request.
+        self._stun_pending: OrderedDict[bytes, tuple] = OrderedDict()
         # Manual hole-punch targets → {"sent": int, "started": float, "task": Task}
         self._manual_holes: OrderedDict[tuple[str, int], dict] = OrderedDict()
         self._stun_enabled: bool = False
@@ -1600,21 +1613,40 @@ class MeshNode:
         if sock is None:
             return
         from .stun import _build_binding_request, DEFAULT_STUN_SERVERS
-        loop = asyncio.get_running_loop()
+        from .ip_utils import bounded_getaddrinfo
         for host, port in DEFAULT_STUN_SERVERS:
             try:
-                infos = await loop.getaddrinfo(
+                # Not `loop.getaddrinfo`: that runs on asyncio's default
+                # executor, which is *joined* at shutdown, so a lookup that
+                # hangs on a restricted network wedges interpreter exit
+                # (gotchas §2). This was the one call site in the tree still
+                # doing it.
+                infos = await bounded_getaddrinfo(
                     host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
-            except (OSError, socket.gaierror):
+            except (OSError, socket.gaierror, asyncio.TimeoutError):
                 continue
             if not infos:
                 continue
+            request = _build_binding_request()
             try:
-                sock.sendto(_build_binding_request(), infos[0][4])
+                sock.sendto(request, infos[0][4])
                 self._punch_stats["keepalives"] += 1
             except (OSError, ConnectionError):
                 continue
+            # Remember what we asked, and who we asked. Without this the
+            # response check compares the datagram's transaction id against
+            # itself, so any datagram carrying the STUN magic cookie set our
+            # believed public address — which we then advertise to the mesh.
+            self._note_stun_request(request[8:20], infos[0][4][0])
             return  # one server is enough per interval
+
+    def _note_stun_request(self, txn_id: bytes, server_ip: str) -> None:
+        now = time.monotonic()
+        for key in [k for k, (_, exp) in self._stun_pending.items() if exp <= now]:
+            del self._stun_pending[key]
+        while len(self._stun_pending) >= _STUN_PENDING_MAX:
+            self._stun_pending.popitem(last=False)
+        self._stun_pending[bytes(txn_id)] = (server_ip, now + _STUN_PENDING_TTL)
 
     def udp_port(self) -> int | None:
         """The port our UDP server is listening on, if any."""
@@ -4541,8 +4573,13 @@ class MeshNode:
         return peer
 
     def _recognize_seek(self, h_code: bytes) -> str | None:
-        """The live invite code whose hash matches, if any (constant-time)."""
-        for code in list(self._invite._codes.keys()):
+        """The live invite code whose hash matches, if any (constant-time).
+
+        *Live*: an expired code is not one. Matching on the hash alone meant an
+        expired code still looked recognised and still started a relayed invite,
+        allocating a virtual peer against `_MAX_RELAY_PEERS` and `_MAX_PEERS`
+        for something that could never be redeemed."""
+        for code in self._invite.live_codes():
             if hmac.compare_digest(_h_code(code), h_code):
                 return code
         return None
@@ -4688,9 +4725,18 @@ class MeshNode:
 
     async def _forward_seek(self, from_peer: '_Peer', packet: Packet) -> None:
         """Greedy XOR routing of a seek toward its inviter id, over authenticated
-        peers only. TTL-bounded; no on-demand connects (stays cheap pre-auth)."""
+        peers only. TTL-bounded; no on-demand connects (stays cheap pre-auth).
+
+        A seek from a link that has **not** authenticated gets a shorter budget.
+        This plane exists so a joiner with no link yet can be heard, which is
+        exactly why any socket that connects reaches it — and each packet it
+        hands us is then carried by up to `_SEEK_TTL` authenticated links. The
+        joiner needs enough hops to reach an inviter, not the full diameter."""
         if packet.ttl <= 1:
             return
+        if (from_peer.authenticated_id is None
+                and packet.ttl > _SEEK_TTL_PREAUTH):
+            packet = packet.with_ttl(_SEEK_TTL_PREAUTH)
         target = NodeID(packet.dst_id)
         direct = next(
             (p for p in self._peers
@@ -5484,7 +5530,7 @@ class MeshNode:
             sources.remove(node_id)
         sources.append(node_id)
         del sources[:-_RELEASE_SOURCES_MAX]
-        while len(self._release_sources) > _RELEASE_SOURCES_MAX:
+        while len(self._release_sources) > _RELEASE_SOURCES_TRACKED:
             self._release_sources.popitem(last=False)
 
     async def _handle_release_fetch(self, peer: '_Peer', packet: Packet) -> None:
@@ -6254,7 +6300,13 @@ class MeshNode:
         if peer._invite_failures >= 3 and time.monotonic() - peer._invite_lockout_ts < 60:
             return
         if not self._invite.verify_response(peer.pending_challenge, packet.payload):
+            # Both counters. The per-link one cuts an abusive link without
+            # locking out an honest joiner; the manager's is node-wide, and it
+            # is the one `Docs/Architecture/security.md` describes — it existed
+            # and nothing ever called it, so dropping the connection bought
+            # three fresh attempts at no cost.
             peer._invite_failures += 1
+            self._invite.record_failure()
             if peer._invite_failures >= 3:
                 peer._invite_lockout_ts = time.monotonic()
             ack = Packet.create(INVITE_ACK, self._id.raw, packet.src_id,
@@ -6725,7 +6777,7 @@ class MeshNode:
         # handled regardless of punch state so continuous mode keeps learning
         # our public UDP mapping.
         if len(data) >= 20 and data[4:8] == b"\x21\x12\xa4\x42":
-            self._handle_stun_keepalive_response(data)
+            self._handle_stun_keepalive_response(data, addr)
             return
         if not self._punch_enabled:
             return  # punching disabled — ignore probes and acks entirely
@@ -6780,13 +6832,29 @@ class MeshNode:
         table[key] = (cnt + 1, ws)
         return True
 
-    def _handle_stun_keepalive_response(self, data: bytes) -> None:
+    def _handle_stun_keepalive_response(self, data: bytes,
+                                        addr: tuple[str, int] | None = None) -> None:
         """Parse a STUN Binding Response received on the listener socket and
-        record the public UDP address peers actually reach us at."""
+        record the public UDP address peers actually reach us at.
+
+        Only for a request we actually sent. `_parse_binding_response` does
+        compare the transaction id — but it was handed `data[8:20]`, the id out
+        of the datagram being checked, which makes the comparison a tautology.
+        The listener socket is unconnected, so that left any host able to set
+        the address this node believes it has, and then advertises to the mesh."""
         from .stun import _parse_binding_response
-        # The response echoes our transaction id; use it directly so the
-        # XOR-MAPPED-ADDRESS de-XORs correctly without our tracking it.
-        result = _parse_binding_response(data, data[8:20])
+        if len(data) < 20:
+            return
+        txn_id = bytes(data[8:20])
+        pending = self._stun_pending.pop(txn_id, None)
+        if pending is None:
+            return
+        server_ip, expiry = pending
+        if expiry <= time.monotonic():
+            return
+        if addr is not None and addr[0] != server_ip:
+            return          # answered by somebody we did not ask
+        result = _parse_binding_response(data, txn_id)
         if result is None:
             return
         ip, port = result

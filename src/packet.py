@@ -135,7 +135,16 @@ class Packet:
         return session.decrypt(self.__payload, self.__nonce, self.__gcm_tag, self.aad())
 
     def with_decremented_ttl(self) -> 'Packet':
-        return Packet(self.__version, self.__type, self.__ttl - 1,
+        return self.with_ttl(self.__ttl - 1)
+
+    def with_ttl(self, ttl: int) -> 'Packet':
+        """The same packet with a different hop budget.
+
+        Only the TTL changes, and the TTL is outside both the AAD and the
+        `msg_id` pre-image — so the packet stays exactly as authentic as it
+        was, and dedup still recognises it. That is the whole reason those two
+        exclusions exist."""
+        return Packet(self.__version, self.__type, ttl,
                       self.__src_id, self.__dst_id, self.__msg_id,
                       self.__nonce, self.__gcm_tag, self.__payload)
         

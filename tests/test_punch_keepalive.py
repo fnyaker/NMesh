@@ -8,6 +8,7 @@ mapping, and that a node whose only links are UDP (i.e. itself NAT'd) can
 still act as a hole-punch relay.
 """
 import asyncio
+import os
 import socket
 import struct
 
@@ -66,10 +67,12 @@ class TestKeepaliveControl:
     async def test_keepalive_sends_stun_from_listener_socket(self, monkeypatch):
         node, _ = await make_node()
         node._udp_server = _FakeUDPServer()
-        loop = asyncio.get_running_loop()
+        # `bounded_getaddrinfo`, not `loop.getaddrinfo`: the latter runs on
+        # asyncio's default executor, which is joined at shutdown (gotchas §2).
+        import src.ip_utils
         async def fake_gai(*a, **k):
             return [(socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("1.2.3.4", 3478))]
-        monkeypatch.setattr(loop, "getaddrinfo", fake_gai)
+        monkeypatch.setattr(src.ip_utils, "bounded_getaddrinfo", fake_gai)
 
         await node._send_nat_keepalive()
         assert len(node._udp_server._sock.sent) == 1
@@ -94,16 +97,55 @@ class TestKeepaliveControl:
 class TestStunResponse:
     async def test_learns_public_udp_mapping(self):
         node, _ = await make_node()
-        node._handle_stun_keepalive_response(_stun_response("198.51.100.9", 41234))
+        txn = os.urandom(12)
+        node._note_stun_request(txn, "1.2.3.4")          # we asked
+        node._handle_stun_keepalive_response(
+            _stun_response("198.51.100.9", 41234, txn), ("1.2.3.4", 3478))
         assert node._observed_udp_addr == ("198.51.100.9", 41234)
         assert "198.51.100.9" in node._extra_addrs
+
+    async def test_an_unsolicited_response_sets_nothing(self):
+        """The listener socket is unconnected, so anyone can send it a datagram.
+        The transaction id was compared against the datagram's own — a
+        tautology — which left any host able to set the address this node
+        believes it has, and then advertises to the mesh."""
+        node, _ = await make_node()
+        node._handle_stun_keepalive_response(
+            _stun_response("198.51.100.9", 41234, os.urandom(12)),
+            ("1.2.3.4", 3478))
+        assert node._observed_udp_addr is None
+        assert "198.51.100.9" not in node._extra_addrs
+        await node.stop()
+
+    async def test_a_response_from_the_wrong_server_sets_nothing(self):
+        node, _ = await make_node()
+        txn = os.urandom(12)
+        node._note_stun_request(txn, "1.2.3.4")
+        node._handle_stun_keepalive_response(
+            _stun_response("198.51.100.9", 41234, txn), ("9.9.9.9", 3478))
+        assert node._observed_udp_addr is None
+        await node.stop()
+
+    async def test_a_response_is_good_once(self):
+        node, _ = await make_node()
+        txn = os.urandom(12)
+        node._note_stun_request(txn, "1.2.3.4")
+        response = _stun_response("198.51.100.9", 41234, txn)
+        node._handle_stun_keepalive_response(response, ("1.2.3.4", 3478))
+        node._observed_udp_addr = None
+        node._handle_stun_keepalive_response(response, ("1.2.3.4", 3478))
+        assert node._observed_udp_addr is None
+        await node.stop()
 
     async def test_reported_in_snapshot(self):
         node, _ = await make_node()
         node._udp_server = _FakeUDPServer()
         node._udp_listen_uri = "udp://0.0.0.0:9001"
         node._punch_keepalive = True
-        node._handle_stun_keepalive_response(_stun_response("198.51.100.9", 41234))
+        txn = os.urandom(12)
+        node._note_stun_request(txn, "1.2.3.4")
+        node._handle_stun_keepalive_response(
+            _stun_response("198.51.100.9", 41234, txn), ("1.2.3.4", 3478))
         snap = await node.console_snapshot()
         udp = next(t for t in snap["transport_details"] if t["scheme"] == "udp")
         assert udp["hole_punch"]["public_udp"] == "198.51.100.9:41234"
@@ -118,7 +160,9 @@ class TestStunResponse:
         node, _ = await make_node()
         node.console_set_punch_enabled(False)
         # STUN responses keep working so continuous mode still learns our addr
-        node.handle_udp_datagram(_stun_response("198.51.100.9", 41234),
+        txn = os.urandom(12)
+        node._note_stun_request(txn, "1.2.3.4")
+        node.handle_udp_datagram(_stun_response("198.51.100.9", 41234, txn),
                                  ("1.2.3.4", 3478))
         assert node._observed_udp_addr == ("198.51.100.9", 41234)
 

@@ -13,6 +13,13 @@ Source: `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
   version. The state directory itself is 700 and belongs to the node's
   dedicated account when `install.sh` put it there (see
   [`../Setup/guide`](../Setup/guide)).
+- **A file that is there and unreadable raises**; only a missing one means
+  "generate". `load` used to answer any failure with a fresh key pair, and the
+  caller writes back what it gets — so one truncated write, one bad sector, one
+  half-restored backup destroyed the identity permanently, and the symptom
+  looked like a network fault. `load` also **checks the pair against itself**:
+  nothing verified that the stored public half belonged to the stored secret,
+  and a mismatched file produced a node whose signatures nobody could verify.
 - `NodeID = sha256(DSA_public_key)[:20]` (`NodeID.from_public_key`). So **the ID
   is derivable from the key**: a `NodeID` that does not match the key presented
   is a lie → reject (`claimed_id != NodeID(packet.src_id)`).
@@ -51,6 +58,12 @@ propagates through certificate chains.
   - `verify_chain(chain)`: continuous issuance links + a self-signed last cert +
     the last `subject_id ∈ roots` + nothing expired → returns the anchor,
     otherwise None.
+  - **Bounded** (`MAX_SUBJECTS`, `MAX_PER_SUBJECT`, LRU), with the roots and our
+    own subject pinned — a bound that can leave us unable to authenticate is an
+    outage, not a bound. `get_chain_to_root` is **memoised per subject** and the
+    cache is dropped on any change: it is a BFS, `_handle_find_node` runs it
+    once per candidate it considers, and an unbounded store made a 28-byte
+    packet buy an unbounded graph walk.
 - `TrustTable` (`trust.py`): **TOFU** `NodeID → DSA key`. First sighting →
   store; a later sighting with a **different key** → `False` (compromise or
   impersonation).
@@ -65,7 +78,17 @@ Joining = proving knowledge of a code **without sending it in the clear**.
   (`compute_response`). `verify_response` compares in **constant time**
   (`hmac.compare_digest`) and purges expired codes.
 - **Single use**: `consume(challenge, response)` deletes the code that matched.
-- Anti-bruteforce: `_MAX_FAILURES = 3` → a `_LOCKOUT_TTL = 60 s` lockout.
+- Anti-bruteforce, at **two** levels: `peer._invite_failures` cuts one abusive
+  link (three tries, then 60 s), and `InviteManager.record_failure` counts
+  node-wide — `_MAX_FAILURES = 3` → a `_LOCKOUT_TTL = 60 s` lockout across every
+  link. The node-wide one existed and nothing ever called it, so dropping the
+  connection and reconnecting bought three fresh attempts at no cost. The
+  per-link counter stays because it is what lets an abusive link be cut without
+  locking out an honest joiner.
+- **Expiry is enforced wherever the pool is read**, not only in
+  `verify_response`: `live_codes()` purges on the way past, so an expired code
+  cannot look recognised to `_recognize_seek` and start a relayed invite that
+  could never be redeemed.
 - **TTL per code.** `generate_code(ttl)` widens the window of one specific code,
   bounded by `_MAX_TTL` (6 h). This is for invitations that are not typed by
   hand: the one a node leaves on a machine being provisioned is only redeemed

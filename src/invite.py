@@ -61,8 +61,29 @@ class InviteManager:
     def generate_challenge(self) -> bytes:
         return os.urandom(32)
 
+    def live_codes(self) -> list[str]:
+        """Codes that have not expired, purging the rest on the way.
+
+        The pool was only ever pruned inside `verify_response`, so expired
+        entries accumulated for the life of the process and anything else that
+        looked at `_codes` saw them as live."""
+        now = time()
+        return [code for code in list(self._codes)
+                if not self._expire(code, now)]
+
+    def _expire(self, code: str, now: float) -> bool:
+        """True (and forgotten) if ``code`` has run out."""
+        entry = self._codes.get(code)
+        if entry is None:
+            return True
+        created, window = entry
+        if (now - created) > window:
+            del self._codes[code]
+            return True
+        return False
+
     def has_code(self) -> bool:
-        return bool(self._codes)
+        return bool(self.live_codes())
 
     def consume(self, challenge: bytes | None = None,
                 response: bytes | None = None) -> None:
@@ -91,9 +112,9 @@ class InviteManager:
             return False
         if self.is_locked_out():
             return False
-        for code, (ts, window) in list(self._codes.items()):
-            if (time() - ts) > window:
-                del self._codes[code]
+        now = time()
+        for code in list(self._codes):
+            if self._expire(code, now):
                 continue
             if hmac.compare_digest(compute_response(code, challenge), response):
                 return True
