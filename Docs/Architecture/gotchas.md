@@ -68,16 +68,6 @@ incoming link's receive loop) and by `console_ping_node`'s fallback.
 (cancellable, see 3b) in `TCPTransport.connect`. **Every connection opened
 towards an unproven address must be bounded.**
 
-### 4c. A TCP `send()` to a non-draining peer wedged the sender
-A peer that stops reading (its receive loop stuck, its socket buffer full) never
-acknowledges, so `writelines` + `drain()` blocked **forever** — the send loop
-froze, and with it every packet queued behind it on that link. No read timeout
-catches it: the *read* side is fine, it is the *write* side that is stuck.
-→ Fix: `_WRITE_TIMEOUT` (30 s, an option `write_timeout`, 5–600 s) bounds the
-write through `asyncio.timeout` (cancellable, see 3b), raising
-`ConnectionError("write timeout")` so the link is reaped like any other dead
-link. **A send must be bounded exactly like a connect or a read.**
-
 ### 4b. `peer.stop()` waited without a bound for a cancelled task that never dies
 `_Peer.stop()` did `task.cancel()` then `await task` **with no bound**. When the
 cancellation lands on a read whose future was already cancelled, the task stays

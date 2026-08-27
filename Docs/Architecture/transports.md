@@ -62,9 +62,9 @@ applies first and writes afterwards: a value the transport refuses never reaches
 the file, or the next startup would refuse it in turn with nobody at the
 keyboard to read why.
 
-Current settings: TCP (connect timeout, read timeout, write timeout,
-`TCP_NODELAY`, address families, source address), UDP (keepalive interval and
-timeout, reorder buffer depth), spool (poll interval).
+Current settings: TCP (connect timeout, read timeout, `TCP_NODELAY`, address
+families, source address), UDP (keepalive interval and timeout, reorder buffer
+depth), spool (poll interval).
 
 ## Observing itself: `endpoints()` and `stats()`
 
@@ -236,12 +236,6 @@ is worth it.
 - `_READ_TIMEOUT = 60 s`: a `receive()` with no data for 60 s raises → the link
   is treated as dead and reaped. **An idle link therefore dies without a
   keepalive** (see §keepalive).
-- `_WRITE_TIMEOUT = 30 s` (option `write_timeout`, 5–600 s): a `send()` to a
-  peer that has stopped draining (its receive loop stuck, its socket buffer
-  full) blocks on `drain()` forever — no read timeout catches a stuck *write*.
-  The write is bounded through `asyncio.timeout` and raises
-  `ConnectionError("write timeout")`, so the link is reaped like any other dead
-  link (see `gotchas.md` §4c).
 - **`_wait_closed_bounded`**: Python 3.12 changed `Server.wait_closed()` — it
   now blocks until **every accepted client connection** is closed, not only the
   listening socket. Closing a port while a peer stayed connected never returned

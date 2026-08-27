@@ -72,28 +72,3 @@ class TestTCPTransport:
         t = TCPTransport()
         with pytest.raises(ConnectionError):
             await t.receive()
-
-    async def test_send_to_a_non_draining_peer_times_out(self):
-        """A peer that accepts the connection but never drains wedges the sender
-        forever: the write buffer fills and drain() never returns. The send must
-        give up, not hang the loop."""
-        class _NonDrainingWriter:
-            def writelines(self, chunks):
-                pass
-            async def drain(self):
-                await asyncio.sleep(3600)
-
-        t = TCPTransport()
-        t._writer = _NonDrainingWriter()
-        # A tiny value, set directly: the 5 s floor is for operators, not for a
-        # test that must fail fast.
-        old = TCPTransport.SETTINGS.get("write_timeout")
-        TCPTransport.SETTINGS["write_timeout"] = 0.01
-        try:
-            with pytest.raises(ConnectionError, match="write timeout"):
-                await t.send(make_packet())
-        finally:
-            if old is None:
-                TCPTransport.SETTINGS.pop("write_timeout", None)
-            else:
-                TCPTransport.SETTINGS["write_timeout"] = old
