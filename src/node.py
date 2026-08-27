@@ -191,6 +191,7 @@ _BROADCAST_ID    = b"\xff" * 20
 _MSG_DEDUP_MAX         = 10_000
 _MAX_PEERS             = 128    # open links, not distinct nodes: a node may hold several
 _MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
+_MAX_HANDSHAKE_ATTEMPTS = 8     # handshakes one link may make us verify
 _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
 _MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
 # Decrypted application payloads waiting for whoever calls receive_data(). A
@@ -521,9 +522,16 @@ def _encode_chain(chain: list[Certificate]) -> bytes:
 
 
 def _decode_chain(data: bytes) -> list[Certificate]:
+    """Parse a certificate chain. Every certificate is verified as it is built
+    (``Certificate._build``), so this is the expensive half of a handshake —
+    hence the explicit ceiling. It used to be bounded only by the packet size,
+    which is a bound by accident: it moves the day a smaller signature scheme
+    is added, and every other decoder in this file states its own."""
     if not data:
         return []
     count = data[0]
+    if count > _ENTRY_CHAIN_MAX:
+        raise ValueError(f"chain too long: {count}")
     offset = 1
     certs: list[Certificate] = []
     for _ in range(count):
@@ -549,7 +557,13 @@ def _encode_handshake(kem_pub: bytes, dsa_pub: bytes,
             + kem_pub + dsa_pub + chain_bytes + signature)
 
 
-def _decode_handshake(data: bytes) -> tuple[bytes, bytes, list[Certificate], bytes]:
+def _split_handshake(data: bytes) -> tuple[bytes, bytes, bytes, bytes]:
+    """Slice a HANDSHAKE into its four fields, **without** parsing the chain.
+
+    Parsing a chain verifies every certificate in it, which is the most
+    expensive thing in the packet — and `_handle_handshake` can rule the packet
+    out with two SHA-256s before spending any of it. Keeping the slice and the
+    verification apart is what lets the cheap test come first."""
     if len(data) < _HS_HEADER.size:
         raise ValueError("handshake payload too short")
     kem_len, dsa_len, chain_len = _HS_HEADER.unpack_from(data, 0)
@@ -559,7 +573,12 @@ def _decode_handshake(data: bytes) -> tuple[bytes, bytes, list[Certificate], byt
     kem_pub     = data[offset:offset + kem_len];   offset += kem_len
     dsa_pub     = data[offset:offset + dsa_len];   offset += dsa_len
     chain_bytes = data[offset:offset + chain_len]; offset += chain_len
-    return kem_pub, dsa_pub, _decode_chain(chain_bytes), data[offset:]
+    return kem_pub, dsa_pub, chain_bytes, data[offset:]
+
+
+def _decode_handshake(data: bytes) -> tuple[bytes, bytes, list[Certificate], bytes]:
+    kem_pub, dsa_pub, chain_bytes, signature = _split_handshake(data)
+    return kem_pub, dsa_pub, _decode_chain(chain_bytes), signature
 
 
 def _encode_handshake_ack(ciphertext: bytes, dsa_pub: bytes,
@@ -937,6 +956,12 @@ class _Peer:
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
+        # Handshakes this link has been allowed to make us verify. A joiner
+        # legitimately needs more than one (the invite exchange re-drives it,
+        # and a lost packet is retried), but not without end: the work is a
+        # post-quantum verification per certificate plus one for the handshake
+        # itself, and nothing above this handler is authenticated.
+        self._handshake_attempts: int = 0
         self.dsa_pub: bytes = b""
         self._malformed: int = 0
         # Liveness / round-trip: set when we PING, cleared+measured on the PONG.
@@ -998,6 +1023,11 @@ class _Peer:
                 raise
             except Exception:
                 pass  # malformed payload or handler bug — drop, loop continues
+
+    def note_handshake_attempt(self) -> bool:
+        """Claim one handshake attempt on this link. False once they run out."""
+        self._handshake_attempts += 1
+        return self._handshake_attempts <= _MAX_HANDSHAKE_ATTEMPTS
 
     def note_abuse(self) -> bool:
         """Count one thing this peer did that a correct node never does, and say
@@ -4308,11 +4338,17 @@ class MeshNode:
         # 1. cheap structural / bound checks first
         if packet.ttl <= 0:
             return
+        # The rate limit comes BEFORE the dedup table, because `_is_seen` is not
+        # a query — it inserts. This handler runs pre-auth, so any socket that
+        # connects reached it; with the order the other way round an
+        # unauthenticated peer flushed the whole node-wide replay window
+        # (`_MSG_DEDUP_MAX` entries, FIFO) at line rate, and dedup is what stops
+        # a routed packet looping and a relay re-injecting the same payload.
+        if not self._seek_allowed(peer):
+            return
         if packet.msg_id != packet.compute_msg_id():
             return  # msg_id must commit to content (anti-amplification)
         if self._is_seen(packet.msg_id):
-            return
-        if not self._seek_allowed(peer):
             return
         decoded = _decode_seek(packet.payload)
         if decoded is None:
@@ -4409,11 +4445,13 @@ class MeshNode:
         Bounded: TTL, dedup, per-link rate limit."""
         if packet.ttl <= 0:
             return
+        # Same order as the seek handler, and for the same reason: this is
+        # pre-auth, and `_is_seen` mutates a node-wide table.
+        if not self._carry_allowed(peer):
+            return
         if packet.msg_id != packet.compute_msg_id():
             return
         if self._is_seen(packet.msg_id):
-            return
-        if not self._carry_allowed(peer):
             return
         if packet.dst_id == self._id.raw:
             vp = self._relay_peers.get(packet.src_id)
@@ -6063,15 +6101,28 @@ class MeshNode:
             return
         if peer.pending_challenge is None:
             return
+        # This handler is reachable on an *unauthenticated* link, and a failed
+        # attempt clears neither guard above, so the same connection may try
+        # again. Order the work accordingly: slice the payload, rule it out
+        # with two SHA-256s, verify the one signature that binds it to our
+        # challenge, and only then parse the chain — which verifies a
+        # post-quantum signature per certificate in it.
         try:
-            kem_pub, bob_dsa_pub, chain, signature = _decode_handshake(packet.payload)
+            kem_pub, bob_dsa_pub, chain_bytes, signature = _split_handshake(
+                packet.payload)
         except Exception:
-            return
-        if not self._identity.verify(peer.pending_challenge + kem_pub + bob_dsa_pub,
-                                     signature, bob_dsa_pub):
             return
         claimed_id = NodeID.from_public_key(bob_dsa_pub)
         if claimed_id != NodeID(packet.src_id):
+            return
+        if not peer.note_handshake_attempt():
+            return          # this link has had its tries
+        if not self._identity.verify(peer.pending_challenge + kem_pub + bob_dsa_pub,
+                                     signature, bob_dsa_pub):
+            return
+        try:
+            chain = _decode_chain(chain_bytes)
+        except Exception:
             return
 
         issued_cert: Certificate | None = None

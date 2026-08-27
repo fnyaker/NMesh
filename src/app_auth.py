@@ -264,16 +264,19 @@ def verify_assertion(blob: bytes, verifier, *, app_id: bytes,
     stamp = int(now if now is not None else time.time())
     if parsed.issued_at > stamp + MAX_SKEW or parsed.expires_at <= stamp:
         return None
-    # Burn the nonce only once everything cheap has passed, so a flood of
-    # rubbish cannot evict live entries from a bounded cache.
-    if nonces is not None and not nonces.claim(parsed.nonce, parsed.expires_at,
-                                               now=stamp):
-        return None
     try:
         if not verifier(parsed.signed_body(), parsed.signature, parsed.subject_pub):
             return None
     except Exception:
         return None  # a broken key blob must not raise into the caller
+    # Only now. Burning a nonce mutates bounded state, and until the signature
+    # has spoken the assertion is anybody's to write — everything above it is
+    # structural and copied straight off a legitimate one. Claiming first let
+    # unsigned rubbish evict live entries, which reopens the replay window this
+    # cache exists to close.
+    if nonces is not None and not nonces.claim(parsed.nonce, parsed.expires_at,
+                                               now=stamp):
+        return None
     subject = parsed.subject
     if trust is not None and not trust.add(subject, parsed.subject_pub):
         return None  # same id, different key — impersonation or compromise

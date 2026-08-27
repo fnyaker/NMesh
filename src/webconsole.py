@@ -79,6 +79,10 @@ _APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
+# Password checks allowed to run at once. One scrypt is 16 MiB and a slice of
+# CPU by design, so a burst of parallel logins costs the node far more than it
+# costs whoever sent them.
+_LOGIN_MAX_INFLIGHT = 4
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
 _LIST_DEFAULT_LIMIT = 20
 _LIST_MAX_LIMIT = 100
@@ -141,9 +145,19 @@ class WebConsole:
         self._tokens: dict[str, float] = {}
         self._tokens_lock = threading.Lock()
 
-        # Login throttling.
+        # Login throttling. Under its own lock: the HTTP server is threaded, so
+        # without one every concurrent attempt passes `_locked_out()` before any
+        # of them records a failure, and `+= 1` loses increments — turning "5
+        # failures then 60 s" into "as many parallel attempts as the attacker
+        # opens". Each of those attempts is one scrypt (16 MiB and a slice of
+        # CPU), so it is a work lever as much as a throttle bypass.
         self._fail_count = 0
         self._lockout_until = 0.0
+        self._login_lock = threading.Lock()
+        # Password checks running right now. scrypt is deliberately expensive,
+        # so the count of them in flight is its own bound: without it a burst of
+        # parallel logins is a memory and CPU lever regardless of the lockout.
+        self._attempts_in_flight = 0
 
         self.generated_password: str | None = None
         self._salt, self._pw_hash = self._load_or_create_credentials(password)
@@ -269,17 +283,33 @@ class WebConsole:
 
     # -- login throttle ---------------------------------------------------
 
+    def _begin_login(self) -> bool:
+        """Claim one attempt, or refuse. Deciding and counting happen under the
+        same lock, so parallel attempts cannot all slip through the gap between
+        them."""
+        with self._login_lock:
+            if time.monotonic() < self._lockout_until:
+                return False
+            self._attempts_in_flight += 1
+            if self._attempts_in_flight > _LOGIN_MAX_INFLIGHT:
+                self._attempts_in_flight -= 1
+                return False
+            return True
+
     def _locked_out(self) -> bool:
-        return time.monotonic() < self._lockout_until
+        with self._login_lock:
+            return time.monotonic() < self._lockout_until
 
     def _record_login_result(self, ok: bool) -> None:
-        if ok:
-            self._fail_count = 0
-            return
-        self._fail_count += 1
-        if self._fail_count >= _LOGIN_MAX_FAILURES:
-            self._lockout_until = time.monotonic() + _LOGIN_LOCKOUT
-            self._fail_count = 0
+        with self._login_lock:
+            self._attempts_in_flight = max(0, self._attempts_in_flight - 1)
+            if ok:
+                self._fail_count = 0
+                return
+            self._fail_count += 1
+            if self._fail_count >= _LOGIN_MAX_FAILURES:
+                self._lockout_until = time.monotonic() + _LOGIN_LOCKOUT
+                self._fail_count = 0
 
     # -- loop marshalling -------------------------------------------------
 
@@ -1042,17 +1072,26 @@ def _make_handler(console: WebConsole):
                 cap = _MAX_KEY_UPLOAD
             else:
                 cap = _MAX_BODY
+            remote = self._remote_node()
+            # The session is checked before a large body is read into memory.
+            # The upload caps are generous — 64 MiB for a chat file — and the
+            # server is threaded with no ceiling on connections, so reading
+            # first meant any stranger who could reach the port could hold that
+            # much per request. /api/login is the one route that must read its
+            # (small) body before it can possibly be authorised.
+            if path != "/api/login" or remote is not None:
+                if not self._authed():
+                    self.close_connection = True
+                    self._json(401, {"error": "unauthorized"})
+                    return
+            elif cap > _MAX_BODY:
+                cap = _MAX_BODY
             body = self._read_body(cap)
             if body is None:
                 self._json(413, {"error": "body too large or malformed"})
                 return
-            remote = self._remote_node()
             if path == "/api/login" and remote is None:
                 self._handle_login(body)
-                return
-            # everything below requires auth
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
                 return
             if remote is not None:
                 if not remote:
@@ -2119,12 +2158,16 @@ def _make_handler(console: WebConsole):
                 self._json(400, {"ok": False, "error": str(exc)[:200]})
 
         def _handle_login(self, body: bytes) -> None:
-            if console._locked_out():
+            if not console._begin_login():
                 self._json(429, {"error": "too many attempts, locked out"})
                 return
-            data = _parse_json(body)
-            password = (data or {}).get("password")
-            ok = bool(password) and console._check_password(password)
+            try:
+                data = _parse_json(body)
+                password = (data or {}).get("password")
+                ok = bool(password) and console._check_password(password)
+            except BaseException:
+                console._record_login_result(False)
+                raise
             console._record_login_result(ok)
             if not ok:
                 self._json(401, {"error": "invalid password"})

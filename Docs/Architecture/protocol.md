@@ -107,6 +107,15 @@ The exact order applied to every packet received:
 1. `INVITE_SEEK` → dedicated pre-auth handler (rate-limited per link, bounded).
    Return.
 2. `RELAY_CARRY` → dedicated handler. Return.
+
+> **Order inside the two pre-auth handlers.** TTL, then the **rate limit**, then
+> `msg_id`, then dedup, then the signature. The rate limit sits above `_is_seen`
+> because `_is_seen` is not a query — it *inserts*, into the node-wide dedup
+> table. These handlers run before every authentication gate, so any socket that
+> connects reaches them; with the limit below the insert, an unauthenticated
+> peer could flush the whole replay window (`_MSG_DEDUP_MAX`, FIFO) at line
+> rate, and dedup is what stops a routed packet looping and a relay
+> re-injecting the same payload. The expensive ML-DSA verification stays last.
 3. If `type ∈ _DIRECT_TYPES`: reject if the peer is not authenticated, or if
    `src_id != authenticated_id`. ("reject by default".)
 4. If `type ∈ _ROUTABLE_TYPES`:
