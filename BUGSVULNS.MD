@@ -1721,6 +1721,9 @@ the same sentence read from either side.
 
 ## P1 — The packet dispatch table is rebuilt for every packet
 
+**Status — fixed.** `_HANDLERS`, built once at module level from the unbound methods.
+
+
 **Where** — `src/node.py`, `_handle_packet`.
 
 The handler map is a dict literal *inside* the function:
@@ -1744,6 +1747,9 @@ the ordering of the gates above it is the security property and must not move.
 
 ## P2 — `NodeID.distance` is a Python loop over 20 bytes
 
+**Status — fixed.** The id is kept as an integer (`__slots__`, computed in `__init__`); `distance` is one XOR.
+
+
 **Where** — `src/node_id.py`.
 
 ```python
@@ -1764,6 +1770,9 @@ XOR metric and its ordering are unchanged.
 
 ## P3 — `get_closest` materialises and sorts the whole routing table
 
+**Status — fixed.** `heapq.nsmallest` over a generator across the buckets.
+
+
 **Where** — `src/routing.py`, `RoutingTable.all_entries` / `get_closest`.
 
 `all_entries()` walks all 160 buckets and builds a fresh list (up to 3 200
@@ -1779,6 +1788,9 @@ entries are skipped" behaviour — `gotchas.md` §9 explains why scanning exactl
 k left replies empty.
 
 ## P4 — Every UDP link polls at 100 Hz and pops from the front of a list
+
+**Status — fixed** with **6**: an `asyncio.Event` and a `deque`.
+
 
 **Where** — `src/udp_transport.py`, `UDPTransport.receive`.
 
@@ -1802,6 +1814,9 @@ must set the event rather than await anything.
 
 ## P5 — The reliability layer does O(window) work per received frame
 
+**Status — fixed.** The SACK bitmap is maintained as frames land and recomputed only when the cursor moves; the cumulative ack clears a prefix instead of scanning.
+
+
 **Where** — `src/udp_transport.py`, `_ReliableLink.process_ack` and
 `_build_ack`.
 
@@ -1818,6 +1833,9 @@ bitmap incrementally as frames land in `_reorder`. The modular-distance
 reasoning that fixed the 2³² wrap (`gotchas.md` §8) must survive untouched.
 
 ## P6 — A fresh liboqs context per signature verification
+
+**Status — fixed.** `crypto.verify_signature` keeps one thread-local verifier; `cert._verify_dsa` uses it too.
+
 
 **Where** — `src/crypto.py`, `CryptoIdentity.verify`; `src/cert.py`,
 `_verify_dsa`.
@@ -1838,6 +1856,9 @@ re-entrant) and reuse it. This also directly reduces the cost of the DoS levers
 in **17**, **28** and **11**.
 
 ## P7 — A fresh AES-GCM object per packet
+
+**Status — fixed.** `SessionKey` builds its `AESGCM` once.
+
 
 **Where** — `src/crypto.py`, `SessionKey.encrypt` / `decrypt`.
 
@@ -1886,6 +1907,9 @@ for **P8**.
 
 ## P10 — `_EntryPacker.add` re-serialises every certificate up to three times
 
+**Status — fixed.** Serialised once per certificate, reused as the pool key.
+
+
 **Where** — `src/node.py`, `_EntryPacker.add`.
 
 ```python
@@ -1905,6 +1929,9 @@ per `FIND_NODE`, that is a lot of megabytes of pointless copying per query.
 
 ## P11 — A release announce verifies the same signature three times
 
+**Status — fixed.** Parsed once and the `have` flag passed down to `_gossip_release`.
+
+
 **Where** — `src/node.py`, `_handle_release_announce` → `_gossip_release`.
 
 `_core_parse_release(release_bytes, self._identity.verify)` runs once for the
@@ -1916,6 +1943,9 @@ times per 10 s window.
 **Fix** — parse once and pass the parsed document down.
 
 ## P12 — Pseudo search re-folds the whole book on every keystroke
+
+**Status — fixed.** The folded form is stored with the entry; `rank_folded` takes both sides already folded and the query is folded once.
+
 
 **Where** — `src/pseudo_dir.py`, `PseudoBook.search`; reached from
 `/api/pseudo?q=` (the console field searches as the operator types) and from the
@@ -1932,6 +1962,9 @@ is filed (it is already computed there, for `dir_key`), and fold the query once
 before the loop. The ranking and its ordering stay exactly as they are.
 
 ## P13 — The spool transport blocks the event loop on file I/O
+
+**Status — fixed.** The write (with its `fsync`), the read and the directory scan all run through `asyncio.to_thread`; the decode queue is a `deque`. Truncating a long-lived spool file is still open.
+
 
 **Where** — `src/spool_transport.py`, `send` (`os.fsync`), `_read_new`
 (`open`/`seek`/`read`), `receive` (`pop(0)`, poll), `SpoolServer._accept_loop`
@@ -1953,6 +1986,9 @@ consumed past an offset.
 
 ## P14 — TCP framing copies the whole packet on every send
 
+**Status — fixed.** `writelines((prefix, data))`.
+
+
 **Where** — `src/tcp_transport.py`, `send`.
 
 ```python
@@ -1970,6 +2006,9 @@ not cost an extra segment.
 
 ## P15 — `transport.setting()` walks the option list on every call
 
+**Status — fixed.** Defaults resolved into a per-class dict on first use.
+
+
 **Where** — `src/transport.py`, `BaseTransport.setting`.
 
 When a name is not in `SETTINGS` (the normal case — settings default), the
@@ -1984,6 +2023,9 @@ in place" property of `SETTINGS` makes that invalidation trivial and must be
 kept.
 
 ## P16 — `_route_candidates` sorts every authenticated peer per forwarded packet
+
+**Status — fixed.** `heapq.nsmallest`; the ordering rules are unchanged.
+
 
 **Where** — `src/node.py`, `_route_candidates`.
 
@@ -2017,6 +2059,9 @@ fan-out at the same time also addresses finding **11**.
 
 ## P18 — Small change, small win: the dedup cache stores a timestamp nobody reads
 
+**Status — fixed.** The value is `None`; the table is a FIFO set of ids.
+
+
 **Where** — `src/node.py`, `_is_seen`.
 
 `self._seen_msgs[msg_id] = time.monotonic()` — the value is never read anywhere
@@ -2032,6 +2077,9 @@ better property under the flood described in **3**.
 
 ## P19 — `app_storage` fsyncs on the event loop
 
+**Status — fixed.** The connector runs the four drawer operations through `asyncio.to_thread`; `AppStorage` already holds its own lock.
+
+
 **Where** — `src/app_storage.py`, `_save` (`os.fsync(fd)`), reached from the
 connector's `_STORE_PUT` on every write.
 
@@ -2040,6 +2088,9 @@ An app writing its drawer at any rate stalls the node once per write.
 **Fix** — same shape as **P8**: batch, and write off the loop.
 
 ## P20 — 128 MiB of DHT and 16 MiB of session store are large defaults
+
+**Status — partly fixed.** The DHT default is 32 MiB and settable (`dht_max_mb`, 1–4096). The session store and the drawer ceilings are unchanged.
+
 
 **Where** — `src/dht.py` (`_MAX_BYTES = 128 * 1024 * 1024`),
 `src/session_store.py` (`_MAX_FILE = 16 MiB`), `src/app_storage.py`

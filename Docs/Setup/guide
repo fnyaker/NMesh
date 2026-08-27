@@ -409,3 +409,16 @@ matching exactly the `liboqs-python` wrapper installed**, into
 macOS the official Homebrew formula is accepted after both required algorithms
 are checked. The liboqs traps in detail:
 [`../Architecture/gotchas.md`](../Architecture/gotchas.md).
+
+### `dht_max_mb` — what this node caches for the network
+
+The DHT store holds content-addressed values other nodes asked us to keep: app
+package chunks, release content. It is filled **entirely by what peers store**,
+so it is memory this node gives away, and the right number depends on the
+machine rather than on the protocol — a node on a LoRa link and a node on a
+server have no business sharing one.
+
+Default 32 MiB, settable in `nmesh.conf` between 1 and 4096. It was 128 MiB and
+not settable at all, which is a server's number in a project whose point is
+running over BLE, LoRa and a USB stick. Eviction is least-recently-used, so a
+smaller store does not fail — it forgets sooner.

@@ -184,6 +184,9 @@ class BaseTransport(ABC):
     #: Current values, by name. Class-level: a setting belongs to the medium,
     #: not to one link.
     SETTINGS: dict = {}
+    #: Declared defaults, resolved on first use. Per class (``cls.__dict__``),
+    #: so a transport never reads another's.
+    _DEFAULTS: dict | None = None
 
     @classmethod
     def options(cls) -> list[dict]:
@@ -220,13 +223,19 @@ class BaseTransport(ABC):
 
     @classmethod
     def setting(cls, name: str):
-        """The value in force, falling back to the declared default."""
+        """The value in force, falling back to the declared default.
+
+        The fallback is a dict, not a scan of ``OPTIONS``. Defaults are the
+        normal case — an operator changes few settings — and this is read per
+        received frame (`max_reorder`), per read (`read_timeout`) and per
+        liveness check (`keepalive_timeout`)."""
         if name in cls.SETTINGS:
             return cls.SETTINGS[name]
-        for field in cls.OPTIONS:
-            if field["name"] == name:
-                return field["default"]
-        return None
+        defaults = cls.__dict__.get("_DEFAULTS")
+        if defaults is None:
+            defaults = {field["name"]: field["default"] for field in cls.OPTIONS}
+            cls._DEFAULTS = defaults
+        return defaults.get(name)
 
     def stats(self) -> dict:
         """Live counters this medium can report about *this* link.

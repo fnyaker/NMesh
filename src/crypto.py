@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import oqs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -16,6 +17,24 @@ class CryptoError(Exception):
     pass
 
 
+# One verifier per thread, reused. Constructing an `oqs.Signature` allocates
+# liboqs state, and a verification happens per certificate parsed, per pseudo
+# claim, per release descriptor, per app-auth assertion — decoding one
+# FOUND_NODE with a full pool is 32 of them. The context holds no per-call
+# state for a *public-key* verification, but it is not documented as
+# re-entrant, so it is thread-local rather than shared.
+_verifiers = threading.local()
+
+
+def verify_signature(message: bytes, signature: bytes, public_key: bytes) -> bool:
+    """Verify an ML-DSA signature, reusing this thread's verifier."""
+    verifier = getattr(_verifiers, "dsa", None)
+    if verifier is None:
+        verifier = oqs.Signature(DSA_ALG)
+        _verifiers.dsa = verifier
+    return verifier.verify(message, signature, public_key)
+
+
 class CryptoIdentity:
 
     def __init__(self) -> None:
@@ -30,8 +49,7 @@ class CryptoIdentity:
         return self._signer.sign(message)
 
     def verify(self, message: bytes, signature: bytes, public_key: bytes) -> bool:
-        with oqs.Signature(DSA_ALG) as verifier:
-            return verifier.verify(message, signature, public_key)
+        return verify_signature(message, signature, public_key)
 
     def generate_kem_keypair(self) -> tuple[bytes, bytes]:
         kem = oqs.KeyEncapsulation(KEM_ALG)
@@ -154,6 +172,13 @@ class CryptoIdentity:
 
 
 class SessionKey:
+    """An AES-256-GCM key, and the cipher built from it.
+
+    The cipher is built **once**. It used to be constructed per call, so the key
+    schedule was rebuilt for every packet in and out — on a link whose key is
+    fixed for its whole life."""
+
+    __slots__ = ("_key", "_aead")
 
     def __init__(self, shared_secret: bytes) -> None:
         self._key = HKDF(
@@ -162,6 +187,7 @@ class SessionKey:
             salt=None,
             info=_HKDF_INFO,
         ).derive(shared_secret)
+        self._aead = AESGCM(self._key)
 
     @classmethod
     def from_key(cls, key: bytes) -> "SessionKey":
@@ -171,6 +197,7 @@ class SessionKey:
             raise ValueError("session key must be 32 bytes")
         obj = cls.__new__(cls)
         obj._key = key
+        obj._aead = AESGCM(key)
         return obj
 
     @property
@@ -178,11 +205,11 @@ class SessionKey:
         return self._key
 
     def encrypt(self, plaintext: bytes, nonce: bytes, aad: bytes) -> tuple[bytes, bytes]:
-        raw = AESGCM(self._key).encrypt(nonce, plaintext, aad)
+        raw = self._aead.encrypt(nonce, plaintext, aad)
         return raw[:-16], raw[-16:]
 
     def decrypt(self, ciphertext: bytes, nonce: bytes, gcm_tag: bytes, aad: bytes) -> bytes:
         try:
-            return AESGCM(self._key).decrypt(nonce, ciphertext + gcm_tag, aad)
+            return self._aead.decrypt(nonce, ciphertext + gcm_tag, aad)
         except Exception as e:
             raise CryptoError("decryption failed") from e

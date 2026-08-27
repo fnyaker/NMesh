@@ -131,6 +131,7 @@ class _ReliableLink:
         self._recv_started: bool = False
         self._reorder: dict[int, bytes] = {}  # seq → payload (out-of-order buffer)
         self._reorder_bytes: int = 0      # what that buffer is actually holding
+        self._sack: int = 0               # selective-ack bitmap, kept in step
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -185,15 +186,24 @@ class _ReliableLink:
         return _MAGIC + header
 
     def _build_ack(self) -> tuple[int, int]:
-        """Build cumulative ack + selective ack bitmap."""
-        ack = (self._recv_next - 1) & 0xFFFFFFFF
+        """Build cumulative ack + selective ack bitmap.
+
+        The bitmap is maintained as frames land rather than rebuilt here: this
+        is called for every frame built *and* every standalone ACK, which
+        `_process_frame` emits after every data frame, and it used to walk the
+        whole reorder buffer each time — up to 1 024 entries at the maximum
+        setting."""
+        return (self._recv_next - 1) & 0xFFFFFFFF, self._sack
+
+    def _recompute_sack(self) -> None:
+        """Rebuild the bitmap from the buffer. Only when the cursor moves."""
         sack = 0
         base = self._recv_next
         for seq in self._reorder:
             offset = (seq - base) & 0xFFFFFFFF
             if 0 < offset <= 32:
                 sack |= (1 << (offset - 1))
-        return ack, sack
+        self._sack = sack
 
     def process_ack(self, ack: int, sack: int) -> None:
         """Process incoming ACK + SACK, removing acknowledged frames.
@@ -202,10 +212,14 @@ class _ReliableLink:
         We use unsigned wraparound distance: a frame s is cumulatively ACKed
         if the forward distance (ack - s) mod 2^32 is small (< _MAX_UNACKED).
         """
+        # Sequence numbers are issued in order, so `_unacked` is in order too:
+        # the cumulative ack clears a *prefix*. Walking the whole window (and
+        # copying its key list) on every incoming frame was O(window) per
+        # datagram, for a window of up to `_MAX_UNACKED`.
         for s in list(self._unacked.keys()):
-            dist = (ack - s) & 0xFFFFFFFF
-            if dist < _MAX_UNACKED:
-                del self._unacked[s]
+            if ((ack - s) & 0xFFFFFFFF) >= _MAX_UNACKED:
+                break
+            del self._unacked[s]
 
         # Selective ACK: bits indicate seqs received above the cumulative ack
         base = (ack + 1) & 0xFFFFFFFF
@@ -278,6 +292,7 @@ class _ReliableLink:
                 self._reorder_bytes -= len(buffered)
                 delivered.append(buffered)
                 self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
+            self._recompute_sack()        # the cursor moved
             self._schedule_ack()
             return delivered
 
@@ -290,6 +305,9 @@ class _ReliableLink:
                 self._reorder[seq] = payload
                 self._reorder_bytes += len(payload)
                 self.reordered += 1
+                offset = (seq - self._recv_next) & 0xFFFFFFFF
+                if 0 < offset <= 32:
+                    self._sack |= (1 << (offset - 1))
             self._schedule_ack()
             return []
 

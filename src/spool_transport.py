@@ -24,7 +24,7 @@ import re
 import secrets
 import struct
 import zlib
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
@@ -103,7 +103,7 @@ class SpoolTransport(BaseTransport):
         self._in_path: str | None = None
         self._out_fd: int | None = None
         self._offset = 0
-        self._decoded: list[Packet] = []
+        self._decoded: deque[Packet] = deque()
         self._closed = False
 
     # -- role binding -----------------------------------------------------
@@ -154,8 +154,22 @@ class SpoolTransport(BaseTransport):
             raise ConnectionError("packet too large for spool record")
         record = _REC.pack(_REC_MAGIC, len(payload),
                            zlib.crc32(payload) & 0xFFFFFFFF) + payload
-        os.write(self._out_fd, record)
-        os.fsync(self._out_fd)
+        # Off the loop thread. The medium is a removable device or a shared
+        # directory by design, so a write and an fsync here can stall for
+        # seconds — and every other task on the node stalls with them
+        # (gotchas §2: slow I/O is bounded, off the loop, and not joined).
+        await asyncio.to_thread(self._write_record, record)
+
+    def _write_record(self, record: bytes) -> None:
+        fd = self._out_fd
+        if fd is None:
+            return
+        # os.write may write fewer bytes than it was given; a short write here
+        # would split a record and the reader would resync past it.
+        view = memoryview(record)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
 
     def _read_new(self) -> bytes:
         if self._in_path is None:
@@ -170,10 +184,10 @@ class SpoolTransport(BaseTransport):
     async def receive(self) -> Packet:
         while True:
             if self._decoded:
-                return self._decoded.pop(0)
+                return self._decoded.popleft()
             if self._closed:
                 raise ConnectionError("spool transport closed")
-            data = self._read_new()
+            data = await asyncio.to_thread(self._read_new)
             if data:
                 payloads, consumed = _parse_records(data)
                 self._offset += consumed
@@ -215,7 +229,7 @@ class SpoolServer(BaseServer):
     async def _accept_loop(self) -> None:
         while not self._closed:
             try:
-                names = os.listdir(self._dir)
+                names = await asyncio.to_thread(os.listdir, self._dir)
             except (FileNotFoundError, OSError):
                 names = []
             self._live = [t for t in self._live if not t._closed]

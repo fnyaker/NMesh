@@ -4,10 +4,19 @@ import os
 
 class NodeID:
 
+    __slots__ = ("_raw", "_int")
+
     def __init__(self, raw: bytes) -> None:
         if len(raw) != 20:
             raise ValueError("NodeID must be 20 bytes")
         self._raw = raw
+        # The id as one 160-bit integer, computed once. `distance` is the sort
+        # key of every routing decision — `get_closest`, `_route_candidates`,
+        # `kad_lookup`, `_handle_find_node` — so it runs thousands of times per
+        # lookup, and it used to be a twenty-iteration Python loop of
+        # shift-and-or per call. A NodeID is immutable, so this is free after
+        # the first read.
+        self._int = int.from_bytes(raw, "big")
 
     @classmethod
     def generate(cls) -> 'NodeID':
@@ -22,10 +31,7 @@ class NodeID:
         return cls(bytes.fromhex(hex_str))
 
     def distance(self, other: 'NodeID') -> int:
-        result = 0
-        for a, b in zip(self._raw, other._raw):
-            result = (result << 8) | (a ^ b)
-        return result
+        return self._int ^ other._int
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, NodeID):
