@@ -6,10 +6,6 @@ from .ip_utils import split_host_port
 
 _FRAME = struct.Struct('!H')
 _READ_TIMEOUT = 60.0
-# A send to a peer that has stopped draining (a link gone half-dead, a NAT
-# mapping lost) would otherwise wedge the sender forever: the write buffer
-# fills, drain() never returns, and every later send on that link blocks.
-_WRITE_TIMEOUT = 30.0
 # A dial to an unreachable address (a NATted peer's private IP learned via
 # gossip, a dead host) must fail fast: with no cap, the OS SYN timeout holds
 # the caller — _ensure_route_to / join-block tries — for minutes.
@@ -51,9 +47,6 @@ class TCPTransport(BaseTransport):
         option("read_timeout", "float", _READ_TIMEOUT,
                "A link silent for this long is treated as dead. Must stay above "
                "the keepalive interval, or healthy links get reaped.",
-               minimum=5.0, maximum=600.0, unit="s"),
-        option("write_timeout", "float", _WRITE_TIMEOUT,
-               "Seconds before a send to a non-draining peer is given up.",
                minimum=5.0, maximum=600.0, unit="s"),
         option("nodelay", "bool", True,
                "Send small packets immediately instead of coalescing them "
@@ -153,16 +146,8 @@ class TCPTransport(BaseTransport):
         # two-byte length. The asyncio transport gathers these without an
         # intermediate buffer, and TCP_NODELAY is already set so this does not
         # cost an extra segment.
-        # asyncio.timeout (not wait_for): wait_for can lose an outer
-        # cancellation when its inner write completes in the same loop step, so
-        # a cancelled send loop would silently re-block instead of exiting.
-        # asyncio.timeout propagates cancellation cleanly (see gotchas 3b).
-        try:
-            async with asyncio.timeout(self.setting("write_timeout")):
-                self._writer.writelines((_FRAME.pack(len(data)), data))
-                await self._writer.drain()
-        except asyncio.TimeoutError:
-            raise ConnectionError("write timeout")
+        self._writer.writelines((_FRAME.pack(len(data)), data))
+        await self._writer.drain()
 
     async def receive(self) -> Packet:
         if self._reader is None:
