@@ -269,6 +269,11 @@ UDP is connectionless and unreliable → a **reliability layer**:
   started yet — grew it without limit. Overflow **drops**: `_process_frame` runs
   inside `datagram_received`, a synchronous callback that must never block, and
   UDP promises no delivery anyway.
+- **The send window backpressures, it never overflows.** `_unacked` is bounded
+  (`_MAX_UNACKED`); while it is full the send loop holds the next frame and
+  waits on an `asyncio.Event` that `process_ack` sets when a slot frees, rather
+  than sending a frame it cannot track. A frame sent *untracked* is never
+  retransmitted and never ACKed — silent loss under load (see `gotchas.md` §8c).
 - `receive()` waits on an `asyncio.Event`, not on a poll. The poll cost up to
   10 ms of latency per packet and 100 timer wakeups a second **per link** at
   complete rest; with `_MAX_PEERS_UDP` links that is 12 800 wakeups a second
