@@ -286,8 +286,8 @@ is restarted. That is the normal path for a manual update.
 
 ### Service managers handled
 
-systemd (system and user), OpenRC, launchd. None of the three → the script says
-so and prints the command to run by hand; it does not fail for it, and the
+systemd (system and user), OpenRC, launchd, Termux. None of them → the script
+says so and prints the command to run by hand; it does not fail for it, and the
 installation stays valid.
 
 A trap that is handled: `systemctl` present **without** systemd behind it (the
@@ -303,6 +303,27 @@ update and then **exit to come back on the new code**. Replacing the tree does
 nothing to a process that already has the old code loaded, so leaving is the
 update. Without that variable the node stays up and says to restart it by hand —
 exiting with nothing to catch it would be worse than running the old version.
+
+Termux (Android) has no service manager the script may drive, so the installer
+writes its own: a supervise loop (`termux-service.sh`, next to `start.sh`) that
+runs the node through `start.sh` and restarts it five seconds after any exit —
+the same contract `Restart=always` gives elsewhere, including the exit-to-update
+above. Start at boot is a hook in `~/.termux/boot/`: the Termux:Boot app runs
+it, and the hook backgrounds the loop because Termux:Boot runs its scripts one
+after another. The loop takes a wakelock when `termux-wake-lock` exists (the
+Termux:API app provides it) and bounds its own log at 1 MiB. Stopping is two
+`pkill`s, supervisor first: kill the node alone and the loop brings it back
+behind the uninstaller.
+
+Two collisions with the platform are handled in the installer itself. Termux
+exports `PREFIX` for its own tree, and bash keeps the export flag on a plain
+assignment — so `PREFIX=/install/path ./install.sh` would leak the installation
+path into every child, and the delegated `start.sh` would stop recognising
+Android. The installer therefore captures Termux's `PREFIX` as `ENV_PREFIX`
+before touching the name, and hands it back inside the delegation subshell. And
+with no root and no sudo, `chown`ing the tree to the account that already owns
+it is a no-op that *fails*: `lock_down` skips the chown when the node's account
+is the caller's.
 
 The tests source `install.sh` with `NMESH_INSTALL_LIB=1` and exercise init
 detection, privileges, paths, account creation, the generated units and the tree
