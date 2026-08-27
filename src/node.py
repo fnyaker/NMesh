@@ -193,6 +193,18 @@ _MAX_PEERS             = 128    # open links, not distinct nodes: a node may hol
 _MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
 _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
 _MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
+# Decrypted application payloads waiting for whoever calls receive_data(). A
+# node relaying with no app attached has no consumer at all, so without a
+# ceiling any peer holding an E2E session grows this until the node dies. The
+# E2E plane offers no delivery guarantee, so overflow drops rather than blocks —
+# awaiting a full queue inside _handle_data would freeze the ingress link.
+_MAX_DATA_QUEUE         = 512
+# Live E2E sessions. `src_id` is checked against the key inside the payload, not
+# against the link, so an adversary mints a fresh identity per handshake and
+# each one used to add a permanent entry — and re-wrote the whole session store
+# on the way (see _persist_state). Bounded and LRU, with anything that still has
+# data queued for it held back from eviction.
+_MAX_E2E_SESSIONS       = 512
 _ON_DEMAND_TIMEOUT     = 5.0    # transport open + handshake
 _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
 _KAD_LOOKUP_MAX_ROUNDS = 4
@@ -349,6 +361,7 @@ _RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code T
 _RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
 _RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
 _MAX_RELAY_PEERS   = 64        # bounded virtual (relayed) peer table
+_RELAY_QUEUE_MAX   = 32        # packets a relayed tunnel may hold undelivered
 
 # Hole punching
 _PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
@@ -1043,7 +1056,11 @@ class RelayedTransport(BaseTransport):
         self._node = node
         self._remote = remote
         self._via = via
-        self._queue: asyncio.Queue = asyncio.Queue()
+        # Bounded: `feed` is reached from `_handle_relay_carry`, which runs
+        # *before* the authentication gates, so an unauthenticated peer that
+        # knows the seeker's id can push into this. A relayed handshake is a
+        # handful of packets; anything past that is not a handshake.
+        self._queue: asyncio.Queue = asyncio.Queue(_RELAY_QUEUE_MAX)
         self._closed = False
 
     async def connect(self, address: str) -> None:  # never dialled directly
@@ -1060,15 +1077,24 @@ class RelayedTransport(BaseTransport):
         await self._via.send(carrier)
 
     def feed(self, inner: Packet) -> None:
-        if not self._closed:
+        if self._closed:
+            return
+        try:
             self._queue.put_nowait(inner)
+        except asyncio.QueueFull:
+            pass       # the tunnel is not a buffer — drop, the join retries
 
     async def receive(self) -> Packet:
         while True:
             if self._closed:
                 raise ConnectionError("relayed transport closed")
+            # asyncio.timeout, not wait_for: on a path that must stay
+            # cancellable, wait_for can swallow the outer cancellation when the
+            # inner get completes in the same loop step, and the receive task
+            # then never dies (gotchas.md §3b).
             try:
-                return await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                async with asyncio.timeout(1.0):
+                    return await self._queue.get()
             except asyncio.TimeoutError:
                 continue
 
@@ -1155,7 +1181,8 @@ class MeshNode:
                             if cert_store_path else CertStore(self._id))
         self._cert_store.add(self._identity.self_signed_cert())
         self._seen_msgs: OrderedDict[int, float] = OrderedDict()
-        self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue()
+        self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
+            _MAX_DATA_QUEUE)
         self._e2e_sessions: dict[NodeID, SessionKey] = {}
         self._e2e_pending_kem: dict[NodeID, bytes] = {}
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
@@ -1774,7 +1801,7 @@ class MeshNode:
             # Cap half-open destinations so an app flooding unreachable targets
             # can't exhaust memory; evict the oldest destination if needed.
             if target not in pending and len(pending) >= _MAX_PENDING_TARGETS:
-                del pending[next(iter(pending))]
+                self._forget_e2e(next(iter(pending)))
             queue = pending.setdefault(target, [])
             queue.append(payload)
             if len(queue) > _MAX_PENDING_PER_TARGET:
@@ -2619,6 +2646,41 @@ class MeshNode:
         # itself remains undiallable. Try the refreshed neighbor set once.
         return await self._send_to_candidates(
             packet, self._route_candidates(target))
+
+    def _forget_e2e(self, target: NodeID) -> None:
+        """Drop everything we hold for one destination, in one place.
+
+        The four tables describe one relationship, so they have to be forgotten
+        together: evicting only the queued data left an ML-KEM secret, a nonce
+        and an attempt timestamp behind for a target nothing would ever mention
+        again, and those three had no bound of their own."""
+        self._e2e_sessions.pop(target, None)
+        self._e2e_pending_kem.pop(target, None)
+        self._e2e_pending_nonce.pop(target, None)
+        self._e2e_pending_data.pop(target, None)
+        self._e2e_attempt.pop(target, None)
+        self._e2e_rekey.pop(target, None)
+
+    def _keep_e2e_session(self, src: NodeID, session: SessionKey) -> None:
+        """File a live E2E session, evicting the least recently used if needed.
+
+        `src` is proven against the key inside the handshake, not against the
+        link it arrived on, so an adversary mints a fresh identity per handshake
+        and every one of them wants an entry. A destination with data still
+        queued is never the one evicted: dropping it would strand the backlog
+        and the retry loop would re-handshake for it immediately."""
+        if src in self._e2e_sessions:
+            self._e2e_sessions[src] = session
+            return
+        while len(self._e2e_sessions) >= _MAX_E2E_SESSIONS:
+            victim = next((nid for nid in self._e2e_sessions
+                           if nid not in self._e2e_pending_data), None)
+            if victim is None:
+                # Every session is backing a queue. Take the oldest anyway —
+                # a bound that can be switched off is not a bound.
+                victim = next(iter(self._e2e_sessions))
+            self._forget_e2e(victim)
+        self._e2e_sessions[src] = session
 
     def _should_initiate_e2e(self, target: NodeID) -> bool:
         """True if we should (re)send an E2E handshake to ``target``: no session
@@ -4533,10 +4595,17 @@ class MeshNode:
                 plaintext = packet.decrypt_payload(candidate)
             except Exception:
                 return
-            self._e2e_sessions[src] = candidate
+            self._keep_e2e_session(src, candidate)
             del self._e2e_rekey[src]
             self._persist_state()
-        await self._data_queue.put((src, plaintext))
+        try:
+            self._data_queue.put_nowait((src, plaintext))
+        except asyncio.QueueFull:
+            # Dropped on purpose. We are inside this peer's receive loop, so
+            # awaiting a full queue would freeze the link — and a node with no
+            # app attached never drains it at all. The E2E plane promises no
+            # delivery; the app layer already tolerates loss.
+            self._metrics.total.on_drop()
 
     async def _handle_ping(self, peer: _Peer, packet: Packet) -> None:
         if not packet.payload:
@@ -5918,7 +5987,9 @@ class MeshNode:
             # produces such a packet, so the candidate just expires.
             self._e2e_rekey_store(src, SessionKey(shared_secret))
         else:
-            self._e2e_sessions[src] = SessionKey(shared_secret)
+            self._keep_e2e_session(src, SessionKey(shared_secret))
+            if src not in self._e2e_sessions:
+                return          # evicted on the way in — nothing to ACK under
         ack_sig = self._identity.sign(nonce + ciphertext + self._identity.dsa_public_key)
         ack_payload = _encode_e2e_handshake_ack(
             nonce, ciphertext, self._identity.dsa_public_key, my_cert_chain, ack_sig
@@ -5979,7 +6050,7 @@ class MeshNode:
             return
         self._e2e_pending_nonce.pop(src, None)
         shared_secret = self._identity.kem_decapsulate(ciphertext, kem_secret)
-        self._e2e_sessions[src] = SessionKey(shared_secret)
+        self._keep_e2e_session(src, SessionKey(shared_secret))
         pending = self._e2e_pending_data.pop(src, [])
         for payload in pending:
             pkt = Packet.create_encrypted(DATA, self._id.raw, src.raw, payload,

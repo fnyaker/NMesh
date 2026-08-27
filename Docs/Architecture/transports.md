@@ -252,6 +252,22 @@ UDP is connectionless and unreliable → a **reliability layer**:
   delivered; ahead → a bounded buffer (`_MAX_REORDER`); behind → a duplicate,
   re-ACK. No set of seen sequence numbers (bounded state whatever a hostile peer
   sends; the 2³² wrap no longer freezes the link).
+- **Both buffers are bounded in bytes as well as in entries**, whichever binds
+  first: `_MAX_REORDER_BYTES` for the out-of-order buffer and
+  `_MAX_DECODED_BYTES` for the decoded packets waiting on `receive()`. A frame
+  count is not a memory bound — a frame carries up to 60 000 bytes, so 256 of
+  them is 15 MB per link, and the sender chooses every byte by sending sequence
+  numbers ahead of the cursor and never filling the gap. The decode queue has
+  the same shape from the other side: nothing couples arrival to consumption, so
+  a sender faster than `_Peer._loop` — or a transport whose consumer has not
+  started yet — grew it without limit. Overflow **drops**: `_process_frame` runs
+  inside `datagram_received`, a synchronous callback that must never block, and
+  UDP promises no delivery anyway.
+- `receive()` waits on an `asyncio.Event`, not on a poll. The poll cost up to
+  10 ms of latency per packet and 100 timer wakeups a second **per link** at
+  complete rest; with `_MAX_PEERS_UDP` links that is 12 800 wakeups a second
+  doing nothing. `close()` and the keepalive's death verdict both set the event,
+  so a parked `receive()` is never left waiting for a link that has gone.
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
   killed when the phases lined up (route flapping).
@@ -266,6 +282,11 @@ The mesh also runs over a **directory/file** (`spool://DIR`): each node writes
 its outgoing packets to a file and polls (`_POLL = 0.02 s`) the peer's file. For
 offline / very high latency links ("a USB stick carried on foot"). The same
 invite/handshake/E2E, with no socket.
+
+Whoever can write to that directory decides how many sessions appear, so
+`SpoolServer` bounds both: `_MAX_SESSIONS` live links at once, `_MAX_SEEN`
+remembered names, and a directory whose name is not exactly what `connect`
+writes (`sess-` + 16 hex characters, `_SESSION_RE`) is not a session at all.
 
 ## NAT hole punching (in `node.py`)
 

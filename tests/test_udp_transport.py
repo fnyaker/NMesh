@@ -13,7 +13,8 @@ import pytest
 from src.udp_transport import (
     UDPTransport, UDPServer, _ReliableLink, _FRAME, _MAGIC,
     FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE,
-    _MAX_UNACKED, _MAX_REORDER, _MAX_SEND_QUEUE,
+    _MAX_UNACKED, _MAX_REORDER, _MAX_REORDER_BYTES,
+    _MAX_DECODED_BYTES, _MAX_SEND_QUEUE,
 )
 from src.packet import Packet
 
@@ -86,6 +87,26 @@ class TestReliableLink:
             link.process_incoming(_MAX_REORDER + 100 + i, FLAG_DATA, b"x")
         assert len(link._reorder) <= _MAX_REORDER
 
+    def test_reorder_buffer_bounded_in_bytes_not_only_frames(self):
+        """A frame count is not a memory bound.
+
+        A frame carries up to 60 000 bytes, so 256 of them is 15 MB per link —
+        and the sender chooses every byte by sending sequence numbers ahead of
+        the cursor and never filling the gap."""
+        link = _ReliableLink()
+        big = b"x" * 60_000
+        for i in range(_MAX_REORDER):
+            link.process_incoming(1_000 + i, FLAG_DATA, big)
+        assert link._reorder_bytes <= _MAX_REORDER_BYTES
+        assert sum(len(v) for v in link._reorder.values()) == link._reorder_bytes
+
+    def test_reorder_bytes_released_when_the_gap_fills(self):
+        link = _ReliableLink()
+        link.process_incoming(1, FLAG_DATA, b"y" * 100)
+        assert link._reorder_bytes == 100
+        link.process_incoming(0, FLAG_DATA, b"y" * 100)   # fills the gap
+        assert link._reorder_bytes == 0
+
     def test_keepalive_flag_no_delivery(self):
         link = _ReliableLink()
         delivered = link.process_incoming(0, FLAG_KEEPALIVE, b"")
@@ -149,6 +170,44 @@ async def udp_pair():
 
 
 class TestUDPTransport:
+    async def test_decoded_queue_bounded_in_bytes(self):
+        """Nothing couples arrival to consumption, so the decode queue has to
+        bound itself: a sender faster than the receive loop — or a transport
+        whose consumer never started — grew this without limit."""
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        big = b"z" * 59_000
+        for seq in range(200):
+            packet = make_packet(big).pack()
+            transport._process_frame(
+                _MAGIC + _FRAME.pack(seq, 0, 0, FLAG_DATA, len(packet)) + packet)
+        assert transport._decoded_bytes <= _MAX_DECODED_BYTES
+
+    async def test_receive_is_woken_not_polled(self):
+        """A parked receive() returns as soon as a datagram lands.
+
+        The old poll cost 10 ms of latency per packet and 100 wakeups a second
+        per link at rest; with 128 links that is 12 800 timer wakeups doing
+        nothing."""
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        waiter = asyncio.create_task(transport.receive())
+        await asyncio.sleep(0)
+        packet = make_packet(b"woken").pack()
+        transport._process_frame(
+            _MAGIC + _FRAME.pack(0, 0, 0, FLAG_DATA, len(packet)) + packet)
+        got = await asyncio.wait_for(waiter, timeout=0.2)
+        assert got.payload == make_packet(b"woken").payload
+
+    async def test_close_wakes_a_parked_receive(self):
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        waiter = asyncio.create_task(transport.receive())
+        await asyncio.sleep(0)
+        await transport.close()
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(waiter, timeout=0.2)
+
     async def test_send_receive(self, udp_pair):
         server, srv_transport, client = udp_pair
         assert srv_transport is not None, "server transport was not created"

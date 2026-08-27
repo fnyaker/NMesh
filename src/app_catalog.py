@@ -30,6 +30,11 @@ from .app_channel import APP_ID_LEN
 
 MAX_APPS = 1024          # catalog entries (distinct app ids)
 MAX_INSTALLED = 256      # locally installed apps
+# Authors the catalogue guarantees room for. One key must not be able to own
+# the table: publishing is free (a release is signed by the key it names, and
+# any node can sign its own), so "first come, held for ever" is a catalogue a
+# single peer fills and nobody else can ever appear in.
+MIN_AUTHORS = 16
 
 
 class AppCatalog:
@@ -41,6 +46,9 @@ class AppCatalog:
 
     def __init__(self, max_apps: int = MAX_APPS) -> None:
         self._max = max_apps
+        # Insertion-ordered, and re-ordered on every announce that changes our
+        # view, so the front of the dict is the app nobody has mentioned for
+        # longest. That is what makes the eviction below mean something.
         self._apps: dict[bytes, dict] = {}   # app_id -> entry
 
     def offer(self, release_bytes: bytes, verify) -> str | None:
@@ -61,8 +69,8 @@ class AppCatalog:
                 return None            # older or same — ignore (anti-rollback)
             outcome = "updated"
         else:
-            if len(self._apps) >= self._max:
-                return None            # catalog full — reject new app ids
+            if len(self._apps) >= self._max and not self._make_room(doc["author"]):
+                return None
             outcome = "new"
         self._apps[app_id] = {
             "app_id": app_id,
@@ -74,7 +82,50 @@ class AppCatalog:
             "root_key": doc["root_key"],
             "ts": doc["ts"],
         }
+        # Freshly heard of, so it goes to the back of the queue for eviction.
+        # An app nobody announces any more is the one we should forget first.
+        self._touch(app_id)
         return outcome
+
+    # -- making room ------------------------------------------------------
+    # Publishing costs nothing an adversary does not already have: a release is
+    # signed by the key it names, and any node can sign its own. So a full
+    # catalogue that simply refuses newcomers is a catalogue one peer can fill
+    # and hold for the life of the process, after which no app on the network is
+    # discoverable here. It has to make room instead — but not in a way one key
+    # can drive, hence the per-author share.
+
+    def _touch(self, app_id: bytes) -> None:
+        entry = self._apps.pop(app_id, None)
+        if entry is not None:
+            self._apps[app_id] = entry
+
+    def _author_share(self) -> int:
+        """Entries one author may hold before it is evicting only itself."""
+        return max(1, self._max // MIN_AUTHORS)
+
+    def _make_room(self, author: bytes) -> bool:
+        """Evict one entry so ``author`` can be filed. False if none may go."""
+        counts: dict[bytes, int] = {}
+        for entry in self._apps.values():
+            counts[entry["author"]] = counts.get(entry["author"], 0) + 1
+        # An author already over its share pays for its own newcomer; otherwise
+        # whoever is over theirs does, oldest first. Only when nobody is over
+        # does the plain oldest entry go.
+        mine = counts.get(author, 0)
+        if mine >= self._author_share():
+            victim = next((aid for aid, e in self._apps.items()
+                           if e["author"] == author), None)
+        else:
+            share = self._author_share()
+            victim = next((aid for aid, e in self._apps.items()
+                           if counts.get(e["author"], 0) > share), None)
+            if victim is None:
+                victim = next(iter(self._apps), None)
+        if victim is None:
+            return False
+        del self._apps[victim]
+        return True
 
     def get(self, app_id: bytes) -> dict | None:
         return self._apps.get(app_id)
