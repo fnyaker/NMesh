@@ -18,6 +18,7 @@ from src.node import (
     _PUNCH_PROBE_MAGIC, _PUNCH_ACK_MAGIC,
     _PunchState, _PUNCH_MAX_PENDING,
 )
+from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 from src.packet import Packet
 from tests.conftest import make_node, FakeTransport
@@ -177,3 +178,52 @@ class TestPunchState:
 
     def test_max_pending_constant(self):
         assert _PUNCH_MAX_PENDING == 16
+
+
+class TestPunchDatagramsAreMetered:
+    """A raw punch datagram is the cheapest thing an attacker can send: no
+    link, no session, no handshake. Each one that names a node we know used to
+    buy a full ML-DSA verification, and each one that verified bought a
+    *signature* and a ~3.4 kB answer to whatever source address it claimed."""
+
+    async def test_a_datagram_flood_is_capped_per_source(self):
+        from src.node import (_PUNCH_DGRAM_MAX, _build_punch_probe,
+                              _PUNCH_PROBE_MAGIC)
+        node, _ = await make_node()
+        node._punch_enabled = True
+        addr = ("198.51.100.7", 40000)
+        allowed = sum(1 for _ in range(_PUNCH_DGRAM_MAX * 4)
+                      if node._punch_datagram_allowed(addr))
+        assert allowed <= _PUNCH_DGRAM_MAX
+        # A different source has its own budget: a shared limit would let one
+        # sprayer lock out every real peer.
+        assert node._punch_datagram_allowed(("198.51.100.8", 40000))
+        await node.stop()
+
+    async def test_a_probe_names_its_recipient_and_its_minute(self):
+        """Signing only `magic ‖ src ‖ nonce` made every probe a token valid at
+        any node, for ever."""
+        from src.node import (_punch_signed_blob, _punch_minutes,
+                              _PUNCH_PROBE_MAGIC)
+        sender = CryptoIdentity()
+        src = NodeID.from_public_key(sender.dsa_public_key).raw
+        intended, elsewhere = os.urandom(20), os.urandom(20)
+        nonce = os.urandom(16)
+        minute = _punch_minutes()[0]
+        signature = sender.sign(_punch_signed_blob(
+            _PUNCH_PROBE_MAGIC, src, intended, nonce, minute))
+
+        ok = sender.verify(_punch_signed_blob(_PUNCH_PROBE_MAGIC, src,
+                                              intended, nonce, minute),
+                           signature, sender.dsa_public_key)
+        assert ok
+        # …and the same bytes replayed at another node do not verify.
+        assert not sender.verify(
+            _punch_signed_blob(_PUNCH_PROBE_MAGIC, src, elsewhere, nonce,
+                               minute),
+            signature, sender.dsa_public_key)
+        # …nor an hour later.
+        assert not sender.verify(
+            _punch_signed_blob(_PUNCH_PROBE_MAGIC, src, intended, nonce,
+                               minute - 60),
+            signature, sender.dsa_public_key)

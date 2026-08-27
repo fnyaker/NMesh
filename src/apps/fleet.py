@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
 import secrets
@@ -113,6 +114,13 @@ MAX_ASSERTION = 32 * 1024
 SID_LEN = 16
 RID_LEN = 8
 MAX_SHELLS = 4                    # concurrent shells this node will host
+# Signed requests one sender may make us verify per window. Every frame in
+# `_SIGNED_INBOUND` costs an ML-DSA verification before a handler sees it, and a
+# node id is free to mint. Far above any real operator (a status refresh, an
+# update, a shell, a scan) and far below a flood.
+MAX_REQUESTS = 64
+REQUEST_WINDOW = 10.0
+MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
 SHELL_CHUNK = 8192
 SHELL_INPUT_MAX = 8192
@@ -355,6 +363,8 @@ class FleetApp:
         self._local_console = local_console
         self._console_calls: dict[str, dict] = {}       # operator side, by rid
         self._console_hosted: dict[str, int] = {}       # agent side, per peer
+        # node id -> (count, window start). See _request_allowed.
+        self._request_rate: dict[bytes, tuple[int, float]] = {}
 
     # -- lifecycle --------------------------------------------------------
 
@@ -488,6 +498,9 @@ class FleetApp:
             self._dispatch_shell_stream(src, kind, body)
             return
         if kind in _SIGNED_INBOUND:
+            # Before the signature check, not after: verifying is the cost.
+            if not self._request_allowed(src):
+                return
             parsed = self._open_signed(src, kind, body)
             if parsed is None:
                 return
@@ -556,6 +569,31 @@ class FleetApp:
         self._reply(target, ERROR, {"rid": rid, "error": error[:256]})
 
     # -- authorisation ----------------------------------------------------
+
+    def _request_allowed(self, src: NodeID) -> bool:
+        """Per-sender ceiling on signed requests.
+
+        Every one of these costs an ML-DSA verification in `_open_signed`
+        before any handler sees it, and node ids are free to mint — so without a
+        ceiling a stranger can spend our CPU without limit and, on the enrolment
+        plane, fill the queue a human is supposed to read. Bounded and pruned,
+        like the node's own gossip valves."""
+        now = time.monotonic()
+        table = self._request_rate
+        for key in [k for k, (_, ws) in table.items()
+                    if now - ws > REQUEST_WINDOW]:
+            del table[key]
+        while len(table) > MAX_REQUEST_SENDERS:
+            table.pop(next(iter(table)), None)
+        key = src.raw
+        count, window = table.get(key, (0, now))
+        if now - window > REQUEST_WINDOW:
+            count, window = 0, now
+        if count >= MAX_REQUESTS:
+            table[key] = (count, window)
+            return False
+        table[key] = (count + 1, window)
+        return True
 
     def _authorised(self, src: NodeID, capability: str, rid: str) -> bool:
         """Gate 2: the ledger. Gate 3 (the signature) already passed by the time
@@ -1338,12 +1376,12 @@ class FleetApp:
     def _on_scan_result(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "scan"):
             return
-        hosts = document.get("hosts")
+        hosts = _clean_scan_hosts(document.get("hosts"))
         networks = document.get("networks")
         rejected = document.get("rejected")
         truncated = document.get("truncated")
         self._emit(ScanReceived(src, _rid(document),
-                                hosts[:256] if isinstance(hosts, list) else [],
+                                hosts,
                                 networks[:32] if isinstance(networks, list) else [],
                                 rejected[:32] if isinstance(rejected, list) else [],
                                 truncated if isinstance(truncated, int) else 0))
@@ -1785,6 +1823,35 @@ def _dim(value) -> int:
         return 24
 
 
+def _clean_scan_hosts(raw) -> list[dict]:
+    """A scan reply, validated before an operator can pick from it.
+
+    The `ip` is the field that decides where a credential goes, so it has to be
+    a literal address here as well as in `_clean_targets` — checking only at the
+    second gate would mean the console had already offered the operator a row
+    naming somewhere else. The label is the scanning node's to choose and is
+    shown beside the address, never instead of it (`Docs/Apps/fleet`)."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw[:256]:
+        if not isinstance(entry, dict) or not _is_literal_address(entry.get("ip")):
+            continue
+        out.append(entry)
+    return out
+
+
+def _is_literal_address(value) -> bool:
+    """True for an IPv4 or IPv6 address written out, nothing else."""
+    if not isinstance(value, str) or not 0 < len(value) <= 64:
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _clean_targets(raw) -> list[dict]:
     """Validate a provisioning target list from the network."""
     if not isinstance(raw, list):
@@ -1794,7 +1861,13 @@ def _clean_targets(raw) -> list[dict]:
         if not isinstance(entry, dict):
             continue
         ip = entry.get("ip")
-        if not isinstance(ip, str) or not 0 < len(ip) <= 64:
+        # A literal address, not "any string". These arrive from a managed
+        # node's LAN scan, and the operator picks from what comes back — so a
+        # hostile scan could answer with `collector.attacker.example` under a
+        # label reading `192.168.1.42`, and the SSH password typed for that
+        # deploy would be offered to whatever answered. A scan produces
+        # addresses; anything else is not a scan result.
+        if not _is_literal_address(ip):
             continue
         try:
             port = int(entry.get("port") or 22)

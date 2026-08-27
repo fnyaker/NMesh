@@ -252,13 +252,45 @@ UDP is connectionless and unreliable → a **reliability layer**:
   delivered; ahead → a bounded buffer (`_MAX_REORDER`); behind → a duplicate,
   re-ACK. No set of seen sequence numbers (bounded state whatever a hostile peer
   sends; the 2³² wrap no longer freezes the link).
+- **Both buffers are bounded in bytes as well as in entries**, whichever binds
+  first: `_MAX_REORDER_BYTES` for the out-of-order buffer and
+  `_MAX_DECODED_BYTES` for the decoded packets waiting on `receive()`. A frame
+  count is not a memory bound — a frame carries up to 60 000 bytes, so 256 of
+  them is 15 MB per link, and the sender chooses every byte by sending sequence
+  numbers ahead of the cursor and never filling the gap. The decode queue has
+  the same shape from the other side: nothing couples arrival to consumption, so
+  a sender faster than `_Peer._loop` — or a transport whose consumer has not
+  started yet — grew it without limit. Overflow **drops**: `_process_frame` runs
+  inside `datagram_received`, a synchronous callback that must never block, and
+  UDP promises no delivery anyway.
+- `receive()` waits on an `asyncio.Event`, not on a poll. The poll cost up to
+  10 ms of latency per packet and 100 timer wakeups a second **per link** at
+  complete rest; with `_MAX_PEERS_UDP` links that is 12 800 wakeups a second
+  doing nothing. `close()` and the keepalive's death verdict both set the event,
+  so a parked `receive()` is never left waiting for a link that has gone.
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
   killed when the phases lined up (route flapping).
 - `UDPServer`: **one shared socket**, multiplexed by source `(ip, port)`. A
   datagram from an unknown source creates a `UDPTransport` +
   `on_new_connection` — like a TCP accept. `NPPB`/`NPAK`/STUN datagrams are
-  routed to `on_raw_datagram` (hole punch), not to a reliable transport.
+  routed to `on_raw_datagram` (hole punch), not to a reliable transport. The
+  dispatch table counts **live** transports: a closed one releases its slot
+  (`remove_transport` on close and on the keepalive's death verdict,
+  `_reap_closed` when the table is read), because counting the dead meant 128
+  datagrams from 128 source ports disabled UDP for the life of the process,
+  including for a known peer whose link had died and wanted to come back.
+- **Sequence numbers start random**, and the receiver learns the peer's starting
+  point from the first frame of any kind — which is the keepalive `connect()`
+  sends before any data, so the cursor is set before a data frame can arrive.
+  The frame header is *not* authenticated (only the mesh Packet inside it is)
+  and a link's endpoints are public gossip, so a cursor starting at zero was a
+  free target: one spoofed frame at the next expected sequence advanced it, and
+  the real peer's next frame was then dropped as a duplicate. Randomising does
+  not make the header authentic — that would be a design change — it removes the
+  guess. A delivered payload that is not a decodable packet is counted
+  (`undecodable`, visible in `stats()`): a real peer's frames decode, so it is a
+  fault worth seeing rather than silence.
 
 ## Store-and-forward (`spool_transport.py`)
 
@@ -266,6 +298,11 @@ The mesh also runs over a **directory/file** (`spool://DIR`): each node writes
 its outgoing packets to a file and polls (`_POLL = 0.02 s`) the peer's file. For
 offline / very high latency links ("a USB stick carried on foot"). The same
 invite/handshake/E2E, with no socket.
+
+Whoever can write to that directory decides how many sessions appear, so
+`SpoolServer` bounds both: `_MAX_SESSIONS` live links at once, `_MAX_SEEN`
+remembered names, and a directory whose name is not exactly what `connect`
+writes (`sess-` + 16 hex characters, `_SESSION_RE`) is not a session at all.
 
 ## NAT hole punching (in `node.py`)
 
@@ -293,7 +330,43 @@ coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
    automatically triggers an attempt at a direct link (rate-limited per target,
    `_UPGRADE_COOLDOWN`).
 
+### What a punch probe signs
+
+`magic ‖ src_id ‖ dst_id ‖ nonce ‖ minute` — the **recipient** and the minute,
+not just the sender. Signing `magic ‖ src ‖ nonce` alone made every probe a
+bearer token: captured once, it verified at any node that knew the sender, for
+ever, and each replay bought a signature and a ~3.4 kB ack sent to whatever
+source address the replayer forged. The receiver accepts the current minute or
+the previous one, so a probe crossing a boundary is not treated as a replay.
+
+Raw punch datagrams are also metered per **source address**
+(`_punch_datagram_allowed`) before any verification — there is no peer and no
+identity to key on, and they are the only expensive thing reachable with no link
+at all. A spoofed source therefore spends only the budget of the address it
+forged.
+
 ## Address discovery & reachability
+
+**A STUN response is only believed if we sent that request.**
+`_send_nat_keepalive` records the transaction id it generated and the server it
+went to (`_note_stun_request`); `_handle_stun_keepalive_response` requires both
+to match and consumes the entry. `stun._parse_binding_response` *does* compare
+the transaction id — but it was handed `data[8:20]`, the id out of the datagram
+being checked, which makes the comparison a tautology. The listener socket is
+unconnected, so that left any host able to set the address this node believes it
+has, and then advertises to the mesh. The lookup also goes through
+`ip_utils.bounded_getaddrinfo`, not `loop.getaddrinfo`: this was the one call
+site in the tree still using the executor asyncio joins at shutdown (gotchas §2).
+
+**An AutoNAT answer is only believed if we asked the question.** `probe_reachability`
+records `(peer id, scheme)` with a short TTL (`_note_reach_probe`), and
+`_handle_reach_probe_ack` requires a match, consumes it, and ignores anything
+else. `_inbound_schemes` decides what the node advertises and whether it offers
+itself as a relay, so an unsolicited "yes" from one peer could make a NATted node
+announce itself as reachable — a black hole for everyone who then routes through
+it. Contrast the *passive* signal in `_handle_handshake`: an inbound connection
+that authenticated is proof, not a claim.
+
 
 - `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it
   sees → our public address as seen from there (bounded addition to

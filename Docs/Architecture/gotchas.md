@@ -159,6 +159,42 @@ Measured: a single unroutable packet froze the link for 4.95 s.
 acquisition in a bounded background task (`_MAX_DEFERRED_ROUTES`, cancelled by
 `stop()`). **Never await `_ensure_route_to` from a packet handler.**
 
+### 10b. Four more handlers were still doing the slow thing inline
+
+§10 named the rule — **never await `_ensure_route_to` from a packet handler** —
+and four places still broke it, each in its own way, long after the rule was
+written:
+
+- `_handle_release_fetch` called `_route_outbound` **without `blocking=False`**,
+  the one sibling handler that did not pass it. `src_id` is not authenticated,
+  so a stranger's unroutable id was exactly the packet that cost most: up to
+  `_ON_DEMAND_TIMEOUT` of frozen link, `_RELEASE_SERVE_MAX` times per window.
+- `_handle_reach_probe` awaited the AutoNAT dial-back: two bounded waits of
+  `_REACH_DIAL_TIMEOUT` each, five allowed per window — so the peer's link was
+  held busy for longer than its own rate window lasts, and never caught up.
+- `_send_to_candidates` awaited `_drop_failed_peer`, which awaited
+  `peer.stop()` (bounded at `_PEER_STOP_TIMEOUT`) and then closed the
+  transport. A forward tries up to `_ROUTE_SEND_FANOUT` candidates, so one
+  packet could spend ~10 s tearing links down *inside an unrelated peer's*
+  receive loop. It removes the peer from routing synchronously now — which is
+  what correctness needs — and stops it in the background.
+- the three gossip handlers fanned out with `await p.send(...)` over every peer,
+  so one peer's full send buffer stalled the link the announce arrived on.
+
+**The rule generalises: a handler's job is to decide, not to wait.** Anything
+that dials, stops a link, writes to disk or talks to every peer goes through
+`_spawn_bounded` / `_track_route_task`.
+
+Two of those were also `fsync`s. `_persist_state` (every handshake, both E2E
+handlers, `_handle_data`, `send_data`) and `_cert_add` (per certificate, so six
+times for one chain) each serialised their whole store and wrote it
+synchronously on the loop — and the cost grew with the state, so a node that
+had been up a while stalled longer per handshake. Both mark a dirty flag now;
+one bounded task writes at most every `_STATE_WRITE_INTERVAL`, off the loop
+thread, and `stop()` flushes whatever is pending. **A snapshot the node never
+wrote is a restart that re-handshakes everything, so the flush at teardown is
+not optional.**
+
 ### 11. Replies were routed by a fresh XOR guess
 A reply (`FOUND_NODE`, `ECHO_REPLY`, an E2E ACK, `DATA`) left again by a greedy
 choice recomputed from scratch, while the path the request had just taken was

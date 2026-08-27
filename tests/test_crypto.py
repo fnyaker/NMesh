@@ -157,3 +157,50 @@ class TestIdentityOnDisk:
         path = str(tmp_path / "node.key")
         CryptoIdentity().save(path)
         assert not os.path.exists(path + ".tmp")
+
+
+class TestIdentityOnDisk:
+    """The node's private key *is* its identity on the mesh: its certificates,
+    its memberships, its place in every peer's routing table. Losing it is not
+    recoverable, and the caller writes back whatever `load` returns."""
+
+    def test_a_missing_file_makes_a_new_identity(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        identity = CryptoIdentity.load(path)
+        assert identity.dsa_public_key
+
+    def test_a_truncated_file_is_refused_not_replaced(self, tmp_path):
+        path = tmp_path / "node.key"
+        CryptoIdentity().save(str(path))
+        original = path.read_bytes()
+        path.write_bytes(original[:len(original) // 2])
+        with pytest.raises(CryptoError):
+            CryptoIdentity.load(str(path))
+        # …and the file is still there, untouched.
+        assert path.read_bytes() == original[:len(original) // 2]
+
+    def test_garbage_is_refused(self, tmp_path):
+        path = tmp_path / "node.key"
+        path.write_bytes(b"not an identity")
+        with pytest.raises(CryptoError):
+            CryptoIdentity.load(str(path))
+
+    def test_a_mismatched_pair_is_refused(self, tmp_path):
+        """Nothing checked that the stored public half belonged to the stored
+        secret, so a mismatched file produced a node whose signatures nobody
+        could verify — with no diagnostic anywhere."""
+        import struct
+        mine, theirs = CryptoIdentity(), CryptoIdentity()
+        secret = mine._signer.export_secret_key()
+        pub = theirs.dsa_public_key                      # somebody else's
+        path = tmp_path / "node.key"
+        path.write_bytes(struct.pack("!HH", len(pub), len(secret)) + pub + secret)
+        with pytest.raises(CryptoError):
+            CryptoIdentity.load(str(path))
+
+    def test_a_good_file_round_trips(self, tmp_path):
+        path = str(tmp_path / "node.key")
+        original = CryptoIdentity()
+        original.save(path)
+        again = CryptoIdentity.load(path)
+        assert again.dsa_public_key == original.dsa_public_key

@@ -14,13 +14,17 @@ from collections import deque
 class Counters:
     """Cumulative packet / byte counters. Plain ints, cheap to bump."""
 
-    __slots__ = ("pkts_in", "pkts_out", "bytes_in", "bytes_out")
+    __slots__ = ("pkts_in", "pkts_out", "bytes_in", "bytes_out", "dropped")
 
     def __init__(self) -> None:
         self.pkts_in = 0
         self.pkts_out = 0
         self.bytes_in = 0
         self.bytes_out = 0
+        # Payloads a bound refused. A drop is not a failure to hide: it is the
+        # only honest thing a full queue can do, and an operator watching this
+        # climb is watching a consumer that cannot keep up.
+        self.dropped = 0
 
     def on_in(self, nbytes: int) -> None:
         self.pkts_in += 1
@@ -30,12 +34,16 @@ class Counters:
         self.pkts_out += 1
         self.bytes_out += nbytes
 
+    def on_drop(self) -> None:
+        self.dropped += 1
+
     def as_dict(self) -> dict:
         return {
             "pkts_in": self.pkts_in,
             "pkts_out": self.pkts_out,
             "bytes_in": self.bytes_in,
             "bytes_out": self.bytes_out,
+            "dropped": self.dropped,
         }
 
 

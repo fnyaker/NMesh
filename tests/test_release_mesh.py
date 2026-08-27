@@ -21,7 +21,7 @@ from src import updater
 from src.node import MeshNode, RELEASE_ANNOUNCE
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_manager
+from tests.conftest import make_manager, settle
 
 
 def _tree(root, version="9.9.9", extra=None):
@@ -182,12 +182,14 @@ class TestGossip:
                                    ingress.authenticated_id.raw,
                                    b"\xff" * 20, b"\x00" + blob)
             await node._handle_release_announce(ingress, packet)
+            await settle(node)
             assert node._releases.get(publisher_id) is not None
             assert any(p.type == RELEASE_ANNOUNCE for p in downstream.sent)
             assert ingress.sent == []          # never back where it came from
 
             downstream.sent.clear()
             await node._handle_release_announce(ingress, packet)
+            await settle(node)
             assert downstream.sent == []       # the epidemic terminates
         finally:
             await publisher.stop(); await node.stop()
@@ -204,6 +206,7 @@ class TestGossip:
                 ingress, Packet.create(RELEASE_ANNOUNCE,
                                        ingress.authenticated_id.raw,
                                        b"\xff" * 20, b"\x00" + blob))
+            await settle(node)
             assert any(p.type == RELEASE_ANNOUNCE for p in downstream.sent)
             listed = node.release_overview()["releases"][0]
             assert listed["trusted"] is False and listed["state"] == "untrusted"
@@ -239,8 +242,13 @@ class TestGossip:
                                    b"\xff" * 20, b"\x00" + blob)
             for _ in range(500):
                 await node._handle_release_announce(ingress, packet)
+                await settle(node)
             from src.node import _RELEASE_RATE_MAX
-            assert node._release_rate[id(ingress)][0] <= _RELEASE_RATE_MAX
+            # Keyed on the peer's identity, not on id(peer): the object's
+            # address is reused after collection, and these tables are pruned
+            # by window expiry rather than by peer lifetime.
+            key = node._rate_key(ingress)
+            assert node._release_rate[key][0] <= _RELEASE_RATE_MAX
         finally:
             await publisher.stop(); await node.stop()
 

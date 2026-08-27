@@ -11,10 +11,15 @@ from tests.conftest import FakeTransport, make_node
 
 
 def _setup_challenge_pair(node_a, node_b) -> bytes:
-    """Set matching challenge on both sides to satisfy C3 binding."""
+    """Set matching challenge on both sides to satisfy C3 binding.
+
+    ``joined_by_invite`` on the client stands in for the INVITE/INVITE_ACK
+    exchange these tests skip: it is what `_handle_handshake_ack` reads before
+    it will accept a root from the host (see security.md)."""
     challenge = os.urandom(32)
     node_b._peers[0].pending_challenge = challenge
     node_a._peers[0].received_challenge = challenge
+    node_a._peers[0].joined_by_invite = True
     return challenge
 
 
@@ -130,5 +135,55 @@ class TestFullHandshakeRoundtrip:
         fake_a.inject(ack)
         await asyncio.sleep(0.1)
         assert node_a.session is None
+        await node_a.stop()
+        await node_b.stop()
+
+
+class TestPreAuthWorkIsBounded:
+    """`_handle_handshake` runs on an *unauthenticated* link, and a failed
+    attempt clears neither of its guards, so the same connection may try again.
+    Both the order of the work and the number of tries have to be bounded."""
+
+    async def test_identity_mismatch_costs_no_signature_check(self, monkeypatch):
+        """Two SHA-256s rule the packet out; the chain must not be parsed
+        (which verifies a post-quantum signature per certificate) and neither
+        must the handshake signature."""
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        _setup_challenge_pair(node_a, node_b)
+        await node_a.initiate_handshake(node_a._peers[0])
+        handshake = fake_a.sent[0]
+
+        verifications = []
+        real_verify = node_b._identity.verify
+        monkeypatch.setattr(node_b._identity, "verify",
+                            lambda *a, **k: (verifications.append(1),
+                                             real_verify(*a, **k))[1])
+        # src_id names somebody other than the key inside the payload.
+        lying = Packet.create(HANDSHAKE, os.urandom(20),
+                              NodeID(b"\xff" * 20).raw, handshake.payload)
+        await node_b._handle_handshake(node_b._peers[0], lying)
+        assert verifications == [], "a lie about the id bought a signature check"
+        assert node_b._peers[0].authenticated_id is None
+        await node_a.stop()
+        await node_b.stop()
+
+    async def test_attempts_per_link_are_bounded(self):
+        from src.node import _MAX_HANDSHAKE_ATTEMPTS
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
+        _setup_challenge_pair(node_a, node_b)
+        await node_a.initiate_handshake(node_a._peers[0])
+        handshake = fake_a.sent[0]
+        # Same packet, over and over: the signature is valid, so only the
+        # attempt budget can stop it.
+        for _ in range(_MAX_HANDSHAKE_ATTEMPTS + 5):
+            node_b._peers[0].authenticated_id = None
+            node_b._peers[0].pending_challenge = node_a._peers[0].received_challenge
+            await node_b._handle_handshake(node_b._peers[0], handshake)
+        assert node_b._peers[0]._handshake_attempts <= _MAX_HANDSHAKE_ATTEMPTS + 5
+        acks = [p for p in fake_b.sent if p.type == HANDSHAKE_ACK]
+        assert len(acks) <= _MAX_HANDSHAKE_ATTEMPTS
         await node_a.stop()
         await node_b.stop()

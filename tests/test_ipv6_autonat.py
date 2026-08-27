@@ -109,6 +109,12 @@ class TestAutoNAT:
         payload = struct.pack("!BH", 3, 9000) + b"tcp"
         pkt = Packet.create(REACH_PROBE, b"\x02" * 20, node.id.raw, payload)
         await node._handle_reach_probe(peer, pkt)
+        # The dial-back runs off the receive loop (two bounded waits would
+        # otherwise hold this peer's loop for longer than its own rate window),
+        # so wait for the task rather than for a fixed delay.
+        async with asyncio.timeout(2):
+            while not dialed:
+                await asyncio.sleep(0)
         assert dialed == [("tcp", "203.0.113.9", 9000)]   # observed ip, not claimed
 
     async def test_reach_probe_rate_limited(self):
@@ -128,6 +134,9 @@ class TestAutoNAT:
             pkt = Packet.create(REACH_PROBE, b"\x02" * 20, node.id.raw, payload)
             await node._handle_reach_probe(peer, pkt)
         from src.node import _REACH_PROBE_RATE_MAX
+        async with asyncio.timeout(2):          # let the deferred dials run
+            while len(node._detached):
+                await asyncio.sleep(0)
         assert calls["n"] <= _REACH_PROBE_RATE_MAX
 
     async def test_ack_confirms_scheme(self):
@@ -136,10 +145,52 @@ class TestAutoNAT:
         peer = node._peers[0]
         peer.authenticated_id = NodeID(b"\x02" * 20)
         assert "tcp" not in node._inbound_schemes
+        node._note_reach_probe(peer.authenticated_id, "tcp")   # we asked
         ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
                             struct.pack("!BB", 3, 1) + b"tcp")
         await node._handle_reach_probe_ack(peer, ack)
         assert "tcp" in node._inbound_schemes
+
+    async def test_an_unsolicited_ack_confirms_nothing(self):
+        """`_inbound_schemes` decides what we advertise and whether we offer
+        ourselves as a relay. An answer to a question we never asked would let
+        one peer make a NATted node announce itself as reachable — a black hole
+        for everyone who then routes through it."""
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
+
+    async def test_an_ack_from_a_peer_we_did_not_ask_confirms_nothing(self):
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        node._note_reach_probe(NodeID(b"\x03" * 20), "tcp")   # asked somebody else
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
+
+    async def test_an_ack_is_good_once(self):
+        node, _ = await make_node()
+        node._transport_manager.register("tcp", TCPTransport, TCPServer)
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(b"\x02" * 20)
+        node._note_reach_probe(peer.authenticated_id, "tcp")
+        ack = Packet.create(REACH_PROBE_ACK, b"\x02" * 20, node.id.raw,
+                            struct.pack("!BB", 3, 1) + b"tcp")
+        await node._handle_reach_probe_ack(peer, ack)
+        node._inbound_schemes.clear()
+        await node._handle_reach_probe_ack(peer, ack)   # replayed
+        assert "tcp" not in node._inbound_schemes
+        await node.stop()
 
     async def test_ack_failure_does_not_confirm(self):
         node, _ = await make_node()

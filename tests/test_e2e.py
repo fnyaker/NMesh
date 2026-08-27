@@ -48,7 +48,7 @@ async def _make_authed_pair(
     challenge = os.urandom(32)
     node_b._peers[0].invite_accepted = True
     node_b._peers[0].pending_challenge = challenge
-    node_a._peers[0].invite_accepted = True
+    node_a._peers[0].joined_by_invite = True
     node_a._peers[0].received_challenge = challenge
     await node_a.initiate_handshake(node_a._peers[0])
     fake_b.inject(fake_a.sent[-1])
@@ -93,7 +93,7 @@ async def _make_chain() -> tuple[
     challenge_ab = os.urandom(32)
     node_b._peers[0].invite_accepted = True
     node_b._peers[0].pending_challenge = challenge_ab
-    node_a._peers[0].invite_accepted = True
+    node_a._peers[0].joined_by_invite = True
     node_a._peers[0].received_challenge = challenge_ab
     await node_a.initiate_handshake(node_a._peers[0])
     t_ba.inject(t_ab.sent[-1])       # HANDSHAKE: A→B
@@ -106,7 +106,7 @@ async def _make_chain() -> tuple[
     challenge_bc = os.urandom(32)
     node_c._peers[0].invite_accepted = True
     node_c._peers[0].pending_challenge = challenge_bc
-    node_b._peers[1].invite_accepted = True
+    node_b._peers[1].joined_by_invite = True
     node_b._peers[1].received_challenge = challenge_bc
     await node_b.initiate_handshake(node_b._peers[1])
     t_cb.inject(t_bc.sent[-1])       # HANDSHAKE: B→C

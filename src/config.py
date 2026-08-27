@@ -113,6 +113,18 @@ def _as_pseudo(raw: str) -> str:
         raise ConfigError(str(exc)) from None
 
 
+def _as_store_mb(raw: str) -> int:
+    """Megabytes of DHT cache, bounded on both sides.
+
+    Zero would switch the node off as a DHT participant, which is a different
+    decision and not one to make by typo; the upper bound is a sanity check, not
+    a policy."""
+    value = int(str(raw).strip())
+    if not 1 <= value <= 4096:
+        raise ValueError("between 1 and 4096 megabytes")
+    return value
+
+
 def _as_path(raw: str):
     value = raw.strip()
     if not value:
@@ -160,6 +172,13 @@ SETTINGS = {
     "pseudo":          (_as_pseudo, "", True,
                         "Display name for this node, shown beside its id "
                         "(at most 50 characters)"),
+    # How much of this machine the node may give to peers. The DHT is filled
+    # entirely by what other nodes STORE, so its ceiling is the one an operator
+    # most often wants to move — a node on a LoRa link and a node on a server
+    # have no business sharing a number.
+    "dht_max_mb":      (_as_store_mb, 32, False,
+                        "Megabytes of DHT content this node caches for the "
+                        "network (file only)"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),

@@ -55,8 +55,16 @@ _FRAME = struct.Struct("!IIQ")
 
 FILE_CHUNK_SIZE = 48_000
 _MAX_FILE = 256 * 1024 * 1024
-_MAX_CHUNKS = _MAX_FILE // 1024
+# Derived from the chunk the sender actually uses, not from a round number: at
+# 1024 the ceiling was 48x what any real file needs, and since nothing bounded a
+# chunk's *length* either, an offer for a one-byte file could buy 15 GB of
+# buffer. The count and the size have to agree, and both have to be enforced.
+_MAX_CHUNKS = -(-_MAX_FILE // FILE_CHUNK_SIZE)
 _MAX_TRANSFERS = 64
+# Transfers one peer may hold open at once. The table is keyed by
+# (sender, transfer id) and the id is the sender's to choose, so without this a
+# single peer fills every slot and nobody else can send a file.
+_MAX_TRANSFERS_PER_PEER = 8
 _MAX_NAME = 512
 
 _MAX_BIO_BYTES = 1024
@@ -166,7 +174,14 @@ class Reaction:
 
 
 class _Transfer:
-    __slots__ = ("name", "size", "digest", "total", "chunks", "mid", "reply_to")
+    """One inbound file, buffered until every chunk has arrived.
+
+    The declared ``size`` is the bound, and it is enforced *while* chunks
+    arrive rather than at the end: the sha256 check can only speak once the
+    whole thing is in memory, which is too late to be a bound at all."""
+
+    __slots__ = ("name", "size", "digest", "total", "chunks", "mid",
+                 "reply_to", "held")
 
     def __init__(self, name: str, size: int, digest: bytes, total: int,
                  mid: bytes, reply_to: bytes | None) -> None:
@@ -177,6 +192,19 @@ class _Transfer:
         self.mid = mid
         self.reply_to = reply_to
         self.chunks: dict[int, bytes] = {}
+        self.held = 0
+
+    def accept(self, index: int, data: bytes) -> bool:
+        """Take one chunk. False when it does not belong to this transfer —
+        a duplicate, an index past the end, an oversized piece, or one that
+        would push the total past what was declared."""
+        if index >= self.total or index in self.chunks:
+            return False
+        if len(data) > FILE_CHUNK_SIZE or self.held + len(data) > self.size:
+            return False
+        self.chunks[index] = data
+        self.held += len(data)
+        return True
 
     def complete(self) -> bool:
         return len(self.chunks) >= self.total
@@ -506,7 +534,15 @@ class ChatApp:
             if size == 0 and digest == hashlib.sha256(b"").digest():
                 self._emit(FileReceived(src, name, b"", mid, reply))
             return
+        # The two numbers have to describe the same file. Without this a
+        # one-byte offer can declare the maximum chunk count and the buffer
+        # bound below never binds, because there is nothing to compare against.
+        if total != -(-size // FILE_CHUNK_SIZE):
+            return
         if len(self._transfers) >= _MAX_TRANSFERS:
+            return
+        mine = sum(1 for key in self._transfers if key[0] == src.raw)
+        if mine >= _MAX_TRANSFERS_PER_PEER:
             return
         self._transfers[(src.raw, tid)] = _Transfer(name, size, digest, total, mid, reply)
 
@@ -516,9 +552,10 @@ class ChatApp:
         tid, index = _CHUNK.unpack_from(body, 0)
         data = body[_CHUNK.size:]
         t = self._transfers.get((src.raw, tid))
-        if t is None or index >= t.total or index in t.chunks:
+        if t is None:
             return
-        t.chunks[index] = data
+        if not t.accept(index, data):
+            return
         if t.complete():
             self._transfers.pop((src.raw, tid), None)
             assembled = t.assemble()

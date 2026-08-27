@@ -376,3 +376,41 @@ def _principal(node, identity):
     from src.app_auth import Principal
     return Principal(node, identity.dsa_public_key, APP, PURPOSE_LOGIN,
                      b"\x00" * CTX_LEN, int(time.time()), int(time.time()) + 60)
+
+
+class TestNonceIsClaimedAfterTheSignature:
+    """Everything ahead of the signature is structural — an attacker copies the
+    app id, the audience, the purpose and the ctx off a legitimate assertion and
+    picks a fresh timestamp. Claiming the nonce there let unsigned rubbish evict
+    live entries from a bounded cache, which reopens the replay window."""
+
+    def test_a_badly_signed_assertion_burns_nothing(self):
+        idn = CryptoIdentity()
+        app = builtin_id("chat")
+        audience = NodeID(os.urandom(20))
+        nonces = NonceCache()
+
+        blob = make_assertion(idn, app, audience=audience,
+                              purpose="p", ttl=60).serialize()
+        # Same fields, signature replaced with rubbish.
+        forged = bytearray(blob)
+        forged[-1] ^= 0xFF
+        assert verify_assertion(bytes(forged), idn.verify, app_id=app,
+                                audience=audience, nonces=nonces) is None
+        assert len(nonces) == 0, "a forged assertion consumed a cache slot"
+
+        # …and the genuine one still works afterwards.
+        assert verify_assertion(blob, idn.verify, app_id=app,
+                                audience=audience, nonces=nonces) is not None
+
+    def test_the_genuine_assertion_is_still_single_use(self):
+        idn = CryptoIdentity()
+        app = builtin_id("chat")
+        audience = NodeID(os.urandom(20))
+        nonces = NonceCache()
+        blob = make_assertion(idn, app, audience=audience,
+                              purpose="p", ttl=60).serialize()
+        assert verify_assertion(blob, idn.verify, app_id=app,
+                                audience=audience, nonces=nonces) is not None
+        assert verify_assertion(blob, idn.verify, app_id=app,
+                                audience=audience, nonces=nonces) is None

@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import struct
 import zlib
+from collections import OrderedDict, deque
 
 from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
@@ -33,6 +35,13 @@ _MAX_REC = 65_535
 _POLL = 0.02                     # directory poll interval, seconds
 _C2S = "c2s.spool"               # client → server
 _S2C = "s2c.spool"               # server → client
+# The medium is a shared directory — a removable device, a network share —
+# so whoever can write there decides how many sessions appear. Both the live
+# links and the memory of names ever seen are bounded, and a name that is not
+# exactly what `connect` writes is not a session at all.
+_MAX_SESSIONS = 32               # concurrent spool links one server accepts
+_MAX_SEEN = 4096                 # session names remembered as already accepted
+_SESSION_RE = re.compile(r"^sess-[0-9a-f]{16}$")
 
 
 def _parse_records(data: bytes) -> tuple[list[bytes], int]:
@@ -94,7 +103,7 @@ class SpoolTransport(BaseTransport):
         self._in_path: str | None = None
         self._out_fd: int | None = None
         self._offset = 0
-        self._decoded: list[Packet] = []
+        self._decoded: deque[Packet] = deque()
         self._closed = False
 
     # -- role binding -----------------------------------------------------
@@ -145,8 +154,22 @@ class SpoolTransport(BaseTransport):
             raise ConnectionError("packet too large for spool record")
         record = _REC.pack(_REC_MAGIC, len(payload),
                            zlib.crc32(payload) & 0xFFFFFFFF) + payload
-        os.write(self._out_fd, record)
-        os.fsync(self._out_fd)
+        # Off the loop thread. The medium is a removable device or a shared
+        # directory by design, so a write and an fsync here can stall for
+        # seconds — and every other task on the node stalls with them
+        # (gotchas §2: slow I/O is bounded, off the loop, and not joined).
+        await asyncio.to_thread(self._write_record, record)
+
+    def _write_record(self, record: bytes) -> None:
+        fd = self._out_fd
+        if fd is None:
+            return
+        # os.write may write fewer bytes than it was given; a short write here
+        # would split a record and the reader would resync past it.
+        view = memoryview(record)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
 
     def _read_new(self) -> bytes:
         if self._in_path is None:
@@ -161,10 +184,10 @@ class SpoolTransport(BaseTransport):
     async def receive(self) -> Packet:
         while True:
             if self._decoded:
-                return self._decoded.pop(0)
+                return self._decoded.popleft()
             if self._closed:
                 raise ConnectionError("spool transport closed")
-            data = self._read_new()
+            data = await asyncio.to_thread(self._read_new)
             if data:
                 payloads, consumed = _parse_records(data)
                 self._offset += consumed
@@ -193,7 +216,8 @@ class SpoolServer(BaseServer):
     def __init__(self) -> None:
         super().__init__()
         self._dir: str | None = None
-        self._seen: set[str] = set()
+        self._seen: OrderedDict[str, None] = OrderedDict()
+        self._live: list[SpoolTransport] = []
         self._task: asyncio.Task | None = None
         self._closed = False
 
@@ -205,21 +229,27 @@ class SpoolServer(BaseServer):
     async def _accept_loop(self) -> None:
         while not self._closed:
             try:
-                names = os.listdir(self._dir)
+                names = await asyncio.to_thread(os.listdir, self._dir)
             except (FileNotFoundError, OSError):
                 names = []
+            self._live = [t for t in self._live if not t._closed]
             for name in sorted(names):
-                if name in self._seen or not name.startswith("sess-"):
+                if name in self._seen or not _SESSION_RE.match(name):
                     continue
                 sd = os.path.join(self._dir, name)
                 if not os.path.isdir(sd):
                     continue
                 if not os.path.exists(os.path.join(sd, _C2S)):
                     continue  # client hasn't announced yet
-                self._seen.add(name)
+                if len(self._live) >= _MAX_SESSIONS:
+                    break     # full — come back when a link has gone
+                self._seen[name] = None
+                while len(self._seen) > _MAX_SEEN:
+                    self._seen.popitem(last=False)
                 transport = SpoolTransport()
                 transport._bind_server(sd)
                 transport._ensure_out()
+                self._live.append(transport)
                 if self.on_new_connection is not None:
                     try:
                         await self.on_new_connection(transport)
