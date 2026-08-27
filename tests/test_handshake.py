@@ -11,10 +11,15 @@ from tests.conftest import FakeTransport, make_node
 
 
 def _setup_challenge_pair(node_a, node_b) -> bytes:
-    """Set matching challenge on both sides to satisfy C3 binding."""
+    """Set matching challenge on both sides to satisfy C3 binding.
+
+    ``joined_by_invite`` on the client stands in for the INVITE/INVITE_ACK
+    exchange these tests skip: it is what `_handle_handshake_ack` reads before
+    it will accept a root from the host (see security.md)."""
     challenge = os.urandom(32)
     node_b._peers[0].pending_challenge = challenge
     node_a._peers[0].received_challenge = challenge
+    node_a._peers[0].joined_by_invite = True
     return challenge
 
 

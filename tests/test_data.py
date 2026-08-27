@@ -15,7 +15,7 @@ async def make_connected_pair() -> tuple[MeshNode, FakeTransport, MeshNode, Fake
     shared_challenge = os.urandom(32)
     node_b._peers[0].invite_accepted = True
     node_b._peers[0].pending_challenge = shared_challenge
-    node_a._peers[0].invite_accepted = True
+    node_a._peers[0].joined_by_invite = True
     node_a._peers[0].received_challenge = shared_challenge
     await node_a.initiate_handshake(node_a._peers[0])
     fake_b.inject(fake_a.sent[-1])

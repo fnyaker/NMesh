@@ -911,6 +911,12 @@ class _Peer:
         self.authenticated_id: NodeID | None = None
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
+        # We presented an invitation code on THIS link and it was accepted.
+        # Only then may the answer's issued certificate make its self-signed
+        # root a root of ours: the alternative — believing whoever we happen to
+        # have dialled — is a trust anchor anybody we contact can plant. See
+        # `_handle_handshake_ack`, and Docs/Architecture/security.md.
+        self.joined_by_invite: bool = False
         self.is_client_side: bool = is_client_side
         # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
         # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
@@ -5867,7 +5873,10 @@ class MeshNode:
             return
         peer.invite_sent = False
         if packet.payload[0] == _ACK_ACCEPTED:
+            # The code is spent, but the fact that we presented one is not: it
+            # is the only reason this link may hand us a trust root.
             peer.join_code = None
+            peer.joined_by_invite = True
             await self.initiate_handshake(peer)
 
     async def _handle_e2e_handshake(self, peer: _Peer, packet: Packet) -> None:
@@ -6063,7 +6072,14 @@ class MeshNode:
             return
         server_id = NodeID(packet.src_id)
 
-        if issued_cert is not None:
+        # Adopting a root is the one irreversible thing a handshake can do to
+        # this node: from then on every chain anchored there authenticates. So
+        # the branch is chosen by OUR record of having presented a code, never
+        # by the answer carrying a certificate — the peer writes that field, and
+        # it knows our public key (we just sent it), so it can always forge one.
+        # Without this test, every address we dial — and we dial addresses
+        # learned from gossip — could plant a trust anchor.
+        if issued_cert is not None and peer.joined_by_invite:
             if issued_cert.issuer_id != server_id:
                 return
             if issued_cert.subject_id != self._id:

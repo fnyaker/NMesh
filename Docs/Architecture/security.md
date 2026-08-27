@@ -121,6 +121,34 @@ From then on `peer.authenticated_id` is set on both sides and all traffic on the
 link is AES-256-GCM encrypted. Trust is **mutual** (each side challenges the
 other).
 
+### Adopting a root: the joiner decides, not the answer
+
+Step 4 is where a node can gain a **new trust root** — the host's self-signed
+certificate, arriving at the end of a join. From then on every chain anchored
+there authenticates, so this is the single most consequential thing a handshake
+does, and it is the one branch that must never be chosen by the remote side.
+
+It is not. The branch is gated on `peer.joined_by_invite`, which only
+`_handle_invite_ack` sets, and only on an `_ACK_ACCEPTED` — that is, only when
+**we** presented a code on **this link** and it was accepted. The `issued_cert`
+field in the answer is not evidence of anything: the peer writes it, and it has
+our public key (we sent it in the HANDSHAKE one step earlier), so it can always
+mint a certificate naming us.
+
+Without that gate, every address we dial is a trust anchor waiting to be
+planted — and we dial addresses learned from gossip (`_maintain_neighbors`,
+`_address_retry_loop`, the console's manual retry, latency steering). A single
+peer answering an ordinary reconnect could have made itself a root and then
+minted memberships for identities it generated on the spot, which is the whole
+invitation gate removed. Locked down by
+`tests/test_invite_to_handshake.py::test_dialled_peer_cannot_plant_a_trust_root`,
+with its counterpart `test_joining_by_invite_still_adopts_the_host_root` so the
+bound cannot close the door it exists to open.
+
+A link that presents no code takes the other branch and is held to the ordinary
+rule: its chain must verify to a root we already hold, or the link does not
+authenticate at all.
+
 > **Address invariant note**: the handshake does **not** yet carry the peer's
 > full set of announced addresses. After authentication we only know the address
 > that was dialled (client) or none at all (server: `_routing.add(id, [],

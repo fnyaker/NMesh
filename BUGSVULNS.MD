@@ -114,6 +114,12 @@ security section.
 
 ## 1 — critical — A dialled peer can install itself as a trust root
 
+> **Status — fixed.** `_Peer.joined_by_invite` is set only by
+> `_handle_invite_ack` on an accepted code, and `_handle_handshake_ack`
+> now requires it before the `issued_cert` branch can adopt a root.
+> Locked down by `test_dialled_peer_cannot_plant_a_trust_root`, with
+> `test_joining_by_invite_still_adopts_the_host_root` beside it.
+
 **Where** — `src/node.py`, `MeshNode._handle_handshake_ack` (the
 `if issued_cert is not None:` branch).
 
