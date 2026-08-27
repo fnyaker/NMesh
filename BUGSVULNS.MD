@@ -6,21 +6,85 @@
 > layer, and out to the console and the apps. Every input is treated as hostile
 > until a gate has proved it is not.
 >
-> **What this is not.** It is not a patch set. Nothing here has been changed.
-> Each entry carries the context needed to fix it *without* breaking the
+> **What this was not, at the time of writing.** It was not a patch set: each
+> entry carries the context needed to fix the defect *without* breaking the
 > mechanism it belongs to — the surrounding invariant is written down next to
 > the defect, because several of these findings sit on paths whose fragility is
-> already documented in `Docs/Architecture/gotchas.md`.
+> already documented in `Docs/Architecture/gotchas.md`. The fixes came after,
+> and every entry now opens with a **Status** line saying what landed. The body
+> of each entry is left as it was written, describing the tree *before* the
+> fix; that is what makes the Status line readable.
 >
 > Severity is about what an adversary gains, in the threat model of
 > `CLAUDE.md`: the network, the peers and the transports are hostile, and an
 > authenticated peer may still be an adversary.
 
-> **Baseline.** Every finding below is present in a tree whose unit suite is
-> green: `pytest --ignore=tests/integration` on this commit is
-> **1882 passed, 8 skipped**. None of these is a broken test waiting to be
-> noticed — they are all in the space the tests do not cover, which is the
-> useful thing to know about them.
+> **Baseline.** Every finding below was present in a tree whose unit suite was
+> green: `pytest --ignore=tests/integration` at the audit commit was
+> **1882 passed, 8 skipped**. None of these was a broken test waiting to be
+> noticed — they were all in the space the tests did not cover, which is the
+> useful thing to know about them. After the fixes the same command is
+> **1940 passed, 8 skipped**, and `pytest tests/integration` is **88 passed**.
+
+## Where this stands
+
+65 findings: 45 security, 20 performance. All 65 are addressed. Sixty are
+closed outright; five are recorded below as *partly* closed, and it is worth
+being precise about why, because "mitigated" here does not mean "we ran out of
+time" — in each case the remainder is a design decision, not a patch.
+
+| # | What is left, and why |
+|---|---|
+| **2** | The E2E session table is bounded (`_MAX_E2E_SESSIONS`, LRU) and no longer re-writes the store per entry. What remains is that a session store on disk is still a whole-file write when it is written at all; making it incremental means a record format, which is a protocol change. |
+| **9** | `RELEASE_FETCH` no longer blocks the receive loop and is metered. It still answers a `src_id` that only *claims* to be who it says on an unauthenticated link — closing that means refusing to serve the core release to a node that has not yet joined, which is the one case the plane exists for. |
+| **13** | The UDP frame header is still unauthenticated. Sequence numbers now start random and are adopted from the peer's first frame, and an undecodable payload is counted rather than dropped silently — a spoofer has to guess a 32-bit cursor instead of starting at zero. Authenticating the header means carrying the link session down into the transport, below the layer that establishes it. That is a design change and it wants its own pass. |
+| **18** | The pre-authentication relay plane still exists, because a joining node has no link yet and no other way to reach an inviter. What changed: a seek arriving on an unauthenticated link is clamped to `_SEEK_TTL_PREAUTH = 6` hops, the limits key on something the sender cannot cycle (**15**), and the relay inbox is bounded (**43**). The plane is metered now, not removed. |
+| **P20** | The DHT ceiling drops from 128 MiB to 32 MiB and becomes `dht_max_mb` (1–4096). The session store and the app drawer ceilings are unchanged — they are per-application budgets an operator sets, not something a peer can push against. |
+
+Two more caveats that are not findings of their own:
+
+- **P13** — the spool transport's file I/O is off the loop thread now, but a
+  long-lived spool file still grows without ever being truncated. Truncating it
+  safely needs a reader cursor both sides agree on.
+- Finding **35**'s fix escapes at the point of rendering. Every new cell added
+  to a console table has to go through `esc()`; there is no type that enforces
+  it. If that table grows much further it wants one.
+
+### How the work was split
+
+Eight themed commits plus one performance commit, each carrying its own tests
+and its own documentation, with both suites green at every step:
+
+1. **1** — the trust-root injection, alone, first.
+2. **27, 6, 7, 2, 36, 43, 41, 24** — the bounds pass.
+3. **3, 33, 34, 17** — the ordering pass: take the gate before touching what it guards.
+4. **9, 14, 16, P17, P8, P9** — the receive-loop pass (`gotchas.md` §10).
+5. **10, 15, 20, 28, 42, 44, 11** — rate limits, keyed on identity.
+6. **4, 5, 13, 19, 21, 45** — admission and liveness.
+7. **30, 31, 35, 37, 38, 39** — fleet and console.
+8. **8, 12, 18, 22, 23, 25, 26, 29, 32, 40** — the remaining correctness.
+9. **P1–P7, P10–P16, P18–P20** — the performance pass.
+
+### What the fixing itself turned up
+
+Four tests asserted the defect rather than the behaviour, and had to be
+rewritten rather than weakened around:
+
+- `test_app_store.py::test_capacity_bounded` asserted that a full catalogue
+  refuses newcomers — which is finding **41**, written down as expected.
+- `test_console_auth.py::TestCorruptFiles` asserted that an unreadable
+  credential file reads back as `None`, which is finding **38**: the silent
+  reset.
+- Three handshake helpers set `invite_accepted` on the *client* peer, a field
+  the node never reads. They meant `joined_by_invite`, and finding **1** is
+  exactly the gap that made both spellings look equivalent.
+- Two AutoNAT and STUN tests asserted that an unsolicited answer is accepted,
+  which is findings **19** and **29**.
+
+A test that encodes the bug is worse than a missing test: it makes the fix look
+like the regression.
+
+---
 
 ## How to read an entry
 
@@ -555,6 +619,11 @@ than acquire a route for a stranger's slice.
 
 ## 10 — high — `DIR_FIND` has no rate limit and reflects up to 56 KB
 
+> **Status — fixed.** `DIR_FIND` goes through `_query_allowed` — the same
+> valve the DHT lookups use — before a single claim is encoded, so the 56 KB
+> reflection now costs the sender a budget it has to hold. The limit keys on
+> the identity (**15**), not on the link.
+
 **Where** — `src/node.py`, `MeshNode._handle_dir_find`;
 `src/pseudo_dir.py`, `encode_claims` (`_FOUND_BUDGET = 56 * 1024`).
 
@@ -585,6 +654,12 @@ already passes `blocking=False`, which is correct; keep it.
 ---
 
 ## 11 — high — A stranger's pseudo claim is re-gossiped to every peer
+
+> **Status — fixed.** All three epidemic planes (pseudo, catalog, release)
+> now go through `_gossip_targets(exclude, _GOSSIP_FANOUT)`, which picks at
+> most `_GOSSIP_FANOUT = 6` peers instead of every link we hold. Coverage is
+> what an epidemic gives you anyway; the fan-out was buying nothing but the
+> amplification factor.
 
 **Where** — `src/node.py`, `MeshNode._handle_pseudo_announce` →
 `_gossip_pseudo`; the same shape in `_handle_catalog_announce` →
@@ -757,6 +832,12 @@ aimed at a victim.
 ---
 
 ## 15 — medium — Rate-limit tables are keyed by `id(peer)`
+
+> **Status — fixed.** `MeshNode._rate_key(peer)` replaces every `id(peer)`
+> site: the key is the authenticated `NodeID` where there is one, and an
+> explicitly-marked anonymous key where there cannot be (the pre-auth planes).
+> Reconnecting no longer resets a budget, and a collected object can no longer
+> hand its allowance to whoever lands on its address next.
 
 **Where** — `src/node.py`: `_seek_allowed`, `_carry_allowed`, `_query_allowed`,
 `_dir_allowed`, `_reach_probe_allowed`, and `_gossip_allowed` (shared by the
@@ -2403,6 +2484,11 @@ the regression tests for each finding. They need only the existing
 
 
 # Suggested order of work
+
+> **This is what was followed.** The order below was written before any fix
+> landed; the commits match it, with the additions noted in *Where this
+> stands*. It is kept here because the reasoning — "what does fixing this
+> unlock" — is what made the sequence work.
 
 Not a priority ranking by severity alone — by "what does fixing this unlock".
 

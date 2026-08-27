@@ -234,12 +234,16 @@ fully self-contained artefact, prefer the Docker image.
 The failures people actually hit, with the exact message and the command that
 fixes them: [`FAQ.md`](FAQ.md).
 
-## Known defects
+## Audit
 
 A full audit that follows the execution order — every packet field from the
 socket to the app, then the console and the apps — with each finding written up
-next to the invariant a fix must not break:
-[`BUGSVULNS.MD`](BUGSVULNS.MD). Nothing in it is fixed yet.
+next to the invariant a fix must not break: [`BUGSVULNS.MD`](BUGSVULNS.MD).
+
+65 findings, 45 security and 20 performance, all addressed. Five are recorded
+there as *partly* closed, with the reason next to each: what is left in those
+five is a design decision (authenticating the UDP frame header, serving a node
+that has not yet joined), not an unfinished patch.
 
 ## Tests
 
