@@ -109,6 +109,12 @@ class TestAutoNAT:
         payload = struct.pack("!BH", 3, 9000) + b"tcp"
         pkt = Packet.create(REACH_PROBE, b"\x02" * 20, node.id.raw, payload)
         await node._handle_reach_probe(peer, pkt)
+        # The dial-back runs off the receive loop (two bounded waits would
+        # otherwise hold this peer's loop for longer than its own rate window),
+        # so wait for the task rather than for a fixed delay.
+        async with asyncio.timeout(2):
+            while not dialed:
+                await asyncio.sleep(0)
         assert dialed == [("tcp", "203.0.113.9", 9000)]   # observed ip, not claimed
 
     async def test_reach_probe_rate_limited(self):
@@ -128,6 +134,9 @@ class TestAutoNAT:
             pkt = Packet.create(REACH_PROBE, b"\x02" * 20, node.id.raw, payload)
             await node._handle_reach_probe(peer, pkt)
         from src.node import _REACH_PROBE_RATE_MAX
+        async with asyncio.timeout(2):          # let the deferred dials run
+            while len(node._detached):
+                await asyncio.sleep(0)
         assert calls["n"] <= _REACH_PROBE_RATE_MAX
 
     async def test_ack_confirms_scheme(self):

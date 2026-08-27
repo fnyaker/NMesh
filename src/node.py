@@ -224,6 +224,10 @@ _LINK_KEEPALIVE_INTERVAL = 20.0
 # until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
 # self-repair / delay tolerance).
 _E2E_RETRY_INTERVAL = 5.0
+# How often the persisted snapshot is written at most. A handshake marks the
+# state dirty; one task writes. Anything shorter and a burst of handshakes is
+# back to one full serialise-and-fsync each.
+_STATE_WRITE_INTERVAL = 2.0
 # Responder-side E2E re-key candidates (see _handle_e2e_handshake): when a valid
 # handshake arrives for a peer we ALREADY have a session with, answering naively
 # would overwrite the live session while the initiator (which keeps no matching
@@ -1224,6 +1228,11 @@ class MeshNode:
         # across a restart the peer re-handshakes anyway.
         self._e2e_rekey: dict[NodeID, tuple[SessionKey, float]] = {}
         self._e2e_retry_task: asyncio.Task | None = None
+        # Persisted state is written by one background task, not by whoever
+        # happened to change it — see _persist_state.
+        self._state_dirty: bool = False
+        self._certs_dirty: bool = False
+        self._state_task: asyncio.Task | None = None
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
@@ -1799,6 +1808,7 @@ class MeshNode:
         await self._stop_address_steering()
         await self._stop_release_watch()
         await self._stop_deferred_routes()
+        await self._stop_state_writer()
         # Concurrently: each peer.stop() is individually bounded, and stopping
         # 128 links one after another would stack those bounds into minutes.
         await asyncio.gather(*(peer.stop() for peer in list(self._peers)),
@@ -2583,15 +2593,22 @@ class MeshNode:
                                   if p.authenticated_id != hint.authenticated_id]
         return peers[:_ROUTE_SEND_FANOUT]
 
-    async def _drop_failed_peer(self, peer: _Peer) -> None:
-        try:
-            await peer.stop()
-        except Exception:
-            pass
+    def _drop_failed_peer(self, peer: _Peer) -> None:
+        """A send to this peer failed: take it out of routing *now*, tear the
+        link down in the background.
+
+        Called from `_send_to_candidates`, which runs in some *other* peer's
+        receive loop. `peer.stop()` waits up to `_PEER_STOP_TIMEOUT` and then
+        closes the transport, and a forward tries up to `_ROUTE_SEND_FANOUT`
+        candidates — so doing it inline let one packet freeze an unrelated link
+        for ten seconds (gotchas §10). Removing it from `self._peers`
+        synchronously is what matters for correctness: the next
+        `_route_candidates` must not pick it again."""
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
         self._wake_neighbor_maintenance()
+        self._spawn_bounded(self._safe_stop_peer(peer))
 
     async def _send_to_candidates(self, packet: Packet, candidates: list[_Peer],
                                   *, decrement: bool = False) -> _Peer | None:
@@ -2601,7 +2618,7 @@ class MeshNode:
                 await peer.send(outgoing)
                 return peer
             except Exception:
-                await self._drop_failed_peer(peer)
+                self._drop_failed_peer(peer)
         return None
 
     def _track_route_task(self, coro) -> bool:
@@ -2901,10 +2918,50 @@ class MeshNode:
         self._wake_neighbor_maintenance()
 
     def _persist_state(self) -> None:
-        """Snapshot E2E + routing state to the encrypted store, if persistence
-        is on. Never raises — a disk problem must not take the node down."""
+        """Mark the persisted state dirty; a background task does the writing.
+
+        `SessionStore.save` serialises every session, every pending handshake
+        and the whole routing export, encrypts it, writes it and calls
+        `os.fsync` — synchronously. It is called from `_handle_handshake`,
+        both E2E handlers, `_handle_data` and `send_data`, all of which run on
+        the event loop, so every handshake stopped the entire node for the
+        length of a serialise-and-fsync, and the cost grew with the state.
+
+        Never raises: a disk problem must not take the node down."""
         if self._session_store is None:
             return
+        self._state_dirty = True
+        self._ensure_state_writer()
+
+    def _ensure_state_writer(self) -> None:
+        if self._session_store is None and not self._cert_store_path:
+            return
+        if self._state_task is None or self._state_task.done():
+            try:
+                self._state_task = asyncio.create_task(self._state_writer_loop())
+            except RuntimeError:
+                # No running loop (construction, teardown). Write inline: this
+                # is the one place where there is nothing to block.
+                self._state_task = None
+                self._write_state_now()
+                self._write_certs_now()
+
+    async def _state_writer_loop(self) -> None:
+        """Write what has changed, at most every `_STATE_WRITE_INTERVAL`.
+
+        Off the loop thread (`to_thread`): both writes end in an `fsync`, and
+        the medium may be a slow one."""
+        while self._running or self._state_dirty or self._certs_dirty:
+            await asyncio.sleep(_STATE_WRITE_INTERVAL)
+            if self._state_dirty:
+                await asyncio.to_thread(self._write_state_now)
+            if self._certs_dirty:
+                await asyncio.to_thread(self._write_certs_now)
+
+    def _write_state_now(self) -> None:
+        if self._session_store is None:
+            return
+        self._state_dirty = False
         try:
             self._session_store.save(
                 self._e2e_sessions, self._e2e_pending_kem,
@@ -2913,6 +2970,23 @@ class MeshNode:
             )
         except Exception:
             pass
+
+    async def _stop_state_writer(self) -> None:
+        task = self._state_task
+        self._state_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Whatever is still pending goes to disk before we go: a snapshot the
+        # node never wrote is a restart that re-handshakes everything, and a
+        # certificate never written is a peer that can no longer be verified.
+        if self._state_dirty:
+            self._write_state_now()
+        if self._certs_dirty:
+            self._write_certs_now()
 
     # -- console / management surface -------------------------------------
     # These read or mutate node state and are meant to be driven from the web
@@ -4187,10 +4261,28 @@ class MeshNode:
         return True
 
     def _cert_add(self, cert: Certificate) -> bool:
+        """Take one certificate and mark the store for writing.
+
+        `CertStore.save` serialises the *whole* store to hex JSON and writes it,
+        synchronously. Doing that per certificate meant absorbing one chain of
+        six re-wrote a multi-megabyte file six times, inside a receive loop.
+        Same shape as `_persist_state`: mark dirty, let one task write."""
         ok = self._cert_store.add(cert)
         if ok and self._cert_store_path:
-            self._cert_store.save(self._cert_store_path)
+            self._certs_dirty = True
+            self._ensure_state_writer()
+            if self._state_task is None:
+                self._write_certs_now()   # no loop to write on
         return ok
+
+    def _write_certs_now(self) -> None:
+        if not self._cert_store_path:
+            return
+        self._certs_dirty = False
+        try:
+            self._cert_store.save(self._cert_store_path)
+        except Exception:
+            pass          # a disk problem must not take the node down
 
     def _is_seen(self, msg_id: int) -> bool:
         if msg_id in self._seen_msgs:
@@ -4568,17 +4660,27 @@ class MeshNode:
         # Dial ONLY the address we observed this peer at — never a value it
         # supplied — so it can never make us dial an arbitrary victim.
         observed = peer.transport.remote_ip()
-        ok = False
-        if observed is not None:
-            self._reach_dials_active += 1
-            try:
-                ok = await self._dial_back(scheme, observed, port)
-            finally:
-                self._reach_dials_active -= 1
+        if observed is None:
+            return
+        # …and never inline. A dial-back is two bounded waits of
+        # _REACH_DIAL_TIMEOUT, and the rate limit allows five per window: awaited
+        # here they hold this peer's receive loop for longer than the window
+        # lasts, so it never catches up (gotchas §10).
+        self._spawn_bounded(self._reach_probe_answer(peer, packet.src_id,
+                                                     scheme, observed, port))
+
+    async def _reach_probe_answer(self, peer: '_Peer', dst: bytes, scheme: str,
+                                  observed: str, port: int) -> None:
+        """Dial the peer back and tell it what happened. Off the receive loop."""
+        self._reach_dials_active += 1
+        try:
+            ok = await self._dial_back(scheme, observed, port)
+        finally:
+            self._reach_dials_active -= 1
         reply = struct.pack("!BB", len(scheme.encode()), 1 if ok else 0) + scheme.encode()
         try:
             await peer.send(Packet.create(REACH_PROBE_ACK, self._id.raw,
-                                          packet.src_id, reply))
+                                          dst, reply))
         except Exception:
             pass
 
@@ -4958,7 +5060,9 @@ class MeshNode:
         # is exactly when we re-gossip — so the epidemic terminates on its own.
         outcome = self._catalog.offer(release_bytes, self._identity.verify)
         if outcome:
-            await self._gossip_catalog(release_bytes, exclude=peer)
+            # Off the receive loop: the fan-out awaits a send to every peer, so
+            # one peer whose send buffer is full stalls *this* peer's link.
+            self._spawn_bounded(self._gossip_catalog(release_bytes, exclude=peer))
 
     async def _gossip_catalog(self, release_bytes: bytes,
                               exclude: '_Peer | None' = None) -> None:
@@ -5123,7 +5227,7 @@ class MeshNode:
         outcome = self._releases.offer(release_bytes, self._identity.verify,
                                        self._trusts_publisher)
         if outcome:
-            await self._gossip_release(release_bytes, exclude=peer)
+            self._spawn_bounded(self._gossip_release(release_bytes, exclude=peer))
 
     def _release_have_byte(self, release_bytes: bytes) -> bytes:
         """Do we hold this release's package? Re-answered at every hop, because
@@ -5247,9 +5351,15 @@ class MeshNode:
         if package is None or offset >= len(package):
             return
         slice_ = package[offset:offset + _RELEASE_SLICE]
+        # blocking=False, like every other handler: we are in a receive loop,
+        # and `_route_outbound` with no live candidate awaits `_ensure_route_to`
+        # — a lookup, a dial and a hole punch, seconds of it — while this link
+        # processes nothing else (gotchas §10). `src_id` is not authenticated,
+        # so a stranger's unroutable id is exactly the packet that costs most.
         await self._route_outbound(Packet.create(
             RELEASE_DATA, self._id.raw, packet.src_id,
-            payload[:_RELEASE_ID_LEN] + offset.to_bytes(4, "big") + slice_))
+            payload[:_RELEASE_ID_LEN] + offset.to_bytes(4, "big") + slice_),
+            blocking=False)
 
     async def _handle_release_data(self, peer: '_Peer', packet: Packet) -> None:
         payload = packet.payload
@@ -5616,7 +5726,7 @@ class MeshNode:
         # Re-gossip only when our view actually changed, so the epidemic dies
         # out instead of circulating forever (same shape as the catalog).
         if self._absorb_claim(peer, packet.payload) is not None:
-            await self._gossip_pseudo(packet.payload, exclude=peer)
+            self._spawn_bounded(self._gossip_pseudo(packet.payload, exclude=peer))
 
     async def _gossip_pseudo(self, raw: bytes,
                              exclude: '_Peer | None' = None) -> None:

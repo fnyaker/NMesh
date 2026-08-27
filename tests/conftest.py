@@ -36,6 +36,21 @@ class FakeServer(BaseServer):
     async def close(self) -> None: ...
 
 
+async def settle(node, timeout: float = 2.0) -> None:
+    """Wait for the node's detached tasks to finish.
+
+    Gossip fan-out, the AutoNAT dial-back and a failed peer's teardown all run
+    off the receive loop now (`_spawn_bounded`), because awaiting them there let
+    one slow peer stall an unrelated link. A test that used to read the effect
+    straight after the handler waits for the task instead — on the observable
+    state, never on a fixed sleep."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while node._detached:
+        if asyncio.get_event_loop().time() >= deadline:
+            raise TimeoutError("detached tasks did not finish")
+        await asyncio.sleep(0)
+
+
 def make_manager() -> TransportManager:
     manager = TransportManager()
     manager.register("fake", FakeTransport, FakeServer)
