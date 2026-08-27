@@ -44,6 +44,16 @@ from .node_id import NodeID
 _LEN = struct.Struct("!I")
 _MAX_FRAME = 70_000        # 1 type byte + 20-byte id + up to ~60 KiB payload
 _MAX_CLIENTS = 64
+# Connections accepted but not yet authenticated. `_clients` only counts a
+# client *after* AUTH, so counting that alone meant a process that never sent
+# its first frame was never counted at all — and there is no deadline on a read
+# that has not arrived. The socket is loopback or a Unix socket, but a container
+# sharing it is an explicitly supported deployment.
+_MAX_PENDING_CLIENTS = 16
+_AUTH_DEADLINE = 10.0      # seconds a connection has to send its AUTH frame
+# Frames queued for one client. A client that stops reading must not be able to
+# hold the pump — and with it every other app's inbound delivery.
+_MAX_CLIENT_QUEUE = 64
 
 _KLEN = struct.Struct("!H")   # key-length prefix for STORE_PUT
 _MAX_LIST = 60_000            # cap on a serialised key list reply
@@ -117,6 +127,12 @@ class DataConnector:
         self._auths: dict[bytes, object] = {}
         self._server: asyncio.AbstractServer | None = None
         self._pump_task: asyncio.Task | None = None
+        # writer -> outbound queue + its pump task. One slow app must not stall
+        # the others, so each client drains at its own pace and is dropped if it
+        # falls too far behind.
+        self._outbox: dict[asyncio.StreamWriter, asyncio.Queue] = {}
+        self._writers: dict[asyncio.StreamWriter, asyncio.Task] = {}
+        self._pending: int = 0
 
     @property
     def host(self) -> str:
@@ -124,10 +140,18 @@ class DataConnector:
 
     async def start(self) -> None:
         if self._unix_path:
-            self._server = await asyncio.start_unix_server(
-                self._handle_client, path=self._unix_path)
+            # 0600 from the moment it exists, not by a chmod afterwards: the
+            # same window CLAUDE.md rejects for the identity file. A umask
+            # around the bind is the only way to get it — a socket's mode is set
+            # when it is created.
+            previous = os.umask(0o177)
             try:
-                os.chmod(self._unix_path, 0o600)
+                self._server = await asyncio.start_unix_server(
+                    self._handle_client, path=self._unix_path)
+            finally:
+                os.umask(previous)
+            try:
+                os.chmod(self._unix_path, 0o600)   # belt and braces
             except OSError:
                 pass
         else:
@@ -151,6 +175,10 @@ class DataConnector:
             except Exception:
                 pass
             self._server = None
+        for task in list(self._writers.values()):
+            task.cancel()
+        self._writers.clear()
+        self._outbox.clear()
         for w in list(self._clients):
             try:
                 w.close()
@@ -164,29 +192,65 @@ class DataConnector:
                 pass
 
     async def _pump(self) -> None:
-        """Demultiplex inbound mesh messages by app section to matching clients."""
+        """Demultiplex inbound mesh messages by app section to matching clients.
+
+        Never writes to a socket itself. Writing here meant one client that had
+        stopped reading blocked `drain()` and with it **every** app's inbound
+        delivery, while `_data_queue` kept filling behind it. Each client has its
+        own bounded queue and its own writer; a client that falls behind loses
+        frames, alone.
+
+        Never raises out, either: this task dying stopped inbound app data for
+        good, with nothing to restart it."""
         while True:
-            src, framed = await self._node.receive_data()
-            parsed = _unframe(framed)
-            if parsed is None:
-                continue  # no section header — drop (reject by default)
-            app_id, payload = parsed
-            body = src.raw + payload
-            for w, w_app in list(self._clients.items()):
-                if w_app != app_id:
-                    continue  # not this client's section
-                try:
-                    await _write_frame(w, _RECV, body)
-                except Exception:
-                    self._clients.pop(w, None)
+            try:
+                src, framed = await self._node.receive_data()
+                parsed = _unframe(framed)
+                if parsed is None:
+                    continue  # no section header — drop (reject by default)
+                app_id, payload = parsed
+                body = src.raw + payload
+                for w, w_app in list(self._clients.items()):
+                    if w_app != app_id:
+                        continue  # not this client's section
+                    queue = self._outbox.get(w)
+                    if queue is None:
+                        continue
+                    try:
+                        queue.put_nowait(body)
+                    except asyncio.QueueFull:
+                        pass      # this client is behind; the others are not
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    async def _drain_client(self, writer: asyncio.StreamWriter,
+                            queue: asyncio.Queue) -> None:
+        """Write one client's frames, at that client's own pace."""
+        try:
+            while True:
+                body = await queue.get()
+                await _write_frame(writer, _RECV, body)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._clients.pop(writer, None)
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
-        if len(self._clients) >= _MAX_CLIENTS:
+        # Counted from accept, not from AUTH: a connection that never sends its
+        # first frame is still a connection, and nothing else was counting it.
+        if (len(self._clients) >= _MAX_CLIENTS
+                or self._pending >= _MAX_PENDING_CLIENTS):
             writer.close()
             return
+        self._pending += 1
         try:
-            ftype, body = await _read_frame(reader)
+            # …and it has a deadline to use it. There is no timeout on a read
+            # that never arrives.
+            async with asyncio.timeout(_AUTH_DEADLINE):
+                ftype, body = await _read_frame(reader)
             # AUTH body = app_id(APP_ID_LEN) ‖ token. The token is compared in
             # constant time; the app id names this client's section.
             if ftype != _AUTH or len(body) < APP_ID_LEN or not hmac.compare_digest(
@@ -197,6 +261,11 @@ class DataConnector:
             app_id = body[:APP_ID_LEN]
             await _write_frame(writer, _AUTH_OK, b"")
             self._clients[writer] = app_id
+            queue: asyncio.Queue = asyncio.Queue(_MAX_CLIENT_QUEUE)
+            self._outbox[writer] = queue
+            self._writers[writer] = asyncio.create_task(
+                self._drain_client(writer, queue))
+            self._pending -= 1
             while True:
                 ftype, body = await _read_frame(reader)
                 if ftype == _SEND:
@@ -225,12 +294,19 @@ class DataConnector:
                     # frame, so an app can only ever speak for its own section.
                     await self._handle_app_auth(writer, app_id, ftype, body)
                 # unknown types are ignored
-        except (asyncio.IncompleteReadError, ConnectionError, ValueError, OSError):
+        except (asyncio.IncompleteReadError, ConnectionError, ValueError,
+                OSError, asyncio.TimeoutError):
             pass
         except asyncio.CancelledError:
             raise
         finally:
+            if writer not in self._outbox:
+                self._pending = max(0, self._pending - 1)
             self._clients.pop(writer, None)
+            self._outbox.pop(writer, None)
+            task = self._writers.pop(writer, None)
+            if task is not None:
+                task.cancel()
             try:
                 writer.close()
             except Exception:

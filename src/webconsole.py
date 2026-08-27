@@ -215,7 +215,7 @@ class WebConsole:
     # -- TLS --------------------------------------------------------------
 
     def _build_ssl_context(self) -> ssl.SSLContext:
-        cert_pem, key_pem = self._load_or_create_cert()
+        cert_pem, key_pem, loaded = self._load_or_create_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         # load_cert_chain needs files; use a temp dir only if we have no state dir.
@@ -223,23 +223,30 @@ class WebConsole:
         d = self._state_dir or tempfile.mkdtemp(prefix="nmesh-console-")
         cert_path = os.path.join(d, "console_cert.pem")
         key_path = os.path.join(d, "console_key.pem")
-        if not os.path.exists(cert_path):
-            with open(cert_path, "wb") as f:
-                f.write(cert_pem)
-        if not os.path.exists(key_path):
-            with open(key_path, "wb") as f:
-                f.write(key_pem)
-            try:
-                os.chmod(key_path, 0o600)
-            except OSError:
-                pass
+        if not loaded:
+            # Both, or neither. Writing each only "if it does not exist" meant a
+            # state directory with the certificate but no key kept the stale
+            # certificate and wrote a fresh key beside it — a mismatched pair,
+            # and a console that fails to start with an opaque TLS error.
+            self._write_private(cert_path, cert_pem)
+            self._write_private(key_path, key_pem)
         ctx.load_cert_chain(cert_path, key_path)
         self.cert_fingerprint = hashlib.sha256(
             ssl.PEM_cert_to_DER_cert(cert_pem.decode())
         ).hexdigest()
         return ctx
 
-    def _load_or_create_cert(self) -> tuple[bytes, bytes]:
+    @staticmethod
+    def _write_private(path: str, data: bytes) -> None:
+        """Create 0600 at open time, not by a chmod afterwards — the private
+        half of a TLS pair must never exist world-readable, however briefly
+        (the rule CLAUDE.md states for the identity file)."""
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+
+    def _load_or_create_cert(self) -> tuple[bytes, bytes, bool]:
+        """``(cert, key, loaded_from_disk)``."""
         if self._state_dir:
             cp = os.path.join(self._state_dir, "console_cert.pem")
             kp = os.path.join(self._state_dir, "console_key.pem")
@@ -248,8 +255,9 @@ class WebConsole:
                     cert_pem = f.read()
                 with open(kp, "rb") as f:
                     key_pem = f.read()
-                return cert_pem, key_pem
-        return _generate_self_signed(self.host)
+                return cert_pem, key_pem, True
+        cert_pem, key_pem = _generate_self_signed(self.host)
+        return cert_pem, key_pem, False
 
     # -- token sessions ---------------------------------------------------
 

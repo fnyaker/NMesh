@@ -442,8 +442,10 @@ function statusHTML(status){
   const memory = status.memory || {}, disks = status.disks || [];
   const root = disks[0] || null, host = status.host || {};
   const load = (status.load && status.load.length) ? status.load[0].toFixed(2) : "—";
+  // The status document comes from a managed node over the mesh, so every
+  // field in it is network input — including the ones that look like numbers.
   const cell = (key, value, meter) =>
-    '<div class="stat sm"><span class="v">' + value +
+    '<div class="stat sm"><span class="v">' + esc(value) +
     '</span><span class="k">' + esc(key) + "</span>" + (meter || "") + "</div>";
   const meter = (used, total) => {
     const share = total > 0 ? Math.min(100, Math.round(100 * used / total)) : 0;
