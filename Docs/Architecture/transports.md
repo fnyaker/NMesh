@@ -236,11 +236,13 @@ is worth it.
 - `_READ_TIMEOUT = 60 s`: a `receive()` with no data for 60 s raises → the link
   is treated as dead and reaped. **An idle link therefore dies without a
   keepalive** (see §keepalive).
-- **`_wait_closed_bounded`**: Python 3.12 changed `Server.wait_closed()` — it
-  now blocks until **every accepted client connection** is closed, not only the
-  listening socket. Closing a port while a peer stayed connected never returned
-  (a hang). We bound the wait (the listening socket is already closed by
-  `close()`, which is what matters). See `gotchas.md`.
+- **`wait_closed_bounded`** (`ip_utils.py`, shared with the data connector):
+  Python 3.12 changed `Server.wait_closed()` — it now blocks until **every
+  accepted client connection** is closed, not only the listening socket.
+  Closing a port while a peer stayed connected never returned (a hang). We bound
+  the wait (the listening socket is already closed by `close()`, which is what
+  matters). It lived here as `_wait_closed_bounded` until a second caller needed
+  it and the connector was found still awaiting bare — see `gotchas.md` §1.
 
 ## UDP (`udp_transport.py`)
 

@@ -46,6 +46,26 @@ async def bounded_getaddrinfo(host: str, port: int, *,
     return res
 
 
+async def wait_closed_bounded(obj, timeout: float = 1.0) -> None:
+    """``wait_closed()`` that cannot wedge the caller.
+
+    Python 3.12 changed ``asyncio.Server.wait_closed()`` to block until every
+    accepted connection has finished too, not just until the listening socket
+    is shut. Awaiting it while a client is still parked in its handler never
+    returns — the shutdown deadlocks, and on 3.11 the same code returned at
+    once, so the trap is invisible until the interpreter moves. ``close()`` has
+    already shut the listening socket, which is what the caller is really
+    waiting for, so wait briefly and move on.
+
+    Whoever owns the connections should drop them *before* calling this; the
+    bound is what stops one handler that ignores its close from wedging the
+    rest."""
+    try:
+        await asyncio.wait_for(obj.wait_closed(), timeout=timeout)
+    except (asyncio.TimeoutError, Exception):
+        pass
+
+
 def split_host_port(opaque: str) -> tuple[str, str] | None:
     """Split ``host:port`` handling ``[ipv6]:port``. Returns (host, port) or None."""
     if opaque.startswith("["):

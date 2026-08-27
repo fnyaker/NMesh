@@ -240,10 +240,12 @@ A full audit that follows the execution order — every packet field from the
 socket to the app, then the console and the apps — with each finding written up
 next to the invariant a fix must not break: [`BUGSVULNS.MD`](BUGSVULNS.MD).
 
-65 findings, 45 security and 20 performance, all addressed. Five are recorded
+68 findings, 48 security and 20 performance, all addressed. Five are recorded
 there as *partly* closed, with the reason next to each: what is left in those
 five is a design decision (authenticating the UDP frame header, serving a node
-that has not yet joined), not an unfinished patch.
+that has not yet joined), not an unfinished patch. The last three were not found
+by reading the code — one CI failure turned them up when the base image's Python
+moved to 3.13.
 
 ## Tests
 

@@ -28,10 +28,18 @@
 
 ## Where this stands
 
-65 findings: 45 security, 20 performance. All 65 are addressed. Sixty are
+68 findings: 48 security, 20 performance. All 68 are addressed. Sixty-three are
 closed outright; five are recorded below as *partly* closed, and it is worth
 being precise about why, because "mitigated" here does not mean "we ran out of
 time" — in each case the remainder is a design decision, not a patch.
+
+Findings **46** to **48** were not found by reading the code. They came out of
+one CI failure, after the audit was written, when the base image's Python moved
+to 3.13 — a shutdown deadlock, a native leak the audit read straight past, and
+five tests that a fix in this very audit had silently switched off. They are in
+the list because they belong there, and because of what the three of them say
+together: a green suite is a claim about one interpreter and about the tests
+that actually ran.
 
 | # | What is left, and why |
 |---|---|
@@ -118,6 +126,9 @@ like the regression.
 | 29 | **high** | Any datagram with the STUN magic cookie rewrites our public address |
 | 30 | **high** | Argument injection into `ssh` from a fleet provisioning request |
 | 41 | **high** | The app-store catalogue can be filled and held for ever |
+| 46 | **high** | `DataConnector.stop()` deadlocks on Python 3.12+ while an app is attached |
+| 47 | **medium** | liboqs contexts are never freed, and one of them is per handshake |
+| 48 | **low** | Two test classes shared a name, and five permission tests stopped running |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2397,6 +2408,145 @@ must leave that state alone.
 ---
 
 ---
+
+## 46 — high — `DataConnector.stop()` deadlocks on Python 3.12+ while an app is attached
+
+> **Status — fixed.** `stop()` drops the clients it owns *before* closing the
+> server, and the wait is bounded through the shared
+> `ip_utils.wait_closed_bounded`. `tcp_transport`'s private copy of that helper
+> moved to `ip_utils` so both callers share one implementation. Two regression
+> tests (`TestShutdown`) fail in 10 s on the old ordering instead of hanging
+> for the full timeout.
+
+**Where** — `src/data_connector.py`, `DataConnector.stop()`.
+
+**Reach** — every shutdown: `scripts/nmesh_node.py` on SIGTERM, the console's
+restart-for-update path, and `conn.stop()` in ~35 tests.
+
+**What happens** — `stop()` closed the listening server and awaited
+`self._server.wait_closed()` *before* closing the client writers it owns.
+Python 3.12 changed `wait_closed()` to block until **every accepted connection**
+has finished, not just until the listening socket is shut. So the wait needs the
+client handlers to end, and the only thing that ends them is the `w.close()`
+loop that comes after the wait. The two halves face each other and neither
+moves.
+
+On Python 3.11 `wait_closed()` returned immediately, so the ordering read as
+correct for as long as CI stayed on 3.11. Proven across versions:
+
+```
+python 3.11: wait_closed() RETURNED with a live connection
+python 3.12: wait_closed() BLOCKED on the live connection  <-- deadlock
+python 3.13: wait_closed() BLOCKED on the live connection  <-- deadlock
+```
+
+**Impact** — a node with an app attached to the connector never finishes
+shutting down. Under systemd that becomes a SIGKILL after the stop timeout,
+which is the one path that skips every flush the node does on the way out
+(session store, certificate store). In the suite it hung one worker for the
+full `--timeout=120`, and pytest-timeout's thread method answers a hang with
+`os._exit(1)` — reported by xdist as `[gwN] node down: Not properly
+terminated`, with no traceback and no failing test named. It reproduces 3/3 on
+Python 3.13 and 0/4 on 3.11.
+
+**Why the audit missed it** — the audit read the code on a tree whose test
+environment was Python 3.11, where the defect is unreachable. It is a reminder
+that "the suite is green" is a statement about one interpreter, and that
+`Docs/Architecture/gotchas.md` §1 had already written this rule down — with
+`tcp_transport` fixed and this caller left bare. A rule recorded in prose is not
+a rule applied; the second copy of a helper is the second chance to miss its
+fix.
+
+**Fixing it without breaking something** — the client writers must be closed
+before the server is awaited, not after: closing a `StreamWriter` shuts the
+transport both ways, so the handler's read returns EOF and it unwinds on its
+own. The bounded wait stays as defence against a handler that ignores its
+close, never as the mechanism. Do not simply drop the `wait_closed()` call: on
+a Unix socket the path is unlinked immediately after, and unlinking under a
+listener that has not finished closing is how you get a connector that cannot
+be restarted.
+
+
+## 47 — medium — liboqs contexts are never freed, and one of them is per handshake
+
+> **Status — fixed.** `generate_kem_keypair` uses the context manager, like both
+> its sibling methods. The thread-local verifier becomes a pool capped at
+> `_VERIFIER_POOL_MAX = 8`: a verifier that comes back to a full pool is freed
+> rather than kept, so the native contexts are capped by the pool and not by
+> however many threads happen to verify. `CryptoIdentity.load` gives its signer
+> back on the failure path. Measured after: 20 000 handshake-shaped keypairs and
+> 20 000 verifications both grow the process by **0 KiB**, against 5 236 KiB and
+> 1 664 KiB before.
+
+**Where** — `src/crypto.py`: `generate_kem_keypair`, `verify_signature`,
+`CryptoIdentity.load`.
+
+**Reach** — `initiate_handshake` (`node.py:2406`) and `_initiate_e2e_handshake`
+(`node.py:2854`) each call `generate_kem_keypair` once. Both are driven by a
+peer: a link handshake per connection, an E2E handshake per pair that wants to
+talk.
+
+**What happens** — liboqs-python defines **no `__del__`** on either
+`Signature` or `KeyEncapsulation`. There is `free()`, and there is the context
+manager that calls it, and that is all. A context dropped without one of them is
+native memory that is never returned, whatever Python does with the wrapper.
+
+`generate_kem_keypair` built its `KeyEncapsulation` bare where
+`kem_encapsulate` and `kem_decapsulate`, three lines below, both use `with`.
+Measured against liboqs 0.16.0:
+
+```
+20000 unfreed Signature contexts: +1664 KiB (85.2 bytes each)
+20000 unfreed KEM keypairs:      +5236 KiB (268.1 bytes each)
+```
+
+**Impact** — 268 bytes per handshake, and a peer decides how often to hand us
+one. That is slow, but it is the shape `CLAUDE.md` rules out: *nothing that can
+grow without end under an attacker's pressure*. Reconnecting in a loop grows a
+long-lived relay by a quarter of a gigabyte per million handshakes, and nothing
+reclaims it short of a restart. `free()` is also what calls `OQS_MEM_cleanse` on
+the secret-key buffer, so skipping it leaves ML-KEM secret material in released
+heap — against "sensitive keys kept in memory where possible".
+
+The verifier (from **P6**) is the smaller half and the more interesting one: a
+`threading.local` cache is bounded by the number of threads that ever verify,
+which is a bound by accident. `ThreadingHTTPServer` makes a thread per request;
+no console path verifies a signature *today*, and "today" is not a bound.
+
+**Fixing it without breaking something** — the verifier cannot simply be a
+single shared object: liboqs does not document `verify` as re-entrant. A pool
+keeps that property (a verifier is checked out by exactly one thread at a time,
+as with thread-local) while capping the contexts. Do not add a `__del__` to
+`CryptoIdentity` to chase the last one: a finaliser that calls into ctypes
+during interpreter shutdown is how this class of code segfaults on the way out,
+and liboqs-python's own authors left `__del__` off for that reason.
+
+## 48 — low — Two test classes shared a name, and five permission tests stopped running
+
+> **Status — fixed.** The class added by the finding-12 work is renamed
+> `TestIdentityLoad`, with a docstring saying why the name is deliberate. The
+> file collects 10 tests where it collected 5.
+
+**Where** — `tests/test_crypto.py`.
+
+**What happens** — the fix for **12** added a class called
+`TestIdentityOnDisk`, and a class of that name already existed. Python does not
+complain: the second binding simply replaces the first in the module namespace,
+so pytest only ever saw one of them. The five tests in the original — among them
+`test_saved_identity_is_owner_only` and `test_the_umask_cannot_loosen_it`, which
+are what hold the node's private key at 0600 — stopped being collected, and the
+suite stayed green while it happened.
+
+**Impact** — no defect in the product, and that is the point: the guard against
+one was switched off silently by a commit that was adding guards. It sits next
+to **46** under the same heading — a green suite is a claim about what actually
+ran, and neither the count nor the colour tells you that.
+
+**Fixing it without breaking something** — renaming is all it takes. Worth
+knowing that nothing in the tooling will catch the next one: pytest has no
+duplicate-name check, and the count only went *up* over the commit that broke
+it, because the new class carried more tests than the one it hid.
+
 
 # Verified by running it
 

@@ -2,7 +2,7 @@ import asyncio
 import struct
 from .transport import BaseTransport, BaseServer, option
 from .packet import Packet
-from .ip_utils import split_host_port
+from .ip_utils import split_host_port, wait_closed_bounded
 
 _FRAME = struct.Struct('!H')
 _READ_TIMEOUT = 60.0
@@ -19,20 +19,6 @@ def _host_port(address: str) -> tuple[str, int]:
         raise ValueError(f"invalid address: {address!r}")
     host, port = hp
     return host, int(port)
-
-
-async def _wait_closed_bounded(obj) -> None:
-    """Bounded ``wait_closed()``.
-
-    Python 3.12 changed ``asyncio.Server.wait_closed()`` to block until every
-    accepted client connection also closes, not just the listening socket. When
-    we stop listening (or close a link) while a peer is still connected, that
-    never returns and wedges the caller. ``close()`` has already closed the
-    listening socket — all that matters here — so wait briefly and move on."""
-    try:
-        await asyncio.wait_for(obj.wait_closed(), timeout=1.0)
-    except (asyncio.TimeoutError, Exception):
-        pass
 
 
 class TCPTransport(BaseTransport):
@@ -210,10 +196,10 @@ class TCPTransport(BaseTransport):
     async def close(self) -> None:
         if self._writer:
             self._writer.close()
-            await _wait_closed_bounded(self._writer)
+            await wait_closed_bounded(self._writer)
         if self._server:
             self._server.close()
-            await _wait_closed_bounded(self._server)
+            await wait_closed_bounded(self._server)
 
 
 class TCPServer(BaseServer):
@@ -242,4 +228,4 @@ class TCPServer(BaseServer):
     async def close(self) -> None:
         if self._server:
             self._server.close()
-            await _wait_closed_bounded(self._server)
+            await wait_closed_bounded(self._server)

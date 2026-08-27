@@ -10,8 +10,32 @@ Python 3.12 changed the semantics: `wait_closed()` blocks until **every accepted
 connection** is closed, not only the listening socket. Closing a server
 (`remove_listen`, `close`) while a peer stayed connected **never returned** → an
 infinite hang (5 h in CI before the kill).
-→ Fix: `_wait_closed_bounded()` (`tcp_transport.py`) bounds the wait. **Never
+→ Fix: `wait_closed_bounded()` (`ip_utils.py`) bounds the wait. **Never
 `await server.wait_closed()` bare** on a server that may have live clients.
+
+**It happened a second time, in `DataConnector.stop()`.** The rule above was
+written down and the transport was fixed; the connector kept a bare
+`await self._server.wait_closed()`, and it closed the server *before* dropping
+the clients it owns. That is not a slow wait, it is a deadlock with two halves
+facing each other: the wait needs the handlers to end, and the only thing that
+ends them is the close that comes after it. It stayed invisible for as long as
+CI ran 3.11, where `wait_closed()` returned at once; the day the image moved to
+3.13 it hung one worker for the full `--timeout=120`, and pytest-timeout's
+thread method answers a hang with `os._exit(1)` — which xdist reports as
+`[gwN] node down: Not properly terminated`, with no traceback and no failing
+test name. A whole CI run diagnosed as "flaky infrastructure".
+
+Two lessons, and the second is the one that generalises:
+- **Order first, bound second.** Whoever owns the connections drops them
+  *before* waiting on the server. `wait_closed_bounded` is then only defence
+  against a handler that ignores its close — not the thing holding shutdown
+  together. Closing a `StreamWriter` shuts the transport both ways, so the
+  handler's read returns EOF and it unwinds by itself.
+- **A rule written down is not a rule applied.** When a version change breaks
+  an idiom, grep for *every* use of it, not just the one that surfaced. One
+  shared helper (here, moved to `ip_utils.py` so both callers use the same
+  implementation) is worth more than a note, because a second copy is a second
+  chance to miss the fix.
 
 ### 2. Blocking network probes → a frozen loop/shutdown
 `discover_public_ip` did **blocking** socket work (`getaddrinfo` with no
