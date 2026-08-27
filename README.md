@@ -79,8 +79,8 @@ python scripts/nmesh_node.py --data ./data
 ## Installing for good (the recommended way)
 
 For a machine that is meant to **host** a node, `install.sh` copies the tree to
-a durable location, enables start-at-boot (systemd, OpenRC, launchd or
-Termux:Boot) and then starts the node:
+a durable location, enables start-at-boot (systemd, OpenRC or launchd) and then
+starts the node:
 
 ```bash
 ./install.sh                       # install, enable at boot, start
@@ -206,25 +206,6 @@ Writing your own: [`Docs/Transports/guide`](Docs/Transports/guide) +
 
 `./install.sh` — see [Installing for good](#installing-for-good-the-recommended-way)
 above.
-
-### Android (Termux)
-
-A phone hosts a node through [Termux](https://f-droid.org/packages/com.termux/)
-(install it from F-Droid — the Play Store build is abandoned):
-
-```bash
-pkg install git
-git clone https://github.com/fnyaker/NMesh.git && cd NMesh
-./install.sh
-```
-
-The same installer: it detects Termux, compiles liboqs (a few minutes on a
-phone), and installs a supervise loop that restarts the node if it dies, plus a
-boot hook. Two companion apps, also from F-Droid, complete it: **Termux:Boot**
-for start-at-boot (without it the node runs only while Termux is open) and
-**Termux:API** for the wakelock that keeps the node alive with the screen off.
-Exempt Termux from Android's battery optimisation, or the system kills the node
-when the screen locks.
 
 ### Docker (hosting a relay node)
 

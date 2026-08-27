@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "0.1.18"
+__version__ = "0.1.17"
 
 # Releases are tagged ``vX.Y.Z`` (see .github/workflows/release.yml). Anything
 # after the numbers (``-rc1``, ``+build``) is kept but only used to break ties
