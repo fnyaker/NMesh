@@ -59,6 +59,27 @@ reaped. Without a keepalive, a healthy but silent link goes down. →
 `_link_keepalive_loop` (a PING every 20 s). If you see links "dropping after a
 while", look at the keepalive first.
 
+### 3d. A sequential ping loop let one slow link starve the rest
+Keepalive, address announce and the console ping each walked their peers with
+`await self.ping(p)` **one at a time**. A single slow or dead peer (a ping that
+hangs until its timeout) held the whole pass, so every other peer's keepalive
+was delayed past its own deadline — one bad link silently starved a healthy
+mesh. → All three now `asyncio.gather(*(self.ping(p) for p in targets),
+return_exceptions=True)`: each ping runs concurrently, a slow one delays only
+itself, and a raising ping is contained. **A fan-out over peers must be
+concurrent, or one slow peer becomes the whole mesh's clock.**
+
+### 13. A vanished local address left a dead link hanging around
+When the machine moved networks (Wi-Fi to LTE), the node refreshed its
+advertised addresses but **kept** links whose local endpoint was an address it
+no longer held. The remote could no longer dial back to that address, so the
+link was dead in one direction — "cannot reach" until a keepalive timeout
+eventually noticed. → On a `local_ips` change, `_reap_dead_endpoint_links`
+reaps **only** the links whose `endpoints()["local"]` host has vanished
+(computed as `set(old) - set(new)`), never a mass teardown. **Recover from an
+addressing change by reaping the links that lost their address, not by
+re-dialling everything.**
+
 ### 4. A TCP `connect()` with no timeout hangs for minutes
 Dialling an unreachable address (a NATted peer's private IP learned by gossip, a
 dead host) with no bound lets the OS exhaust its SYN timeout (~2 min) **inside**
