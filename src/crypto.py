@@ -17,22 +17,42 @@ class CryptoError(Exception):
     pass
 
 
-# One verifier per thread, reused. Constructing an `oqs.Signature` allocates
+# A small pool of verifiers, reused. Constructing an `oqs.Signature` allocates
 # liboqs state, and a verification happens per certificate parsed, per pseudo
 # claim, per release descriptor, per app-auth assertion — decoding one
-# FOUND_NODE with a full pool is 32 of them. The context holds no per-call
-# state for a *public-key* verification, but it is not documented as
-# re-entrant, so it is thread-local rather than shared.
-_verifiers = threading.local()
+# FOUND_NODE with a full pool is 32 of them.
+#
+# A pool and not a `threading.local`: liboqs-python defines **no `__del__`** on
+# `Signature`, only `free()`, so a context nobody frees is native memory gone
+# for the life of the process (85 bytes, measured). Per-thread caching leaks one
+# per thread that ever verifies, and `ThreadingHTTPServer` makes a thread per
+# request — a bound that holds only because no console path verifies *today*.
+# The pool caps the native contexts outright: a verifier is checked out by one
+# thread at a time (so this is as re-entrant as thread-local was), and one that
+# comes back to a full pool is freed rather than kept.
+_VERIFIER_POOL_MAX = 8
+_verifier_pool: list = []
+_verifier_lock = threading.Lock()
 
 
 def verify_signature(message: bytes, signature: bytes, public_key: bytes) -> bool:
-    """Verify an ML-DSA signature, reusing this thread's verifier."""
-    verifier = getattr(_verifiers, "dsa", None)
+    """Verify an ML-DSA signature, borrowing a verifier from the pool."""
+    with _verifier_lock:
+        verifier = _verifier_pool.pop() if _verifier_pool else None
     if verifier is None:
         verifier = oqs.Signature(DSA_ALG)
-        _verifiers.dsa = verifier
-    return verifier.verify(message, signature, public_key)
+    try:
+        return verifier.verify(message, signature, public_key)
+    finally:
+        with _verifier_lock:
+            if len(_verifier_pool) < _VERIFIER_POOL_MAX:
+                _verifier_pool.append(verifier)
+                verifier = None
+        if verifier is not None:
+            try:
+                verifier.free()
+            except Exception:
+                pass
 
 
 class CryptoIdentity:
@@ -52,9 +72,15 @@ class CryptoIdentity:
         return verify_signature(message, signature, public_key)
 
     def generate_kem_keypair(self) -> tuple[bytes, bytes]:
-        kem = oqs.KeyEncapsulation(KEM_ALG)
-        public_key = kem.generate_keypair()
-        return public_key, kem.export_secret_key()
+        # `with`, like both sibling methods: liboqs-python frees nothing on
+        # garbage collection (no `__del__`, only `free()`), so a context dropped
+        # without it is 268 bytes of native memory gone for good — and this runs
+        # once per handshake, which a peer chooses how often to ask for. `free()`
+        # also cleanses the secret key buffer, which is the whole reason the
+        # library offers it.
+        with oqs.KeyEncapsulation(KEM_ALG) as kem:
+            public_key = kem.generate_keypair()
+            return public_key, kem.export_secret_key()
 
     def kem_encapsulate(self, their_public_key: bytes) -> tuple[bytes, bytes]:
         with oqs.KeyEncapsulation(KEM_ALG) as kem:
@@ -138,6 +164,16 @@ class CryptoIdentity:
             if not identity.verify(b"nmesh-identity-self-test", probe, pub):
                 raise ValueError("the stored public key does not match the secret")
         except Exception as exc:
+            # The signer may already hold liboqs state and a secret-key buffer,
+            # and nothing frees either on collection. Give it back before the
+            # identity is thrown away.
+            signer = getattr(identity, "_signer", None)
+            if signer is not None:
+                try:
+                    signer.free()
+                except Exception:
+                    pass
+                identity._signer = None
             raise CryptoError(
                 f"{path} exists but is not a usable identity ({exc}). Refusing "
                 f"to replace it — move it aside deliberately to start fresh."
