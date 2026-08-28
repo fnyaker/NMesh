@@ -521,6 +521,32 @@ fetch_liboqs() {
     return 1
 }
 
+# ── verifying an import ──────────────────────────────────────────────────────
+# Two rules, both learned from the same one-line failure ("src import failed —
+# check project structure", with the traceback thrown away and the structure
+# perfectly fine).
+#
+# 1. Show what Python actually said. A verification that hides its own error
+#    sends the operator hunting for a missing directory when the real cause is
+#    an ImportError three modules deep, or a dependency that installed but
+#    cannot load. The output is indented so a traceback reads as an aside.
+# 2. Import the project the way the node does. scripts/nmesh_node.py puts the
+#    project root on sys.path itself, so the node starts wherever it is called
+#    from; this check relied on `python -c` doing that implicitly, from the
+#    current directory. PYTHONSAFEPATH=1 in the environment (or `python -P`, or
+#    any wrapper that isolates the interpreter) drops it — and the check then
+#    fails on a machine where the node would have run perfectly. Naming the
+#    directory removes the difference.
+verify_import() {
+    local label="$1" code="$2" out=""
+    if out="$(PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" python -c "$code" 2>&1)"; then
+        [ -n "$label" ] && ok "$label"
+        return 0
+    fi
+    [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/       /' >&2
+    return 1
+}
+
 # ─────────────────────────────── MAIN ────────────────────────────────────────
 # The test-suite sources everything above without running any of what follows.
 if [ -n "${NMESH_START_LIB:-}" ]; then return 0; fi
@@ -723,12 +749,29 @@ fi
 
 # ── step 6: verify imports ───────────────────────────────────────────────────
 info "Verifying imports…"
-pq_ready && ok "liboqs-python (ML-KEM-768, ML-DSA-65)" \
-    || fail "liboqs-python check failed — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"
-python -c "import cryptography" >/dev/null 2>&1 && ok "cryptography (AES-GCM/HKDF)" \
-    || fail "cryptography import failed"
-python -c "import src" >/dev/null 2>&1 && ok "src (NMesh core)" \
-    || fail "src import failed — check project structure"
+if pq_ready; then
+    ok "liboqs-python (ML-KEM-768, ML-DSA-65)"
+else
+    # Say why, but only once the library is known to be on disk: importing the
+    # wrapper without it is what triggers its surprise auto-build.
+    if pq_lib_on_disk; then
+        verify_import "" "import oqs
+oqs.KeyEncapsulation('ML-KEM-768')
+oqs.Signature('ML-DSA-65')" || true
+    else
+        echo "       no liboqs shared library under ${OQS_INSTALL_PATH:-?} or in the linker path" >&2
+    fi
+    fail "liboqs-python check failed — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"
+fi
+verify_import "cryptography (AES-GCM/HKDF)" "import cryptography" \
+    || fail "cryptography import failed — try: rm -rf $VENV && ./start.sh"
+# Only claim a structure problem when there really is one: this is the install
+# tree, and a copy that arrived without src/ is a different fault — and a
+# different fix — from a module in it that raises on import.
+[ -f "src/__init__.py" ] \
+    || fail "src/__init__.py is missing from $PWD — this tree is incomplete, re-install from a full checkout"
+verify_import "src (NMesh core)" "import src" \
+    || fail "src import failed — the error above says why"
 
 # Setup-only mode: everything above is the install path, nothing below it is.
 # CI and "did my machine get set up?" checks stop here instead of starting a node.
