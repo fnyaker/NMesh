@@ -279,8 +279,8 @@ class TestOrdering:
 
     def test_the_config_is_written_before_the_lock_down(self):
         text = INSTALL.read_text()
-        config_write = text.index('CONFIG_FILE="$PREFIX/')
-        lock = text.index('lock_down "$PREFIX"')
+        config_write = text.index('CONFIG_FILE="$INSTALL_DIR/')
+        lock = text.index('lock_down "$INSTALL_DIR"')
         assert config_write < lock
 
     def test_the_lock_down_covers_the_install_directory(self):
@@ -319,3 +319,38 @@ class TestHelp:
 
     def test_the_script_is_executable(self):
         assert os.access(INSTALL, os.X_OK)
+
+
+class TestPrefixIsNotOurs:
+    """Termux exports PREFIX — its own /data/data/com.termux/files/usr — and
+    assigning to an inherited exported variable keeps it exported. The installer
+    called its install directory PREFIX, so every child, start.sh included, was
+    handed the install directory as Termux's prefix: start.sh's Android probe
+    ($PREFIX/bin/pkg) found nothing and set a phone up as a Debian box, down to
+    apt package names and a hunt for sudo."""
+
+    def _code(self):
+        return "\n".join(line for line in INSTALL.read_text().splitlines()
+                         if not line.strip().startswith("#"))
+
+    def test_the_installer_never_assigns_to_prefix(self):
+        import re
+        assert not re.search(r'(?<![A-Z_])PREFIX=', self._code())
+
+    def test_the_installer_never_reads_its_own_prefix_back(self):
+        import re
+        assert not re.search(r'\$\{?PREFIX\b', self._code())
+
+    def test_the_install_directory_has_a_name_of_its_own(self):
+        code = self._code()
+        assert 'INSTALL_DIR="${NMESH_PREFIX:-}"' in code
+        assert '--prefix)     INSTALL_DIR=' in code
+
+    def test_termux_keeps_its_prefix_when_the_installer_runs_start_sh(self, tmp_path):
+        """The environment start.sh is handed must still describe the machine."""
+        result = run_snippet(
+            tmp_path,
+            'INSTALL_DIR=/somewhere/else; echo "PREFIX=[${PREFIX:-}]"',
+            env={"PREFIX": "/data/data/com.termux/files/usr"},
+        )
+        assert "PREFIX=[/data/data/com.termux/files/usr]" in result.stdout
