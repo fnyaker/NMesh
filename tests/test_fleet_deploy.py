@@ -7,6 +7,7 @@ remote deployment ends up less solid than a local one.
 import subprocess
 import tempfile
 import os
+import re
 
 import pytest
 
@@ -95,6 +96,18 @@ class TestTheTwoPhases:
         for reimplemented in ("[Unit]", "openrc-run", "launchctl load",
                               "systemctl daemon-reload"):
             assert reimplemented not in script, reimplemented
+
+    def test_the_bootstrap_leaves_the_environments_prefix_alone(self):
+        """Termux exports PREFIX — its own — and a shell assignment to an
+        inherited exported variable stays exported. A bootstrap that called the
+        install directory PREFIX handed install.sh, and start.sh under it, an
+        Android machine dressed as a Debian one."""
+        script = fp.build_install_phase(stage=fp.staging_name())
+        code = "\n".join(line for line in script.splitlines()
+                         if not line.strip().startswith("#"))
+        assert not re.search(r'(?<![A-Z_])PREFIX=', code)
+        assert not re.search(r'\$\{?PREFIX\b', code)
+        assert "INSTALL_DIR=" in code
 
     def test_a_system_install_names_the_expected_places(self):
         script = fp.build_install_phase(stage=fp.staging_name(), mode="system")

@@ -218,7 +218,7 @@ pkg_names() {
         termux:pipvenv)  echo "python-pip";;
         termux:build)    echo "cmake clang make git";;
         termux:optional) echo "ninja binutils";;
-        termux:native)   echo "openssl libffi rust";;
+        termux:native)   echo "openssl libffi rust pkg-config";;
 
         *) echo "";;
     esac
@@ -521,6 +521,28 @@ fetch_liboqs() {
     return 1
 }
 
+# ── is the cryptography install actually usable? ─────────────────────────────
+# `import cryptography` proves nothing. The top-level package is pure Python and
+# imports happily on top of a binding that cannot load — which is how a venv
+# holding a _rust.abi3.so built against another interpreter passed both the
+# fast-start probe and the verification, and the install then died three modules
+# deeper on "ImportError: dlopen failed: cannot locate symbol PyModule_Type".
+# (pip caches a wheel it built by version and ABI tag, not by the interpreter it
+# was built for; abi3 wheels are reused across Python versions, so a Python
+# upgrade under an existing pip cache hands you exactly that.)
+#
+# So ask for what src/crypto.py actually uses — the AEAD and the KDF — and run
+# them, since importing the class is not the same as the extension working.
+CRYPTO_CHECK='from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+AESGCM(b"k" * 32).encrypt(b"n" * 12, b"probe", None)
+HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"probe").derive(b"secret")'
+
+crypto_ready() {
+    python -c "$CRYPTO_CHECK" >/dev/null 2>&1
+}
+
 # ── verifying an import ──────────────────────────────────────────────────────
 # Two rules, both learned from the same one-line failure ("src import failed —
 # check project structure", with the traceback thrown away and the structure
@@ -655,7 +677,7 @@ OQS_PREFIX="${OQS_INSTALL_PATH:-$(node_home)/_oqs}"
 # would be built in one place and looked for in another.
 export OQS_INSTALL_PATH="$OQS_PREFIX"
 
-if pq_ready && python -c "import cryptography, pytest, pytest_asyncio" >/dev/null 2>&1; then
+if pq_ready && crypto_ready && python -c "import pytest, pytest_asyncio" >/dev/null 2>&1; then
     ok "Dependencies already installed (fast start)"
 else
     info "Installing Python dependencies…"
@@ -672,6 +694,35 @@ else
         pkg_install_role native || true
         hash -r
         python -m pip install -r requirements.txt || fail "pip install failed (see output above)"
+    fi
+
+    # pip is satisfied by a *version*, so a cryptography that installs cleanly
+    # and cannot load is a state it will never leave on its own: nothing is
+    # missing, so nothing is reinstalled. That is the Python-upgrade case — the
+    # wheel in the cache was built against the old interpreter and its abi3 tag
+    # says nothing about that. Ask for it again, past the cache, and if a source
+    # build is what it takes, put the headers and the Rust toolchain in first.
+    if ! crypto_ready; then
+        warn "cryptography is installed but its binding will not load — reinstalling it past the pip cache…"
+        python -m pip install --quiet --force-reinstall --no-cache-dir cryptography \
+            || warn "the reinstall failed — trying a source build next"
+    fi
+    if ! crypto_ready; then
+        warn "still no usable binding — building cryptography from source…"
+        pkg_install_role native || true
+        hash -r
+        # Android quirk: setuptools-rust derives the target triple from Python's
+        # platform tag, which is not the one the Termux toolchain builds for, and
+        # the compile dies before it starts. rustc knows its own host triple.
+        if [ "$PKG" = termux ] && command -v rustc >/dev/null 2>&1; then
+            CARGO_BUILD_TARGET="$(rustc -vV | awk '/^host: /{print $2}')"
+            if [ -n "$CARGO_BUILD_TARGET" ]; then
+                export CARGO_BUILD_TARGET
+                info "Compiling for $CARGO_BUILD_TARGET (the Termux toolchain's own target)"
+            fi
+        fi
+        python -m pip install --force-reinstall --no-cache-dir --no-binary cryptography cryptography \
+            || true
     fi
 
     if ! pq_ready && [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null; then
@@ -763,8 +814,8 @@ oqs.Signature('ML-DSA-65')" || true
     fi
     fail "liboqs-python check failed — try: rm -rf $OQS_PREFIX $VENV && ./start.sh"
 fi
-verify_import "cryptography (AES-GCM/HKDF)" "import cryptography" \
-    || fail "cryptography import failed — try: rm -rf $VENV && ./start.sh"
+verify_import "cryptography (AES-GCM/HKDF)" "$CRYPTO_CHECK" \
+    || fail "cryptography is installed but unusable — try: rm -rf $VENV && ./start.sh"
 # Only claim a structure problem when there really is one: this is the install
 # tree, and a copy that arrived without src/ is a different fault — and a
 # different fix — from a module in it that raises on import.

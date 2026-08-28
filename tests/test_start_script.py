@@ -619,3 +619,94 @@ def test_a_structure_problem_is_only_claimed_when_the_tree_is_missing():
                      if not line.strip().startswith("#"))
     assert "check project structure" not in code
     assert '[ -f "src/__init__.py" ]' in code
+
+
+# ── the cryptography binding ─────────────────────────────────────────────────
+# An install died on "ImportError: dlopen failed: cannot locate symbol
+# PyModule_Type" from cryptography's Rust extension — after the fast-start probe
+# and the verification had both reported cryptography fine. `import
+# cryptography` is pure Python: it says nothing about whether the binding loads.
+
+def test_the_cryptography_probe_runs_the_binding_not_the_import(tmp_path):
+    """A stub that imports but cannot do AES-GCM is what a broken binding looks
+    like from the outside."""
+    out = run_snippet(
+        tmp_path,
+        'crypto_ready && echo READY || echo BROKEN',
+        fake_bins=[("python", 'grep -q "^import cryptography$" <<<"$2" && exit 0; exit 1')],
+    )
+    assert out == "BROKEN"
+
+
+def test_the_cryptography_probe_accepts_a_working_binding(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        'crypto_ready && echo READY || echo BROKEN',
+        fake_bins=[("python", "exit 0")],
+    )
+    assert out == "READY"
+
+
+def test_the_probe_exercises_what_the_project_actually_uses():
+    """src/crypto.py needs AES-GCM and HKDF; both go through the extension."""
+    source = START.read_text()
+    check = source.split("CRYPTO_CHECK='", 1)[1].split("'\n", 1)[0]
+    assert "AESGCM" in check and "HKDF" in check
+    assert ".encrypt(" in check and ".derive(" in check
+
+
+def test_the_fast_start_probe_uses_it():
+    """Skipping the install on a venv that cannot decrypt anything is how the
+    broken binding survived a re-run of the installer."""
+    main = START.read_text().split("MAIN", 1)[1]
+    fast = [line for line in main.splitlines() if "fast start" in line or "pq_ready &&" in line]
+    assert any("crypto_ready" in line for line in fast)
+    assert not any('"import cryptography, pytest' in line for line in fast)
+
+
+def test_a_binding_that_will_not_load_is_reinstalled_past_the_pip_cache():
+    """pip is satisfied by a version: the cached wheel built for the previous
+    interpreter is never replaced unless it is asked for explicitly."""
+    main = START.read_text().split("MAIN", 1)[1]
+    assert "--force-reinstall --no-cache-dir cryptography" in main
+    assert "--no-binary cryptography" in main
+
+
+# ── Android ──────────────────────────────────────────────────────────────────
+
+def test_android_is_recognised_by_its_own_prefix(tmp_path):
+    """Termux is detected by $PREFIX/bin/pkg. install.sh used to name its
+    install directory PREFIX — an exported variable on Termux — and handed that
+    to start.sh, which then set a phone up as if it were Debian."""
+    termux = tmp_path / "usr"
+    (termux / "bin").mkdir(parents=True)
+    (termux / "bin" / "pkg").write_text("#!/bin/sh\nexit 0\n")
+    (termux / "bin" / "pkg").chmod(0o755)
+    out = run_snippet(
+        tmp_path,
+        'detect_os; echo "$PKG"',
+        env={"PREFIX": str(termux)},
+    )
+    assert out == "termux"
+
+
+def test_android_needs_no_sudo(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        'PKG=termux; detect_sudo; echo "SUDO=[$SUDO]"',
+    )
+    assert out == "SUDO=[]"
+
+
+def test_a_source_build_on_android_names_the_toolchains_own_target():
+    """setuptools-rust derives the triple from Python's platform tag; on Termux
+    that is not what the toolchain builds for, and the compile never starts."""
+    main = START.read_text().split("MAIN", 1)[1]
+    assert "CARGO_BUILD_TARGET" in main
+    assert 'rustc -vV' in main
+
+
+def test_android_can_build_a_native_extension(tmp_path):
+    """openssl + libffi + a Rust toolchain, under the names Termux uses."""
+    out = run_snippet(tmp_path, 'PKG=termux; pkg_names native')
+    assert "rust" in out and "openssl" in out
