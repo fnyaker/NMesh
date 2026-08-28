@@ -328,7 +328,10 @@ say() {{ echo "::step::$1"; }}
 die() {{ echo "::error::$1" >&2; exit 1; }}
 
 STAGE="$HOME"/{stage}
-PREFIX={install_dir}
+# INSTALL_DIR, never PREFIX: Termux exports PREFIX (its own prefix), assigning
+# to it keeps it exported, and install.sh and start.sh below would then be told
+# an Android target is a Debian box.
+INSTALL_DIR={install_dir}
 DATA={data_dir}
 SERVICE={service}
 PREAUTH_NAME={preauth_name}
@@ -368,13 +371,13 @@ elevated() {{
 }}
 
 # ---- where does it go? ------------------------------------------------------
-if [ -z "$PREFIX" ]; then
-    if [ "$MODE" = "system" ]; then PREFIX=/opt/nmesh; else PREFIX="$HOME/.nmesh"; fi
+if [ -z "$INSTALL_DIR" ]; then
+    if [ "$MODE" = "system" ]; then INSTALL_DIR=/opt/nmesh; else INSTALL_DIR="$HOME/.nmesh"; fi
 fi
 if [ -z "$DATA" ]; then
-    if [ "$MODE" = "system" ]; then DATA=/var/lib/nmesh; else DATA="$PREFIX/data"; fi
+    if [ "$MODE" = "system" ]; then DATA=/var/lib/nmesh; else DATA="$INSTALL_DIR/data"; fi
 fi
-say "install dir $PREFIX (state in $DATA)"
+say "install dir $INSTALL_DIR (state in $DATA)"
 
 # The pre-authorisation goes in before install.sh runs, so its lock-down hands
 # it to the node's own account with the rest of the state directory.
@@ -386,7 +389,7 @@ elevated "mkdir -p '$DATA' && chmod 700 '$DATA' && cp '$STAGE/$PREAUTH_NAME' '$D
 # liboqs cache: all install.sh's job. Nothing here reimplements any of it — a
 # second, weaker installer is exactly how a remote deploy ends up less solid
 # than a local one.
-ARGS="--prefix '$PREFIX' --data '$DATA' --service '$SERVICE'"
+ARGS="--prefix '$INSTALL_DIR' --data '$DATA' --service '$SERVICE'"
 [ "$MODE" = "user" ] && ARGS="$ARGS --run-as '$(id -un)'"
 [ "$SETUP_ONLY" = "1" ] && ARGS="$ARGS --no-start"
 
