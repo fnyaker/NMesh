@@ -382,7 +382,14 @@ if [ -n "${NMESH_INSTALL_LIB:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE="${NMESH_SERVICE:-nmesh}"
-PREFIX="${NMESH_PREFIX:-}"
+# Where NMesh is installed. Called INSTALL_DIR, never PREFIX, on purpose:
+# Termux *exports* PREFIX (its own /data/data/com.termux/files/usr), and
+# assigning to an inherited exported variable keeps it exported. This script
+# used to call its install directory PREFIX, so every child process — start.sh
+# above all — was handed the install directory as Termux's prefix. start.sh
+# recognises Android by $PREFIX/bin/pkg, found nothing there, and set up a phone
+# as if it were Debian: apt package names, a search for sudo, the lot.
+INSTALL_DIR="${NMESH_PREFIX:-}"
 DATA="${NMESH_DATA:-}"
 RUN_USER="${NMESH_USER:-}"
 DO_START=true
@@ -395,7 +402,7 @@ NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix)     PREFIX="${2:-}"; shift 2;;
+        --prefix)     INSTALL_DIR="${2:-}"; shift 2;;
         --data)       DATA="${2:-}"; shift 2;;
         --service)    SERVICE="${2:-}"; shift 2;;
         --run-as)     RUN_USER="${2:-}"; shift 2;;
@@ -412,8 +419,8 @@ done
 
 detect_sudo
 INIT="$(detect_init)"
-[ -n "$PREFIX" ] || PREFIX="$(default_prefix)"
-[ -n "$DATA" ]   || DATA="$(default_data "$PREFIX")"
+[ -n "$INSTALL_DIR" ] || INSTALL_DIR="$(default_prefix)"
+[ -n "$DATA" ]   || DATA="$(default_data "$INSTALL_DIR")"
 # As root the node gets a dedicated account (created further down); otherwise it
 # can only run as whoever is installing it. `--run-as root` is the way out.
 SERVICE_ACCOUNT="${NMESH_ACCOUNT:-nmesh}"
@@ -438,10 +445,10 @@ esac
 # writers would be a silent authentication bug.
 if [ "$RESET_PASSWORD" = true ]; then
     [ -d "$DATA" ] || fail "No state directory at $DATA — is this node installed?"
-    PYTHON_BIN="$PREFIX/.venv/bin/python"
+    PYTHON_BIN="$INSTALL_DIR/.venv/bin/python"
     [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3 || true)"
     [ -n "$PYTHON_BIN" ] || fail "No python available to rewrite the credential"
-    SCRIPT="$PREFIX/scripts/nmesh_password.py"
+    SCRIPT="$INSTALL_DIR/scripts/nmesh_password.py"
     [ -f "$SCRIPT" ] || SCRIPT="$SOURCE_DIR/scripts/nmesh_password.py"
     [ -f "$SCRIPT" ] || fail "nmesh_password.py not found — update this install first"
 
@@ -499,9 +506,9 @@ if [ "$UNINSTALL" = true ]; then
     esac
     ok "Service removed"
 
-    if [ -d "$PREFIX" ]; then
-        run_priv rm -rf "$PREFIX"
-        ok "Removed $PREFIX"
+    if [ -d "$INSTALL_DIR" ]; then
+        run_priv rm -rf "$INSTALL_DIR"
+        ok "Removed $INSTALL_DIR"
     fi
     if [ "$PURGE" = true ]; then
         # The identity is what makes this node *this* node on the mesh: deleting
@@ -534,9 +541,9 @@ echo ""
 [ -f "$SOURCE_DIR/start.sh" ] || fail "start.sh not found next to install.sh — run this from an NMesh checkout"
 
 SOURCE_REAL="$(cd "$SOURCE_DIR" && pwd -P)"
-DEST_REAL="$(cd "$PREFIX" 2>/dev/null && pwd -P || echo "$PREFIX")"
+DEST_REAL="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P || echo "$INSTALL_DIR")"
 UPGRADE=false
-[ -d "$PREFIX/src" ] && UPGRADE=true
+[ -d "$INSTALL_DIR/src" ] && UPGRADE=true
 
 if [ "$SOURCE_REAL" = "$DEST_REAL" ]; then
     # Running the installer from inside the install directory is how an upgrade
@@ -544,21 +551,21 @@ if [ "$SOURCE_REAL" = "$DEST_REAL" ]; then
     info "Already installed here — configuring the service only"
 else
     if [ "$UPGRADE" = true ]; then
-        info "Upgrading the existing install in $PREFIX (state is left alone)"
+        info "Upgrading the existing install in $INSTALL_DIR (state is left alone)"
     else
-        info "Installing to $PREFIX"
+        info "Installing to $INSTALL_DIR"
     fi
     # A user install must own its directory; a root install stays root-owned.
-    ensure_dir "$PREFIX" "$(is_root || echo "$(id -u):$(id -g)")" \
-        || fail "Could not create $PREFIX"
-    copy_tree "$SOURCE_REAL" "$PREFIX" || fail "Could not copy the NMesh tree"
-    chmod +x "$PREFIX/start.sh" "$PREFIX/install.sh" 2>/dev/null || true
-    ok "Files installed in $PREFIX"
+    ensure_dir "$INSTALL_DIR" "$(is_root || echo "$(id -u):$(id -g)")" \
+        || fail "Could not create $INSTALL_DIR"
+    copy_tree "$SOURCE_REAL" "$INSTALL_DIR" || fail "Could not copy the NMesh tree"
+    chmod +x "$INSTALL_DIR/start.sh" "$INSTALL_DIR/install.sh" 2>/dev/null || true
+    ok "Files installed in $INSTALL_DIR"
 fi
 
 # ── the account the node runs under ──────────────────────────────────────────
 if is_root && [ "$RUN_USER" = "$SERVICE_ACCOUNT" ] && ! user_exists "$RUN_USER"; then
-    if create_service_user "$RUN_USER" "$PREFIX"; then
+    if create_service_user "$RUN_USER" "$INSTALL_DIR"; then
         ok "Created the $RUN_USER system account (no login, no password)"
     else
         warn "Could not create a $RUN_USER account — the node will run as root"
@@ -618,7 +625,7 @@ reuse_prefixes() {
 # node must find the same library at boot as the one built here, and a system
 # account has no home of its own to find it in.
 info "Installing dependencies (this is start.sh doing its usual work)…"
-if ! ( cd "$PREFIX" && HOME="$PREFIX" OQS_INSTALL_PATH="$PREFIX/_oqs" \
+if ! ( cd "$INSTALL_DIR" && HOME="$INSTALL_DIR" OQS_INSTALL_PATH="$INSTALL_DIR/_oqs" \
        OQS_REUSE_FROM="$(reuse_prefixes)" \
        NMESH_LIBOQS_CACHE="$(liboqs_cache_root)" \
        NMESH_SETUP_ONLY=1 ./start.sh ); then
@@ -627,7 +634,7 @@ fi
 ok "Dependencies ready"
 # start.sh builds liboqs under $HOME, which we just pinned to the install
 # directory: the built library stays, its build tree has no reason to.
-rm -rf "$PREFIX/_oqs_build" 2>/dev/null || true
+rm -rf "$INSTALL_DIR/_oqs_build" 2>/dev/null || true
 
 # ── configuration file ───────────────────────────────────────────────────────
 # Node options belong in a file the operator (and the console) can edit, not
@@ -639,13 +646,13 @@ rm -rf "$PREFIX/_oqs_build" 2>/dev/null || true
 # as whoever runs the installer, so a lock-down that has already happened would
 # leave it owned by root and unreadable to the node's own account — the node
 # then starts on its defaults and every setting here is silently ignored.
-CONFIG_FILE="$PREFIX/${NMESH_CONFIG_NAME:-nmesh.conf}"
+CONFIG_FILE="$INSTALL_DIR/${NMESH_CONFIG_NAME:-nmesh.conf}"
 LEFTOVER=()
-if [ -x "$PREFIX/.venv/bin/python" ]; then
+if [ -x "$INSTALL_DIR/.venv/bin/python" ]; then
     info "Writing $CONFIG_FILE"
     while IFS= read -r leftover; do
         [ -n "$leftover" ] && LEFTOVER+=("$leftover")
-    done < <( cd "$PREFIX" && ./.venv/bin/python scripts/nmesh_config.py \
+    done < <( cd "$INSTALL_DIR" && ./.venv/bin/python scripts/nmesh_config.py \
               "$CONFIG_FILE" "${NODE_ARGS[@]+"${NODE_ARGS[@]}"}" || true )
     [ -f "$CONFIG_FILE" ] && ok "Options stored in $CONFIG_FILE" \
         || warn "Could not write $CONFIG_FILE — options stay on the command line"
@@ -670,11 +677,11 @@ if [ "$ALLOW_UPDATE" = true ]; then
         warn "--allow-update needs root to write a sudoers rule — skipped"
     else
         info "Granting $RUN_USER one root command (system updates)"
-        WRAPPER="$("$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --path 2>/dev/null)" || WRAPPER=""
+        WRAPPER="$("$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/nmesh_sudoers.py" --path 2>/dev/null)" || WRAPPER=""
         TMP_WRAP="$(mktemp)"; TMP_RULE="$(mktemp)"
         if [ -n "$WRAPPER" ] \
-           && "$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --wrapper > "$TMP_WRAP" \
-           && "$PREFIX/.venv/bin/python" "$PREFIX/scripts/nmesh_sudoers.py" --rule "$RUN_USER" > "$TMP_RULE"; then
+           && "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/nmesh_sudoers.py" --wrapper > "$TMP_WRAP" \
+           && "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/nmesh_sudoers.py" --rule "$RUN_USER" > "$TMP_RULE"; then
             run_priv mkdir -p "$(dirname "$WRAPPER")"
             run_priv cp "$TMP_WRAP" "$WRAPPER"
             run_priv chown root:root "$WRAPPER" 2>/dev/null || true
@@ -718,7 +725,7 @@ lock_down() {
     fi
     chmod 700 "$path" 2>/dev/null || run_priv chmod 700 "$path" 2>/dev/null || true
 }
-lock_down "$PREFIX"
+lock_down "$INSTALL_DIR"
 lock_down "$DATA"
 if [ -n "$RUN_USER" ]; then
     ok "Install and state belong to $RUN_USER alone (mode 700)"
@@ -732,7 +739,7 @@ case "$INIT" in
     systemd-system)
         info "Installing systemd unit $UNIT_PATH"
         TMP_UNIT="$(mktemp)"
-        systemd_unit "$PREFIX" "$DATA" "$RUN_USER" "$ARGS" multi-user.target \
+        systemd_unit "$INSTALL_DIR" "$DATA" "$RUN_USER" "$ARGS" multi-user.target \
                      "$UPDATE_GRANTED" > "$TMP_UNIT"
         # The files are already in place: a service manager that refuses is a
         # degraded install, not a failed one. Say so and keep going.
@@ -749,7 +756,7 @@ case "$INIT" in
     systemd-user)
         info "Installing user systemd unit $UNIT_PATH"
         mkdir -p "$(dirname "$UNIT_PATH")"
-        systemd_unit "$PREFIX" "$DATA" "" "$ARGS" default.target \
+        systemd_unit "$INSTALL_DIR" "$DATA" "" "$ARGS" default.target \
                      "$UPDATE_GRANTED" > "$UNIT_PATH"
         systemctl --user daemon-reload || warn "systemctl --user daemon-reload failed"
         systemctl --user enable "$SERVICE" >/dev/null 2>&1 || warn "Could not enable $SERVICE at boot"
@@ -770,7 +777,7 @@ case "$INIT" in
     openrc)
         info "Installing OpenRC service $UNIT_PATH"
         TMP_RC="$(mktemp)"
-        openrc_service "$PREFIX" "$DATA" "$RUN_USER" "$ARGS" "$SERVICE" > "$TMP_RC"
+        openrc_service "$INSTALL_DIR" "$DATA" "$RUN_USER" "$ARGS" "$SERVICE" > "$TMP_RC"
         if run_priv cp "$TMP_RC" "$UNIT_PATH" && run_priv chmod +x "$UNIT_PATH"; then
             run_priv rc-update add "$SERVICE" default >/dev/null 2>&1 \
                 || warn "Could not enable $SERVICE at boot"
@@ -783,14 +790,14 @@ case "$INIT" in
     launchd)
         info "Installing launchd agent $UNIT_PATH"
         mkdir -p "$(dirname "$UNIT_PATH")"
-        launchd_plist "$PREFIX" "$DATA" "org.nmesh.$SERVICE" "$ARGS" > "$UNIT_PATH"
+        launchd_plist "$INSTALL_DIR" "$DATA" "org.nmesh.$SERVICE" "$ARGS" > "$UNIT_PATH"
         ok "Agent org.nmesh.$SERVICE will start at login";;
     *)
         warn "No supported init system found — nothing will start automatically."
         if [ -n "$RUN_USER" ]; then
-            warn "Run it yourself with:  sudo -u $RUN_USER env HOME=$PREFIX OQS_INSTALL_PATH=$PREFIX/_oqs NMESH_DATA=$DATA $PREFIX/start.sh $ARGS"
+            warn "Run it yourself with:  sudo -u $RUN_USER env HOME=$INSTALL_DIR OQS_INSTALL_PATH=$INSTALL_DIR/_oqs NMESH_DATA=$DATA $INSTALL_DIR/start.sh $ARGS"
         else
-            warn "Run it yourself with:  cd $PREFIX && NMESH_DATA=$DATA ./start.sh $ARGS"
+            warn "Run it yourself with:  cd $INSTALL_DIR && NMESH_DATA=$DATA ./start.sh $ARGS"
         fi;;
 esac
 
@@ -819,7 +826,7 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
-echo "  Installed in : $PREFIX"
+echo "  Installed in : $INSTALL_DIR"
 echo "  State in     : $DATA"
 echo "  Runs as      : ${RUN_USER:-root} (files mode 700)"
 echo "  Service      : $SERVICE ($INIT)"
