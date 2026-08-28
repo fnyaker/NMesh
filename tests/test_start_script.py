@@ -556,3 +556,66 @@ def test_an_explicit_udp_port_from_the_environment_is_still_honoured():
     source = START.read_text()
     assert 'NMESH_UDP_PORT' in source
     assert '--udp "$NMESH_UDP_PORT"' in source
+
+
+# ── verifying imports ────────────────────────────────────────────────────────
+# The install ended on "src import failed — check project structure" with the
+# traceback discarded and the structure perfectly fine. A check that hides what
+# Python said cannot be acted on, and one that relies on the interpreter putting
+# the current directory on sys.path fails on machines where the node itself runs
+# fine (scripts/nmesh_node.py inserts the project root by hand).
+
+def test_a_failed_import_shows_what_python_said(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        'verify_import "core" "import src" 2>&1 || echo FAILED',
+        fake_bins=[("python", 'echo "ModuleNotFoundError: No module named \'zzz\'" >&2; exit 1')],
+    )
+    assert "ModuleNotFoundError: No module named 'zzz'" in out
+    assert "FAILED" in out
+
+
+def test_a_successful_import_says_so_and_nothing_else(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        'verify_import "core" "import src" 2>&1 || echo FAILED',
+        fake_bins=[("python", 'echo "chatter on stdout"; exit 0')],
+    )
+    assert "core" in out
+    assert "FAILED" not in out
+    assert "chatter" not in out
+
+
+def test_the_import_check_names_the_project_root(tmp_path):
+    """PYTHONSAFEPATH=1 (or `python -P`) drops the implicit current directory.
+    The node survives that — it puts the root on sys.path itself — so the check
+    must too, or it condemns a working install."""
+    project = tmp_path / "tree"
+    project.mkdir()
+    out = run_snippet(
+        tmp_path,
+        f'cd "{project}" && verify_import "" "import src" 2>&1 || true',
+        fake_bins=[("python", 'echo "PYTHONPATH=$PYTHONPATH" >&2; exit 1')],
+        env={"PYTHONSAFEPATH": "1"},
+    )
+    assert str(project) in out
+
+
+def test_the_import_check_keeps_an_existing_pythonpath(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        'verify_import "" "import src" 2>&1 || true',
+        fake_bins=[("python", 'echo "PYTHONPATH=$PYTHONPATH" >&2; exit 1')],
+        env={"PYTHONPATH": "/opt/somewhere"},
+    )
+    assert "/opt/somewhere" in out
+
+
+def test_a_structure_problem_is_only_claimed_when_the_tree_is_missing():
+    """`check project structure` was printed for every import failure, whatever
+    the cause. The tree is now actually looked at before saying that."""
+    source = START.read_text()
+    code = "\n".join(line for line in source.splitlines()
+                     if not line.strip().startswith("#"))
+    assert "check project structure" not in code
+    assert '[ -f "src/__init__.py" ]' in code
