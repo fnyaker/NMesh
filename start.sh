@@ -219,6 +219,8 @@ pkg_names() {
         termux:build)    echo "cmake clang make git";;
         termux:optional) echo "ninja binutils";;
         termux:native)   echo "openssl libffi rust pkg-config";;
+        # Android has no usable cryptography on PyPI — see termux_cryptography.
+        termux:pycrypto) echo "python-cryptography";;
 
         *) echo "";;
     esac
@@ -543,6 +545,37 @@ crypto_ready() {
     python -c "$CRYPTO_CHECK" >/dev/null 2>&1
 }
 
+# ── cryptography on Android ──────────────────────────────────────────────────
+# A Rust extension built on any other Linux carries no -lpython: there, the
+# interpreter is the executable and exports its own symbols. Termux's does not —
+# its symbols live in libpython3.x.so — so a PyPI wheel installs cleanly and then
+# fails to load with "cannot locate symbol PyModule_Type", and building the same
+# sdist locally reproduces it, because pyo3 omits that link by design. Termux
+# builds and ships python-cryptography for exactly this reason. Take theirs.
+#
+# Their packages install into the system site-packages, which a venv hides. The
+# switch for that lives in pyvenv.cfg and can be turned on after the fact — no
+# need to throw away a venv that is otherwise fine.
+venv_sees_system_packages() {
+    local cfg="$VENV/pyvenv.cfg" tmp=""
+    [ -f "$cfg" ] || return 1
+    grep -qi '^include-system-site-packages *= *true' "$cfg" && return 0
+    tmp="$(mktemp)" || return 1
+    grep -vi '^include-system-site-packages' "$cfg" > "$tmp" 2>/dev/null || true
+    echo "include-system-site-packages = true" >> "$tmp"
+    cat "$tmp" > "$cfg" && rm -f "$tmp"
+}
+
+termux_cryptography() {
+    info "Android: taking cryptography from Termux (PyPI's Rust wheels do not load here)…"
+    pkg_install_role pycrypto || return 1
+    venv_sees_system_packages || return 1
+    # A broken copy inside the venv would shadow the one that works.
+    python -m pip uninstall -y cryptography >/dev/null 2>&1 || true
+    hash -r
+    crypto_ready
+}
+
 # ── verifying an import ──────────────────────────────────────────────────────
 # Two rules, both learned from the same one-line failure ("src import failed —
 # check project structure", with the traceback thrown away and the structure
@@ -681,6 +714,14 @@ if pq_ready && crypto_ready && python -c "import pytest, pytest_asyncio" >/dev/n
     ok "Dependencies already installed (fast start)"
 else
     info "Installing Python dependencies…"
+    # Before pip touches cryptography on Android: every wheel PyPI has for it is
+    # unusable here, and so is a local build of the sdist. Termux's own package
+    # is the one that loads, so take it first — then pip finds the requirement
+    # already satisfied and never fetches a wheel that cannot work.
+    if [ "$PKG" = termux ] && ! crypto_ready; then
+        termux_cryptography && ok "cryptography from Termux's own package" \
+            || warn "Termux's python-cryptography did not take — falling back to pip"
+    fi
     python -m pip install --quiet --upgrade pip \
         || warn "pip could not be upgraded — continuing with the bundled one"
     # A venv on Python ≥3.12 has no setuptools, which some sdists still assume.
@@ -719,6 +760,15 @@ else
             if [ -n "$CARGO_BUILD_TARGET" ]; then
                 export CARGO_BUILD_TARGET
                 info "Compiling for $CARGO_BUILD_TARGET (the Termux toolchain's own target)"
+            fi
+            # And link the interpreter in. pyo3 leaves -lpython out on purpose —
+            # correct where the executable exports its own symbols, wrong on
+            # Android, where they live in libpython3.x.so and the finished .so
+            # cannot resolve PyModule_Type. This is the same reason Termux
+            # builds its own package; the build here is only the last resort.
+            TERMUX_PY_VER="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+            if [ -n "${TERMUX_PY_VER:-}" ] && [ -n "${PREFIX:-}" ]; then
+                export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-L${PREFIX}/lib -C link-arg=-lpython${TERMUX_PY_VER}"
             fi
         fi
         python -m pip install --force-reinstall --no-cache-dir --no-binary cryptography cryptography \
