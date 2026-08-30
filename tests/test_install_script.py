@@ -464,3 +464,51 @@ class TestOwnership:
         hint = hint[:hint.index("esac")]
         assert 'owner_is_me "$RUN_USER"' in hint
         assert "cd $INSTALL_DIR && NMESH_DATA=$DATA ./start.sh" in hint
+
+
+class TestEscalation:
+    """`./install.sh --reset-password` on a phone died on "No 'su' binary
+    found": Termux ships a sudo that wraps a su only a rooted phone has, and
+    install.sh escalated to write a file the account already owned."""
+
+    def test_android_never_escalates(self, tmp_path):
+        prefix = tmp_path / "usr"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "pkg").write_text("#!/bin/sh\nexit 0\n")
+        (prefix / "bin" / "pkg").chmod(0o755)
+        # A sudo on PATH, exactly as Termux has one.
+        result = run_snippet(
+            tmp_path, 'detect_sudo; echo "SUDO=[$SUDO]"',
+            fake_bins=[("sudo", "#!/bin/sh\nexit 1\n")],
+            env={"PREFIX": str(prefix)})
+        assert "SUDO=[]" in result.stdout
+
+    def test_a_writable_target_is_not_escalated(self, tmp_path):
+        """Writing a file we own is not a privileged operation, on any system.
+        Through sudo it is a password prompt for nothing."""
+        marker = tmp_path / "escalated"
+        result = run_snippet(
+            tmp_path,
+            f'SUDO=sudo; run_owning "{tmp_path}" echo DONE',
+            fake_bins=[("sudo", f'#!/bin/sh\ntouch "{marker}"\nexec "$@"\n')])
+        assert "DONE" in result.stdout
+        assert not marker.exists()
+
+    @pytest.mark.skipif(os.geteuid() == 0,
+                        reason="root can write anywhere, so nothing is unwritable")
+    def test_an_unwritable_target_still_escalates(self, tmp_path):
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        marker = tmp_path / "escalated"
+        result = run_snippet(
+            tmp_path,
+            f'SUDO=sudo; run_owning "{locked}" echo DONE',
+            fake_bins=[("sudo", f'#!/bin/sh\ntouch "{marker}"\nexec "$@"\n')])
+        assert "DONE" in result.stdout
+        assert marker.exists()
+
+    def test_the_credential_is_written_without_escalating(self):
+        text = INSTALL.read_text()
+        assert 'run_owning "$DATA" "$PYTHON_BIN" "$SCRIPT"' in text
+        assert 'run_priv "$PYTHON_BIN"' not in text
