@@ -100,10 +100,40 @@ def _as_host(raw: str) -> str:
     return value
 
 
+def _pseudo_module():
+    """The rules for a pseudo, whichever way this module was loaded.
+
+    ``scripts/nmesh_config.py`` loads this file on its own — importing the
+    package would pull in the node and liboqs, whose banner would land on the
+    stdout install.sh parses — and a relative import from a module with no
+    package raises ImportError, not ConfigError. It was caught by the catch-all
+    below, so *every* pseudo anyone set came back as "unusable value" and was
+    dropped from the file install.sh had just been asked to write. Load the file
+    next door when there is no package to import from."""
+    global _PSEUDO
+    if _PSEUDO is None:
+        try:
+            from . import pseudo as module
+        except ImportError:
+            import importlib.util
+            import os
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "pseudo.py")
+            spec = importlib.util.spec_from_file_location("nmesh_pseudo", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        _PSEUDO = module
+    return _PSEUDO
+
+
+_PSEUDO = None
+
+
 def _as_pseudo(raw: str) -> str:
     """The node's display name. Validated here, in exactly the form the network
     validates it, so a name the mesh would reject never reaches a running node."""
-    from .pseudo import PseudoError, canonical
+    module = _pseudo_module()
+    PseudoError, canonical = module.PseudoError, module.canonical
     value = raw.strip()
     if not value:
         return ""
@@ -273,8 +303,12 @@ def parse(text: str) -> tuple[dict, list]:
             values[key] = parser(raw)
         except ConfigError as exc:
             problems.append(f"line {number}: {key} — {exc}")
-        except Exception:
-            problems.append(f"line {number}: {key} — unusable value")
+        except Exception as exc:
+            # Nothing here is expected to raise anything but ConfigError, so
+            # name what did: a bare "unusable value" hid a broken import for as
+            # long as it took someone to read a config file back.
+            problems.append(f"line {number}: {key} — unusable value "
+                            f"({type(exc).__name__})")
     return values, problems
 
 

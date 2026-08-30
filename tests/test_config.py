@@ -346,6 +346,26 @@ class TestInstallerMerge:
         assert result.stdout.split() == ["--not-a-setting", "x"]
         assert config.load(str(path))[0]["fleet"] is True
 
+    def test_a_pseudo_survives_the_installer(self, tmp_path):
+        """nmesh_config.py loads config.py on its own — no package, so
+        `from .pseudo import ...` raised ImportError, which the catch-all turned
+        into "unusable value". Every ./install.sh silently erased the node's
+        name from the file it was rewriting."""
+        path = tmp_path / "nmesh.conf"
+        path.write_text("pseudo = Bob le Noeud\n")
+        result = self.run(path)
+        assert "unusable" not in result.stderr, result.stderr
+        assert config.load(str(path))[0]["pseudo"] == "Bob le Noeud"
+
+    def test_the_installer_still_refuses_a_pseudo_the_mesh_would(self, tmp_path):
+        """Loading the rules from the file next door is the same validation, not
+        a weaker one."""
+        path = tmp_path / "nmesh.conf"
+        path.write_text("pseudo = a\u0000b\n")
+        result = self.run(path)
+        assert "pseudo" in result.stderr
+        assert not config.load(str(path))[0].get("pseudo")
+
     def test_an_invalid_value_is_reported_and_not_written(self, tmp_path):
         path = tmp_path / "nmesh.conf"
         result = self.run(path, "--console-port", "70000")
