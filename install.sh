@@ -109,6 +109,12 @@ default_data() {
 # Probed in the order that decides how the service is written. "systemd-user"
 # is what a non-root install gets: a unit under ~/.config/systemd/user, which
 # needs lingering enabled to start without a login session.
+# Android. The environment's PREFIX, which this script is careful never to take
+# over (see INSTALL_DIR), is what says so.
+is_termux() {
+    [ -n "${PREFIX:-}" ] && [ -x "${PREFIX}/bin/pkg" ]
+}
+
 detect_init() {
     # `systemctl` on PATH proves nothing: plenty of container images ship it
     # with no systemd behind it, and every call then fails with "Failed to
@@ -126,7 +132,22 @@ detect_init() {
     fi
     if command -v rc-update >/dev/null 2>&1 && is_root; then echo "openrc"; return; fi
     if command -v launchctl >/dev/null 2>&1; then echo "launchd"; return; fi
+    # Android has no init a package can reach, but termux-services runs runit
+    # inside the app and is the supported way to keep something alive there.
+    if is_termux && command -v sv-enable >/dev/null 2>&1; then echo "runit"; return; fi
     echo "none"
+}
+
+# A phone with no service manager is a node that only runs while a terminal is
+# open — the one thing install.sh exists to avoid. termux-services is one small
+# package away, so ask for it rather than shrugging.
+ensure_termux_services() {
+    is_termux || return 1
+    command -v sv-enable >/dev/null 2>&1 && return 0
+    info "Installing termux-services (Android's way of keeping a node alive)…"
+    pkg install -y termux-services >/dev/null 2>&1 || return 1
+    hash -r
+    command -v sv-enable >/dev/null 2>&1
 }
 
 # ── copying the tree ─────────────────────────────────────────────────────────
@@ -163,6 +184,7 @@ ensure_dir() {
         mkdir -p "$path" 2>/dev/null || run_priv mkdir -p "$path" || return 1
     fi
     [ -n "$owner" ] || return 0
+    owner_is_me "$owner" && return 0
     if is_root; then
         run_priv chown -R "$owner" "$path" 2>/dev/null || true
     elif [ ! -w "$path" ]; then
@@ -240,6 +262,20 @@ delete_service_user() {
 # `chown user:group` when the account has a group of its own, `chown user`
 # otherwise — a `chown x:x` against a system that put the account in `nogroup`
 # fails outright and would leave the tree unreadable to the node.
+# Is that owner the account already running this script? A user install always
+# names itself, and comparing the strings never noticed: owner_spec produces
+# "name:group" while `id -u`/`id -g` produce numbers. So every user install
+# asked to chown its own files to itself — a silent no-op on Linux, a warning on
+# Android, where nothing may chown anything and nothing needs to.
+owner_is_me() {
+    local spec="$1" user group=""
+    [ -n "$spec" ] || return 1
+    user="${spec%%:*}"
+    case "$spec" in *:*) group="${spec#*:}";; esac
+    [ "$(id -u "$user" 2>/dev/null)" = "$(id -u)" ] || return 1
+    [ -z "$group" ] || [ "$group" = "$(id -gn 2>/dev/null)" ] || [ "$group" = "$(id -g)" ]
+}
+
 owner_spec() {
     local name="$1" group
     group="$(id -gn "$name" 2>/dev/null || true)"
@@ -339,6 +375,30 @@ depend() {
 EOF
 }
 
+# One runit service, the way termux-services expects it: an executable `run`
+# that execs the node in the foreground (runsv owns the restarting), and a `log`
+# service so the console's first-run password ends up somewhere readable instead
+# of on a terminal that has since been closed.
+runit_service() {
+    local dir="$1" data="$2" args="$3"
+    cat <<EOF
+#!$PREFIX/bin/sh
+exec 2>&1
+cd "$dir" || exit 1
+export HOME="$dir"
+export OQS_INSTALL_PATH="$dir/_oqs"
+export NMESH_DATA="$data"
+exec ./start.sh $args
+EOF
+}
+
+runit_log_service() {
+    cat <<EOF
+#!$PREFIX/bin/sh
+exec svlogger
+EOF
+}
+
 launchd_plist() {
     local prefix="$1" data="$2" label="$3" args="$4"
     {
@@ -371,6 +431,7 @@ service_hint() {
         systemd-user)   echo "systemctl --user status $2 · journalctl --user -u $2 -f";;
         openrc)         echo "rc-service $2 status · tail -f /var/log/$2.log";;
         launchd)        echo "launchctl list | grep $2";;
+        runit)          echo "sv status $2 · tail -f ${PREFIX:-}/var/log/sv/$2/current";;
         *)              echo "(no service installed)";;
     esac
 }
@@ -419,6 +480,12 @@ done
 
 detect_sudo
 INIT="$(detect_init)"
+# Only when we are actually installing: --uninstall and --reset-password have no
+# business putting a package on someone's phone.
+if [ "$INIT" = none ] && [ "$UNINSTALL" != true ] && [ "$RESET_PASSWORD" != true ] \
+   && ensure_termux_services; then
+    INIT="$(detect_init)"
+fi
 [ -n "$INSTALL_DIR" ] || INSTALL_DIR="$(default_prefix)"
 [ -n "$DATA" ]   || DATA="$(default_data "$INSTALL_DIR")"
 # As root the node gets a dedicated account (created further down); otherwise it
@@ -435,6 +502,7 @@ case "$INIT" in
     systemd-user)   UNIT_PATH="${XDG_CONFIG_HOME:-$(caller_home)/.config}/systemd/user/$SERVICE.service";;
     openrc)         UNIT_PATH="/etc/init.d/$SERVICE";;
     launchd)        UNIT_PATH="$(caller_home)/Library/LaunchAgents/org.nmesh.$SERVICE.plist";;
+    runit)          UNIT_PATH="$PREFIX/var/service/$SERVICE";;
 esac
 
 # ── reset the console password ───────────────────────────────────────────────
@@ -478,6 +546,9 @@ if [ "$RESET_PASSWORD" = true ]; then
                         launchctl load "$UNIT_PATH" >/dev/null 2>&1 \
                             && ok "Node restarted" \
                             || warn "Restart the node for it to take effect";;
+        runit)          sv restart "$SERVICE" >/dev/null 2>&1 \
+                            && ok "Node restarted" \
+                            || warn "Restart the node for it to take effect";;
         *)              warn "Restart the node for it to take effect";;
     esac
     exit 0
@@ -502,6 +573,10 @@ if [ "$UNINSTALL" = true ]; then
         launchd)
             launchctl unload "$UNIT_PATH" >/dev/null 2>&1 || true
             rm -f "$UNIT_PATH";;
+        runit)
+            sv-disable "$SERVICE" >/dev/null 2>&1 || true
+            sv down "$SERVICE" >/dev/null 2>&1 || true
+            rm -rf "$UNIT_PATH";;
         *) warn "No service to remove (none was installed)";;
     esac
     ok "Service removed"
@@ -719,7 +794,7 @@ fi
 lock_down() {
     local path="$1"
     [ -d "$path" ] || return 0
-    if [ "$OWNER" != "$(id -u):$(id -g)" ]; then
+    if ! owner_is_me "$OWNER"; then
         run_priv chown -R "$OWNER" "$path" 2>/dev/null \
             || warn "Could not give $path to $OWNER"
     fi
@@ -792,9 +867,24 @@ case "$INIT" in
         mkdir -p "$(dirname "$UNIT_PATH")"
         launchd_plist "$INSTALL_DIR" "$DATA" "org.nmesh.$SERVICE" "$ARGS" > "$UNIT_PATH"
         ok "Agent org.nmesh.$SERVICE will start at login";;
+    runit)
+        info "Installing runit service $UNIT_PATH"
+        if mkdir -p "$UNIT_PATH/log" \
+           && runit_service "$INSTALL_DIR" "$DATA" "$ARGS" > "$UNIT_PATH/run" \
+           && runit_log_service > "$UNIT_PATH/log/run" \
+           && chmod +x "$UNIT_PATH/run" "$UNIT_PATH/log/run"; then
+            sv-enable "$SERVICE" >/dev/null 2>&1 || rm -f "$UNIT_PATH/down"
+            ok "Service $SERVICE will start with the Termux session"
+        else
+            warn "Could not write the runit service — NMesh is installed but will not autostart"
+            INIT=none
+        fi;;
     *)
         warn "No supported init system found — nothing will start automatically."
-        if [ -n "$RUN_USER" ]; then
+        # Never `sudo -u` at a name that is this very account: on Android that
+        # prints Termux's sudo help, and everywhere else it asks for a password
+        # to become who you already are.
+        if [ -n "$RUN_USER" ] && ! owner_is_me "$RUN_USER"; then
             warn "Run it yourself with:  sudo -u $RUN_USER env HOME=$INSTALL_DIR OQS_INSTALL_PATH=$INSTALL_DIR/_oqs NMESH_DATA=$DATA $INSTALL_DIR/start.sh $ARGS"
         else
             warn "Run it yourself with:  cd $INSTALL_DIR && NMESH_DATA=$DATA ./start.sh $ARGS"
@@ -812,6 +902,12 @@ if [ "$DO_START" = true ]; then
                             || run_priv rc-service "$SERVICE" start || STARTED=false;;
         launchd)        launchctl unload "$UNIT_PATH" >/dev/null 2>&1 || true
                         launchctl load "$UNIT_PATH" || STARTED=false;;
+        # runsvdir is started by the Termux session's own profile, so a freshly
+        # installed termux-services has no supervisor running yet. Say exactly
+        # that instead of "the service did not start".
+        runit)          sv up "$SERVICE" >/dev/null 2>&1 \
+                            || { STARTED=false
+                                 warn "Not started: no runit supervisor yet — close and reopen Termux, then: sv up $SERVICE"; };;
         *)              STARTED=false
                         warn "Not starting: no service manager";;
     esac
@@ -832,6 +928,12 @@ echo "  Runs as      : ${RUN_USER:-root} (files mode 700)"
 echo "  Service      : $SERVICE ($INIT)"
 echo "  Follow it    : $(service_hint "$INIT" "$SERVICE")"
 echo ""
+if [ "$INIT" = runit ]; then
+echo "  Starts with Termux. To start it when the phone boots,"
+echo "  install the Termux:Boot app (F-Droid) — it runs the same"
+echo "  services without a terminal open."
+echo ""
+fi
 echo "  The console prints its URL and a generated password on first"
 echo "  start — read them from the service log above."
 echo ""

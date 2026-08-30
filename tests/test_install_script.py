@@ -337,9 +337,18 @@ class TestPrefixIsNotOurs:
         import re
         assert not re.search(r'(?<![A-Z_])PREFIX=', self._code())
 
-    def test_the_installer_never_reads_its_own_prefix_back(self):
+    def test_the_installer_never_takes_its_install_dir_from_prefix(self):
         import re
-        assert not re.search(r'\$\{?PREFIX\b', self._code())
+        assert not re.search(r'INSTALL_DIR=.*\$\{?PREFIX\b', self._code())
+
+    def test_prefix_is_only_ever_read_as_termux_own(self):
+        """It is read again now — to find Termux's pkg, its service directory
+        and its sh — and that is exactly the value the rename protects."""
+        import re
+        termux_paths = ("bin/pkg", "bin/sh", "var/service", "var/log/sv")
+        for line in self._code().splitlines():
+            if re.search(r'\$\{?PREFIX\b', line):
+                assert any(path in line for path in termux_paths), line
 
     def test_the_install_directory_has_a_name_of_its_own(self):
         code = self._code()
@@ -354,3 +363,104 @@ class TestPrefixIsNotOurs:
             env={"PREFIX": "/data/data/com.termux/files/usr"},
         )
         assert "PREFIX=[/data/data/com.termux/files/usr]" in result.stdout
+
+
+class TestAndroidService:
+    """A phone had "No supported init system found — nothing will start
+    automatically", and the manual command it offered was `sudo -u <yourself>`,
+    which on Termux prints sudo's help screen. Android has no init a package can
+    reach, but termux-services runs runit inside the app."""
+
+    def _termux(self, tmp_path):
+        """A PREFIX that looks like Termux's, with the tools it ships."""
+        prefix = tmp_path / "usr"
+        (prefix / "bin").mkdir(parents=True, exist_ok=True)
+        for name in ("pkg", "sv", "sv-enable"):
+            tool = prefix / "bin" / name
+            tool.write_text("#!/bin/sh\nexit 0\n")
+            tool.chmod(0o755)
+        return prefix
+
+    def test_termux_with_services_has_a_service_manager(self, tmp_path):
+        prefix = self._termux(tmp_path)
+        result = run_snippet(
+            tmp_path, 'detect_init',
+            env={"PREFIX": str(prefix), "PATH": f"{prefix}/bin:/usr/bin:/bin"})
+        assert result.stdout.strip() == "runit"
+
+    def test_a_phone_without_termux_services_is_offered_them(self, tmp_path):
+        """Reporting "nothing will start automatically" while the fix is one
+        package away is not a report, it is a shrug."""
+        prefix = self._termux(tmp_path)
+        (prefix / "bin" / "sv-enable").unlink()
+        result = run_snippet(
+            tmp_path, 'ensure_termux_services && echo INSTALLED || echo GAVE_UP',
+            env={"PREFIX": str(prefix), "PATH": f"{prefix}/bin:/usr/bin:/bin"})
+        assert "termux-services" in result.stdout + result.stderr
+
+    def test_the_run_script_starts_the_node_in_the_foreground(self, tmp_path):
+        """runsv owns the restarting: a run script that daemonises is a service
+        that runit thinks died."""
+        result = run_snippet(
+            tmp_path, 'runit_service /opt/nmesh /var/lib/nmesh "--fleet"',
+            env={"PREFIX": "/data/data/com.termux/files/usr"})
+        script = result.stdout
+        assert script.startswith("#!/data/data/com.termux/files/usr/bin/sh")
+        assert "exec ./start.sh --fleet" in script
+        assert 'cd "/opt/nmesh"' in script
+        assert 'NMESH_DATA="/var/lib/nmesh"' in script
+        # `exec 2>&1` is the redirect runit wants; a backgrounded command is
+        # what it must never see.
+        assert not [line for line in script.splitlines() if line.rstrip().endswith("&")]
+
+    def test_the_service_says_where_its_log_is(self, tmp_path):
+        result = run_snippet(tmp_path, 'service_hint runit nmesh',
+                             env={"PREFIX": "/data/data/com.termux/files/usr"})
+        assert "sv status nmesh" in result.stdout
+        assert "/var/log/sv/nmesh/current" in result.stdout
+
+    def test_uninstalling_does_not_install_a_package(self, tmp_path):
+        """Removing NMesh from a phone is not the moment to put something new
+        on it."""
+        text = INSTALL.read_text()
+        guard = text[text.index('INIT="$(detect_init)"'):]
+        guard = guard[:guard.index("ensure_termux_services")]
+        assert '"$UNINSTALL" != true' in guard
+        assert '"$RESET_PASSWORD" != true' in guard
+
+
+class TestOwnership:
+    """A user install names itself as the owner, and the string comparison never
+    noticed: owner_spec makes "name:group", `id -u`/`id -g` make numbers. So
+    every user install chowned its files to itself — a no-op on Linux, a pair of
+    warnings on Android, where nothing may chown anything and nothing needs to."""
+
+    def test_my_own_account_is_recognised(self, tmp_path):
+        result = run_snippet(
+            tmp_path,
+            'owner_is_me "$(id -un):$(id -gn)" && echo ME || echo SOMEONE_ELSE')
+        assert result.stdout.strip() == "ME"
+
+    def test_my_own_account_without_a_group_is_recognised(self, tmp_path):
+        result = run_snippet(tmp_path,
+                             'owner_is_me "$(id -un)" && echo ME || echo SOMEONE_ELSE')
+        assert result.stdout.strip() == "ME"
+
+    def test_somebody_else_is_not_me(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'owner_is_me "nmesh:nmesh" && echo ME || echo SOMEONE_ELSE')
+        assert result.stdout.strip() == "SOMEONE_ELSE"
+
+    def test_nothing_is_not_me(self, tmp_path):
+        result = run_snippet(tmp_path,
+                             'owner_is_me "" && echo ME || echo SOMEONE_ELSE')
+        assert result.stdout.strip() == "SOMEONE_ELSE"
+
+    def test_the_manual_hint_never_sudoes_to_yourself(self):
+        """`sudo -u you` asks for a password to become who you already are, and
+        on Termux it just prints sudo's help."""
+        text = INSTALL.read_text()
+        hint = text[text.index("No supported init system found"):]
+        hint = hint[:hint.index("esac")]
+        assert 'owner_is_me "$RUN_USER"' in hint
+        assert "cd $INSTALL_DIR && NMESH_DATA=$DATA ./start.sh" in hint
