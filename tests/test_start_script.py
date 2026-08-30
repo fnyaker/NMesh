@@ -710,3 +710,63 @@ def test_android_can_build_a_native_extension(tmp_path):
     """openssl + libffi + a Rust toolchain, under the names Termux uses."""
     out = run_snippet(tmp_path, 'PKG=termux; pkg_names native')
     assert "rust" in out and "openssl" in out
+
+
+# ── cryptography on Android ──────────────────────────────────────────────────
+# Every cryptography wheel on PyPI is built where the interpreter exports its own
+# symbols. Termux's does not — they live in libpython3.x.so — so the wheel
+# installs and then cannot resolve PyModule_Type, and building the sdist locally
+# reproduces it (pyo3 omits -lpython by design). Termux ships a package built
+# against its own interpreter; that is the one that works.
+
+def test_android_takes_cryptography_from_termux(tmp_path):
+    out = run_snippet(tmp_path, 'PKG=termux; pkg_names pycrypto')
+    assert out == "python-cryptography"
+
+
+def test_the_venv_is_taught_to_see_the_system_packages(tmp_path):
+    """Termux installs into the system site-packages, which a venv hides. The
+    switch lives in pyvenv.cfg and can be flipped without rebuilding the venv."""
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.14.0\n")
+    out = run_snippet(tmp_path, f'VENV="{venv}"; venv_sees_system_packages && echo DONE')
+    assert out == "DONE"
+    cfg = (venv / "pyvenv.cfg").read_text()
+    assert "include-system-site-packages = true" in cfg
+    assert "false" not in cfg
+    # The rest of the file is not collateral damage.
+    assert "home = /usr/bin" in cfg
+    assert "version = 3.14.0" in cfg
+
+
+def test_teaching_a_venv_twice_changes_nothing(tmp_path):
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("include-system-site-packages = true\n")
+    run_snippet(tmp_path, f'VENV="{venv}"; venv_sees_system_packages')
+    assert (venv / "pyvenv.cfg").read_text() == "include-system-site-packages = true\n"
+
+
+def test_a_venv_that_is_not_there_is_not_a_venv(tmp_path):
+    out = run_snippet(
+        tmp_path,
+        f'VENV="{tmp_path}/nope"; venv_sees_system_packages && echo DONE || echo NOPE')
+    assert out == "NOPE"
+
+
+def test_android_is_served_before_pip_reaches_for_a_wheel():
+    """Ordered the other way, pip installs the wheel that cannot load and the
+    repair is a second round with a download in between."""
+    main = START.read_text().split("MAIN", 1)[1]
+    termux = main.index("termux_cryptography")
+    requirements = main.index("pip install --quiet -r requirements.txt")
+    assert termux < requirements
+
+
+def test_the_last_resort_build_links_the_interpreter_in():
+    """pyo3 leaves -lpython out — right where the executable exports its
+    symbols, wrong on Android."""
+    main = START.read_text().split("MAIN", 1)[1]
+    assert "-C link-arg=-lpython" in main
