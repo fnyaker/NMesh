@@ -61,6 +61,11 @@ warn() { echo -e "${Y}[warn]${N} $*"; }
 detect_sudo() {
     SUDO=""
     if [ "$(id -u)" -eq 0 ]; then return; fi
+    # Android has no root to reach. Termux ships a `sudo` anyway — a wrapper
+    # around a `su` binary that only exists on a rooted phone — so finding it on
+    # PATH proves nothing, and every escalation through it dies on "No 'su'
+    # binary found". Nothing on a phone needs escalating: one app, one uid.
+    if is_termux; then return; fi
     if command -v sudo >/dev/null 2>&1; then
         SUDO="sudo"
         if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then SUDO="none"; fi
@@ -194,6 +199,17 @@ ensure_dir() {
 }
 
 # `run_priv` is a no-op as root and refuses loudly when there is no way up.
+# Escalate only where the work actually needs it. The console credential lives
+# in the node's own state directory, which on a user install belongs to the
+# account running this script — asking sudo to write a file we already own is a
+# password prompt for nothing on Linux, and on Android a sudo that can only
+# fail.
+run_owning() {
+    local path="$1"; shift
+    if [ -w "$path" ]; then "$@"; return; fi
+    run_priv "$@"
+}
+
 run_priv() {
     if [ -z "$SUDO" ]; then "$@"; return; fi
     if [ "$SUDO" = none ]; then
@@ -520,10 +536,12 @@ if [ "$RESET_PASSWORD" = true ]; then
     [ -f "$SCRIPT" ] || SCRIPT="$SOURCE_DIR/scripts/nmesh_password.py"
     [ -f "$SCRIPT" ] || fail "nmesh_password.py not found — update this install first"
 
-    NEW_PASSWORD="$(run_priv "$PYTHON_BIN" "$SCRIPT" "$DATA")" \
+    NEW_PASSWORD="$(run_owning "$DATA" "$PYTHON_BIN" "$SCRIPT" "$DATA")" \
         || fail "Could not write a new console password"
-    # The file belongs to the node, not to whoever ran the installer.
-    if [ -n "$RUN_USER" ] && user_exists "$RUN_USER"; then
+    # The file belongs to the node, not to whoever ran the installer — unless
+    # those are the same account, which is every user install.
+    if [ -n "$RUN_USER" ] && user_exists "$RUN_USER" \
+       && ! owner_is_me "$(owner_spec "$RUN_USER")"; then
         run_priv chown "$(owner_spec "$RUN_USER")" "$DATA/console.cred" 2>/dev/null || true
     fi
     ok "New console password: $NEW_PASSWORD"
