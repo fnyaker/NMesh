@@ -465,6 +465,13 @@ progress.meter.crit::-moz-progress-bar{background:var(--danger)}
   text-decoration:none}
 .menu a:hover,.menu button.item:hover{background:var(--surface-2);border-color:transparent;
   text-decoration:none}
+.menu button.item.danger{color:var(--danger)}
+.menu button.item[disabled]{color:var(--text-muted);cursor:not-allowed}
+.menu button.item[disabled]:hover{background:transparent}
+/* Why an item is unavailable, under the item — a disabled control that does not
+   say what would enable it is a dead end. */
+.menu .menu-note{margin:0;padding:0 var(--s-3) var(--s-2);
+  font-size:var(--fs-xs);color:var(--text-muted)}
 .menu .sep{height:1px;background:var(--border);margin:var(--s-1) var(--s-2)}
 .menu .none{padding:var(--s-5) var(--s-3);text-align:center;color:var(--text-muted);
   font-size:var(--fs-sm)}
@@ -575,6 +582,12 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 .pre{white-space:pre-wrap}
 .flush{padding:0}
 .bare{border:0;padding:0;margin:0;min-width:0}
+/* A QR always sits on white, in either theme: a scanner reads contrast, not
+   taste, and an inverted code is a code nothing can read. */
+.qr-holder{display:flex;justify-content:center;padding:var(--s-4);
+  border-radius:var(--r-md);background:#fff;border:1px solid var(--border)}
+.qr-holder:empty{display:none}
+.qr-holder svg{width:min(220px,100%);height:auto}
 .stat.sm .v{font-size:var(--fs-md);font-weight:600}
 /* -- icons ---------------------------------------------------------------- */
 /* Sized in `em` and painted with `currentColor`, so an icon is the size and the
@@ -587,7 +600,7 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 /* A disclosure chevron points down when open and right when closed — one icon
    turned, not two drawings to keep in step. */
 .ic.turn{transform:rotate(-90deg);transition:transform var(--speed) var(--ease)}
-[aria-expanded="true"] .ic.turn{transform:none}
+[aria-expanded="true"] .ic.turn,details[open]>summary .ic.turn{transform:none}
 button>.ic:only-child{width:1.25em;height:1.25em}
 
 .search{position:relative;min-width:min(200px,100%);flex:1 1 220px;max-width:340px}
@@ -663,6 +676,8 @@ SHELL = """
   padding:var(--s-2) var(--s-5);background:var(--warn-soft);color:var(--warn);
   border-bottom:1px solid var(--border);font-size:var(--fs-sm);font-weight:600}
 .ctx-bar .mono{font-weight:400}
+.ctx-bar .ctx-note{font-weight:500;color:var(--text-muted)}
+.ctx-bar .ctx-note:empty{display:none}
 .ctx-bar button{margin-left:auto}
 .shell.remote .mark{background:var(--warn);color:var(--warn-soft)}
 .ctx-pick{display:flex;align-items:center;gap:var(--s-2);min-width:0}
@@ -699,6 +714,13 @@ main{min-width:0;display:flex;flex-direction:column}
 .refresh select{display:none;min-height:var(--ctl-h-sm);font-size:var(--fs-xs);
   padding-block:0;width:auto}
 .refresh.paused input[type="number"],.refresh.paused select{color:var(--text-faint)}
+/* Live means the node says when something moves; the interval beside it is
+   only how often the numbers that move constantly are re-read. The dot is a
+   dot *and* a title, because a colour on its own says nothing to a reader who
+   cannot see it. */
+.refresh .live{width:7px;height:7px;flex:none;border-radius:var(--r-full);
+  background:var(--text-faint)}
+.refresh.streaming .live{background:var(--ok)}
 @media (max-width:720px){
   .refresh input[type="number"],.refresh .unit{display:none}
   .refresh select{display:block}
@@ -767,6 +789,28 @@ main{min-width:0;display:flex;flex-direction:column}
 """
 
 CSS = TOKENS + BASE + COMPONENTS + SHELL
+
+
+# ---------------------------------------------------------------------------
+# Markup every page shares
+# ---------------------------------------------------------------------------
+# The strip saying which machine the controls on this page now point at. One
+# definition, embedded by each page: three pages writing it three times is three
+# chances for one of them to say it differently, and this is the one line on
+# screen that must never be wrong.
+#
+# `data-ctx-local` on the page's <body> says what this particular page cannot do
+# for that node — chat and fleet run here whatever is on screen, because the far
+# console refuses them by design (see Docs/Apps/fleet).
+
+CTX_BAR = """
+    <div id="ctx-bar" class="ctx-bar" role="status" hidden>
+      <span>Managing <b id="ctx-label"></b></span>
+      <span id="ctx-id" class="mono tiny"></span>
+      <span id="ctx-note" class="ctx-note"></span>
+      <button id="ctx-leave" class="sm">Back to this node</button>
+    </div>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -840,13 +884,20 @@ const ICONS = {
   check:      '<path d="M20 6.5 9.2 17.3 4 12.1"/>',
   checkTwice: '<path d="M1.5 12.4 6 16.9 15.2 7.7M12 16.9 21.7 7.2"/>',
   chevron:    '<path d="M6 9.5 12 15.5l6-6"/>',
+  dots:       '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
+  link:       '<path d="M10 13.5a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7M14 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/>',
+  copy:       '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+  pulse:      '<path d="M2 12h4l3-8 5 16 3-8h5"/>',
+  person:     '<circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
+  server:     '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  window:     '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
 };
 // `title` is what a screen reader announces; without one the icon is decorative
 // and hidden, because a button beside it already carries the label.
-function icon(name, title){
+function icon(name, title, extra){
   const path = ICONS[name];
   if(!path) return "";
-  return '<svg class="ic" viewBox="0 0 24 24" ' +
+  return '<svg class="ic' + (extra ? " " + esc(extra) : "") + '" viewBox="0 0 24 24" ' +
     (title ? 'role="img"><title>' + esc(title) + "</title>"
            : 'aria-hidden="true">') + path + "</svg>";
 }
@@ -902,23 +953,146 @@ const SESSION = {
   set(token){ TOKEN = token; try{ sessionStorage.setItem("nmesh_token", token); }catch(_){} },
   clear(){ TOKEN = null; try{ sessionStorage.removeItem("nmesh_token"); }catch(_){} },
 };
-// The node this page is driving. Empty means the one serving the page; set to
-// another id, every call below carries it and the console relays the call over
-// the mesh. One place to change, so no view can forget it and quietly act on
-// the wrong machine.
-const CONTEXT = {node: "", label: ""};
-async function api(path, method, body){
+// ---- the node this page is driving -----------------------------------------
+// Empty means the one serving the page; set to another id, every call below
+// carries it and the console relays the call over the mesh. One place to
+// change, so no view can forget it and quietly act on the wrong machine.
+//
+// Three families are never relayed, and the far side refuses them anyway
+// (`_CONSOLE_DENIED` in src/apps/fleet.py): `/api/fleet/`, because a managed
+// node is not a jump host; `/api/remote/`, because that is the proxy driving
+// the proxy; `/api/chat/`, because somebody else's conversations were never
+// part of managing their machine. Signing in and out are this console's own.
+// The rule is written on both sides on purpose — sending the header anyway
+// would turn a designed refusal into a 403 every page has to explain.
+const LOCAL_ONLY = ["/api/remote/", "/api/fleet/", "/api/chat/",
+                    "/api/login", "/api/logout"];
+const local = (path) => LOCAL_ONLY.some((prefix) => path.startsWith(prefix));
+
+// A reply is stale when the node it came from is no longer the node on screen.
+// Thrown rather than returned: every caller already has a catch, and the one
+// thing none of them should do is paint it.
+class StaleContext extends Error {
+  constructor(){ super("the node being managed changed"); this.stale = true; }
+}
+const isStale = (error) => !!(error && error.stale);
+
+const CONTEXT = {
+  node: "", label: "",
+  // Bumped on every switch. A request records it and its reply is dropped if
+  // it no longer matches: a page that switched machines mid-flight used to
+  // paint the one it had just left, and with auto-refresh off it stayed that
+  // way. This is what makes the switch atomic rather than eventual.
+  epoch: 0,
+  listeners: [],
+
+  get remote(){ return !!this.node; },
+
+  // Remembered for this tab only — never localStorage. It is the same lifetime
+  // as the session token it travels with, and a context that outlived the tab
+  // would greet somebody with a machine they did not choose.
+  save(){
+    try{
+      if(this.node) sessionStorage.setItem("nmesh_context",
+                                           JSON.stringify({node:this.node, label:this.label}));
+      else sessionStorage.removeItem("nmesh_context");
+    }catch(_){}
+  },
+
+  restore(){
+    try{
+      const stored = JSON.parse(sessionStorage.getItem("nmesh_context") || "null");
+      if(stored && /^[0-9a-f]{40}$/.test(stored.node || "")){
+        this.node = stored.node;
+        this.label = typeof stored.label === "string" ? stored.label : "";
+      }
+    }catch(_){}
+    return this.node;
+  },
+
+  set(node, label){
+    this.node = /^[0-9a-f]{40}$/.test(node || "") ? node : "";
+    this.label = this.node ? (label || "") : "";
+    this.epoch += 1;
+    this.save();
+    this.paint();
+    this.listeners.forEach((fn) => { try{ fn(this); }catch(_){} });
+  },
+
+  // Called by anything that has to forget what it was holding. Registered
+  // rather than called from one place, so a view added later cannot be the one
+  // nobody remembered to reset.
+  subscribe(fn){ this.listeners.push(fn); },
+
+  // Hand the remote session back and return to this node. The local console
+  // holds that session, so telling it to drop the session is what actually
+  // ends the access — clearing the field would only hide it.
+  async leave(){
+    const left = this.node;
+    if(!left) return;
+    try{ await api("/api/remote/disconnect", "POST", {node:left}); }catch(_){}
+    this.set("", "");
+  },
+
+  // A context restored from a reload is a claim, not a fact: the remote session
+  // lives in the local console and may be gone. Check before believing it —
+  // driving a node this console can no longer reach would fail every call with
+  // nothing on screen to say why.
+  async confirm(){
+    if(!this.node) return;
+    try{
+      const {data} = await apiJson("/api/remote/targets");
+      const target = (data.targets || []).find((entry) => entry.id === this.node);
+      if(target && target.connected){
+        if(target.label && target.label !== this.label) this.set(this.node, target.label);
+        return;
+      }
+    }catch(_){}
+    this.set("", "");
+  },
+
+  paint(){
+    const shell = $("shell");
+    if(shell) shell.classList.toggle("remote", this.remote);
+    const bar = $("ctx-bar");
+    if(bar) bar.hidden = !this.remote;
+    const label = $("ctx-label");
+    if(label) label.textContent = this.label || shortId(this.node);
+    const id = $("ctx-id");
+    if(id) id.textContent = this.node;
+    // What this page can and cannot do for the node being managed. Chat and
+    // fleet run here whatever is on screen (the far console refuses them), and
+    // a bar that did not say so would be the whole point of the bar missed.
+    const note = $("ctx-note");
+    if(note) note.textContent = document.body.dataset.ctxLocal || "";
+    document.body.dataset.appName = this.remote
+      ? "NMesh — " + (this.label || shortId(this.node))
+      : (document.body.dataset.appHome || document.body.dataset.appName || "NMesh");
+  },
+};
+
+// `options.local` forces one call to this node whatever the console is driving.
+// A view mounted inside a local app needs it: "what is my link to this person"
+// is *this* node's question, and answering it from the machine being managed
+// would be a different question with the same wording.
+async function api(path, method, body, options){
   const headers = {};
+  const at = CONTEXT.epoch;
+  const here = local(path) || !!(options && options.local);
   if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
   if(body !== undefined) headers["Content-Type"] = "application/json";
-  if(CONTEXT.node && !path.startsWith("/api/remote/")) headers["X-NMesh-Node"] = CONTEXT.node;
+  if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
   const response = await fetch(path, {method: method || "GET", headers,
     body: body === undefined ? undefined : JSON.stringify(body)});
   if(response.status === 401){ SESSION.clear(); SESSION.onLost(); throw new Error("unauthorized"); }
+  // A local call answers for this node whatever is on screen, so it is never
+  // stale; everything else belongs to the node that was being driven when it
+  // was asked for, and must not paint over the one that replaced it.
+  if(!here && CONTEXT.epoch !== at) throw new StaleContext();
   return response;
 }
-async function apiJson(path, method, body){
-  const response = await api(path, method, body);
+async function apiJson(path, method, body, options){
+  const response = await api(path, method, body, options);
   const data = await response.json().catch(() => ({}));
   return {ok: response.ok, status: response.status, data};
 }
@@ -1207,6 +1381,96 @@ const PALETTE = {
 // does not close what is open, does not drop a selection, and does not wipe a
 // field being typed in. Losing a selection is legitimate in exactly one case —
 // the thing selected is no longer there.
+// ---- what changed, the moment it changes -----------------------------------
+// A console on a timer is either late or wasteful: at two seconds a link that
+// came up is invisible for two seconds, and at a tenth of a second it asks two
+// hundred times a minute for nothing. So the node says when something moved
+// (`GET /api/events`, one line per change) and the page reads only then.
+//
+// Two rules make that usable rather than frantic:
+//
+//   * **a frame.** However many events arrive, at most `FRAME` repaints a
+//     second, and every event inside one frame is answered by one repaint. Ten
+//     a second reads as instant; a hundred is a page that fights the pointer.
+//   * **structure only.** Links, nodes, names, addressing — things that either
+//     are or are not. Latency, jitter and throughput move constantly and by
+//     tiny amounts, and they stay on the timer, because a repaint per
+//     measurement says nothing new and costs the whole list.
+//
+// The stream is the local console's: it is a connection held open, and the
+// fleet relay moves one bounded request and its answer. Driving another node
+// therefore keeps the cadence, and `EVENTS.live` is how a page says which of
+// the two it is on.
+const EVENTS = {
+  FRAME: 100,
+  source: null,
+  live: false,
+  pending: new Set(),
+  timer: null,
+  handlers: {},
+  onLive: null,
+
+  // `topics` is a list of names, or "*" for anything at all.
+  on(topics, fn){
+    (Array.isArray(topics) ? topics : [topics]).forEach((topic) => {
+      (this.handlers[topic] = this.handlers[topic] || []).push(fn);
+    });
+  },
+
+  start(){
+    this.stop();
+    // Driving another node: there is nothing to listen to here, and pretending
+    // otherwise would leave the page waiting on a stream that never speaks.
+    if(CONTEXT.remote || typeof EventSource === "undefined"){ this.say(false); return; }
+    let source;
+    try{ source = new EventSource("/api/events"); }
+    catch(_){ this.say(false); return; }
+    this.source = source;
+    source.addEventListener("ready", () => this.say(true));
+    source.addEventListener("change", (event) => {
+      let topics = [];
+      try{ topics = (JSON.parse(event.data) || {}).topics || []; }catch(_){}
+      topics.forEach((topic) => this.pending.add(topic));
+      this.schedule();
+    });
+    // The browser reconnects on its own; what it cannot do is tell the page it
+    // is currently blind. Saying so is what puts the timer back.
+    source.addEventListener("error", () => this.say(false));
+  },
+
+  stop(){
+    if(this.source){ this.source.close(); this.source = null; }
+    if(this.timer){ clearTimeout(this.timer); this.timer = null; }
+    this.pending.clear();
+    this.say(false);
+  },
+
+  say(live){
+    if(this.live === live) return;
+    this.live = live;
+    if(this.onLive) this.onLive(live);
+  },
+
+  schedule(){
+    if(this.timer) return;      // a frame is already open; ride it
+    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, this.FRAME);
+  },
+
+  flush(){
+    const topics = [...this.pending];
+    this.pending.clear();
+    if(!topics.length) return;
+    const called = new Set();
+    topics.concat("*").forEach((topic) => {
+      (this.handlers[topic] || []).forEach((fn) => {
+        if(called.has(fn)) return;    // one repaint per frame, not one per topic
+        called.add(fn);
+        try{ fn(topics); }catch(_){}
+      });
+    });
+  },
+};
+
 const REFRESH = {
   MAX: 30,
   DEFAULT: 2,
@@ -1247,8 +1511,15 @@ const REFRESH = {
     }
     if(box){
       box.classList.toggle("paused", seconds === 0);
-      box.title = seconds === 0 ? "Auto-refresh is off"
-                                : "Refreshing every " + seconds + " seconds";
+      // Two different things, said in one place so they cannot contradict:
+      // whether changes arrive by themselves, and how often the numbers that
+      // never stop moving are re-read.
+      const stream = EVENTS.live
+        ? "Links and nodes update as they change. "
+        : "Not streaming — everything is read on this interval. ";
+      box.title = stream + (seconds === 0
+        ? "The interval is off, so ping, jitter and throughput stand still."
+        : "Ping, jitter and throughput every " + seconds + " seconds.");
     }
   },
 
@@ -1265,10 +1536,23 @@ const REFRESH = {
     return seconds;
   },
 
-  stop(){ if(this.timer){ clearInterval(this.timer); this.timer = null; } },
+  stop(){
+    if(this.timer){ clearInterval(this.timer); this.timer = null; }
+    EVENTS.stop();
+  },
+
+  // The stream coming up or going down changes what the interval means, and the
+  // control has to say so — a dot that only ever means "on" is decoration.
+  live(streaming){
+    const box = $("refresh");
+    if(box) box.classList.toggle("streaming", !!streaming);
+    this.paint(this.read());
+  },
 
   // Called once the page has something to refresh. Runs the job immediately —
-  // whoever mounts this wants the first paint now, whatever the interval.
+  // whoever mounts this wants the first paint now, whatever the interval — and
+  // opens the change stream, which is what makes the interval a *statistics*
+  // interval rather than the only thing keeping the page true.
   mount(job){
     this.job = job;
     const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
@@ -1276,8 +1560,10 @@ const REFRESH = {
     if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
     // Off is a choice, not a dead end: one press still reads the node.
     if(now) now.addEventListener("click", () => { if(this.job) this.job(); });
+    EVENTS.onLive = (streaming) => this.live(streaming);
     this.set(this.read());
     if(this.job) this.job();
+    EVENTS.start();
   },
 };
 
@@ -1390,5 +1676,14 @@ function mountShell(){
   }
   const close = $("confirm-cancel");
   if(close) close.addEventListener("click", () => $("confirm-dialog").close());
+
+  // The context is the page's, not this view's: restored before anything is
+  // drawn, so nothing paints for the wrong machine on the way in, and checked
+  // against the console that holds the session before it is believed.
+  document.body.dataset.appHome = document.body.dataset.appName || "NMesh";
+  CONTEXT.restore();
+  CONTEXT.paint();
+  const leave = $("ctx-leave");
+  if(leave) leave.addEventListener("click", () => CONTEXT.leave());
 }
 """

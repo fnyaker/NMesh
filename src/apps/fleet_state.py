@@ -37,9 +37,14 @@ import threading
 import time
 
 # What an operator may be granted. Ordered from harmless to total.
-CAPABILITIES = ("status", "update", "scan", "provision", "shell", "manage")
+CAPABILITIES = ("status", "invite", "update", "scan", "provision", "shell",
+                "manage")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
+    # Deliberately separate from "manage": handing somebody the whole console
+    # so they can mint an invitation is a grant out of all proportion to the
+    # thing they wanted. This one does that and nothing else.
+    "invite": "mint a single-use invitation to this node's mesh, on its behalf",
     "update": "run the system package manager's upgrade",
     "scan": "sweep this machine's LAN for SSH hosts",
     "provision": "install NMesh on machines on this LAN",

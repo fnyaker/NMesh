@@ -34,6 +34,7 @@ import secrets
 import ssl
 import threading
 import time
+from collections import OrderedDict
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -117,6 +118,96 @@ def _scrypt(password: str, salt: bytes) -> bytes:
     return hashlib.scrypt(password.encode("utf-8"), salt=salt, **_SCRYPT)
 
 
+# ---------------------------------------------------------------------------
+# Changes, coalesced
+# ---------------------------------------------------------------------------
+
+class _Changes:
+    """What moved, and a way to wait for the next thing that does.
+
+    The node calls :meth:`note` on its receive loop, the moment a link comes up
+    or goes down. So this side has to cost a set and a notify — never a
+    snapshot, never a socket: whoever is streaming reads the state afterwards,
+    on its own thread.
+
+    A sequence number rather than a queue per listener. A listener remembers
+    where it was and asks for what has changed since; a burst of forty link
+    events between two reads is one answer naming one topic, which is exactly
+    what a page wants — it is going to re-read the same list either way.
+    """
+
+    # Topics are a closed set from one file (`MeshNode._note_change`), but the
+    # dictionary is bounded anyway: an unbounded map keyed by something another
+    # module chooses is the shape of the bug, whoever writes the keys today.
+    MAX_TOPICS = 32
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._seq = 0
+        self._at: "OrderedDict[str, int]" = OrderedDict()
+        self._closed = False
+
+    @property
+    def seq(self) -> int:
+        with self._cond:
+            return self._seq
+
+    def note(self, topic) -> None:
+        topic = str(topic)[:32]
+        with self._cond:
+            if self._closed:
+                return
+            self._seq += 1
+            self._at.pop(topic, None)
+            self._at[topic] = self._seq
+            while len(self._at) > self.MAX_TOPICS:
+                self._at.popitem(last=False)
+            self._cond.notify_all()
+
+    def since(self, seq: int, timeout: float):
+        """``(topics, seq)`` — what changed after ``seq``, waiting up to
+        ``timeout`` seconds for the first of it. Empty on timeout, and on
+        close, so a caller's loop ends rather than spinning."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cond:
+            while self._seq <= seq and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return [], self._seq
+                self._cond.wait(remaining)
+            if self._closed:
+                return [], self._seq
+            return (sorted(name for name, at in self._at.items() if at > seq),
+                    self._seq)
+
+    @property
+    def closed(self) -> bool:
+        with self._cond:
+            return self._closed
+
+    def close(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+
+# One stream wakes at most this often, however many changes arrive in between:
+# ten repaints a second reads as instant, and a hundred is a page that fights
+# the pointer while saying nothing new.
+_STREAM_FRAME = 0.1
+# Nothing happened for this long → a comment down the wire. It keeps a proxy
+# from reaping an idle connection, and it is how a stream notices the client
+# went away without ever telling us: a page that reloaded is a socket nobody
+# closed on this side, and it is the *write* that finds out. Short enough that
+# a few reloads in a row do not park several dead streams against the ceiling.
+_STREAM_PING = 10.0
+# Streams held at once. Each one is a thread of the console's server for as
+# long as a page is open, so it is bounded like everything else here — with
+# room for the pages of a couple of browsers plus whatever a reload left
+# behind for a ping or two.
+_MAX_STREAMS = 16
+
+
 class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
@@ -140,6 +231,12 @@ class WebConsole:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # What the node says has moved, and the streams reading it. The console
+        # subscribes on start() and unsubscribes on stop(): a listener left
+        # hooked to a node whose console is gone is a reference nothing drops.
+        self._changes = _Changes()
+        self._streams = 0
+        self._streams_lock = threading.Lock()
 
         # Sessions: token -> expiry monotonic deadline.
         self._tokens: dict[str, float] = {}
@@ -364,11 +461,18 @@ class WebConsole:
                 "max": MAX_PSEUDO}
 
     def _persist_pseudo(self, pseudo: str):
-        """Record the adopted pseudo in the configuration file so it survives a
-        restart. Returns ``(saved, problem)`` — never raises: the rename already
-        happened on the node, and this is only about making it stick."""
+        """Record the adopted pseudo in the configuration file.
+
+        The name already survives a restart on its own: the node signed a claim
+        and its name store keeps it (see :class:`src.session_store.PseudoStore`).
+        What the file adds is that the *declared* value agrees — a configuration
+        still naming the old one wins at startup, so leaving it stale is how a
+        rename comes undone on the next boot.
+
+        Returns ``(saved, problem)`` — never raises: the rename already happened
+        on the node, and this is only about the file."""
         if not self._config_path:
-            return False, "this node was not started from a configuration file"
+            return False, None   # nothing declares a name here; the store keeps it
         try:
             values, _problems = node_config.load(self._config_path)
             merged = node_config.defaults()
@@ -470,6 +574,7 @@ class WebConsole:
             self._app_host.bind_console(self._loop)
         elif self._chat_bridge is not None:
             self._chat_bridge.start(self._loop)
+        self._node.set_change_listener(self._changes.note)
         handler = _make_handler(self)
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         if self._ssl_ctx is not None:
@@ -483,13 +588,16 @@ class WebConsole:
             name="nmesh-console", daemon=True)
         self._thread.start()
 
-    # -- restarting onto freshly installed code ---------------------------
+    # -- restarting --------------------------------------------------------
     #
-    # Replacing the tree does not change the code already loaded in this
-    # process: an update only takes effect when the node starts again. The
-    # service manager is what starts it, so "restart" here means "exit, and let
-    # it bring us back" — the same path a crash would take, which is why it is
-    # only ever done when something is actually watching.
+    # There is no way for a process to restart itself; the service manager is
+    # what starts it, so "restart" here means "exit, and let it bring us back"
+    # — the same path a crash would take, which is why it is only ever done
+    # when something is actually watching (`NMESH_SERVICE_MANAGED`).
+    #
+    # Two callers, one mechanism: an update, which only takes effect when the
+    # node starts again on the tree that was just written, and an operator who
+    # asked for a restart outright.
 
     _RESTART_DELAY = 1.0        # let the operator's response reach them first
 
@@ -506,13 +614,14 @@ class WebConsole:
             pass                # going down regardless; state writes are bounded
         os._exit(0)
 
-    def restart_for_update(self) -> bool:
-        """Exit so the service manager starts us again on the new code.
+    def restart(self) -> bool:
+        """Exit so the service manager starts us again.
 
         Returns whether a restart was scheduled. Without a service manager
         (``NMESH_SERVICE_MANAGED``), exiting would simply stop the node — a
-        worse outcome than running yesterday's code — so we stay up and the
-        console tells the operator to restart it themselves."""
+        worse outcome than either running yesterday's code or not restarting at
+        all — so we stay up and the console says so instead of leaving an
+        operator with a node that never came back."""
         if not updater.service_managed():
             return False
         threading.Thread(target=self._restart_worker, daemon=True,
@@ -520,6 +629,14 @@ class WebConsole:
         return True
 
     def stop(self) -> None:
+        # Before the socket: a stream waiting on the condition would otherwise
+        # sit there until its next ping, holding a thread against a console that
+        # has already gone.
+        try:
+            self._node.set_change_listener(None)
+        except Exception:
+            pass
+        self._changes.close()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -821,10 +938,21 @@ def _make_handler(console: WebConsole):
                 if not remote:
                     self._json(400, {"error": "bad node id"})
                     return
+                if path == "/api/events":
+                    # A connection held open is not a thing the relay carries:
+                    # it moves one bounded request and its answer. Saying so is
+                    # what lets a page fall back to its cadence rather than
+                    # waiting on a stream that will never speak.
+                    self._json(409, {"error": "a change stream is local to the "
+                                              "console serving it"})
+                    return
                 self._proxy_remote(remote, self.path, None)
                 return
             if path == "/api/remote/targets":
                 self._handle_remote_targets()
+                return
+            if path == "/api/events":
+                self._stream_changes()
                 return
             if path in _STATIC:
                 ctype, text = _STATIC[path]
@@ -854,6 +982,9 @@ def _make_handler(console: WebConsole):
                     snap["server_time"] = time.time()
                     snap["apps"] = console._apps()
                     snap["version"] = updater.__version__
+                    # Whether a restart would come back. The page needs it to
+                    # decide between offering the action and saying why not.
+                    snap["service_managed"] = updater.service_managed()
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
@@ -1411,6 +1542,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/update/apply":
                 self._handle_update_apply(_parse_json(body))
                 return
+            if path == "/api/restart":
+                self._handle_restart(_parse_json(body))
+                return
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
@@ -1599,7 +1733,7 @@ def _make_handler(console: WebConsole):
                     # An operator pressed Install and is watching. The
                     # unattended path (the release loop) never restarts — that
                     # is where a bad release could become a restart loop.
-                    restarting = console.restart_for_update()
+                    restarting = console.restart()
                     self._json(200, {"ok": True, **result,
                                      "restarting": restarting})
                     return
@@ -1707,6 +1841,34 @@ def _make_handler(console: WebConsole):
                              "restart_required": True,
                              "service_managed": updater.service_managed()})
 
+        def _handle_restart(self, data) -> None:
+            """Restart this node, if something will bring it back.
+
+            The gate is not the point of interest — the answer is. A console
+            that says "restarting" and leaves the operator with a stopped node
+            is worse than one that refuses, so the refusal is explicit and names
+            the reason: this process cannot restart itself, only exit and be
+            started again.
+
+            Under a remote context this arrives at the *managed* node's console,
+            which is exactly right: the operator asked to restart that machine,
+            and it is that machine's service manager that answers for it."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            if data.get("confirm") is not True:
+                self._json(400, {"error": "confirmation required"})
+                return
+            if not updater.service_managed():
+                self._json(409, {
+                    "ok": False, "restarting": False,
+                    "error": "nothing would start this node again — it runs "
+                             "outside a service manager, so it would stop "
+                             "rather than restart"})
+                return
+            self._json(200, {"ok": True, "restarting": console.restart()})
+
         def _handle_update_apply(self, data) -> None:
             """Install a release — only ever the one the operator confirmed.
 
@@ -1752,7 +1914,7 @@ def _make_handler(console: WebConsole):
             # The files are in place; this process is still running the old
             # ones. Answer first, then leave so the manager brings us back on
             # the new code — otherwise the page's "restarting" is a lie.
-            restarting = console.restart_for_update()
+            restarting = console.restart()
             self._json(200, {"ok": True, **result, "restarting": restarting})
 
         # -- fleet (remote management) ------------------------------------
@@ -1810,6 +1972,76 @@ def _make_handler(console: WebConsole):
                                          in result["applied"].items()},
                              "rejected": result["rejected"],
                              "persisted": saved, "note": note})
+
+        # -- the change stream ---------------------------------------------
+        #
+        # The console used to ask "has anything changed?" on a timer. At two
+        # seconds a link that came up was invisible for two seconds; at a tenth
+        # of a second it was two hundred questions a minute answered "no". This
+        # inverts it: the node says when something moved and the page reads only
+        # then, so a link appears the moment it does.
+        #
+        # Only *that* something moved is sent — never what it is. The page reads
+        # the state it already knows how to read; a second description of a node
+        # travelling down a second channel is two things to keep in step.
+        #
+        # This one is local by construction. It is a connection held open, and
+        # the fleet console relay is a bounded request and its answer, not a
+        # stream; a page driving another node keeps its cadence instead, and
+        # says so.
+
+        def _stream_changes(self) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            with console._streams_lock:
+                if console._streams >= _MAX_STREAMS:
+                    self._json(503, {"error": "too many open streams"})
+                    return
+                console._streams += 1
+            try:
+                self._run_stream()
+            finally:
+                with console._streams_lock:
+                    console._streams -= 1
+
+        def _run_stream(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            # No length, so the body ends when the connection does. Announcing
+            # that here is what makes it legal under HTTP/1.1 — and it is what
+            # tells this handler not to try to read a second request off a
+            # socket that is going to stay busy for hours.
+            self.send_header("Connection", "close")
+            for key, value in _SECURITY_HEADERS.items():
+                self.send_header(key, value)
+            self.end_headers()
+            seq = console._changes.seq
+            try:
+                # Says the stream is live before anything has moved, so a page
+                # can stop its timer on evidence rather than on hope.
+                self._emit("ready", {"at": time.time()})
+                while console._server is not None:
+                    topics, seq = console._changes.since(seq, _STREAM_PING)
+                    if not topics:
+                        if console._changes.closed:
+                            return
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    self._emit("change", {"topics": topics, "at": time.time()})
+                    # Hold the frame open rather than answering each event: the
+                    # next pass picks up everything that piled up meanwhile, in
+                    # one message. Ten a second, whatever the mesh is doing.
+                    time.sleep(_STREAM_FRAME)
+            except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+                return          # the page went away; nothing to report
+
+        def _emit(self, name: str, document: dict) -> None:
+            self.wfile.write(
+                f"event: {name}\ndata: {json.dumps(document)}\n\n".encode("utf-8"))
+            self.wfile.flush()
 
         def _handle_remote_targets(self) -> None:
             if not self._authed():
@@ -1881,6 +2113,13 @@ def _make_handler(console: WebConsole):
                     self._json(200, {"rid": fleet.status(node)})
                 elif action == "update":
                     self._json(200, {"rid": fleet.update(node)})
+                elif action == "invite":
+                    # The answer *is* the invitation, so this one waits for it
+                    # rather than handing back a request id and leaving the
+                    # page to poll for a secret it must show once.
+                    result = fleet.api_invite(node, data.get("ttl") or 0,
+                                              data.get("ticket") is True)
+                    self._json(200 if not result.get("error") else 502, result)
                 elif action == "scan":
                     # ``targets`` mixes subnets and precise machines; ``subnets``
                     # is accepted as the older spelling of the same field.

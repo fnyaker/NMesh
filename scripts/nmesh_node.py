@@ -14,6 +14,7 @@ import asyncio
 import os
 import shlex
 import sys
+import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
@@ -69,7 +70,8 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),
                        state=FleetState(store=store), repo_root=ROOT,
-                       mesh_invite=lambda: _mesh_invitation(node),
+                       mesh_invite=lambda ttl=None, ticket=False:
+                           _mesh_invitation(node, ttl, ticket),
                        local_console=local_console)
         return app, FleetBridge(app)
     return build
@@ -83,14 +85,29 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
 PROVISION_INVITE_TTL = 3 * 3600
 
 
-def _mesh_invitation(node) -> dict:
+def _mesh_invitation(node, ttl=None, ticket=False) -> dict:
     """A fresh single-use invitation to this node's mesh, plus where to reach it.
 
     Redeeming it runs the ordinary invite → handshake path, so the newcomer's
     certificate is **issued and signed by this node** — the one that scanned and
-    installed it — and chains from there to the network's root."""
+    installed it — and chains from there to the network's root.
+
+    ``ticket`` asks for the same invitation in the compact scannable form. It
+    needs a confirmed public address, which not every node has, so a node that
+    cannot mint one still returns the invitation — with no ticket in it, rather
+    than nothing at all."""
+    window = PROVISION_INVITE_TTL if ttl is None else float(ttl)
+    if ticket:
+        try:
+            issued = node.issue_join_ticket(window)
+            return {"uris": node.advertised_uris()[:8], "code": issued["code"],
+                    "ticket": issued["ticket"],
+                    "expires_at": issued["expires_at"], "ttl": issued["ttl"]}
+        except Exception:
+            pass          # no public address — fall through to the plain code
     return {"uris": node.advertised_uris()[:8],
-            "code": node.generate_invite(PROVISION_INVITE_TTL)}
+            "code": node.generate_invite(window),
+            "ticket": "", "expires_at": time.time() + window, "ttl": window}
 
 
 async def _join_mesh(node, preauth) -> bool:
@@ -258,6 +275,9 @@ async def main() -> None:
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
         cert_store_path=os.path.join(args.data, "node.certs") if args.data else None,
         session_store_path=os.path.join(args.data, "node.sessions") if args.data else None,
+        # The names this node has learned, so a restart does not blank every
+        # label on every screen while gossip fills in again.
+        pseudo_store_path=os.path.join(args.data, "node.names") if args.data else None,
         app_storage_path=os.path.join(args.data, "app_store") if args.data else None,
         app_store_dir=os.path.join(args.data, "appstore") if args.data else None,
         # Pinned release publishers live with the node's state: what may

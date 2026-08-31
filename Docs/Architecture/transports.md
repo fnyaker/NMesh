@@ -225,6 +225,42 @@ beyond the measurement. It is off by default because it is a trade — a dial an
 a handshake against a few milliseconds — and only the operator knows whether it
 is worth it.
 
+The candidate is dialled with `_dial_uri(..., probe=True)`, which marks it
+`probation` **before** its handshake can complete. That is what keeps the
+duplicate reaper below out of the measurement: a second link opened on purpose,
+whose loser this pass closes itself.
+
+## One link per node per medium (`_collapse_redundant_links`)
+
+Two nodes that dial each other at the same moment end up with **two** links
+each: same pair, same transport, both authenticated. Nothing used to look, so
+both stayed — the console showed one node twice on one port, the keepalive paid
+for both, and half the traffic went down a link the far end was not using.
+
+Which of the two survives cannot be decided locally: if each end drops the
+other's, the pair is left with none. So it is decided from the two identities,
+which both ends already know:
+
+> **The canonical link is the one dialled by the larger node id.**
+
+The same rule as the hole punch's initiator (`_complete_punch`), for the same
+reason: one comparison, one answer, no exchange. Each end runs it at the moment
+a link authenticates (both handshake handlers) and closes what the new link
+supersedes — with `_safe_stop_peer`, not `_reap_peer`, because the *node* is
+still reachable and forgetting the routes through it would cost real traffic.
+
+Two guards keep it from eating something legitimate:
+
+- **only the same scheme**. A node reached over both `tcp://` and `udp://` holds
+  one link on each and that is the design; two `tcp://` links to one node is the
+  accident.
+- **never a `probation` link** (address steering, above) and never a relayed
+  virtual peer — a tunnelled link has no medium and no port to duplicate.
+
+When both links run the same way round (we dialled twice, or were dialled
+twice), direction cannot choose, and the **older** one wins: the far end sees
+the same pair in the same order.
+
 ## TCP (`tcp_transport.py`)
 
 - Framing: a **2-byte** prefix (uint16 big-endian) = the size of the `Packet`

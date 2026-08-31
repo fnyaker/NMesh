@@ -406,16 +406,18 @@ def _measure_by_peer(table):
 
 
 def _dial_returning(node, peer):
-    """What a real `_dial_uri` does: the peer that succeeded is in the list."""
-    async def _run(node_id, uri, timeout):
+    """What a real `_dial_uri` does: the peer that succeeded is in the list,
+    and a probe dial hands back a link marked as the deliberate duplicate it is."""
+    async def _run(node_id, uri, timeout, *, probe=False):
         peer.remote_addr = uri
+        peer.probation = probe
         if peer not in node._peers:
             node._peers.append(peer)
         return peer
     return _run
 
 
-async def _no_dial(node_id, uri, timeout):
+async def _no_dial(node_id, uri, timeout, *, probe=False):
     return None
 
 
