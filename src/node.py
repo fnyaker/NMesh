@@ -308,6 +308,14 @@ _ADDR_STEER_PROBES        = 3      # pings averaged before believing a number
 # Steering compares *scores*, not milliseconds, so "this medium is preferred"
 # and "this address is faster" are weighed on one scale (see `_address_score`).
 _ADDR_STEER_MIN_GAIN      = 0.05   # below this, the difference is noise
+# How hard losing probes counts against a link. Loss is not "a slower link" —
+# it is a link that does not work — so it *multiplies* the score rather than
+# shifting it: at this exponent one probe in ten lost costs more than any
+# latency difference a real network produces (0.9^4 ≈ 0.66), and a link nothing
+# comes back from scores exactly zero, so it is never chosen while anything
+# else exists. It stays listed, and stays connected: probes lost is not proof
+# that data is, and an operator who can see "100% loss" can act on it.
+_LOSS_PENALTY_EXP         = 4.0
 
 # Choosing between the addresses of one node. Two things matter and they are not
 # the same kind of thing: what the *medium* is worth (a priority the operator
@@ -2046,8 +2054,7 @@ class MeshNode:
             return {"ok": False, "error": "bad id"}
         if nid == self._id:
             return {"ok": False, "error": "self"}
-        peer = next((p for p in self._peers
-                     if p.authenticated_id == nid and p.session is not None), None)
+        peer = self._link_to(nid)
         if peer is not None:
             await self.ping(peer)
             deadline = time.monotonic() + _DIRECT_PING_TIMEOUT
@@ -2206,17 +2213,75 @@ class MeshNode:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # -- choosing between the links to one node ---------------------------
+    #
+    # A node may be reached over several media at once, and they are not
+    # equally good: one of them may be losing every probe. Everywhere that used
+    # to write `next(p for p in self._peers if p.authenticated_id == …)` picked
+    # *the first one opened*, which with two links is a coin toss — and half
+    # the traffic went down the dead one. There is one rule now, and one place
+    # holding it.
+
+    def _loss_factor(self, peer: '_Peer') -> float:
+        """What losing probes does to a link's score, 0..1.
+
+        ``None`` — fewer than two probes — is not "no loss" and not "all of
+        it": it is unknown, and an unproven link is neither rewarded nor
+        punished for being new."""
+        try:
+            loss = peer.quality.loss()
+        except Exception:
+            return 1.0
+        if loss is None:
+            return 1.0
+        return max(0.0, 1.0 - loss) ** _LOSS_PENALTY_EXP
+
+    def _link_score(self, peer: '_Peer') -> float:
+        """How good a live link is, 0..1 — the address score, cut by loss.
+
+        The same score the dial order uses, so "prefer this medium", "this
+        address is faster" and "this link works" are settled on one scale
+        rather than by three rules that can disagree."""
+        uri = peer.remote_addr
+        if not uri:
+            scheme = self._peer_scheme(peer)
+            uri = f"{scheme}://link:1" if scheme else ""
+        rtt = None if peer.last_rtt is None else peer.last_rtt * 1000.0
+        return self._address_score(uri, rtt) * self._loss_factor(peer)
+
+    def _link_to(self, target: NodeID, *,
+                 exclude: '_Peer | None' = None) -> '_Peer | None':
+        """The best live authenticated link to ``target``, or ``None``."""
+        best, best_score = None, -1.0
+        for peer in self._peers:
+            if (peer is exclude or peer.authenticated_id != target
+                    or peer.session is None):
+                continue
+            score = self._link_score(peer)
+            if score > best_score:
+                best, best_score = peer, score
+        return best
+
     def _authenticated_peers(self, *, exclude: _Peer | None = None) -> list[_Peer]:
-        """Return one live authenticated link per identity."""
-        seen: set[NodeID] = set()
-        out: list[_Peer] = []
+        """One live authenticated link per identity — the **best** one.
+
+        Identities keep the order they were first seen in, so a list on a
+        screen does not reshuffle itself because two links swapped rank."""
+        best: dict[NodeID, tuple[float, _Peer]] = {}
+        order: list[NodeID] = []
         for peer in self._peers:
             if (peer is exclude or peer.authenticated_id is None
-                    or peer.session is None or peer.authenticated_id in seen):
+                    or peer.session is None):
                 continue
-            seen.add(peer.authenticated_id)
-            out.append(peer)
-        return out
+            node_id = peer.authenticated_id
+            score = self._link_score(peer)
+            held = best.get(node_id)
+            if held is None:
+                order.append(node_id)
+                best[node_id] = (score, peer)
+            elif score > held[0]:
+                best[node_id] = (score, peer)
+        return [best[node_id][1] for node_id in order]
 
     # -- redundant links --------------------------------------------------
     #
@@ -2533,11 +2598,7 @@ class MeshNode:
                                 timeout: float = _ON_DEMAND_TIMEOUT) -> _Peer | None:
         if target == self._id:
             return None
-        existing = next(
-            (p for p in self._peers
-             if p.authenticated_id == target and p.session is not None),
-            None,
-        )
+        existing = self._link_to(target)
         if existing is not None:
             return existing
         pending = self._pending_connections.get(target)
@@ -2546,11 +2607,7 @@ class MeshNode:
                 await asyncio.wait_for(pending.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 return None
-            return next(
-                (p for p in self._peers
-                 if p.authenticated_id == target and p.session is not None),
-                None,
-            )
+            return self._link_to(target)
         event = asyncio.Event()
         self._pending_connections[target] = event
         deadline = asyncio.get_event_loop().time() + timeout
@@ -2601,11 +2658,7 @@ class MeshNode:
         # on _punch_pending. One bounded wait covers them all.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            peer = next(
-                (p for p in self._peers
-                 if p.authenticated_id == target and p.session is not None),
-                None,
-            )
+            peer = self._link_to(target)
             if peer is not None:
                 return peer
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
@@ -2747,9 +2800,7 @@ class MeshNode:
         if time.monotonic() - seen_at > _ROUTE_HINT_TTL:
             del self._route_hints[target]
             return None
-        return next((p for p in self._peers
-                     if p is not exclude and p.authenticated_id == via
-                     and p.session is not None), None)
+        return self._link_to(via, exclude=exclude)
 
     def _route_candidates(self, target: NodeID,
                           exclude: _Peer | None = None) -> list[_Peer]:
@@ -3737,8 +3788,7 @@ class MeshNode:
             targets = [uri]
         else:
             targets = known
-        peer = next((p for p in self._peers if p.authenticated_id == node_id
-                     and p.session is not None), None)
+        peer = self._link_to(node_id)
         in_use = peer.remote_addr if peer is not None else None
         results = []
         for target in targets:
@@ -3885,12 +3935,16 @@ class MeshNode:
         better = False
         try:
             measured = await self._measure_peer(candidate)
-            # The same score the dial order uses, so "prefer this medium" and
-            # "this address is faster" are settled by one rule rather than two
-            # that can disagree.
+            # The same score the dial order uses, cut by what each link is
+            # losing — so "prefer this medium", "this address is faster" and
+            # "this link works" are settled by one rule rather than three that
+            # can disagree. A link losing probes is what steering exists to
+            # leave, so it must count here or it never gets left.
             better = (measured is not None
                       and self._address_score(uri, measured)
+                      * self._loss_factor(candidate)
                       - self._address_score(peer.remote_addr or uri, current)
+                      * self._loss_factor(peer)
                       >= _ADDR_STEER_MIN_GAIN)
         finally:
             loser = peer if better else candidate
@@ -4840,12 +4894,7 @@ class MeshNode:
                 and packet.ttl > _SEEK_TTL_PREAUTH):
             packet = packet.with_ttl(_SEEK_TTL_PREAUTH)
         target = NodeID(packet.dst_id)
-        direct = next(
-            (p for p in self._peers
-             if p is not from_peer and p.authenticated_id == target
-             and p.session is not None),
-            None,
-        )
+        direct = self._link_to(target, exclude=from_peer)
         if direct is not None:
             await direct.send(packet.with_decremented_ttl())
             return
@@ -6772,11 +6821,7 @@ class MeshNode:
         target_id = NodeID(target_id_raw)
 
         # Find the target among our authenticated peers
-        target_peer = next(
-            (p for p in self._peers
-             if p.authenticated_id == target_id and p.session is not None),
-            None,
-        )
+        target_peer = self._link_to(target_id)
         if target_peer is None:
             return  # can't relay if we don't have a link to the target
 

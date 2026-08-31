@@ -166,6 +166,12 @@ What each of the pages used to solve on its own:
   `withBusy` (the label stays put during the request);
 - `setHTML` — writes only when the markup actually changed, so a list painted on
   a timer does not replace a node under the pointer and swallow the click;
+- `paintLive` / `patchValues` — for a view whose numbers *always* change, which
+  is where `setHTML` stops helping: the **shape** (which rows exist, which
+  buttons are drawn) decides whether anything is rebuilt, and the values are
+  written into the markup already on screen (`data-v="key"`, `data-base` for a
+  badge whose tone moves with it). A view that rewrote itself every second shut
+  every `<details>` its reader had opened;
 - `confirmAction` — destructive actions ask, in the page;
 - `THEME` — light / dark / system, remembered per browser;
 - `EVENTS` — the node's change stream (`/api/events`): what moved, coalesced into

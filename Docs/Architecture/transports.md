@@ -197,6 +197,41 @@ the join block, the hole punch. `node.transport_preference()` returns the order
 of the schemes alone, so the console can show it without reimplementing the rule
 in JavaScript.
 
+### Choosing between the links a node already holds
+
+An address score answers "which of these would I dial?". A node reached over
+`tcp` **and** `udp` at once needs the other question — "which of these do I
+send down?" — and every place that asked it wrote
+`next(p for p in self._peers if p.authenticated_id == …)`: *the first link
+opened*, which with two links is a coin toss. One of the two may be losing every
+probe, and half the traffic went down it.
+
+`node._link_to(target)` answers it once, by `_link_score`: the address score,
+**multiplied** by what the link is losing.
+
+```
+_link_score(peer) = _address_score(uri, rtt) × (1 − loss) ** _LOSS_PENALTY_EXP
+```
+
+Multiplied, not shifted, because loss is not "a slower link" — it is a link that
+does not work. At `_LOSS_PENALTY_EXP = 4`, one probe in ten lost costs about a
+third of the score (0.9⁴ ≈ 0.66), which is more than any latency difference a
+real network produces; and a link nothing comes back from scores **exactly
+zero**, so it is never chosen while anything else exists. Loss below two probes
+is `None` — unknown, not zero — and an unproven link is neither rewarded nor
+punished for being new.
+
+`_authenticated_peers()` returns the **best** link per identity by the same
+score (identities keep the order they were first seen in, so a list on a screen
+does not reshuffle when two links swap rank), which puts routing, gossip
+fan-out and the neighbourhood on it too. Address steering multiplies by the same
+factor on both sides of its comparison — a lossy incumbent is precisely what
+steering exists to leave, so it has to count there or it never gets left.
+
+A link losing everything is **not torn down**: probes lost is not proof that
+data is, and the console shows `100% loss` plainly next to it. What changes is
+that nothing is sent down it while a better one exists.
+
 ## Steering an address on latency (`dynamic_address`, off by default)
 
 A node reachable at several addresses is usually reachable at several
