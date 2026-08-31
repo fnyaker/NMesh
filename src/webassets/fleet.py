@@ -333,13 +333,13 @@ FLEET_PAGE_JS = r"""
 // One polled snapshot drives every panel. Actions post and let the next poll
 // tell the truth, so two operators looking at the same node see the same thing.
 
-let VER = 0, ST = {}, POLL = null;
+let VER = 0, ST = {};
 let SHELL = {sid:null, node:null, off:0}, PICKED = {}, HOSTS = [], KEYS = [];
 let SCAN_AT = null;              // when the selected node last reported a scan
 let DEPLOY_RID = null;           // the remote deployment we are waiting on
 
 SESSION.onLost = () => {
-  if(POLL){ clearInterval(POLL); POLL = null; }
+  REFRESH.stop();
   $("shell").classList.add("hidden");
   $("login").classList.remove("hidden");
 };
@@ -388,8 +388,13 @@ async function poll(){
       DEPLOY_RID = null;
     }
   }
-  if(SHELL.node) pollShell();
 }
+
+// A terminal is not a status page. It keeps its own cadence — faster than the
+// ledger's, and running only while a session is open — so the interval in the
+// top bar cannot be set to zero and freeze somebody's shell.
+const SHELL_TICK = 600;
+setInterval(() => { if(SHELL.node) pollShell(); }, SHELL_TICK);
 
 // ---- decisions waiting on a human ------------------------------------------
 function paintInbox(){
@@ -1345,8 +1350,10 @@ async function enter(token){
   ROUTER.start(() => {});
   await poll();
   await loadKeys();
-  if(POLL) clearInterval(POLL);
-  POLL = setInterval(poll, 1500);
+  // The interval in the top bar drives this page too. It used to be markup with
+  // nothing behind it while the page polled at a rate of its own — a control
+  // that does nothing is worse than no control.
+  REFRESH.mount(poll);
   return true;
 }
 $("login-form").addEventListener("submit", async (event) => {

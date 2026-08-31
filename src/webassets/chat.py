@@ -551,6 +551,7 @@ const initials = (s) => { s = (s || "").trim(); return s ? s.slice(0, 2).toUpper
 
 SESSION.onLost = () => {
   if(timer){ clearInterval(timer); timer = null; }
+  EVENTS.stop();
   $("app").classList.add("hidden"); $("login").classList.remove("hidden");
 };
 SESSION.load();
@@ -1299,6 +1300,9 @@ async function enter(token){
   // The bar says which node the console is driving; this page still drives
   // this one. Confirming drops a claim the local console no longer honours.
   CONTEXT.confirm();
+  // The conversation is this app's own business and keeps its own poll; the
+  // node panel beside it is about links, and links are told rather than asked.
+  EVENTS.start();
   autoGrow();
   await poll();
   if(timer) clearInterval(timer);

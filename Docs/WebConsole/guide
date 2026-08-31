@@ -154,6 +154,13 @@ relay carries one bounded request and its answer. Under a remote context the
 endpoint answers **409** and the page keeps its cadence, saying so rather than
 waiting on a stream that will never speak.
 
+**Every page, one control.** `/fleet` used to carry the interval's markup with
+nothing behind it while polling at a rate of its own; a control that does
+nothing is worse than no control, so it drives that page's poll too. The
+**shell** is the exception and keeps its own faster cadence, running only while
+a session is open: a terminal is not a status page, and the interval can be set
+to zero.
+
 ## Watching the mesh live
 
 - **The map** (Overview → Topology) opens large in one click — on the map

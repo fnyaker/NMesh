@@ -490,6 +490,25 @@ def test_a_change_never_samples_the_throughput():
     assert "if(sample === false) STATE._rates = RATE_NOW;" in webassets.APP_JS
 
 
+def test_no_page_carries_a_refresh_control_with_nothing_behind_it():
+    """Fleet's top bar had the markup and polled at a rate of its own. A control
+    that does nothing is worse than no control."""
+    for html_name, script_name in (("INDEX_HTML", "APP_JS"),
+                                   ("FLEET_HTML", "FLEET_JS")):
+        html = getattr(webassets, html_name)
+        if 'id="refresh-secs"' not in html:
+            continue
+        assert "REFRESH.mount(" in getattr(webassets, script_name), script_name
+
+
+def test_a_terminal_keeps_its_own_cadence():
+    """A shell is not a status page, and the interval in the top bar can be set
+    to zero. Freezing somebody's terminal with it is not a preference."""
+    assert "SHELL_TICK" in webassets.FLEET_JS
+    poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert "pollShell" not in poll
+
+
 def test_driving_another_node_keeps_the_cadence():
     """The relay carries one bounded request and its answer, never a connection
     held open — so the page must not sit waiting on a stream."""
