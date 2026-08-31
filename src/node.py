@@ -1028,6 +1028,10 @@ class _Peer:
         # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
         # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
         self.relay_only: bool = False
+        # A second link to a node we already reach, opened to measure it
+        # (address steering). It is a duplicate on purpose and the pass that
+        # opened it closes the loser, so the duplicate reaper leaves it alone.
+        self.probation: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
@@ -2209,6 +2213,55 @@ class MeshNode:
             out.append(peer)
         return out
 
+    # -- redundant links --------------------------------------------------
+    #
+    # Two nodes that dial each other at the same moment end up with two links
+    # each: same pair, same medium, both authenticated, both kept — because
+    # nothing ever looked. The console then shows one node twice on one port,
+    # the keepalive pays for both, and half the traffic goes down a link the
+    # other end is not using.
+    #
+    # Which of the two survives cannot be decided locally: if each end drops
+    # the other's, the pair is left with none. So it is decided from the two
+    # identities, which both ends already know — **the canonical link is the
+    # one dialled by the larger id**. Same rule as the hole punch's initiator
+    # (`_complete_punch`), for the same reason: one number, one answer, no
+    # exchange.
+    #
+    # Only same-scheme duplicates are collapsed. A node reached over both tcp
+    # and udp holds one link on each and that is the point of the design; two
+    # tcp links to one node is the accident.
+
+    def _redundant_links(self, peer: '_Peer') -> list['_Peer']:
+        """The links that ``peer``'s arrival makes redundant, if any."""
+        target = peer.authenticated_id
+        scheme = self._peer_scheme(peer)
+        if target is None or scheme is None or peer.probation:
+            return []
+        same = [p for p in self._peers
+                if p.authenticated_id == target and p.session is not None
+                and not p.relay_only and self._peer_scheme(p) == scheme]
+        if len(same) < 2:
+            return []
+        # A link being measured against another (address steering) is a second
+        # link on purpose, and the pass that opened it closes the loser itself.
+        if any(p.probation for p in same):
+            return []
+        we_dial = self._id.raw > target.raw
+        keep = next((p for p in same if p.is_client_side == we_dial), None)
+        if keep is None:
+            # Both links run the same way — we dialled twice, or were dialled
+            # twice. The far end sees the same pair from the other side and
+            # orders them the same way, so the older one is the agreed survivor.
+            keep = min(same, key=lambda p: p.connected_at)
+        return [p for p in same if p is not keep]
+
+    def _collapse_redundant_links(self, peer: '_Peer') -> None:
+        """Close whatever ``peer`` supersedes. Never raises, never awaits: it
+        is called from the handshake handlers, which run on the receive loop."""
+        for loser in self._redundant_links(peer):
+            self._spawn_bounded(self._safe_stop_peer(loser))
+
     def _live_neighbors(self) -> list[NodeID]:
         """Identities we hold a live authenticated link with, nearest first."""
         ids = [p.authenticated_id for p in self._authenticated_peers()
@@ -2959,8 +3012,8 @@ class MeshNode:
                 self._peers.remove(peer)
             self._spawn_bounded(self._safe_stop_peer(peer))
 
-    async def _dial_uri(self, node_id: NodeID, uri: str,
-                        timeout: float) -> _Peer | None:
+    async def _dial_uri(self, node_id: NodeID, uri: str, timeout: float,
+                        *, probe: bool = False) -> _Peer | None:
         """Dial one address of one node and require it to prove who it is.
 
         The single place an outgoing link is opened: the routing walk, the
@@ -2968,6 +3021,10 @@ class MeshNode:
         come through here, so they all apply the same timeout, tear a failed
         attempt down the same way, and — the reason it matters to an operator —
         record the same outcome against the same address.
+
+        ``probe`` marks the link as a deliberate second one to a node we already
+        reach (address steering): the caller closes the loser itself, so the
+        duplicate reaper must not choose for it.
 
         Returns the authenticated peer, or ``None``. Never raises: a dial that
         fails is the normal case on a real network, not an error."""
@@ -2994,6 +3051,7 @@ class MeshNode:
                 transport = await self._transport_manager.connect(uri)
                 peer = _Peer(transport, is_client_side=True)
                 peer.on_dead = self._reap_peer
+                peer.probation = probe   # set before the handshake can complete
                 peer.total = self._metrics.total
                 peer.trace = self.trace
                 peer.remote_addr = uri
@@ -3780,7 +3838,8 @@ class MeshNode:
         current = await self._measure_peer(peer)
         if current is None:
             return "current link did not answer"
-        candidate = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT)
+        candidate = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT,
+                                         probe=True)
         if candidate is None:
             return "candidate did not connect"
         better = False
@@ -3795,6 +3854,7 @@ class MeshNode:
                       >= _ADDR_STEER_MIN_GAIN)
         finally:
             loser = peer if better else candidate
+            candidate.probation = False   # whichever survives is a link like any other
             try:
                 await loser.stop()
             except Exception:
@@ -6542,6 +6602,7 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        self._collapse_redundant_links(peer)
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
@@ -6632,6 +6693,7 @@ class MeshNode:
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
+        self._collapse_redundant_links(peer)
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
