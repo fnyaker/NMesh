@@ -1252,6 +1252,7 @@ class MeshNode:
                  identity_path: str | None = None,
                  cert_store_path: str | None = None,
                  session_store_path: str | None = None,
+                 pseudo_store_path: str | None = None,
                  app_storage_path: str | None = None,
                  app_store_dir: str | None = None,
                  release_dir: str | None = None,
@@ -1378,6 +1379,15 @@ class MeshNode:
             # restart — re-authenticated via the persisted cert store, so no
             # re-invitation is needed.
             self._routing.import_entries(restored.routing)
+        # Names, kept apart from the session blob (see PseudoStore). Restored
+        # before anything can rename this node, so `set_pseudo` below sees the
+        # timestamp of the claim we published last time and moves past it.
+        self._pseudo_store = None
+        self._pseudo_dirty = False
+        if pseudo_store_path:
+            from .session_store import PseudoStore
+            self._pseudo_store = PseudoStore(pseudo_store_path, self._identity)
+            self._restore_pseudos(self._pseudo_store.load())
         transport_manager.on_new_connection = self._on_new_transport
         # UDP hole-punching state
         self._udp_server: 'UDPServer | None' = None
@@ -3079,7 +3089,8 @@ class MeshNode:
         self._ensure_state_writer()
 
     def _ensure_state_writer(self) -> None:
-        if self._session_store is None and not self._cert_store_path:
+        if (self._session_store is None and not self._cert_store_path
+                and self._pseudo_store is None):
             return
         if self._state_task is None or self._state_task.done():
             try:
@@ -3090,18 +3101,22 @@ class MeshNode:
                 self._state_task = None
                 self._write_state_now()
                 self._write_certs_now()
+                self._write_pseudos_now()
 
     async def _state_writer_loop(self) -> None:
         """Write what has changed, at most every `_STATE_WRITE_INTERVAL`.
 
         Off the loop thread (`to_thread`): both writes end in an `fsync`, and
         the medium may be a slow one."""
-        while self._running or self._state_dirty or self._certs_dirty:
+        while (self._running or self._state_dirty or self._certs_dirty
+               or self._pseudo_dirty):
             await asyncio.sleep(_STATE_WRITE_INTERVAL)
             if self._state_dirty:
                 await asyncio.to_thread(self._write_state_now)
             if self._certs_dirty:
                 await asyncio.to_thread(self._write_certs_now)
+            if self._pseudo_dirty:
+                await asyncio.to_thread(self._write_pseudos_now)
 
     def _write_state_now(self) -> None:
         if self._session_store is None:
@@ -3132,6 +3147,8 @@ class MeshNode:
             self._write_state_now()
         if self._certs_dirty:
             self._write_certs_now()
+        if self._pseudo_dirty:
+            self._write_pseudos_now()
 
     # -- console / management surface -------------------------------------
     # These read or mutate node state and are meant to be driven from the web
@@ -5824,6 +5841,39 @@ class MeshNode:
         """This node's own pseudo, or "" if it has none."""
         return self._pseudo
 
+    def _restore_pseudos(self, claims) -> None:
+        """Refill the book from disk, re-verifying every claim on the way in.
+
+        A claim off our own disk gets exactly the gate a claim off the network
+        gets — the file is not a trusted input, and the signature is the only
+        thing that makes a name mean anything. Our own claim, if it is in there,
+        also restores what this node is *called*: the name was published under a
+        signature we made, and re-adopting it is how a restart stops being a
+        rename to nothing on every screen that had learned it."""
+        for raw in claims:
+            claim = _dir_parse_claim(raw, self._identity.verify)
+            if claim is None:
+                continue
+            self._pseudo_book.offer(claim, bytes(raw))
+            if claim["node_id"] == self._id.raw:
+                self._pseudo, self._pseudo_claim = claim["pseudo"], bytes(raw)
+
+    def _persist_pseudos(self) -> None:
+        """Mark the name cache dirty; the state writer does the writing."""
+        if self._pseudo_store is None:
+            return
+        self._pseudo_dirty = True
+        self._ensure_state_writer()
+
+    def _write_pseudos_now(self) -> None:
+        if self._pseudo_store is None:
+            return
+        self._pseudo_dirty = False
+        try:
+            self._pseudo_store.save(self._pseudo_book.claims())
+        except Exception:
+            pass
+
     def set_pseudo(self, pseudo: str) -> str:
         """Adopt ``pseudo`` as this node's name and sign a fresh claim for it.
 
@@ -5838,6 +5888,7 @@ class MeshNode:
             # does not — see Docs/Pseudos/guide.
             self._pseudo, self._pseudo_claim = "", None
             self._pseudo_book.forget(self._id.raw)
+            self._persist_pseudos()
             return ""
         wanted = _pseudo_canonical(pseudo)
         # Strictly forward, even when two renames land in the same second:
@@ -5854,6 +5905,7 @@ class MeshNode:
             raise PseudoDirError("could not verify our own claim")   # cannot read
         self._pseudo, self._pseudo_claim = wanted, claim
         self._pseudo_book.offer(parsed, claim)
+        self._persist_pseudos()
         self._announce_own_pseudo()
         return wanted
 
@@ -5898,7 +5950,10 @@ class MeshNode:
         if claim is None:
             self._charge_abuse(peer)
             return None
-        return claim if self._pseudo_book.offer(claim, bytes(raw)) else None
+        if not self._pseudo_book.offer(claim, bytes(raw)):
+            return None
+        self._persist_pseudos()   # a name learned once is a name kept
+        return claim
 
     def _spawn_bounded(self, coro) -> None:
         """Run a coroutine detached from the caller.
@@ -6116,7 +6171,8 @@ class MeshNode:
             claim = _dir_parse_claim(raw, self._identity.verify)
             if claim is None or claim["key"] != key:
                 return
-            self._pseudo_book.offer(claim, raw)     # cache → this node re-serves it
+            if self._pseudo_book.offer(claim, raw):  # cache → this node re-serves it
+                self._persist_pseudos()
             found[claim["node_id"].hex()] = {"id": claim["node_id"].hex(),
                                              "pseudo": claim["pseudo"],
                                              "ts": claim["ts"], "match": 0}

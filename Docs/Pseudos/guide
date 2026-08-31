@@ -35,7 +35,10 @@ it is `alice`.
 
 **In the console:** Settings → Identity → *What this node is called*. Type it,
 press Save. It takes effect immediately — the node signs a new claim and tells
-the mesh — and it is written to the configuration file so a restart keeps it.
+the mesh — and the node keeps it across a restart on its own (see *Names are
+kept across a restart*). When the node was started from a configuration file the
+name is written there too, because a file still naming the old one would win at
+the next start; if that write fails, the console says so.
 
 **At startup:** `--pseudo "Alice Ada"`, or in `nmesh.conf`:
 
@@ -97,6 +100,23 @@ fills in on its own.
 **Ask the network** does one more thing: a directory lookup for the name exactly
 as typed, which finds somebody whose node you have never met. It costs a round
 of queries, so it is a button rather than something typing triggers.
+
+### Names are kept across a restart
+
+A node given a state directory (`--data`) writes what it has learned to
+`node.names` — the signed claims, encrypted at rest under the node identity like
+every other file there. On the next start they are read back and **re-verified
+one by one**, exactly as if they had arrived from a stranger: a name is believed
+because it is signed, never because it was on our own disk, so a tampered file
+buys nothing but an empty cache.
+
+Two things follow. A restart no longer blanks every label on every screen while
+gossip fills in again. And this node's **own** name comes back with it: the claim
+it published last time is its own, so it is re-adopted — a node that was never
+started from a configuration file keeps the name you gave it in the console.
+
+The cache is bounded (`MAX_STORED_CLAIMS`, the most recently used names), and it
+is a cache: losing it costs a round of gossip, nothing else.
 
 ## For apps
 

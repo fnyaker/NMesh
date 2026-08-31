@@ -2261,12 +2261,15 @@ async function savePseudo(wanted){
     return;
   }
   $("pseudo-input").value = data.pseudo || "";
-  // The rename is live either way; only its survival across a restart is at
-  // stake, so a failure to write the file is a warning, not an error.
+  // The node keeps the name on its own — it signed a claim and its name store
+  // holds it. The configuration file only matters when there is one: a file
+  // still naming the old node wins at the next start, and that is the one
+  // failure worth warning about.
+  const stale = data.error ? " — but " + data.error +
+    ", so the configuration file still names the old one." : "";
   setMessage("pseudo-status", data.pseudo
-    ? "Now called " + data.pseudo + (data.saved ? " — saved for next start." :
-       " — but not saved: " + (data.error || "no configuration file."))
-    : "The name is gone; this node shows only its id.", !data.saved);
+    ? "Now called " + data.pseudo + (stale || " — it survives a restart.")
+    : "The name is gone; this node shows only its id.", !!data.error);
   tick();
 }
 

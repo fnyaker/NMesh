@@ -13,6 +13,12 @@ is exposed to the medium. Persisting session keys does trade away some forward
 secrecy (disk + identity ⇒ past traffic), which is inherent to resuming sessions
 across restarts; that is why it is opt-in.
 
+:class:`PseudoStore` sits beside it and keeps the *names* this node has learned.
+Separate on purpose, and not because the bytes are different: the session blob is
+rewritten every couple of seconds while data flows, and a book of ~5 kB claims
+folded into it would put a megabyte through ``fsync`` on the hot path. Names
+change once in a blue moon, so they get their own file and their own cadence.
+
 The load path treats the file as hostile: any corruption, truncation, tamper
 (GCM auth failure), or malformed field yields an empty state and a fresh start,
 never a crash.
@@ -28,8 +34,14 @@ from .node_id import NodeID
 from .crypto import SessionKey
 
 _INFO = b"nmesh-session-store-v1"
+_NAMES_INFO = b"nmesh-pseudo-store-v1"
 _NONCE_LEN = 12
 _MAX_FILE = 16 * 1024 * 1024   # 16 MiB ceiling on the on-disk blob
+# Claims are ~5.3 kB each (an ML-DSA-65 public key and signature). This many is
+# a neighbourhood's worth of names and a file of about 1.5 MiB, which is what a
+# cache of display names is worth spending.
+MAX_STORED_CLAIMS = 256
+_MAX_NAMES_FILE = 4 * 1024 * 1024
 
 
 class SessionState:
@@ -64,40 +76,15 @@ class SessionStore:
                              for n, lst in pending_data.items()},
             "routing": routing or [],
         }
-        plaintext = json.dumps(doc).encode("utf-8")
-        nonce = os.urandom(_NONCE_LEN)
-        blob = nonce + AESGCM(self._key).encrypt(nonce, plaintext, None)
-        tmp = f"{self._path}.tmp.{os.getpid()}"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, blob)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, self._path)
+        _write_sealed(self._path, self._key, doc)
 
     # -- load -------------------------------------------------------------
 
     def load(self) -> SessionState:
         state = SessionState()
-        try:
-            if os.path.getsize(self._path) > _MAX_FILE:
-                return state
-            with open(self._path, "rb") as f:
-                blob = f.read()
-        except (FileNotFoundError, OSError):
+        doc = _read_sealed(self._path, self._key, _MAX_FILE)
+        if doc is None:
             return state
-        if len(blob) < _NONCE_LEN + 16:
-            return state
-        try:
-            nonce, ct = blob[:_NONCE_LEN], blob[_NONCE_LEN:]
-            plaintext = AESGCM(self._key).decrypt(nonce, ct, None)
-            doc = json.loads(plaintext.decode("utf-8"))
-            if not isinstance(doc, dict):
-                return state
-        except Exception:
-            return state  # tampered / corrupt / wrong key — start fresh
-
         _load_map(doc.get("e2e_sessions"), state.e2e_sessions, _as_session)
         _load_map(doc.get("pending_kem"), state.pending_kem, _as_bytes)
         _load_map(doc.get("pending_nonce"), state.pending_nonce, _as_bytes)
@@ -106,6 +93,80 @@ class SessionStore:
         if isinstance(routing, list):
             state.routing = [r for r in routing if isinstance(r, dict)]
         return state
+
+
+class PseudoStore:
+    """The names this node has learned, kept across a restart.
+
+    Only raw claims are stored — never the name as text. A claim carries its own
+    public key and signature, so what comes back off disk is re-verified exactly
+    like a claim arriving from a stranger (:func:`src.pseudo_dir.parse_claim`),
+    and a tampered file buys an attacker nothing but an empty cache. That is why
+    a *name* is safe to keep on disk at all: it is not believed, it is checked.
+    """
+
+    def __init__(self, path: str, identity) -> None:
+        self._path = path
+        self._key = identity.derive_secret(_NAMES_INFO, 32)
+
+    def save(self, claims) -> None:
+        """``claims`` is an iterable of raw claim bytes, most valuable last (the
+        book hands them over least-recently-touched first). The tail is what
+        survives the cap, so the names most recently in use are the ones kept."""
+        kept = [bytes(c).hex() for c in list(claims)[-MAX_STORED_CLAIMS:]]
+        _write_sealed(self._path, self._key, {"claims": kept})
+
+    def load(self) -> list[bytes]:
+        doc = _read_sealed(self._path, self._key, _MAX_NAMES_FILE)
+        if doc is None:
+            return []
+        raw = doc.get("claims")
+        if not isinstance(raw, list):
+            return []
+        out: list[bytes] = []
+        for item in raw[:MAX_STORED_CLAIMS]:
+            decoded = _as_bytes(item)
+            if decoded:
+                out.append(decoded)
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Sealed files — one encrypt/decrypt idiom for both stores above.
+# ---------------------------------------------------------------------------
+
+def _write_sealed(path: str, key: bytes, doc: dict) -> None:
+    plaintext = json.dumps(doc).encode("utf-8")
+    nonce = os.urandom(_NONCE_LEN)
+    blob = nonce + AESGCM(key).encrypt(nonce, plaintext, None)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, blob)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def _read_sealed(path: str, key: bytes, ceiling: int) -> dict | None:
+    """The document, or ``None`` for anything missing, oversized, corrupt or
+    tampered with. Never raises: a bad file means "start fresh", never a crash."""
+    try:
+        if os.path.getsize(path) > ceiling:
+            return None
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except (FileNotFoundError, OSError):
+        return None
+    if len(blob) < _NONCE_LEN + 16:
+        return None
+    try:
+        plaintext = AESGCM(key).decrypt(blob[:_NONCE_LEN], blob[_NONCE_LEN:], None)
+        doc = json.loads(plaintext.decode("utf-8"))
+    except Exception:
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 # ---------------------------------------------------------------------------

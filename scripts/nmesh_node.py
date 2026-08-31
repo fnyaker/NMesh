@@ -258,6 +258,9 @@ async def main() -> None:
         identity_path=os.path.join(args.data, "node.key") if args.data else None,
         cert_store_path=os.path.join(args.data, "node.certs") if args.data else None,
         session_store_path=os.path.join(args.data, "node.sessions") if args.data else None,
+        # The names this node has learned, so a restart does not blank every
+        # label on every screen while gossip fills in again.
+        pseudo_store_path=os.path.join(args.data, "node.names") if args.data else None,
         app_storage_path=os.path.join(args.data, "app_store") if args.data else None,
         app_store_dir=os.path.join(args.data, "appstore") if args.data else None,
         # Pinned release publishers live with the node's state: what may
