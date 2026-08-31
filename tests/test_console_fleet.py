@@ -14,6 +14,7 @@ would deadlock against it).
 """
 import asyncio
 import base64
+import json
 import os
 import tempfile
 
@@ -432,6 +433,65 @@ class TestFleetRoutes:
             await node.stop()
 
 
+class TestInviteRoute:
+    """`POST /api/fleet/invite` is the one fleet route that waits for its own
+    answer: what comes back *is* the invitation, and a page cannot poll for a
+    secret it has to show exactly once."""
+
+    async def test_it_hands_back_the_invitation_the_node_minted(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            target = "cd" * 20
+            # Stand in for the far node: the reply arrives as if it had come
+            # back over the mesh, against the request id the bridge minted.
+            original = app.request_invite
+
+            async def _answer(node_id, *, ttl=None, ticket=False):
+                rid = await original(node_id, ttl=ttl, ticket=ticket)
+                app._on_invite_issued(node_id, {
+                    "rid": rid, "code": "abcdefghij", "uris": ["tcp://h:9"],
+                    "ticket": "TICKET" if ticket else "",
+                    "expires_at": 1000.0, "ttl": ttl or 300})
+                return rid
+            app.request_invite = _answer
+            status, _, _, body = await _post(
+                console, "/api/fleet/invite", token,
+                {"node": target, "ttl": 3600, "ticket": True})
+            assert status == 200
+            assert body["code"] == "abcdefghij"
+            assert body["ticket"] == "TICKET"
+            assert body["qr_svg"].startswith("<svg")
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_an_invitation_is_handed_over_once(self):
+        """It is a single-use secret. A console that re-serves it leaves it on
+        the screen of whoever opens the fleet page next."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            bridge = host.bridge("fleet")
+            from src.apps.fleet import InviteIssued
+            bridge._record_invite("cd" * 20, InviteIssued(
+                NodeID(bytes.fromhex("cd" * 20)), "aa" * 8, [], "code", "", 0, 300))
+            assert bridge.take_invite("cd" * 20)["code"] == "code"
+            assert bridge.take_invite("cd" * 20) is None
+            # And it never rides along in the polled snapshot.
+            assert "code" not in json.dumps(bridge.snapshot())
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_it_needs_a_session(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _post(console, "/api/fleet/invite", None,
+                                          {"node": "cd" * 20})
+            assert status == 401
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+
 class TestOperationTracking:
     """A remote action answers asynchronously. With no tracking, the page has
     no way of saying whether it succeeded, failed, or is still running — which
@@ -645,7 +705,7 @@ class TestAppApiOverHttp:
             apps = {entry["app"]: entry for entry in body["apps"]}
             assert "fleet" in apps
             names = {op["name"] for op in apps["fleet"]["operations"]}
-            assert names == {"relation", "enrol", "request"}
+            assert names == {"relation", "enrol", "request", "invite"}
         finally:
             console.stop(); await host.stop_all(); await node.stop()
 

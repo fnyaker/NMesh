@@ -827,10 +827,6 @@ CONSOLE_PAGE_CSS = """
   .ctx-pick select{max-width:120px}
 }
 
-.qr-holder{display:flex;justify-content:center;padding:var(--s-4);border-radius:var(--r-md);
-  background:#fff;border:1px solid var(--border)}
-.qr-holder:empty{display:none}
-.qr-holder svg{width:min(220px,100%);height:auto}
 .qr-video{width:100%;max-height:260px;border-radius:var(--r-md);background:#000;object-fit:cover}
 
 .app-tile{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-4);

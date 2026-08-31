@@ -94,6 +94,9 @@ SHELL_CLOSE = 0x35
 CONSOLE_REQUEST = 0x50
 CONSOLE_REPLY = 0x51
 
+INVITE_REQUEST = 0x60
+INVITE_ISSUED = 0x61
+
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
 PROVISION_REQUEST = 0x42
@@ -128,6 +131,11 @@ MAX_INFLIGHT = 64                 # requests we track as an operator
 UPDATE_TIMEOUT = 1800.0
 UPDATE_CHUNK = 4096
 SCAN_TIMEOUT = 300.0
+# An invitation minted for somebody else. The operator asks for a window; the
+# node that will honour it decides, because it is the one carrying the risk of
+# a code that stays live. `src.invite` caps it again at `_MAX_TTL`.
+INVITE_TTL_DEFAULT = 300.0
+INVITE_TTL_MAX = 6 * 3600.0
 MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 # Remote console. A request must fit one frame; an answer is chunked, because a
@@ -215,6 +223,23 @@ class CommandResult:
     kind: str
     ok: bool
     detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class InviteIssued:
+    """A node we manage minted an invitation to its mesh, for us to hand on.
+
+    ``code`` is single use and short-lived, and it is the whole secret: it is
+    kept out of the activity log on purpose and shown once, where it was asked
+    for. ``ticket`` is the same invitation in the compact scannable form, empty
+    when that node has no confirmed public address to put in one."""
+    src: NodeID
+    rid: str
+    uris: list
+    code: str
+    ticket: str = ""
+    expires_at: float = 0.0
+    ttl: float = 0.0
 
 
 @dataclass
@@ -331,12 +356,14 @@ class FleetApp:
     would push when provisioning; with none, the provision capability reports
     itself unavailable rather than half working.
 
-    ``mesh_invite()`` returns ``{"uris": [...], "code": "..."}`` — a fresh
-    single-use invitation to *this* node's mesh. Provisioning calls it once per
-    machine so the new node joins through the node that installed it and has its
-    certificate signed by it (see ``Docs/Apps/fleet``). Keeping it a callable
-    rather than a node reference is what lets the app stay ignorant of the node,
-    exactly like every other connector app."""
+    ``mesh_invite(ttl=None, ticket=False)`` returns
+    ``{"uris": [...], "code": "...", "ticket": "...", "expires_at": …}`` — a
+    fresh single-use invitation to *this* node's mesh. Provisioning calls it
+    once per machine so the new node joins through the node that installed it
+    and has its certificate signed by it (see ``Docs/Apps/fleet``); the
+    ``invite`` capability calls it on an operator's behalf. Keeping it a
+    callable rather than a node reference is what lets the app stay ignorant of
+    the node, exactly like every other connector app."""
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None, mesh_invite=None,
@@ -1067,6 +1094,70 @@ class FleetApp:
         if isinstance(status, dict):
             self.state.record_status(src.raw.hex(), status)
             self._emit(StatusReceived(src, status, _rid(document)))
+
+    # ======================================================================
+    # Invitations minted on another node's behalf
+    # ======================================================================
+    #
+    # An operator holding `manage` could already do this: drive that node's
+    # console and press the button. But "let me add somebody to your mesh" and
+    # "let me drive your console" are not the same ask, and granting the second
+    # to obtain the first is exactly the kind of over-grant this ledger exists
+    # to avoid. Hence a capability of its own — and the node that will honour
+    # the invitation is the one that mints it, bounds it and can revoke the
+    # right at any time.
+
+    async def request_invite(self, target: NodeID, *, ttl: float | None = None,
+                             ticket: bool = False) -> str:
+        rid = self._new_rid(target, "invite")
+        await self._send(target, self._signed_frame(
+            INVITE_REQUEST, target, PURPOSE_BY_CAP["invite"],
+            {"rid": rid, "ttl": _invite_ttl(ttl), "ticket": bool(ticket)}))
+        return rid
+
+    def _on_invite_request(self, src: NodeID, principal, document: dict) -> None:
+        rid = _rid(document)
+        if not self._authorised(src, "invite", rid):
+            return
+        if self._mesh_invite is None:
+            self._fail(src, rid, "this node cannot issue invitations")
+            return
+        # The operator asked for a window; this node decides what it is worth.
+        ttl = _invite_ttl(document.get("ttl"))
+        want_ticket = document.get("ticket") is True
+        try:
+            invitation = self._mesh_invite(ttl=ttl, ticket=want_ticket)
+        except Exception:                       # noqa: BLE001 — never crash here
+            invitation = None
+        if not isinstance(invitation, dict) or not invitation.get("code"):
+            self._fail(src, rid, "could not mint an invitation")
+            return
+        uris = [uri for uri in (invitation.get("uris") or [])
+                if isinstance(uri, str)][:8]
+        self._reply(src, INVITE_ISSUED, {
+            "rid": rid,
+            "uris": uris,
+            "code": str(invitation.get("code"))[:64],
+            "ticket": str(invitation.get("ticket") or "")[:256],
+            "expires_at": float(invitation.get("expires_at") or (time.time() + ttl)),
+            "ttl": ttl,
+        })
+
+    def _on_invite_issued(self, src: NodeID, document: dict) -> None:
+        if not self._claim_inflight(src, document, "invite"):
+            return
+        code = document.get("code")
+        if not isinstance(code, str) or not code:
+            return
+        uris = document.get("uris")
+        uris = [uri for uri in uris if isinstance(uri, str)][:8] \
+            if isinstance(uris, list) else []
+        ticket = document.get("ticket")
+        self._emit(InviteIssued(
+            src, _rid(document), uris, code[:64],
+            ticket[:256] if isinstance(ticket, str) else "",
+            _as_time(document.get("expires_at")),
+            _invite_ttl(document.get("ttl"))))
 
     # ======================================================================
     # Update
@@ -1806,6 +1897,29 @@ def _rid(document: dict) -> str:
     return rid[:RID_LEN * 2] if isinstance(rid, str) else ""
 
 
+def _invite_ttl(value) -> float:
+    """A lifetime from anywhere — a page, the network — made safe.
+
+    Bounded on both sides of the wire: the operator's number is a request, and
+    the node that will honour the invitation is the one that decides what it is
+    worth leaving live."""
+    try:
+        window = float(value)
+    except (TypeError, ValueError):
+        return INVITE_TTL_DEFAULT
+    if window != window or window <= 0:          # NaN, zero, negative
+        return INVITE_TTL_DEFAULT
+    return min(window, INVITE_TTL_MAX)
+
+
+def _as_time(value) -> float:
+    try:
+        moment = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return moment if 0 <= moment < 1e12 else 0.0
+
+
 def _hex_bytes(value, length: int) -> bytes | None:
     if not isinstance(value, str) or len(value) != length * 2:
         return None
@@ -1965,6 +2079,7 @@ _SIGNED_INBOUND = {
     CONSOLE_REQUEST: FleetApp._on_console_request,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
+    INVITE_REQUEST: FleetApp._on_invite_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
     SHELL_OPEN: FleetApp._on_shell_open,
     SCAN_REQUEST: FleetApp._on_scan_request,
@@ -1980,6 +2095,7 @@ _PURPOSE_FOR = {
     CONSOLE_REQUEST: PURPOSE_BY_CAP["manage"],
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
+    INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],
     SHELL_OPEN: PURPOSE_BY_CAP["shell"],
     SCAN_REQUEST: PURPOSE_BY_CAP["scan"],
@@ -1988,6 +2104,7 @@ _PURPOSE_FOR = {
 
 _REPLY_INBOUND = {
     STATUS_REPORT: FleetApp._on_status_report,
+    INVITE_ISSUED: FleetApp._on_invite_issued,
     UPDATE_OUTPUT: FleetApp._on_update_output,
     UPDATE_RESULT: FleetApp._on_update_result,
     SHELL_OPENED: FleetApp._on_shell_opened,

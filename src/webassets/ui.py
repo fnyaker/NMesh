@@ -582,6 +582,12 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 .pre{white-space:pre-wrap}
 .flush{padding:0}
 .bare{border:0;padding:0;margin:0;min-width:0}
+/* A QR always sits on white, in either theme: a scanner reads contrast, not
+   taste, and an inverted code is a code nothing can read. */
+.qr-holder{display:flex;justify-content:center;padding:var(--s-4);
+  border-radius:var(--r-md);background:#fff;border:1px solid var(--border)}
+.qr-holder:empty{display:none}
+.qr-holder svg{width:min(220px,100%);height:auto}
 .stat.sm .v{font-size:var(--fs-md);font-weight:600}
 /* -- icons ---------------------------------------------------------------- */
 /* Sized in `em` and painted with `currentColor`, so an icon is the size and the

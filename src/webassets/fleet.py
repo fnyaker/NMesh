@@ -504,6 +504,7 @@ function paintNodes(){
       updateHTML(node.id) + statusHTML(node.status) +
       '<div class="btn-row">' +
       (can("status") ? '<button data-status="' + esc(node.id) + '">Refresh</button>' : "") +
+      (can("invite") ? '<button data-invite="' + esc(node.id) + '">Invite</button>' : "") +
       (can("update") ? '<button data-update="' + esc(node.id) + '">Update</button>' : "") +
       (can("shell") ? '<button data-shell="' + esc(node.id) + '">Shell</button>' : "") +
       (can("scan") ? '<button data-scan="' + esc(node.id) + '">Scan LAN</button>' : "") +
@@ -1173,6 +1174,8 @@ document.body.addEventListener("click", async (event) => {
     toast("Relationship revoked");
     return poll();
   }
+  if(data.copy) return void copyText(data.copy);
+  if(data.invite) return inviteDialog(data.invite);
   if(data.status){ await api("/api/fleet/status", "POST", {node:data.status}); return; }
   if(data.update){
     const agreed = await confirmAction({title:"Run the package upgrade there?",
@@ -1195,6 +1198,63 @@ document.body.addEventListener("click", async (event) => {
     return openShell();
   }
 });
+// ---- an invitation minted by somebody else ---------------------------------
+// The node that will honour the invitation is the one that mints it, so this is
+// an ask, not a local action: it goes over the mesh, that node checks the
+// `invite` right, and what comes back is a live single-use code.
+//
+// Shown once. The console holds it until the page collects it and then forgets
+// it — a code re-served to every poll is a code sitting on the screen of
+// whoever opens this page next.
+const INVITE_WINDOWS = [["300", "5 minutes"], ["3600", "1 hour"],
+                        ["21600", "6 hours"]];
+
+function inviteDialog(id){
+  const who = managedLabel(id);
+  $("modal-title").textContent = "Invite somebody to " + who + "'s mesh";
+  $("modal-body").innerHTML =
+    '<p class="muted small">' + esc(who) + " mints it, not this node: whoever uses it " +
+    "joins through that machine and has their certificate signed by it. It is single " +
+    "use, and it stops working when the window closes.</p>" +
+    '<label class="field"><span>Stays live for</span><select id="inv-ttl">' +
+    INVITE_WINDOWS.map((pair) => '<option value="' + pair[0] + '">' + pair[1] +
+      "</option>").join("") + "</select></label>" +
+    '<label class="check"><input id="inv-ticket" type="checkbox" checked>' +
+    "<span>Also make it scannable — needs a confirmed public address on that node, " +
+    "and it is left out rather than refused when there is none</span></label>" +
+    '<div class="btn-row"><button id="inv-go" class="primary">Create</button>' +
+    '<button id="inv-no">Cancel</button></div>' +
+    '<p id="inv-msg" class="msg"></p><div id="inv-out"></div>';
+  $("modal").showModal();
+  $("inv-no").addEventListener("click", () => $("modal").close());
+  $("inv-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+    setMessage("inv-msg", "Asking " + who + "…");
+    const {ok, data} = await apiJson("/api/fleet/invite", "POST",
+      {node:id, ttl:parseInt($("inv-ttl").value, 10) || 300,
+       ticket:$("inv-ticket").checked});
+    if(!ok || data.error){
+      setMessage("inv-msg", data.error || "That node refused.", true);
+      return;
+    }
+    setMessage("inv-msg", "");
+    $("inv-out").innerHTML = inviteHTML(data);
+  }));
+}
+
+function inviteHTML(invite){
+  const uris = (invite.uris || []).map((uri) =>
+    '<div class="mono tiny truncate">' + esc(uri) + "</div>").join("");
+  return '<div class="notice"><span>Shown once. Close this and it is gone from ' +
+    "here — the invitation itself stays live until it is used or expires.</span></div>" +
+    '<div class="copyable"><code class="mono">' + esc(invite.code) +
+    '</code><button class="sm" data-copy="' + esc(invite.code) + '">Copy code</button></div>' +
+    (invite.ticket ? '<div class="copyable"><code class="mono">' + esc(invite.ticket) +
+      '</code><button class="sm" data-copy="' + esc(invite.ticket) +
+      '">Copy ticket</button></div>' : "") +
+    (invite.qr_svg ? '<div class="qr-holder">' + invite.qr_svg + "</div>" : "") +
+    (uris ? '<p class="small muted">Reachable at</p>' + uris : "");
+}
+
 // The console's description of a node, in fleet's own sheet: the same view, so
 // a machine looks the same whether it is being managed or being talked to. The
 // fleet button is dropped — you are already here.
