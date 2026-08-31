@@ -136,7 +136,10 @@ channel is two things to keep in step.
 wants to be instant. Latency, jitter, throughput and load move constantly and by
 tiny amounts, so they stay on the interval — a repaint per measurement says
 nothing new and costs the whole list. The number in the top bar is therefore
-*that* interval, and the dot beside it says whether the stream is live.
+*that* interval, and the dot beside it says whether the stream is live — **amber
+when the interval is off**, because streaming with no cadence is only half live:
+links still arrive and every number stands still, and a green dot there would be
+the console lying by omission.
 
 **A frame, not a firehose.** One stream wakes at most ten times a second
 (`_STREAM_FRAME`), and every change inside a frame is answered by one repaint on
