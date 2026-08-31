@@ -1517,30 +1517,50 @@ function groupByNode(items){
   return order;
 }
 
+// A row's *shape* is what it is a row of; its numbers are written in afterwards
+// (see `rowValues` and `paintLive`). One row per link, keyed by the link, so a
+// table repainted every second keeps the row under the reader's finger.
+function rowKey(node, inner){
+  return (inner ? "l:" : "n:") + node.id +
+         (inner ? "|" + ((node.link || {}).scheme || node.transport || "?") +
+                  "|" + ((node.link || {}).remote || "") : "");
+}
+
 function linkRowHTML(node, kind, inner){
   const transport = node.transport ||
     ((node.addresses || [])[0] || "").split(":", 1)[0] || "—";
-  const tone = node.connected ? "ok" : (node.has_key ? "" : "warn");
-  const label = node.connected ? "authenticated" : (node.has_key ? "key known" : "no key");
-  const quality = (node.link || {}).quality || {};
-  const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+  const key = rowKey(node, inner);
   return '<tr class="link-row"' + (inner ? ' data-inner' : ' data-clickable') +
     ' data-node-id="' + esc(node.id) + '">' +
     '<td class="mono">' + (inner ? '<span class="link-in"></span>' : "") +
       esc(inner ? (transport + " link") : nodeLabel(node.id, node.pseudo)) + "</td>" +
-    "<td>" + badge(label, tone) +
-      (loss ? " " + badge(loss + "% loss", "warn") : "") + "</td>" +
+    '<td><span class="badge" data-base="badge" data-v="' + esc(key + ":state") +
+      '"></span> <span data-v="' + esc(key + ":loss") + '"></span></td>' +
     "<td>" + esc(transport) +
       ((node.link && node.link.remote)
         ? '<div class="tiny muted mono truncate">' + esc(node.link.remote) + "</div>" : "") +
     "</td>" +
-    '<td class="num">' + (node.rtt_ms == null ? "—" : esc(node.rtt_ms) + " ms") +
-      (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
-        " ms</div>" : "") + "</td>" +
-    "<td>" + (node.seen_ago == null ? "live" : esc(fmtAgo(node.seen_ago))) + "</td>" +
+    '<td class="num"><span data-v="' + esc(key + ":rtt") + '"></span>' +
+      '<div class="tiny muted" data-v="' + esc(key + ":jitter") + '"></div></td>' +
+    '<td data-v="' + esc(key + ":seen") + '"></td>' +
     '<td class="tight">' + (inner ? "" :
       '<button class="sm" data-node-id="' + esc(node.id) + '">Details</button>') +
     "</td></tr>";
+}
+
+// The numbers of one row, whether it stands for a node or for one of its links.
+function rowValues(node, inner, out){
+  const key = rowKey(node, inner);
+  const quality = (node.link || {}).quality || {};
+  const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+  out[key + ":state"] = {
+    text: node.connected ? "authenticated" : (node.has_key ? "key known" : "no key"),
+    tone: node.connected ? "ok" : (node.has_key ? "" : "warn")};
+  out[key + ":loss"] = {html: loss ? badge(loss + "% loss", "warn") : ""};
+  out[key + ":rtt"] = node.rtt_ms == null ? "—" : node.rtt_ms + " ms";
+  out[key + ":jitter"] = quality.jitter_ms ? "±" + quality.jitter_ms + " ms" : "";
+  out[key + ":seen"] = node.seen_ago == null ? "live" : fmtAgo(node.seen_ago);
+  return out;
 }
 
 function groupRowHTML(group, unfolded){
@@ -1549,6 +1569,7 @@ function groupRowHTML(group, unfolded){
   const quality = (best.link || {}).quality || {};
   const schemes = [...new Set(group.links.map((link) => link.transport ||
     ((link.link || {}).scheme) || "?"))];
+  const key = "g:" + group.id;
   return '<tr class="link-row group" data-clickable data-node-id="' + esc(group.id) +
     '"><td class="mono">' +
     '<button class="icon sm fold" data-fold="' + esc(group.id) + '" aria-expanded="' +
@@ -1556,14 +1577,24 @@ function groupRowHTML(group, unfolded){
     (open ? "Hide" : "Show") + ' the links to ' + esc(nodeLabel(group.id, group.pseudo)) + '">' +
     '<svg class="ic turn" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5 12 15.5l6-6"/></svg>' +
     "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</td>" +
-    "<td>" + badge(plural(group.links.length, "link"), "ok") + "</td>" +
+    '<td><span class="badge ok">' + esc(plural(group.links.length, "link")) +
+      "</span></td>" +
     "<td>" + esc(schemes.join(", ")) + "</td>" +
-    '<td class="num">' + (best.rtt_ms == null ? "—" : esc(best.rtt_ms) + " ms") +
-      (quality.jitter_ms ? '<div class="tiny muted">±' + esc(quality.jitter_ms) +
-        " ms</div>" : "") + "</td>" +
-    "<td>" + (best.seen_ago == null ? "live" : esc(fmtAgo(best.seen_ago))) + "</td>" +
+    '<td class="num"><span data-v="' + esc(key + ":rtt") + '"></span>' +
+      '<div class="tiny muted" data-v="' + esc(key + ":jitter") + '"></div></td>' +
+    '<td data-v="' + esc(key + ":seen") + '"></td>' +
     '<td class="tight"><button class="sm" data-node-id="' + esc(group.id) +
     '">Details</button></td></tr>';
+}
+
+function groupValues(group, out){
+  const key = "g:" + group.id;
+  const best = group.best || group.links[0];
+  const quality = (best.link || {}).quality || {};
+  out[key + ":rtt"] = best.rtt_ms == null ? "—" : best.rtt_ms + " ms";
+  out[key + ":jitter"] = quality.jitter_ms ? "±" + quality.jitter_ms + " ms" : "";
+  out[key + ":seen"] = best.seen_ago == null ? "live" : fmtAgo(best.seen_ago);
+  return out;
 }
 
 async function paintNodes(kind){
@@ -1573,28 +1604,47 @@ async function paintNodes(kind){
     const items = await fetchPage(kind);
     $(kind + "-count").textContent = PAGES[kind].total;
     const groups = groupByNode(items);
-    // A node that no longer has several links has nothing to unfold; forgetting
-    // it here is the one deselection a refresh is allowed to make.
+    // A node that is *gone* has nothing to unfold. A node that momentarily
+    // shows one link has not gone anywhere — a flapping second link used to
+    // fold the row shut under the reader, and it stayed shut.
     const unfolded = LINKS_OPEN[kind];
     [...unfolded].forEach((id) => {
-      const group = groups.find((entry) => entry.id === id);
-      if(!group || group.links.length < 2) unfolded.delete(id);
+      if(!groups.some((entry) => entry.id === id)) unfolded.delete(id);
     });
-    setHTML(body, groups.length ? groups.map((group) =>
-      group.links.length > 1
-        ? groupRowHTML(group, unfolded) + (unfolded.has(group.id)
-            ? group.links.map((link) => linkRowHTML(link, kind, true)).join("") : "")
-        : linkRowHTML(group.links[0], kind, false)).join("")
-      : spanRow(6, emptyHTML(
-      PAGES[kind].query ? "No node matches that" :
-        kind === "active" ? "Not connected to any node yet" : "No known node yet",
-      PAGES[kind].query ? "Try a shorter prefix of the id, or an address." :
-        kind === "active" ? "Add one from Network → Add a node."
-                          : "Nodes appear here once this one has heard of them.")));
+    if(!groups.length){
+      setHTML(body, spanRow(6, emptyHTML(
+        PAGES[kind].query ? "No node matches that" :
+          kind === "active" ? "Not connected to any node yet" : "No known node yet",
+        PAGES[kind].query ? "Try a shorter prefix of the id, or an address." :
+          kind === "active" ? "Add one from Network → Add a node."
+                            : "Nodes appear here once this one has heard of them.")));
+      body.dataset.shape = "";
+    }else{
+      // Which rows exist decides the markup; their numbers are written into it.
+      // Rebuilding the table every second replaced the row under the reader's
+      // finger and shut every row they had unfolded.
+      const shape = JSON.stringify(groups.map((group) => [
+        group.id, group.pseudo, group.links.length > 1 && unfolded.has(group.id),
+        group.links.map((link) => rowKey(link, group.links.length > 1))]));
+      const values = {};
+      groups.forEach((group) => {
+        if(group.links.length > 1){
+          groupValues(group, values);
+          if(unfolded.has(group.id))
+            group.links.forEach((link) => rowValues(link, true, values));
+        }else rowValues(group.links[0], false, values);
+      });
+      paintLive(body, shape, () => groups.map((group) =>
+        group.links.length > 1
+          ? groupRowHTML(group, unfolded) + (unfolded.has(group.id)
+              ? group.links.map((link) => linkRowHTML(link, kind, true)).join("") : "")
+          : linkRowHTML(group.links[0], kind, false)).join(""), values);
+    }
     paintPager(kind, kind + "-pager", () => paintNodes(kind));
   }catch(_){
     setHTML(body, spanRow(6, errorHTML("Node list unavailable",
       "The console could not read the routing table just now.")));
+    body.dataset.shape = "";
   }
 }
 ["active-list", "known-list"].forEach((id) => $(id).addEventListener("click", (event) => {

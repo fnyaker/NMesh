@@ -187,7 +187,7 @@ def test_the_console_renders_whatever_a_transport_reports():
     knows neither "retransmits" nor "SNR", and that is the point."""
     source = webassets.APP_JS
     assert "detail.stats || {}" in source
-    assert "Object.entries(stats)" in source
+    assert 'rows.push([name, slot("stat:" + name)])' in source
 
 
 # ── narrow navigation and the menus ─────────────────────────────────────────
@@ -355,8 +355,8 @@ def test_the_card_repaints_on_a_change_but_not_faster_than_its_floor():
     # And never while the menu is open — replacing the panel under the finger
     # that opened it is worse than being a beat late.
     assert 'MENU.open === "nv-menu"' in view
-    # setHTML, so a repaint that changes nothing does not swallow a click.
-    assert "setHTML(element, this.render(" in view
+    # And a repaint writes values into the markup rather than replacing it.
+    assert "paintLive(element, this.shape(" in view
 
 
 def _nodeview_js() -> str:
@@ -554,6 +554,42 @@ def test_the_interval_being_off_is_not_reported_as_live():
     # And the sentence goes with it, because a colour says nothing to a reader
     # who cannot see it.
     assert "stand still." in webassets.ui.JS
+
+
+def test_a_refresh_writes_values_into_the_markup_it_already_drew():
+    """A view that rewrites its markup every second is a view nobody can use:
+    every `<details>` springs shut and the row under a finger is a different
+    element by the time the tap lands. `setHTML` only helps when *nothing*
+    changed, and on a live view something always has."""
+    ui_js = webassets.ui.JS
+    assert "function paintLive(" in ui_js and "function patchValues(" in ui_js
+    # The shape decides whether anything is rebuilt at all.
+    assert 'node.dataset.shape !== shape' in ui_js
+    # Values are written as text, never as markup — the same guarantee `esc()`
+    # gave, on data that can come from another node's console.
+    assert "slot.textContent = shown" in ui_js
+
+
+def test_the_node_card_and_the_peers_table_both_use_it():
+    """The two places a reader opens something and watches it shut."""
+    view = _nodeview_js()
+    assert "shape(view, extras, options){" in view
+    assert "values(view, extras){" in view
+    assert "paintLive(element, this.shape(" in view
+    table = webassets.APP_JS
+    assert "function rowValues(" in table and "function groupValues(" in table
+    assert "paintLive(body, shape," in table
+    # A row is keyed by the link it stands for, so the same link keeps the same
+    # element across a repaint.
+    assert "function rowKey(node, inner){" in table
+
+
+def test_a_link_flapping_does_not_fold_the_row_shut():
+    """*Gone* is the only thing that may deselect. A second link dropping for
+    one tick used to fold the row, and it stayed folded."""
+    source = webassets.APP_JS
+    assert "if(!groups.some((entry) => entry.id === id)) unfolded.delete(id)" in source
+    assert "group.links.length < 2) unfolded.delete" not in source
 
 
 def test_driving_another_node_keeps_the_cadence():
@@ -769,7 +805,9 @@ def test_a_refresh_repaints_values_without_rebuilding_what_is_open():
 def test_only_a_vanished_thing_may_be_deselected():
     source = webassets.APP_JS
     assert "if(MAP_PICK && !direct.some(" in source
-    assert "if(!group || group.links.length < 2) unfolded.delete(id)" in source
+    # *Gone*, not "momentarily down to one link": a flapping second link used
+    # to fold the row shut under the reader, and it stayed shut.
+    assert "if(!groups.some((entry) => entry.id === id)) unfolded.delete(id)" in source
 
 
 # ── active links, grouped by node ───────────────────────────────────────────

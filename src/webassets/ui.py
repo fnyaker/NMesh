@@ -1202,6 +1202,56 @@ function openLinked(url, name){
 // only waste: replacing a node under the pointer loses the click someone was
 // making, drops focus out of the page, and closes whatever was open inside it.
 // Comparing the string first is cheaper than the DOM work it avoids.
+// ---- repainting without rebuilding -----------------------------------------
+// A view that rewrites its markup every second is a view nobody can use: every
+// `<details>` springs shut, the text being selected disappears, and the row
+// under a finger is a different element by the time the tap lands. `setHTML`
+// only helps when *nothing* changed, and on a live view something always has —
+// that is the point of it.
+//
+// So a view draws its **shape** once and then writes only the **values** into
+// it. `shape` is whatever decides the markup: which links exist, which buttons
+// are drawn. Same shape, patch it; different shape, redraw it — and a redraw
+// then really is a change worth the folds closing.
+//
+//   <span data-v="rtt">12 ms</span>
+//   <span class="badge ok" data-v="state" data-base="badge">authenticated</span>
+//
+// A value is a string, or `{text, tone}` for something whose class changes with
+// it (`data-base` carries the classes that stay), or `{html}` where the value
+// is itself markup — a sparkline, a badge row.
+function paintLive(element, shape, build, values){
+  const node = typeof element === "string" ? $(element) : element;
+  if(!node) return node;
+  if(node.dataset.shape !== shape){
+    node.dataset.shape = shape;
+    node.innerHTML = typeof build === "function" ? build() : build;
+  }
+  patchValues(node, values);
+  return node;
+}
+
+function patchValues(root, values){
+  if(!root || !values) return;
+  Object.keys(values).forEach((key) => {
+    const value = values[key];
+    $$('[data-v="' + key + '"]', root).forEach((slot) => {
+      if(value && value.html !== undefined){
+        if(slot.innerHTML !== value.html) slot.innerHTML = value.html;
+      }else{
+        const text = value && value.text !== undefined ? value.text : value;
+        const shown = text == null ? "—" : String(text);
+        if(slot.textContent !== shown) slot.textContent = shown;
+      }
+      if(value && value.tone !== undefined){
+        const base = slot.dataset.base || "";
+        const wanted = (value.tone ? base + " " + value.tone : base).trim();
+        if(slot.className !== wanted) slot.className = wanted;
+      }
+    });
+  });
+}
+
 function setHTML(target, html){
   const element = typeof target === "string" ? $(target) : target;
   if(!element || element.innerHTML === html) return element;
