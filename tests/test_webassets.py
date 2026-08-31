@@ -546,6 +546,16 @@ def test_a_card_nobody_is_looking_at_asks_for_nothing():
     assert "if(!this.showing()) return;" in view
 
 
+def test_the_interval_being_off_is_not_reported_as_live():
+    """Streaming with the interval at zero is only half live: links still
+    arrive, every number stands still. A green dot there would be the console
+    lying by omission."""
+    assert ".refresh.streaming.paused .live{background:var(--warn)}" in webassets.ui.CSS
+    # And the sentence goes with it, because a colour says nothing to a reader
+    # who cannot see it.
+    assert "stand still." in webassets.ui.JS
+
+
 def test_driving_another_node_keeps_the_cadence():
     """The relay carries one bounded request and its answer, never a connection
     held open — so the page must not sit waiting on a stream."""

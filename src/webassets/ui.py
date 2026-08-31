@@ -721,6 +721,11 @@ main{min-width:0;display:flex;flex-direction:column}
 .refresh .live{width:7px;height:7px;flex:none;border-radius:var(--r-full);
   background:var(--text-faint)}
 .refresh.streaming .live{background:var(--ok)}
+/* Streaming with the interval off is only half live: links still arrive, every
+   number stands still. Saying "live" there would be the console lying by
+   omission, so the dot warns — and carries the sentence, because a colour on
+   its own says nothing to a reader who cannot see it. */
+.refresh.paused .live,.refresh.streaming.paused .live{background:var(--warn)}
 @media (max-width:720px){
   .refresh input[type="number"],.refresh .unit{display:none}
   .refresh select{display:block}
@@ -1527,9 +1532,13 @@ const REFRESH = {
       const stream = EVENTS.live
         ? "Links and nodes update as they change. "
         : "Not streaming — everything is read on this interval. ";
-      box.title = stream + (seconds === 0
-        ? "The interval is off, so ping, jitter and throughput stand still."
-        : "Ping, jitter and throughput every " + seconds + " seconds.");
+      const cadence = seconds === 0
+        ? "The interval is off, so ping, jitter, throughput and everything on "
+          + "a node's card stand still."
+        : "Ping, jitter and throughput every " + seconds + " seconds.";
+      box.title = stream + cadence;
+      const dot = $("refresh-live");
+      if(dot) dot.title = cadence;
     }
   },
 
