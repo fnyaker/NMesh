@@ -40,6 +40,13 @@ visible as buttons — message them, open them in fleet, ping them — and the r
 (copy the id, retry an address, mint an invitation, forget the node) live behind
 the **⋯**, where secondary actions belong.
 
+It is **live** on both counts. A link that comes up is a change, so the card is
+told (`EVENTS`) and re-reads at once, apps included. Latency, jitter, loss and
+what a link has carried are not changes — they never stop moving — so they come
+from the statistics cadence every other view is on (`REFRESH.on`), reading only
+the live rows. A card nobody is looking at reads nothing: a closed dialog keeps
+its contents in the page, so being connected is not the same as being read.
+
 What it *offers* is not decided here either. It asks the app API what is running
 (:mod:`src.app_api`) and draws the buttons those apps make possible: chat says
 whether it knows this identity, fleet says how the two nodes stand. An app that
@@ -165,6 +172,8 @@ const NODEVIEW = {
   REREAD_FLOOR: 500,
   reread: null,
   lastRead: 0,
+  // Set when the next repaint has to re-ask the apps as well as the node.
+  deep: false,
 
   // Every call this view makes goes through here, so a mount cannot half
   // follow the context.
@@ -200,22 +209,33 @@ const NODEVIEW = {
   // `/api/nodes?scope=active` answers one row **per link**, and a node may hold
   // several. Taking the first and calling it "the link" is what made a node
   // reached over tcp *and* udp look like a node reached over tcp.
-  async facts(id, selfId, seed){
+  async facts(id, selfId, seed, keep){
     const rows = async (scope) => {
       const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
       const {ok, data} = await this.ask("/api/nodes?" + params.toString());
       if(!ok) return [];
       return (data.items || []).filter((item) => item.id === id);
     };
-    let known = [], active = [];
-    if(id !== selfId)
-      [known, active] = await Promise.all([rows("known").catch(() => []),
-                                           rows("active").catch(() => [])]);
+    // `keep` is the previous read's routing-table row, handed back on the
+    // cadence. Every number that moves — latency, jitter, loss, what the link
+    // has carried, how long it has been up — is in the *active* rows; the
+    // address book and the identity key are not, and asking for them again
+    // every two seconds doubles what an open card costs for nothing. A
+    // structural change re-reads both.
+    let known = keep || [], active = [];
+    if(id !== selfId){
+      const answers = await Promise.all(
+        [rows("active").catch(() => [])].concat(
+          keep ? [] : [rows("known").catch(() => [])]));
+      active = answers[0];
+      if(!keep) known = answers[1];
+    }
     const view = Object.assign({}, known[0] || {}, active[0] || {}, seed || {}, {id});
     view.self = view.self || id === selfId;
     view.direct = active.length > 0;
     view.knownHere = known.length > 0;
     view.links = active;
+    view.known = known;          // handed to the next cadence read as `keep`
     view.addresses = this.addressRows(known, active);
     // This node has no entry in its own routing table, so its addresses are the
     // ones it advertises. Without this the card said "no address is advertised
@@ -619,8 +639,7 @@ const NODEVIEW = {
     if(!element) return;
     // Set before the first call: everything below reads it.
     this.here = !!options.local;
-    const fresh = element.dataset.nvId !== id;
-    if(fresh) element.innerHTML = skeletonHTML(4);
+    if(element.dataset.nvId !== id) element.innerHTML = skeletonHTML(4);
     if(!Object.keys(this.apps).length) await this.catalogue();
     let selfId = options.selfId || null;
     if(selfId == null){
@@ -629,44 +648,76 @@ const NODEVIEW = {
         selfId = data.id;
       }catch(_){ selfId = null; }
     }
-    let view;
-    try{
-      view = await this.facts(id, selfId, options.seed);
-    }catch(error){
-      if(isStale(error)) return;
-      element.innerHTML = errorHTML("Node unavailable", "The console did not answer.");
-      return;
-    }
-    const extras = await this.extras(id, view.self);
-    // setHTML, not innerHTML: this repaints whenever a link moves, and rewriting
-    // markup that did not change replaces the node under the pointer and
-    // swallows the click.
-    setHTML(element, this.render(view, extras, options));
     if(!element.dataset.nvWired){
       element.dataset.nvWired = "1";
       element.addEventListener("click", (event) => this.act(event, element, options));
     }
     element.dataset.nvId = id;
-    this.lastRead = Date.now();
-    this.current = {id, view, extras, options, element};
+    this.current = {id, selfId, options, element, extras:null};
+    await this.read(true);
   },
 
-  // A link came up or went down somewhere: repaint what is open, on a trailing
-  // edge and never faster than the floor above.
-  refresh(){
+  // Read this node again and repaint. `deep` also re-asks the apps what they
+  // make of the identity; the cadence does not, because "in your contacts" and
+  // "you hold status on it" do not move between two ticks and asking every two
+  // seconds would triple the cost of a card being open for nothing.
+  async read(deep){
+    const open = this.current;
+    if(!open || !open.element.isConnected) return;
+
+    const element = open.element;
+    this.here = !!open.options.local;
+    this.lastRead = Date.now();
+    let view;
+    try{
+      view = await this.facts(open.id, open.selfId, open.options.seed,
+                              deep ? null : (open.view || {}).known);
+    }catch(error){
+      if(isStale(error) || this.current !== open) return;
+      element.innerHTML = errorHTML("Node unavailable", "The console did not answer.");
+      return;
+    }
+    if(this.current !== open) return;      // mounted elsewhere while we asked
+    if(deep || open.extras == null) open.extras = await this.extras(open.id, view.self);
+    if(this.current !== open) return;
+    open.view = view;
+    // setHTML, not innerHTML: this repaints on every tick and whenever a link
+    // moves, and rewriting markup that did not change replaces the node under
+    // the pointer and swallows the click.
+    setHTML(element, this.render(view, open.extras, open.options));
+  },
+
+  // Repaint what is open, on a trailing edge and never faster than the floor
+  // above. `deep` when something structural moved — a link, a name, a grant —
+  // and not on the plain cadence, which is only about the numbers.
+  refresh(deep){
+    if(!this.showing()) return;
+    if(deep) this.deep = true;
     if(this.reread) return;
     const wait = Math.max(0, this.REREAD_FLOOR - (Date.now() - this.lastRead));
     this.reread = setTimeout(() => { this.reread = null; this.repaint(); }, wait);
   },
 
+  // Mounted, in the document, and actually drawing something. A dialog that is
+  // closed keeps its contents in the page, so `isConnected` alone would have
+  // this card polling for ever behind a card nobody is looking at; a box with
+  // no client rect has no reader.
+  showing(){
+    const open = this.current;
+    return !!(open && open.element.isConnected
+              && open.element.getClientRects().length);
+  },
+
   repaint(){
     const open = this.current;
-    if(!open || !open.element.isConnected) return;
+    if(!this.showing()) return;
     // Never while the ⋯ is open: replacing the panel under the finger that
     // opened it is worse than being a beat late. Try again rather than dropping
     // the change, or the card stays stale until the next thing moves.
     if(MENU.open === "nv-menu"){ this.refresh(); return; }
-    this.mount(open.element, open.id, open.options);
+    const deep = this.deep;
+    this.deep = false;
+    this.read(deep);
   },
 
   say(element, text, bad){
@@ -828,8 +879,14 @@ const NODEVIEW = {
 };
 
 // A link that came up is the thing this view is about, so it does not wait for
-// a timer. The stream's frame already bounds how often that can happen.
-EVENTS.on(["links", "nodes", "names"], () => NODEVIEW.refresh());
+// a timer. The stream's frame already bounds how often that can happen, and a
+// structural change is the one worth re-asking the apps about.
+EVENTS.on(["links", "nodes", "names"], () => NODEVIEW.refresh(true));
+// And the numbers on it move without anything "happening" — latency, jitter,
+// loss, what the link has carried — so the card is on the statistics cadence
+// like every other view that shows one. It used to be on neither, and stood
+// still for as long as it was open.
+REFRESH.on(() => NODEVIEW.refresh());
 """
 
 
@@ -951,9 +1008,10 @@ function enter(){
   $("login").classList.add("hidden");
   $("main").classList.remove("hidden");
   draw();
-  // This page is about one link, so it is the page that most wants to be told
-  // rather than to ask. Nothing else here is on a timer.
-  EVENTS.start();
+  // The card is registered with both already; this is what arms them. Without
+  // it the page opened, drew once and stood still — the one view in the product
+  // that was on no cadence at all.
+  REFRESH.mount();
 }
 
 async function boot(){

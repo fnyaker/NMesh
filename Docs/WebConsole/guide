@@ -163,6 +163,23 @@ nothing is worse than no control, so it drives that page's poll too. The
 a session is open: a terminal is not a status page, and the interval can be set
 to zero.
 
+**Every view, one cadence.** The interval drives a *list* of jobs, not one. It
+used to be one, so a view showing a moving number was on the cadence only if
+somebody had remembered to call it from inside that job — and the node card was
+not, so its latency, jitter, loss and volume stood still for as long as it was
+open, on every page that mounts it and on `/node`, which armed no cadence at
+all. A view registers itself (`REFRESH.on`) and cannot be the one that was
+forgotten; every page arms it (`REFRESH.mount`), including the ones with no
+control of their own — the interval is a per-browser preference and applies
+wherever numbers move.
+
+What that costs is kept honest at both ends. The card re-reads only the *live*
+rows on a tick — every number that moves is in them; the address book and the
+identity key are not, and a structural change re-reads those too, along with
+what the apps make of the identity. And a card nobody is looking at asks for
+nothing: a closed dialog keeps its contents in the page, so being connected is
+not the same as being read.
+
 ## Watching the mesh live
 
 - **The map** (Overview → Topology) opens large in one click — on the map
