@@ -197,11 +197,15 @@ class _Changes:
 _STREAM_FRAME = 0.1
 # Nothing happened for this long → a comment down the wire. It keeps a proxy
 # from reaping an idle connection, and it is how a stream notices the client
-# went away without ever telling us.
-_STREAM_PING = 20.0
+# went away without ever telling us: a page that reloaded is a socket nobody
+# closed on this side, and it is the *write* that finds out. Short enough that
+# a few reloads in a row do not park several dead streams against the ceiling.
+_STREAM_PING = 10.0
 # Streams held at once. Each one is a thread of the console's server for as
-# long as a page is open, so it is bounded like everything else here.
-_MAX_STREAMS = 8
+# long as a page is open, so it is bounded like everything else here — with
+# room for the pages of a couple of browsers plus whatever a reload left
+# behind for a ping or two.
+_MAX_STREAMS = 16
 
 
 class WebConsole:
