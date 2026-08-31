@@ -490,13 +490,16 @@ class WebConsole:
             name="nmesh-console", daemon=True)
         self._thread.start()
 
-    # -- restarting onto freshly installed code ---------------------------
+    # -- restarting --------------------------------------------------------
     #
-    # Replacing the tree does not change the code already loaded in this
-    # process: an update only takes effect when the node starts again. The
-    # service manager is what starts it, so "restart" here means "exit, and let
-    # it bring us back" — the same path a crash would take, which is why it is
-    # only ever done when something is actually watching.
+    # There is no way for a process to restart itself; the service manager is
+    # what starts it, so "restart" here means "exit, and let it bring us back"
+    # — the same path a crash would take, which is why it is only ever done
+    # when something is actually watching (`NMESH_SERVICE_MANAGED`).
+    #
+    # Two callers, one mechanism: an update, which only takes effect when the
+    # node starts again on the tree that was just written, and an operator who
+    # asked for a restart outright.
 
     _RESTART_DELAY = 1.0        # let the operator's response reach them first
 
@@ -513,13 +516,14 @@ class WebConsole:
             pass                # going down regardless; state writes are bounded
         os._exit(0)
 
-    def restart_for_update(self) -> bool:
-        """Exit so the service manager starts us again on the new code.
+    def restart(self) -> bool:
+        """Exit so the service manager starts us again.
 
         Returns whether a restart was scheduled. Without a service manager
         (``NMESH_SERVICE_MANAGED``), exiting would simply stop the node — a
-        worse outcome than running yesterday's code — so we stay up and the
-        console tells the operator to restart it themselves."""
+        worse outcome than either running yesterday's code or not restarting at
+        all — so we stay up and the console says so instead of leaving an
+        operator with a node that never came back."""
         if not updater.service_managed():
             return False
         threading.Thread(target=self._restart_worker, daemon=True,
@@ -861,6 +865,9 @@ def _make_handler(console: WebConsole):
                     snap["server_time"] = time.time()
                     snap["apps"] = console._apps()
                     snap["version"] = updater.__version__
+                    # Whether a restart would come back. The page needs it to
+                    # decide between offering the action and saying why not.
+                    snap["service_managed"] = updater.service_managed()
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
@@ -1418,6 +1425,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/update/apply":
                 self._handle_update_apply(_parse_json(body))
                 return
+            if path == "/api/restart":
+                self._handle_restart(_parse_json(body))
+                return
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
@@ -1606,7 +1616,7 @@ def _make_handler(console: WebConsole):
                     # An operator pressed Install and is watching. The
                     # unattended path (the release loop) never restarts — that
                     # is where a bad release could become a restart loop.
-                    restarting = console.restart_for_update()
+                    restarting = console.restart()
                     self._json(200, {"ok": True, **result,
                                      "restarting": restarting})
                     return
@@ -1714,6 +1724,34 @@ def _make_handler(console: WebConsole):
                              "restart_required": True,
                              "service_managed": updater.service_managed()})
 
+        def _handle_restart(self, data) -> None:
+            """Restart this node, if something will bring it back.
+
+            The gate is not the point of interest — the answer is. A console
+            that says "restarting" and leaves the operator with a stopped node
+            is worse than one that refuses, so the refusal is explicit and names
+            the reason: this process cannot restart itself, only exit and be
+            started again.
+
+            Under a remote context this arrives at the *managed* node's console,
+            which is exactly right: the operator asked to restart that machine,
+            and it is that machine's service manager that answers for it."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            if data.get("confirm") is not True:
+                self._json(400, {"error": "confirmation required"})
+                return
+            if not updater.service_managed():
+                self._json(409, {
+                    "ok": False, "restarting": False,
+                    "error": "nothing would start this node again — it runs "
+                             "outside a service manager, so it would stop "
+                             "rather than restart"})
+                return
+            self._json(200, {"ok": True, "restarting": console.restart()})
+
         def _handle_update_apply(self, data) -> None:
             """Install a release — only ever the one the operator confirmed.
 
@@ -1759,7 +1797,7 @@ def _make_handler(console: WebConsole):
             # The files are in place; this process is still running the old
             # ones. Answer first, then leave so the manager brings us back on
             # the new code — otherwise the page's "restarting" is a lie.
-            restarting = console.restart_for_update()
+            restarting = console.restart()
             self._json(200, {"ok": True, **result, "restarting": restarting})
 
         # -- fleet (remote management) ------------------------------------

@@ -93,6 +93,8 @@ INDEX_HTML = """<!doctype html>
           <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
           <div id="more-apps"></div>
           <div class="sep"></div>
+          <button class="item danger" id="more-restart" data-menu-close>Restart this node</button>
+          <p id="more-restart-why" class="menu-note" hidden></p>
           <button class="item" id="more-logout" data-menu-close>Sign out</button>
         </div>
       </div>
@@ -921,7 +923,7 @@ async function tick(){
     STATE = await response.json();
     trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
-    paintApps(STATE); paintReach(STATE); paintMap();
+    paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
     if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
   }catch(_){
@@ -2909,6 +2911,49 @@ $("pref-open").addEventListener("change", (event) => {
     : event.target.value === "window" ? "in a separate window"
     : "to suit the screen"));
 });
+// ---- restarting the node ---------------------------------------------------
+// A process cannot restart itself; it can only exit and be started again. So
+// the offer depends on there being a service manager watching, and when there
+// is not, the item says why rather than disappearing — an operator looking for
+// "restart" deserves to find out it is not available and what would make it so.
+function paintRestart(state){
+  const managed = !!state.service_managed;
+  const item = $("more-restart");
+  item.disabled = !managed;
+  item.textContent = CONTEXT.node
+    ? "Restart " + (CONTEXT.label || shortId(CONTEXT.node)) : "Restart this node";
+  const why = $("more-restart-why");
+  why.hidden = managed;
+  why.textContent = managed ? ""
+    : "This node runs outside a service manager, so nothing would start it again.";
+}
+
+async function restartNode(){
+  const who = CONTEXT.node ? (CONTEXT.label || shortId(CONTEXT.node)) : "this node";
+  const agreed = await confirmAction({
+    title:"Restart " + who + "?",
+    danger:true,
+    confirmLabel:"Restart",
+    body:'<p class="muted small">Every link drops and the node comes back a few ' +
+      "seconds later, reconnecting on its own. Sessions and known nodes are kept; " +
+      "anything queued for a peer that is not reachable is kept too.</p>" +
+      (CONTEXT.node ? '<p class="muted small">This console goes back to the local ' +
+        "node while that one is away.</p>" : ""),
+  });
+  if(!agreed) return;
+  const {ok, data} = await apiJson("/api/restart", "POST", {confirm:true});
+  if(!ok || !data.restarting){
+    toast("Not restarting", "danger", (data && data.error) || "The node refused.");
+    return;
+  }
+  toast("Restarting " + who, "warn", "It should be back in a few seconds.");
+  // The node we were driving is the one going away, so stop driving it.
+  if(CONTEXT.node) leaveContext();
+}
+
+$("more-restart").addEventListener("click", restartNode);
+PALETTE.add("Restart this node", "Action", restartNode);
+
 $("palette-open").addEventListener("click", () => PALETTE.open());
 $("more-search").addEventListener("click", () => PALETTE.open());
 $("more-logout").addEventListener("click", () => $("logout").click());
