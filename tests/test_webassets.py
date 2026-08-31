@@ -509,6 +509,43 @@ def test_a_terminal_keeps_its_own_cadence():
     assert "pollShell" not in poll
 
 
+def test_every_view_that_shows_a_moving_number_is_on_the_cadence():
+    """The cadence used to be one job, so a view was on it only if somebody
+    remembered to call it from inside that job. The node card was not, and its
+    latency, jitter and loss stood still for as long as it was open."""
+    ui_js = webassets.ui.JS
+    assert "jobs: []" in ui_js
+    assert "on(job){" in ui_js
+    # And the card registers itself, wherever it happens to be mounted.
+    assert "REFRESH.on(() => NODEVIEW.refresh());" in _nodeview_js()
+
+
+def test_every_page_arms_the_cadence():
+    """A page that never arms it is a page where nothing moves. `/node` was
+    exactly that: it drew once and stood still."""
+    for script in (webassets.APP_JS, webassets.FLEET_JS, webassets.CHAT_JS,
+                   webassets.NODE_JS):
+        assert "REFRESH.mount(" in script
+
+
+def test_the_cadence_does_not_re_ask_what_does_not_move():
+    """"In your contacts" and "you hold status on it" do not change between two
+    ticks. Asking every two seconds would double what an open card costs for
+    nothing; a structural change re-reads both."""
+    view = _nodeview_js()
+    assert "async facts(id, selfId, seed, keep){" in view
+    assert "deep ? null : (open.view || {}).known" in view
+    assert "EVENTS.on([\"links\", \"nodes\", \"names\"], () => NODEVIEW.refresh(true));" in view
+
+
+def test_a_card_nobody_is_looking_at_asks_for_nothing():
+    """A closed dialog keeps its contents in the page, so being connected is not
+    the same as being read."""
+    view = _nodeview_js()
+    assert "getClientRects().length" in view
+    assert "if(!this.showing()) return;" in view
+
+
 def test_driving_another_node_keeps_the_cadence():
     """The relay carries one bounded request and its answer, never a connection
     held open — so the page must not sit waiting on a stream."""

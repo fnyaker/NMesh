@@ -1300,9 +1300,11 @@ async function enter(token){
   // The bar says which node the console is driving; this page still drives
   // this one. Confirming drops a claim the local console no longer honours.
   CONTEXT.confirm();
-  // The conversation is this app's own business and keeps its own poll; the
-  // node panel beside it is about links, and links are told rather than asked.
-  EVENTS.start();
+  // The conversation is this app's own business and keeps its own poll. The
+  // node panel beside it is not: it shows links, which are told rather than
+  // asked, and latency, which is read on the shared cadence like everywhere
+  // else. `REFRESH.mount` arms both.
+  REFRESH.mount();
   autoGrow();
   await poll();
   if(timer) clearInterval(timer);
