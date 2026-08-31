@@ -144,10 +144,12 @@ the page (`EVENTS.FRAME`), each handler running once however many topics named
 it. Forty link events between two reads is one message naming one topic.
 
 **Bounds.** At most `_MAX_STREAMS` open at once (each is a thread of the
-console's server while a page is open), a comment down the wire every 20 s so an
-idle connection is neither reaped nor mistaken for a live one, and the hub's
-topic table is capped. Stopping the console unhooks the node and releases
-whoever is waiting.
+console's server while a page is open) and the hub's topic table is capped. A
+comment goes down the wire every `_STREAM_PING` seconds: it keeps an idle
+connection from being reaped, and it is how a stream finds out the page
+reloaded — nobody closed that socket on this side, and it is the write that
+discovers it. Stopping the console unhooks the node and releases whoever is
+waiting.
 
 **Local by construction.** A stream is a connection held open, and the fleet
 relay carries one bounded request and its answer. Under a remote context the
