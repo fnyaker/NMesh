@@ -171,6 +171,9 @@ What each of the pages used to solve on its own:
 - `EVENTS` — the node's change stream (`/api/events`): what moved, coalesced into
   at most ten repaints a second, one handler call per frame. Structure only —
   the numbers that never stop moving stay on `REFRESH`'s interval;
+- `REFRESH` — that interval, and the **list** of views on it (`REFRESH.on`,
+  `REFRESH.mount`). A list rather than one job, so a view that shows a moving
+  number registers itself instead of waiting to be remembered;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
   and `CTX_BAR`, the strip that says so on all three pages;

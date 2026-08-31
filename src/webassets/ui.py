@@ -721,6 +721,11 @@ main{min-width:0;display:flex;flex-direction:column}
 .refresh .live{width:7px;height:7px;flex:none;border-radius:var(--r-full);
   background:var(--text-faint)}
 .refresh.streaming .live{background:var(--ok)}
+/* Streaming with the interval off is only half live: links still arrive, every
+   number stands still. Saying "live" there would be the console lying by
+   omission, so the dot warns — and carries the sentence, because a colour on
+   its own says nothing to a reader who cannot see it. */
+.refresh.paused .live,.refresh.streaming.paused .live{background:var(--warn)}
 @media (max-width:720px){
   .refresh input[type="number"],.refresh .unit{display:none}
   .refresh select{display:block}
@@ -1471,11 +1476,21 @@ const EVENTS = {
   },
 };
 
+// ---- the statistics cadence ------------------------------------------------
+// `EVENTS` covers what either is or is not: a link up, a node learned. This
+// covers what never stops moving — latency, jitter, loss, throughput, load —
+// which cannot be an event without being a flood.
+//
+// A **list** of jobs, not one. It used to be one, so a view that showed a
+// moving number was on the cadence only if somebody remembered to call it from
+// inside that one function; the node card was not, and its numbers stood still
+// for as long as it was open. Now a view registers itself once and cannot be
+// the one that was forgotten.
 const REFRESH = {
   MAX: 30,
   DEFAULT: 2,
   timer: null,
-  job: null,
+  jobs: [],
 
   read(){
     try{
@@ -1517,15 +1532,33 @@ const REFRESH = {
       const stream = EVENTS.live
         ? "Links and nodes update as they change. "
         : "Not streaming — everything is read on this interval. ";
-      box.title = stream + (seconds === 0
-        ? "The interval is off, so ping, jitter and throughput stand still."
-        : "Ping, jitter and throughput every " + seconds + " seconds.");
+      const cadence = seconds === 0
+        ? "The interval is off, so ping, jitter, throughput and everything on "
+          + "a node's card stand still."
+        : "Ping, jitter and throughput every " + seconds + " seconds.";
+      box.title = stream + cadence;
+      const dot = $("refresh-live");
+      if(dot) dot.title = cadence;
     }
+  },
+
+  // Anything that shows a number that moves. Registered rather than called
+  // from one place, so a view added later is on the cadence by construction.
+  on(job){
+    if(typeof job === "function" && this.jobs.indexOf(job) < 0) this.jobs.push(job);
+    return job;
+  },
+
+  // One job's failure is not the others': a card that cannot read must not
+  // stop the throughput chart.
+  run(){
+    this.jobs.forEach((job) => { try{ job(); }catch(_){} });
   },
 
   arm(seconds){
     if(this.timer){ clearInterval(this.timer); this.timer = null; }
-    if(seconds > 0 && this.job) this.timer = setInterval(this.job, seconds * 1000);
+    if(seconds > 0 && this.jobs.length)
+      this.timer = setInterval(() => this.run(), seconds * 1000);
   },
 
   set(value){
@@ -1553,16 +1586,22 @@ const REFRESH = {
   // whoever mounts this wants the first paint now, whatever the interval — and
   // opens the change stream, which is what makes the interval a *statistics*
   // interval rather than the only thing keeping the page true.
+  // Called once per page, with that page's own job if it has one. Runs
+  // everything registered immediately — whoever mounts this wants the first
+  // paint now, whatever the interval — and opens the change stream, which is
+  // what makes the interval a *statistics* interval rather than the only thing
+  // keeping the page true. A page with no control of its own still calls it:
+  // the cadence is a per-browser preference and applies wherever numbers move.
   mount(job){
-    this.job = job;
+    this.on(job);
     const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
     if(field) field.addEventListener("change", (event) => this.set(event.target.value));
     if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
     // Off is a choice, not a dead end: one press still reads the node.
-    if(now) now.addEventListener("click", () => { if(this.job) this.job(); });
+    if(now) now.addEventListener("click", () => this.run());
     EVENTS.onLive = (streaming) => this.live(streaming);
     this.set(this.read());
-    if(this.job) this.job();
+    this.run();
     EVENTS.start();
   },
 };
