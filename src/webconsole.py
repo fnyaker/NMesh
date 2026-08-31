@@ -364,11 +364,18 @@ class WebConsole:
                 "max": MAX_PSEUDO}
 
     def _persist_pseudo(self, pseudo: str):
-        """Record the adopted pseudo in the configuration file so it survives a
-        restart. Returns ``(saved, problem)`` — never raises: the rename already
-        happened on the node, and this is only about making it stick."""
+        """Record the adopted pseudo in the configuration file.
+
+        The name already survives a restart on its own: the node signed a claim
+        and its name store keeps it (see :class:`src.session_store.PseudoStore`).
+        What the file adds is that the *declared* value agrees — a configuration
+        still naming the old one wins at startup, so leaving it stale is how a
+        rename comes undone on the next boot.
+
+        Returns ``(saved, problem)`` — never raises: the rename already happened
+        on the node, and this is only about the file."""
         if not self._config_path:
-            return False, "this node was not started from a configuration file"
+            return False, None   # nothing declares a name here; the store keeps it
         try:
             values, _problems = node_config.load(self._config_path)
             merged = node_config.defaults()
