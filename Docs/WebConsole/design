@@ -67,6 +67,9 @@ Styled **on the element** where there is one (`button`, `input`, `table`,
 `dialog`): a control that forgets its class still looks like the product.
 Classes are for variants, not for the baseline.
 
+`icon(name, title, extra)` takes an optional extra class, which is how a
+disclosure chevron becomes `.ic.turn` without a second drawing.
+
 `button` (+ `.primary` `.danger` `.ghost` `.sm` `.icon` `.wide`, `aria-busy` for
 waiting) · `input`/`select`/`textarea` · `input[type=range]` + `.scale` · `.field`
 (label + control + `.hint`) · `.check` (box and label in **one** target) ·
