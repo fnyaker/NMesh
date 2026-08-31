@@ -1400,6 +1400,94 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
 
+class TestRestartingOnDemand:
+    """An operator asking for a restart, rather than an update asking for one.
+
+    Same mechanism, and the same thing decides it: a process cannot restart
+    itself, only exit and be started again. So the console must never answer
+    "restarting" when nothing would bring the node back — it has to refuse and
+    say why, or the operator is left with a node that is simply gone."""
+
+    async def test_it_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", None, {"confirm": True})
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_needs_confirmation(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {})
+            assert status == 400
+            await asyncio.sleep(0.05)
+            assert left == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_refuses_and_says_why_with_nothing_watching(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {"confirm": True})
+            assert status == 409
+            assert body["restarting"] is False
+            assert "service manager" in body["error"]
+            await asyncio.sleep(0.05)
+            assert left == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_leaves_when_something_will_bring_it_back(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {"confirm": True})
+            assert status == 200 and body["restarting"] is True
+            for _ in range(50):
+                if left:
+                    break
+                await asyncio.sleep(0.01)
+            assert left == [True]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_state_says_whether_a_restart_would_come_back(self,
+                                                                   monkeypatch):
+        """The page draws the offer from this, so it has to be in the answer."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert body["service_managed"] is True
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert body["service_managed"] is False
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestRestartingOntoNewCode:
     """Replacing the tree changes nothing in a running process: the update only
     takes effect when the node starts again.
@@ -1417,7 +1505,7 @@ class TestRestartingOntoNewCode:
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
                                 lambda self: left.append(True))
-            assert console.restart_for_update() is True
+            assert console.restart() is True
             # The worker runs in its own thread; give it a moment to be seen.
             for _ in range(50):
                 if left:
@@ -1434,7 +1522,7 @@ class TestRestartingOntoNewCode:
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
                                 lambda self: left.append(True))
-            assert console.restart_for_update() is False
+            assert console.restart() is False
             await asyncio.sleep(0.05)
             assert left == []
         finally:

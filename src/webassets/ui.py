@@ -465,6 +465,13 @@ progress.meter.crit::-moz-progress-bar{background:var(--danger)}
   text-decoration:none}
 .menu a:hover,.menu button.item:hover{background:var(--surface-2);border-color:transparent;
   text-decoration:none}
+.menu button.item.danger{color:var(--danger)}
+.menu button.item[disabled]{color:var(--text-muted);cursor:not-allowed}
+.menu button.item[disabled]:hover{background:transparent}
+/* Why an item is unavailable, under the item — a disabled control that does not
+   say what would enable it is a dead end. */
+.menu .menu-note{margin:0;padding:0 var(--s-3) var(--s-2);
+  font-size:var(--fs-xs);color:var(--text-muted)}
 .menu .sep{height:1px;background:var(--border);margin:var(--s-1) var(--s-2)}
 .menu .none{padding:var(--s-5) var(--s-3);text-align:center;color:var(--text-muted);
   font-size:var(--fs-sm)}
