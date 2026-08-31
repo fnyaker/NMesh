@@ -318,6 +318,76 @@ def test_the_console_keeps_its_browser_preferences_in_the_browser():
     assert "/api/pref" not in webassets.APP_JS
 
 
+# ── driving another node ────────────────────────────────────────────────────
+# One question the console must never get wrong: which machine is this control
+# pointing at. Three things make the answer reliable, and each is checked here.
+
+def test_the_context_bar_is_written_once_and_shown_on_every_page():
+    """Three pages saying "you are managing X" three times is three chances for
+    one of them to say it differently."""
+    assert 'id="ctx-bar"' in webassets.ui.CTX_BAR
+    for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
+        assert webassets.ui.CTX_BAR.strip() in html
+        # Once: a page carrying a second one of its own is the drift this
+        # shared constant exists to stop.
+        assert html.count('id="ctx-bar"') == 1
+
+
+def test_an_app_that_cannot_be_driven_remotely_says_so():
+    """A managed node refuses `/api/chat/` and `/api/fleet/` by design. The page
+    still shows the bar — hiding it would be the one thing worse — and the bar
+    says what it can and cannot do."""
+    for html in (webassets.CHAT_HTML, webassets.FLEET_HTML):
+        assert "data-ctx-local=" in html
+    assert "data-ctx-local=" not in webassets.INDEX_HTML
+
+
+def test_the_calls_a_managed_node_refuses_are_never_addressed_to_it():
+    """The refusal list is written on both sides. Sending the header anyway
+    would turn a designed refusal into a 403 every page has to explain."""
+    from src.apps.fleet import _CONSOLE_DENIED
+    for prefix in _CONSOLE_DENIED:
+        assert f'"{prefix}"' in webassets.ui.JS, prefix
+    # Signing in and out are this console's own, whatever it is driving.
+    assert '"/api/login"' in webassets.ui.JS and '"/api/logout"' in webassets.ui.JS
+
+
+def test_a_reply_from_the_node_we_left_cannot_paint_over_the_one_we_entered():
+    """The switch has to be atomic. A request records the epoch it was made in
+    and its reply is dropped if that moved — otherwise a slow answer from the
+    old machine lands under the new machine's name, and with auto-refresh off it
+    stays there."""
+    assert "class StaleContext" in webassets.ui.JS
+    assert "CONTEXT.epoch !== at" in webassets.ui.JS
+    # The one place that would otherwise report it as the node being down.
+    assert "isStale(error)" in webassets.APP_JS
+
+
+def test_everything_the_console_holds_is_dropped_on_a_switch():
+    """A cache nobody cleared is a value from the previous machine wearing the
+    new machine's name."""
+    body = webassets.APP_JS.split("CONTEXT.subscribe(")[1].split("});")[0]
+    for held in ("STATE", "PREVIOUS", "RATES", "MAP_NAMES", "UPDATE_OFFER",
+                 "TRANSPORT_FORM", "CONFIG_FIELDS", "NODEVIEW.apps",
+                 "stopTracePolling", "TICKING"):
+        assert held in body, held
+
+
+def test_a_view_inside_a_local_app_asks_this_node():
+    """Chat's panel and fleet's sheet ask "what is *my* link to this identity".
+    Answering from the machine being managed is a different question with the
+    same wording, and a confidently wrong answer."""
+    assert "local:true" in webassets.CHAT_JS
+    assert "local:true" in webassets.FLEET_JS
+    # And the view routes every call through one place, so a mount cannot half
+    # follow the context: `ask` is the only caller of the shared helpers.
+    from src.webassets import nodeview
+    body = nodeview.JS.replace("apiJson(path, method, body, {local:this.here})", "")
+    assert "ask(path, method, body)" in nodeview.JS
+    assert "apiJson(" not in body
+    assert re.search(r"\bawait api\(", body) is None
+
+
 # ── layout that cannot overflow ─────────────────────────────────────────────
 # Both of these were real: a long message made the chat page scroll sideways on
 # a phone, and every bubble in the log was crushed to 20px so the conversation

@@ -7,6 +7,8 @@ Four sections, in the order someone actually needs them: what this node is doing
 sub-page can be linked to, bookmarked, and reached with the Back button.
 """
 
+from . import ui
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -100,11 +102,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </header>
 
-    <div id="ctx-bar" class="ctx-bar" role="status" hidden>
-      <span>Managing <b id="ctx-label"></b></span>
-      <span id="ctx-id" class="mono tiny"></span>
-      <button id="ctx-leave" class="sm">Back to this node</button>
-    </div>
+""" + ui.CTX_BAR + """
 
     <!-- ── Overview ─────────────────────────────────────────────────────── -->
     <section id="panel-overview" class="content panel" role="tabpanel" data-panel="overview">
@@ -852,7 +850,10 @@ CONSOLE_PAGE_JS = r"""
 // Reads /api/state on a timer and paints; every control posts and re-reads.
 // Nothing is cached across a reload: what the node says is the truth.
 
-let STATE = null, PREVIOUS = null, TICKING = false;
+let STATE = null, PREVIOUS = null;
+// `false`, or the context epoch a request is in flight for. Never a boolean
+// once one is running: see tick().
+let TICKING = false;
 const RATES = [];                       // ~90 samples, the throughput window
 
 // ---- gate ------------------------------------------------------------------
@@ -866,8 +867,10 @@ function enterConsole(){
   $("login").classList.add("hidden");
   $("shell").classList.remove("hidden");
   ROUTER.start(onRoute);
-  paintContext();
-  loadTargets();
+  CONTEXT.paint();
+  // A context carried over a reload is a claim until the console that holds the
+  // session agrees; `confirm` drops it if that session is gone.
+  CONTEXT.confirm().then(loadTargets);
   REFRESH.mount(tick);
 }
 SESSION.onLost = showGate;
@@ -891,8 +894,9 @@ $("login-form").addEventListener("submit", async (event) => {
   });
 });
 $("logout").addEventListener("click", async () => {
-  // Straight to the local console: signing out is never a remote action.
-  CONTEXT.node = "";
+  // Straight to the local console: signing out is never a remote action, and
+  // the remote session goes with it rather than outliving the operator.
+  await CONTEXT.leave();
   try{ await api("/api/logout", "POST"); }catch(_){}
   SESSION.clear(); showGate();
 });
@@ -911,8 +915,13 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
 async function tick(){
-  if(TICKING) return;
-  TICKING = true;
+  // Held per context, not as a plain flag: a tick for the node we just left
+  // must not make the tick for the node we just entered look redundant. That
+  // is how a switch used to leave the old machine's numbers on screen until
+  // the next timer — for ever, with auto-refresh off.
+  const epoch = CONTEXT.epoch;
+  if(TICKING === epoch) return;
+  TICKING = epoch;
   try{
     const response = await api("/api/state");
     if(!response.ok) return;
@@ -922,9 +931,9 @@ async function tick(){
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
     if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
-  }catch(_){
-    railState("danger", "Console unreachable");
-  }finally{ TICKING = false; }
+  }catch(error){
+    if(!isStale(error)) railState("danger", "Console unreachable");
+  }finally{ if(TICKING === epoch) TICKING = false; }
 }
 function trackRates(state){
   let inbound = 0, outbound = 0;
@@ -2790,34 +2799,36 @@ async function loadTargets(){
   select.value = TARGETS.some((target) => target.id === keep) ? keep : CONTEXT.node;
 }
 
-function paintContext(){
-  const remote = !!CONTEXT.node;
-  $("shell").classList.toggle("remote", remote);
-  $("ctx-bar").hidden = !remote;
-  $("ctx-label").textContent = CONTEXT.label || shortId(CONTEXT.node);
-  $("ctx-id").textContent = CONTEXT.node;
-  $("ctx-node").value = CONTEXT.node;
-  document.body.dataset.appName = remote
-    ? "NMesh — " + (CONTEXT.label || shortId(CONTEXT.node)) : "NMesh Console";
-}
-
-function enterContext(node, label){
-  CONTEXT.node = node; CONTEXT.label = label || "";
-  // Everything on screen belongs to the node we just left.
-  STATE = null; PREVIOUS = null; RATES.length = 0;
+// Everything on this page describes one node. A switch invalidates all of it at
+// once — the caches, the panels, and anything still in flight — because the
+// alternative is a number nobody re-derived still standing under the new
+// machine's name. Registered rather than called inline, so a view added later
+// is reset by the same list as the rest.
+CONTEXT.subscribe(() => {
+  STATE = null; PREVIOUS = null; RATES.length = 0; TICKING = false;
+  MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
+  TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
+  // What a node can offer is that node's answer, and the buttons drawn from it
+  // are the ones an operator is about to press.
+  NODEVIEW.apps = {};
+  stopTracePolling();
   ["active", "known", "catalog", "installed"].forEach((kind) => {
     PAGES[kind].offset = 0; PAGES[kind].query = "";
+    LINKS_OPEN[kind] && LINKS_OPEN[kind].clear();
     $(kind + "-list").innerHTML = "";
   });
-  paintContext();
+  // A node card describes a peer of the machine we just left.
+  if($("node-dialog").open) $("node-dialog").close();
+  $("ctx-node").value = CONTEXT.node;
   tick();
   onRoute(ROUTER.section, ROUTER.sub);
-}
+  loadTargets();
+});
 
 function askForContext(node){
   const target = TARGETS.find((entry) => entry.id === node);
   if(!target){ $("ctx-node").value = CONTEXT.node; return; }
-  if(target.connected){ enterContext(node, target.label); loadTargets(); return; }
+  if(target.connected){ CONTEXT.set(node, target.label); return; }
   const name = target.label || shortId(node);
   $("modal-title").textContent = "Manage " + name;
   $("modal-body").innerHTML =
@@ -2842,8 +2853,7 @@ function askForContext(node){
       return;
     }
     $("modal").close();
-    await loadTargets();
-    enterContext(node, target.label);
+    CONTEXT.set(node, target.label);
     toast("Managing " + name, "warn");
   }));
   $("ctx-no").addEventListener("click", finish);
@@ -2855,16 +2865,9 @@ function askForContext(node){
 
 $("ctx-node").addEventListener("change", (event) => {
   const node = event.target.value;
-  if(!node){ leaveContext(); return; }
+  if(!node){ CONTEXT.leave(); return; }
   askForContext(node);
 });
-async function leaveContext(){
-  const left = CONTEXT.node;
-  if(left) await api("/api/remote/disconnect", "POST", {node:left}).catch(() => {});
-  enterContext("", "");
-  loadTargets();
-}
-$("ctx-leave").addEventListener("click", leaveContext);
 
 // ---- palette ---------------------------------------------------------------
 [["Overview", "overview", ""],
@@ -2888,7 +2891,7 @@ PALETTE.add("Check for updates", "Action", () => {
   ROUTER.go("settings", "updates"); $("update-check").click();
 });
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
-PALETTE.add("Back to this node", "Action", leaveContext);
+PALETTE.add("Back to this node", "Action", () => CONTEXT.leave());
 PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
 PALETTE.add("Transport settings", "Go to", () => ROUTER.go("network", "reach"));
 // Per-browser preferences. They are read where they are used (THEME, OPEN), so
@@ -2944,7 +2947,7 @@ async function restartNode(){
   }
   toast("Restarting " + who, "warn", "It should be back in a few seconds.");
   // The node we were driving is the one going away, so stop driving it.
-  if(CONTEXT.node) leaveContext();
+  if(CONTEXT.node) CONTEXT.leave();
 }
 
 $("more-restart").addEventListener("click", restartNode);

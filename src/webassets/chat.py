@@ -17,6 +17,8 @@ generic names, and a page that redefines one of them (this page used to redefine
 split exists to prevent.
 """
 
+from . import ui
+
 CHAT_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -29,7 +31,8 @@ CHAT_HTML = """<!doctype html>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/chat.css">
 </head>
-<body data-app-name="NMesh Chat">
+<body data-app-name="NMesh Chat"
+      data-ctx-local="Chat runs on this node — its conversations are not part of managing another.">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
@@ -45,7 +48,7 @@ CHAT_HTML = """<!doctype html>
 </div>
 
 <a class="skip" href="#main">Skip to the conversation</a>
-
+""" + ui.CTX_BAR + """
 <div id="app" class="ch hidden" data-view="list">
 
   <!-- ── the conversation list: this page's navigation ──────────────────── -->
@@ -1152,6 +1155,9 @@ async function showPeer(id){
   $("peer-panel").hidden = false;
   view("peer");
   await NODEVIEW.mount("peer-view", id, {
+    // "What is my link to this person" is this node's question, whoever the
+    // console happens to be managing.
+    local:true,
     hide:["chat"],                       // you are already in the conversation
     onGone(){ closePeerPanel(); closeConv(); poll(); },
   });
@@ -1290,6 +1296,9 @@ async function enter(token){
   if(token) SESSION.set(token);
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   mountShell();
+  // The bar says which node the console is driving; this page still drives
+  // this one. Confirming drops a claim the local console no longer honours.
+  CONTEXT.confirm();
   autoGrow();
   await poll();
   if(timer) clearInterval(timer);
