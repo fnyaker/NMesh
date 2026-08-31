@@ -3,6 +3,57 @@
 Real bugs, hit and fixed. Each one was expensive to diagnose. If you touch the
 area, keep the fix — and if you add one, document it here.
 
+## Handshakes that never complete ("nothing connects any more")
+
+### The answer must leave before the bookkeeping runs
+`_handle_handshake` used to set `peer.session`, then do its bookkeeping —
+collapse duplicate links, note the change, wake maintenance, schedule three
+syncs — and *then* build and send the `HANDSHAKE_ACK`. Every one of those lines
+is a chance to fail, and one of them **closed the link the answer was about to
+go down** (see below). The far end saw its `CHALLENGE` answered, sent its
+`HANDSHAKE`, and waited for ever.
+
+> A peer that has just proved who it is is owed its answer. Send the
+> `HANDSHAKE_ACK` first; everything else is bookkeeping and goes after it.
+
+The receive loop swallows handler exceptions (`except Exception: pass` — one bad
+packet must never kill a link), so any bug in that block is invisible. That is
+the reason to order it this way rather than to trust it.
+
+### Reading a trace that stops at `HANDSHAKE`
+`Trace.record("in", …)` runs in the receive loop **before** the handler, and
+`record("out", …)` after `transport.send()` returned. So:
+
+- a packet in the trace as `in` arrived on the wire, whatever the handler then
+  decided about it;
+- a missing `in HANDSHAKE_ACK` means no ACK arrived — not that one was rejected.
+
+A trace of `out HANDSHAKE ×11 / in CHALLENGE ×11` and nothing else is therefore
+a statement about the **far end**: it is refusing, or something closed the link
+before it answered. Do not go looking at the dialler's parsing.
+
+### Refusals are recorded now — look there first
+Every rejection in `_handle_handshake` and `_handle_handshake_ack` was a bare
+`return`. Reject by default is right and stays; refusing *in silence* is what
+made a mesh that would not connect unreadable. Both handlers now call
+`_refuse_handshake(packet, reason)`, which counts the reason (never the peer —
+the vocabulary is ours, so nothing a peer sends can grow the store) and shows it
+in the console under **Network → Reachability → Refused handshakes**.
+
+Start there. "The certificate chain reaches no root we trust" and "no
+certificate chain was presented" are the two that mean the two nodes are not in
+the same network any more; the rest are a stranger knocking.
+
+### A trusted root can be evicted out from under you
+`CertStore._pinned` protected the roots and our own certificates, and its
+comment claimed it protected "our own chain". It did not protect the
+**intermediates** — the issuer that invited us, and its issuer, up to the root.
+Evict one under store pressure and `get_chain_to_root(own_id)` falls back to our
+self-signed chain, which nobody trusts: we go on authenticating everyone else
+while nobody can authenticate us, and nothing errors anywhere. `_pinned` now
+covers every subject the chain runs through, and the per-subject trim never
+drops the certificate the chain is using.
+
 ## Hangs (the job/node "never finishes")
 
 ### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections

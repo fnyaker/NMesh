@@ -229,6 +229,15 @@ _DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallba
 # established peer well inside that window — both sides do it, so each link
 # carries a packet each way and a few misses still leave margin.
 _LINK_KEEPALIVE_INTERVAL = 20.0
+# When probes stop coming back, the link is gone whatever the socket believes.
+# A half-open TCP connection and a UDP mapping a NAT has forgotten both look
+# alive from here — nothing errors, nothing closes — so the only evidence is
+# silence, and the only honest reading of it is to cut the link and dial again.
+# Counted as a run rather than a share: a link that carried traffic for an hour
+# and then died never shows a high lifetime loss, because a thousand good
+# probes outvote the dead ones. Four in a row is over a minute of one-way
+# silence on a link whose own transport reaps at sixty seconds.
+_DEAD_LINK_PROBES = 4
 # Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
 # session with, re-initiate on this cadence. Without it, a single lost handshake
 # (peer offline at send time, an ACK dropped in transit) stranded the queued data
@@ -299,6 +308,10 @@ _RETRY_TICK               = 5.0
 _RETRY_MAX_PER_PASS       = 4
 _RETRY_NODES_SCANNED      = 64
 _RETRY_DIAL_TIMEOUT       = 8.0
+# Distinct refusal reasons remembered. The vocabulary is this file's own, so
+# the bound is a formality — it is here so that adding a reason can never turn
+# a counter into a leak.
+_REFUSALS_KEPT            = 24
 # Moving a live link to a better address. Off by default: switching costs a
 # dial, a handshake and a moment with two links to the same node, which is only
 # worth it when the gain is real and lasting.
@@ -1432,6 +1445,12 @@ class MeshNode:
         # node hex -> {uri: {outcome, detail, at, ms}} — what each address did
         # last time it was dialled. Bounded on both axes.
         self._dial_log: OrderedDict[str, OrderedDict] = OrderedDict()
+        # reason -> {count, at, peer}: why handshakes were refused. Reject by
+        # default is the rule, and it stays the rule — but a node that refuses
+        # in silence leaves its operator with a mesh that will not connect and
+        # nothing anywhere saying which test failed. Keyed by our own words, so
+        # a peer cannot grow it.
+        self._handshake_refusals: OrderedDict[str, dict] = OrderedDict()
         self._retry_task: asyncio.Task | None = None
         self._steer_task: asyncio.Task | None = None
         # Moving a link to a lower-latency address is off unless someone asks
@@ -2192,6 +2211,7 @@ class MeshNode:
                     await self.ping(peer)
                 except Exception:
                     pass
+            self._reap_silent_links()
             # Only nudge maintenance while it is still finding things. A mesh
             # smaller than the floor is below it permanently, and nudging every
             # keepalive there means a certificate-carrying lookup every 20 s
@@ -2202,6 +2222,34 @@ class MeshNode:
             if (len(self._live_neighbors()) < _NEIGHBOR_FLOOR
                     and self._neighbor_idle_cycles == 0):
                 self._wake_neighbor_maintenance()
+
+    def _reap_silent_links(self) -> None:
+        """Cut the links that answer nothing. Never raises, never awaits.
+
+        A link is judged on its own probes only, so cutting one says nothing
+        about the rest and a node reached over two media keeps the medium that
+        works. The identity is not forgotten — its addresses stay known and
+        maintenance dials it again — so this heals the link rather than losing
+        the node.
+
+        Relayed links carry no probes of their own and are left alone."""
+        dead = []
+        for peer in list(self._peers):
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            if peer.relay_only or peer.probation:
+                continue
+            try:
+                silent = peer.quality.since_pong
+            except Exception:
+                continue
+            if silent >= _DEAD_LINK_PROBES:
+                dead.append(peer)
+        for peer in dead:
+            self._spawn_bounded(self._safe_stop_peer(peer))
+        if dead:
+            self._note_change("nodes")   # the link itself is noted by the stop
+            self._wake_neighbor_maintenance()
 
     async def _stop_link_keepalive(self) -> None:
         task = self._keepalive_task
@@ -2301,6 +2349,16 @@ class MeshNode:
     # Only same-scheme duplicates are collapsed. A node reached over both tcp
     # and udp holds one link on each and that is the point of the design; two
     # tcp links to one node is the accident.
+    #
+    # The rule holds only while both ends see the same two links, and that is
+    # what a simultaneous dial is. It is bounded in time: the two dials cross
+    # within one open-and-authenticate, which this node already bounds at
+    # `_HANDSHAKE_DEADLINE`. A link much older than that when a new one
+    # authenticates is not the other half of anything — it is a link the far
+    # end no longer has (it restarted, its address moved, its TCP went
+    # half-open) and is telling us so by dialling us again. Applying the
+    # canonical rule there answered a live link by closing it, and left the
+    # pair with nothing.
 
     def _redundant_links(self, peer: '_Peer') -> list['_Peer']:
         """The links that ``peer``'s arrival makes redundant, if any."""
@@ -2324,6 +2382,9 @@ class MeshNode:
             # twice. The far end sees the same pair from the other side and
             # orders them the same way, so the older one is the agreed survivor.
             keep = min(same, key=lambda p: p.connected_at)
+        newest = max(same, key=lambda p: p.connected_at)
+        if newest.connected_at - keep.connected_at > _HANDSHAKE_DEADLINE:
+            keep = newest      # the keeper is a ghost; the newest one is proven
         return [p for p in same if p is not keep]
 
     def _collapse_redundant_links(self, peer: '_Peer') -> None:
@@ -3374,6 +3435,7 @@ class MeshNode:
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
+            "handshake_refusals": self.handshake_refusals(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
@@ -5113,10 +5175,18 @@ class MeshNode:
         await peer.send(pong)
 
     async def _handle_pong(self, peer: _Peer, packet: Packet) -> None:
+        # Timing needs the ping this answers, and only the latest ping is kept.
+        # Liveness needs no such thing: an answer that arrived after the next
+        # probe went out has no round trip to measure and is still proof the
+        # link carries traffic both ways. Dropping it entirely — which is what
+        # used to happen — makes a link slower than the keepalive interval look
+        # exactly like a dead one.
         if peer.ping_sent_at is not None:
             peer.last_rtt = max(0.0, time.monotonic() - peer.ping_sent_at)
             peer.quality.on_pong(peer.last_rtt)
             peer.ping_sent_at = None
+        else:
+            peer.quality.on_answer()
 
     def _query_allowed(self, peer: '_Peer') -> bool:
         """Per-ingress-link rate limit for the expensive query replies
@@ -6646,11 +6716,46 @@ class MeshNode:
             await self._route_outbound(pkt, blocking=False)   # in a receive loop
         self._persist_state()
 
+    def _refuse_handshake(self, packet: Packet, reason: str) -> None:
+        """Record why a handshake was refused.
+
+        Refusing costs nothing and says nothing, and that combination is what
+        makes a mesh that will not connect impossible to read: the far end
+        retries, every attempt is dropped at one of a dozen tests, and no test
+        leaves a trace. The packet is still dropped with no side effect — what
+        changes is that an operator can ask which test, and be told.
+
+        Counted per reason, never per peer: the reasons are this file's own
+        words, so nothing a peer sends can make this grow."""
+        record = self._handshake_refusals.get(reason)
+        if record is None:
+            while len(self._handshake_refusals) >= _REFUSALS_KEPT:
+                self._handshake_refusals.popitem(last=False)
+            record = self._handshake_refusals[reason] = {"count": 0}
+        record["count"] += 1
+        record["at"] = time.time()
+        try:
+            record["peer"] = packet.src_id.hex()
+        except Exception:
+            record["peer"] = ""
+        self._handshake_refusals.move_to_end(reason)
+        # Reachability, not links: nothing about a link changed — something
+        # failed to *become* one. The stream's own throttle bounds what a peer
+        # hammering the door can cost the console.
+        self._note_change("reach")
+
+    def handshake_refusals(self) -> list[dict]:
+        """What this node has refused, most recent first — for the console."""
+        rows = [{"reason": reason, **record}
+                for reason, record in self._handshake_refusals.items()]
+        rows.reverse()
+        return rows
+
     async def _handle_handshake(self, peer: _Peer, packet: Packet) -> None:
         if peer.authenticated_id is not None:
-            return
+            return          # not a refusal: this link is already up
         if peer.pending_challenge is None:
-            return
+            return self._refuse_handshake(packet, "no challenge was pending")
         # This handler is reachable on an *unauthenticated* link, and a failed
         # attempt clears neither guard above, so the same connection may try
         # again. Order the work accordingly: slice the payload, rule it out
@@ -6661,19 +6766,21 @@ class MeshNode:
             kem_pub, bob_dsa_pub, chain_bytes, signature = _split_handshake(
                 packet.payload)
         except Exception:
-            return
+            return self._refuse_handshake(packet, "handshake was malformed")
         claimed_id = NodeID.from_public_key(bob_dsa_pub)
         if claimed_id != NodeID(packet.src_id):
-            return
+            return self._refuse_handshake(
+                packet, "the id claimed is not the hash of the key presented")
         if not peer.note_handshake_attempt():
-            return          # this link has had its tries
+            return self._refuse_handshake(packet, "this link had used its tries")
         if not self._identity.verify(peer.pending_challenge + kem_pub + bob_dsa_pub,
                                      signature, bob_dsa_pub):
-            return
+            return self._refuse_handshake(
+                packet, "the signature did not match our challenge")
         try:
             chain = _decode_chain(chain_bytes)
         except Exception:
-            return
+            return self._refuse_handshake(packet, "the certificate chain was malformed")
 
         issued_cert: Certificate | None = None
         if peer.invite_accepted:
@@ -6681,19 +6788,36 @@ class MeshNode:
             self._cert_add(issued_cert)
         else:
             if not chain:
-                return
+                return self._refuse_handshake(packet, "no certificate chain was presented")
             anchor = self._cert_store.verify_chain(chain)
             if anchor is None:
-                return
+                return self._refuse_handshake(
+                    packet, "the certificate chain reaches no root we trust")
             for cert in chain:
                 self._cert_add(cert)
 
         peer.authenticated_id = claimed_id
         peer.dsa_pub = bob_dsa_pub
-        self._note_punch_link_up(peer)
-        self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+
+        # Answer before anything else. A peer that has just proved who it is is
+        # owed its half of the handshake, and every line below this send is
+        # bookkeeping that can fail, reorder, or — as the duplicate-link
+        # collapse once did — close the very link the answer goes down. When
+        # that happened the far end saw a CHALLENGE, sent a HANDSHAKE, and
+        # waited forever for an ACK nobody was going to send.
+        dsa_pub      = self._identity.dsa_public_key
+        server_chain = self._cert_store.get_chain_to_root(self._id) or []
+        signature    = self._identity.sign(peer.pending_challenge + ciphertext + dsa_pub)
+        payload      = _encode_handshake_ack(ciphertext, dsa_pub, server_chain,
+                                             issued_cert, signature)
+        peer.pending_challenge = None
+        ack = Packet.create(HANDSHAKE_ACK, self._id.raw, packet.src_id, payload)
+        await peer.send(ack)
+
+        self._note_punch_link_up(peer)
+        self._routing.add(claimed_id, [], bob_dsa_pub)
         self._collapse_redundant_links(peer)
         self._note_change("links")
         self._note_change("nodes")
@@ -6711,14 +6835,6 @@ class MeshNode:
                     self._inbound_schemes.add(scheme)
             except Exception:
                 pass
-        dsa_pub      = self._identity.dsa_public_key
-        server_chain = self._cert_store.get_chain_to_root(self._id) or []
-        signature    = self._identity.sign(peer.pending_challenge + ciphertext + dsa_pub)
-        payload      = _encode_handshake_ack(ciphertext, dsa_pub, server_chain,
-                                             issued_cert, signature)
-        peer.pending_challenge = None
-        ack = Packet.create(HANDSHAKE_ACK, self._id.raw, packet.src_id, payload)
-        await peer.send(ack)
         self._persist_state()  # persist the newly-known peer for restart recovery
         # Tell the peer the source IP we saw — that's their public address.
         observed = peer.transport.remote_ip()
@@ -6731,20 +6847,22 @@ class MeshNode:
 
     async def _handle_handshake_ack(self, peer: _Peer, packet: Packet) -> None:
         if peer.pending_kem_secret is None:
-            return
+            return          # not a refusal: nothing was in flight on this link
         if peer.received_challenge is None:
-            return
+            return self._refuse_handshake(packet, "no challenge of ours was answered")
         try:
             ciphertext, alice_dsa_pub, server_chain, issued_cert, signature = (
                 _decode_handshake_ack(packet.payload)
             )
         except Exception:
-            return
+            return self._refuse_handshake(packet, "the answer was malformed")
         if not self._identity.verify(peer.received_challenge + ciphertext + alice_dsa_pub,
                                      signature, alice_dsa_pub):
-            return
+            return self._refuse_handshake(
+                packet, "the answer's signature did not match our challenge")
         if NodeID.from_public_key(alice_dsa_pub) != NodeID(packet.src_id):
-            return
+            return self._refuse_handshake(
+                packet, "the answering id is not the hash of the key presented")
         server_id = NodeID(packet.src_id)
 
         # Adopting a root is the one irreversible thing a handshake can do to
@@ -6756,9 +6874,11 @@ class MeshNode:
         # learned from gossip — could plant a trust anchor.
         if issued_cert is not None and peer.joined_by_invite:
             if issued_cert.issuer_id != server_id:
-                return
+                return self._refuse_handshake(
+                    packet, "the certificate we were issued names another issuer")
             if issued_cert.subject_id != self._id:
-                return
+                return self._refuse_handshake(
+                    packet, "the certificate we were issued names another subject")
             for cert in server_chain:
                 self._cert_add(cert)
             if server_chain:
@@ -6768,10 +6888,12 @@ class MeshNode:
             self._cert_add(issued_cert)
         else:
             if not server_chain:
-                return
+                return self._refuse_handshake(
+                    packet, "the answer presented no certificate chain")
             anchor = self._cert_store.verify_chain(server_chain)
             if anchor is None:
-                return
+                return self._refuse_handshake(
+                    packet, "the answer's chain reaches no root we trust")
             for cert in server_chain:
                 self._cert_add(cert)
 

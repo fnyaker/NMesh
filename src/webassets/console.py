@@ -237,6 +237,19 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">What this node tells other nodes about itself</div></div></div>
           <div class="card-body"><dl id="addressing" class="kv"></dl></div>
         </article>
+        <article class="card" id="refusals-card" hidden>
+          <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
+            <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
+          <div class="card-body">
+            <p class="muted small">A node drops anything it cannot verify, which is the point —
+              but a mesh that will not connect looks the same from outside as one nobody is
+              calling. These are the tests that failed, newest first. Nothing here is an error
+              on its own: a stranger dialling a closed door lands here too.</p>
+            <div class="table-wrap"><table class="rows">
+            <thead><tr><th>Reason</th><th>From</th><th class="num">Times</th><th>Last</th></tr></thead>
+            <tbody id="refusals-list"></tbody></table></div>
+          </div>
+        </article>
       </div>
 
       <div data-sub="join" class="stack" hidden>
@@ -1732,6 +1745,28 @@ function paintReach(state){
   ].map(([key, value]) => "<dt>" + esc(key) + '</dt><dd class="mono pre">' +
     esc(value) + "</dd>").join("");
   paintTransportLive(state);
+  paintRefusals(state);
+}
+// Refusals are a table of *reasons*, so the row key is the reason: a count that
+// climbs must climb in place rather than redraw the list under a reader.
+function paintRefusals(state){
+  const rows = state.handshake_refusals || [];
+  $("refusals-card").hidden = rows.length === 0;
+  if(!rows.length) return;
+  const cell = (key) => '<span data-v="' + esc(key) + '"></span>';
+  const values = {};
+  rows.forEach((row) => {
+    values[row.reason + ":peer"] = row.peer ? shortId(row.peer) : "—";
+    values[row.reason + ":count"] = row.count;
+    values[row.reason + ":at"] = row.at ? fmtAgo(Date.now() / 1000 - row.at) : "—";
+  });
+  paintLive("refusals-list", rows.map((row) => row.reason).join("|"),
+    () => rows.map((row) =>
+      "<tr><td>" + esc(row.reason) +
+      '</td><td class="mono">' + cell(row.reason + ":peer") +
+      '</td><td class="num">' + cell(row.reason + ":count") +
+      "</td><td>" + cell(row.reason + ":at") + "</td></tr>").join(""),
+    values);
 }
 async function post(path, body, message){
   try{
