@@ -88,8 +88,37 @@ its own console** over loopback. Nothing is reimplemented: same routes, same
 caps, same lockout. Full detail, bounds and refused paths:
 [`Docs/Apps/fleet`](../Apps/fleet).
 
-A warning strip stays visible for as long as you are driving another machine,
-and `Sign out` always returns to the local console.
+### What makes the switch reliable
+
+Three things, because "which machine am I on" is the one question a console must
+never get wrong.
+
+- **The switch is atomic, not eventual.** Every context carries an *epoch*, and
+  a request records the epoch it was made in. A reply whose epoch has moved is
+  dropped rather than painted: without it, a slow answer from the machine you
+  just left lands under the name of the one you just entered — and with
+  auto-refresh off, it stays there. Everything the page was holding (the state
+  snapshot, the throughput window, the map's names, the transport form, the
+  configuration fields, what the apps offer, the trace poll) is dropped at the
+  same moment, by a subscription rather than by a list somebody has to remember
+  to extend.
+
+- **The strip is on every page.** It is written once (`ui.CTX_BAR`) and embedded
+  by the console, chat and fleet, so the three cannot say it differently. It
+  stays for as long as you are driving another machine, `Sign out` hands the
+  remote session back and returns here, and the context survives a page reload —
+  checked against the console that holds the session before it is believed.
+
+- **What cannot be driven remotely says so, rather than failing.** A managed
+  node refuses `/api/fleet/`, `/api/remote/` and `/api/chat/` by design (a
+  managed node is not a jump host; the proxy must not drive the proxy; somebody
+  else's conversations were never part of managing their machine). The page
+  knows the same list, so those calls are never *addressed* to it — and the
+  strip on `/chat` and `/fleet` says in words that the app runs here. A view
+  mounted inside one of those apps asks this node too: *"what is my link to this
+  person"* is a different question depending on who "my" is, and answering it
+  from the machine being managed would be a confidently wrong answer rather than
+  an error.
 
 ## Watching the mesh live
 

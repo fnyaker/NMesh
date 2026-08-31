@@ -69,10 +69,22 @@ const ADDRESS_TONE = {"in-use":"ok", connected:"ok", timeout:"warn",
 const NODEVIEW = {
   // What the app API says is reachable right now, read once per mount.
   apps: {},
+  // Whose point of view this view takes. A mount inside a local app (chat's
+  // panel, fleet's sheet) asks *this* node about the identity on screen, even
+  // while the console is driving another one: "what is my link to this person"
+  // is a different question depending on who "my" is, and answering it from the
+  // wrong machine gives a confidently wrong answer rather than an error.
+  here: false,
+
+  // Every call this view makes goes through here, so a mount cannot half
+  // follow the context.
+  ask(path, method, body){
+    return apiJson(path, method, body, {local:this.here});
+  },
 
   async catalogue(){
     try{
-      const {data} = await apiJson("/api/app-api");
+      const {data} = await this.ask("/api/app-api");
       const out = {};
       (data.apps || []).forEach((entry) => { out[entry.app] = entry.operations; });
       this.apps = out;
@@ -85,7 +97,7 @@ const NODEVIEW = {
   },
 
   async call(app, op, args){
-    const {ok, data} = await apiJson("/api/app-call", "POST", {app, op, args});
+    const {ok, data} = await this.ask("/api/app-call", "POST", {app, op, args});
     if(!ok || !data.ok) throw new Error((data && data.error) || "refused");
     return data.result || {};
   },
@@ -97,9 +109,9 @@ const NODEVIEW = {
   async facts(id, selfId, seed){
     const scoped = async (scope) => {
       const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
-      const response = await api("/api/nodes?" + params.toString());
-      if(!response.ok) return null;
-      return (await response.json()).items.find((item) => item.id === id) || null;
+      const {ok, data} = await this.ask("/api/nodes?" + params.toString());
+      if(!ok) return null;
+      return (data.items || []).find((item) => item.id === id) || null;
     };
     let known = null, active = null;
     if(id !== selfId)
@@ -320,12 +332,14 @@ const NODEVIEW = {
     options = options || {};
     const element = typeof container === "string" ? $(container) : container;
     if(!element) return;
+    // Set before the first call: everything below reads it.
+    this.here = !!options.local;
     element.innerHTML = skeletonHTML(4);
     if(!Object.keys(this.apps).length) await this.catalogue();
     let selfId = options.selfId || null;
     if(selfId == null){
       try{
-        const {data} = await apiJson("/api/state");
+        const {data} = await this.ask("/api/state");
         selfId = data.id;
       }catch(_){ selfId = null; }
     }
@@ -375,7 +389,7 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, "Pinging through the mesh…");
       try{
-        const {data} = await apiJson("/api/ping/node", "POST", {id});
+        const {data} = await this.ask("/api/ping/node", "POST", {id});
         this.say(element, data.reachable
           ? "Reachable in " + (data.rtt_ms == null ? "an unknown time" : data.rtt_ms + " ms") +
             " via " + (data.via || "the mesh")
@@ -389,7 +403,7 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, uri ? "Dialling " + uri + "…" : "Dialling every address…");
       try{
-        const {ok, data} = await apiJson("/api/peers/retry", "POST", {id, uri:uri || ""});
+        const {ok, data} = await this.ask("/api/peers/retry", "POST", {id, uri:uri || ""});
         if(!ok){ this.say(element, data.error || "Retry refused", true); return; }
         this.say(element, (data.results || []).map((row) =>
           row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""))
@@ -451,7 +465,7 @@ const NODEVIEW = {
     });
     if(!agreed) return;
     try{
-      await api("/api/nodes/forget", "POST", {id});
+      await this.ask("/api/nodes/forget", "POST", {id});
       toast("Node forgotten");
       if(options.onGone) options.onGone();
     }catch(_){ this.say(element, "Could not forget that node", true); }

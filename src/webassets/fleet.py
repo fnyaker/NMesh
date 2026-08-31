@@ -10,6 +10,8 @@ Five sections, split along the question being asked: *whom do I control*
 something now* (Shell), *what happened* (Activity).
 """
 
+from . import ui
+
 FLEET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -22,7 +24,8 @@ FLEET_HTML = """<!doctype html>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/fleet.css">
 </head>
-<body data-app-name="NMesh Fleet">
+<body data-app-name="NMesh Fleet"
+      data-ctx-local="Fleet runs on this node — that one has a fleet of its own.">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
@@ -101,7 +104,7 @@ FLEET_HTML = """<!doctype html>
         </div>
       </div>
     </header>
-
+""" + ui.CTX_BAR + """
     <!-- ── Nodes we manage ──────────────────────────────────────────────── -->
     <section id="panel-nodes" class="content panel" role="tabpanel" data-panel="nodes">
       <div class="page-head">
@@ -1263,6 +1266,7 @@ function nodeDialog(id){
   $("modal-body").innerHTML = '<div id="fleet-node-view"></div>';
   $("modal").showModal();
   return NODEVIEW.mount("fleet-node-view", id, {
+    local:true,
     hide:["fleet"],
     onGone(){ $("modal").close(); poll(); },
   });
@@ -1337,6 +1341,7 @@ async function enter(token){
   $("login").classList.add("hidden");
   $("shell").classList.remove("hidden");
   mountShell();
+  CONTEXT.confirm();
   ROUTER.start(() => {});
   await poll();
   await loadKeys();

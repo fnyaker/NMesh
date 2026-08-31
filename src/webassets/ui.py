@@ -676,6 +676,8 @@ SHELL = """
   padding:var(--s-2) var(--s-5);background:var(--warn-soft);color:var(--warn);
   border-bottom:1px solid var(--border);font-size:var(--fs-sm);font-weight:600}
 .ctx-bar .mono{font-weight:400}
+.ctx-bar .ctx-note{font-weight:500;color:var(--text-muted)}
+.ctx-bar .ctx-note:empty{display:none}
 .ctx-bar button{margin-left:auto}
 .shell.remote .mark{background:var(--warn);color:var(--warn-soft)}
 .ctx-pick{display:flex;align-items:center;gap:var(--s-2);min-width:0}
@@ -780,6 +782,28 @@ main{min-width:0;display:flex;flex-direction:column}
 """
 
 CSS = TOKENS + BASE + COMPONENTS + SHELL
+
+
+# ---------------------------------------------------------------------------
+# Markup every page shares
+# ---------------------------------------------------------------------------
+# The strip saying which machine the controls on this page now point at. One
+# definition, embedded by each page: three pages writing it three times is three
+# chances for one of them to say it differently, and this is the one line on
+# screen that must never be wrong.
+#
+# `data-ctx-local` on the page's <body> says what this particular page cannot do
+# for that node — chat and fleet run here whatever is on screen, because the far
+# console refuses them by design (see Docs/Apps/fleet).
+
+CTX_BAR = """
+    <div id="ctx-bar" class="ctx-bar" role="status" hidden>
+      <span>Managing <b id="ctx-label"></b></span>
+      <span id="ctx-id" class="mono tiny"></span>
+      <span id="ctx-note" class="ctx-note"></span>
+      <button id="ctx-leave" class="sm">Back to this node</button>
+    </div>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -915,23 +939,146 @@ const SESSION = {
   set(token){ TOKEN = token; try{ sessionStorage.setItem("nmesh_token", token); }catch(_){} },
   clear(){ TOKEN = null; try{ sessionStorage.removeItem("nmesh_token"); }catch(_){} },
 };
-// The node this page is driving. Empty means the one serving the page; set to
-// another id, every call below carries it and the console relays the call over
-// the mesh. One place to change, so no view can forget it and quietly act on
-// the wrong machine.
-const CONTEXT = {node: "", label: ""};
-async function api(path, method, body){
+// ---- the node this page is driving -----------------------------------------
+// Empty means the one serving the page; set to another id, every call below
+// carries it and the console relays the call over the mesh. One place to
+// change, so no view can forget it and quietly act on the wrong machine.
+//
+// Three families are never relayed, and the far side refuses them anyway
+// (`_CONSOLE_DENIED` in src/apps/fleet.py): `/api/fleet/`, because a managed
+// node is not a jump host; `/api/remote/`, because that is the proxy driving
+// the proxy; `/api/chat/`, because somebody else's conversations were never
+// part of managing their machine. Signing in and out are this console's own.
+// The rule is written on both sides on purpose — sending the header anyway
+// would turn a designed refusal into a 403 every page has to explain.
+const LOCAL_ONLY = ["/api/remote/", "/api/fleet/", "/api/chat/",
+                    "/api/login", "/api/logout"];
+const local = (path) => LOCAL_ONLY.some((prefix) => path.startsWith(prefix));
+
+// A reply is stale when the node it came from is no longer the node on screen.
+// Thrown rather than returned: every caller already has a catch, and the one
+// thing none of them should do is paint it.
+class StaleContext extends Error {
+  constructor(){ super("the node being managed changed"); this.stale = true; }
+}
+const isStale = (error) => !!(error && error.stale);
+
+const CONTEXT = {
+  node: "", label: "",
+  // Bumped on every switch. A request records it and its reply is dropped if
+  // it no longer matches: a page that switched machines mid-flight used to
+  // paint the one it had just left, and with auto-refresh off it stayed that
+  // way. This is what makes the switch atomic rather than eventual.
+  epoch: 0,
+  listeners: [],
+
+  get remote(){ return !!this.node; },
+
+  // Remembered for this tab only — never localStorage. It is the same lifetime
+  // as the session token it travels with, and a context that outlived the tab
+  // would greet somebody with a machine they did not choose.
+  save(){
+    try{
+      if(this.node) sessionStorage.setItem("nmesh_context",
+                                           JSON.stringify({node:this.node, label:this.label}));
+      else sessionStorage.removeItem("nmesh_context");
+    }catch(_){}
+  },
+
+  restore(){
+    try{
+      const stored = JSON.parse(sessionStorage.getItem("nmesh_context") || "null");
+      if(stored && /^[0-9a-f]{40}$/.test(stored.node || "")){
+        this.node = stored.node;
+        this.label = typeof stored.label === "string" ? stored.label : "";
+      }
+    }catch(_){}
+    return this.node;
+  },
+
+  set(node, label){
+    this.node = /^[0-9a-f]{40}$/.test(node || "") ? node : "";
+    this.label = this.node ? (label || "") : "";
+    this.epoch += 1;
+    this.save();
+    this.paint();
+    this.listeners.forEach((fn) => { try{ fn(this); }catch(_){} });
+  },
+
+  // Called by anything that has to forget what it was holding. Registered
+  // rather than called from one place, so a view added later cannot be the one
+  // nobody remembered to reset.
+  subscribe(fn){ this.listeners.push(fn); },
+
+  // Hand the remote session back and return to this node. The local console
+  // holds that session, so telling it to drop the session is what actually
+  // ends the access — clearing the field would only hide it.
+  async leave(){
+    const left = this.node;
+    if(!left) return;
+    try{ await api("/api/remote/disconnect", "POST", {node:left}); }catch(_){}
+    this.set("", "");
+  },
+
+  // A context restored from a reload is a claim, not a fact: the remote session
+  // lives in the local console and may be gone. Check before believing it —
+  // driving a node this console can no longer reach would fail every call with
+  // nothing on screen to say why.
+  async confirm(){
+    if(!this.node) return;
+    try{
+      const {data} = await apiJson("/api/remote/targets");
+      const target = (data.targets || []).find((entry) => entry.id === this.node);
+      if(target && target.connected){
+        if(target.label && target.label !== this.label) this.set(this.node, target.label);
+        return;
+      }
+    }catch(_){}
+    this.set("", "");
+  },
+
+  paint(){
+    const shell = $("shell");
+    if(shell) shell.classList.toggle("remote", this.remote);
+    const bar = $("ctx-bar");
+    if(bar) bar.hidden = !this.remote;
+    const label = $("ctx-label");
+    if(label) label.textContent = this.label || shortId(this.node);
+    const id = $("ctx-id");
+    if(id) id.textContent = this.node;
+    // What this page can and cannot do for the node being managed. Chat and
+    // fleet run here whatever is on screen (the far console refuses them), and
+    // a bar that did not say so would be the whole point of the bar missed.
+    const note = $("ctx-note");
+    if(note) note.textContent = document.body.dataset.ctxLocal || "";
+    document.body.dataset.appName = this.remote
+      ? "NMesh — " + (this.label || shortId(this.node))
+      : (document.body.dataset.appHome || document.body.dataset.appName || "NMesh");
+  },
+};
+
+// `options.local` forces one call to this node whatever the console is driving.
+// A view mounted inside a local app needs it: "what is my link to this person"
+// is *this* node's question, and answering it from the machine being managed
+// would be a different question with the same wording.
+async function api(path, method, body, options){
   const headers = {};
+  const at = CONTEXT.epoch;
+  const here = local(path) || !!(options && options.local);
   if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
   if(body !== undefined) headers["Content-Type"] = "application/json";
-  if(CONTEXT.node && !path.startsWith("/api/remote/")) headers["X-NMesh-Node"] = CONTEXT.node;
+  if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
   const response = await fetch(path, {method: method || "GET", headers,
     body: body === undefined ? undefined : JSON.stringify(body)});
   if(response.status === 401){ SESSION.clear(); SESSION.onLost(); throw new Error("unauthorized"); }
+  // A local call answers for this node whatever is on screen, so it is never
+  // stale; everything else belongs to the node that was being driven when it
+  // was asked for, and must not paint over the one that replaced it.
+  if(!here && CONTEXT.epoch !== at) throw new StaleContext();
   return response;
 }
-async function apiJson(path, method, body){
-  const response = await api(path, method, body);
+async function apiJson(path, method, body, options){
+  const response = await api(path, method, body, options);
   const data = await response.json().catch(() => ({}));
   return {ok: response.ok, status: response.status, data};
 }
@@ -1403,5 +1550,14 @@ function mountShell(){
   }
   const close = $("confirm-cancel");
   if(close) close.addEventListener("click", () => $("confirm-dialog").close());
+
+  // The context is the page's, not this view's: restored before anything is
+  // drawn, so nothing paints for the wrong machine on the way in, and checked
+  // against the console that holds the session before it is believed.
+  document.body.dataset.appHome = document.body.dataset.appName || "NMesh";
+  CONTEXT.restore();
+  CONTEXT.paint();
+  const leave = $("ctx-leave");
+  if(leave) leave.addEventListener("click", () => CONTEXT.leave());
 }
 """
