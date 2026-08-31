@@ -284,6 +284,13 @@ const NODEVIEW = {
   },
 
   // -- drawing --------------------------------------------------------------
+  // Drawn once, then written into. This card repaints every tick, and rewriting
+  // its markup shut every fold the reader had opened, dropped what they were
+  // selecting, and moved the row under their finger. So the *shape* — which
+  // links exist, which buttons are drawn, which addresses are listed — decides
+  // whether anything is rebuilt, and the numbers are patched into the markup
+  // that is already there. See `paintLive` in the design system.
+
   render(view, extras, options){
     return '<div class="nodeview">' +
       this.headerHTML(view, extras) +
@@ -294,6 +301,81 @@ const NODEVIEW = {
       this.foldHTML("Identity and session", this.identityHTML(view), "") +
       '<p class="msg" data-nv-status role="status"></p>' +
       "</div>";
+  },
+
+  // Everything the markup is built from, and nothing that merely fills it.
+  // A link appearing changes this; its latency does not.
+  shape(view, extras, options){
+    const chat = extras.chat || {}, fleet = extras.fleet || {};
+    return JSON.stringify([
+      view.id, view.self, view.direct, view.knownHere, view.has_key,
+      view.links.map((link) => this.linkKey(link)),
+      view.addresses.map((row) => row.uri),
+      (options.hide || []), !!extras.chat, !!chat.contact, !!chat.seen,
+      !!chat.unread, !!extras.fleet, !!fleet.managed, !!fleet.operator,
+      (fleet.caps || []), (fleet.operator_caps || []),
+      !!fleet.waiting_on_them, !!fleet.waiting_on_us, (fleet.asked_caps || []),
+    ]);
+  },
+
+  // One link, named by what does not change while it is up. Two links on one
+  // scheme are told apart by their endpoint.
+  linkKey(link){
+    const detail = link.link || {};
+    return (detail.scheme || link.transport || "?") + "|" +
+           (detail.remote || detail.dialled || "");
+  },
+
+  // What gets written into that markup on every tick.
+  values(view, extras){
+    const out = {};
+    if(!view.self && view.links.length){
+      const best = this.bestLink(view);
+      const quality = (best.link || {}).quality || {};
+      const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+      const carried = view.links.reduce((sum, link) => {
+        const counters = (link.link || {}).counters || link.counters || {};
+        return sum + (counters.bytes_in || 0) + (counters.bytes_out || 0);
+      }, 0);
+      out["glance:rtt"] = best.rtt_ms == null ? "—" : best.rtt_ms + " ms";
+      out["glance:jitter"] = quality.jitter_ms == null ? "—" : quality.jitter_ms + " ms";
+      out["glance:loss"] = loss == null ? "—" : loss + "%";
+      out["glance:carried"] = carried ? fmtBytes(carried) : "—";
+      out["glance:spark"] = {html: quality.samples_ms
+        ? sparkHTML(quality.samples_ms) : ""};
+      // The wires are a drawing, so they are replaced whole rather than
+      // patched — an SVG holds no fold, no selection and no focus.
+      out.wires = {html: this.wiresHTML(view)};
+    }
+    view.links.forEach((link) => {
+      const key = "link:" + this.linkKey(link);
+      const detail = link.link || {};
+      const quality = detail.quality || {};
+      const counters = detail.counters || link.counters || {};
+      const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+      out[key + ":rtt"] = link.rtt_ms == null ? "—" : link.rtt_ms + " ms";
+      out[key + ":up"] = fmtDuration(detail.since);
+      out[key + ":carried"] = fmtBytes((counters.bytes_in || 0) +
+                                       (counters.bytes_out || 0)) +
+        " (" + fmtBytes(counters.bytes_in) + " in, " +
+        fmtBytes(counters.bytes_out) + " out)";
+      out[key + ":probes"] = quality.probes
+        ? quality.probes + (loss == null ? "" : " · " + loss + "% lost")
+        : "none yet";
+      out[key + ":malformed"] = detail.malformed == null ? "—" : detail.malformed;
+      Object.entries(detail.stats || {}).slice(0, 16).forEach(([name, value]) => {
+        out[key + ":stat:" + name] = value;
+      });
+    });
+    view.addresses.forEach((row) => {
+      out["addr:" + row.uri + ":state"] = {
+        text: row.outcome, tone: ADDRESS_TONE[row.outcome] || ""};
+      out["addr:" + row.uri + ":detail"] = row.detail || "";
+      out["addr:" + row.uri + ":tried"] = row.ago == null ? "—"
+        : fmtAgo(row.ago) + (row.ms == null ? "" : " · " + row.ms + " ms");
+    });
+    out.seen = view.seen_ago == null ? "Live" : fmtAgo(view.seen_ago);
+    return out;
   },
 
   // The node's own pseudo, from its signed claim. The full id sits right under
@@ -438,7 +520,7 @@ const NODEVIEW = {
     return '<article class="card"><div class="card-head"><div class="grow">' +
       "<h2>" + plural(view.links.length, "link") + "</h2>" +
       '<div class="sub">' + esc(this.schemes(view).join(" · ")) + "</div></div></div>" +
-      '<div class="card-body">' + this.wiresHTML(view) + this.glanceHTML(view) +
+      '<div class="card-body"><div data-v="wires"></div>' + this.glanceHTML(view) +
       '<div class="nv-links">' +
       view.links.map((link) => this.linkHTML(link)).join("") +
       "</div></div></article>";
@@ -507,22 +589,20 @@ const NODEVIEW = {
       const counters = (link.link || {}).counters || link.counters || {};
       return sum + (counters.bytes_in || 0) + (counters.bytes_out || 0);
     }, 0);
-    // esc() on the value like everywhere else. These read as "obviously
-    // numbers", and they are when the JSON comes from this node — but under a
-    // remote context the console proxies the request to *another* node's
-    // console and returns its answer verbatim, so they are network input.
-    const cell = (label, value, extra) =>
-      '<div class="stat sm"><span class="v">' + esc(value) + '</span><span class="k">' +
-      esc(label) + "</span>" + (extra || "") + "</div>";
+    // The numbers are written in afterwards (`values`), so the cells here are
+    // empty slots. `patchValues` sets them as text, never as markup, which is
+    // the same guarantee `esc()` gave: under a remote context these come
+    // verbatim from *another* node's console and are network input.
+    const cell = (key, label, extra) =>
+      '<div class="stat sm"><span class="v" data-v="glance:' + key +
+      '"></span><span class="k">' + esc(label) + "</span>" + (extra || "") + "</div>";
     return '<div class="stats">' +
-      cell("Round trip",
-           best.rtt_ms == null ? "—" : best.rtt_ms + " ms",
-           quality.samples_ms ? '<div' +
-             ((loss != null && loss >= 10) ? ' class="spark warn"' : "") + ">" +
-             sparkHTML(quality.samples_ms) + "</div>" : "") +
-      cell("Jitter", quality.jitter_ms == null ? "—" : quality.jitter_ms + " ms") +
-      cell("Probe loss", loss == null ? "—" : loss + "%") +
-      cell("Carried", totals ? fmtBytes(totals) : "—") +
+      cell("rtt", "Round trip",
+           '<div data-v="glance:spark"' +
+           ((loss != null && loss >= 10) ? ' class="spark warn"' : "") + "></div>") +
+      cell("jitter", "Jitter") +
+      cell("loss", "Probe loss") +
+      cell("carried", "Carried") +
       "</div>";
   },
 
@@ -542,35 +622,32 @@ const NODEVIEW = {
     const quality = detail.quality || {};
     const counters = detail.counters || link.counters || {};
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+    const key = "link:" + this.linkKey(link);
+    const slot = (name) => '<span data-v="' + esc(key + ":" + name) + '"></span>';
     const rows = [
       ["Direction", esc(detail.direction || (link.is_client_side ? "outbound" : "inbound"))],
-      ["Up for", esc(fmtDuration(detail.since))],
+      ["Up for", slot("up")],
       ["Local endpoint", detail.local ? '<span class="mono">' + esc(detail.local) + "</span>" : "—"],
       ["Remote endpoint", detail.remote ? '<span class="mono">' + esc(detail.remote) + "</span>" : "—"],
     ];
     if(detail.dialled && detail.dialled !== detail.remote)
       rows.push(["Dialled", '<span class="mono">' + esc(detail.dialled) + "</span>"]);
-    rows.push(["Carried", esc(fmtBytes((counters.bytes_in || 0) + (counters.bytes_out || 0))) +
-      " (" + esc(fmtBytes(counters.bytes_in)) + " in, " +
-      esc(fmtBytes(counters.bytes_out)) + " out)"]);
-    rows.push(["Probes", quality.probes ? esc(quality.probes) +
-      (loss == null ? "" : " · " + loss + "% lost") : "none yet"]);
-    rows.push(["Malformed input", detail.malformed == null ? "—" : esc(detail.malformed)]);
+    rows.push(["Carried", slot("carried")]);
+    rows.push(["Probes", slot("probes")]);
+    rows.push(["Malformed input", slot("malformed")]);
     // Whatever the medium chose to report. This view does not know what a
     // retransmit or an SNR is — it renders the names it is given.
-    const stats = detail.stats || {};
-    Object.entries(stats).slice(0, 16).forEach(([key, value]) =>
-      rows.push([key, esc(value)]));
+    Object.keys(detail.stats || {}).slice(0, 16).forEach((name) =>
+      rows.push([name, slot("stat:" + name)]));
     const where = detail.remote || detail.dialled || link.transport || "—";
     return '<details class="nv-link"><summary>' +
       icon("chevron", "", "turn") +
       '<span class="nv-scheme">' + esc(detail.scheme || link.transport || "?") + "</span>" +
       '<span class="nv-where mono truncate">' + esc(where) + "</span>" +
-      '<span class="nv-num">' + (link.rtt_ms == null ? "—" : esc(link.rtt_ms) + " ms") +
-      "</span>" +
-      '<span class="nv-num">' + esc(fmtDuration(detail.since)) + "</span></summary>" +
-      '<div class="nv-link-body"><dl class="kv">' + rows.map(([key, value]) =>
-        "<dt>" + esc(key) + "</dt><dd>" + value + "</dd>").join("") +
+      '<span class="nv-num" data-v="' + esc(key + ":rtt") + '"></span>' +
+      '<span class="nv-num" data-v="' + esc(key + ":up") + '"></span></summary>' +
+      '<div class="nv-link-body"><dl class="kv">' + rows.map(([name, value]) =>
+        "<dt>" + esc(name) + "</dt><dd>" + value + "</dd>").join("") +
       "</dl></div></details>";
   },
 
@@ -602,11 +679,11 @@ const NODEVIEW = {
       '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
       "</tr></thead><tbody>" +
       rows.map((row) => '<tr><td class="mono">' + esc(row.uri) + "</td><td>" +
-        badge(row.outcome, ADDRESS_TONE[row.outcome] || "") +
-        (row.detail ? ' <span class="tiny muted">' + esc(row.detail) + "</span>" : "") +
-        '</td><td class="num">' +
-        (row.ago == null ? "—" : esc(fmtAgo(row.ago)) +
-          (row.ms == null ? "" : " · " + esc(row.ms) + " ms")) +
+        '<span class="badge" data-base="badge" data-v="' +
+        esc("addr:" + row.uri + ":state") + '"></span>' +
+        ' <span class="tiny muted" data-v="' +
+        esc("addr:" + row.uri + ":detail") + '"></span>' +
+        '</td><td class="num" data-v="' + esc("addr:" + row.uri + ":tried") + '">' +
         "</td>" + (view.self ? "" :
           '<td class="tight"><button class="sm" data-nv-retry="' +
           esc(row.uri) + '">Retry</button></td>') +
@@ -620,7 +697,7 @@ const NODEVIEW = {
         : view.knownHere ? "Known routing identity" : "Routed session endpoint"],
       ["Session", view.has_session === false ? "Not established"
         : view.direct ? "Open" : view.self ? "Local" : "Not directly observed"],
-      ["Last seen", view.seen_ago == null ? "Live" : esc(fmtAgo(view.seen_ago))],
+      ["Last seen", '<span data-v="seen"></span>'],
       ["Identity key", view.has_key == null ? "Unknown"
         : view.has_key ? "Known" : "Missing"],
       ["Malformed input", view.malformed == null ? "—" : esc(view.malformed)],
@@ -681,10 +758,12 @@ const NODEVIEW = {
     if(deep || open.extras == null) open.extras = await this.extras(open.id, view.self);
     if(this.current !== open) return;
     open.view = view;
-    // setHTML, not innerHTML: this repaints on every tick and whenever a link
-    // moves, and rewriting markup that did not change replaces the node under
-    // the pointer and swallows the click.
-    setHTML(element, this.render(view, open.extras, open.options));
+    // The shape decides whether anything is rebuilt; the numbers are written
+    // into what is already there. A card repainted every second that rewrote
+    // its markup shut every fold the reader had opened.
+    paintLive(element, this.shape(view, open.extras, open.options),
+              () => this.render(view, open.extras, open.options),
+              this.values(view, open.extras));
   },
 
   // Repaint what is open, on a trailing edge and never faster than the floor

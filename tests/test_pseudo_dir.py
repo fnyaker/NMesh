@@ -14,6 +14,7 @@ from src.pseudo_dir import (
     encode_claims, decode_claims, MAX_CLAIM, _MAX_PER_KEY,
 )
 from src.crypto import CryptoIdentity
+from src.metrics import LinkQuality
 from src.node_id import NodeID
 from src.node import MeshNode, DIR_STORE, DIR_FIND, DIR_FOUND, _QID_LEN
 from src.packet import Packet
@@ -220,6 +221,12 @@ class _FakePeer:
         self.sent = []
         self.relay_only = False
         self._malformed = 0
+        # A stand-in for a link is only useful while it still looks like one:
+        # choosing between two links reads what they measured.
+        self.remote_addr = "fake://peer:1"
+        self.transport = None
+        self.last_rtt = None
+        self.quality = LinkQuality()
 
     def note_abuse(self) -> bool:
         from src.node import _MAX_MALFORMED

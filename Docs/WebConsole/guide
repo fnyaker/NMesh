@@ -166,6 +166,17 @@ nothing is worse than no control, so it drives that page's poll too. The
 a session is open: a terminal is not a status page, and the interval can be set
 to zero.
 
+**A refresh writes the values, it does not redraw the page.** A view whose
+numbers always change is a view `setHTML` cannot help — it only skips a write
+when *nothing* moved. So a view draws its **shape** once (which rows exist,
+which buttons are drawn) and the cadence writes only the numbers into the markup
+already on screen. Before that, at one second apart, every fold a reader had
+opened sprang shut, the text they were selecting vanished, and the row under
+their finger was a different element by the time the tap landed. A row is keyed
+by the link it stands for, so the same link keeps the same element; and only a
+node that is actually **gone** folds a row back — a second link dropping for one
+tick used to fold it, and it stayed folded.
+
 **Every view, one cadence.** The interval drives a *list* of jobs, not one. It
 used to be one, so a view showing a moving number was on the cadence only if
 somebody had remembered to call it from inside that job — and the node card was
@@ -207,6 +218,14 @@ not the same as being read.
     the node and its edges on the map. The selected row carries a **Details**
     button — selecting is not opening, so a tap that only meant to point at
     something does not throw a dialog over the map.
+- **Which link carries the traffic is chosen, not stumbled on.** A node reached
+  over two media at once may have one of them losing every probe. The score that
+  picks between them multiplies the address score by `(1 − loss)⁴`, so a tenth
+  of the probes lost costs more than any latency difference and a link nothing
+  comes back from is never chosen while anything else exists. It stays listed —
+  and stays connected: probes lost is not proof that data is, and `100% loss`
+  beside it is something an operator can act on. See
+  [`../Architecture/transports.md`](../Architecture/transports.md).
 - **Connected nodes are one row each**, whatever the number of links. A node you
   hold five links with is one row: its name, how many links, the lowest latency,
   and the jitter **of that fastest link** — the jitter of a link nobody uses
