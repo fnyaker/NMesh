@@ -136,7 +136,10 @@ channel is two things to keep in step.
 wants to be instant. Latency, jitter, throughput and load move constantly and by
 tiny amounts, so they stay on the interval — a repaint per measurement says
 nothing new and costs the whole list. The number in the top bar is therefore
-*that* interval, and the dot beside it says whether the stream is live.
+*that* interval, and the dot beside it says whether the stream is live — **amber
+when the interval is off**, because streaming with no cadence is only half live:
+links still arrive and every number stands still, and a green dot there would be
+the console lying by omission.
 
 **A frame, not a firehose.** One stream wakes at most ten times a second
 (`_STREAM_FRAME`), and every change inside a frame is answered by one repaint on
@@ -162,6 +165,23 @@ nothing is worse than no control, so it drives that page's poll too. The
 **shell** is the exception and keeps its own faster cadence, running only while
 a session is open: a terminal is not a status page, and the interval can be set
 to zero.
+
+**Every view, one cadence.** The interval drives a *list* of jobs, not one. It
+used to be one, so a view showing a moving number was on the cadence only if
+somebody had remembered to call it from inside that job — and the node card was
+not, so its latency, jitter, loss and volume stood still for as long as it was
+open, on every page that mounts it and on `/node`, which armed no cadence at
+all. A view registers itself (`REFRESH.on`) and cannot be the one that was
+forgotten; every page arms it (`REFRESH.mount`), including the ones with no
+control of their own — the interval is a per-browser preference and applies
+wherever numbers move.
+
+What that costs is kept honest at both ends. The card re-reads only the *live*
+rows on a tick — every number that moves is in them; the address book and the
+identity key are not, and a structural change re-reads those too, along with
+what the apps make of the identity. And a card nobody is looking at asks for
+nothing: a closed dialog keeps its contents in the page, so being connected is
+not the same as being read.
 
 ## Watching the mesh live
 
