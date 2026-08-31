@@ -15,12 +15,15 @@ import json
 import os
 import ssl
 import tempfile
+import threading
+import time
 
 import pytest
 
 from src.node import MeshNode
 from src.node_id import NodeID
-from src.webconsole import WebConsole, _LOGIN_MAX_FAILURES
+from src.webconsole import (WebConsole, _Changes, _LOGIN_MAX_FAILURES,
+                            _MAX_STREAMS)
 from tests.conftest import make_manager
 
 PW = "correct-horse-battery-staple"
@@ -1400,6 +1403,267 @@ class TestJoinTicket:
             console.stop(); await node.stop()
 
 
+class TestTheChangeStream:
+    """A console on a timer is either late or wasteful. The node says when
+    something structural moved, and the page reads only then.
+
+    What is proved here: the stream needs a session, it coalesces rather than
+    reporting every event, it names what moved without describing it, it is
+    bounded, and it refuses to pretend it can be relayed to another node."""
+
+    def _open(self, console, token, timeout=8.0):
+        """Open the stream. The caller reads the frames it is waiting for."""
+        connection = http.client.HTTPConnection(console.host, console.port,
+                                                timeout=timeout)
+        connection.request("GET", "/api/events",
+                           headers={"Authorization": "Bearer " + token})
+        response = connection.getresponse()
+        return connection, response
+
+    async def test_it_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/events")
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_reports_what_moved_without_describing_it(self):
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+
+            def read():
+                connection, response = self._open(console, token)
+                assert response.status == 200
+                assert response.getheader("Content-Type").startswith("text/event-stream")
+                lines = []
+                # "ready", then the change we are about to cause.
+                while len(lines) < 2:
+                    line = response.fp.readline().decode("utf-8", "replace")
+                    if line.startswith("data:"):
+                        lines.append(json.loads(line[5:]))
+                connection.close()
+                return lines
+
+            job = asyncio.get_running_loop().run_in_executor(None, read)
+            await asyncio.sleep(0.2)
+            node._note_change("links")
+            ready, change = await asyncio.wait_for(job, timeout=8)
+            assert "at" in ready
+            assert change["topics"] == ["links"]
+            # Only that it moved. A second description of a node travelling
+            # down a second channel is two things to keep in step.
+            assert set(change) == {"topics", "at"}
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_burst_is_one_message(self):
+        """Forty link events between two reads is one answer naming one topic:
+        the page re-reads the same list either way."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+
+            def read():
+                connection, response = self._open(console, token)
+                payloads = []
+                while len(payloads) < 2:
+                    line = response.fp.readline().decode("utf-8", "replace")
+                    if line.startswith("data:"):
+                        payloads.append(json.loads(line[5:]))
+                connection.close()
+                return payloads
+
+            job = asyncio.get_running_loop().run_in_executor(None, read)
+            await asyncio.sleep(0.2)
+            for _ in range(40):
+                node._note_change("links")
+                node._note_change("nodes")
+            _ready, change = await asyncio.wait_for(job, timeout=8)
+            assert change["topics"] == ["links", "nodes"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_is_bounded(self):
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+            console._streams = _MAX_STREAMS
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/events", token)
+            assert status == 503
+            assert "streams" in body["error"]
+        finally:
+            console._streams = 0
+            console.stop(); await node.stop()
+
+    async def test_it_is_never_relayed_to_another_node(self):
+        """The relay moves one bounded request and its answer, not a connection
+        held open. Saying so is what lets a page keep its cadence instead of
+        waiting on a stream that will never speak."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/events", token, None, None,
+                False, None, {"X-NMesh-Node": "cd" * 20})
+            assert status == 409
+            assert "local" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_stopping_the_console_unhooks_the_node(self):
+        """A listener left hooked to a node whose console is gone is a
+        reference nothing drops."""
+        node, console = await _make_console()
+        console.stop()
+        assert node._on_change is None
+        node._note_change("links")      # and it costs nothing
+        await node.stop()
+
+
+class TestChangesCoalescing:
+    """The hub on its own, without a socket in the way."""
+
+    def test_nothing_moved_is_an_empty_answer(self):
+        changes = _Changes()
+        assert changes.since(changes.seq, 0.01) == ([], 0)
+
+    def test_only_what_moved_since_the_caller_looked(self):
+        changes = _Changes()
+        changes.note("links")
+        first, seq = changes.since(0, 0.01)
+        assert first == ["links"]
+        assert changes.since(seq, 0.01)[0] == []
+        changes.note("names")
+        assert changes.since(seq, 0.01)[0] == ["names"]
+
+    def test_a_repeated_topic_is_named_once(self):
+        changes = _Changes()
+        for _ in range(50):
+            changes.note("links")
+        assert changes.since(0, 0.01)[0] == ["links"]
+
+    def test_the_topic_table_is_bounded(self):
+        changes = _Changes()
+        for index in range(_Changes.MAX_TOPICS * 3):
+            changes.note(f"topic{index}")
+        assert len(changes.since(0, 0.01)[0]) == _Changes.MAX_TOPICS
+
+    def test_closing_releases_whoever_is_waiting(self):
+        changes = _Changes()
+        started = threading.Event()
+        result = []
+
+        def wait():
+            started.set()
+            result.append(changes.since(0, 30.0))
+        thread = threading.Thread(target=wait, daemon=True)
+        thread.start()
+        started.wait(2)
+        time.sleep(0.05)
+        changes.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result and result[0][0] == []
+
+    def test_a_closed_hub_takes_nothing_more(self):
+        changes = _Changes()
+        changes.close()
+        changes.note("links")
+        assert changes.since(0, 0.01) == ([], 0)
+
+
+class TestRestartingOnDemand:
+    """An operator asking for a restart, rather than an update asking for one.
+
+    Same mechanism, and the same thing decides it: a process cannot restart
+    itself, only exit and be started again. So the console must never answer
+    "restarting" when nothing would bring the node back — it has to refuse and
+    say why, or the operator is left with a node that is simply gone."""
+
+    async def test_it_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", None, {"confirm": True})
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_needs_confirmation(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {})
+            assert status == 400
+            await asyncio.sleep(0.05)
+            assert left == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_refuses_and_says_why_with_nothing_watching(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {"confirm": True})
+            assert status == 409
+            assert body["restarting"] is False
+            assert "service manager" in body["error"]
+            await asyncio.sleep(0.05)
+            assert left == []
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_leaves_when_something_will_bring_it_back(self, monkeypatch):
+        node, console = await _make_console()
+        try:
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self: left.append(True))
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/restart", token, {"confirm": True})
+            assert status == 200 and body["restarting"] is True
+            for _ in range(50):
+                if left:
+                    break
+                await asyncio.sleep(0.01)
+            assert left == [True]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_state_says_whether_a_restart_would_come_back(self,
+                                                                   monkeypatch):
+        """The page draws the offer from this, so it has to be in the answer."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert body["service_managed"] is True
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert body["service_managed"] is False
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestRestartingOntoNewCode:
     """Replacing the tree changes nothing in a running process: the update only
     takes effect when the node starts again.
@@ -1417,7 +1681,7 @@ class TestRestartingOntoNewCode:
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
                                 lambda self: left.append(True))
-            assert console.restart_for_update() is True
+            assert console.restart() is True
             # The worker runs in its own thread; give it a moment to be seen.
             for _ in range(50):
                 if left:
@@ -1434,7 +1698,7 @@ class TestRestartingOntoNewCode:
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
                                 lambda self: left.append(True))
-            assert console.restart_for_update() is False
+            assert console.restart() is False
             await asyncio.sleep(0.05)
             assert left == []
         finally:

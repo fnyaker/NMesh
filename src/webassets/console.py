@@ -7,6 +7,8 @@ Four sections, in the order someone actually needs them: what this node is doing
 sub-page can be linked to, bookmarked, and reached with the Back button.
 """
 
+from . import ui
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -67,7 +69,8 @@ INDEX_HTML = """<!doctype html>
         <select id="ctx-node"></select></label>
       <span class="grow"></span>
       <div id="refresh" class="refresh">
-        <label class="sr-only" for="refresh-secs">Auto-refresh, in seconds (0 turns it off)</label>
+        <i id="refresh-live" class="live" aria-hidden="true"></i>
+        <label class="sr-only" for="refresh-secs">How often the changing numbers are re-read, in seconds (0 turns it off)</label>
         <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
         <span class="unit" aria-hidden="true">s</span>
         <label class="sr-only" for="refresh-pick">Auto-refresh</label>
@@ -93,16 +96,14 @@ INDEX_HTML = """<!doctype html>
           <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
           <div id="more-apps"></div>
           <div class="sep"></div>
+          <button class="item danger" id="more-restart" data-menu-close>Restart this node</button>
+          <p id="more-restart-why" class="menu-note" hidden></p>
           <button class="item" id="more-logout" data-menu-close>Sign out</button>
         </div>
       </div>
     </header>
 
-    <div id="ctx-bar" class="ctx-bar" role="status" hidden>
-      <span>Managing <b id="ctx-label"></b></span>
-      <span id="ctx-id" class="mono tiny"></span>
-      <button id="ctx-leave" class="sm">Back to this node</button>
-    </div>
+""" + ui.CTX_BAR + """
 
     <!-- ── Overview ─────────────────────────────────────────────────────── -->
     <section id="panel-overview" class="content panel" role="tabpanel" data-panel="overview">
@@ -825,10 +826,6 @@ CONSOLE_PAGE_CSS = """
   .ctx-pick select{max-width:120px}
 }
 
-.qr-holder{display:flex;justify-content:center;padding:var(--s-4);border-radius:var(--r-md);
-  background:#fff;border:1px solid var(--border)}
-.qr-holder:empty{display:none}
-.qr-holder svg{width:min(220px,100%);height:auto}
 .qr-video{width:100%;max-height:260px;border-radius:var(--r-md);background:#000;object-fit:cover}
 
 .app-tile{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-4);
@@ -854,8 +851,15 @@ CONSOLE_PAGE_JS = r"""
 // Reads /api/state on a timer and paints; every control posts and re-reads.
 // Nothing is cached across a reload: what the node says is the truth.
 
-let STATE = null, PREVIOUS = null, TICKING = false;
+let STATE = null, PREVIOUS = null;
+// `false`, or the context epoch a request is in flight for. Never a boolean
+// once one is running: see tick().
+let TICKING = false;
 const RATES = [];                       // ~90 samples, the throughput window
+// The last rate measured. A repaint triggered by a change did not measure one
+// and must not invent a zero: nothing about the throughput changed because a
+// link came up.
+let RATE_NOW = {inbound:0, outbound:0};
 
 // ---- gate ------------------------------------------------------------------
 function showGate(){
@@ -868,8 +872,10 @@ function enterConsole(){
   $("login").classList.add("hidden");
   $("shell").classList.remove("hidden");
   ROUTER.start(onRoute);
-  paintContext();
-  loadTargets();
+  CONTEXT.paint();
+  // A context carried over a reload is a claim until the console that holds the
+  // session agrees; `confirm` drops it if that session is gone.
+  CONTEXT.confirm().then(loadTargets);
   REFRESH.mount(tick);
 }
 SESSION.onLost = showGate;
@@ -893,8 +899,9 @@ $("login-form").addEventListener("submit", async (event) => {
   });
 });
 $("logout").addEventListener("click", async () => {
-  // Straight to the local console: signing out is never a remote action.
-  CONTEXT.node = "";
+  // Straight to the local console: signing out is never a remote action, and
+  // the remote session goes with it rather than outliving the operator.
+  await CONTEXT.leave();
   try{ await api("/api/logout", "POST"); }catch(_){}
   SESSION.clear(); showGate();
 });
@@ -912,22 +919,45 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "updates") refreshReleases();
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
-async function tick(){
-  if(TICKING) return;
-  TICKING = true;
+// One reader of `/api/state`, two reasons to call it.
+//
+//   * the **interval**, for the numbers that never stop moving — throughput,
+//     latency, jitter, load. Those want a steady cadence: a rate is a
+//     difference over a known time, and sampling it whenever a link happened to
+//     come up would make the chart a picture of the mesh's mood rather than of
+//     its throughput.
+//   * a **change**, for the things that either are or are not. Those want to be
+//     instant, and they carry no rate.
+//
+// So `sample` is the whole difference between the two, and it is the only one.
+// Two readers would be two descriptions of one node.
+async function tick(sample){
+  // Held per context, not as a plain flag: a tick for the node we just left
+  // must not make the tick for the node we just entered look redundant. That
+  // is how a switch used to leave the old machine's numbers on screen until
+  // the next timer — for ever, with auto-refresh off.
+  const epoch = CONTEXT.epoch;
+  if(TICKING === epoch) return;
+  TICKING = epoch;
   try{
     const response = await api("/api/state");
     if(!response.ok) return;
     STATE = await response.json();
-    trackRates(STATE);
+    if(sample === false) STATE._rates = RATE_NOW;
+    else trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
-    paintApps(STATE); paintReach(STATE); paintMap();
+    paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
     if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
-  }catch(_){
-    railState("danger", "Console unreachable");
-  }finally{ TICKING = false; }
+  }catch(error){
+    if(!isStale(error)) railState("danger", "Console unreachable");
+  }finally{ if(TICKING === epoch) TICKING = false; }
 }
+// The node says when something structural moved; the page reads then. Every
+// event inside one frame is answered by one repaint (EVENTS.FRAME), so a burst
+// of forty link changes is one pass over the list rather than forty.
+EVENTS.on(["links", "nodes", "names", "reach"], () => tick(false));
+
 function trackRates(state){
   let inbound = 0, outbound = 0;
   const restarted = !PREVIOUS || PREVIOUS.id !== state.id || state.uptime < PREVIOUS.uptime ||
@@ -943,7 +973,7 @@ function trackRates(state){
               bytes_in:state.total.bytes_in, bytes_out:state.total.bytes_out};
   RATES.push({inbound:Math.max(0,inbound), outbound:Math.max(0,outbound)});
   while(RATES.length > 90) RATES.shift();
-  state._rates = {inbound, outbound};
+  state._rates = RATE_NOW = {inbound, outbound};
 }
 
 // The rail is hidden on a phone and the same line shows in the ⋯ menu; written
@@ -2261,12 +2291,15 @@ async function savePseudo(wanted){
     return;
   }
   $("pseudo-input").value = data.pseudo || "";
-  // The rename is live either way; only its survival across a restart is at
-  // stake, so a failure to write the file is a warning, not an error.
+  // The node keeps the name on its own — it signed a claim and its name store
+  // holds it. The configuration file only matters when there is one: a file
+  // still naming the old node wins at the next start, and that is the one
+  // failure worth warning about.
+  const stale = data.error ? " — but " + data.error +
+    ", so the configuration file still names the old one." : "";
   setMessage("pseudo-status", data.pseudo
-    ? "Now called " + data.pseudo + (data.saved ? " — saved for next start." :
-       " — but not saved: " + (data.error || "no configuration file."))
-    : "The name is gone; this node shows only its id.", !data.saved);
+    ? "Now called " + data.pseudo + (stale || " — it survives a restart.")
+    : "The name is gone; this node shows only its id.", !!data.error);
   tick();
 }
 
@@ -2789,34 +2822,41 @@ async function loadTargets(){
   select.value = TARGETS.some((target) => target.id === keep) ? keep : CONTEXT.node;
 }
 
-function paintContext(){
-  const remote = !!CONTEXT.node;
-  $("shell").classList.toggle("remote", remote);
-  $("ctx-bar").hidden = !remote;
-  $("ctx-label").textContent = CONTEXT.label || shortId(CONTEXT.node);
-  $("ctx-id").textContent = CONTEXT.node;
-  $("ctx-node").value = CONTEXT.node;
-  document.body.dataset.appName = remote
-    ? "NMesh — " + (CONTEXT.label || shortId(CONTEXT.node)) : "NMesh Console";
-}
-
-function enterContext(node, label){
-  CONTEXT.node = node; CONTEXT.label = label || "";
-  // Everything on screen belongs to the node we just left.
-  STATE = null; PREVIOUS = null; RATES.length = 0;
+// Everything on this page describes one node. A switch invalidates all of it at
+// once — the caches, the panels, and anything still in flight — because the
+// alternative is a number nobody re-derived still standing under the new
+// machine's name. Registered rather than called inline, so a view added later
+// is reset by the same list as the rest.
+CONTEXT.subscribe(() => {
+  STATE = null; PREVIOUS = null; RATES.length = 0; TICKING = false;
+  RATE_NOW = {inbound:0, outbound:0};
+  MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
+  TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
+  // What a node can offer is that node's answer, and the buttons drawn from it
+  // are the ones an operator is about to press.
+  NODEVIEW.apps = {};
+  stopTracePolling();
   ["active", "known", "catalog", "installed"].forEach((kind) => {
     PAGES[kind].offset = 0; PAGES[kind].query = "";
+    LINKS_OPEN[kind] && LINKS_OPEN[kind].clear();
     $(kind + "-list").innerHTML = "";
   });
-  paintContext();
+  // A node card describes a peer of the machine we just left.
+  if($("node-dialog").open) $("node-dialog").close();
+  $("ctx-node").value = CONTEXT.node;
+  // The stream belongs to the console serving this page, so driving another
+  // node closes it and coming back opens it again. `start` knows which of the
+  // two this is; the page only has to tell it that the answer moved.
+  EVENTS.start();
   tick();
   onRoute(ROUTER.section, ROUTER.sub);
-}
+  loadTargets();
+});
 
 function askForContext(node){
   const target = TARGETS.find((entry) => entry.id === node);
   if(!target){ $("ctx-node").value = CONTEXT.node; return; }
-  if(target.connected){ enterContext(node, target.label); loadTargets(); return; }
+  if(target.connected){ CONTEXT.set(node, target.label); return; }
   const name = target.label || shortId(node);
   $("modal-title").textContent = "Manage " + name;
   $("modal-body").innerHTML =
@@ -2841,8 +2881,7 @@ function askForContext(node){
       return;
     }
     $("modal").close();
-    await loadTargets();
-    enterContext(node, target.label);
+    CONTEXT.set(node, target.label);
     toast("Managing " + name, "warn");
   }));
   $("ctx-no").addEventListener("click", finish);
@@ -2854,16 +2893,9 @@ function askForContext(node){
 
 $("ctx-node").addEventListener("change", (event) => {
   const node = event.target.value;
-  if(!node){ leaveContext(); return; }
+  if(!node){ CONTEXT.leave(); return; }
   askForContext(node);
 });
-async function leaveContext(){
-  const left = CONTEXT.node;
-  if(left) await api("/api/remote/disconnect", "POST", {node:left}).catch(() => {});
-  enterContext("", "");
-  loadTargets();
-}
-$("ctx-leave").addEventListener("click", leaveContext);
 
 // ---- palette ---------------------------------------------------------------
 [["Overview", "overview", ""],
@@ -2887,7 +2919,7 @@ PALETTE.add("Check for updates", "Action", () => {
   ROUTER.go("settings", "updates"); $("update-check").click();
 });
 PALETTE.add("Switch theme", "Action", () => THEME.toggle());
-PALETTE.add("Back to this node", "Action", leaveContext);
+PALETTE.add("Back to this node", "Action", () => CONTEXT.leave());
 PALETTE.add("Open the mesh map", "Action", () => $("map-open").click());
 PALETTE.add("Transport settings", "Go to", () => ROUTER.go("network", "reach"));
 // Per-browser preferences. They are read where they are used (THEME, OPEN), so
@@ -2906,6 +2938,49 @@ $("pref-open").addEventListener("change", (event) => {
     : event.target.value === "window" ? "in a separate window"
     : "to suit the screen"));
 });
+// ---- restarting the node ---------------------------------------------------
+// A process cannot restart itself; it can only exit and be started again. So
+// the offer depends on there being a service manager watching, and when there
+// is not, the item says why rather than disappearing — an operator looking for
+// "restart" deserves to find out it is not available and what would make it so.
+function paintRestart(state){
+  const managed = !!state.service_managed;
+  const item = $("more-restart");
+  item.disabled = !managed;
+  item.textContent = CONTEXT.node
+    ? "Restart " + (CONTEXT.label || shortId(CONTEXT.node)) : "Restart this node";
+  const why = $("more-restart-why");
+  why.hidden = managed;
+  why.textContent = managed ? ""
+    : "This node runs outside a service manager, so nothing would start it again.";
+}
+
+async function restartNode(){
+  const who = CONTEXT.node ? (CONTEXT.label || shortId(CONTEXT.node)) : "this node";
+  const agreed = await confirmAction({
+    title:"Restart " + who + "?",
+    danger:true,
+    confirmLabel:"Restart",
+    body:'<p class="muted small">Every link drops and the node comes back a few ' +
+      "seconds later, reconnecting on its own. Sessions and known nodes are kept; " +
+      "anything queued for a peer that is not reachable is kept too.</p>" +
+      (CONTEXT.node ? '<p class="muted small">This console goes back to the local ' +
+        "node while that one is away.</p>" : ""),
+  });
+  if(!agreed) return;
+  const {ok, data} = await apiJson("/api/restart", "POST", {confirm:true});
+  if(!ok || !data.restarting){
+    toast("Not restarting", "danger", (data && data.error) || "The node refused.");
+    return;
+  }
+  toast("Restarting " + who, "warn", "It should be back in a few seconds.");
+  // The node we were driving is the one going away, so stop driving it.
+  if(CONTEXT.node) CONTEXT.leave();
+}
+
+$("more-restart").addEventListener("click", restartNode);
+PALETTE.add("Restart this node", "Action", restartNode);
+
 $("palette-open").addEventListener("click", () => PALETTE.open());
 $("more-search").addEventListener("click", () => PALETTE.open());
 $("more-logout").addEventListener("click", () => $("logout").click());

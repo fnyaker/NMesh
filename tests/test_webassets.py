@@ -186,7 +186,7 @@ def test_the_console_renders_whatever_a_transport_reports():
     """A transport's counters are displayed under their own names: the console
     knows neither "retransmits" nor "SNR", and that is the point."""
     source = webassets.APP_JS
-    assert "statsHTML(link)" in source
+    assert "detail.stats || {}" in source
     assert "Object.entries(stats)" in source
 
 
@@ -289,6 +289,81 @@ def test_the_addresses_are_folded_away_by_default():
            '<details class="card"><summary>' in source
 
 
+def test_the_view_describes_every_link_not_the_first_one():
+    """`/api/nodes?scope=active` answers one row **per link**, and a node may
+    hold several. Taking the first and calling it "the link" is what made a node
+    reached over tcp *and* udp look like a node reached over tcp."""
+    view = _nodeview_js()
+    assert "view.links = active;" in view
+    assert "filter((item) => item.id === id)" in view
+    # And the addresses are merged across all of them, with the live one winning.
+    assert "addressRows(known, active)" in view
+    assert 'row.outcome === "in-use"' in view
+
+
+def test_the_links_are_drawn_before_they_are_listed():
+    """One wire per link — thicker with what it carries, amber when it is losing
+    probes — because a node reached two ways is a shape, and a table of rows
+    never showed it as one."""
+    view = _nodeview_js()
+    assert "wiresHTML(view)" in view
+    assert 'class="nv-wire' in view
+    assert "stroke-width=" in view
+    # Colour is never the only signal: an amber wire says so in words too.
+    assert '"% lost"' in view
+    # And the drawing is bounded — the list below still carries every link.
+    assert "MAX_WIRES" in view
+
+
+def test_the_primary_actions_stay_out_of_the_menu():
+    """An overflow menu is where secondary actions belong and where primary ones
+    go to be never found. Message, fleet and ping are buttons; copy, retry,
+    invite and forget are behind the kebab."""
+    view = _nodeview_js()
+    row = view.split("actionsHTML(view, extras, options){")[1].split("\n  },")[0]
+    menu = view.split("menuHTML(view, extras){")[1].split("\n  },")[0]
+    for visible in ('data-nv-act="message"', 'data-nv-act="ping"',
+                    'data-nv-act="fleet"'):
+        assert visible in row, visible
+        assert visible not in menu, visible
+    for hidden in ('data-nv-act="forget"', 'data-nv-act="retry-all"',
+                   'data-nv-act="invite"'):
+        assert hidden in menu, hidden
+        assert hidden not in row, hidden
+    # A destructive action asks before it happens, wherever it is drawn.
+    assert "confirmAction({" in view.split("async forget(")[1]
+
+
+def test_the_relationship_is_read_before_the_numbers():
+    """"It can drive this console" is the reason to open the card at all, and it
+    used to be a row two thirds of the way down a table."""
+    view = _nodeview_js()
+    order = view.split("render(view, extras, options){")[1].split("\n  },")[0]
+    assert order.index("relationHTML") < order.index("linksHTML")
+    assert order.index("headerHTML") < order.index("relationHTML")
+    # The two fleet directions are independent and are never one summary.
+    body = view.split("relationHTML(view, extras, options){")[1].split("\n  },")[0]
+    assert "fleet.caps" in body and "fleet.operator_caps" in body
+
+
+def test_the_card_repaints_on_a_change_but_not_faster_than_its_floor():
+    """One repaint is five requests. The stream's frame bounds events at ten a
+    second, which would be fifty calls a second here."""
+    view = _nodeview_js()
+    assert 'EVENTS.on(["links", "nodes", "names"]' in view
+    assert "REREAD_FLOOR" in view
+    # And never while the menu is open — replacing the panel under the finger
+    # that opened it is worse than being a beat late.
+    assert 'MENU.open === "nv-menu"' in view
+    # setHTML, so a repaint that changes nothing does not swallow a click.
+    assert "setHTML(element, this.render(" in view
+
+
+def _nodeview_js() -> str:
+    from src.webassets import nodeview
+    return nodeview.JS
+
+
 # ── the journeys from one app to another ────────────────────────────────────
 
 def test_every_page_mounts_the_same_view_and_hides_the_way_it_came():
@@ -316,6 +391,133 @@ def test_the_console_keeps_its_browser_preferences_in_the_browser():
     assert 'id="pref-open"' in webassets.INDEX_HTML and 'id="pref-theme"' in webassets.INDEX_HTML
     assert 'localStorage.getItem("nmesh_open_mode")' in webassets.ui.JS
     assert "/api/pref" not in webassets.APP_JS
+
+
+# ── driving another node ────────────────────────────────────────────────────
+# One question the console must never get wrong: which machine is this control
+# pointing at. Three things make the answer reliable, and each is checked here.
+
+def test_the_context_bar_is_written_once_and_shown_on_every_page():
+    """Three pages saying "you are managing X" three times is three chances for
+    one of them to say it differently."""
+    assert 'id="ctx-bar"' in webassets.ui.CTX_BAR
+    for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
+        assert webassets.ui.CTX_BAR.strip() in html
+        # Once: a page carrying a second one of its own is the drift this
+        # shared constant exists to stop.
+        assert html.count('id="ctx-bar"') == 1
+
+
+def test_an_app_that_cannot_be_driven_remotely_says_so():
+    """A managed node refuses `/api/chat/` and `/api/fleet/` by design. The page
+    still shows the bar — hiding it would be the one thing worse — and the bar
+    says what it can and cannot do."""
+    for html in (webassets.CHAT_HTML, webassets.FLEET_HTML):
+        assert "data-ctx-local=" in html
+    assert "data-ctx-local=" not in webassets.INDEX_HTML
+
+
+def test_the_calls_a_managed_node_refuses_are_never_addressed_to_it():
+    """The refusal list is written on both sides. Sending the header anyway
+    would turn a designed refusal into a 403 every page has to explain."""
+    from src.apps.fleet import _CONSOLE_DENIED
+    for prefix in _CONSOLE_DENIED:
+        assert f'"{prefix}"' in webassets.ui.JS, prefix
+    # Signing in and out are this console's own, whatever it is driving.
+    assert '"/api/login"' in webassets.ui.JS and '"/api/logout"' in webassets.ui.JS
+
+
+def test_a_reply_from_the_node_we_left_cannot_paint_over_the_one_we_entered():
+    """The switch has to be atomic. A request records the epoch it was made in
+    and its reply is dropped if that moved — otherwise a slow answer from the
+    old machine lands under the new machine's name, and with auto-refresh off it
+    stays there."""
+    assert "class StaleContext" in webassets.ui.JS
+    assert "CONTEXT.epoch !== at" in webassets.ui.JS
+    # The one place that would otherwise report it as the node being down.
+    assert "isStale(error)" in webassets.APP_JS
+
+
+def test_everything_the_console_holds_is_dropped_on_a_switch():
+    """A cache nobody cleared is a value from the previous machine wearing the
+    new machine's name."""
+    body = webassets.APP_JS.split("CONTEXT.subscribe(")[1].split("});")[0]
+    for held in ("STATE", "PREVIOUS", "RATES", "MAP_NAMES", "UPDATE_OFFER",
+                 "TRANSPORT_FORM", "CONFIG_FIELDS", "NODEVIEW.apps",
+                 "stopTracePolling", "TICKING"):
+        assert held in body, held
+
+
+def test_a_view_inside_a_local_app_asks_this_node():
+    """Chat's panel and fleet's sheet ask "what is *my* link to this identity".
+    Answering from the machine being managed is a different question with the
+    same wording, and a confidently wrong answer."""
+    assert "local:true" in webassets.CHAT_JS
+    assert "local:true" in webassets.FLEET_JS
+    # And the view routes every call through one place, so a mount cannot half
+    # follow the context: `ask` is the only caller of the shared helpers.
+    from src.webassets import nodeview
+    body = nodeview.JS.replace("apiJson(path, method, body, {local:this.here})", "")
+    assert "ask(path, method, body)" in nodeview.JS
+    assert "apiJson(" not in body
+    assert re.search(r"\bawait api\(", body) is None
+
+
+# ── changes, the moment they happen ─────────────────────────────────────────
+
+def test_the_page_listens_rather_than_asking_whether_anything_moved():
+    """A console on a timer is either late or wasteful. The interval that
+    remains is for the numbers that never stop moving."""
+    assert "new EventSource(\"/api/events\")" in webassets.ui.JS
+    assert 'EVENTS.on(["links", "nodes", "names", "reach"]' in webassets.APP_JS
+
+
+def test_a_burst_of_changes_is_one_repaint():
+    """Ten a second reads as instant; a hundred is a page that fights the
+    pointer while saying nothing new."""
+    assert "FRAME: 100" in webassets.ui.JS
+    frame = webassets.ui.JS.split("schedule(){")[1].split("},")[0]
+    assert "if(this.timer) return" in frame
+    # And one handler runs once per frame however many topics named it.
+    flush = webassets.ui.JS.split("flush(){")[1].split("\n  },")[0]
+    assert "called.has(fn)" in flush
+
+
+def test_a_change_never_samples_the_throughput():
+    """A rate is a difference over a known time. Sampling it whenever a link
+    happened to come up would draw the mesh's mood, not its throughput."""
+    assert "tick(false)" in webassets.APP_JS
+    assert "if(sample === false) STATE._rates = RATE_NOW;" in webassets.APP_JS
+
+
+def test_no_page_carries_a_refresh_control_with_nothing_behind_it():
+    """Fleet's top bar had the markup and polled at a rate of its own. A control
+    that does nothing is worse than no control."""
+    for html_name, script_name in (("INDEX_HTML", "APP_JS"),
+                                   ("FLEET_HTML", "FLEET_JS")):
+        html = getattr(webassets, html_name)
+        if 'id="refresh-secs"' not in html:
+            continue
+        assert "REFRESH.mount(" in getattr(webassets, script_name), script_name
+
+
+def test_a_terminal_keeps_its_own_cadence():
+    """A shell is not a status page, and the interval in the top bar can be set
+    to zero. Freezing somebody's terminal with it is not a preference."""
+    assert "SHELL_TICK" in webassets.FLEET_JS
+    poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert "pollShell" not in poll
+
+
+def test_driving_another_node_keeps_the_cadence():
+    """The relay carries one bounded request and its answer, never a connection
+    held open — so the page must not sit waiting on a stream."""
+    start = webassets.ui.JS.split("start(){")[1].split("\n  },")[0]
+    assert "CONTEXT.remote" in start
+    # And the control says which of the two it is on, rather than showing a dot
+    # that only ever means "on".
+    assert "EVENTS.live" in webassets.ui.JS
+    assert 'id="refresh-live"' in webassets.INDEX_HTML
 
 
 # ── layout that cannot overflow ─────────────────────────────────────────────

@@ -1028,6 +1028,10 @@ class _Peer:
         # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
         # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
         self.relay_only: bool = False
+        # A second link to a node we already reach, opened to measure it
+        # (address steering). It is a duplicate on purpose and the pass that
+        # opened it closes the loser, so the duplicate reaper leaves it alone.
+        self.probation: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
@@ -1252,6 +1256,7 @@ class MeshNode:
                  identity_path: str | None = None,
                  cert_store_path: str | None = None,
                  session_store_path: str | None = None,
+                 pseudo_store_path: str | None = None,
                  app_storage_path: str | None = None,
                  app_store_dir: str | None = None,
                  release_dir: str | None = None,
@@ -1378,6 +1383,16 @@ class MeshNode:
             # restart — re-authenticated via the persisted cert store, so no
             # re-invitation is needed.
             self._routing.import_entries(restored.routing)
+        # Names, kept apart from the session blob (see PseudoStore). Restored
+        # before anything can rename this node, so `set_pseudo` below sees the
+        # timestamp of the claim we published last time and moves past it.
+        self._pseudo_store = None
+        self._pseudo_dirty = False
+        self._on_change = None        # see set_change_listener
+        if pseudo_store_path:
+            from .session_store import PseudoStore
+            self._pseudo_store = PseudoStore(pseudo_store_path, self._identity)
+            self._restore_pseudos(self._pseudo_store.load())
         transport_manager.on_new_connection = self._on_new_transport
         # UDP hole-punching state
         self._udp_server: 'UDPServer | None' = None
@@ -1508,6 +1523,7 @@ class MeshNode:
                     and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
                 self._extra_addrs.append(new)
         self._announce_addresses_soon("network-change")
+        self._note_change("reach")
 
     def _poke_net(self, reason: str) -> None:
         if self._net_monitor is not None:
@@ -2090,6 +2106,9 @@ class MeshNode:
                 if peer in self._peers:
                     self._peers.remove(peer)
         self._persist_state()
+        if existed:
+            self._note_change("nodes")
+            self._note_change("links")
         return existed
 
     async def _routed_ping(self, target: NodeID, timeout: float = 5.0) -> float | None:
@@ -2198,6 +2217,55 @@ class MeshNode:
             seen.add(peer.authenticated_id)
             out.append(peer)
         return out
+
+    # -- redundant links --------------------------------------------------
+    #
+    # Two nodes that dial each other at the same moment end up with two links
+    # each: same pair, same medium, both authenticated, both kept — because
+    # nothing ever looked. The console then shows one node twice on one port,
+    # the keepalive pays for both, and half the traffic goes down a link the
+    # other end is not using.
+    #
+    # Which of the two survives cannot be decided locally: if each end drops
+    # the other's, the pair is left with none. So it is decided from the two
+    # identities, which both ends already know — **the canonical link is the
+    # one dialled by the larger id**. Same rule as the hole punch's initiator
+    # (`_complete_punch`), for the same reason: one number, one answer, no
+    # exchange.
+    #
+    # Only same-scheme duplicates are collapsed. A node reached over both tcp
+    # and udp holds one link on each and that is the point of the design; two
+    # tcp links to one node is the accident.
+
+    def _redundant_links(self, peer: '_Peer') -> list['_Peer']:
+        """The links that ``peer``'s arrival makes redundant, if any."""
+        target = peer.authenticated_id
+        scheme = self._peer_scheme(peer)
+        if target is None or scheme is None or peer.probation:
+            return []
+        same = [p for p in self._peers
+                if p.authenticated_id == target and p.session is not None
+                and not p.relay_only and self._peer_scheme(p) == scheme]
+        if len(same) < 2:
+            return []
+        # A link being measured against another (address steering) is a second
+        # link on purpose, and the pass that opened it closes the loser itself.
+        if any(p.probation for p in same):
+            return []
+        we_dial = self._id.raw > target.raw
+        keep = next((p for p in same if p.is_client_side == we_dial), None)
+        if keep is None:
+            # Both links run the same way — we dialled twice, or were dialled
+            # twice. The far end sees the same pair from the other side and
+            # orders them the same way, so the older one is the agreed survivor.
+            keep = min(same, key=lambda p: p.connected_at)
+        return [p for p in same if p is not keep]
+
+    def _collapse_redundant_links(self, peer: '_Peer') -> None:
+        """Close whatever ``peer`` supersedes. Never raises, never awaits: it
+        is called from the handshake handlers, which run on the receive loop."""
+        for loser in self._redundant_links(peer):
+            self._spawn_bounded(self._safe_stop_peer(loser))
 
     def _live_neighbors(self) -> list[NodeID]:
         """Identities we hold a live authenticated link with, nearest first."""
@@ -2949,8 +3017,8 @@ class MeshNode:
                 self._peers.remove(peer)
             self._spawn_bounded(self._safe_stop_peer(peer))
 
-    async def _dial_uri(self, node_id: NodeID, uri: str,
-                        timeout: float) -> _Peer | None:
+    async def _dial_uri(self, node_id: NodeID, uri: str, timeout: float,
+                        *, probe: bool = False) -> _Peer | None:
         """Dial one address of one node and require it to prove who it is.
 
         The single place an outgoing link is opened: the routing walk, the
@@ -2958,6 +3026,10 @@ class MeshNode:
         come through here, so they all apply the same timeout, tear a failed
         attempt down the same way, and — the reason it matters to an operator —
         record the same outcome against the same address.
+
+        ``probe`` marks the link as a deliberate second one to a node we already
+        reach (address steering): the caller closes the loser itself, so the
+        duplicate reaper must not choose for it.
 
         Returns the authenticated peer, or ``None``. Never raises: a dial that
         fails is the normal case on a real network, not an error."""
@@ -2984,6 +3056,7 @@ class MeshNode:
                 transport = await self._transport_manager.connect(uri)
                 peer = _Peer(transport, is_client_side=True)
                 peer.on_dead = self._reap_peer
+                peer.probation = probe   # set before the handshake can complete
                 peer.total = self._metrics.total
                 peer.trace = self.trace
                 peer.remote_addr = uri
@@ -3060,7 +3133,42 @@ class MeshNode:
             pass
         self._forget_hints_via(peer.authenticated_id)
         self._poke_net("peer-lost")
+        self._note_change("links")
         self._wake_neighbor_maintenance()
+
+    # -- telling a console what moved -------------------------------------
+    #
+    # A console that polls is a console that is either late or wasteful: at two
+    # seconds a link that came up is invisible for two seconds, and at a tenth
+    # of a second it asks two hundred times for nothing. So the node says when
+    # something structural moved and the console reads only then.
+    #
+    # Deliberately only *that something moved*, never what: this runs on the
+    # receive loop, at the moment a link comes up or goes down, so it must cost
+    # a set and a notify — never a snapshot. What changed is read afterwards, by
+    # whoever cared, off this thread.
+    #
+    # Structural only. Latency, jitter and throughput move constantly and by
+    # tiny amounts; they are read on a cadence instead, because a repaint per
+    # measurement is a page that fights the pointer for no new information.
+
+    def set_change_listener(self, callback) -> None:
+        """Call ``callback(topic)`` whenever something structural moves.
+
+        Topics: ``links`` (a link came up or went down), ``nodes`` (the routing
+        table gained or lost one), ``names`` (a pseudo was learned or changed),
+        ``reach`` (this node's own addressing moved). ``None`` unhooks."""
+        self._on_change = callback
+
+    def _note_change(self, topic: str) -> None:
+        """Never raises, never blocks: a listener's bug is not the node's."""
+        callback = self._on_change
+        if callback is None:
+            return
+        try:
+            callback(topic)
+        except Exception:
+            pass
 
     def _persist_state(self) -> None:
         """Mark the persisted state dirty; a background task does the writing.
@@ -3079,7 +3187,8 @@ class MeshNode:
         self._ensure_state_writer()
 
     def _ensure_state_writer(self) -> None:
-        if self._session_store is None and not self._cert_store_path:
+        if (self._session_store is None and not self._cert_store_path
+                and self._pseudo_store is None):
             return
         if self._state_task is None or self._state_task.done():
             try:
@@ -3090,18 +3199,22 @@ class MeshNode:
                 self._state_task = None
                 self._write_state_now()
                 self._write_certs_now()
+                self._write_pseudos_now()
 
     async def _state_writer_loop(self) -> None:
         """Write what has changed, at most every `_STATE_WRITE_INTERVAL`.
 
         Off the loop thread (`to_thread`): both writes end in an `fsync`, and
         the medium may be a slow one."""
-        while self._running or self._state_dirty or self._certs_dirty:
+        while (self._running or self._state_dirty or self._certs_dirty
+               or self._pseudo_dirty):
             await asyncio.sleep(_STATE_WRITE_INTERVAL)
             if self._state_dirty:
                 await asyncio.to_thread(self._write_state_now)
             if self._certs_dirty:
                 await asyncio.to_thread(self._write_certs_now)
+            if self._pseudo_dirty:
+                await asyncio.to_thread(self._write_pseudos_now)
 
     def _write_state_now(self) -> None:
         if self._session_store is None:
@@ -3132,6 +3245,8 @@ class MeshNode:
             self._write_state_now()
         if self._certs_dirty:
             self._write_certs_now()
+        if self._pseudo_dirty:
+            self._write_pseudos_now()
 
     # -- console / management surface -------------------------------------
     # These read or mutate node state and are meant to be driven from the web
@@ -3763,7 +3878,8 @@ class MeshNode:
         current = await self._measure_peer(peer)
         if current is None:
             return "current link did not answer"
-        candidate = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT)
+        candidate = await self._dial_uri(node_id, uri, _RETRY_DIAL_TIMEOUT,
+                                         probe=True)
         if candidate is None:
             return "candidate did not connect"
         better = False
@@ -3778,6 +3894,7 @@ class MeshNode:
                       >= _ADDR_STEER_MIN_GAIN)
         finally:
             loser = peer if better else candidate
+            candidate.probation = False   # whichever survives is a link like any other
             try:
                 await loser.stop()
             except Exception:
@@ -4321,6 +4438,7 @@ class MeshNode:
             pass
         if peer in self._peers:
             self._peers.remove(peer)
+            self._note_change("links")
 
     def console_invite_block(self) -> str:
         """A shareable join bundle: base64 JSON with a fresh invite code and
@@ -5824,6 +5942,39 @@ class MeshNode:
         """This node's own pseudo, or "" if it has none."""
         return self._pseudo
 
+    def _restore_pseudos(self, claims) -> None:
+        """Refill the book from disk, re-verifying every claim on the way in.
+
+        A claim off our own disk gets exactly the gate a claim off the network
+        gets — the file is not a trusted input, and the signature is the only
+        thing that makes a name mean anything. Our own claim, if it is in there,
+        also restores what this node is *called*: the name was published under a
+        signature we made, and re-adopting it is how a restart stops being a
+        rename to nothing on every screen that had learned it."""
+        for raw in claims:
+            claim = _dir_parse_claim(raw, self._identity.verify)
+            if claim is None:
+                continue
+            self._pseudo_book.offer(claim, bytes(raw))
+            if claim["node_id"] == self._id.raw:
+                self._pseudo, self._pseudo_claim = claim["pseudo"], bytes(raw)
+
+    def _persist_pseudos(self) -> None:
+        """Mark the name cache dirty; the state writer does the writing."""
+        if self._pseudo_store is None:
+            return
+        self._pseudo_dirty = True
+        self._ensure_state_writer()
+
+    def _write_pseudos_now(self) -> None:
+        if self._pseudo_store is None:
+            return
+        self._pseudo_dirty = False
+        try:
+            self._pseudo_store.save(self._pseudo_book.claims())
+        except Exception:
+            pass
+
     def set_pseudo(self, pseudo: str) -> str:
         """Adopt ``pseudo`` as this node's name and sign a fresh claim for it.
 
@@ -5838,6 +5989,7 @@ class MeshNode:
             # does not — see Docs/Pseudos/guide.
             self._pseudo, self._pseudo_claim = "", None
             self._pseudo_book.forget(self._id.raw)
+            self._persist_pseudos()
             return ""
         wanted = _pseudo_canonical(pseudo)
         # Strictly forward, even when two renames land in the same second:
@@ -5854,6 +6006,8 @@ class MeshNode:
             raise PseudoDirError("could not verify our own claim")   # cannot read
         self._pseudo, self._pseudo_claim = wanted, claim
         self._pseudo_book.offer(parsed, claim)
+        self._persist_pseudos()
+        self._note_change("names")
         self._announce_own_pseudo()
         return wanted
 
@@ -5898,7 +6052,11 @@ class MeshNode:
         if claim is None:
             self._charge_abuse(peer)
             return None
-        return claim if self._pseudo_book.offer(claim, bytes(raw)) else None
+        if not self._pseudo_book.offer(claim, bytes(raw)):
+            return None
+        self._persist_pseudos()   # a name learned once is a name kept
+        self._note_change("names")
+        return claim
 
     def _spawn_bounded(self, coro) -> None:
         """Run a coroutine detached from the caller.
@@ -6116,7 +6274,8 @@ class MeshNode:
             claim = _dir_parse_claim(raw, self._identity.verify)
             if claim is None or claim["key"] != key:
                 return
-            self._pseudo_book.offer(claim, raw)     # cache → this node re-serves it
+            if self._pseudo_book.offer(claim, raw):  # cache → this node re-serves it
+                self._persist_pseudos()
             found[claim["node_id"].hex()] = {"id": claim["node_id"].hex(),
                                              "pseudo": claim["pseudo"],
                                              "ts": claim["ts"], "match": 0}
@@ -6486,6 +6645,9 @@ class MeshNode:
         self._routing.add(claimed_id, [], bob_dsa_pub)
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
+        self._collapse_redundant_links(peer)
+        self._note_change("links")
+        self._note_change("nodes")
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
@@ -6576,6 +6738,9 @@ class MeshNode:
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
+        self._collapse_redundant_links(peer)
+        self._note_change("links")
+        self._note_change("nodes")
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases

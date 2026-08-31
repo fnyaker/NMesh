@@ -28,8 +28,8 @@ from .. import app_api
 from ..node_id import NodeID
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, EnrolAnswered,
-    EnrolRequested, Failure, NodeAdopted, Revoked, ScanReceived, ShellClosed,
-    ShellOpened, ShellOutput, StatusReceived,
+    EnrolRequested, Failure, InviteIssued, NodeAdopted, Revoked, ScanReceived,
+    ShellClosed, ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import CAP_DESCRIPTIONS, CAPABILITIES, clean_caps
 
@@ -38,6 +38,11 @@ MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
 MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
 MAX_UPDATES = 64              # per-node update progress kept for the UI
+MAX_INVITES = 32              # invitations held for the page, one per node
+# How long a caller waits for a managed node to answer with an invitation. A
+# mesh hop and one signature, not a job: long enough for a slow path, short
+# enough that a page is never left hanging on a node that went away.
+_INVITE_WAIT = 20.0
 
 
 def _dump(document) -> bytes:
@@ -80,6 +85,10 @@ class FleetBridge:
         self._log: deque = deque(maxlen=MAX_LOG)
         self._log_seq = 0
         self._scans: dict[str, dict] = {}          # node hex -> last scan result
+        # node hex -> the last invitation that node minted for us. Held here
+        # rather than logged: the code *is* the secret, and an activity log is
+        # a long-lived list on a screen anybody walking past can read.
+        self._invites: "OrderedDict[str, dict]" = OrderedDict()
         # node hex -> where its update has got to. An update runs for minutes;
         # the node list should say so rather than leaving a scrolling log as the
         # only sign of life.
@@ -181,6 +190,13 @@ class FleetBridge:
             for bad in event.rejected:
                 self._say("warn", f"{short}… could not understand target "
                                   f"{bad!r}", node_hex)
+        elif isinstance(event, InviteIssued):
+            self._record_invite(node_hex, event)
+            self._finish(event.rid, "ok", "invitation issued")
+            # What it is worth, never what it is: the code goes to the dialog
+            # that asked for it and nowhere else.
+            self._say("ok", f"{short}… issued an invitation to its mesh, valid "
+                            f"{_window(event.ttl)}", node_hex)
         elif isinstance(event, ShellOpened):
             self._finish(event.rid, "ok")
             self._open_shell_record(event.sid.hex(), node_hex)
@@ -230,6 +246,41 @@ class FleetBridge:
                 return
             job.update(state=state, detail=detail[:256], at=time.time())
             self._bump()
+
+    def _record_invite(self, node_hex: str, event) -> None:
+        """Hold one invitation per node, with its QR drawn once.
+
+        Once, because the snapshot is polled: an SVG re-encoded on every poll is
+        the same picture paid for again and again."""
+        svg = ""
+        if event.ticket:
+            try:
+                from .. import qr
+                svg = qr.svg_for(event.ticket)
+            except Exception:
+                svg = ""            # a ticket without a picture is still a ticket
+        with self._lock:
+            while len(self._invites) >= MAX_INVITES:
+                self._invites.popitem(last=False)
+            self._invites[node_hex] = {
+                "node": node_hex, "at": time.time(), "rid": event.rid,
+                "uris": list(event.uris), "code": event.code,
+                "ticket": event.ticket, "qr_svg": svg,
+                "expires_at": event.expires_at, "ttl": event.ttl,
+            }
+            self._bump()
+
+    def take_invite(self, node_hex: str) -> dict | None:
+        """Hand the invitation to the page that asked, and forget it.
+
+        Read once on purpose. It is a single-use secret, and a console that
+        keeps re-serving it to every poll is a console that leaves it on the
+        screen of whoever opens the fleet page next."""
+        with self._lock:
+            invite = self._invites.pop(str(node_hex), None)
+            if invite is not None:
+                self._bump()
+        return invite
 
     def _open_shell_record(self, sid: str, node_hex: str) -> None:
         with self._lock:
@@ -335,6 +386,13 @@ class FleetBridge:
             "request", "Ask a node we already manage for extra rights",
             [app_api.param("node", "node"), app_api.param("caps", "tokens")],
             changes=True),
+        app_api.operation(
+            "invite", "Have a node we manage mint an invitation to its mesh",
+            [app_api.param("node", "node"),
+             app_api.param("ttl", "count", required=False, default=0,
+                           help="seconds it stays live; 0 takes the default"),
+             app_api.param("ticket", "flag", required=False, default=False)],
+            changes=True),
     )
 
     def api_relation(self, node: str) -> dict:
@@ -368,6 +426,34 @@ class FleetBridge:
 
     def api_request(self, node: str, caps) -> dict:
         return {"sent": bool(self.request_caps(node, caps))}
+
+    def api_invite(self, node: str, ttl=0, ticket=False) -> dict:
+        """Ask, then wait for the answer to come back over the mesh.
+
+        The other operations here return "sent" because a human on the far side
+        decides what happens next. This one has no human in it: the node either
+        holds the right or it does not, and a caller handed "sent" would have
+        nothing to show. So the call waits for the reply it caused — bounded,
+        and identified by the request id, so a reply to somebody else's ask can
+        never be handed back here."""
+        rid = self.invite(node, ttl or None, bool(ticket))
+        deadline = time.monotonic() + _INVITE_WAIT
+        while time.monotonic() < deadline:
+            invite = self.take_invite(node)
+            if invite is not None and invite.get("rid") == rid:
+                return invite
+            failure = self._job_failure(rid)
+            if failure is not None:
+                return {"error": failure}
+            time.sleep(0.05)
+        return {"error": "that node did not answer"}
+
+    def _job_failure(self, rid: str):
+        with self._lock:
+            job = self._jobs.get(rid)
+            if job is None or job.get("state") not in ("failed", "refused"):
+                return None
+            return job.get("detail") or "refused"
 
     def enrol(self, node_hex: str, caps, label: str = "") -> bool:
         caps = clean_caps(caps)
@@ -513,6 +599,10 @@ class FleetBridge:
     def update(self, node_hex: str) -> str:
         return self._job(self._call(self._app.request_update(
             self._node(node_hex))), "update", node_hex)
+
+    def invite(self, node_hex: str, ttl=None, ticket: bool = False) -> str:
+        return self._job(self._call(self._app.request_invite(
+            self._node(node_hex), ttl=ttl, ticket=ticket)), "invite", node_hex)
 
     def scan(self, node_hex: str, targets=None) -> str:
         return self._job(self._call(self._app.request_scan(
@@ -673,6 +763,21 @@ class FleetBridge:
         if isinstance(key_id, str) and key_id:
             return None, self._app.state.ssh_key_material(key_id)
         return (key_path or None), None
+
+
+def _window(seconds) -> str:
+    """A lifetime as an operator would say it: "5 minutes", "6 hours"."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "a short while"
+    if total >= 3600:
+        hours = total // 3600
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+    if total >= 60:
+        minutes = total // 60
+        return f"{minutes} minute" + ("s" if minutes != 1 else "")
+    return f"{max(total, 1)} seconds"
 
 
 def _describe(networks, targets=None) -> str:

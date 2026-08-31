@@ -17,6 +17,8 @@ generic names, and a page that redefines one of them (this page used to redefine
 split exists to prevent.
 """
 
+from . import ui
+
 CHAT_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -29,7 +31,8 @@ CHAT_HTML = """<!doctype html>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/chat.css">
 </head>
-<body data-app-name="NMesh Chat">
+<body data-app-name="NMesh Chat"
+      data-ctx-local="Chat runs on this node — its conversations are not part of managing another.">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
@@ -45,7 +48,7 @@ CHAT_HTML = """<!doctype html>
 </div>
 
 <a class="skip" href="#main">Skip to the conversation</a>
-
+""" + ui.CTX_BAR + """
 <div id="app" class="ch hidden" data-view="list">
 
   <!-- ── the conversation list: this page's navigation ──────────────────── -->
@@ -548,6 +551,7 @@ const initials = (s) => { s = (s || "").trim(); return s ? s.slice(0, 2).toUpper
 
 SESSION.onLost = () => {
   if(timer){ clearInterval(timer); timer = null; }
+  EVENTS.stop();
   $("app").classList.add("hidden"); $("login").classList.remove("hidden");
 };
 SESSION.load();
@@ -1152,6 +1156,9 @@ async function showPeer(id){
   $("peer-panel").hidden = false;
   view("peer");
   await NODEVIEW.mount("peer-view", id, {
+    // "What is my link to this person" is this node's question, whoever the
+    // console happens to be managing.
+    local:true,
     hide:["chat"],                       // you are already in the conversation
     onGone(){ closePeerPanel(); closeConv(); poll(); },
   });
@@ -1290,6 +1297,12 @@ async function enter(token){
   if(token) SESSION.set(token);
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   mountShell();
+  // The bar says which node the console is driving; this page still drives
+  // this one. Confirming drops a claim the local console no longer honours.
+  CONTEXT.confirm();
+  // The conversation is this app's own business and keeps its own poll; the
+  // node panel beside it is about links, and links are told rather than asked.
+  EVENTS.start();
   autoGrow();
   await poll();
   if(timer) clearInterval(timer);

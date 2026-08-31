@@ -88,8 +88,80 @@ its own console** over loopback. Nothing is reimplemented: same routes, same
 caps, same lockout. Full detail, bounds and refused paths:
 [`Docs/Apps/fleet`](../Apps/fleet).
 
-A warning strip stays visible for as long as you are driving another machine,
-and `Sign out` always returns to the local console.
+### What makes the switch reliable
+
+Three things, because "which machine am I on" is the one question a console must
+never get wrong.
+
+- **The switch is atomic, not eventual.** Every context carries an *epoch*, and
+  a request records the epoch it was made in. A reply whose epoch has moved is
+  dropped rather than painted: without it, a slow answer from the machine you
+  just left lands under the name of the one you just entered — and with
+  auto-refresh off, it stays there. Everything the page was holding (the state
+  snapshot, the throughput window, the map's names, the transport form, the
+  configuration fields, what the apps offer, the trace poll) is dropped at the
+  same moment, by a subscription rather than by a list somebody has to remember
+  to extend.
+
+- **The strip is on every page.** It is written once (`ui.CTX_BAR`) and embedded
+  by the console, chat and fleet, so the three cannot say it differently. It
+  stays for as long as you are driving another machine, `Sign out` hands the
+  remote session back and returns here, and the context survives a page reload —
+  checked against the console that holds the session before it is believed.
+
+- **What cannot be driven remotely says so, rather than failing.** A managed
+  node refuses `/api/fleet/`, `/api/remote/` and `/api/chat/` by design (a
+  managed node is not a jump host; the proxy must not drive the proxy; somebody
+  else's conversations were never part of managing their machine). The page
+  knows the same list, so those calls are never *addressed* to it — and the
+  strip on `/chat` and `/fleet` says in words that the app runs here. A view
+  mounted inside one of those apps asks this node too: *"what is my link to this
+  person"* is a different question depending on who "my" is, and answering it
+  from the machine being managed would be a confidently wrong answer rather than
+  an error.
+
+## The page is told, it does not ask
+
+The console used to read the node on a timer. At two seconds a link that came
+up was invisible for two seconds; at a tenth of a second it was two hundred
+questions a minute answered "nothing". `GET /api/events` inverts it: the node
+says when something moved, and the page reads only then.
+
+**Only that something moved** — never what. The frame names topics
+(`links`, `nodes`, `names`, `reach`) and the page reads the state it already
+knows how to read. A second description of a node travelling down a second
+channel is two things to keep in step.
+
+**Structure, not measurement.** A link that came up either did or did not, and
+wants to be instant. Latency, jitter, throughput and load move constantly and by
+tiny amounts, so they stay on the interval — a repaint per measurement says
+nothing new and costs the whole list. The number in the top bar is therefore
+*that* interval, and the dot beside it says whether the stream is live.
+
+**A frame, not a firehose.** One stream wakes at most ten times a second
+(`_STREAM_FRAME`), and every change inside a frame is answered by one repaint on
+the page (`EVENTS.FRAME`), each handler running once however many topics named
+it. Forty link events between two reads is one message naming one topic.
+
+**Bounds.** At most `_MAX_STREAMS` open at once (each is a thread of the
+console's server while a page is open) and the hub's topic table is capped. A
+comment goes down the wire every `_STREAM_PING` seconds: it keeps an idle
+connection from being reaped, and it is how a stream finds out the page
+reloaded — nobody closed that socket on this side, and it is the write that
+discovers it. Stopping the console unhooks the node and releases whoever is
+waiting.
+
+**Local by construction.** A stream is a connection held open, and the fleet
+relay carries one bounded request and its answer. Under a remote context the
+endpoint answers **409** and the page keeps its cadence, saying so rather than
+waiting on a stream that will never speak.
+
+**Every page, one control.** `/fleet` used to carry the interval's markup with
+nothing behind it while polling at a rate of its own; a control that does
+nothing is worse than no control, so it drives that page's poll too. The
+**shell** is the exception and keeps its own faster cadence, running only while
+a session is open: a terminal is not a status page, and the interval can be set
+to zero.
 
 ## Watching the mesh live
 
@@ -128,19 +200,46 @@ and `Sign out` always returns to the local console.
   beside the conversation in chat, fleet's sheet, or the `/node#<id>` page in a
   window or a tab. It offers only what the installed apps make possible
   (`Docs/AppAPI/guide`) and hides the button that leads back where you came
-  from: from chat, no "Message"; from fleet, no fleet button. It shows the real
-  link: local and remote endpoints as the medium sees them, direction, duration,
-  latency (last / best / worst / jitter / loss, with the sample count), the
-  transport's own counters, and **the state of every known address** — in
-  service, unreachable, never tried. Every row carries a **Retry**, and the
-  table a **Retry all**: one precise address or all of them are dialled again,
-  and the answer says what each one did. Only addresses already known for that
-  identity are dialled.
-  - The order is the order of the questions: who this is and where we stand, the
-    four numbers that say whether the link is healthy, what each side is allowed
-    to do to the other, then the facts. **Addresses and counters are folded**
-    (with their count in the title) — an unfolded address table used to push the
-    answers below the fold.
+  from: from chat, no "Message"; from fleet, no fleet button.
+
+  It is laid out as the three questions somebody opens it with, in that order.
+
+  1. **Who is this, and what are we to each other?** The name, the id under it,
+     and at most two badges — how the node is reached, and whether its key is
+     known. Then the relationship in **sentences**: in your contacts, what you
+     hold on it, what it holds on *this* node. Those last two are independent
+     and are never one summary; "it can drive this console" is the reason to
+     open the card at all, and it used to be a row two thirds of the way down a
+     table.
+  2. **Is the link any good?** The links are **drawn** before they are listed:
+     one wire per link, thicker with what it carries, amber when it is losing
+     probes — and saying so in words, because colour is never the only signal.
+     A node reached over `tcp` **and** `udp` at once is the normal case here and
+     a list of rows never showed it as one shape. Under the drawing, the four
+     numbers of the *fastest* link (the jitter of a link nobody uses answers no
+     question), then one expandable row per link: scheme, endpoint, latency,
+     uptime — opening onto its endpoints as the medium sees them, its direction,
+     what it carried, its probes, and the transport's **own** counters under
+     their own names.
+  3. **Everything else, folded**, with its count in the title so nobody has to
+     open a fold to find out it is empty: **the state of every known address**
+     (in service, unreachable, never tried) with a **Retry** on each row, and
+     the identity and session facts.
+
+  **Actions** follow the same rule. The one or two anybody came for stay visible
+  — message them, open them in fleet, ping them — and the rest go behind the
+  **⋯**: copy the identity, open it in its own window, add to contacts, mint an
+  invitation on its behalf (with the `invite` right), retry every address,
+  forget the node. An overflow menu is where secondary actions belong and where
+  primary ones go to be never found, so nothing anybody needs often is put in
+  it.
+
+  The card **repaints when a link moves**, off the same change stream as the
+  rest of the console — with a floor of its own on top of the stream's frame,
+  because one repaint here is five requests — and never while the ⋯ is open:
+  replacing the panel under the finger that opened it is worse than being a beat
+  late.
+
   - **Requesting fleet rights** asks *which ones*, with what each allows:
     "access" on its own is not a question anyone can answer. Nothing is granted
     by asking — the request lands on the other machine and a human there decides,
@@ -242,6 +341,7 @@ works on a machine with no internet.
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**) |
+| GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
@@ -272,7 +372,7 @@ works on a machine with no internet.
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
 | POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
 | GET     | `/api/pseudo`      | this node's name, id and the length limit; `?q=…` searches names instead (`&wide=1` also asks the network) |
-| POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file |
+| POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
 | GET     | `/api/transports` | what each transport declares it takes, with the values in force |
@@ -282,6 +382,7 @@ works on a machine with no internet.
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
 | POST    | `/api/fleet/caps-set` | `{node, caps}` → an operator's rights **on this node**. The only place a right is added: decided by a human, here |
 | POST    | `/api/fleet/caps-request` / `caps-drop` | `{node, caps}` → request (the target must approve) / hand back (immediate) a right on a managed node |
+| POST    | `/api/fleet/invite` | `{node, ttl?, ticket?}` → an invitation minted by that node, on its behalf (capability `invite`). Waits for the answer: what comes back is a single-use code shown once |
 | POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
@@ -292,6 +393,7 @@ works on a machine with no internet.
 | POST    | `/api/releases/trust` / `untrust` / `auto` | pin a publisher key, take it back, or let their releases install by themselves |
 | GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
+| POST    | `/api/restart`   | `{confirm:true}` — restarts the node. **409** with the reason when nothing would start it again |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
 | POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) |
@@ -379,9 +481,13 @@ a runner that hosts a single app itself.
 Two cards. The first sets **what this node is called** — the name shown beside
 its id everywhere, in the console and in every app. Saving does two things: the
 node signs a new claim and announces it to the mesh straight away, and the name
-is written to the configuration file so a restart keeps it. If the file cannot
-be written the rename still stands for this run, and the page says so rather
-than pretending otherwise.
+is written to the configuration file when there is one.
+
+The node keeps the name across a restart either way: it signed the claim, and
+its name store holds it (see [`Docs/Pseudos/guide`](../Pseudos/guide)). What the
+file adds is that the *declared* value agrees — a configuration still naming the
+old node wins at the next start. If that write fails the rename still stands,
+and the page says so rather than pretending otherwise.
 
 A name the network would refuse is refused here, in the same words: at most 50
 characters, nothing invisible or directional, plain spaces only. See
@@ -420,6 +526,22 @@ new code is the code that runs — but only when a service manager is there to
 bring it back (`NMESH_SERVICE_MANAGED`). Without one, the node stays up and the
 page says to restart it yourself rather than pretending. Unattended installs
 from the mesh never restart at all.
+
+### Restarting on demand (⋯ → *Restart this node*)
+
+The same mechanism, asked for outright rather than by an update: the node stops
+its links properly and exits, and the service manager starts it again. It is in
+the **⋯** menu because it is a node action rather than a section of one, and
+because from there it is one click away wherever the operator is.
+
+The same gate applies, for the same reason — a process cannot restart itself,
+only exit and be started again. With nothing watching, the item is disabled and
+says why underneath; `POST /api/restart` answers **409** with the reason rather
+than "restarting" for a node that would simply stop.
+
+Under a remote context it reaches the *managed* node's console, which is the
+point: it is that machine's service manager that answers for it. The console
+returns to the local node while the other one is away.
 
 What is replaced, what is not, and the refusal cases (container, non-writable
 directory): [`../Setup/guide`](../Setup/guide).

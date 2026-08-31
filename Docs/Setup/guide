@@ -42,7 +42,8 @@ another node's state travels.
 ### The node has an account of its own
 
 The state directory holds the node's **identity key**, its encrypted session
-store and the console password's hash. Running it under the account of whoever
+store, its cache of the names it has learned (`node.names`) and the console
+password's hash. Running it under the account of whoever
 installed it hands all of that to every process of that account — the browser
 included.
 
