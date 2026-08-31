@@ -191,19 +191,46 @@ waiting on a stream that will never speak.
   beside the conversation in chat, fleet's sheet, or the `/node#<id>` page in a
   window or a tab. It offers only what the installed apps make possible
   (`Docs/AppAPI/guide`) and hides the button that leads back where you came
-  from: from chat, no "Message"; from fleet, no fleet button. It shows the real
-  link: local and remote endpoints as the medium sees them, direction, duration,
-  latency (last / best / worst / jitter / loss, with the sample count), the
-  transport's own counters, and **the state of every known address** — in
-  service, unreachable, never tried. Every row carries a **Retry**, and the
-  table a **Retry all**: one precise address or all of them are dialled again,
-  and the answer says what each one did. Only addresses already known for that
-  identity are dialled.
-  - The order is the order of the questions: who this is and where we stand, the
-    four numbers that say whether the link is healthy, what each side is allowed
-    to do to the other, then the facts. **Addresses and counters are folded**
-    (with their count in the title) — an unfolded address table used to push the
-    answers below the fold.
+  from: from chat, no "Message"; from fleet, no fleet button.
+
+  It is laid out as the three questions somebody opens it with, in that order.
+
+  1. **Who is this, and what are we to each other?** The name, the id under it,
+     and at most two badges — how the node is reached, and whether its key is
+     known. Then the relationship in **sentences**: in your contacts, what you
+     hold on it, what it holds on *this* node. Those last two are independent
+     and are never one summary; "it can drive this console" is the reason to
+     open the card at all, and it used to be a row two thirds of the way down a
+     table.
+  2. **Is the link any good?** The links are **drawn** before they are listed:
+     one wire per link, thicker with what it carries, amber when it is losing
+     probes — and saying so in words, because colour is never the only signal.
+     A node reached over `tcp` **and** `udp` at once is the normal case here and
+     a list of rows never showed it as one shape. Under the drawing, the four
+     numbers of the *fastest* link (the jitter of a link nobody uses answers no
+     question), then one expandable row per link: scheme, endpoint, latency,
+     uptime — opening onto its endpoints as the medium sees them, its direction,
+     what it carried, its probes, and the transport's **own** counters under
+     their own names.
+  3. **Everything else, folded**, with its count in the title so nobody has to
+     open a fold to find out it is empty: **the state of every known address**
+     (in service, unreachable, never tried) with a **Retry** on each row, and
+     the identity and session facts.
+
+  **Actions** follow the same rule. The one or two anybody came for stay visible
+  — message them, open them in fleet, ping them — and the rest go behind the
+  **⋯**: copy the identity, open it in its own window, add to contacts, mint an
+  invitation on its behalf (with the `invite` right), retry every address,
+  forget the node. An overflow menu is where secondary actions belong and where
+  primary ones go to be never found, so nothing anybody needs often is put in
+  it.
+
+  The card **repaints when a link moves**, off the same change stream as the
+  rest of the console — with a floor of its own on top of the stream's frame,
+  because one repaint here is five requests — and never while the ⋯ is open:
+  replacing the panel under the finger that opened it is worse than being a beat
+  late.
+
   - **Requesting fleet rights** asks *which ones*, with what each allows:
     "access" on its own is not a question anyone can answer. Nothing is granted
     by asking — the request lands on the other machine and a human there decides,

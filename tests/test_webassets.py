@@ -186,7 +186,7 @@ def test_the_console_renders_whatever_a_transport_reports():
     """A transport's counters are displayed under their own names: the console
     knows neither "retransmits" nor "SNR", and that is the point."""
     source = webassets.APP_JS
-    assert "statsHTML(link)" in source
+    assert "detail.stats || {}" in source
     assert "Object.entries(stats)" in source
 
 
@@ -287,6 +287,81 @@ def test_the_addresses_are_folded_away_by_default():
     assert 'foldHTML("Addresses"' in source
     assert "<details class=\\\"card\\\"><summary>" in source or \
            '<details class="card"><summary>' in source
+
+
+def test_the_view_describes_every_link_not_the_first_one():
+    """`/api/nodes?scope=active` answers one row **per link**, and a node may
+    hold several. Taking the first and calling it "the link" is what made a node
+    reached over tcp *and* udp look like a node reached over tcp."""
+    view = _nodeview_js()
+    assert "view.links = active;" in view
+    assert "filter((item) => item.id === id)" in view
+    # And the addresses are merged across all of them, with the live one winning.
+    assert "addressRows(known, active)" in view
+    assert 'row.outcome === "in-use"' in view
+
+
+def test_the_links_are_drawn_before_they_are_listed():
+    """One wire per link — thicker with what it carries, amber when it is losing
+    probes — because a node reached two ways is a shape, and a table of rows
+    never showed it as one."""
+    view = _nodeview_js()
+    assert "wiresHTML(view)" in view
+    assert 'class="nv-wire' in view
+    assert "stroke-width=" in view
+    # Colour is never the only signal: an amber wire says so in words too.
+    assert '"% lost"' in view
+    # And the drawing is bounded — the list below still carries every link.
+    assert "MAX_WIRES" in view
+
+
+def test_the_primary_actions_stay_out_of_the_menu():
+    """An overflow menu is where secondary actions belong and where primary ones
+    go to be never found. Message, fleet and ping are buttons; copy, retry,
+    invite and forget are behind the kebab."""
+    view = _nodeview_js()
+    row = view.split("actionsHTML(view, extras, options){")[1].split("\n  },")[0]
+    menu = view.split("menuHTML(view, extras){")[1].split("\n  },")[0]
+    for visible in ('data-nv-act="message"', 'data-nv-act="ping"',
+                    'data-nv-act="fleet"'):
+        assert visible in row, visible
+        assert visible not in menu, visible
+    for hidden in ('data-nv-act="forget"', 'data-nv-act="retry-all"',
+                   'data-nv-act="invite"'):
+        assert hidden in menu, hidden
+        assert hidden not in row, hidden
+    # A destructive action asks before it happens, wherever it is drawn.
+    assert "confirmAction({" in view.split("async forget(")[1]
+
+
+def test_the_relationship_is_read_before_the_numbers():
+    """"It can drive this console" is the reason to open the card at all, and it
+    used to be a row two thirds of the way down a table."""
+    view = _nodeview_js()
+    order = view.split("render(view, extras, options){")[1].split("\n  },")[0]
+    assert order.index("relationHTML") < order.index("linksHTML")
+    assert order.index("headerHTML") < order.index("relationHTML")
+    # The two fleet directions are independent and are never one summary.
+    body = view.split("relationHTML(view, extras, options){")[1].split("\n  },")[0]
+    assert "fleet.caps" in body and "fleet.operator_caps" in body
+
+
+def test_the_card_repaints_on_a_change_but_not_faster_than_its_floor():
+    """One repaint is five requests. The stream's frame bounds events at ten a
+    second, which would be fifty calls a second here."""
+    view = _nodeview_js()
+    assert 'EVENTS.on(["links", "nodes", "names"]' in view
+    assert "REREAD_FLOOR" in view
+    # And never while the menu is open — replacing the panel under the finger
+    # that opened it is worse than being a beat late.
+    assert 'MENU.open === "nv-menu"' in view
+    # setHTML, so a repaint that changes nothing does not swallow a click.
+    assert "setHTML(element, this.render(" in view
+
+
+def _nodeview_js() -> str:
+    from src.webassets import nodeview
+    return nodeview.JS
 
 
 # ── the journeys from one app to another ────────────────────────────────────

@@ -13,6 +13,33 @@ So the view lives here, once, and two things mount it:
 * ``/node#<id>``, a page of its own that chat and fleet open — in a panel, a
   window or a tab, whichever the operator chose.
 
+## What it says, in the order it says it
+
+The first version listed everything it could find, in the order the endpoints
+happened to return it: a table of key/value rows, a fold of addresses, a fold of
+counters. Everything was there and nothing was answered. This one is built round
+the three questions somebody actually opens it with.
+
+1. **Who is this, and what are we to each other?** The name, the id under it,
+   and the relationship in words — in your contacts, you manage it, it can drive
+   this console. That last one is not a detail: it is the reason to open the
+   card at all, and it used to be a row two thirds of the way down a table.
+2. **Is the link any good?** The links *drawn* — one wire per link, thickness
+   from what it carries, colour from whether it is losing probes, latency on the
+   wire — over four numbers. A node reached over tcp and udp at once is the
+   normal case here, and a list of rows never showed it as one picture.
+3. **Everything else, folded.** Each link's endpoints and counters, the address
+   book with what each address last did, the identity and session facts. Present
+   for whoever needs them, silent for everybody else (progressive disclosure:
+   the fold *says how much is inside*, so nobody has to open it to find out
+   there is nothing).
+
+Actions follow the same rule, and the well-documented trap with it: an overflow
+menu hides what people then never find. So the one or two that matter stay
+visible as buttons — message them, open them in fleet, ping them — and the rest
+(copy the id, retry an address, mint an invitation, forget the node) live behind
+the **⋯**, where secondary actions belong.
+
 What it *offers* is not decided here either. It asks the app API what is running
 (:mod:`src.app_api`) and draws the buttons those apps make possible: chat says
 whether it knows this identity, fleet says how the two nodes stand. An app that
@@ -27,44 +54,97 @@ the app answers with the same rules it always applies.
 # ---------------------------------------------------------------------------
 # Styles
 # ---------------------------------------------------------------------------
-# Only what is this view's own. Everything else — cards, stats, tables,
-# disclosures — comes from the design system, which is the whole point.
+# Only what is this view's own — the identity header, the wires, the link rows.
+# Everything else — cards, stats, badges, folds, menus — comes from the design
+# system, which is the whole point of there being one.
 
 CSS = """
 .nodeview{display:flex;flex-direction:column;gap:var(--s-4);min-width:0}
-.nv-head{display:flex;align-items:center;gap:var(--s-3);min-width:0}
+
+/* -- who this is --------------------------------------------------------- */
+.nv-head{display:flex;align-items:flex-start;gap:var(--s-3);min-width:0}
 .nv-mark{width:44px;height:44px;flex:none;border-radius:14px;display:grid;
   place-items:center;background:var(--accent-soft);color:var(--accent);
   font:700 var(--fs-md)/1 var(--mono);letter-spacing:.02em}
-.nv-head .nv-title{font-size:var(--fs-xl);font-weight:640;letter-spacing:-.02em;
+.nv-head .grow{min-width:0}
+.nv-title{font-size:var(--fs-xl);font-weight:640;letter-spacing:-.02em;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nv-head .nv-sub{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:3px}
-.nv-actions{gap:var(--s-2)}
+.nv-sub{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:4px}
 /* The full identity is 40 characters nobody reads and everybody copies. */
 .nv-id code{font-size:var(--fs-xs)}
-.nv-caps{display:flex;flex-wrap:wrap;gap:var(--s-1)}
-.nv-pick{display:grid;gap:var(--s-2);grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr))}
+
+/* -- what we are to each other ------------------------------------------- */
+/* Sentences, not a table. "managed" and "controls this node" are independent,
+   and reading them apart is the whole difficulty. */
+.nv-rel{display:flex;flex-direction:column;gap:var(--s-2);margin:0;padding:0;
+  list-style:none}
+.nv-rel li{display:flex;align-items:flex-start;gap:var(--s-2);
+  font-size:var(--fs-sm);color:var(--text)}
+.nv-rel .ic{flex:none;margin-top:2px;color:var(--text-muted)}
+.nv-rel li.warn .ic{color:var(--warn)}
+
+/* -- the links, drawn ---------------------------------------------------- */
+.nv-wires{width:100%;height:auto;display:block;overflow:visible}
+.nv-wire{fill:none;stroke:var(--ok);stroke-linecap:round}
+.nv-wire.warn{stroke:var(--warn)}
+.nv-wire.idle{stroke:var(--text-faint);stroke-dasharray:5 5}
+.nv-node{fill:var(--accent-soft);stroke:var(--accent)}
+.nv-node.them{fill:var(--surface-2);stroke:var(--border-strong)}
+.nv-glyph{fill:var(--accent);font:700 9px var(--mono)}
+.nv-glyph.them{fill:var(--text-muted)}
+.nv-cap{fill:var(--text-muted);font:500 9px var(--font)}
+.nv-wire-label{fill:var(--text-muted);font:600 9px var(--font);
+  font-variant-numeric:tabular-nums}
+
+/* -- one row per link ---------------------------------------------------- */
+.nv-links{display:flex;flex-direction:column;gap:var(--s-2)}
+.nv-link{border:1px solid var(--border);border-radius:var(--r-md);
+  background:var(--surface);overflow:hidden}
+.nv-link>summary{display:flex;align-items:center;gap:var(--s-3);
+  padding:var(--s-2) var(--s-3);cursor:pointer;min-height:var(--tap);
+  font-size:var(--fs-sm);list-style:none}
+.nv-link>summary::-webkit-details-marker{display:none}
+.nv-link>summary:hover{background:var(--surface-2)}
+.nv-link>summary .ic.turn{color:var(--text-muted)}
+.nv-link .nv-scheme{flex:none;font:600 var(--fs-2xs)/1 var(--mono);
+  text-transform:uppercase;letter-spacing:.05em;padding:4px 6px;
+  border-radius:var(--r-sm);background:var(--surface-2);color:var(--text-muted)}
+.nv-link .nv-where{flex:1 1 auto;min-width:0}
+.nv-link .nv-num{flex:none;font-variant-numeric:tabular-nums;
+  color:var(--text-muted);font-size:var(--fs-xs)}
+.nv-link-body{padding:0 var(--s-3) var(--s-3);border-top:1px solid var(--border)}
+.nv-link-body .kv{margin-top:var(--s-3)}
+
+/* -- folds --------------------------------------------------------------- */
 /* Sections that answer "and what about…" rather than "what is this": folded,
-   because an address table nobody asked for is the reason the old dialog
+   because an address table nobody asked for is the reason the first version
    needed scrolling before it said anything. */
 .nodeview details.card>summary{padding:var(--s-3) var(--s-4);font-size:var(--fs-sm)}
 .nodeview details.card>.card-body{padding:var(--s-4)}
 .nodeview details.card>summary .tail{margin-left:auto;color:var(--text-muted);
   font-weight:500;font-size:var(--fs-xs)}
+.nv-pick{display:grid;gap:var(--s-2);grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr))}
 """
 
 
 # ---------------------------------------------------------------------------
 # The view
 # ---------------------------------------------------------------------------
-# Loaded by both mounts. `NODEVIEW.mount(container, id, options)` is the whole
+# Loaded by every mount. `NODEVIEW.mount(container, id, options)` is the whole
 # public surface; everything below it is private to this file.
 
 JS = r"""
 // ── one node, described ─────────────────────────────────────────────────────
 const ADDRESS_TONE = {"in-use":"ok", connected:"ok", timeout:"warn",
                       refused:"danger", "no-answer":"warn", untried:"",
+                      advertised:"accent",
                       invalid:"danger", "no transport":"danger", "peer limit":"warn"};
+// Above this share of probes lost, a link is drawn as troubled rather than
+// merely slow. One in ten is where a human starts noticing.
+const LOSS_TROUBLE = 0.1;
+// Links drawn as wires. Past this the picture stops being a picture; the list
+// below it still carries every one of them.
+const MAX_WIRES = 6;
 
 const NODEVIEW = {
   // What the app API says is reachable right now, read once per mount.
@@ -75,6 +155,16 @@ const NODEVIEW = {
   // is a different question depending on who "my" is, and answering it from the
   // wrong machine gives a confidently wrong answer rather than an error.
   here: false,
+  // The mount that is open, so a change on the mesh can repaint it.
+  current: null,
+  // One repaint of this card is five requests — two scopes of the node list,
+  // the state, and what chat and fleet make of the identity. The stream's frame
+  // bounds events at ten a second, which would be fifty calls a second here, so
+  // the card keeps a floor of its own on top of it. Half a second is under what
+  // anybody reads as a delay and an order of magnitude off the cost.
+  REREAD_FLOOR: 500,
+  reread: null,
+  lastRead: 0,
 
   // Every call this view makes goes through here, so a mount cannot half
   // follow the context.
@@ -106,22 +196,57 @@ const NODEVIEW = {
   // Everything the view needs, from the endpoints that already exist. A node
   // this console has never heard of still renders: the identity is real, the
   // rest is simply empty.
+  //
+  // `/api/nodes?scope=active` answers one row **per link**, and a node may hold
+  // several. Taking the first and calling it "the link" is what made a node
+  // reached over tcp *and* udp look like a node reached over tcp.
   async facts(id, selfId, seed){
-    const scoped = async (scope) => {
+    const rows = async (scope) => {
       const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
       const {ok, data} = await this.ask("/api/nodes?" + params.toString());
-      if(!ok) return null;
-      return (data.items || []).find((item) => item.id === id) || null;
+      if(!ok) return [];
+      return (data.items || []).filter((item) => item.id === id);
     };
-    let known = null, active = null;
+    let known = [], active = [];
     if(id !== selfId)
-      [known, active] = await Promise.all([scoped("known").catch(() => null),
-                                           scoped("active").catch(() => null)]);
-    const node = Object.assign({}, known || {}, active || {}, seed || {}, {id});
-    node.self = node.self || id === selfId;
-    node.direct = !!active;
-    node.knownHere = !!known;
-    return node;
+      [known, active] = await Promise.all([rows("known").catch(() => []),
+                                           rows("active").catch(() => [])]);
+    const view = Object.assign({}, known[0] || {}, active[0] || {}, seed || {}, {id});
+    view.self = view.self || id === selfId;
+    view.direct = active.length > 0;
+    view.knownHere = known.length > 0;
+    view.links = active;
+    view.addresses = this.addressRows(known, active);
+    // This node has no entry in its own routing table, so its addresses are the
+    // ones it advertises. Without this the card said "no address is advertised
+    // for this node" about the node doing the advertising.
+    if(view.self) view.addresses = await this.ownAddresses();
+    return view;
+  },
+
+  async ownAddresses(){
+    try{
+      const {data} = await this.ask("/api/state");
+      return (data.advertised || []).map((uri) => ({uri, outcome:"advertised"}));
+    }catch(_){ return []; }
+  },
+
+  // One row per address, from every link and from the routing table. The live
+  // one wins: an address carrying traffic right now is "in use" whatever it did
+  // last week, and it is the row somebody is looking for.
+  addressRows(known, active){
+    const seen = new Map();
+    const consider = (row) => {
+      if(!row || !row.uri) return;
+      const held = seen.get(row.uri);
+      if(!held || row.outcome === "in-use") seen.set(row.uri, row);
+    };
+    (known[0] ? known[0].address_status || [] : []).forEach(consider);
+    active.forEach((link) => (link.address_status || []).forEach(consider));
+    if(!seen.size)
+      ((known[0] || active[0] || {}).addresses || [])
+        .forEach((uri) => consider({uri, outcome:"untried"}));
+    return [...seen.values()];
   },
 
   async extras(id, self){
@@ -139,70 +264,229 @@ const NODEVIEW = {
   },
 
   // -- drawing --------------------------------------------------------------
-  render(node, extras, options){
-    const hide = options.hide || [];
-    const chat = extras.chat, fleet = extras.fleet;
-    // The node's own pseudo, from its signed claim. The full id sits right
-    // under it, because a name is never proof of who this is.
-    const name = node.pseudo || shortId(node.id);
-    const badges = [];
-    if(node.self) badges.push(badge("this node", "accent"));
-    else if(node.direct) badges.push(badge("direct link", "ok"));
-    else if(node.knownHere) badges.push(badge("known, not linked", ""));
-    else badges.push(badge("routed session", "warn"));
-    if(node.has_key === false) badges.push(badge("no identity key", "warn"));
-    if(chat && chat.contact) badges.push(badge("contact", "accent"));
-    if(fleet && fleet.managed) badges.push(badge("managed", "accent"));
-    if(fleet && fleet.operator) badges.push(badge("controls this node", "warn"));
-
+  render(view, extras, options){
     return '<div class="nodeview">' +
-      '<header class="nv-head"><span class="nv-mark" aria-hidden="true">' +
-        esc(name.trim().slice(0, 2).toUpperCase()) + "</span>" +
-        '<div class="grow"><div class="nv-title">' + esc(name) + "</div>" +
-        '<div class="nv-sub">' + badges.join(" ") + "</div></div></header>" +
-      '<div class="copyable nv-id"><code class="mono" data-nv-id>' + esc(node.id) +
-        '</code><button class="sm" data-nv-act="copy">Copy</button></div>' +
-      this.actionsHTML(node, extras, hide) +
-      this.glanceHTML(node) +
-      this.relationHTML(fleet, hide) +
-      this.factsHTML(node) +
-      this.foldHTML("Addresses", this.addressHTML(node), this.addressCount(node)) +
-      this.foldHTML(((node.link || {}).scheme || "Transport") + " counters",
-                    this.statsHTML(node.link), "") +
+      this.headerHTML(view, extras) +
+      this.relationHTML(view, extras, options) +
+      this.actionsHTML(view, extras, options) +
+      this.linksHTML(view) +
+      this.foldHTML("Addresses", this.addressHTML(view), this.addressCount(view)) +
+      this.foldHTML("Identity and session", this.identityHTML(view), "") +
       '<p class="msg" data-nv-status role="status"></p>' +
       "</div>";
   },
 
-  actionsHTML(node, extras, hide){
-    if(node.self)
-      return '<div class="btn-row nv-actions"><button data-nv-act="refresh">Refresh</button></div>';
+  // The node's own pseudo, from its signed claim. The full id sits right under
+  // it, because a name is never proof of who this is.
+  // Two badges at most, and only about the mesh: how this node is reached, and
+  // whether its key is known. Everything else about the relationship is said in
+  // sentences just below, and a badge repeating a sentence is the clutter this
+  // rewrite exists to remove.
+  headerHTML(view, extras){
+    const name = view.pseudo || shortId(view.id);
+    const badges = [];
+    if(view.self) badges.push(badge("this node", "accent"));
+    else if(view.links.length > 1)
+      badges.push(badge(plural(view.links.length, "link"), "ok"));
+    else if(view.direct) badges.push(badge("direct link", "ok"));
+    else if(view.knownHere) badges.push(badge("known, not linked", ""));
+    else badges.push(badge("routed session", "warn"));
+    if(view.has_key === false) badges.push(badge("no identity key", "warn"));
+    return '<header class="nv-head"><span class="nv-mark" aria-hidden="true">' +
+      esc(name.trim().slice(0, 2).toUpperCase()) + "</span>" +
+      '<div class="grow"><div class="nv-title">' + esc(name) + "</div>" +
+      '<div class="nv-sub">' + badges.join(" ") + "</div></div>" +
+      this.menuHTML(view, extras) + "</header>" +
+      '<div class="copyable nv-id"><code class="mono" data-nv-id>' + esc(view.id) +
+      '</code><button class="sm" data-nv-act="copy">Copy</button></div>';
+  },
+
+  // What we are to each other, in sentences. The two fleet directions are
+  // independent — holding rights over a node says nothing about what it holds
+  // over this one — so they are two lines, never one summary.
+  relationHTML(view, extras, options){
+    const hide = options.hide || [];
+    const chat = extras.chat, fleet = extras.fleet;
+    const lines = [];
+    const say = (name, text, tone) =>
+      lines.push('<li' + (tone ? ' class="' + tone + '"' : "") + ">" +
+                 icon(name) + "<span>" + text + "</span></li>");
+    if(view.self)
+      say("server", "This is the node whose console you are reading.");
+    else if(view.links.length > 1)
+      say("link", "Reached over " + esc(this.schemes(view).join(" and ")) +
+          " at the same time.");
+    else if(view.direct)
+      say("link", "One authenticated link, over " +
+          esc(this.schemes(view)[0] || "an unnamed medium") + ".");
+    else if(view.knownHere)
+      say("link", "Known here, with no link open. It can be dialled again.");
+    else
+      say("link", "Reached through the mesh — no direct link to it.");
+
+    if(chat && chat.contact)
+      say("person", "In your contacts" +
+          (chat.unread ? ", with " + plural(chat.unread, "unread message") : "") + ".");
+    else if(chat && chat.seen)
+      say("person", "Seen in chat, not in your contacts.");
+
+    if(fleet && hide.indexOf("fleet") < 0){
+      if(fleet.managed)
+        say("server", "You hold <b>" + esc(fleet.caps.join(", ") || "nothing") +
+            "</b> on it.");
+      if(fleet.operator)
+        say("server", "It holds <b>" +
+            esc(fleet.operator_caps.join(", ") || "nothing") +
+            "</b> on this node.", "warn");
+      if(fleet.waiting_on_them)
+        say("server", "Waiting for somebody there to allow <b>" +
+            esc(fleet.asked_caps.join(", ")) + "</b>.");
+      if(fleet.waiting_on_us)
+        say("server", "Waiting on <b>you</b> to answer its request.", "warn");
+    }
+    return '<ul class="nv-rel">' + lines.join("") + "</ul>";
+  },
+
+  schemes(view){
+    return [...new Set(view.links.map((link) =>
+      (link.link || {}).scheme || link.transport || "?"))];
+  },
+
+  // -- actions --------------------------------------------------------------
+  // The one or two anybody came for stay visible; the rest go behind the ⋯.
+  // An overflow menu is where secondary actions belong and where primary ones
+  // go to be never found.
+  actionsHTML(view, extras, options){
+    if(view.self)
+      return '<div class="btn-row"><button data-nv-act="refresh">Refresh</button></div>';
+    const hide = options.hide || [];
     const chat = extras.chat, fleet = extras.fleet;
     const buttons = [];
     if(chat && hide.indexOf("chat") < 0)
       buttons.push('<button class="primary" data-nv-act="message">Message' +
         (chat.unread ? " " + badge(chat.unread, "danger") : "") + "</button>");
-    if(chat && !chat.contact && hide.indexOf("chat") < 0)
-      buttons.push('<button data-nv-act="contact">Add to contacts</button>');
     if(fleet && hide.indexOf("fleet") < 0){
       if(fleet.managed) buttons.push('<button data-nv-act="fleet">Open in Fleet</button>');
       else if(fleet.waiting_on_them)
         buttons.push('<button disabled>Access requested</button>');
       else buttons.push('<button data-nv-act="enrol">Request access</button>');
     }
-    buttons.push('<button data-nv-act="ping">Ping</button>');
-    buttons.push('<button data-nv-act="retry-all">Retry addresses</button>');
-    buttons.push('<button class="danger" data-nv-act="forget">Forget</button>');
-    return '<div class="btn-row nv-actions">' + buttons.join("") + "</div>";
+    buttons.push('<button data-nv-act="ping">' + icon("pulse") + "Ping</button>");
+    return '<div class="btn-row">' + buttons.join("") + "</div>";
   },
 
-  // The four numbers that say whether this link is any good, before any of the
-  // detail. One RTT cannot tell a steady link from a flapping one.
-  glanceHTML(node){
-    const link = node.link || {};
-    const quality = link.quality || {};
-    const counters = node.counters || {};
-    if(!quality.probes && node.rtt_ms == null && !counters.bytes_in) return "";
+  // Secondary actions only. The visible row above keeps the one or two anybody
+  // came for; what goes behind a ⋯ is what people would otherwise never find,
+  // so nothing they need often is put here.
+  menuHTML(view, extras){
+    // Nothing to hide behind a ⋯ for this node's own card: the id has its own
+    // copy button, and a one-item menu is a button with a lid on.
+    if(view.self) return "";
+    const chat = extras.chat, fleet = extras.fleet;
+    const items = ['<button class="item" data-nv-act="copy" data-menu-close>' +
+                   icon("copy") + "Copy the identity</button>",
+                   '<button class="item" data-nv-act="window" data-menu-close>' +
+                   icon("window") + "Open in its own window</button>"];
+    if(chat && !chat.contact)
+      items.push('<button class="item" data-nv-act="contact" data-menu-close>' +
+                 icon("person") + "Add to contacts</button>");
+    if(fleet && fleet.managed && (fleet.caps || []).indexOf("invite") >= 0)
+      items.push('<button class="item" data-nv-act="invite" data-menu-close>' +
+                 icon("send") + "Mint an invitation to its mesh</button>");
+    items.push('<div class="sep"></div>');
+    if(view.addresses.length)
+      items.push('<button class="item" data-nv-act="retry-all" data-menu-close>' +
+                 icon("pulse") + "Retry every address</button>");
+    items.push('<button class="item danger" data-nv-act="forget" data-menu-close>' +
+               icon("trash") + "Forget this node</button>");
+    return '<div class="menu-wrap"><button class="icon" data-menu="nv-menu" ' +
+      'aria-haspopup="true" aria-expanded="false" aria-label="More about this node">' +
+      icon("dots") + "</button>" +
+      '<div id="nv-menu" class="menu" role="region" hidden aria-label="Node actions">' +
+      items.join("") + "</div></div>";
+  },
+
+  // -- the links ------------------------------------------------------------
+  linksHTML(view){
+    if(view.self) return "";
+    if(!view.links.length)
+      return '<div class="card"><div class="card-body">' +
+        emptyHTML("No link to this node",
+          view.knownHere
+            ? "It is in the routing table; retry an address to open one."
+            : "Anything sent to it travels through the mesh.") + "</div></div>";
+    return '<article class="card"><div class="card-head"><div class="grow">' +
+      "<h2>" + plural(view.links.length, "link") + "</h2>" +
+      '<div class="sub">' + esc(this.schemes(view).join(" · ")) + "</div></div></div>" +
+      '<div class="card-body">' + this.wiresHTML(view) + this.glanceHTML(view) +
+      '<div class="nv-links">' +
+      view.links.map((link) => this.linkHTML(link)).join("") +
+      "</div></div></article>";
+  },
+
+  // The links as one picture rather than as a list of rows: one wire per link,
+  // thicker with what it carries, amber when it is losing probes, its latency
+  // written on it. A node reached two ways is the normal case here, and a table
+  // never showed that as a shape.
+  wiresHTML(view){
+    const links = view.links.slice(0, MAX_WIRES);
+    const rows = links.length;
+    const height = 62 + Math.max(0, rows - 1) * 22;
+    const mid = height / 2;
+    const carried = links.map((link) => {
+      const counters = (link.link || {}).counters || link.counters || {};
+      return (counters.bytes_in || 0) + (counters.bytes_out || 0);
+    });
+    const busiest = Math.max(1, ...carried);
+    const wires = links.map((link, index) => {
+      const quality = (link.link || {}).quality || {};
+      const loss = quality.loss;
+      const apex = mid + (index - (rows - 1) / 2) * 22;
+      const control = 2 * apex - mid;
+      // Two to six pixels: enough that the busy wire reads as the busy one,
+      // never so much that a quiet link disappears.
+      const width = (2 + 4 * Math.min(1, carried[index] / busiest)).toFixed(1);
+      const troubled = loss != null && loss >= LOSS_TROUBLE;
+      const tone = troubled ? " warn" : (link.rtt_ms == null ? " idle" : "");
+      const label = (link.link || {}).scheme || link.transport || "?";
+      // The colour says it too, and colour is never the only signal: a wire
+      // drawn amber has to read as amber in words as well.
+      const latency = (link.rtt_ms == null ? "" : " · " + link.rtt_ms + " ms") +
+        (troubled ? " · " + Math.round(loss * 100) + "% lost" : "");
+      return '<path class="nv-wire' + tone + '" stroke-width="' + width + '" d="M46 ' +
+        mid.toFixed(1) + " Q160 " + control.toFixed(1) + " 274 " + mid.toFixed(1) + '"/>' +
+        '<text class="nv-wire-label" x="160" y="' + (apex - 5).toFixed(1) +
+        '" text-anchor="middle">' + esc(label + latency) + "</text>";
+    }).join("");
+    const hidden = view.links.length - links.length;
+    return '<svg class="nv-wires" viewBox="0 0 320 ' + height +
+      '" role="img" aria-label="' +
+      esc(plural(view.links.length, "link") + " to this node") + '">' + wires +
+      '<circle class="nv-node" cx="32" cy="' + mid + '" r="13"/>' +
+      '<text class="nv-glyph" x="32" y="' + (mid + 3) + '" text-anchor="middle">NM</text>' +
+      '<text class="nv-cap" x="32" y="' + (height - 5) + '" text-anchor="middle">this node</text>' +
+      '<circle class="nv-node them" cx="288" cy="' + mid + '" r="13"/>' +
+      '<text class="nv-glyph them" x="288" y="' + (mid + 3) + '" text-anchor="middle">' +
+      esc((view.pseudo || shortId(view.id)).trim().slice(0, 2).toUpperCase()) + "</text>" +
+      '<text class="nv-cap" x="288" y="' + (height - 5) + '" text-anchor="middle">' +
+      esc(shortId(view.id)) + "</text>" +
+      (hidden > 0 ? '<text class="nv-cap" x="160" y="' + (height - 5) +
+        '" text-anchor="middle">' + esc("+" + hidden + " more below") + "</text>" : "") +
+      "</svg>";
+  },
+
+  // The four numbers that say whether this is any good, before any of the
+  // detail. One round trip cannot tell a steady link from a flapping one, which
+  // is why the spread is beside it rather than behind a fold.
+  glanceHTML(view){
+    const best = this.bestLink(view);
+    if(!best) return "";
+    const quality = (best.link || {}).quality || {};
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+    const totals = view.links.reduce((sum, link) => {
+      const counters = (link.link || {}).counters || link.counters || {};
+      return sum + (counters.bytes_in || 0) + (counters.bytes_out || 0);
+    }, 0);
     // esc() on the value like everywhere else. These read as "obviously
     // numbers", and they are when the JSON comes from this node — but under a
     // remote context the console proxies the request to *another* node's
@@ -212,69 +496,65 @@ const NODEVIEW = {
       esc(label) + "</span>" + (extra || "") + "</div>";
     return '<div class="stats">' +
       cell("Round trip",
-           quality.rtt_ms != null ? quality.rtt_ms + " ms"
-             : (node.rtt_ms == null ? "—" : node.rtt_ms + " ms"),
-           quality.samples_ms ? '<div class="' +
-             ((loss != null && loss >= 10) ? "spark warn" : "") + '">' +
+           best.rtt_ms == null ? "—" : best.rtt_ms + " ms",
+           quality.samples_ms ? '<div' +
+             ((loss != null && loss >= 10) ? ' class="spark warn"' : "") + ">" +
              sparkHTML(quality.samples_ms) + "</div>" : "") +
       cell("Jitter", quality.jitter_ms == null ? "—" : quality.jitter_ms + " ms") +
       cell("Probe loss", loss == null ? "—" : loss + "%") +
-      cell("Traffic", counters.bytes_in == null ? "—"
-           : fmtBytes((counters.bytes_in || 0) + (counters.bytes_out || 0))) +
+      cell("Carried", totals ? fmtBytes(totals) : "—") +
       "</div>";
   },
 
-  // Where the two nodes stand, in words rather than in a table: "managed" and
-  // "controls this node" are independent and reading them apart is the whole
-  // difficulty.
-  relationHTML(fleet, hide){
-    if(!fleet || hide.indexOf("fleet") >= 0) return "";
-    const lines = [];
-    if(fleet.managed)
-      lines.push("<div>This node may <b>" + esc(fleet.caps.join(", ") || "do nothing") +
-        "</b> on that one.</div>");
-    if(fleet.operator)
-      lines.push("<div>That node may <b>" +
-        esc(fleet.operator_caps.join(", ") || "do nothing") +
-        "</b> on this one.</div>");
-    if(fleet.waiting_on_them)
-      lines.push("<div>Waiting on someone there to allow <b>" +
-        esc(fleet.asked_caps.join(", ")) + "</b>.</div>");
-    if(fleet.waiting_on_us)
-      lines.push("<div>Waiting on <b>you</b> to answer its request.</div>");
-    if(!lines.length) return "";
-    return '<div class="notice"><span>' + lines.join("") + "</span></div>";
+  // The yardstick is the fastest link, and its spread is the one worth showing:
+  // the jitter of a link nobody is using answers no question.
+  bestLink(view){
+    let best = null;
+    view.links.forEach((link) => {
+      if(link.rtt_ms == null) return;
+      if(best == null || link.rtt_ms < best.rtt_ms) best = link;
+    });
+    return best || view.links[0] || null;
   },
 
-  factsHTML(node){
-    const link = node.link || null;
+  linkHTML(link){
+    const detail = link.link || {};
+    const quality = detail.quality || {};
+    const counters = detail.counters || link.counters || {};
+    const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
     const rows = [
-      ["Relationship", node.self ? "This console's node"
-        : node.direct ? "Authenticated direct link"
-        : node.knownHere ? "Known routing identity" : "Routed session endpoint"],
-      ["Session", node.has_session === false ? "Not established"
-        : node.direct ? "Open" : node.self ? "Local" : "Not directly observed"],
-      ["Last seen", node.seen_ago == null ? "Live" : esc(fmtAgo(node.seen_ago))],
-      ["Identity key", node.has_key == null ? "Unknown"
-        : node.has_key ? "Known" : "Missing"],
+      ["Direction", esc(detail.direction || (link.is_client_side ? "outbound" : "inbound"))],
+      ["Up for", esc(fmtDuration(detail.since))],
+      ["Local endpoint", detail.local ? '<span class="mono">' + esc(detail.local) + "</span>" : "—"],
+      ["Remote endpoint", detail.remote ? '<span class="mono">' + esc(detail.remote) + "</span>" : "—"],
     ];
-    if(link){
-      rows.push(["Link", esc(link.scheme || "?") + " · " + esc(link.direction) +
-        " · up " + esc(fmtDuration(link.since))]);
-      if(link.local)
-        rows.push(["Local endpoint", '<span class="mono">' + esc(link.local) + "</span>"]);
-      if(link.remote)
-        rows.push(["Remote endpoint", '<span class="mono">' + esc(link.remote) + "</span>"]);
-      if(link.dialled && link.dialled !== link.remote)
-        rows.push(["Dialled", '<span class="mono">' + esc(link.dialled) + "</span>"]);
-    }else{
-      rows.push(["Transport", esc(node.transport || "Unknown")]);
-    }
-    rows.push(["Malformed input", node.malformed == null ? "—" : esc(node.malformed)]);
-    return '<dl class="kv">' + rows.map(([key, value]) =>
-      "<dt>" + esc(key) + "</dt><dd>" + value + "</dd>").join("") + "</dl>";
+    if(detail.dialled && detail.dialled !== detail.remote)
+      rows.push(["Dialled", '<span class="mono">' + esc(detail.dialled) + "</span>"]);
+    rows.push(["Carried", esc(fmtBytes((counters.bytes_in || 0) + (counters.bytes_out || 0))) +
+      " (" + esc(fmtBytes(counters.bytes_in)) + " in, " +
+      esc(fmtBytes(counters.bytes_out)) + " out)"]);
+    rows.push(["Probes", quality.probes ? esc(quality.probes) +
+      (loss == null ? "" : " · " + loss + "% lost") : "none yet"]);
+    rows.push(["Malformed input", detail.malformed == null ? "—" : esc(detail.malformed)]);
+    // Whatever the medium chose to report. This view does not know what a
+    // retransmit or an SNR is — it renders the names it is given.
+    const stats = detail.stats || {};
+    Object.entries(stats).slice(0, 16).forEach(([key, value]) =>
+      rows.push([key, esc(value)]));
+    const where = detail.remote || detail.dialled || link.transport || "—";
+    return '<details class="nv-link"><summary>' +
+      icon("chevron", "", "turn") +
+      '<span class="nv-scheme">' + esc(detail.scheme || link.transport || "?") + "</span>" +
+      '<span class="nv-where mono truncate">' + esc(where) + "</span>" +
+      '<span class="nv-num">' + (link.rtt_ms == null ? "—" : esc(link.rtt_ms) + " ms") +
+      "</span>" +
+      '<span class="nv-num">' + esc(fmtDuration(detail.since)) + "</span></summary>" +
+      '<div class="nv-link-body"><dl class="kv">' + rows.map(([key, value]) =>
+        "<dt>" + esc(key) + "</dt><dd>" + value + "</dd>").join("") +
+      "</dl></div></details>";
   },
 
+  // -- the folds ------------------------------------------------------------
   // A fold with a count in its summary: closed it still says how much is in
   // there, so nobody has to open it to find out there is nothing.
   foldHTML(title, body, count){
@@ -284,22 +564,20 @@ const NODEVIEW = {
       '<div class="card-body">' + body + "</div></details>";
   },
 
-  addressCount(node){
-    const rows = (node.address_status && node.address_status.length)
-      ? node.address_status : (node.addresses || []);
-    return rows.length ? String(rows.length) : "none";
+  addressCount(view){
+    return view.addresses.length ? String(view.addresses.length) : "none";
   },
 
-  addressHTML(node){
-    const rows = (node.address_status && node.address_status.length)
-      ? node.address_status
-      : (node.addresses || []).map((uri) => ({uri, outcome:"untried"}));
+  addressHTML(view){
+    const rows = view.addresses;
     if(!rows.length)
-      return '<p class="small muted">No address is advertised for this node.</p>';
+      return '<p class="small muted">' + (view.self
+        ? "This node advertises no address — nothing can dial it."
+        : "No address is advertised for this node.") + "</p>";
     // A node advertising four addresses of which one works is the normal case;
     // "try that one again, now" is the question an operator has while looking
     // at this table, so the button is in the table.
-    const action = node.self ? "" : '<th class="tight"></th>';
+    const action = view.self ? "" : '<th class="tight"></th>';
     return '<div class="table-wrap"><table><thead><tr>' +
       '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
       "</tr></thead><tbody>" +
@@ -309,32 +587,40 @@ const NODEVIEW = {
         '</td><td class="num">' +
         (row.ago == null ? "—" : esc(fmtAgo(row.ago)) +
           (row.ms == null ? "" : " · " + esc(row.ms) + " ms")) +
-        "</td>" + (node.self ? "" :
+        "</td>" + (view.self ? "" :
           '<td class="tight"><button class="sm" data-nv-retry="' +
           esc(row.uri) + '">Retry</button></td>') +
         "</tr>").join("") + "</tbody></table></div>";
   },
 
-  // Whatever the medium chose to report. This view does not know what a
-  // retransmit or an SNR is — it renders the names it is given.
-  statsHTML(link){
-    const stats = link && link.stats;
-    if(!stats || !Object.keys(stats).length) return "";
-    return '<dl class="kv">' + Object.entries(stats).map(([key, value]) =>
-      "<dt>" + esc(key) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl>";
+  identityHTML(view){
+    const rows = [
+      ["Relationship", view.self ? "This console's node"
+        : view.direct ? "Authenticated direct link"
+        : view.knownHere ? "Known routing identity" : "Routed session endpoint"],
+      ["Session", view.has_session === false ? "Not established"
+        : view.direct ? "Open" : view.self ? "Local" : "Not directly observed"],
+      ["Last seen", view.seen_ago == null ? "Live" : esc(fmtAgo(view.seen_ago))],
+      ["Identity key", view.has_key == null ? "Unknown"
+        : view.has_key ? "Known" : "Missing"],
+      ["Malformed input", view.malformed == null ? "—" : esc(view.malformed)],
+    ];
+    return '<dl class="kv">' + rows.map(([key, value]) =>
+      "<dt>" + esc(key) + "</dt><dd>" + value + "</dd>").join("") + "</dl>";
   },
 
   // -- mounting -------------------------------------------------------------
   // `options.hide` names the buttons that point back where the viewer came
   // from; `options.onGone` is called when the node is forgotten, so the mount
-  // can close itself.
+  // can close itself; `options.local` makes this view ask *this* node.
   async mount(container, id, options){
     options = options || {};
     const element = typeof container === "string" ? $(container) : container;
     if(!element) return;
     // Set before the first call: everything below reads it.
     this.here = !!options.local;
-    element.innerHTML = skeletonHTML(4);
+    const fresh = element.dataset.nvId !== id;
+    if(fresh) element.innerHTML = skeletonHTML(4);
     if(!Object.keys(this.apps).length) await this.catalogue();
     let selfId = options.selfId || null;
     if(selfId == null){
@@ -343,21 +629,44 @@ const NODEVIEW = {
         selfId = data.id;
       }catch(_){ selfId = null; }
     }
-    let node;
+    let view;
     try{
-      node = await this.facts(id, selfId, options.seed);
-    }catch(_){
+      view = await this.facts(id, selfId, options.seed);
+    }catch(error){
+      if(isStale(error)) return;
       element.innerHTML = errorHTML("Node unavailable", "The console did not answer.");
       return;
     }
-    const extras = await this.extras(id, node.self);
-    element.innerHTML = this.render(node, extras, options);
+    const extras = await this.extras(id, view.self);
+    // setHTML, not innerHTML: this repaints whenever a link moves, and rewriting
+    // markup that did not change replaces the node under the pointer and
+    // swallows the click.
+    setHTML(element, this.render(view, extras, options));
     if(!element.dataset.nvWired){
       element.dataset.nvWired = "1";
       element.addEventListener("click", (event) => this.act(event, element, options));
     }
     element.dataset.nvId = id;
-    this.current = {id, node, extras, options, element};
+    this.lastRead = Date.now();
+    this.current = {id, view, extras, options, element};
+  },
+
+  // A link came up or went down somewhere: repaint what is open, on a trailing
+  // edge and never faster than the floor above.
+  refresh(){
+    if(this.reread) return;
+    const wait = Math.max(0, this.REREAD_FLOOR - (Date.now() - this.lastRead));
+    this.reread = setTimeout(() => { this.reread = null; this.repaint(); }, wait);
+  },
+
+  repaint(){
+    const open = this.current;
+    if(!open || !open.element.isConnected) return;
+    // Never while the ⋯ is open: replacing the panel under the finger that
+    // opened it is worse than being a beat late. Try again rather than dropping
+    // the change, or the card stays stale until the next thing moves.
+    if(MENU.open === "nv-menu"){ this.refresh(); return; }
+    this.mount(open.element, open.id, open.options);
   },
 
   say(element, text, bad){
@@ -376,11 +685,13 @@ const NODEVIEW = {
     const what = button.dataset.nvAct;
     if(what === "copy"){ copyText(id); return; }
     if(what === "refresh"){ await this.mount(element, id, options); return; }
+    if(what === "window"){ openLinked("/node#" + id); return; }
     if(what === "retry-all"){ await this.retry(element, button, ""); return; }
     if(what === "message"){ openLinked("/chat#c/" + id); return; }
     if(what === "fleet"){ openLinked("/fleet#nodes"); return; }
     if(what === "ping"){ await this.ping(element, button, id); return; }
     if(what === "contact"){ await this.contact(element, button, id, options); return; }
+    if(what === "invite"){ await this.invite(element, button, id); return; }
     if(what === "enrol"){ await this.enrol(element, button, id, options); return; }
     if(what === "forget"){ await this.forget(element, id, options); return; }
   },
@@ -394,7 +705,7 @@ const NODEVIEW = {
           ? "Reachable in " + (data.rtt_ms == null ? "an unknown time" : data.rtt_ms + " ms") +
             " via " + (data.via || "the mesh")
           : "Node is currently unreachable", !data.reachable);
-      }catch(_){ this.say(element, "Ping failed", true); }
+      }catch(error){ if(!isStale(error)) this.say(element, "Ping failed", true); }
     });
   },
 
@@ -408,7 +719,7 @@ const NODEVIEW = {
         this.say(element, (data.results || []).map((row) =>
           row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""))
           .join(" · ") || "Nothing to dial", !data.connected);
-      }catch(_){ this.say(element, "Retry failed", true); }
+      }catch(error){ if(!isStale(error)) this.say(element, "Retry failed", true); }
     });
   },
 
@@ -418,6 +729,47 @@ const NODEVIEW = {
         await this.call("chat", "contact", {node:id});
         toast("Added to contacts", "ok");
         await this.mount(element, id, options);
+      }catch(error){ this.say(element, String(error.message || error), true); }
+    });
+  },
+
+  // Minting an invitation on somebody else's behalf is a right of its own
+  // (`invite`), separate from driving their console: the node that will honour
+  // the code is the node that makes it, and it decides how long it lives.
+  async invite(element, button, id){
+    const agreed = await confirmAction({
+      title:"Mint an invitation to that node's mesh",
+      confirmLabel:"Create",
+      body:'<p class="muted small">That node makes it, not this one: whoever uses ' +
+        "it joins through that machine and has their certificate signed by it. " +
+        "Single use, and it stops working when the window closes.</p>" +
+        '<label class="field"><span>Stays live for</span><select id="nv-ttl">' +
+        '<option value="300">5 minutes</option>' +
+        '<option value="3600">1 hour</option>' +
+        '<option value="21600">6 hours</option></select></label>' +
+        '<label class="check"><input id="nv-ticket" type="checkbox" checked>' +
+        "<span>Also make it scannable, if that node has a public address</span></label>",
+    });
+    if(!agreed) return;
+    const ttl = parseInt(($("nv-ttl") || {}).value, 10) || 300;
+    const ticket = !!($("nv-ticket") || {}).checked;
+    await withBusy(button, async () => {
+      try{
+        const result = await this.call("fleet", "invite", {node:id, ttl, ticket});
+        if(result.error){ this.say(element, result.error, true); return; }
+        // Shown once, where it was asked for. A single-use secret does not
+        // belong in a list a page keeps.
+        await confirmAction({
+          title:"Invitation to " + shortId(id),
+          confirmLabel:"Done",
+          body:'<p class="muted small">Shown once. The invitation itself stays ' +
+            "live until it is used or expires.</p>" +
+            '<div class="copyable"><code class="mono">' + esc(result.code) +
+            '</code></div>' +
+            (result.ticket ? '<div class="copyable"><code class="mono">' +
+              esc(result.ticket) + "</code></div>" : "") +
+            (result.qr_svg ? '<div class="qr-holder">' + result.qr_svg + "</div>" : ""),
+        });
       }catch(error){ this.say(element, String(error.message || error), true); }
     });
   },
@@ -467,10 +819,17 @@ const NODEVIEW = {
     try{
       await this.ask("/api/nodes/forget", "POST", {id});
       toast("Node forgotten");
+      this.current = null;
       if(options.onGone) options.onGone();
-    }catch(_){ this.say(element, "Could not forget that node", true); }
+    }catch(error){
+      if(!isStale(error)) this.say(element, "Could not forget that node", true);
+    }
   },
 };
+
+// A link that came up is the thing this view is about, so it does not wait for
+// a timer. The stream's frame already bounds how often that can happen.
+EVENTS.on(["links", "nodes", "names"], () => NODEVIEW.refresh());
 """
 
 
@@ -552,14 +911,22 @@ PAGE_JS = r"""
 // (never the path: a fragment is not sent to the server, and this page is
 // opened by pasting a link as often as by clicking one) and `?from=` names the
 // app that opened it, so the button pointing back there is not drawn.
+//
+// `?from=` also settles whose point of view the page takes. Opened from chat or
+// fleet it answers for *this* node, because those apps run here whatever the
+// console is driving; opened from the console it follows the console.
 
 function targetId(){
   const raw = (location.hash || "").replace(/^#/, "").trim().toLowerCase();
   return /^[0-9a-f]{40}$/.test(raw) ? raw : "";
 }
 
+function openedFrom(){
+  return new URLSearchParams(location.search).get("from") || "";
+}
+
 function hiddenActions(){
-  const from = new URLSearchParams(location.search).get("from") || "";
+  const from = openedFrom();
   return ["chat", "fleet"].filter((name) => name === from);
 }
 
@@ -572,6 +939,7 @@ async function draw(){
   }
   await NODEVIEW.mount("view", id, {
     hide: hiddenActions(),
+    local: ["chat", "fleet"].includes(openedFrom()),
     onGone(){
       $("view").innerHTML = emptyHTML("Node forgotten",
         "It is out of the routing table. Close this and carry on.");
@@ -583,6 +951,9 @@ function enter(){
   $("login").classList.add("hidden");
   $("main").classList.remove("hidden");
   draw();
+  // This page is about one link, so it is the page that most wants to be told
+  // rather than to ask. Nothing else here is on a timer.
+  EVENTS.start();
 }
 
 async function boot(){
@@ -594,9 +965,12 @@ async function boot(){
   $$("dialog").forEach((element) => element.addEventListener("click", (event) => {
     if(event.target === element) element.close();
   }));
+  // The view's ⋯ is a shell menu like any other, and this page has no shell.
+  MENU.mount();
   // Framed by another app: drop our own chrome so it reads as one panel.
   if(window.self !== window.top) document.body.classList.add("framed");
   window.addEventListener("hashchange", draw);
+  CONTEXT.restore();
 
   $("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();

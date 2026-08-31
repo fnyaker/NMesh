@@ -600,7 +600,7 @@ code.inline{font-family:var(--mono);font-size:.92em;background:var(--surface-2);
 /* A disclosure chevron points down when open and right when closed — one icon
    turned, not two drawings to keep in step. */
 .ic.turn{transform:rotate(-90deg);transition:transform var(--speed) var(--ease)}
-[aria-expanded="true"] .ic.turn{transform:none}
+[aria-expanded="true"] .ic.turn,details[open]>summary .ic.turn{transform:none}
 button>.ic:only-child{width:1.25em;height:1.25em}
 
 .search{position:relative;min-width:min(200px,100%);flex:1 1 220px;max-width:340px}
@@ -884,13 +884,20 @@ const ICONS = {
   check:      '<path d="M20 6.5 9.2 17.3 4 12.1"/>',
   checkTwice: '<path d="M1.5 12.4 6 16.9 15.2 7.7M12 16.9 21.7 7.2"/>',
   chevron:    '<path d="M6 9.5 12 15.5l6-6"/>',
+  dots:       '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
+  link:       '<path d="M10 13.5a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7M14 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/>',
+  copy:       '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+  pulse:      '<path d="M2 12h4l3-8 5 16 3-8h5"/>',
+  person:     '<circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
+  server:     '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  window:     '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
 };
 // `title` is what a screen reader announces; without one the icon is decorative
 // and hidden, because a button beside it already carries the label.
-function icon(name, title){
+function icon(name, title, extra){
   const path = ICONS[name];
   if(!path) return "";
-  return '<svg class="ic" viewBox="0 0 24 24" ' +
+  return '<svg class="ic' + (extra ? " " + esc(extra) : "") + '" viewBox="0 0 24 24" ' +
     (title ? 'role="img"><title>' + esc(title) + "</title>"
            : 'aria-hidden="true">') + path + "</svg>";
 }
