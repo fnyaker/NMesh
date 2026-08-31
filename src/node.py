@@ -1388,6 +1388,7 @@ class MeshNode:
         # timestamp of the claim we published last time and moves past it.
         self._pseudo_store = None
         self._pseudo_dirty = False
+        self._on_change = None        # see set_change_listener
         if pseudo_store_path:
             from .session_store import PseudoStore
             self._pseudo_store = PseudoStore(pseudo_store_path, self._identity)
@@ -1522,6 +1523,7 @@ class MeshNode:
                     and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
                 self._extra_addrs.append(new)
         self._announce_addresses_soon("network-change")
+        self._note_change("reach")
 
     def _poke_net(self, reason: str) -> None:
         if self._net_monitor is not None:
@@ -2104,6 +2106,9 @@ class MeshNode:
                 if peer in self._peers:
                     self._peers.remove(peer)
         self._persist_state()
+        if existed:
+            self._note_change("nodes")
+            self._note_change("links")
         return existed
 
     async def _routed_ping(self, target: NodeID, timeout: float = 5.0) -> float | None:
@@ -3128,7 +3133,42 @@ class MeshNode:
             pass
         self._forget_hints_via(peer.authenticated_id)
         self._poke_net("peer-lost")
+        self._note_change("links")
         self._wake_neighbor_maintenance()
+
+    # -- telling a console what moved -------------------------------------
+    #
+    # A console that polls is a console that is either late or wasteful: at two
+    # seconds a link that came up is invisible for two seconds, and at a tenth
+    # of a second it asks two hundred times for nothing. So the node says when
+    # something structural moved and the console reads only then.
+    #
+    # Deliberately only *that something moved*, never what: this runs on the
+    # receive loop, at the moment a link comes up or goes down, so it must cost
+    # a set and a notify — never a snapshot. What changed is read afterwards, by
+    # whoever cared, off this thread.
+    #
+    # Structural only. Latency, jitter and throughput move constantly and by
+    # tiny amounts; they are read on a cadence instead, because a repaint per
+    # measurement is a page that fights the pointer for no new information.
+
+    def set_change_listener(self, callback) -> None:
+        """Call ``callback(topic)`` whenever something structural moves.
+
+        Topics: ``links`` (a link came up or went down), ``nodes`` (the routing
+        table gained or lost one), ``names`` (a pseudo was learned or changed),
+        ``reach`` (this node's own addressing moved). ``None`` unhooks."""
+        self._on_change = callback
+
+    def _note_change(self, topic: str) -> None:
+        """Never raises, never blocks: a listener's bug is not the node's."""
+        callback = self._on_change
+        if callback is None:
+            return
+        try:
+            callback(topic)
+        except Exception:
+            pass
 
     def _persist_state(self) -> None:
         """Mark the persisted state dirty; a background task does the writing.
@@ -4398,6 +4438,7 @@ class MeshNode:
             pass
         if peer in self._peers:
             self._peers.remove(peer)
+            self._note_change("links")
 
     def console_invite_block(self) -> str:
         """A shareable join bundle: base64 JSON with a fresh invite code and
@@ -5966,6 +6007,7 @@ class MeshNode:
         self._pseudo, self._pseudo_claim = wanted, claim
         self._pseudo_book.offer(parsed, claim)
         self._persist_pseudos()
+        self._note_change("names")
         self._announce_own_pseudo()
         return wanted
 
@@ -6013,6 +6055,7 @@ class MeshNode:
         if not self._pseudo_book.offer(claim, bytes(raw)):
             return None
         self._persist_pseudos()   # a name learned once is a name kept
+        self._note_change("names")
         return claim
 
     def _spawn_bounded(self, coro) -> None:
@@ -6603,6 +6646,8 @@ class MeshNode:
         ciphertext, shared_secret = self._identity.kem_encapsulate(kem_pub)
         peer.session = SessionKey(shared_secret)
         self._collapse_redundant_links(peer)
+        self._note_change("links")
+        self._note_change("nodes")
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
@@ -6694,6 +6739,8 @@ class MeshNode:
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
         self._collapse_redundant_links(peer)
+        self._note_change("links")
+        self._note_change("nodes")
         self._wake_neighbor_maintenance()
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases

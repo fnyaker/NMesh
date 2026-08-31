@@ -714,6 +714,13 @@ main{min-width:0;display:flex;flex-direction:column}
 .refresh select{display:none;min-height:var(--ctl-h-sm);font-size:var(--fs-xs);
   padding-block:0;width:auto}
 .refresh.paused input[type="number"],.refresh.paused select{color:var(--text-faint)}
+/* Live means the node says when something moves; the interval beside it is
+   only how often the numbers that move constantly are re-read. The dot is a
+   dot *and* a title, because a colour on its own says nothing to a reader who
+   cannot see it. */
+.refresh .live{width:7px;height:7px;flex:none;border-radius:var(--r-full);
+  background:var(--text-faint)}
+.refresh.streaming .live{background:var(--ok)}
 @media (max-width:720px){
   .refresh input[type="number"],.refresh .unit{display:none}
   .refresh select{display:block}
@@ -1367,6 +1374,96 @@ const PALETTE = {
 // does not close what is open, does not drop a selection, and does not wipe a
 // field being typed in. Losing a selection is legitimate in exactly one case —
 // the thing selected is no longer there.
+// ---- what changed, the moment it changes -----------------------------------
+// A console on a timer is either late or wasteful: at two seconds a link that
+// came up is invisible for two seconds, and at a tenth of a second it asks two
+// hundred times a minute for nothing. So the node says when something moved
+// (`GET /api/events`, one line per change) and the page reads only then.
+//
+// Two rules make that usable rather than frantic:
+//
+//   * **a frame.** However many events arrive, at most `FRAME` repaints a
+//     second, and every event inside one frame is answered by one repaint. Ten
+//     a second reads as instant; a hundred is a page that fights the pointer.
+//   * **structure only.** Links, nodes, names, addressing — things that either
+//     are or are not. Latency, jitter and throughput move constantly and by
+//     tiny amounts, and they stay on the timer, because a repaint per
+//     measurement says nothing new and costs the whole list.
+//
+// The stream is the local console's: it is a connection held open, and the
+// fleet relay moves one bounded request and its answer. Driving another node
+// therefore keeps the cadence, and `EVENTS.live` is how a page says which of
+// the two it is on.
+const EVENTS = {
+  FRAME: 100,
+  source: null,
+  live: false,
+  pending: new Set(),
+  timer: null,
+  handlers: {},
+  onLive: null,
+
+  // `topics` is a list of names, or "*" for anything at all.
+  on(topics, fn){
+    (Array.isArray(topics) ? topics : [topics]).forEach((topic) => {
+      (this.handlers[topic] = this.handlers[topic] || []).push(fn);
+    });
+  },
+
+  start(){
+    this.stop();
+    // Driving another node: there is nothing to listen to here, and pretending
+    // otherwise would leave the page waiting on a stream that never speaks.
+    if(CONTEXT.remote || typeof EventSource === "undefined"){ this.say(false); return; }
+    let source;
+    try{ source = new EventSource("/api/events"); }
+    catch(_){ this.say(false); return; }
+    this.source = source;
+    source.addEventListener("ready", () => this.say(true));
+    source.addEventListener("change", (event) => {
+      let topics = [];
+      try{ topics = (JSON.parse(event.data) || {}).topics || []; }catch(_){}
+      topics.forEach((topic) => this.pending.add(topic));
+      this.schedule();
+    });
+    // The browser reconnects on its own; what it cannot do is tell the page it
+    // is currently blind. Saying so is what puts the timer back.
+    source.addEventListener("error", () => this.say(false));
+  },
+
+  stop(){
+    if(this.source){ this.source.close(); this.source = null; }
+    if(this.timer){ clearTimeout(this.timer); this.timer = null; }
+    this.pending.clear();
+    this.say(false);
+  },
+
+  say(live){
+    if(this.live === live) return;
+    this.live = live;
+    if(this.onLive) this.onLive(live);
+  },
+
+  schedule(){
+    if(this.timer) return;      // a frame is already open; ride it
+    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, this.FRAME);
+  },
+
+  flush(){
+    const topics = [...this.pending];
+    this.pending.clear();
+    if(!topics.length) return;
+    const called = new Set();
+    topics.concat("*").forEach((topic) => {
+      (this.handlers[topic] || []).forEach((fn) => {
+        if(called.has(fn)) return;    // one repaint per frame, not one per topic
+        called.add(fn);
+        try{ fn(topics); }catch(_){}
+      });
+    });
+  },
+};
+
 const REFRESH = {
   MAX: 30,
   DEFAULT: 2,
@@ -1407,8 +1504,15 @@ const REFRESH = {
     }
     if(box){
       box.classList.toggle("paused", seconds === 0);
-      box.title = seconds === 0 ? "Auto-refresh is off"
-                                : "Refreshing every " + seconds + " seconds";
+      // Two different things, said in one place so they cannot contradict:
+      // whether changes arrive by themselves, and how often the numbers that
+      // never stop moving are re-read.
+      const stream = EVENTS.live
+        ? "Links and nodes update as they change. "
+        : "Not streaming — everything is read on this interval. ";
+      box.title = stream + (seconds === 0
+        ? "The interval is off, so ping, jitter and throughput stand still."
+        : "Ping, jitter and throughput every " + seconds + " seconds.");
     }
   },
 
@@ -1425,10 +1529,23 @@ const REFRESH = {
     return seconds;
   },
 
-  stop(){ if(this.timer){ clearInterval(this.timer); this.timer = null; } },
+  stop(){
+    if(this.timer){ clearInterval(this.timer); this.timer = null; }
+    EVENTS.stop();
+  },
+
+  // The stream coming up or going down changes what the interval means, and the
+  // control has to say so — a dot that only ever means "on" is decoration.
+  live(streaming){
+    const box = $("refresh");
+    if(box) box.classList.toggle("streaming", !!streaming);
+    this.paint(this.read());
+  },
 
   // Called once the page has something to refresh. Runs the job immediately —
-  // whoever mounts this wants the first paint now, whatever the interval.
+  // whoever mounts this wants the first paint now, whatever the interval — and
+  // opens the change stream, which is what makes the interval a *statistics*
+  // interval rather than the only thing keeping the page true.
   mount(job){
     this.job = job;
     const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
@@ -1436,8 +1553,10 @@ const REFRESH = {
     if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
     // Off is a choice, not a dead end: one press still reads the node.
     if(now) now.addEventListener("click", () => { if(this.job) this.job(); });
+    EVENTS.onLive = (streaming) => this.live(streaming);
     this.set(this.read());
     if(this.job) this.job();
+    EVENTS.start();
   },
 };
 

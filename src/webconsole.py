@@ -34,6 +34,7 @@ import secrets
 import ssl
 import threading
 import time
+from collections import OrderedDict
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -117,6 +118,92 @@ def _scrypt(password: str, salt: bytes) -> bytes:
     return hashlib.scrypt(password.encode("utf-8"), salt=salt, **_SCRYPT)
 
 
+# ---------------------------------------------------------------------------
+# Changes, coalesced
+# ---------------------------------------------------------------------------
+
+class _Changes:
+    """What moved, and a way to wait for the next thing that does.
+
+    The node calls :meth:`note` on its receive loop, the moment a link comes up
+    or goes down. So this side has to cost a set and a notify — never a
+    snapshot, never a socket: whoever is streaming reads the state afterwards,
+    on its own thread.
+
+    A sequence number rather than a queue per listener. A listener remembers
+    where it was and asks for what has changed since; a burst of forty link
+    events between two reads is one answer naming one topic, which is exactly
+    what a page wants — it is going to re-read the same list either way.
+    """
+
+    # Topics are a closed set from one file (`MeshNode._note_change`), but the
+    # dictionary is bounded anyway: an unbounded map keyed by something another
+    # module chooses is the shape of the bug, whoever writes the keys today.
+    MAX_TOPICS = 32
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._seq = 0
+        self._at: "OrderedDict[str, int]" = OrderedDict()
+        self._closed = False
+
+    @property
+    def seq(self) -> int:
+        with self._cond:
+            return self._seq
+
+    def note(self, topic) -> None:
+        topic = str(topic)[:32]
+        with self._cond:
+            if self._closed:
+                return
+            self._seq += 1
+            self._at.pop(topic, None)
+            self._at[topic] = self._seq
+            while len(self._at) > self.MAX_TOPICS:
+                self._at.popitem(last=False)
+            self._cond.notify_all()
+
+    def since(self, seq: int, timeout: float):
+        """``(topics, seq)`` — what changed after ``seq``, waiting up to
+        ``timeout`` seconds for the first of it. Empty on timeout, and on
+        close, so a caller's loop ends rather than spinning."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cond:
+            while self._seq <= seq and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return [], self._seq
+                self._cond.wait(remaining)
+            if self._closed:
+                return [], self._seq
+            return (sorted(name for name, at in self._at.items() if at > seq),
+                    self._seq)
+
+    @property
+    def closed(self) -> bool:
+        with self._cond:
+            return self._closed
+
+    def close(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+
+# One stream wakes at most this often, however many changes arrive in between:
+# ten repaints a second reads as instant, and a hundred is a page that fights
+# the pointer while saying nothing new.
+_STREAM_FRAME = 0.1
+# Nothing happened for this long → a comment down the wire. It keeps a proxy
+# from reaping an idle connection, and it is how a stream notices the client
+# went away without ever telling us.
+_STREAM_PING = 20.0
+# Streams held at once. Each one is a thread of the console's server for as
+# long as a page is open, so it is bounded like everything else here.
+_MAX_STREAMS = 8
+
+
 class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
@@ -140,6 +227,12 @@ class WebConsole:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # What the node says has moved, and the streams reading it. The console
+        # subscribes on start() and unsubscribes on stop(): a listener left
+        # hooked to a node whose console is gone is a reference nothing drops.
+        self._changes = _Changes()
+        self._streams = 0
+        self._streams_lock = threading.Lock()
 
         # Sessions: token -> expiry monotonic deadline.
         self._tokens: dict[str, float] = {}
@@ -477,6 +570,7 @@ class WebConsole:
             self._app_host.bind_console(self._loop)
         elif self._chat_bridge is not None:
             self._chat_bridge.start(self._loop)
+        self._node.set_change_listener(self._changes.note)
         handler = _make_handler(self)
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         if self._ssl_ctx is not None:
@@ -531,6 +625,14 @@ class WebConsole:
         return True
 
     def stop(self) -> None:
+        # Before the socket: a stream waiting on the condition would otherwise
+        # sit there until its next ping, holding a thread against a console that
+        # has already gone.
+        try:
+            self._node.set_change_listener(None)
+        except Exception:
+            pass
+        self._changes.close()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -832,10 +934,21 @@ def _make_handler(console: WebConsole):
                 if not remote:
                     self._json(400, {"error": "bad node id"})
                     return
+                if path == "/api/events":
+                    # A connection held open is not a thing the relay carries:
+                    # it moves one bounded request and its answer. Saying so is
+                    # what lets a page fall back to its cadence rather than
+                    # waiting on a stream that will never speak.
+                    self._json(409, {"error": "a change stream is local to the "
+                                              "console serving it"})
+                    return
                 self._proxy_remote(remote, self.path, None)
                 return
             if path == "/api/remote/targets":
                 self._handle_remote_targets()
+                return
+            if path == "/api/events":
+                self._stream_changes()
                 return
             if path in _STATIC:
                 ctype, text = _STATIC[path]
@@ -1855,6 +1968,76 @@ def _make_handler(console: WebConsole):
                                          in result["applied"].items()},
                              "rejected": result["rejected"],
                              "persisted": saved, "note": note})
+
+        # -- the change stream ---------------------------------------------
+        #
+        # The console used to ask "has anything changed?" on a timer. At two
+        # seconds a link that came up was invisible for two seconds; at a tenth
+        # of a second it was two hundred questions a minute answered "no". This
+        # inverts it: the node says when something moved and the page reads only
+        # then, so a link appears the moment it does.
+        #
+        # Only *that* something moved is sent — never what it is. The page reads
+        # the state it already knows how to read; a second description of a node
+        # travelling down a second channel is two things to keep in step.
+        #
+        # This one is local by construction. It is a connection held open, and
+        # the fleet console relay is a bounded request and its answer, not a
+        # stream; a page driving another node keeps its cadence instead, and
+        # says so.
+
+        def _stream_changes(self) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            with console._streams_lock:
+                if console._streams >= _MAX_STREAMS:
+                    self._json(503, {"error": "too many open streams"})
+                    return
+                console._streams += 1
+            try:
+                self._run_stream()
+            finally:
+                with console._streams_lock:
+                    console._streams -= 1
+
+        def _run_stream(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            # No length, so the body ends when the connection does. Announcing
+            # that here is what makes it legal under HTTP/1.1 — and it is what
+            # tells this handler not to try to read a second request off a
+            # socket that is going to stay busy for hours.
+            self.send_header("Connection", "close")
+            for key, value in _SECURITY_HEADERS.items():
+                self.send_header(key, value)
+            self.end_headers()
+            seq = console._changes.seq
+            try:
+                # Says the stream is live before anything has moved, so a page
+                # can stop its timer on evidence rather than on hope.
+                self._emit("ready", {"at": time.time()})
+                while console._server is not None:
+                    topics, seq = console._changes.since(seq, _STREAM_PING)
+                    if not topics:
+                        if console._changes.closed:
+                            return
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    self._emit("change", {"topics": topics, "at": time.time()})
+                    # Hold the frame open rather than answering each event: the
+                    # next pass picks up everything that piled up meanwhile, in
+                    # one message. Ten a second, whatever the mesh is doing.
+                    time.sleep(_STREAM_FRAME)
+            except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+                return          # the page went away; nothing to report
+
+        def _emit(self, name: str, document: dict) -> None:
+            self.wfile.write(
+                f"event: {name}\ndata: {json.dumps(document)}\n\n".encode("utf-8"))
+            self.wfile.flush()
 
         def _handle_remote_targets(self) -> None:
             if not self._authed():
