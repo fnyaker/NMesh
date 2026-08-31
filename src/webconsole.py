@@ -1926,6 +1926,13 @@ def _make_handler(console: WebConsole):
                     self._json(200, {"rid": fleet.status(node)})
                 elif action == "update":
                     self._json(200, {"rid": fleet.update(node)})
+                elif action == "invite":
+                    # The answer *is* the invitation, so this one waits for it
+                    # rather than handing back a request id and leaving the
+                    # page to poll for a secret it must show once.
+                    result = fleet.api_invite(node, data.get("ttl") or 0,
+                                              data.get("ticket") is True)
+                    self._json(200 if not result.get("error") else 502, result)
                 elif action == "scan":
                     # ``targets`` mixes subnets and precise machines; ``subnets``
                     # is accepted as the older spelling of the same field.

@@ -58,6 +58,7 @@ From the most harmless to total. One never implies another.
 | Capability | What it allows |
 |---|---|
 | `status` | reading uptime, load, memory, disks |
+| `invite` | minting a single-use invitation to **that node's** mesh, on its behalf |
 | `update` | running the machine's package manager upgrade |
 | `scan` | scanning this machine's LAN for SSH hosts |
 | `provision` | installing NMesh on machines of that LAN |
@@ -194,6 +195,34 @@ last right ends the relationship. Losing `shell` closes the shells already open
 
 An unknown capability name is **not** read as "no rights": the request is
 refused. Otherwise a typo would become a cut-off.
+
+## `invite`: a right of its own, on purpose
+
+An operator holding `manage` could already do this — drive that node's console
+and press its own **Add a node** button. That is exactly the reason `invite`
+exists: *"let me add somebody to your mesh"* and *"let me drive your console"*
+are not the same ask, and having to grant the second to obtain the first is the
+over-grant this ledger is here to prevent. So the two are independent, and
+`manage` does **not** imply `invite`.
+
+The node that will honour the invitation is the node that mints it. It checks
+the right, it chooses the lifetime (the operator's number is a request, capped
+at `INVITE_TTL_MAX`, six hours), and it can take the right back at any moment.
+Whoever redeems the code runs the ordinary invite → handshake path, so their
+certificate is **issued and signed by that node** and chains from there — the
+operator is not in the chain at all.
+
+`INVITE_REQUEST` carries `{ttl, ticket}`; `INVITE_ISSUED` comes back with the
+`uris`, the single-use `code`, and — when that node has a confirmed public
+address — the same invitation in the compact scannable form plus its QR. A node
+with no public address returns the invitation without a ticket rather than
+refusing.
+
+The code **is** the secret, so it is treated like one: it never enters the
+activity log (a bounded list that sits on a screen), the console holds it until
+the dialog that asked collects it, and the collection is a **read once** — a
+second poll gets nothing. What the log says is that an invitation was issued and
+how long it lasts.
 
 ## `update` and `shell`: two routes to root, deliberately different
 
@@ -708,6 +737,7 @@ All behind the console session (Bearer or cookie). Details:
 | POST | `/api/remote/connect` / `disconnect` | opens / closes a session on a managed node's console |
 | *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
+| POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
 | POST | `/api/fleet/provision` | deployment |
 | POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | built-in apps |

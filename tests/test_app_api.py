@@ -275,10 +275,11 @@ class TestTheShippedApps:
     def test_fleet_offers_exactly_what_the_details_view_needs(self):
         from src.apps.fleet_web import FleetBridge
         operations = {op["name"]: op for op in app_api.declared(FleetBridge)}
-        assert set(operations) == {"relation", "enrol", "request"}
+        assert set(operations) == {"relation", "enrol", "request", "invite"}
         assert operations["relation"]["changes"] is False
         assert operations["enrol"]["changes"] is True
         assert operations["request"]["changes"] is True
+        assert operations["invite"]["changes"] is True
 
     def test_no_shipped_operation_takes_a_free_form_blob(self):
         """Every argument that crosses this boundary has a shape. If one ever

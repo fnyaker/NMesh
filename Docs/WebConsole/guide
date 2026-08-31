@@ -282,6 +282,7 @@ works on a machine with no internet.
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
 | POST    | `/api/fleet/caps-set` | `{node, caps}` → an operator's rights **on this node**. The only place a right is added: decided by a human, here |
 | POST    | `/api/fleet/caps-request` / `caps-drop` | `{node, caps}` → request (the target must approve) / hand back (immediate) a right on a managed node |
+| POST    | `/api/fleet/invite` | `{node, ttl?, ticket?}` → an invitation minted by that node, on its behalf (capability `invite`). Waits for the answer: what comes back is a single-use code shown once |
 | POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |

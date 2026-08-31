@@ -702,6 +702,114 @@ class TestStatus:
 
 
 # ---------------------------------------------------------------------------
+# Invitations minted on another node's behalf
+# ---------------------------------------------------------------------------
+
+class TestInvite:
+    """A right of its own, deliberately.
+
+    An operator holding `manage` could already drive that node's console and
+    press its button — which is the point: "let me add somebody to your mesh"
+    should not cost a grant of the whole machine."""
+
+    def _agent_that_invites(self, agent, minted):
+        def _mint(ttl=None, ticket=False):
+            minted.append((ttl, ticket))
+            return {"uris": ["tcp://10.0.0.9:9000"], "code": "abcdefghij",
+                    "ticket": "TICKET" if ticket else "",
+                    "expires_at": 1000.0, "ttl": ttl or 300.0}
+        agent.app._mesh_invite = _mint
+
+    async def test_an_authorised_operator_gets_a_live_invitation(self, operator,
+                                                                 agent):
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await enrol(operator, agent, caps=["invite"])
+        await operator.app.request_invite(agent.id, ttl=3600, ticket=True)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        issued = [e for e in operator.drain_events()
+                  if isinstance(e, fleet.InviteIssued)]
+        assert len(issued) == 1
+        assert issued[0].code == "abcdefghij"
+        assert issued[0].ticket == "TICKET"
+        assert issued[0].uris == ["tcp://10.0.0.9:9000"]
+        assert minted == [(3600.0, True)]
+
+    async def test_status_alone_buys_nothing(self, operator, agent):
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await enrol(operator, agent, caps=["status"])
+        await operator.app.request_invite(agent.id)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        assert minted == []
+        assert not [e for e in operator.drain_events()
+                    if isinstance(e, fleet.InviteIssued)]
+
+    async def test_manage_alone_buys_nothing_either(self, operator, agent):
+        """The whole reason the capability exists: the two are separate asks."""
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await enrol(operator, agent, caps=["manage"])
+        await operator.app.request_invite(agent.id)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        assert minted == []
+
+    async def test_a_stranger_gets_nothing(self, operator, agent):
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await operator.app.request_invite(agent.id)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        assert minted == []
+
+    async def test_the_window_is_the_agents_to_decide(self, operator, agent):
+        """The operator's number is a request. The node that will leave the code
+        live is the one that bounds it."""
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await enrol(operator, agent, caps=["invite"])
+        # Straight into the handler, so the operator's own clamp is not what is
+        # being measured here.
+        agent.app._on_invite_request(
+            operator.id, None, {"rid": "aa" * 8, "ttl": 10 ** 9, "ticket": False})
+        await settle()
+        assert minted == [(fleet.INVITE_TTL_MAX, False)]
+
+    async def test_a_nonsense_window_falls_back_rather_than_failing(self,
+                                                                   operator,
+                                                                   agent):
+        minted = []
+        self._agent_that_invites(agent, minted)
+        await enrol(operator, agent, caps=["invite"])
+        for rubbish in ("soon", None, -5, float("nan")):
+            agent.app._on_invite_request(
+                operator.id, None, {"rid": "bb" * 8, "ttl": rubbish})
+        await settle()
+        assert minted == [(fleet.INVITE_TTL_DEFAULT, False)] * 4
+
+    async def test_a_node_that_cannot_mint_says_so(self, operator, agent):
+        await enrol(operator, agent, caps=["invite"])
+        agent.app._mesh_invite = None
+        await operator.app.request_invite(agent.id)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
+        assert len(failures) == 1
+        assert "invitation" in failures[0].error
+
+    async def test_an_unsolicited_invitation_is_dropped(self, operator, agent):
+        """A reply only counts if it answers a request we minted. Otherwise a
+        managed node could push codes at its operator all day."""
+        operator.app._on_invite_issued(
+            agent.id, {"rid": "cc" * 8, "code": "aaaaaaaaaa", "uris": []})
+        assert not [e for e in operator.drain_events()
+                    if isinstance(e, fleet.InviteIssued)]
+
+
+# ---------------------------------------------------------------------------
 # Shell session binding
 # ---------------------------------------------------------------------------
 
