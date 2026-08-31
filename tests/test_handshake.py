@@ -1,7 +1,8 @@
 import asyncio
 import os
+import time
 import pytest
-from src.node import (MeshNode, HANDSHAKE, HANDSHAKE_ACK,
+from src.node import (MeshNode, HANDSHAKE, HANDSHAKE_ACK, _Peer,
                       _encode_handshake, _decode_handshake,
                       _decode_handshake_ack)
 from src.node_id import NodeID
@@ -47,6 +48,95 @@ class TestInitiateHandshake:
         await node.stop()
 
 
+def _stale_link(node, target, *, canonical: bool):
+    """A link this node still holds to ``target`` and the far end does not.
+
+    ``canonical=True`` makes it the one the duplicate-link rule would keep,
+    which is the case that used to eat the handshake."""
+    we_dial = node.id.raw > target.raw
+    peer = _Peer(FakeTransport(),
+                 is_client_side=we_dial if canonical else not we_dial)
+    peer.authenticated_id = target
+    peer.session = object()
+    peer.remote_addr = "fake://gone:1"
+    peer.connected_at = time.monotonic() - 3600.0
+    node._peers.append(peer)
+    return peer
+
+
+class TestSayingWhyAHandshakeWasRefused:
+    """A node that refuses in silence cannot be debugged.
+
+    Rejecting anything unverified is the rule and stays the rule. What was
+    missing is the other half: eleven attempts in two minutes, each dropped at
+    one of a dozen tests, and nothing anywhere saying which one. The packet is
+    still dropped with no side effect — the difference is that the operator can
+    ask."""
+
+    async def test_a_chain_from_another_network_says_so(self):
+        """The answer an operator with a mesh that will not connect needs."""
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()          # no root in common
+        _setup_challenge_pair(node_a, node_b)
+        await node_a.initiate_handshake(node_a._peers[0])
+        fake_b.inject(fake_a.sent[0])
+        await asyncio.sleep(0.1)
+        await node_a.stop()
+        await node_b.stop()
+        assert not any(p.type == HANDSHAKE_ACK for p in fake_b.sent)
+        reasons = [row["reason"] for row in node_b.handshake_refusals()]
+        assert reasons == ["the certificate chain reaches no root we trust"]
+
+    async def test_a_malformed_handshake_says_so(self):
+        node, fake = await make_node()
+        node._peers[0].pending_challenge = os.urandom(32)
+        fake.inject(Packet.create(HANDSHAKE, b"\x01" * 20, node.id.raw, b"junk"))
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert [row["reason"] for row in node.handshake_refusals()] == [
+            "handshake was malformed"]
+
+    async def test_retrying_climbs_one_reason_rather_than_listing_many(self):
+        node, fake = await make_node()
+        for _ in range(5):
+            node._peers[0].pending_challenge = os.urandom(32)
+            fake.inject(Packet.create(HANDSHAKE, b"\x01" * 20, node.id.raw, b"junk"))
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+        await node.stop()
+        rows = node.handshake_refusals()
+        assert len(rows) == 1
+        assert rows[0]["count"] == 5
+
+    async def test_the_peer_that_was_turned_away_is_named(self):
+        node, fake = await make_node()
+        node._peers[0].pending_challenge = os.urandom(32)
+        fake.inject(Packet.create(HANDSHAKE, b"\x07" * 20, node.id.raw, b"junk"))
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert node.handshake_refusals()[0]["peer"] == "07" * 20
+
+    async def test_a_link_that_is_already_up_is_not_a_refusal(self):
+        """A repeat of a handshake we already answered is noise, not a reason."""
+        node, fake = await make_node()
+        node._peers[0].authenticated_id = NodeID(b"\x02" * 20)
+        fake.inject(Packet.create(HANDSHAKE, b"\x02" * 20, node.id.raw, b"junk"))
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert node.handshake_refusals() == []
+
+    async def test_the_reasons_are_bounded_and_newest_first(self):
+        node, _fake = await make_node()
+        from src.node import _REFUSALS_KEPT
+        packet = Packet.create(HANDSHAKE, b"\x03" * 20, node.id.raw, b"x")
+        for index in range(_REFUSALS_KEPT + 10):
+            node._refuse_handshake(packet, "reason %d" % index)
+        await node.stop()
+        rows = node.handshake_refusals()
+        assert len(rows) == _REFUSALS_KEPT
+        assert rows[0]["reason"] == "reason %d" % (_REFUSALS_KEPT + 9)
+
+
 class TestHandleHandshake:
     async def test_sends_handshake_ack(self):
         node_a, fake_a = await make_node()
@@ -59,6 +149,35 @@ class TestHandleHandshake:
         await node_a.stop()
         await node_b.stop()
         assert any(p.type == HANDSHAKE_ACK for p in fake_b.sent)
+
+    async def test_a_link_the_far_end_lost_does_not_eat_the_handshake(self):
+        """The whole mesh stopped connecting on this.
+
+        A node that restarts is dialled by peers still holding the link it had
+        before. On the answering side that link was authenticated, so the
+        duplicate-link rule fired — and because the rule keeps the link *this*
+        side dialled, it closed the one that had just proved itself, before the
+        ACK went out. The dialler saw its CHALLENGE answered, sent its
+        HANDSHAKE, and waited forever. Both halves are proved here: the answer
+        leaves before any bookkeeping, and the bookkeeping keeps the right
+        link."""
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        node_b._peers[0].invite_accepted = True
+        node_b._peers[0].remote_addr = "fake://here:1"
+        _setup_challenge_pair(node_a, node_b)
+        stale = _stale_link(node_b, node_a.id, canonical=True)
+        await node_a.initiate_handshake(node_a._peers[0])
+        fake_b.inject(fake_a.sent[0])
+        await asyncio.sleep(0.1)
+        fresh = node_b._peers[0]
+        held = list(node_b._peers)             # stop() empties it
+        await node_a.stop()
+        await node_b.stop()
+        assert any(p.type == HANDSHAKE_ACK for p in fake_b.sent)
+        assert fresh.session is not None
+        assert fresh in held                   # the proven link is the keeper
+        assert stale not in held               # the ghost is the one dropped
 
     async def test_sets_session_on_responder(self):
         node_a, fake_a = await make_node()

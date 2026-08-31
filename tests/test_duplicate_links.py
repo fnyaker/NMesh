@@ -12,10 +12,11 @@ the same answer from the same two numbers, and neither drops the link the other
 kept.
 """
 import asyncio
+import time
 
 import pytest
 
-from src.node import MeshNode, _Peer
+from src.node import MeshNode, _Peer, _HANDSHAKE_DEADLINE
 from src.node_id import NodeID
 from tests.conftest import FakeTransport, make_manager
 
@@ -87,12 +88,45 @@ class TestWhichLinkSurvives:
 
     def test_two_links_the_same_way_round_keep_the_older_one(self):
         """We dialled twice. Nothing distinguishes them by direction, so the
-        one that was up first wins — an order the far end sees too."""
+        one that was up first wins — an order the far end sees too.
+
+        Seconds apart, because that is what a double dial is: the two attempts
+        cross, they do not sit an hour apart."""
         node = _node()
+        now = time.monotonic()
         target = _smaller_than(node)          # we are the dialler, both outbound
-        _link(node, target, outbound=True, uri="fake://a:1", at=100.0)
-        newer = _link(node, target, outbound=True, uri="fake://b:2", at=200.0)
+        _link(node, target, outbound=True, uri="fake://a:1", at=now - 2.0)
+        newer = _link(node, target, outbound=True, uri="fake://b:2", at=now)
         assert node._redundant_links(newer) == [newer]
+
+    def test_a_link_the_far_end_no_longer_has_never_wins(self):
+        """The bug that stopped the mesh connecting.
+
+        A node restarts and dials us. We still hold the link we had to it — it
+        is authenticated, so the rule fired, and the rule keeps the link *we*
+        dialled. That link is a ghost: the far end restarted, it has no such
+        link, and it is dialling precisely because it has none. Keeping it
+        answered a live link by closing it, and left the pair with nothing."""
+        node = _node()
+        now = time.monotonic()
+        target = _smaller_than(node)          # we are the larger id, so we dial
+        ghost = _link(node, target, outbound=True, uri="fake://gone:1",
+                      at=now - 3600.0)
+        fresh = _link(node, target, outbound=False, uri="fake://back:1", at=now)
+        assert node._redundant_links(fresh) == [ghost]
+
+    def test_the_rule_still_decides_a_dial_that_crossed(self):
+        """The window only rescues a proven link from a ghost. Two links that
+        really did cross are still settled by the two identities, or each end
+        drops the other's and the pair is left with none."""
+        node = _node()
+        now = time.monotonic()
+        target = _smaller_than(node)
+        mine = _link(node, target, outbound=True, uri="fake://a:1",
+                     at=now - _HANDSHAKE_DEADLINE + 5.0)
+        theirs = _link(node, target, outbound=False, uri="fake://b:2", at=now)
+        assert node._redundant_links(theirs) == [theirs]
+        assert mine in node._peers
 
     def test_a_second_medium_is_not_a_duplicate(self):
         """A node reached over two transports holds one link on each, and that

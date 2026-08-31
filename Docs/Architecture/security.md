@@ -58,12 +58,19 @@ propagates through certificate chains.
   - `verify_chain(chain)`: continuous issuance links + a self-signed last cert +
     the last `subject_id ∈ roots` + nothing expired → returns the anchor,
     otherwise None.
-  - **Bounded** (`MAX_SUBJECTS`, `MAX_PER_SUBJECT`, LRU), with the roots and our
-    own subject pinned — a bound that can leave us unable to authenticate is an
-    outage, not a bound. `get_chain_to_root` is **memoised per subject** and the
-    cache is dropped on any change: it is a BFS, `_handle_find_node` runs it
-    once per candidate it considers, and an unbounded store made a 28-byte
-    packet buy an unbounded graph walk.
+  - **Bounded** (`MAX_SUBJECTS`, `MAX_PER_SUBJECT`, LRU), with the roots and
+    **every subject our own chain runs through** pinned (`_pinned`) — a bound
+    that can leave us unable to authenticate is an outage, not a bound. Pinning
+    the roots and ourselves is not enough: the intermediates are what join the
+    two, and evicting one leaves `get_chain_to_root(own_id)` falling back to our
+    self-signed chain, which nobody trusts. We would go on authenticating
+    everyone else while nobody could authenticate us, and nothing would error
+    anywhere. The per-subject trim never drops the certificate the chain is
+    using either. `get_chain_to_root` is **memoised per subject** and the cache
+    is dropped on any change — before the bounds run, since the bounds ask what
+    the chain is made of. It is a BFS, `_handle_find_node` runs it once per
+    candidate it considers, and an unbounded store made a 28-byte packet buy an
+    unbounded graph walk.
 - `TrustTable` (`trust.py`): **TOFU** `NodeID → DSA key`. First sighting →
   store; a later sighting with a **different key** → `False` (compromise or
   impersonation).
@@ -164,8 +171,33 @@ Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
    only once the packet has earned it. `_MAX_HANDSHAKE_ATTEMPTS` bounds how
    many tries one link gets at all, and `_decode_chain` refuses a chain longer
    than `_ENTRY_CHAIN_MAX`.
+   **The ACK leaves before anything else.** Once `peer.session` is set, the
+   peer has proved who it is and is owed its answer, so the ACK is built and
+   sent immediately; the bookkeeping that follows (duplicate-link collapse,
+   change notices, the catalog/release/pseudo syncs) all happens after it. It
+   used to run first, and one of those lines closed the very link the answer
+   was about to go down — see `gotchas.md` and `transports.md`.
 4. The client (`_handle_handshake_ack`) verifies and decapsulates → the same
    `SessionKey`.
+
+### Refusing out loud
+
+Every test above drops the packet with no side effect, which is the rule. What
+neither handler used to do is **say so**, and a node that refuses in silence
+cannot be debugged: the far end retries for ever, each attempt dies at one of a
+dozen tests, and nothing anywhere names the test.
+
+Both handlers now call `_refuse_handshake(packet, reason)`. It changes nothing
+on the wire — no reply, no side effect, the packet is still dropped — and
+records the reason for the operator (`node.handshake_refusals()`, shown in the
+console under Network → Reachability). Counted **per reason, never per peer**:
+the reasons are this file's own words, so nothing a peer sends can grow the
+store, and `_REFUSALS_KEPT` bounds it regardless. The most recent id refused
+under each reason is kept, which is a fixed 20 bytes.
+
+Telling an operator why *their own node* refused is not telling an attacker
+anything: the console is authenticated, and the refusing node sends nothing
+back.
 
 From then on `peer.authenticated_id` is set on both sides and all traffic on the
 link is AES-256-GCM encrypted. Trust is **mutual** (each side challenges the
