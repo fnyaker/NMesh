@@ -165,6 +165,9 @@ What each of the pages used to solve on its own:
   a timer does not replace a node under the pointer and swallow the click;
 - `confirmAction` — destructive actions ask, in the page;
 - `THEME` — light / dark / system, remembered per browser;
+- `EVENTS` — the node's change stream (`/api/events`): what moved, coalesced into
+  at most ten repaints a second, one handler call per frame. Structure only —
+  the numbers that never stop moving stay on `REFRESH`'s interval;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
   and `CTX_BAR`, the strip that says so on all three pages;

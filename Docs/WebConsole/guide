@@ -120,6 +120,40 @@ never get wrong.
   from the machine being managed would be a confidently wrong answer rather than
   an error.
 
+## The page is told, it does not ask
+
+The console used to read the node on a timer. At two seconds a link that came
+up was invisible for two seconds; at a tenth of a second it was two hundred
+questions a minute answered "nothing". `GET /api/events` inverts it: the node
+says when something moved, and the page reads only then.
+
+**Only that something moved** — never what. The frame names topics
+(`links`, `nodes`, `names`, `reach`) and the page reads the state it already
+knows how to read. A second description of a node travelling down a second
+channel is two things to keep in step.
+
+**Structure, not measurement.** A link that came up either did or did not, and
+wants to be instant. Latency, jitter, throughput and load move constantly and by
+tiny amounts, so they stay on the interval — a repaint per measurement says
+nothing new and costs the whole list. The number in the top bar is therefore
+*that* interval, and the dot beside it says whether the stream is live.
+
+**A frame, not a firehose.** One stream wakes at most ten times a second
+(`_STREAM_FRAME`), and every change inside a frame is answered by one repaint on
+the page (`EVENTS.FRAME`), each handler running once however many topics named
+it. Forty link events between two reads is one message naming one topic.
+
+**Bounds.** At most `_MAX_STREAMS` open at once (each is a thread of the
+console's server while a page is open), a comment down the wire every 20 s so an
+idle connection is neither reaped nor mistaken for a live one, and the hub's
+topic table is capped. Stopping the console unhooks the node and releases
+whoever is waiting.
+
+**Local by construction.** A stream is a connection held open, and the fleet
+relay carries one bounded request and its answer. Under a remote context the
+endpoint answers **409** and the page keeps its cadence, saying so rather than
+waiting on a stream that will never speak.
+
 ## Watching the mesh live
 
 - **The map** (Overview → Topology) opens large in one click — on the map
@@ -271,6 +305,7 @@ works on a machine with no internet.
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**) |
+| GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |

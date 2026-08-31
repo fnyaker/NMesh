@@ -388,6 +388,44 @@ def test_a_view_inside_a_local_app_asks_this_node():
     assert re.search(r"\bawait api\(", body) is None
 
 
+# ── changes, the moment they happen ─────────────────────────────────────────
+
+def test_the_page_listens_rather_than_asking_whether_anything_moved():
+    """A console on a timer is either late or wasteful. The interval that
+    remains is for the numbers that never stop moving."""
+    assert "new EventSource(\"/api/events\")" in webassets.ui.JS
+    assert 'EVENTS.on(["links", "nodes", "names", "reach"]' in webassets.APP_JS
+
+
+def test_a_burst_of_changes_is_one_repaint():
+    """Ten a second reads as instant; a hundred is a page that fights the
+    pointer while saying nothing new."""
+    assert "FRAME: 100" in webassets.ui.JS
+    frame = webassets.ui.JS.split("schedule(){")[1].split("},")[0]
+    assert "if(this.timer) return" in frame
+    # And one handler runs once per frame however many topics named it.
+    flush = webassets.ui.JS.split("flush(){")[1].split("\n  },")[0]
+    assert "called.has(fn)" in flush
+
+
+def test_a_change_never_samples_the_throughput():
+    """A rate is a difference over a known time. Sampling it whenever a link
+    happened to come up would draw the mesh's mood, not its throughput."""
+    assert "tick(false)" in webassets.APP_JS
+    assert "if(sample === false) STATE._rates = RATE_NOW;" in webassets.APP_JS
+
+
+def test_driving_another_node_keeps_the_cadence():
+    """The relay carries one bounded request and its answer, never a connection
+    held open — so the page must not sit waiting on a stream."""
+    start = webassets.ui.JS.split("start(){")[1].split("\n  },")[0]
+    assert "CONTEXT.remote" in start
+    # And the control says which of the two it is on, rather than showing a dot
+    # that only ever means "on".
+    assert "EVENTS.live" in webassets.ui.JS
+    assert 'id="refresh-live"' in webassets.INDEX_HTML
+
+
 # ── layout that cannot overflow ─────────────────────────────────────────────
 # Both of these were real: a long message made the chat page scroll sideways on
 # a phone, and every bubble in the log was crushed to 20px so the conversation

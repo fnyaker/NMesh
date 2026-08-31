@@ -69,7 +69,8 @@ INDEX_HTML = """<!doctype html>
         <select id="ctx-node"></select></label>
       <span class="grow"></span>
       <div id="refresh" class="refresh">
-        <label class="sr-only" for="refresh-secs">Auto-refresh, in seconds (0 turns it off)</label>
+        <i id="refresh-live" class="live" aria-hidden="true"></i>
+        <label class="sr-only" for="refresh-secs">How often the changing numbers are re-read, in seconds (0 turns it off)</label>
         <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
         <span class="unit" aria-hidden="true">s</span>
         <label class="sr-only" for="refresh-pick">Auto-refresh</label>
@@ -855,6 +856,10 @@ let STATE = null, PREVIOUS = null;
 // once one is running: see tick().
 let TICKING = false;
 const RATES = [];                       // ~90 samples, the throughput window
+// The last rate measured. A repaint triggered by a change did not measure one
+// and must not invent a zero: nothing about the throughput changed because a
+// link came up.
+let RATE_NOW = {inbound:0, outbound:0};
 
 // ---- gate ------------------------------------------------------------------
 function showGate(){
@@ -914,7 +919,19 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "updates") refreshReleases();
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
-async function tick(){
+// One reader of `/api/state`, two reasons to call it.
+//
+//   * the **interval**, for the numbers that never stop moving — throughput,
+//     latency, jitter, load. Those want a steady cadence: a rate is a
+//     difference over a known time, and sampling it whenever a link happened to
+//     come up would make the chart a picture of the mesh's mood rather than of
+//     its throughput.
+//   * a **change**, for the things that either are or are not. Those want to be
+//     instant, and they carry no rate.
+//
+// So `sample` is the whole difference between the two, and it is the only one.
+// Two readers would be two descriptions of one node.
+async function tick(sample){
   // Held per context, not as a plain flag: a tick for the node we just left
   // must not make the tick for the node we just entered look redundant. That
   // is how a switch used to leave the old machine's numbers on screen until
@@ -926,7 +943,8 @@ async function tick(){
     const response = await api("/api/state");
     if(!response.ok) return;
     STATE = await response.json();
-    trackRates(STATE);
+    if(sample === false) STATE._rates = RATE_NOW;
+    else trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
@@ -935,6 +953,11 @@ async function tick(){
     if(!isStale(error)) railState("danger", "Console unreachable");
   }finally{ if(TICKING === epoch) TICKING = false; }
 }
+// The node says when something structural moved; the page reads then. Every
+// event inside one frame is answered by one repaint (EVENTS.FRAME), so a burst
+// of forty link changes is one pass over the list rather than forty.
+EVENTS.on(["links", "nodes", "names", "reach"], () => tick(false));
+
 function trackRates(state){
   let inbound = 0, outbound = 0;
   const restarted = !PREVIOUS || PREVIOUS.id !== state.id || state.uptime < PREVIOUS.uptime ||
@@ -950,7 +973,7 @@ function trackRates(state){
               bytes_in:state.total.bytes_in, bytes_out:state.total.bytes_out};
   RATES.push({inbound:Math.max(0,inbound), outbound:Math.max(0,outbound)});
   while(RATES.length > 90) RATES.shift();
-  state._rates = {inbound, outbound};
+  state._rates = RATE_NOW = {inbound, outbound};
 }
 
 // The rail is hidden on a phone and the same line shows in the ⋯ menu; written
@@ -2806,6 +2829,7 @@ async function loadTargets(){
 // is reset by the same list as the rest.
 CONTEXT.subscribe(() => {
   STATE = null; PREVIOUS = null; RATES.length = 0; TICKING = false;
+  RATE_NOW = {inbound:0, outbound:0};
   MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
   // What a node can offer is that node's answer, and the buttons drawn from it
@@ -2820,6 +2844,10 @@ CONTEXT.subscribe(() => {
   // A node card describes a peer of the machine we just left.
   if($("node-dialog").open) $("node-dialog").close();
   $("ctx-node").value = CONTEXT.node;
+  // The stream belongs to the console serving this page, so driving another
+  // node closes it and coming back opens it again. `start` knows which of the
+  // two this is; the page only has to tell it that the answer moved.
+  EVENTS.start();
   tick();
   onRoute(ROUTER.section, ROUTER.sub);
   loadTargets();
