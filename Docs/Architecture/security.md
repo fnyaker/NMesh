@@ -320,6 +320,18 @@ session, and the two are held by different people. The relayed call is
 session checking, ceilings and the anti-bruteforce lockout are the console's own
 — a relay that answered by itself would be a second front door with its own bugs.
 
+`passwordless` is the one case where that second key is **given rather than
+typed**, and it exists because of a machine where nobody can type it: a node an
+operator provisioned generated its own console password on first start and
+printed it to a log on a box with no screen. The grant then *is* the second key,
+and it is granted the way every other right is — by a human on the target, or by
+the pre-authorisation that stands in for one on a machine they just installed.
+It skips the password and nothing else: the mesh session, the ledger entry and a
+fresh signature are all still required, the session it mints is an ordinary
+console session with the console's own expiry, `manage` is still needed to carry
+a call, and taking either right back **ends the sessions already open** rather
+than only stopping the next one.
+
 That ledger is never widened by the network. A right is only ever added by a
 local decision on the machine that bears it; the one message that touches
 capabilities without a human (`ENROL_NARROW`) is **intersected** with what its

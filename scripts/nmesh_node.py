@@ -72,9 +72,28 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
                        state=FleetState(store=store), repo_root=ROOT,
                        mesh_invite=lambda ttl=None, ticket=False:
                            _mesh_invitation(node, ttl, ticket),
+                       release_publishers=lambda: _release_publishers(node),
                        local_console=local_console)
         return app, FleetBridge(app)
     return build
+
+
+def _release_publishers(node) -> list:
+    """Whose signed releases this node accepts, plus this node itself.
+
+    Provisioning offers to hand this to the machines it installs. Our own key is
+    in it because "my fleet runs the code I publish" is the point of publishing
+    from a node at all, and because the alternative on a headless box is a
+    machine that accepts nothing from the mesh and has nobody to tell it
+    otherwise. Nothing here is applied by this call — it is a list an operator
+    chooses to send."""
+    overview = node.release_overview()
+    mine = {"key": overview["publisher_key"],
+            "name": (node.pseudo or "the node that installed me")[:64],
+            "auto": True}
+    return [mine] + [{"key": entry["key"], "name": entry["name"],
+                      "auto": entry["auto"]}
+                     for entry in overview["publishers"]]
 
 
 # A provisioned machine redeems its invitation only after installing its
@@ -127,15 +146,38 @@ async def _join_mesh(node, preauth) -> bool:
     return False
 
 
+def _pin_publishers(node, preauth) -> int:
+    """Pin the release publishers the pre-authorisation carries.
+
+    Done before anything else, and whatever the mesh does next: whose code this
+    machine accepts has nothing to do with whether it managed to join, and this
+    is the only moment a box with no screen will ever be told. The keys arrived
+    over the same authenticated SSH channel as the operator's own, which is this
+    side's root of trust; a key that does not parse is dropped, not guessed at."""
+    pinned = 0
+    for entry in preauth.get("publishers") or []:
+        try:
+            node.trust_publisher(entry["key"], entry.get("name", ""),
+                                 entry.get("auto") is True)
+            pinned += 1
+        except Exception:                     # noqa: BLE001 — one bad key is not fatal
+            continue
+    return pinned
+
+
 async def _adopt_operator(node, host, preauth, path) -> None:
-    """First start after provisioning: join the mesh the operator named, adopt
-    them as an operator, prove which provisioning run we came from, and delete
-    the pre-authorisation.
+    """First start after provisioning: accept the operator's publishers, join
+    the mesh they named, adopt them as an operator, prove which provisioning run
+    we came from, and delete the pre-authorisation.
 
     The file is removed whatever happens. It is single-use by construction — the
     operator only honours the token once — so keeping it around after the
     attempt would leave a stale secret on disk for no benefit."""
     try:
+        pinned = _pin_publishers(node, preauth)
+        if pinned:
+            print(f"  Updates       : accepting releases from {pinned} "
+                  f"publisher(s) named by the operator")
         joined = await _join_mesh(node, preauth)
         if not joined:
             # Claiming would go nowhere with no route to anyone. Say so plainly
@@ -368,6 +410,11 @@ async def main() -> None:
                          config_path=config_path)
     console.start(loop=asyncio.get_running_loop())
     local_console.bind(console)
+    # An automatic install writes a new tree; only a restart runs it. The
+    # console owns that route (stop the node properly, exit, let the service
+    # manager bring it back), so the node borrows it rather than growing a
+    # second way to end the process.
+    node.set_restart_hook(console.restart)
 
     if preauth is not None and host is not None:
         await _adopt_operator(node, host, preauth, preauth_path)

@@ -476,6 +476,108 @@ class TestPinsOnTheNode:
             await node.stop()
 
 
+class TestTheRestartGuard:
+    """An automatic install ends in a restart, so it has to be able to give up.
+
+    The dangerous shape is not a bad release — it is a release that installs
+    cleanly and never becomes the running version: without a record that
+    outlives the exit, the node would install it and restart into it for ever,
+    on a machine nobody is watching."""
+
+    async def _armed(self, tmp_path, monkeypatch, state_dir, installed):
+        """A node on ``state_dir`` that is offered 9.9.9 by an auto publisher."""
+        publisher = _node()
+        info = await publisher.publish_release(_tree(str(tmp_path / "tree")))
+        blob = publisher._releases.get(info["publisher_id"])["release"]
+        node = _node(str(state_dir))
+        node._packages = publisher._packages
+        node.trust_publisher(publisher._identity.dsa_public_key.hex(), "them",
+                             auto=True)
+        node._releases.offer(blob, node._identity.verify, node._trusts_publisher)
+
+        async def fake_apply(files, version, **kwargs):
+            installed.append(version)
+            return {"applied": version, "restart_required": True}
+
+        monkeypatch.setattr(updater, "apply_files", fake_apply)
+        return publisher, node, info
+
+    async def test_an_install_that_never_takes_is_abandoned(self, tmp_path,
+                                                            monkeypatch):
+        state = tmp_path / "state"
+        installed, restarts, outcomes = [], [], []
+        for _boot in range(cr.MAX_AUTO_ATTEMPTS + 1):
+            # Each iteration is one boot of the same node: same state directory,
+            # and a running version that is still not the one installed.
+            publisher, node, _info = await self._armed(tmp_path, monkeypatch,
+                                                       state, installed)
+            node.set_restart_hook(lambda: restarts.append(1) or True)
+            try:
+                await node._release_pass()
+                outcomes.append(node.release_overview()["log"][-1]["outcome"])
+            finally:
+                await publisher.stop(); await node.stop()
+        assert installed == ["9.9.9"] * cr.MAX_AUTO_ATTEMPTS
+        assert len(restarts) == cr.MAX_AUTO_ATTEMPTS
+        # And the last boot says so: an update that has given up looks exactly
+        # like one that never started unless the log distinguishes them.
+        assert outcomes[-1] == "abandoned"
+
+    async def test_coming_back_on_the_old_code_is_said_out_loud(self, tmp_path,
+                                                                monkeypatch):
+        state = tmp_path / "state"
+        installed = []
+        publisher, node, _info = await self._armed(tmp_path, monkeypatch, state,
+                                                   installed)
+        node.set_restart_hook(lambda: True)
+        try:
+            await node._release_pass()
+        finally:
+            await publisher.stop(); await node.stop()
+        again = _node(str(state))
+        try:
+            entry = again.release_overview()["log"][-1]
+            assert entry["version"] == "9.9.9" and entry["outcome"] == "did not take"
+        finally:
+            await again.stop()
+
+    async def test_an_install_that_took_leaves_no_record(self, tmp_path,
+                                                          monkeypatch):
+        """The journal is a guard, not a history: a release that became the
+        running version is forgotten, so a later one is judged on its own."""
+        state = tmp_path / "state"
+        installed = []
+        publisher, node, _info = await self._armed(tmp_path, monkeypatch, state,
+                                                   installed)
+        node.set_restart_hook(lambda: True)
+        try:
+            await node._release_pass()
+        finally:
+            await publisher.stop(); await node.stop()
+        journal = cr.AutoInstallJournal(str(state / "autoinstall.json"))
+        assert len(journal) == 1
+        assert journal.settle("9.9.9") == []
+        assert len(cr.AutoInstallJournal(str(state / "autoinstall.json"))) == 0
+
+    async def test_an_operator_installing_by_hand_clears_the_guard(
+            self, tmp_path, monkeypatch):
+        """A deliberate act is a fresh start — otherwise an abandoned release
+        could never be retried at all."""
+        state = tmp_path / "state"
+        installed = []
+        publisher, node, info = await self._armed(tmp_path, monkeypatch, state,
+                                                  installed)
+        node.set_restart_hook(lambda: True)
+        try:
+            await node._release_pass()
+            release_id = node._releases.get(info["publisher_id"])["release_id"]
+            assert node._auto_journal.attempts(release_id.hex()) == 1
+            await node.install_release(info["publisher_id"])
+            assert node._auto_journal.attempts(release_id.hex()) == 0
+        finally:
+            await publisher.stop(); await node.stop()
+
+
 class TestAutomaticInstall:
     async def _ready(self, tmp_path, monkeypatch, auto=True):
         publisher, node = _node(), _node()
@@ -542,12 +644,106 @@ class TestAutomaticInstall:
         finally:
             await publisher.stop(); await node.stop()
 
+    async def test_an_install_restarts_the_node_onto_it(self, tmp_path,
+                                                        monkeypatch):
+        """A tree written and never started is an update that did not happen."""
+        publisher, node, _info, _entry, installed = await self._ready(
+            tmp_path, monkeypatch)
+        restarts = []
+        node.set_restart_hook(lambda: restarts.append(1) or True)
+        try:
+            assert await node._release_pass() == "9.9.9"
+            assert installed == ["9.9.9"] and len(restarts) == 1
+            assert node.release_overview()["log"][-1]["detail"] == "restarting onto it"
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_with_nothing_to_bring_it_back_it_stays_up_and_says_so(
+            self, tmp_path, monkeypatch):
+        """Exiting with no service manager is worse than running the old code.
+        The hook decides that, and the operator is told either way."""
+        publisher, node, _info, _entry, _installed = await self._ready(
+            tmp_path, monkeypatch)
+        node.set_restart_hook(lambda: False)
+        try:
+            assert await node._release_pass() == "9.9.9"
+            assert "no service manager" in \
+                node.release_overview()["log"][-1]["detail"]
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_a_restart_hook_that_explodes_does_not_kill_the_pass(
+            self, tmp_path, monkeypatch):
+        publisher, node, _info, _entry, _installed = await self._ready(
+            tmp_path, monkeypatch)
+
+        def boom():
+            raise RuntimeError("no")
+
+        node.set_restart_hook(boom)
+        try:
+            assert await node._release_pass() == "9.9.9"
+            assert "restart failed" in node.release_overview()["log"][-1]["detail"]
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_an_announce_wakes_the_pass_instead_of_waiting_a_sweep(
+            self, tmp_path, monkeypatch):
+        """Five minutes between an operator publishing and a node taking it is
+        the difference between "it works" and "it does not"."""
+        publisher = _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
+            node = _node()
+            node.trust_publisher(publisher._identity.dsa_public_key.hex(),
+                                 "them", auto=True)
+            try:
+                peer = _FakePeer()
+                packet = Packet.create(RELEASE_ANNOUNCE, publisher.id.raw,
+                                       node.id.raw, b"\x01" + blob)
+                await node._handle_release_announce(peer, packet)
+                assert node._release_wake.is_set()
+            finally:
+                await node.stop()
+        finally:
+            await publisher.stop()
+
+    async def test_an_unpinned_publisher_cannot_make_us_wake(self, tmp_path):
+        """Arrival must not be a lever a stranger can pull."""
+        publisher = _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
+            node = _node()
+            try:
+                await node._handle_release_announce(
+                    _FakePeer(), Packet.create(RELEASE_ANNOUNCE,
+                                               publisher.id.raw, node.id.raw,
+                                               b"\x01" + blob))
+                assert not node._release_wake.is_set()
+                # Pinned, but not for automatic installation: still no wake.
+                node.trust_publisher(publisher._identity.dsa_public_key.hex(),
+                                     "them", auto=False)
+                node._releases = cr.ReleaseCatalog()
+                await node._handle_release_announce(
+                    _FakePeer(), Packet.create(RELEASE_ANNOUNCE,
+                                               publisher.id.raw, node.id.raw,
+                                               b"\x01" + blob))
+                assert not node._release_wake.is_set()
+            finally:
+                await node.stop()
+        finally:
+            await publisher.stop()
+
     async def test_the_loop_survives_a_pass_that_explodes(self, tmp_path,
                                                           monkeypatch):
         """Zero crash: this loop dying would silently stop the updates an
         operator asked for."""
         import asyncio
         monkeypatch.setattr("src.node._RELEASE_TICK", 0.01)
+        monkeypatch.setattr("src.node._RELEASE_FIRST_TICK", 0.01)
+        monkeypatch.setattr("src.node._RELEASE_SETTLE", 0.0)
         node = _node()
         node._running = True
         calls = []

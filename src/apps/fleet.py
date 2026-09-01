@@ -4,9 +4,9 @@ Fleet — remote management and automated deployment over the mesh.
 Every node runs the same app and can play either role:
 
   - the **agent** role obeys: it answers status requests, runs its own package
-    manager, opens a shell, sweeps its LAN, provisions machines it can reach —
-    but only for an operator it has explicitly enrolled, and only for the
-    capabilities that enrolment granted;
+    manager, opens a shell, sweeps its LAN, provisions machines it can reach,
+    hands its own console over — but only for an operator it has explicitly
+    enrolled, and only for the capabilities that enrolment granted;
   - the **operator** role drives: it asks nodes to enrol it, keeps the list of
     nodes that accepted, and sends them commands.
 
@@ -93,6 +93,8 @@ SHELL_CLOSE = 0x35
 
 CONSOLE_REQUEST = 0x50
 CONSOLE_REPLY = 0x51
+CONSOLE_SESSION = 0x52            # "let me in without your password"
+CONSOLE_SESSION_ISSUED = 0x53
 
 INVITE_REQUEST = 0x60
 INVITE_ISSUED = 0x61
@@ -146,6 +148,7 @@ CONSOLE_RESP_MAX = 512 * 1024     # reassembled answer, both sides
 CONSOLE_TIMEOUT = 25.0            # a whole call, mesh round trip included
 CONSOLE_PATH_MAX = 512
 MAX_CONSOLE_CALLS = 8             # concurrent proxied calls we host, per node
+MAX_GRANT_SESSIONS = 4            # passwordless console sessions one operator holds
 _ASSERTION_TTL = 300              # a command signature is good for five minutes
 _NAMES_REFRESH = 30.0             # seconds between re-reading names from the node
 
@@ -356,6 +359,13 @@ class FleetApp:
     would push when provisioning; with none, the provision capability reports
     itself unavailable rather than half working.
 
+    ``release_publishers()`` returns this node's pinned release publishers as
+    ``[{"key", "name", "auto"}]`` — whose signed code it accepts. Provisioning
+    offers to hand that list to the machines it installs, because a headless box
+    has nobody to paste a publisher key into a console and would otherwise
+    accept nothing from the mesh for ever. Same shape and same reason as
+    ``mesh_invite``: a callable, so the app stays ignorant of the node.
+
     ``mesh_invite(ttl=None, ticket=False)`` returns
     ``{"uris": [...], "code": "...", "ticket": "...", "expires_at": …}`` — a
     fresh single-use invitation to *this* node's mesh. Provisioning calls it
@@ -367,6 +377,7 @@ class FleetApp:
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None, mesh_invite=None,
+                 release_publishers=None,
                  auto_status: bool = True, local_console=None) -> None:
         self._client = client
         self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
@@ -374,6 +385,7 @@ class FleetApp:
         self.state = state or FleetState()
         self._repo_root = repo_root
         self._mesh_invite = mesh_invite
+        self._release_publishers = release_publishers
         self._auto_status = auto_status
         self._facts: fleet_host.HostFacts | None = None
         self._events: asyncio.Queue = asyncio.Queue()
@@ -389,7 +401,9 @@ class FleetApp:
         # against our own console. Operator side: the answers being reassembled.
         self._local_console = local_console
         self._console_calls: dict[str, dict] = {}       # operator side, by rid
+        self._session_calls: dict[str, asyncio.Future] = {}   # operator side
         self._console_hosted: dict[str, int] = {}       # agent side, per peer
+        self._granted_sessions: dict[str, list[str]] = {}     # agent side, per peer
         # node id -> (count, window start). See _request_allowed.
         self._request_rate: dict[bytes, tuple[int, float]] = {}
 
@@ -748,6 +762,11 @@ class FleetApp:
             target = NodeID.from_hex(node_hex)
         except ValueError:
             return True
+        # What the grant had opened goes with it. A revocation that only stops
+        # the *next* shell, or leaves a console session live until it idles
+        # out, has not revoked anything an operator is currently using.
+        self._drop_shells_of(target)
+        self._drop_granted_sessions_of(target)
         await self._send(target, self._signed_frame(
             ENROL_REVOKE, target, PURPOSE_GRANT, {}))
         return True
@@ -755,6 +774,7 @@ class FleetApp:
     def _on_revoke(self, src: NodeID, principal, document: dict) -> None:
         node_hex = src.raw.hex()
         self._drop_shells_of(src)
+        self._drop_granted_sessions_of(src)
         self.state.remove_operator(node_hex)
         self.state.remove_managed(node_hex)
         self._emit(Revoked(src))
@@ -830,6 +850,8 @@ class FleetApp:
             return
         if "shell" not in result:
             self._drop_shells_of(src)
+        if "passwordless" not in result or "manage" not in result:
+            self._drop_granted_sessions_of(src)
         if not result:
             self._emit(Revoked(src))
             return
@@ -860,6 +882,8 @@ class FleetApp:
             return False
         if "shell" not in result:
             self._drop_shells_of(target)
+        if "passwordless" not in result or "manage" not in result:
+            self._drop_granted_sessions_of(target)
         self._emit(CapsChanged(target, result, "operator"))
         # Tell them, so their own list stops offering buttons that would now be
         # refused — and starts offering one that would not.
@@ -960,6 +984,99 @@ class FleetApp:
         entry = self._console_calls.pop(rid, None)
         if entry and not entry["future"].done():
             entry["future"].set_exception(ConsoleProxyError(message))
+        future = self._session_calls.pop(rid, None)
+        if future is not None and not future.done():
+            future.set_exception(ConsoleProxyError(message))
+
+    # -- a session with no password (capability "passwordless") -----------
+    #
+    # A machine an operator provisioned has a console password nobody typed: it
+    # was generated on first start and printed to a log on a box with no screen.
+    # `manage` alone therefore opens a channel whose second key does not exist.
+    # This is that second key, given the same way as every other right — by a
+    # human on the target, or by the pre-authorisation that stands in for one on
+    # a machine they just installed — and it is *only* a way past the password:
+    # the mesh session, the ledger entry and a fresh signature are all still
+    # required, and the session that comes back is an ordinary console session,
+    # with the same expiry and revoked by the same password change.
+
+    async def console_session(self, target: NodeID) -> str:
+        """Operator side: obtain a console session on ``target``, no password.
+
+        Returns the session token. Raises ``ConsoleProxyError`` when the node
+        refused or never answered — a refusal here means the grant is not
+        there, which is a different fact from "that password was wrong"."""
+        rid = self._new_rid(target, "session")
+        loop = asyncio.get_running_loop()
+        while len(self._session_calls) >= MAX_INFLIGHT:
+            self._fail_console(next(iter(self._session_calls)),
+                               "dropped: too many calls in flight")
+        future: asyncio.Future = loop.create_future()
+        self._session_calls[rid] = future
+        await self._send(target, self._signed_frame(
+            CONSOLE_SESSION, target, PURPOSE_BY_CAP["passwordless"],
+            {"rid": rid}))
+        try:
+            return await asyncio.wait_for(future, CONSOLE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ConsoleProxyError("that node did not answer in time") from None
+        finally:
+            self._session_calls.pop(rid, None)
+            self._inflight.pop(rid, None)
+
+    def _on_console_session(self, src: NodeID, principal, document: dict) -> None:
+        """Agent side: mint one session for an operator granted the right.
+
+        Both capabilities are required, and neither implies the other: without
+        ``manage`` the token opens nothing here anyway, and minting one that
+        could only be spent somewhere else is a secret handed out for no
+        reason."""
+        rid = _rid(document)
+        if not self._authorised(src, "passwordless", rid):
+            return
+        if not self._authorised(src, "manage", rid):
+            return
+        console = self._local_console
+        if console is None or not console.available:
+            self._fail(src, rid, "this node has no console to manage")
+            return
+        try:
+            token = console.issue_session()
+        except fleet_console.ConsoleError as exc:
+            self._fail(src, rid, str(exc))
+            return
+        except Exception:                       # noqa: BLE001 — never crash a handler
+            self._fail(src, rid, "the console issued no session")
+            return
+        # Remembered so the grant can be taken back with its consequences: a
+        # revocation that leaves a live session open has revoked nothing until
+        # it idles out. Bounded, oldest first — a peer asking again and again
+        # must not grow a list here.
+        held = self._granted_sessions.setdefault(src.raw.hex(), [])
+        held.append(token)
+        while len(held) > MAX_GRANT_SESSIONS:
+            console.revoke_session(held.pop(0))
+        self._reply(src, CONSOLE_SESSION_ISSUED, {"rid": rid, "token": token})
+
+    def _drop_granted_sessions_of(self, src: NodeID) -> None:
+        """End every passwordless session this peer holds on us."""
+        held = self._granted_sessions.pop(src.raw.hex(), None)
+        if not held or self._local_console is None:
+            return
+        for token in held:
+            self._local_console.revoke_session(token)
+
+    def _on_console_session_issued(self, src: NodeID, document: dict) -> None:
+        if not self._claim_inflight(src, document, "session"):
+            return
+        future = self._session_calls.pop(_rid(document), None)
+        if future is None or future.done():
+            return
+        token = document.get("token")
+        if not isinstance(token, str) or not 0 < len(token) <= 256:
+            future.set_exception(ConsoleProxyError("that node sent no session"))
+            return
+        future.set_result(token)
 
     def _on_console_request(self, src: NodeID, principal, document: dict) -> None:
         """Agent side: replay one call against our own console."""
@@ -1492,20 +1609,27 @@ class FleetApp:
                                 mode: str = "system",
                                 caps: list[str] | None = None,
                                 join_uris: list[str] | None = None,
-                                join_code: str | None = None) -> str:
+                                join_code: str | None = None,
+                                publishers: list[dict] | None = None) -> str:
         """Operator side: have ``target`` install NMesh on machines it can reach.
 
         The SSH credential travels inside the end-to-end-encrypted DATA payload
         to a node this operator explicitly trusts, and is wiped there as soon as
         the run ends. It is never written to disk on either side. That trust is
         already total — ``provision`` implies the far node runs code we send it —
-        so this adds no exposure that enrolment did not already grant."""
+        so this adds no exposure that enrolment did not already grant.
+
+        ``publishers`` are whose releases the new machines should accept. They
+        come from **this** node, not from the one doing the SSH: which code a
+        machine we are having installed will take is our decision, and a relay
+        holding `provision` never gets to add a key to it."""
         rid = self._new_rid(target, "provision")
         document = {
             "rid": rid,
             "targets": _clean_targets(targets),
             "username": str(username)[:64],
             "caps": clean_caps(caps) if caps else ["status", "update"],
+            "publishers": fleet_provision.clean_publishers(publishers),
             "join_uris": [str(u)[:256] for u in (join_uris or [])][:8],
             "join_code": str(join_code or "")[:64],
             "mode": "user" if str(mode) == "user" else "system",
@@ -1575,6 +1699,9 @@ class FleetApp:
             return
 
         caps = clean_caps(document.get("caps")) or ["status", "update"]
+        # The operator's list, re-cleaned here like anything else off the wire.
+        # This node relays it; it never adds to it.
+        publishers = fleet_provision.clean_publishers(document.get("publishers"))
         join_uris = document.get("join_uris")
         join_uris = [u for u in join_uris if isinstance(u, str)][:8] \
             if isinstance(join_uris, list) else []
@@ -1583,7 +1710,8 @@ class FleetApp:
             for target in targets:
                 results.append(await self._provision_one(
                     src, rid, target, creds, payload, caps, join_uris,
-                    str(document.get("join_code") or ""), mode))
+                    str(document.get("join_code") or ""), mode,
+                    publishers=publishers))
         finally:
             creds.wipe()          # the secret does not outlive the run
         self._reply(src, PROVISION_RESULT, {"rid": rid, "results": results},
@@ -1592,7 +1720,8 @@ class FleetApp:
     async def _provision_one(self, src: NodeID, rid: str, target: dict,
                              creds, payload: bytes, caps: list[str],
                              join_uris: list[str], join_code: str,
-                             mode: str = "system") -> dict:
+                             mode: str = "system",
+                             publishers: list[dict] | None = None) -> dict:
         """Provision one machine, reporting each step as it happens.
 
         The pre-authorisation is minted *here*, on the node doing the SSH, but
@@ -1610,7 +1739,7 @@ class FleetApp:
         preauth, token = fleet_provision.make_preauth(
             src.raw, self._operator_key(src), capabilities=caps,
             join_uris=uris, join_code=code,
-            label=target.get("label", host))
+            label=target.get("label", host), publishers=publishers)
         self._reply(src, PROVISION_PROGRESS, {
             "rid": rid, "host": host, "step": "starting",
             "token_digest": fleet_provision.token_digest(token)})
@@ -1712,6 +1841,26 @@ class FleetApp:
                 "ssh_client": fleet_ssh.ssh_available(),
                 "keys": fleet_ssh.discover_private_keys()}
 
+    def local_publishers(self, *, auto: bool = True) -> list[dict]:
+        """Whose releases this node accepts — the list a machine we provision
+        can be handed, so it starts life accepting the same code we do.
+
+        ``auto`` decides what the *new* machine does with them, not what this
+        one does: the pins here keep their own flag, and the answer to "should
+        that box install them while nobody watches" belongs to the operator
+        deploying it. Empty when this node cannot answer, which is not an error
+        — a node that pins nobody has nothing to pass on."""
+        if self._release_publishers is None:
+            return []
+        try:
+            listed = self._release_publishers()
+        except Exception:                       # noqa: BLE001 — never crash a caller
+            return []
+        publishers = fleet_provision.clean_publishers(listed)
+        for entry in publishers:
+            entry["auto"] = bool(auto)
+        return publishers
+
     async def provision_local(self, targets: list[dict], *, username: str,
                               password: str | None = None,
                               key_path: str | None = None,
@@ -1724,6 +1873,7 @@ class FleetApp:
                               caps: list[str] | None = None,
                               join_uris: list[str] | None = None,
                               join_code: str | None = None,
+                              publishers: list[dict] | None = None,
                               on_progress=None) -> list[dict]:
         """Provision machines on *our* LAN, from this node, for ourselves.
 
@@ -1747,6 +1897,7 @@ class FleetApp:
                 "login account instead")
         payload = fleet_provision.build_payload(self._repo_root)
         caps = clean_caps(caps) or ["status", "update"]
+        publishers = fleet_provision.clean_publishers(publishers)
         results = []
         try:
             for target in targets:
@@ -1755,7 +1906,8 @@ class FleetApp:
                 preauth, token = fleet_provision.make_preauth(
                     self.node_id.raw, self._auth.public_key,
                     capabilities=caps, join_uris=uris, join_code=code,
-                    label=target.get("label", target["ip"]))
+                    label=target.get("label", target["ip"]),
+                    publishers=publishers)
                 digest = fleet_provision.token_digest(token)
                 self.state.add_provisioned(digest, host=target["ip"], caps=caps,
                                            label=target.get("label", target["ip"]))
@@ -1798,7 +1950,7 @@ class FleetApp:
         message = str(document.get("error", ""))[:256]
         # A refused console call is waited on by a live request; failing the
         # future is what turns it into an answer instead of a timeout.
-        if rid in self._console_calls:
+        if rid in self._console_calls or rid in self._session_calls:
             self._fail_console(rid, message or "refused")
             return
         self._emit(Failure(src, rid, message))
@@ -2077,6 +2229,7 @@ _SIGNED_INBOUND = {
     ENROL_REVOKE: FleetApp._on_revoke,
     ENROL_NARROW: FleetApp._on_cap_narrow,
     CONSOLE_REQUEST: FleetApp._on_console_request,
+    CONSOLE_SESSION: FleetApp._on_console_session,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
     INVITE_REQUEST: FleetApp._on_invite_request,
@@ -2093,6 +2246,7 @@ _PURPOSE_FOR = {
     ENROL_REVOKE: PURPOSE_GRANT,
     ENROL_NARROW: PURPOSE_NARROW,
     CONSOLE_REQUEST: PURPOSE_BY_CAP["manage"],
+    CONSOLE_SESSION: PURPOSE_BY_CAP["passwordless"],
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
@@ -2112,5 +2266,6 @@ _REPLY_INBOUND = {
     PROVISION_PROGRESS: FleetApp._on_provision_progress,
     PROVISION_RESULT: FleetApp._on_provision_result,
     CONSOLE_REPLY: FleetApp._on_console_reply,
+    CONSOLE_SESSION_ISSUED: FleetApp._on_console_session_issued,
     ERROR: FleetApp._on_error,
 }

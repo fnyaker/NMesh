@@ -503,6 +503,55 @@ class TestPreauth:
         assert len(parsed["label"]) <= 128
         assert len(parsed["join_uris"]) <= 8
 
+    def test_publishers_travel_with_the_grant(self):
+        """A headless box has nobody to paste a publisher key into a console:
+        whose code it accepts is decided here or never."""
+        document, _token = self._document(publishers=[
+            {"key": "ab" * 32, "name": "ops", "auto": True},
+            {"key": "cd" * 32, "name": "", "auto": False},
+        ])
+        parsed = fleet_provision.parse_preauth(document)
+        assert parsed["publishers"] == [
+            {"key": "ab" * 32, "name": "ops", "auto": True},
+            {"key": "cd" * 32, "name": "", "auto": False},
+        ]
+
+    def test_a_document_without_publishers_still_parses(self):
+        """Every node provisioned before this existed has none, and must not
+        become unreadable because of it."""
+        document, _token = self._document()
+        del document["publishers"]
+        assert fleet_provision.parse_preauth(document)["publishers"] == []
+
+    def test_a_publisher_that_is_not_a_key_is_dropped(self):
+        """The machine reading this has no operator to ask."""
+        document, _token = self._document(publishers=[
+            {"key": "not hex"}, {"key": ""}, {"key": 42}, "text", None,
+            {"name": "no key at all"}, {"key": "ab" * 32},
+        ])
+        parsed = fleet_provision.parse_preauth(document)
+        assert [entry["key"] for entry in parsed["publishers"]] == ["ab" * 32]
+
+    def test_publishers_are_bounded_and_deduplicated(self):
+        document, _token = self._document(publishers=(
+            [{"key": "ab" * 32}] * 4
+            + [{"key": f"{index:02x}" * 32} for index in range(20)]))
+        parsed = fleet_provision.parse_preauth(document)
+        keys = [entry["key"] for entry in parsed["publishers"]]
+        assert len(keys) == fleet_provision.MAX_PREAUTH_PUBLISHERS
+        assert len(set(keys)) == len(keys)
+
+    def test_a_publisher_name_is_bounded(self):
+        document, _token = self._document(
+            publishers=[{"key": "ab" * 32, "name": "x" * 10_000}])
+        parsed = fleet_provision.parse_preauth(document)
+        assert len(parsed["publishers"][0]["name"]) <= 64
+
+    def test_an_implausible_key_is_refused(self):
+        document, _token = self._document(
+            publishers=[{"key": "ab" * 100_000}])
+        assert fleet_provision.parse_preauth(document)["publishers"] == []
+
     def test_read_from_file(self, tmp_path):
         document, token = self._document()
         path = tmp_path / "preauth.json"

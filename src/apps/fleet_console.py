@@ -19,6 +19,14 @@ Two properties make the pipe safe to point at ourselves:
   cannot answer in its place.
 * **Nothing here is a shortcut.** No token is minted, no check is skipped: the
   caller's token travels with the request and the console decides.
+
+The one exception is :meth:`LocalConsole.issue_session`, and it is an exception
+to the *password*, never to authorisation: an operator granted ``passwordless``
+gets a session minted here instead of typing a password the node generated for
+itself and printed to a log nobody read. The three fleet gates (mesh session,
+ledger entry, fresh signature) have all passed before it is called, and the
+console's own session rules — the sliding expiry, the revocation on a password
+change — govern what comes out of it exactly as they govern a login.
 """
 from __future__ import annotations
 
@@ -85,6 +93,35 @@ class LocalConsole:
     @property
     def available(self) -> bool:
         return self._console is not None and bool(getattr(self._console, "port", 0))
+
+    def issue_session(self) -> str:
+        """A console session for an operator holding ``passwordless``.
+
+        In-process, never over the loopback socket: what authorises it is the
+        fleet ledger, which the caller has already checked, and a token asked
+        for over HTTP would be a token anybody on the machine could ask for."""
+        console = self._console
+        issue = getattr(console, "issue_session_for_grant", None)
+        if console is None or issue is None:
+            raise ConsoleError("no console on this node")
+        token = issue()
+        if not isinstance(token, str) or not token:
+            raise ConsoleError("the console issued no session")
+        return token
+
+    def revoke_session(self, token: str) -> None:
+        """End a session minted by :meth:`issue_session`.
+
+        A right taken back has to take back what it opened: without this,
+        revoking ``passwordless`` would only stop the *next* session and leave
+        the live one running until it idled out."""
+        revoke = getattr(self._console, "revoke_session_for_grant", None)
+        if revoke is None:
+            return
+        try:
+            revoke(token)
+        except Exception:                       # noqa: BLE001 — never crash a caller
+            pass
 
     # -- the call ---------------------------------------------------------
 

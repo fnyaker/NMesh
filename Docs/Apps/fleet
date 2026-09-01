@@ -64,6 +64,7 @@ From the most harmless to total. One never implies another.
 | `provision` | installing NMesh on machines of that LAN |
 | `shell` | opening an interactive shell as the node's user |
 | `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
+| `passwordless` | opening this node's console **without** its password: the grant is the second key. Needs `manage` to be of any use |
 
 ## Enrolment — the notification
 
@@ -108,6 +109,43 @@ is neither stored nor logged. The token the remote console returns stays **in
 the local console's memory**, indexed by the local session that opened it: the
 browser never sees it, and signing out locally closes every remote session
 opened from there.
+
+### `passwordless` — when nobody can type the second key
+
+There is one machine where that table breaks: **one you provisioned yourself**.
+It generated its console password on first start and printed it to a log on a
+box with no screen — nobody typed it, nobody knows it, and `manage` opens a
+channel whose second key does not exist. "How do I find out the password of a
+node I deployed?" has no good answer, so the answer is a right instead:
+
+| | `manage` alone | `manage` + `passwordless` |
+|---|---|---|
+| what opens the session | the target's console password | the grant itself |
+| who decides | a human on the target, then whoever knows the password | a human on the target, once |
+| how it is given | the enrolment a human accepts | the same — or the **pre-authorisation** on a machine being provisioned |
+
+It is a way past the *password*, never past authorisation. Everything else
+holds: the mesh session, the ledger entry with that exact capability, and a
+fresh signature over the request (`CONSOLE_SESSION`, purpose
+`fleet.passwordless`). `manage` is still required — a session that could only be
+spent elsewhere is a secret handed out for no reason — and the app checks both.
+
+The session is minted by the console itself, **in the process**, not over the
+loopback: what authorises it is the ledger, and a token asked for over HTTP
+would be a token anybody on that machine could ask for. What comes back is an
+ordinary console session: same sliding expiry, dropped by the same password
+change.
+
+**Taking the right back ends the sessions it opened.** Untick `passwordless` (or
+`manage`, or cut the operator off entirely) and every session minted for that
+node is revoked at once — like `shell`, a revocation that only stopped the
+*next* one would have revoked nothing. At most `MAX_GRANT_SESSIONS` (4) are held
+per operator; a fifth pushes the oldest out and ends it.
+
+In the console, a node that granted it appears in the context selector with no
+"password needed" mark, and switching to it asks for nothing. Once in, the
+ordinary **Settings → Password** page is right there: set a password you know,
+and take the right back if you would rather have the two keys again.
 
 ### The relay reinvents nothing
 
@@ -471,7 +509,12 @@ The interface asks explicitly for:
 - a checkbox **"this user can `sudo`"**;
 - if it is unticked, **an account that can** and its password;
 - **where NMesh goes**: *system* (`/opt/nmesh`, a dedicated service account —
-  recommended) or *user* (the login account's home, no root).
+  recommended) or *user* (the login account's home, no root);
+- **the capabilities the new machines grant you** — ticked by default:
+  `status`, `update`, `manage` and `passwordless`, because a machine installed
+  from here has nobody in front of it and a console password nobody typed;
+- **"Keep them updated from the publishers this node accepts"**, ticked, which
+  is what makes those machines able to update themselves at all (below).
 
 Nothing is probed: testing whether an account can `sudo` leaves `sudo` failures
 in the target's authentication log, and a machine that logs them is right to do
@@ -544,15 +587,36 @@ behind a NAT on the other side of the world.
 
 The pre-authorisation carries the **operator's node id and public key**
 (delivered over the authenticated SSH channel, which is that side's root of
-trust) plus a **single-use token**. On first start, the node:
+trust), the **release publishers** the machine should accept, and a
+**single-use token**. On first start, the node:
 
-1. joins the mesh through the invitation, and **waits for the session** — a
+1. **pins the publishers**, before anything else and whatever the mesh does
+   next — whose code this machine accepts has nothing to do with whether it
+   managed to join;
+2. joins the mesh through the invitation, and **waits for the session** — a
    `join` that returns proves nothing, the handshake that delivers the
    certificate comes after;
-2. enrols the operator with the intended capabilities;
-3. proves possession of the token, which lets the operator **bind this brand-new
+3. enrols the operator with the intended capabilities;
+4. proves possession of the token, which lets the operator **bind this brand-new
    mesh identity to the provisioning run** they just did;
-4. **deletes the file**, whatever happens.
+5. **deletes the file**, whatever happens.
+
+### The publishers, and why they cannot be added later
+
+A headless machine has nobody to paste a publisher key into a console. If it is
+not told at provisioning whose signed releases it accepts, it accepts none, for
+ever — it would sit there running the version it was installed with while the
+rest of the fleet moves on. So the deploy form ticks **"Keep them updated from
+the publishers this node accepts"** by default: the new machines pin the same
+publishers as the node deploying them, plus that node's own publisher key, and
+install their signed releases on their own
+([`../Updates/guide`](../Updates/guide)).
+
+The list comes from the **operator's** node, not from the one running the SSH: a
+relay holding `provision` carries it and never adds a key to it. It is bounded
+(`MAX_PREAUTH_PUBLISHERS`, 8), de-duplicated on the key, and anything that is
+not a hex key is dropped rather than guessed at — the machine reading this
+document has no operator to ask.
 
 If joining fails, the machine claims nothing and says so: claiming would go
 nowhere with no route to anyone, and a "provisioned" machine that is on no
@@ -652,6 +716,7 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 | `SCAN_REQUEST` / `_RESULT` | 0x40 / 0x41 | → / ← | the request only |
 | `PROVISION_REQUEST` / `_PROGRESS` / `_RESULT` | 0x42–0x44 | → / ← / ← | the request only |
 | `CONSOLE_REQUEST` / `_REPLY` | 0x50 / 0x51 | → / ← | the request only (`fleet.manage`) |
+| `CONSOLE_SESSION` / `_ISSUED` | 0x52 / 0x53 | → / ← | the request only (`fleet.passwordless`) |
 
 **No new mesh packet type**: everything travels in `DATA`, section
 `builtin_id("fleet")`. The node's management plane is untouched.
@@ -734,12 +799,12 @@ All behind the console session (Bearer or cookie). Details:
 | POST | `/api/fleet/caps-set` | an operator's rights **on this node** (a local human) |
 | POST | `/api/fleet/caps-request` / `caps-drop` | ask for / hand back a right on a managed node |
 | GET | `/api/remote/targets` | nodes that granted `manage`, and whether a session is open |
-| POST | `/api/remote/connect` / `disconnect` | opens / closes a session on a managed node's console |
+| POST | `/api/remote/connect` / `disconnect` | opens / closes a session on a managed node's console. `{node, password}`, or `{node}` alone when that node granted `passwordless` |
 | *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
-| POST | `/api/fleet/provision` | deployment |
+| POST | `/api/fleet/provision` | deployment. `auto_update` (default true) sends this node's publisher list to the machines being installed |
 | POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | built-in apps |
 
 ## Tests
@@ -752,12 +817,16 @@ All behind the console session (Bearer or cookie). Details:
   only take away, losing `shell` closes the shell already open; and the console
   relay: refused paths, splitting/reassembly, an over-large reply explained and
   not truncated, a reply forged by a third party ignored, concurrent calls
-  bounded.
+  bounded; and `passwordless`: the grant mints a session, either capability
+  missing mints nothing, taking one back ends the sessions already open, and the
+  count held per operator is bounded.
 - [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — the ledger
   (failing closed, bounds, `narrow_only` that can only take away) and machine
   facts.
 - [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — the
-  secret leaks nowhere, the bootstrap is not an injection surface.
+  secret leaks nowhere, the bootstrap is not an injection surface, and the
+  publishers a pre-authorisation carries are bounded, de-duplicated, and dropped
+  when they are not keys.
 - [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes and
   app toggles.
 - [`tests/integration/test_fleet.py`](../../tests/integration/test_fleet.py) —
