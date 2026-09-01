@@ -357,6 +357,15 @@ medium is backend work that has not been done.
 What belongs to no medium stays apart: the **Addressing** card says what this
 node claims about itself (advertised addresses, local IPs, schemes).
 
+The **Membership** card says what this node can prove about *itself*: whether it
+belongs to a network at all or is only its own root, who admitted it, what its
+chain anchors on, and — the part that matters — how long its certificate has
+left. A membership lasts a year and renews itself a month before it runs out
+(see [`../Architecture/security.md`](../Architecture/security.md)); should that
+ever fail, this is where it shows as a countdown rather than as peers quietly
+refusing to authenticate a week later. Once it hits zero the only way back in is
+a fresh invitation.
+
 **Refused handshakes** is the card to open when nothing will connect. A node
 drops anything it cannot verify — that is the design — but a mesh whose nodes
 all refuse each other looks, from outside, exactly like a mesh nobody is
@@ -417,7 +426,7 @@ works on a machine with no internet.
 |---------|------------------|------------------------------------------------|
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`) |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |

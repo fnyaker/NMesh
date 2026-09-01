@@ -105,6 +105,8 @@ RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
 RELEASE_FETCH     = 0x1F   # "send me this release's package, from here"
 RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
 PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
+CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for me"
+CERT_RENEWED      = 0x23   # reply: the fresh certificate
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -131,6 +133,20 @@ _POOL_INDEX   = struct.Struct('!H')
 _ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
 _ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
+# Certificate renewal. A membership certificate lasts a year
+# (`CryptoIdentity.issue_cert`) and nothing renewed it: at T+365 days a node went
+# on presenting a chain every peer refuses, dropped out of the mesh with no
+# diagnostic anywhere, and only a fresh invitation could bring it back.
+# The two windows differ on purpose. A node starts asking a month out; the
+# issuer will act on anything within three, so clock skew, a slow relayed path
+# and a few missed sweeps can never turn a request made in time into a refusal.
+_CERT_RENEW_WINDOW  = 30 * 86400    # we start asking this long before expiry
+_CERT_RENEW_ACCEPT  = 90 * 86400    # we serve a request this close to expiry
+_CERT_RENEW_TICK    = 6 * 3600.0    # seconds between renewal sweeps
+_CERT_RENEW_FIRST   = 30.0          # first sweep, shortly after start
+_CERT_RENEW_MIN_GAP = 3600.0        # one renewal served per subject per hour
+_CERT_RENEW_TRACKED = 512           # subjects whose last renewal we remember
+_CERT_RENEW_MAX     = 16 * 1024     # bytes of a renewal payload, before any parse
 # Per-cert length prefix inside a chain blob
 _CERT_LEN    = struct.Struct('!H')
 # Address length prefix inside address lists
@@ -194,7 +210,10 @@ _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_R
                     DIR_STORE, DIR_FIND, DIR_FOUND,
                     # A package comes from whoever has it, which may be several
                     # hops away — the publisher, or any node that kept a copy.
-                    RELEASE_FETCH, RELEASE_DATA}
+                    RELEASE_FETCH, RELEASE_DATA,
+                    # The issuer of a membership is rarely still a neighbour by
+                    # the time it needs renewing.
+                    CERT_RENEW, CERT_RENEWED}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -1342,6 +1361,11 @@ class MeshNode:
         self._state_dirty: bool = False
         self._certs_dirty: bool = False
         self._state_task: asyncio.Task | None = None
+        # Certificate renewal: the sweep that keeps our own membership alive,
+        # and — as an issuer — when we last re-signed for each subject. Keyed by
+        # subject rather than by link, so reconnecting buys no fresh allowance.
+        self._cert_task: asyncio.Task | None = None
+        self._renewals_served: dict[bytes, float] = {}
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
@@ -1554,6 +1578,7 @@ class MeshNode:
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_release_watch()
+        self._ensure_cert_renewal()
         self._announce_own_pseudo()   # peers that were already up learn our name
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
@@ -1977,6 +2002,7 @@ class MeshNode:
         await self._stop_address_retry()
         await self._stop_address_steering()
         await self._stop_release_watch()
+        await self._stop_cert_renewal()
         await self._stop_deferred_routes()
         await self._stop_state_writer()
         # Concurrently: each peer.stop() is individually bounded, and stopping
@@ -3460,6 +3486,7 @@ class MeshNode:
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
             "handshake_refusals": self.handshake_refusals(),
+            "trust": self.trust_status(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
@@ -7057,6 +7084,174 @@ class MeshNode:
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------
+    # Certificate renewal
+    # -----------------------------------------------------------------------
+
+    def _ensure_cert_renewal(self) -> None:
+        if self._cert_task is None or self._cert_task.done():
+            self._cert_task = asyncio.create_task(self._cert_renewal_loop())
+
+    async def _stop_cert_renewal(self) -> None:
+        task = self._cert_task
+        self._cert_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _cert_renewal_loop(self) -> None:
+        """Keep our own membership alive, and forget the certificates that are
+        not.
+
+        Never raises: this loop dying is the outage it exists to prevent, and it
+        would be invisible until the day the chain expired."""
+        await asyncio.sleep(_CERT_RENEW_FIRST)
+        while self._running:
+            try:
+                await self._renew_own_membership()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass          # a sweep that fails is retried at the next tick
+            await asyncio.sleep(_CERT_RENEW_TICK)
+
+    async def _renew_own_membership(self) -> bool:
+        """Ask our issuer for a fresh certificate when ours is running out.
+
+        The asking has to happen **while the chain still verifies**: a node whose
+        membership has expired cannot authenticate to anybody, so it has no link
+        left to ask on and no relay willing to carry for it. That is why the
+        window is a month and the sweep is six-hourly — by the time it matters,
+        the node has had sixty chances. Past expiry the only way back in is a
+        fresh invitation, which is the same thing as saying an expired
+        membership really is one.
+
+        Returns whether a request went out."""
+        if self._cert_store.prune_expired():
+            self._note_cert_change()
+        chain = self._cert_store.get_chain_to_root(self._id)
+        if not chain:
+            return False
+        mine = chain[0]
+        # A self-signed first link means we are only our own root: nobody issued
+        # us anything, so there is nothing to renew and nobody to ask.
+        if mine.is_self_signed or not mine.expires_at:
+            return False
+        if mine.expires_at - int(time.time()) > _CERT_RENEW_WINDOW:
+            return False
+        await self._route_outbound(
+            Packet.create(CERT_RENEW, self._id.raw, mine.issuer_id.raw,
+                          mine.serialize()))
+        return True
+
+    def _claim_renewal(self, subject: NodeID) -> bool:
+        """One renewal served per subject per `_CERT_RENEW_MIN_GAP`.
+
+        Per subject and not per link: the work is an ML-DSA signature spent on
+        an identity, and a peer that drops the connection and dials again must
+        not buy itself a fresh allowance — which is exactly the hole the invite
+        lockout had before it was counted node-wide."""
+        now = time.monotonic()
+        last = self._renewals_served.get(subject.raw)
+        if last is not None and now - last < _CERT_RENEW_MIN_GAP:
+            return False
+        self._renewals_served[subject.raw] = now
+        while len(self._renewals_served) > _CERT_RENEW_TRACKED:
+            self._renewals_served.pop(next(iter(self._renewals_served)), None)
+        return True
+
+    async def _handle_cert_renew(self, peer: '_Peer', packet: Packet) -> None:
+        """A node we certified asks us to sign the same binding again.
+
+        This hands out no authority we have not already handed out. Everything
+        the new certificate says is fixed by the old one: the subject, its key,
+        and us as the issuer — and `Certificate.deserialize` refuses one whose
+        ids do not derive from its keys or whose signature does not check, so
+        `issuer_id == our id` is proof we signed it ourselves.
+
+        What it does cost is one post-quantum signature and a routed reply, so
+        the request is bounded before it is parsed and rate limited per subject
+        afterwards. Anything refused is dropped in silence — the sender is
+        typically several hops away, and the peer that handed us the packet only
+        relayed it, so there is nobody here to charge for it."""
+        if len(packet.payload) > _CERT_RENEW_MAX:
+            return
+        try:
+            cert = Certificate.deserialize(packet.payload)
+        except Exception:
+            return
+        if cert.issuer_id != self._id or cert.is_self_signed:
+            return          # not a binding of ours to re-make
+        if cert.subject_id != NodeID(packet.src_id):
+            return          # only the subject may ask for its own
+        # An expired membership is not renewed. It is how a node that left stops
+        # being a member, and re-signing one would be a readmission with no
+        # human anywhere in it — the way back in is an invitation.
+        remaining = cert.expires_at - int(time.time())
+        if not cert.expires_at or remaining <= 0 or remaining > _CERT_RENEW_ACCEPT:
+            return
+        if not self._claim_renewal(cert.subject_id):
+            return
+        fresh = self._identity.issue_cert(cert.subject_id, cert.subject_pub)
+        self._cert_add(fresh)
+        await self._route_outbound(
+            Packet.create(CERT_RENEWED, self._id.raw, packet.src_id,
+                          fresh.serialize()),
+            blocking=False)   # we are inside a receive loop
+
+    async def _handle_cert_renewed(self, peer: '_Peer', packet: Packet) -> None:
+        """Our issuer answered.
+
+        Taken only if it renews the binding we already had: us as the subject,
+        our own key, and an issuer that has certified us before. An unsolicited
+        certificate from a stranger authenticates nothing anyway — it anchors on
+        a root we do not trust — but absorbing one would let any node fill our
+        own bounded slot list with certificates we can never present."""
+        if len(packet.payload) > _CERT_RENEW_MAX:
+            return
+        try:
+            cert = Certificate.deserialize(packet.payload)
+        except Exception:
+            return
+        if cert.subject_id != self._id or cert.is_self_signed:
+            return
+        if cert.subject_pub != self._identity.dsa_public_key:
+            return
+        if cert.issuer_id != NodeID(packet.src_id):
+            return
+        if not any(held.issuer_id == cert.issuer_id
+                   for held in self._cert_store.certs_for(self._id)):
+            return          # an issuer that never certified us is not renewing
+        if self._cert_add(cert):
+            self._note_change("nodes")
+
+    def trust_status(self) -> dict:
+        """What this node can prove about itself, for the console.
+
+        A membership that is running out is the one trust failure a node can see
+        coming, and the only one it can still do something about — so it is
+        shown as a date and a countdown, not discovered from peers that quietly
+        stop authenticating."""
+        chain = self._cert_store.get_chain_to_root(self._id) or []
+        expires = self._cert_store.chain_expires_at(self._id)
+        rooted = bool(chain) and chain[-1].subject_id != self._id
+        return {
+            "chain_length": len(chain),
+            "self_rooted": bool(chain) and not rooted,
+            "anchor": chain[-1].subject_id.raw.hex() if chain else None,
+            "issuer": (chain[0].issuer_id.raw.hex()
+                       if chain and not chain[0].is_self_signed else None),
+            "expires_at": expires,
+            "seconds_left": (None if not expires
+                             else max(0, expires - int(time.time()))),
+            "renewing": bool(expires) and (
+                expires - int(time.time()) <= _CERT_RENEW_WINDOW),
+            "roots": self._cert_store.root_count(),
+        }
+
+    # -----------------------------------------------------------------------
     # Hole-punching handlers
     # -----------------------------------------------------------------------
 
@@ -7539,4 +7734,6 @@ _HANDLERS = {
     DIR_FOUND:         MeshNode._handle_dir_found,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
+    CERT_RENEW:        MeshNode._handle_cert_renew,
+    CERT_RENEWED:      MeshNode._handle_cert_renewed,
 }

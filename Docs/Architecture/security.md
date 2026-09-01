@@ -48,13 +48,29 @@ propagates through certificate chains.
   raises before it ever reaches RAM.
 - `issue_cert`: at the end of a handshake accepted by invitation, the host
   issues a certificate for the new node (attesting it as a member), included in
-  the `HANDSHAKE_ACK`. `self_signed_cert`: the root.
+  the `HANDSHAKE_ACK`, valid **one year**. `self_signed_cert`: the root, which
+  never expires (`expires_at == 0`).
+- `Certificate.is_expired(now)` is the **one** definition of expired in the
+  tree: the chain walk, the pruning and `verify_chain` all ask it rather than
+  each comparing the field themselves.
 - `CertStore` (`cert_store.py`): `subject_id → [certs]` plus a set of roots
   (`_roots`, containing at least ourselves).
   - `get_chain_to_root(target)`: a **BFS** through the issuance graph up to a
     root. **Prefers an external root** (the network): presenting our own
     self-signed root authenticates nothing to a peer; the network chain (through
     the issuer who invited us) is the only one anybody else can verify.
+    **Expired certificates are not walked** — a chain carrying one is refused by
+    every `verify_chain` on the network, so returning it is not a degraded
+    answer but a wrong one. Among the live ones the **longest-lived wins**, or a
+    renewal would sit unused beside the certificate it replaces until the day
+    that one died. `now=` asks what we *would* present at another moment
+    (the renewal sweep, the console) and bypasses the cache rather than
+    poisoning it.
+  - `chain_expires_at(target)` / `prune_expired(now)`: when the chain we present
+    stops verifying, and dropping the certificates that already have. `add`
+    refuses an expired certificate outright — it proves nothing and never will
+    again, but it still costs a slot in a bounded list, so replaying old ones
+    could crowd out the live certificate for a subject an attacker picked.
   - `verify_chain(chain)`: continuous issuance links + a self-signed last cert +
     the last `subject_id ∈ roots` + nothing expired → returns the anchor,
     otherwise None.
@@ -70,13 +86,54 @@ propagates through certificate chains.
     is dropped on any change — before the bounds run, since the bounds ask what
     the chain is made of. It is a BFS, `_handle_find_node` runs it once per
     candidate it considers, and an unbounded store made a 28-byte packet buy an
-    unbounded graph walk.
+    unbounded graph walk. The cache entry also **expires with the earliest
+    certificate in it**: that is the one way a memoised chain rots with nothing
+    changing, and nothing cleared the cache for it.
   - **The root set is persisted state too.** Pinning one goes through
     `MeshNode._trust_root`, never `CertStore.add_root` directly: only `add` used
     to be paired with a "write me" mark, by convention, and `console_add_root`
     marked *before* pinning — so on the path that writes inline, the file went
     out without the root and the dirty flag was already cleared. The operator
     was told the certificate was trusted; the next start had never heard of it.
+
+## Renewal: a membership that runs out is an outage nobody sees coming
+
+A membership certificate lasts a year and **nothing renewed it**. On the day it
+expired the node went on presenting a chain every peer refuses: it dropped out
+of the mesh, no test failed, no counter moved, and the symptom looked exactly
+like a network fault. Every deployment carried a dated outage.
+
+`CERT_RENEW` / `CERT_RENEWED` (`node.py`, routable — the issuer is rarely still
+a neighbour a year on) close it:
+
+- `_cert_renewal_loop` sweeps every 6 h, first pass 30 s after start. It prunes
+  what has expired and, when our own chain has less than `_CERT_RENEW_WINDOW`
+  (30 days) left, sends the certificate back to its issuer.
+- The issuer (`_handle_cert_renew`) can only ever re-sign a binding **it already
+  made**: the subject, its key and the issuer are all fixed by the certificate
+  presented, and `Certificate.deserialize` refuses one whose ids do not derive
+  from its keys or whose signature does not check — so `issuer_id == our id` is
+  proof we signed it. `packet.src_id` must be the subject. It costs one ML-DSA
+  signature, so it is rate limited **per subject** (`_CERT_RENEW_MIN_GAP`, 1 h),
+  never per link: reconnecting must not buy a fresh allowance, which is the hole
+  the invite lockout had before it was counted node-wide.
+- The two windows differ on purpose. A node asks a month out; the issuer serves
+  anything within `_CERT_RENEW_ACCEPT` (3 months), so clock skew, a slow relayed
+  path and a few missed sweeps can never turn a request made in time into a
+  refusal.
+- **An expired membership is never renewed.** Expiry is how a node that left
+  stops being a member; re-signing one would be a readmission with no human in
+  it. The way back is an invitation. This is also why the window is generous and
+  the sweep frequent: the asking must happen while the chain still verifies,
+  because a node that cannot authenticate has no link left to ask on.
+- `_handle_cert_renewed` takes the answer only if it renews the binding we had —
+  us as subject, our own key, and an issuer that has certified us before. A
+  certificate from a stranger authenticates nothing anyway (it anchors on a root
+  we do not trust), but absorbing one would let any node fill our own bounded
+  slot list.
+- `node.trust_status()` puts it on the console (Network → Membership): standing,
+  countdown, issuer, anchor, chain length. A deadline an operator can act on
+  rather than a fault they diagnose afterwards.
 
 There is **no TOFU table**. There used to be one (`trust.py`, `NodeID → DSA
 key`), documented here as a live defence, wired to nothing and imported only by
