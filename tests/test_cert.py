@@ -15,7 +15,7 @@ from src.node import (MeshNode, HANDSHAKE, HANDSHAKE_ACK, FOUND_NODE,
                       _encode_entries, _decode_entries)
 from src.packet import Packet
 from src.routing import NodeEntry
-from tests.conftest import FakeTransport, make_node
+from tests.conftest import FakeTransport, make_manager, make_node
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +126,24 @@ class TestCertStore:
 
             store2 = CertStore.load(path, own_id)
             assert store2.verify_chain([cert]) is not None
+
+    def test_trusting_a_root_survives_a_restart(self):
+        """A root pinned from the console must still be one after a restart.
+
+        `console_add_root` marked the store dirty *before* pinning, so on the
+        path that writes inline the file went out without the root and the
+        dirty flag was already cleared. Nothing errored: the operator was told
+        the certificate was trusted, and the next start had never heard of it."""
+        stranger = make_identity()
+        stranger_id = NodeID.from_public_key(stranger.dsa_public_key)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "certs.json")
+            node = MeshNode(transport_manager=make_manager(),
+                            cert_store_path=path)
+            assert node.console_add_root(
+                stranger.self_signed_cert().serialize().hex())
+            reloaded = CertStore.load(path, node._id)
+            assert reloaded.is_root(stranger_id)
 
 
 # ---------------------------------------------------------------------------

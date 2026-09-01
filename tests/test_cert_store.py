@@ -1,4 +1,4 @@
-"""Tests de CertStore — remplace les anciens tests TrustTable."""
+"""CertStore basics: roots, the issuance graph, and what verifies against it."""
 import pytest
 from src.cert_store import CertStore
 from src.crypto import CryptoIdentity

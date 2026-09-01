@@ -25,7 +25,6 @@ is therefore safe to accept from strangers.
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |
 | `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots). |
-| `trust.py` | TOFU `NodeID → DSA key` (a simple trust table). |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |

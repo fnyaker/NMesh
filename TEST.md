@@ -103,7 +103,7 @@ tests/
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
-├── test_invite*.py / test_trust.py                    — invitations & trust
+├── test_invite*.py / test_cert_store.py               — invitations & trust
 ├── test_fuzz.py                                       — hostile inputs
 ├── test_spool.py                                      — bundle & file transport
 ├── test_webconsole.py / test_data_connector.py        — console & connector

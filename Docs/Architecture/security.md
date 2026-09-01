@@ -1,7 +1,7 @@
 # Identity, crypto & trust
 
-Source: `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `trust.py`,
-`invite.py`, and the handshake handlers in `node.py`.
+Source: `crypto.py`, `node_id.py`, `cert.py`, `cert_store.py`, `invite.py`, and
+the handshake handlers in `node.py`.
 
 ## Identity
 
@@ -71,9 +71,20 @@ propagates through certificate chains.
     the chain is made of. It is a BFS, `_handle_find_node` runs it once per
     candidate it considers, and an unbounded store made a 28-byte packet buy an
     unbounded graph walk.
-- `TrustTable` (`trust.py`): **TOFU** `NodeID → DSA key`. First sighting →
-  store; a later sighting with a **different key** → `False` (compromise or
-  impersonation).
+  - **The root set is persisted state too.** Pinning one goes through
+    `MeshNode._trust_root`, never `CertStore.add_root` directly: only `add` used
+    to be paired with a "write me" mark, by convention, and `console_add_root`
+    marked *before* pinning — so on the path that writes inline, the file went
+    out without the root and the dirty flag was already cleared. The operator
+    was told the certificate was trusted; the next start had never heard of it.
+
+There is **no TOFU table**. There used to be one (`trust.py`, `NodeID → DSA
+key`), documented here as a live defence, wired to nothing and imported only by
+its own tests. It could not have helped anywhere it was offered: every identity
+in this tree — a certificate subject, an app-auth assertion, a pseudo claim, a
+release publisher — has its id *derived* from the key presented, so there is no
+id that can disagree with its key and nothing for a first-use table to catch.
+The check that matters is the derivation itself, and it is made at every gate.
 
 ## Invitation (`invite.py`)
 
