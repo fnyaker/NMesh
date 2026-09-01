@@ -63,7 +63,7 @@ from dataclasses import dataclass, field
 from ..app_auth import ctx_hash
 from ..app_channel import builtin_id
 from ..node_id import NodeID
-from . import fleet_console, fleet_host, fleet_provision, fleet_ssh
+from . import fleet_console, fleet_files, fleet_host, fleet_provision, fleet_ssh
 from .fleet_state import CAPABILITIES, FleetState, clean_caps, clean_label
 
 FLEET_APP_ID = builtin_id("fleet")
@@ -98,6 +98,12 @@ CONSOLE_SESSION_ISSUED = 0x53
 
 INVITE_REQUEST = 0x60
 INVITE_ISSUED = 0x61
+
+# Files, under the same right as the shell: one signed request per operation,
+# one reply, and slices of their own for the bytes.
+FILE_REQUEST = 0x70
+FILE_REPLY = 0x71
+FILE_DATA = 0x72
 
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
@@ -140,6 +146,8 @@ INVITE_TTL_DEFAULT = 300.0
 INVITE_TTL_MAX = 6 * 3600.0
 MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
+FILE_TIMEOUT = 30.0               # one file operation, mesh round trip included
+MAX_FILE_CALLS = 8                # file operations we host at once, per peer
 # Remote console. A request must fit one frame; an answer is chunked, because a
 # node with a hundred peers has a snapshot that does not.
 CONSOLE_REQ_MAX = 24 * 1024       # proxied request body, one frame
@@ -404,6 +412,12 @@ class FleetApp:
         self._session_calls: dict[str, asyncio.Future] = {}   # operator side
         self._console_hosted: dict[str, int] = {}       # agent side, per peer
         self._granted_sessions: dict[str, list[str]] = {}     # agent side, per peer
+        # Files. Operator side: the operations waiting for an answer. Agent
+        # side: how many we are running for each peer, and the uploads being
+        # assembled — (peer, transfer id) -> Upload.
+        self._file_calls: dict[str, asyncio.Future] = {}
+        self._file_hosted: dict[str, int] = {}
+        self._uploads: dict[tuple, "fleet_files.Upload"] = {}
         # node id -> (count, window start). See _request_allowed.
         self._request_rate: dict[bytes, tuple[int, float]] = {}
 
@@ -444,6 +458,9 @@ class FleetApp:
         for shell in list(self._shells.values()):
             shell.close()
         self._shells.clear()
+        for upload in list(self._uploads.values()):
+            upload.abort()
+        self._uploads.clear()
         await self._client.close()
 
     async def _names_loop(self) -> None:
@@ -522,13 +539,21 @@ class FleetApp:
                 continue      # a hostile frame never kills the loop
 
     async def _reap_loop(self) -> None:
-        """Close shells nobody is talking to any more."""
+        """Close what nobody is talking to any more.
+
+        Shells hold a pty and a process; an upload holds a file descriptor and a
+        partial file on this machine's disk. Both are opened on somebody else's
+        say-so, so both are given up when that somebody stops talking."""
         while True:
             await asyncio.sleep(30.0)
             now = time.monotonic()
             for sid, shell in list(self._shells.items()):
                 if now - shell.last_active > SHELL_IDLE_TIMEOUT:
                     self._close_shell(sid, status=-1)
+            for key, upload in list(self._uploads.items()):
+                if now - upload.last_active > fleet_files.UPLOAD_IDLE:
+                    upload.abort()
+                    self._uploads.pop(key, None)
 
     def _dispatch(self, src: NodeID, payload: bytes) -> None:
         if not payload:
@@ -766,6 +791,7 @@ class FleetApp:
         # the *next* shell, or leaves a console session live until it idles
         # out, has not revoked anything an operator is currently using.
         self._drop_shells_of(target)
+        self._drop_uploads_of(target)
         self._drop_granted_sessions_of(target)
         await self._send(target, self._signed_frame(
             ENROL_REVOKE, target, PURPOSE_GRANT, {}))
@@ -774,6 +800,7 @@ class FleetApp:
     def _on_revoke(self, src: NodeID, principal, document: dict) -> None:
         node_hex = src.raw.hex()
         self._drop_shells_of(src)
+        self._drop_uploads_of(src)
         self._drop_granted_sessions_of(src)
         self.state.remove_operator(node_hex)
         self.state.remove_managed(node_hex)
@@ -850,6 +877,7 @@ class FleetApp:
             return
         if "shell" not in result:
             self._drop_shells_of(src)
+            self._drop_uploads_of(src)
         if "passwordless" not in result or "manage" not in result:
             self._drop_granted_sessions_of(src)
         if not result:
@@ -882,6 +910,7 @@ class FleetApp:
             return False
         if "shell" not in result:
             self._drop_shells_of(target)
+            self._drop_uploads_of(target)
         if "passwordless" not in result or "manage" not in result:
             self._drop_granted_sessions_of(target)
         self._emit(CapsChanged(target, result, "operator"))
@@ -1526,6 +1555,214 @@ class FleetApp:
         await self._send(target, bytes([SHELL_CLOSE]) + sid + b"\x00\x00")
 
     # ======================================================================
+    # Files (the same right as the shell)
+    # ======================================================================
+    #
+    # `shell` already grants running commands as this node's user, so listing a
+    # directory or moving a file grants nothing on top of it — what it adds is a
+    # way to do those things from a phone, where `scp` is not an option and a
+    # terminal is the wrong tool for "put this file over there". The
+    # authorisation is therefore the same capability and the same three gates;
+    # what is new is the bounds, and those live in `fleet_files`.
+
+    async def file_op(self, target: NodeID, op: str, document: dict | None = None,
+                      *, timeout: float = FILE_TIMEOUT) -> dict:
+        """Operator side: run one file operation on ``target`` and wait for it.
+
+        Returns the reply document. Raises ``FileTransferError`` when the node
+        refused or never answered — the operator needs "denied" and "gone" to
+        look different, exactly as they do for the console relay."""
+        rid = self._new_rid(target, "file")
+        loop = asyncio.get_running_loop()
+        while len(self._file_calls) >= MAX_INFLIGHT:
+            self._fail_file(next(iter(self._file_calls)),
+                            "dropped: too many operations in flight")
+        future: asyncio.Future = loop.create_future()
+        self._file_calls[rid] = future
+        body = dict(document or {})
+        body.update({"rid": rid, "op": str(op)[:16]})
+        await self._send(target, self._signed_frame(
+            FILE_REQUEST, target, PURPOSE_BY_CAP["shell"], body))
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            raise FileTransferError("that node did not answer in time") from None
+        finally:
+            self._file_calls.pop(rid, None)
+            self._inflight.pop(rid, None)
+
+    async def list_files(self, target: NodeID, path: str = "") -> dict:
+        return await self.file_op(target, "list", {"path": _file_path(path)})
+
+    async def make_dir(self, target: NodeID, path: str, name: str) -> dict:
+        return await self.file_op(target, "mkdir", {"path": _file_path(path),
+                                                    "name": _file_name(name)})
+
+    async def read_file(self, target: NodeID, path: str, offset: int = 0) -> dict:
+        """One slice: ``{"name", "size", "offset", "eof", "data"}`` (raw bytes).
+
+        The caller walks the file. A whole-file read that lived in here would be
+        a whole file held in one frame's worth of hope."""
+        reply = await self.file_op(target, "read", {"path": _file_path(path),
+                                                    "offset": max(0, int(offset))})
+        raw = reply.get("data")
+        try:
+            reply["data"] = base64.b64decode(str(raw or ""), validate=True)
+        except (ValueError, TypeError):
+            raise FileTransferError("that node sent an unreadable slice") from None
+        return reply
+
+    async def write_file(self, target: NodeID, path: str, name: str, uid: str,
+                         offset: int, data: bytes, final: bool) -> dict:
+        """One slice of an upload. ``uid`` names the transfer on the far side,
+        so two uploads to one node cannot land in each other's file."""
+        if len(data) > fleet_files.WRITE_SLICE:
+            raise FileTransferError("that slice is too large to send")
+        return await self.file_op(target, "write", {
+            "path": _file_path(path), "name": _file_name(name),
+            "uid": str(uid)[:32], "offset": max(0, int(offset)),
+            "final": bool(final),
+            "data": base64.b64encode(data).decode("ascii")})
+
+    def _fail_file(self, rid: str, message: str) -> None:
+        future = self._file_calls.pop(rid, None)
+        if future is not None and not future.done():
+            future.set_exception(FileTransferError(message))
+
+    def _on_file_request(self, src: NodeID, principal, document: dict) -> None:
+        """Agent side: one file operation, for an operator granted ``shell``."""
+        rid = _rid(document)
+        if not self._authorised(src, "shell", rid):
+            return
+        key = src.raw.hex()
+        if self._file_hosted.get(key, 0) >= MAX_FILE_CALLS:
+            self._fail(src, rid, "too many file operations in flight")
+            return
+        self._file_hosted[key] = self._file_hosted.get(key, 0) + 1
+        # Off the receive loop like every other job: a directory on a mount that
+        # has gone away can take a long time to answer, and a link that stops
+        # processing while it does is a node that looks dead (gotchas §10).
+        self._spawn(self._run_file_op(src, rid, document))
+
+    async def _run_file_op(self, src: NodeID, rid: str, document: dict) -> None:
+        key = src.raw.hex()
+        try:
+            op = str(document.get("op", ""))[:16]
+            if op == "list":
+                self._file_list(src, rid, document)
+            elif op == "mkdir":
+                self._file_mkdir(src, rid, document)
+            elif op == "read":
+                self._file_read(src, rid, document)
+            elif op == "write":
+                self._file_write(src, rid, document)
+            else:
+                self._fail(src, rid, "unknown file operation")
+        except fleet_files.FileError as exc:
+            self._fail(src, rid, str(exc))
+        except Exception:                       # noqa: BLE001 — never crash a handler
+            self._fail(src, rid, "that operation failed on this machine")
+        finally:
+            remaining = self._file_hosted.get(key, 1) - 1
+            if remaining > 0:
+                self._file_hosted[key] = remaining
+            else:
+                self._file_hosted.pop(key, None)
+
+    def _file_list(self, src: NodeID, rid: str, document: dict) -> None:
+        listed = fleet_files.listing(fleet_files.clean_path(document.get("path")))
+        self._reply(src, FILE_REPLY, {"rid": rid, "op": "list", **listed},
+                    "entries")
+
+    def _file_mkdir(self, src: NodeID, rid: str, document: dict) -> None:
+        path = fleet_files.make_dir(fleet_files.clean_path(document.get("path")),
+                                    document.get("name"))
+        self._reply(src, FILE_REPLY, {"rid": rid, "op": "mkdir", "path": path})
+
+    def _file_read(self, src: NodeID, rid: str, document: dict) -> None:
+        path = fleet_files.clean_path(document.get("path"))
+        offset = document.get("offset")
+        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) else 0
+        data, eof, info = fleet_files.read_slice(path, offset,
+                                                 fleet_files.READ_SLICE)
+        self._reply(src, FILE_DATA, {
+            "rid": rid, "op": "read", "path": path, "name": info["name"],
+            "size": info["size"], "offset": offset, "eof": eof,
+            "data": base64.b64encode(data).decode("ascii")})
+
+    def _file_write(self, src: NodeID, rid: str, document: dict) -> None:
+        key = (src.raw.hex(), str(document.get("uid", ""))[:32])
+        offset = document.get("offset")
+        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) else -1
+        try:
+            data = base64.b64decode(str(document.get("data") or ""), validate=True)
+        except (ValueError, TypeError):
+            raise fleet_files.FileError("that slice is not readable")
+        if len(data) > fleet_files.WRITE_SLICE:
+            raise fleet_files.FileError("that slice is too large")
+        upload = self._uploads.get(key)
+        if upload is None:
+            if offset != 0:
+                raise fleet_files.FileError("no upload to continue — start again")
+            self._reap_uploads(src.raw.hex())
+            upload = fleet_files.Upload(
+                fleet_files.clean_path(document.get("path")),
+                document.get("name"))
+            self._uploads[key] = upload
+        try:
+            written = upload.write(offset, data)
+        except fleet_files.FileError:
+            self._uploads.pop(key, None)
+            raise
+        if not document.get("final"):
+            self._reply(src, FILE_REPLY, {"rid": rid, "op": "write",
+                                          "written": written, "done": False})
+            return
+        self._uploads.pop(key, None)
+        result = upload.finish()
+        self._reply(src, FILE_REPLY, {"rid": rid, "op": "write", "done": True,
+                                      **result})
+
+    def _reap_uploads(self, node_hex: str) -> None:
+        """Make room for a new upload, and drop the ones nobody is feeding.
+
+        An upload holds an open file descriptor and a partial file on the
+        target's disk; a transfer abandoned half way must not keep either for
+        ever."""
+        now = time.monotonic()
+        for key, upload in list(self._uploads.items()):
+            if now - upload.last_active > fleet_files.UPLOAD_IDLE:
+                upload.abort()
+                self._uploads.pop(key, None)
+        mine = [key for key in self._uploads if key[0] == node_hex]
+        while len(mine) >= fleet_files.MAX_UPLOADS:
+            oldest = mine.pop(0)
+            upload = self._uploads.pop(oldest, None)
+            if upload is not None:
+                upload.abort()
+
+    def _drop_uploads_of(self, src: NodeID) -> None:
+        """A right taken back takes its half-finished transfers with it."""
+        node_hex = src.raw.hex()
+        for key, upload in list(self._uploads.items()):
+            if key[0] == node_hex:
+                upload.abort()
+                self._uploads.pop(key, None)
+
+    def _on_file_reply(self, src: NodeID, document: dict) -> None:
+        """Operator side: the answer to one operation we asked for."""
+        rid = _rid(document)
+        future = self._file_calls.get(rid)
+        if future is None:
+            return
+        held = self._inflight.get(rid)
+        if held is None or held[0] != src or held[1] != "file":
+            return                      # not an answer to something we asked
+        self._file_calls.pop(rid, None)
+        if not future.done():
+            future.set_result(document)
+
+    # ======================================================================
     # LAN scan
     # ======================================================================
 
@@ -1953,7 +2190,18 @@ class FleetApp:
         if rid in self._console_calls or rid in self._session_calls:
             self._fail_console(rid, message or "refused")
             return
+        if rid in self._file_calls:
+            self._fail_file(rid, message or "refused")
+            return
         self._emit(Failure(src, rid, message))
+
+
+class FileTransferError(Exception):
+    """A file operation could not be delivered, or came back unusable.
+
+    Distinct from the node refusing it: "permission denied over there" and
+    "that node never answered" are different facts, and an operator acts on
+    them differently."""
 
 
 class ConsoleProxyError(Exception):
@@ -1988,6 +2236,26 @@ def console_path_refusal(path: str) -> str:
 # ---------------------------------------------------------------------------
 # Helpers — all hostile-input safe
 # ---------------------------------------------------------------------------
+
+def _file_path(value) -> str:
+    """A path on its way *out*, checked here so the operator hears why now.
+
+    Truncating it would be worse than refusing: a path cut at 4096 characters is
+    a different file, and the operator would be told nothing. The far side
+    checks it again — this one is for the person waiting."""
+    text = "" if value is None else str(value)
+    if len(text) > fleet_files.MAX_PATH or "\x00" in text:
+        raise FileTransferError("that path cannot be used")
+    return text
+
+
+def _file_name(value) -> str:
+    """One path component, refused rather than trimmed, for the same reason."""
+    try:
+        return fleet_files.clean_name(value)
+    except fleet_files.FileError as exc:
+        raise FileTransferError(str(exc)) from None
+
 
 def _key_material(value) -> str | None:
     """Validate key material arriving from the network before it is written to
@@ -2230,6 +2498,7 @@ _SIGNED_INBOUND = {
     ENROL_NARROW: FleetApp._on_cap_narrow,
     CONSOLE_REQUEST: FleetApp._on_console_request,
     CONSOLE_SESSION: FleetApp._on_console_session,
+    FILE_REQUEST: FleetApp._on_file_request,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
     INVITE_REQUEST: FleetApp._on_invite_request,
@@ -2247,6 +2516,7 @@ _PURPOSE_FOR = {
     ENROL_NARROW: PURPOSE_NARROW,
     CONSOLE_REQUEST: PURPOSE_BY_CAP["manage"],
     CONSOLE_SESSION: PURPOSE_BY_CAP["passwordless"],
+    FILE_REQUEST: PURPOSE_BY_CAP["shell"],
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
@@ -2267,5 +2537,7 @@ _REPLY_INBOUND = {
     PROVISION_RESULT: FleetApp._on_provision_result,
     CONSOLE_REPLY: FleetApp._on_console_reply,
     CONSOLE_SESSION_ISSUED: FleetApp._on_console_session_issued,
+    FILE_REPLY: FleetApp._on_file_reply,
+    FILE_DATA: FleetApp._on_file_reply,
     ERROR: FleetApp._on_error,
 }

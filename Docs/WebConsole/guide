@@ -74,6 +74,18 @@ selected thing is no longer there. Lists painted on the timer go through
 `setHTML`, which writes only when the markup actually changed, so a row under
 the pointer is not replaced mid-click.
 
+## A terminal, and the files behind it (`/term`)
+
+The fleet app's shell has a page of its own: `/term`, opened from *Fleet →
+Shell → Full screen*, in a **tab**. It is the same session as the panel — the
+same emulator, the same driver — with the whole screen instead of two thirds of
+it, a key row for what a phone's keyboard does not have (Esc, Tab, sticky Ctrl
+and Alt, arrows, `^c`), copy and paste both ways, and **Files**: browse the
+machine, download, upload, make a folder. All of it under the `shell` right and
+nothing more, because an operator who can open a shell there can already read
+and write those files by typing. Detail:
+[`Docs/Apps/fleet`](../Apps/fleet).
+
 ## Managing another node from this console
 
 When the fleet app is running and at least one node has granted the `manage`

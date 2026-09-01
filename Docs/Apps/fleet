@@ -62,7 +62,7 @@ From the most harmless to total. One never implies another.
 | `update` | running the machine's package manager upgrade |
 | `scan` | scanning this machine's LAN for SSH hosts |
 | `provision` | installing NMesh on machines of that LAN |
-| `shell` | opening an interactive shell as the node's user |
+| `shell` | opening an interactive shell as the node's user — **and browsing, downloading and uploading its files**, which is the same authority through a different door |
 | `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
 | `passwordless` | opening this node's console **without** its password: the grant is the second key. Needs `manage` to be of any use |
 
@@ -320,6 +320,72 @@ for the occasion interprets the escape sequences. That is what makes a password
 prompt correct: the remote pty turns echo off, and there is nothing on this side
 to display it — where a line-by-line text field would have shown it in the
 clear.
+
+### The terminal, full screen and on a phone
+
+The panel on `/fleet` is a terminal in a box: two thirds of the viewport, a rail
+beside it, and on a phone a keyboard over what is left. **Full screen** opens
+the same session at `/term`, in a **tab** — never a pop-up window, because a
+700px window is the box being escaped. `/term?node=<id>` goes straight to one
+machine; a session this console already holds is picked back up rather than a
+second one being started.
+
+Both draw the same terminal: one emulator, one session driver
+([`src/webassets/terminal.py`](../../src/webassets/terminal.py)), mounted by
+both pages. Two terminals would be two copies of every bug in one.
+
+Nothing about a terminal on Android is automatic, and each of these is a
+deliberate answer to that:
+
+| What a phone does | What the page does about it |
+|---|---|
+| the keyboard only appears for a focused editable element | there is a real one behind the screen; a tap on the terminal focuses it |
+| an IME reports `keydown` as `229`, with no usable key | what was typed is read from `input` events instead, and the field is emptied again at once |
+| backspace on an empty field fires no `input` at all | it is caught in `beforeinput` (`deleteContentBackward`) |
+| Enter inserts a line break | it is translated to a carriage return, which is what a pty expects |
+| there is no Esc, Tab, Ctrl, Alt or arrow key | a row of them under the screen — the arrangement Termux settled on, for the same reasons |
+| two keys at once is not something a touch screen does | **Ctrl and Alt are sticky**: armed, they apply to the next key and release |
+| the soft keyboard shrinks the *visual* viewport rather than scrolling | the layout follows `visualViewport`, so the key row stays above the keyboard |
+| a button press steals focus and folds the keyboard away | the key row cancels the default on `pointerdown`, so focus never leaves |
+
+**Copy and paste both work.** *Copy* takes the selection, or the whole screen
+when there is none. *Paste* asks the browser for the clipboard and sends it; when
+the browser refuses to hand it over silently — Firefox, and most of Android — a
+field to paste into is offered instead, which is the one path that always works.
+A `paste` event on the terminal or the hidden field goes straight through, and
+Ctrl-C / Ctrl-V with a selection are left to the browser.
+
+> **Keystrokes are queued, never fired in parallel.** One request per key looks
+> fine and is not: two POSTs in flight reach a threaded server in whichever order
+> they finish, so typing quickly delivered `panle` instead of `panel`. The driver
+> drains a buffer instead, which keeps the order and coalesces a burst into one
+> request.
+
+### Files: the same right, a different door
+
+`shell` also opens the machine's files — **Files** in the terminal page's top
+bar. It grants nothing new: an operator who can open a shell as that user can
+already `ls`, `cat` and `tee` anything that user can reach. What it adds is the
+case a terminal is bad at, and a phone worse: getting a file off the machine, or
+onto it, without typing `scp`.
+
+Four operations, and deliberately only four for now: **list**, **download**,
+**upload**, **new folder**.
+
+| | |
+|---|---|
+| where it starts | the node's own home, when nobody said otherwise |
+| what a path may be | absolute, bounded, NUL-free, resolved before use. A relative path is refused: it would resolve against a working directory the operator cannot see, which is a different file on every node |
+| what may be transferred | **regular files only**. Reading `/dev/zero` never ends and a fifo blocks whoever opens it — neither is a file transfer |
+| a listing | capped at `MAX_ENTRIES` (500) and says how many it left out; directories first, then names, decided in the node so every front end agrees. A directory with more than `MAX_SCAN` (10,000) names is *counted* rather than read: sorting cannot start until every name is in memory |
+| a download | pulled in `READ_SLICE` (32 KiB) slices at explicit offsets, so a slice that goes missing is re-asked for rather than a transfer restarted |
+| an upload | pushed in `WRITE_SLICE` (24 KiB) slices into a **temporary file beside its target**, renamed into place only when it is whole — an interrupted transfer never half-replaces the file it was meant to update. Out-of-order slices end it |
+| the ceiling | `MAX_TRANSFER`, 32 MiB either way. This is a file manager, not a way to stream a disk image through a web page |
+| an abandoned upload | reaped after `UPLOAD_IDLE` (5 min), and dropped at once if the `shell` right is taken back |
+
+The name a download arrives under is cleaned before it goes into a
+`Content-Disposition` header: it comes off a machine somebody else runs, and a
+quote or a newline in it would end the header and start writing another.
 
 ### An update's progress
 
@@ -717,6 +783,7 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 | `PROVISION_REQUEST` / `_PROGRESS` / `_RESULT` | 0x42–0x44 | → / ← / ← | the request only |
 | `CONSOLE_REQUEST` / `_REPLY` | 0x50 / 0x51 | → / ← | the request only (`fleet.manage`) |
 | `CONSOLE_SESSION` / `_ISSUED` | 0x52 / 0x53 | → / ← | the request only (`fleet.passwordless`) |
+| `FILE_REQUEST` / `_REPLY` / `_DATA` | 0x70–0x72 | → / ← / ← | the request only (`fleet.shell`) |
 
 **No new mesh packet type**: everything travels in `DATA`, section
 `builtin_id("fleet")`. The node's management plane is untouched.
@@ -740,6 +807,12 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `MAX_PAYLOAD` | 16 MB pushed at provisioning |
 | `MAX_SSH_KEYS` / `MAX_SSH_KEY_BYTES` | 8 imported keys / 64 KB per key |
 | `MAX_SUBNETS` / `MAX_NET_ADDRESSES` | 16 networks scanned / 4096 addresses per network before narrowing |
+| `MAX_TRANSFER` | 32 MiB per file, either way |
+| `READ_SLICE` / `WRITE_SLICE` | 32 KiB down / 24 KiB up per frame (a write also carries the signature that authorises it) |
+| `MAX_ENTRIES` | 500 rows per listing, with the rest counted |
+| `MAX_FILE_CALLS` | 8 file operations hosted at once, per peer |
+| `MAX_UPLOADS` / `UPLOAD_IDLE` | 2 uploads per operator / reaped after 300 s |
+| `MAX_GRANT_SESSIONS` | 4 passwordless console sessions per operator |
 
 The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
 ledger (we forget who we believed, rather than trusting a forged list), and an
@@ -804,6 +877,11 @@ All behind the console session (Bearer or cookie). Details:
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
+| GET | `/api/fleet/shell?node=` | the live session on that node — the page has just asked for one and knows the node, not the sid |
+| GET | `/api/fleet/files?node=&path=` | one directory, as rows |
+| GET | `/api/fleet/file?node=&path=` | one file, as an attachment |
+| POST | `/api/fleet/mkdir` | `{node, path, name}` |
+| POST | `/api/fleet/upload` | `{node, path, name, data}` — base64, capped at 46 MiB on the wire for 32 MiB of file |
 | POST | `/api/fleet/provision` | deployment. `auto_update` (default true) sends this node's publisher list to the machines being installed |
 | POST | `/api/apps/enable` / `disable` / `install` / `uninstall` | built-in apps |
 
@@ -817,12 +895,18 @@ All behind the console session (Bearer or cookie). Details:
   only take away, losing `shell` closes the shell already open; and the console
   relay: refused paths, splitting/reassembly, an over-large reply explained and
   not truncated, a reply forged by a third party ignored, concurrent calls
-  bounded; and `passwordless`: the grant mints a session, either capability
+  bounded; `passwordless`: the grant mints a session, either capability
   missing mints nothing, taking one back ends the sessions already open, and the
-  count held per operator is bounded.
+  count held per operator is bounded; and the files: refused without `shell`,
+  slices in and out, an upload that lands only when it is whole, and transfers
+  dropped when the right goes.
 - [`tests/test_fleet_state.py`](../../tests/test_fleet_state.py) — the ledger
   (failing closed, bounds, `narrow_only` that can only take away) and machine
   facts.
+- [`tests/test_fleet_files.py`](../../tests/test_fleet_files.py) — the file
+  surface on its own: a path that is not a path, a name carrying a separator, a
+  fifo pretending to be a file, a listing that is bounded and says so, and an
+  upload that leaves nothing behind when it is interrupted.
 - [`tests/test_fleet_provision.py`](../../tests/test_fleet_provision.py) — the
   secret leaks nowhere, the bootstrap is not an injection surface, and the
   publishers a pre-authorisation carries are bounded, de-duplicated, and dropped

@@ -85,6 +85,110 @@ async def _get(console, path, token=None, headers=None):
                                    None, False, None, headers)
 
 
+class TestTheTerminalPage:
+    """`/term` rides with the fleet app: no fleet, no page — the same rule as
+    every other sub-page, so a console with the app off has no dead route."""
+
+    async def test_it_is_served_only_when_the_app_runs(self):
+        node, console, host, _ = await _make(enabled=False)
+        try:
+            for path in ("/term", "/term.js", "/term.css"):
+                status, _, _, _ = await _get(console, path)
+                assert status == 404
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_page_is_public_and_its_api_is_not(self):
+        """Like /fleet: the markup is public, the session guards every call it
+        makes. A login form behind a login is not a login form."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            for path in ("/term", "/term.js", "/term.css"):
+                status, _, body, _ = await _get(console, path)
+                assert status == 200 and body
+            status, _, _, _ = await _get(console, "/api/fleet/files?node="
+                                         + "ee" * 20)
+            assert status == 401
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+
+class TestFileRoutes:
+    async def test_they_need_a_session_and_a_real_node(self):
+        node, console, host, _built = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _get(console, "/api/fleet/files?node=zz")
+            assert status == 401
+            _status, token = await _login(console)
+            for path in ("/api/fleet/files?node=nothex",
+                         "/api/fleet/file?node=nothex&path=/tmp"):
+                status, _, _, data = await _get(console, path, token)
+                assert status == 400 and "node" in data["error"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_node_that_granted_nothing_is_refused_here(self):
+        """Refused by this console, before it costs a round trip: an operation
+        that can only come back denied is one to stop at home."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            built["app"].state.add_managed("ee" * 20, caps=["status"])
+            status, _, _, data = await _get(
+                console, "/api/fleet/files?node=" + "ee" * 20, token)
+            assert status == 502 and "has not granted" in data["error"]
+            status, _, _, data = await _post(console, "/api/fleet/mkdir", token,
+                                             {"node": "ee" * 20, "path": "/tmp",
+                                              "name": "x"})
+            assert status == 502 and "has not granted" in data["error"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_an_upload_without_a_file_is_a_bad_request(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            built["app"].state.add_managed("ee" * 20, caps=["shell"])
+            status, _, _, data = await _post(console, "/api/fleet/upload", token,
+                                             {"node": "ee" * 20, "path": "/tmp"})
+            assert status == 400 and "file" in data["error"]
+            status, _, _, data = await _post(console, "/api/fleet/upload", token,
+                                             {"node": "ee" * 20, "path": "/tmp",
+                                              "data": "aGk=", "name": ""})
+            assert status == 400 and "name" in data["error"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_shell_can_be_found_by_node_rather_than_by_sid(self):
+        """The terminal page has just asked for a shell and knows the node, not
+        the session — the open answers asynchronously."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await _get(
+                console, "/api/fleet/shell?node=" + "ee" * 20, token)
+            assert status == 404
+            bridge = host.bridge("fleet")
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+            status, _, _, data = await _get(
+                console, "/api/fleet/shell?node=" + "ee" * 20, token)
+            assert status == 200 and data["sid"] == "ab" * 16
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+
 class TestDisabledApp:
     async def test_fleet_api_is_absent_when_disabled(self):
         node, console, host, _ = await _make(enabled=False)

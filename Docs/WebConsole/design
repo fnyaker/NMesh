@@ -1,16 +1,19 @@
 # The console's design system
 
-Four pages (`/`, `/chat`, `/fleet`, `/node`) served by the same server, which
-have to look like the same product. This document describes **the contract**
+Five pages (`/`, `/chat`, `/fleet`, `/node`, `/term`) served by the same server,
+which have to look like the same product. This document describes **the contract**
 that keeps them that way — what lives where, and what is not allowed.
 
 Code: [`src/webassets/`](../../src/webassets/) —
 [`ui.py`](../../src/webassets/ui.py) (the system),
 [`console.py`](../../src/webassets/console.py),
 [`chat.py`](../../src/webassets/chat.py),
-[`fleet.py`](../../src/webassets/fleet.py) (one page each), and
+[`fleet.py`](../../src/webassets/fleet.py) (one page each),
 [`nodeview.py`](../../src/webassets/nodeview.py) (a *view* before it is a page:
-the console, chat and fleet all mount it, and it also serves itself at `/node`).
+the console, chat and fleet all mount it, and it also serves itself at `/node`)
+and [`terminal.py`](../../src/webassets/terminal.py) (the same shape for the
+terminal: the emulator and session driver fleet's panel mounts, plus the
+full-screen page they are served as at `/term`).
 
 ## The rule
 
@@ -20,16 +23,18 @@ the console, chat and fleet all mount it, and it also serves itself at `/node`).
 ```
 STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS   APP_JS   = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
 CHAT_CSS  = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS      CHAT_JS  = ui.JS + nodeview.JS + CHAT_PAGE_JS
-FLEET_CSS = ui.CSS + nodeview.CSS + FLEET_PAGE_CSS     FLEET_JS = ui.JS + nodeview.JS + FLEET_PAGE_JS
+FLEET_CSS = ui.CSS + nodeview.CSS + terminal.CSS      FLEET_JS = ui.JS + nodeview.JS + terminal.JS
+          + FLEET_PAGE_CSS                                      + FLEET_PAGE_JS
 NODE_CSS  = ui.CSS + nodeview.CSS + NODE_PAGE_CSS      NODE_JS  = ui.JS + nodeview.JS + NODE_PAGE_JS
+TERM_CSS  = ui.CSS + terminal.CSS + terminal.PAGE_CSS  TERM_JS  = ui.JS + terminal.JS + terminal.PAGE_JS
 ```
 
 A token changed once changes every page. A page cannot quietly grow a second
 button style: there is one within reach.
 
 What is allowed in a page's own CSS: what exists only there — the graph and the
-throughput canvas (console), the terminal and the host list (fleet), the
-conversation bubbles (chat). If it starts to look reusable, it moves up into
+throughput canvas (console), the host list (fleet), the key row and the file
+list (terminal), the conversation bubbles (chat). If it starts to look reusable, it moves up into
 `ui.py`. The only variables a page may declare are prefixed `--page-` (test:
 `test_no_page_redefines_a_token`).
 

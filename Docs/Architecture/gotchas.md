@@ -401,6 +401,30 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## The terminal in a browser
+
+- **One request per keystroke delivers them out of order.** Every key fired its
+  own `POST /api/fleet/input`, and two of those in flight reach a threaded
+  server in whichever order they finish: typing quickly produced `panle` instead
+  of `panel`, and only when typing quickly — which is to say, only for a real
+  user. The session driver now drains a buffer instead of firing per key, which
+  keeps the order and coalesces a burst into one request. **Anything that turns
+  a stream of user input into independent HTTP requests has this bug.**
+- **A phone's keyboard needs a focused editable element, and reports nothing
+  useful.** `display:none` cannot take focus, so the field that raises the
+  keyboard sits *behind* the screen rather than being hidden; and an Android IME
+  sends `keydown` as `229` with no usable `key`, so what was typed is read from
+  `input`/`beforeinput` events. Backspace on an empty field fires no `input` at
+  all — it exists only as `beforeinput` with `deleteContentBackward`, and
+  without that branch a soft keyboard cannot erase anything.
+- **A button press folds the keyboard away.** Any control the user taps while
+  typing (the key row, a toolbar) must cancel the default on `pointerdown`, or
+  it takes focus, the keyboard closes, and every second tap is spent bringing it
+  back.
+- **`visualViewport`, not `100dvh`.** Android shrinks the visual viewport when
+  the keyboard opens; viewport units keep describing the screen behind it, so a
+  layout built on them puts the key row under the keyboard.
+
 ## Self-update: installing is not updating
 
 - **A tree written and never started is an update that did not happen.**

@@ -17,7 +17,7 @@ from src.webassets import ui
 
 NODE = shutil.which("node")
 
-SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS")
+SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS", "TERM_JS")
 
 
 @pytest.mark.skipif(NODE is None, reason="node is needed to parse the JS")
@@ -80,8 +80,13 @@ TERM_SUITE = pathlib.Path(__file__).with_name("term_emulator_test.js")
 
 
 def _terminal_source() -> str:
+    """The emulator as the pages actually ship it.
+
+    Sliced out of the fleet bundle rather than read from its module: what is
+    proved has to be the code a browser runs, and both pages mount the same
+    shared block (``webassets/terminal.py``)."""
     body = webassets.FLEET_JS.split("// ---- a small terminal")[1]
-    return "// ---- a small terminal" + body.split("// ---- shell ----")[0]
+    return "// ---- a small terminal" + body.split("// ---- one shell session")[0]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")

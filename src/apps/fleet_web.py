@@ -20,16 +20,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import secrets
 import threading
 import time
 from collections import OrderedDict, deque
 
 from .. import app_api
 from ..node_id import NodeID
+from . import fleet_files
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, EnrolAnswered,
-    EnrolRequested, Failure, InviteIssued, NodeAdopted, Revoked, ScanReceived,
-    ShellClosed, ShellOpened, ShellOutput, StatusReceived,
+    EnrolRequested, Failure, FileTransferError, InviteIssued, NodeAdopted,
+    Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import CAP_DESCRIPTIONS, CAPABILITIES, clean_caps
 
@@ -68,6 +70,10 @@ def _step_line(step: dict) -> str:
 _FAIL_LOG_LINES = 20
 MAX_JOBS = 64                 # tracked operations (bounded, oldest evicted)
 _CALL_TIMEOUT = 30.0
+# One file operation. Longer than an ordinary call because the far side may be
+# reading from a slow disk, and short enough that a page never hangs on a node
+# that has gone away.
+_FILE_TIMEOUT = 40.0
 MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
 REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
 
@@ -340,6 +346,18 @@ class FleetBridge:
             "host": self._app.facts.as_dict(),
             "notice": self._notice,
         }
+
+    def newest_shell(self, node_hex: str) -> str:
+        """The sid of the live shell on that node, or "".
+
+        Opening a shell answers asynchronously, so a page that had to find its
+        own session in the full ledger snapshot needed the whole ledger to draw
+        a terminal. Asked and answered here instead."""
+        with self._lock:
+            for record in reversed(list(self._shells.values())):
+                if record["node"] == node_hex and record["open"]:
+                    return record["sid"]
+            return ""
 
     def shell_data(self, sid: str, offset: int = 0) -> dict | None:
         """Terminal bytes since ``offset``, base64-encoded (a terminal stream is
@@ -659,6 +677,69 @@ class FleetBridge:
                 record["open"] = False
             self._bump()
         return True
+
+    # -- files (the same right as the shell) ------------------------------
+    #
+    # Every one of these refuses locally first. A request that can only come
+    # back denied is a round trip over the mesh for nothing, and an operator
+    # reading "that node has not granted a shell" learns more than one reading
+    # "not authorised for shell" thirty seconds later.
+
+    def _shell_granted(self, node_hex: str) -> None:
+        if not self._app.state.may_use(node_hex, "shell"):
+            raise FileTransferError("that node has not granted a shell")
+
+    def files_list(self, node_hex: str, path: str = "") -> dict:
+        self._shell_granted(node_hex)
+        return self._call(self._app.list_files(self._node(node_hex), path),
+                          timeout=_FILE_TIMEOUT)
+
+    def files_mkdir(self, node_hex: str, path: str, name: str) -> dict:
+        self._shell_granted(node_hex)
+        return self._call(self._app.make_dir(self._node(node_hex), path, name),
+                          timeout=_FILE_TIMEOUT)
+
+    def files_download(self, node_hex: str, path: str) -> tuple:
+        """``(name, bytes)`` — pulled slice by slice, bounded.
+
+        The whole file is held here, in the console, because what happens next
+        is one HTTP response to a browser. That is what bounds it: this is a
+        file manager, not a way to stream a disk image through a web page."""
+        self._shell_granted(node_hex)
+        node = self._node(node_hex)
+        parts, offset, name = bytearray(), 0, ""
+        while True:
+            slice_ = self._call(self._app.read_file(node, path, offset),
+                                timeout=_FILE_TIMEOUT)
+            name = name or str(slice_.get("name") or "file")[:255]
+            data = slice_.get("data") or b""
+            parts.extend(data)
+            offset += len(data)
+            if len(parts) > fleet_files.MAX_TRANSFER:
+                raise FileTransferError("that file is too large to fetch this way")
+            if slice_.get("eof") or not data:
+                break
+        return name, bytes(parts)
+
+    def files_upload(self, node_hex: str, path: str, name: str,
+                     data: bytes) -> dict:
+        """Push one file into ``path`` on that node, slice by slice."""
+        self._shell_granted(node_hex)
+        if len(data) > fleet_files.MAX_TRANSFER:
+            raise FileTransferError("that file is too large to send this way")
+        node = self._node(node_hex)
+        uid = secrets.token_hex(8)
+        offset, result = 0, {}
+        while True:
+            piece = data[offset:offset + fleet_files.WRITE_SLICE]
+            final = offset + len(piece) >= len(data)
+            result = self._call(self._app.write_file(
+                node, path, name, uid, offset, piece, final),
+                timeout=_FILE_TIMEOUT)
+            offset += len(piece)
+            if final:
+                break
+        return result
 
     def _note_update_step(self, node_hex: str, step: dict) -> None:
         """Remember where an update has got to, so the node list can show it.

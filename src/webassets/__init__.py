@@ -14,6 +14,10 @@ Layout, and the rule that keeps it from drifting:
 * :mod:`.console`, :mod:`.chat`, :mod:`.fleet` and :mod:`.nodeview` hold one
   page each: markup, the page's own JS, and only the CSS that genuinely belongs
   to that page.
+* :mod:`.terminal` is the other shared piece: the emulator, the session driver
+  and the styles a terminal needs, mounted by ``/fleet`` for its panel and by
+  ``/term`` for the full-screen page it also carries. Two terminals would be two
+  copies of every bug in one.
 * :mod:`.nodeview` is the exception that proves the rule: it is a *view* before
   it is a page. All three pages mount it — the console in a dialog, chat in a
   panel, fleet in its sheet — and it also serves itself at ``/node`` for the
@@ -30,7 +34,8 @@ from .console import INDEX_HTML, CONSOLE_PAGE_CSS, CONSOLE_PAGE_JS
 from .fleet import FLEET_HTML, FLEET_PAGE_CSS, FLEET_PAGE_JS
 from .nodeview import (NODE_PAGE_CSS_FULL as _NODE_PAGE_CSS,
                        PAGE_HTML as NODE_HTML, PAGE_JS as _NODE_PAGE_JS)
-from . import nodeview
+from . import nodeview, terminal
+from .terminal import PAGE_HTML as TERM_HTML
 
 # The node view rides along with the console page: the dialog there mounts it.
 STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS
@@ -41,8 +46,13 @@ APP_JS = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
 CHAT_CSS = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS
 CHAT_JS = ui.JS + nodeview.JS + CHAT_PAGE_JS
 
-FLEET_CSS = ui.CSS + nodeview.CSS + FLEET_PAGE_CSS
-FLEET_JS = ui.JS + nodeview.JS + FLEET_PAGE_JS
+FLEET_CSS = ui.CSS + nodeview.CSS + terminal.CSS + FLEET_PAGE_CSS
+FLEET_JS = ui.JS + nodeview.JS + terminal.JS + FLEET_PAGE_JS
+
+# The terminal, given the whole screen. Same emulator and same session driver as
+# the panel on /fleet — mounted here with the page that is built around them.
+TERM_CSS = ui.CSS + terminal.CSS + terminal.PAGE_CSS
+TERM_JS = ui.JS + terminal.JS + terminal.PAGE_JS
 
 NODE_CSS = ui.CSS + _NODE_PAGE_CSS
 NODE_JS = ui.JS + nodeview.JS + _NODE_PAGE_JS
@@ -50,4 +60,5 @@ NODE_JS = ui.JS + nodeview.JS + _NODE_PAGE_JS
 __all__ = ["INDEX_HTML", "STYLE_CSS", "APP_JS",
            "CHAT_HTML", "CHAT_CSS", "CHAT_JS",
            "FLEET_HTML", "FLEET_CSS", "FLEET_JS",
+           "TERM_HTML", "TERM_CSS", "TERM_JS",
            "NODE_HTML", "NODE_CSS", "NODE_JS", "ui"]

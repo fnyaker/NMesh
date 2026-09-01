@@ -19,8 +19,10 @@ import pytest
 from src import MeshNode
 from src.app_registry import FLEET_APP_ID
 from src.data_connector import ConnectorClient, DataConnector
-from src.apps.fleet import (ConsoleProxyError, FleetApp, StatusReceived,
-                            EnrolRequested, Failure, ScanReceived)
+from src.apps import fleet_files
+from src.apps.fleet import (ConsoleProxyError, FileTransferError, FleetApp,
+                            StatusReceived, EnrolRequested, Failure,
+                            ScanReceived)
 from src.apps.fleet_web import FleetBridge
 from src.apps.fleet_state import FleetState
 from src.node_id import NodeID
@@ -289,6 +291,68 @@ class TestRemoteConsoleOverRealMesh:
             assert "not authorised for manage" in str(failure.value)
             assert console.calls == []
         finally:
+            await operator.close()
+            await agent.close()
+
+
+class TestFilesOverRealMesh:
+    """The file surface behind `shell`, over a real link and through the bridge
+    the console actually calls — slicing, reassembly and all."""
+
+    async def test_a_file_goes_up_and_comes_back_whole(self, tmp_path):
+        """Bigger than one slice in both directions: what is proved is the
+        chunking, not that a small string survives a round trip."""
+        operator, agent = await _linked_pair(19350)
+        bridge = FleetBridge(operator.app)
+        bridge.start(asyncio.get_running_loop())
+        try:
+            await operator.app.request_enrolment(agent.id, caps=["shell"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            body = os.urandom(fleet_files.WRITE_SLICE * 2 + 1234)
+            result = await asyncio.to_thread(
+                bridge.files_upload, agent.hex, str(tmp_path), "payload.bin", body)
+            assert result["done"] is True and result["size"] == len(body)
+            assert (tmp_path / "payload.bin").read_bytes() == body
+
+            listed = await asyncio.to_thread(bridge.files_list, agent.hex,
+                                             str(tmp_path))
+            assert [row["name"] for row in listed["entries"]] == ["payload.bin"]
+
+            name, data = await asyncio.to_thread(
+                bridge.files_download, agent.hex, str(tmp_path / "payload.bin"))
+            assert name == "payload.bin" and data == body
+        finally:
+            bridge.stop()
+            await operator.close()
+            await agent.close()
+
+    async def test_without_the_shell_right_nothing_is_listed(self, tmp_path):
+        operator, agent = await _linked_pair(19351)
+        bridge = FleetBridge(operator.app)
+        bridge.start(asyncio.get_running_loop())
+        try:
+            await operator.app.request_enrolment(agent.id, caps=["status"])
+            await agent.wait_for(EnrolRequested)
+            await agent.app.approve_enrolment(operator.hex)
+            async with asyncio.timeout(20.0):
+                while operator.app.state.managed_one(agent.hex) is None:
+                    await asyncio.sleep(0.05)
+
+            # Refused here, before it costs a round trip: an operation that can
+            # only come back denied is one the bridge should never send.
+            with pytest.raises(FileTransferError, match="has not granted"):
+                await asyncio.to_thread(bridge.files_list, agent.hex,
+                                        str(tmp_path))
+            # And refused over there too, if it somehow left.
+            with pytest.raises(FileTransferError, match="not authorised"):
+                await operator.app.list_files(agent.id, str(tmp_path))
+        finally:
+            bridge.stop()
             await operator.close()
             await agent.close()
 

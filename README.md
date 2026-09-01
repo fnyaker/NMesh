@@ -33,8 +33,9 @@ cryptography; relays never see the content.
 - **Application identity (SSO)** — an app uses the node's mesh identity to
   authenticate its peers: signed assertions, scoped, fresh, single-use.
 - **Fleet management & deployment** — the *Fleet* app: enrol nodes with
-  capabilities, read their status, update them, open a shell, discover the LAN
-  and install NMesh over SSH. A machine deployed this way comes up trusting the
+  capabilities, read their status, update them, open a shell — full screen in a
+  tab, usable from a phone, with the machine's files behind the same right —
+  discover the LAN and install NMesh over SSH. A machine deployed this way comes up trusting the
   operator who installed it, accepting their release publishers, and reachable
   from their console without a password nobody ever typed on it.
 - **Minimal dependencies** — Python stdlib + `liboqs-python` + `cryptography`.
