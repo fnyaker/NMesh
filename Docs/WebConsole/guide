@@ -380,6 +380,19 @@ and they are not the same act:
   chains up to it from authenticating here. This node's own id is not in the
   list: a node that is not its own root can present nothing at all.
 
+**Nodes under suspicion** is what the applications and the core have reported.
+Being in the network is not being trusted: each app sets its own idea of too
+much and reports the sender, and this node decides what the reports add up to
+(the thresholds are `abuse_suspect` / `abuse_hostile` / `abuse_halflife` in
+`nmesh.conf`). A node past the first threshold **stops being served, silently** —
+it is told nothing, so it learns as late as possible — and past the second it is
+refused a fresh link too. Complaints fade on their own, so a node that
+misbehaved once and then behaved comes back with nobody doing anything;
+`Clear` drops everything held against one, because every entry here is a
+judgement made under pressure by software and some of them will be wrong about
+somebody's node. The card is hidden while the table is empty, which is its
+normal state.
+
 **Refused handshakes** is the card to open when nothing will connect. A node
 drops anything it cannot verify — that is the design — but a mesh whose nodes
 all refuse each other looks, from outside, exactly like a mesh nobody is
@@ -456,6 +469,8 @@ works on a machine with no internet.
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
 | POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
 | POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
+| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node |
+| POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
 | GET     | `/api/store`       | app store view: `{catalog:[…state,action], installed:[…]}` |

@@ -81,6 +81,7 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | →    | `AUTH_VERIFY` (0x0D) | `flags(1) + ctx(32) + plen(2) + purpose + assertion` | verifies a peer's assertion |
 | ←    | `AUTH_ASSERTION`(0x8C)| the assertion, or empty if refused | the `AUTH_ASSERT` answer |
 | ←    | `AUTH_PRINCIPAL`(0x8D)| the principal as JSON, or `null` | the `AUTH_VERIFY` answer |
+| →    | `ABUSE` (0x0F)       | `node_id(20) + weight(1) + kind(1) + reason(utf-8)` | reports a node abusing **this app**. No answer, by design |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
 `SEND` frames and receives `RECV` frames from its section as they come. On the
@@ -113,6 +114,26 @@ only a bounded structure in a dedicated domain, with free-form context entering
 solely as a 32-byte hash. Without that rule, an app could have a certificate
 body signed by the node's key. Details, bounds and threat model:
 [`Docs/AppAuth/guide`](../AppAuth/guide).
+
+The `ABUSE` frame is how an app says **a node is abusing it**:
+`report_abuse(node, weight=…, kind=…, reason=…)`. The threshold is the app's —
+only chat knows what too many messages is, only fleet knows what too many
+commands is — and what the reports add up to is the node's, because weighing one
+app's complaint against another's is not something one app can do. Past the
+node's threshold the peer stops being served, silently (see
+[`Docs/Architecture/security.md`](../Architecture/security.md)).
+
+Two deliberate absences. It is **not answered**: a reply would tell the app
+whether its report moved the needle, and a compromised app that could read the
+standing back would have a probe for finding out exactly how much a peer can get
+away with. And it is **not fatal** — a report that cannot be sent must never
+take down the app that noticed. The weight is clamped on the way in, so a bug in
+an app's own accounting cannot bring a peer down in one call, and a report
+naming the node itself is refused outright.
+
+`RateGate(max_events, window)` in `src/reputation.py` is the shared shape of "an
+allowance per sender", so each app stops writing that loop slightly differently.
+The numbers stay the app's.
 
 The `PSEUDO_*` frames read **names** — `my_pseudo()`, `lookup_pseudo(query,
 wide=…)` (ranked, partial, case- and accent-insensitive), `pseudos_of(ids)`, and

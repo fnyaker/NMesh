@@ -248,6 +248,22 @@ INDEX_HTML = """<!doctype html>
             <dl id="trust" class="kv"></dl>
           </div>
         </article>
+        <article class="card" id="abuse-card" hidden>
+          <div class="card-head"><div class="grow"><h2>Nodes under suspicion</h2>
+            <div class="sub">What the applications and the core have reported</div></div></div>
+          <div class="card-body">
+            <p class="muted small">Being in the network is not being trusted. Each application sets
+              its own idea of too much — only chat knows what too many messages is — and reports
+              the sender; this node decides what the reports add up to. A node past the first
+              threshold stops being served, silently: it is told nothing, so it learns as late as
+              possible. Complaints fade on their own, so a node that misbehaved once and then
+              behaved comes back without anyone doing anything.</p>
+            <div class="table-wrap"><table class="rows">
+            <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
+              <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
+            <tbody id="abuse-list"></tbody></table></div>
+          </div>
+        </article>
         <article class="card" id="refusals-card" hidden>
           <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
             <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
@@ -1847,8 +1863,44 @@ function paintReach(state){
     Object.fromEntries(address.map(([key, value]) => ["addr:" + key, value])));
   paintTransportLive(state);
   paintTrust(state);
+  paintAbuse(state);
   paintRefusals(state);
 }
+// Worst first, and hidden entirely while there is nothing: an empty table is
+// the normal state of this list and should read as one.
+function paintAbuse(state){
+  const rows = ((state.abuse || {}).nodes) || [];
+  $("abuse-card").hidden = rows.length === 0;
+  if(!rows.length) return;
+  const cell = (key) => '<span data-v="' + esc(key) + '"></span>';
+  const label = {ok:"watched", suspect:"not served", hostile:"refused"};
+  const values = {};
+  rows.forEach((row) => {
+    values[row.node + ":standing"] = label[row.standing] || row.standing;
+    values[row.node + ":score"] = row.score;
+    values[row.node + ":accusers"] = row.accusers;
+    values[row.node + ":reason"] = row.reason || "—";
+  });
+  paintLive("abuse-list", rows.map((row) => row.node).join("|"),
+    () => rows.map((row) =>
+      '<tr><td class="mono">' + esc(shortId(row.node)) +
+      "</td><td>" + cell(row.node + ":standing") +
+      '</td><td class="num">' + cell(row.node + ":score") +
+      '</td><td class="num">' + cell(row.node + ":accusers") +
+      "</td><td>" + cell(row.node + ":reason") +
+      '</td><td><button data-forgive="' + esc(row.node) + '">Clear</button></td></tr>'
+    ).join(""),
+    values);
+}
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-forgive]");
+  if(!target) return;
+  withBusy(target, async () => {
+    const {ok} = await apiJson("/api/trust/forgive", "POST",
+      {node:target.dataset.forgive});
+    if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
+  });
+});
 // The membership, said out loud: a node that is only its own root has joined
 // nothing, and one whose chain is running out has a deadline, not a status.
 function paintTrust(state){

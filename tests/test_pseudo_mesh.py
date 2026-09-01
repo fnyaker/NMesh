@@ -32,6 +32,7 @@ class _FakePeer:
         self.relay_only = False
         self._malformed = 0
         self.stopped = False
+        self.tarpit_until = 0.0    # served, like any peer nothing is held against
 
     def note_abuse(self) -> bool:
         self._malformed += 1

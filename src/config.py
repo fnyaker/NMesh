@@ -155,6 +155,25 @@ def _as_store_mb(raw: str) -> int:
     return value
 
 
+def _as_score(raw: str) -> float:
+    """An abuse threshold. Bounded on both sides: zero would hold every peer
+    hostile the moment it did anything at all, and a number nobody can reach is
+    the mechanism switched off by typo rather than by decision."""
+    value = float(str(raw).strip())
+    if not 0.5 <= value <= 10_000.0:
+        raise ValueError("between 0.5 and 10000")
+    return value
+
+
+def _as_seconds(raw: str) -> float:
+    """A half-life. One second means a complaint is gone before the next packet;
+    a week means a peer never lives anything down."""
+    value = float(str(raw).strip())
+    if not 60.0 <= value <= 30 * 86400.0:
+        raise ValueError("between 60 seconds and 30 days")
+    return value
+
+
 def _as_path(raw: str):
     value = raw.strip()
     if not value:
@@ -209,6 +228,27 @@ SETTINGS = {
     "dht_max_mb":      (_as_store_mb, 32, False,
                         "Megabytes of DHT content this node caches for the "
                         "network (file only)"),
+    # How quick this node is to stop serving a peer that misbehaves. The
+    # applications decide what misbehaving *means* — only chat knows what too
+    # many messages is — and report it; these say what the reports add up to.
+    # A node on a hostile link wants them low, a node among machines it installed
+    # itself wants them high, and neither is a default the code can guess.
+    # These four literals are the *source* for the abuse thresholds:
+    # `reputation.py` reads its defaults back out of this table rather than
+    # keeping a second copy, so the number in the code and the number in the
+    # help an operator reads can never drift apart. This module is loaded from
+    # its file by `scripts/nmesh_config.py` — importing the package pulls in
+    # liboqs, which prints to stdout, and stdout there is a contract with
+    # install.sh — so it must keep importing nothing of its own.
+    "abuse_suspect":   (_as_score, 8.0, False,
+                        "Score at which a peer stops being served (file only)"),
+    "abuse_hostile":   (_as_score, 20.0, False,
+                        "Score at which a peer is refused outright (file only)"),
+    "abuse_halflife":  (_as_seconds, 3600.0, False,
+                        "Seconds for a complaint to lose half its weight "
+                        "(file only)"),
+    "no_abuse_gossip": (_as_bool, False, True,
+                        "Neither send nor act on other nodes' abuse reports"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),
@@ -436,7 +476,8 @@ def apply_edits(current: dict, edits) -> tuple[dict, list]:
     return merged, rejected
 
 
-_KINDS = {_as_bool: "bool", _as_port: "int", _as_optional_port: "int"}
+_KINDS = {_as_bool: "bool", _as_port: "int", _as_optional_port: "int",
+          _as_store_mb: "int", _as_score: "text", _as_seconds: "text"}
 
 
 def _kind_of(name: str) -> str:

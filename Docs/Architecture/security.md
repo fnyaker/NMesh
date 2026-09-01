@@ -196,6 +196,98 @@ subject, as of this moment."** Domain `nmesh-revocation-v1`.
   could be empty: on a node whose only link was that node, the revocation died
   where it was issued and nobody else ever heard.
 
+## Zero trust: being in the network is not being trusted
+
+Source: `reputation.py`, `accusation.py`, and `MeshNode.report_abuse`.
+
+A membership says an issuer vouched for an identity **once**. It says nothing
+about how that identity behaves afterwards, and an authenticated peer is exactly
+the adversary the threat model names — a relay that alters, replays, amplifies
+or floods. The only answer used to be `_Peer.note_abuse`, which counts frames a
+*link* could not decode and cuts that link: right as far as it goes, and it goes
+one hop. It forgets everything when the socket closes, so reconnecting shed the
+count; it cannot hear what an application saw; and it cannot tell one node
+holding four links from four nodes.
+
+### Who decides what
+
+- **The applications own the thresholds.** Only chat knows what too many
+  messages is, only fleet knows what too many commands is. Each judges by its
+  own numbers and reports the sender — in-process through
+  `MeshNode.report_abuse`, or from another process through the connector's
+  `_ABUSE` frame, where the app id comes from the session and never the frame,
+  as for the drawer and the per-app DHT. `reputation.RateGate` is the shared
+  shape of "an allowance per sender", so each app stops writing it slightly
+  differently; the numbers stay the app's.
+- **The node owns what the reports add up to.** Weighing one app's complaint
+  against another's is not something one app can do. Thresholds live in
+  `nmesh.conf` (`abuse_suspect`, `abuse_hostile`, `abuse_halflife`,
+  `no_abuse_gossip`) — a node on a hostile link and a node among machines its
+  operator installed want different numbers, and neither is one the code can
+  guess. Those four settings are the **source** for `reputation.py`'s defaults,
+  which read them back out rather than keeping a second copy.
+- **Nothing is reported about ourselves**: a bug in an app must never make a
+  node stop serving its own operator.
+- One report is never on its own decisive (`MAX_WEIGHT`, strictly below
+  `abuse_suspect` — when the two were equal, the strongest thing an app could
+  say landed exactly on the line and the first decay tick put it back under).
+  Evidence **fades** on a half-life, so a node that misbehaved once and then
+  behaved comes back with nobody doing anything.
+
+### What an accusation may not do
+
+This is the dangerous part. If hearsay alone could get a node cut off, anybody
+able to speak on the mesh could cut anybody off it — a censorship primitive with
+a reputation label on it. So evidence lands in two buckets and they are not
+equal:
+
+- **direct** — what we saw ourselves, plus a witness the *operator* designated
+  (`console_add_witness`; the natural entries are the Fleet operators this node
+  is enrolled with, which is already where "I trust this specific node" lives).
+  Only this bucket can reach hostile.
+- **rumour** — ordinary members of our own network accusing. Counted as **how
+  many distinct members**, never how many times: repeating an accusation is free
+  to send, so counting repetitions would price the mechanism at whatever the
+  loudest node feels like paying. Hard-capped strictly below the hostile
+  threshold, so a swarm can make this node wary and can never make it cut anyone
+  off.
+
+An accuser we already hold as suspect counts for nothing. A node we cannot place
+in our own network counts for nothing. An accusation naming *us* is neither
+acted on nor relayed — a node cannot be asked to spread the case against itself,
+and a receiver that did would make every accusation self-amplifying. Records
+carry a timestamp and are refused when stale (`MAX_AGE`) or ahead of us
+(`MAX_SKEW`): an old accusation is a replay, not evidence.
+
+### What it costs the accused: as little information as possible
+
+`SUSPECT` **tarpits** the link. Not a close: everything it sends is dropped at
+the top of `_handle_packet`, nothing is answered, no error is returned, and the
+socket stays open and quiet. A node that is disconnected knows the moment it
+happens, changes identity and starts again — so the useful thing to take away is
+not the connection but the feedback. The link is let go after a delay drawn at
+**random** (`_TARPIT_MIN`…`_TARPIT_MAX`), because a fixed one is a message too,
+only slower. `HOSTILE` also refuses a fresh handshake, checked after the two
+SHA-256s that prove which identity is asking and before the post-quantum
+verification, so refusing costs us almost nothing and reconnecting is not a way
+to reset an allowance.
+
+The sweep that lets expired tarpits go rides the keepalive loop rather than a
+task per link: each would sit asleep for minutes holding one of the
+`_MAX_DETACHED` slots the whole node shares, so a flood from many identities
+would starve the fan-outs and teardowns that budget exists for.
+
+We say something to the network only about what we saw **ourselves**, at most
+once per node per `_ACCUSE_MIN_GAP` — an accusation is a broadcast, and a node
+under attack must not answer by becoming the flood — and never to the node it
+names: it will find out when its traffic stops being answered, but not from us,
+and not with a timestamp telling it which of the things it tried was noticed.
+
+`console_forgive` drops everything held against a node. There has to be such a
+thing and it has to be local: every input to this table is a judgement made
+under pressure by software, and some of them will be wrong about somebody's
+node.
+
 There is **no TOFU table**. There used to be one (`trust.py`, `NodeID → DSA
 key`), documented here as a live defence, wired to nothing and imported only by
 its own tests. It could not have helped anywhere it was offered: every identity

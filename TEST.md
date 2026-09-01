@@ -104,6 +104,10 @@ tests/
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
 ├── test_invite*.py / test_cert_store.py               — invitations & trust
+├── test_reputation.py                                 — zero trust: the ledger,
+│     the rate gate, the signed accusation, and above all what hearsay may NOT
+│     do — no crowd of members can get a node cut off, an accusation naming us
+│     is neither acted on nor relayed, the accused is never told
 ├── test_cert_renewal.py / test_revocation.py          — certificate lifecycle:
 │     expiry, pruning, the renewal exchange and its refusals; and taking a
 │     membership back: who may say it, what it may not reach, a root that can
