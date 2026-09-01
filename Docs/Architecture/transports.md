@@ -228,9 +228,40 @@ fan-out and the neighbourhood on it too. Address steering multiplies by the same
 factor on both sides of its comparison — a lossy incumbent is precisely what
 steering exists to leave, so it has to count there or it never gets left.
 
-A link losing everything is **not torn down**: probes lost is not proof that
-data is, and the console shows `100% loss` plainly next to it. What changes is
-that nothing is sent down it while a better one exists.
+### Cutting a link that answers nothing (`_reap_silent_links`)
+
+Scoring a dead link at zero keeps it out of the traffic; it does not get rid of
+it. A half-open TCP connection and a UDP mapping the NAT has forgotten both look
+alive from here — nothing errors, nothing closes — so the link stays listed,
+stays counted, and stays in the way. Worse, the far end has no such link and is
+dialling us to get one, and until this one goes the two ends disagree about
+what exists between them.
+
+The link keepalive (every `_LINK_KEEPALIVE_INTERVAL`, 20 s) cuts any established
+link that has gone `_DEAD_LINK_PROBES` probes with no answer — four in a row,
+over a minute of one-way silence. The evidence is a **run**, not the lifetime
+share:
+
+| | what it answers | what it misses |
+|---|---|---|
+| `loss()` | what an operator reads: how good has this link been | a link that worked for an hour and then died — a thousand good probes outvote the dead ones, so the share never rises |
+| `since_pong` | is this link still a link | nothing; it is reset by any answer |
+
+Three things keep it from cutting something that works:
+
+- **any answer resets the run**, including one that arrived too late to be
+  timed. Only the latest probe is kept for the round-trip measurement, so a
+  link slower than the keepalive interval has its answers arrive unmatched —
+  counting those as silence is how a slow medium gets cut for being slow
+  (`LinkQuality.on_answer`).
+- **each link is judged on its own probes**, so a node reached over `tcp` and
+  `udp` loses only the medium that stopped answering.
+- **relayed and `probation` links are left alone** — the first carries no probes
+  of its own, the second belongs to the steering pass.
+
+Cutting heals the link rather than losing the node: the identity, its addresses
+and the routes through it are untouched (`_safe_stop_peer`, not `_reap_peer`),
+maintenance is woken, and the next pass dials it again.
 
 ## Steering an address on latency (`dynamic_address`, off by default)
 
@@ -295,6 +326,31 @@ Two guards keep it from eating something legitimate:
 When both links run the same way round (we dialled twice, or were dialled
 twice), direction cannot choose, and the **older** one wins: the far end sees
 the same pair in the same order.
+
+### The rule only holds while both ends see both links
+
+The canonical rule settles a **simultaneous dial**, and that is bounded in time:
+two dials cross within one open-and-authenticate, which this node already
+bounds at `_HANDSHAKE_DEADLINE` (60 s). A link much older than that when a new
+one authenticates is not the other half of anything — it is a link the far end
+no longer has (it restarted, its address moved, its TCP went half-open), and it
+is dialling us again precisely because it has none.
+
+Applying the rule there was an outage, not a tidy-up. The far end dialled, we
+answered its `CHALLENGE`, it sent its `HANDSHAKE` — and the rule kept the ghost
+and closed the link that had just proved itself. From the dialler, over two
+minutes: eleven `HANDSHAKE` out, eleven `CHALLENGE` in, **no `HANDSHAKE_ACK`
+at all**, for ever.
+
+So when the keeper the rule chooses is more than `_HANDSHAKE_DEADLINE` older
+than the newest link, the newest one is kept instead: it is the one that has
+just been proved, and the other is the one nobody on the far side has. A pair
+that really did cross is seconds apart and is still settled by the two ids.
+
+The `_reap_silent_links` sweep above is the other half of this: the ghost that
+made the rule misfire is exactly a link that stopped answering, and it now goes
+on its own within a couple of minutes rather than waiting for a dial to trip
+over it.
 
 ## TCP (`tcp_transport.py`)
 

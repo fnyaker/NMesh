@@ -222,10 +222,17 @@ not the same as being read.
   over two media at once may have one of them losing every probe. The score that
   picks between them multiplies the address score by `(1 − loss)⁴`, so a tenth
   of the probes lost costs more than any latency difference and a link nothing
-  comes back from is never chosen while anything else exists. It stays listed —
-  and stays connected: probes lost is not proof that data is, and `100% loss`
-  beside it is something an operator can act on. See
-  [`../Architecture/transports.md`](../Architecture/transports.md).
+  comes back from is never chosen while anything else exists.
+- **And a link that answers nothing is cut.** Scoring it at zero keeps traffic
+  off it; it does not get rid of it, and a half-open connection stays listed and
+  counted for ever while the far end — which has no such link — dials us to get
+  one. Four unanswered probes in a row (over a minute of one-way silence) and
+  the link goes. Judged per link, so a node reached over `tcp` and `udp` loses
+  only the medium that went quiet; judged on a **run**, not the lifetime share,
+  because a link that worked for an hour and then died never shows a high share;
+  and any answer resets it, including one too late to be timed. The node keeps
+  the identity and its addresses, so the next maintenance pass dials it again.
+  See [`../Architecture/transports.md`](../Architecture/transports.md).
 - **Connected nodes are one row each**, whatever the number of links. A node you
   hold five links with is one row: its name, how many links, the lowest latency,
   and the jitter **of that fastest link** — the jitter of a link nobody uses
@@ -332,6 +339,19 @@ medium is backend work that has not been done.
 What belongs to no medium stays apart: the **Addressing** card says what this
 node claims about itself (advertised addresses, local IPs, schemes).
 
+**Refused handshakes** is the card to open when nothing will connect. A node
+drops anything it cannot verify — that is the design — but a mesh whose nodes
+all refuse each other looks, from outside, exactly like a mesh nobody is
+calling: the dialler retries, every attempt dies at one of a dozen tests, and
+none of them used to say a word. The card lists the tests that failed, newest
+first, with how many times and which id was turned away. It is hidden while
+there is nothing to show, and nothing in it is an error on its own — a stranger
+dialling a closed door lands here too.
+
+Two reasons mean the two nodes are no longer in the same network, and are worth
+acting on: *the certificate chain reaches no root we trust* and *no certificate
+chain was presented*. The rest are noise or a bug worth reporting.
+
 These numbers come from the transport itself (`endpoints()` / `stats()`), so a
 new medium appears here with no change to the console. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
@@ -379,7 +399,7 @@ works on a machine with no internet.
 |---------|------------------|------------------------------------------------|
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**) |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`) |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |

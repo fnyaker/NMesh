@@ -26,9 +26,9 @@ class CertStore:
                  max_per_subject: int = MAX_PER_SUBJECT) -> None:
         self._own_id = own_id
         # Insertion-ordered, oldest first: eviction takes the subject nobody has
-        # mentioned for longest. Roots and our own chain are pinned (see
-        # `_evict_subject`) — a bound that can make us unable to authenticate is
-        # not a bound, it is an outage.
+        # mentioned for longest. Roots and every subject our own chain runs
+        # through are pinned (see `_pinned`) — a bound that can make us unable
+        # to authenticate is not a bound, it is an outage.
         self._certs: dict[bytes, list[Certificate]] = {}  # subject_id.raw → [Certificate]
         self._roots: set[bytes] = {own_id.raw}
         self._max_subjects = max_subjects
@@ -53,13 +53,22 @@ class CertStore:
                 self._touch(key)
                 return True  # already present
         existing.append(cert)
+        # Cleared before the bounds run, not after: both of them ask what our
+        # own chain is made of, and a chain computed from the graph as it was a
+        # certificate ago can name the wrong certificates to keep.
+        self._chains.clear()
         # Oldest first within a subject: a peer presenting chain after chain
-        # cannot make one subject's list grow without end.
-        while len(existing) > self._max_per_subject:
-            existing.pop(0)
+        # cannot make one subject's list grow without end. The one certificate
+        # our own chain runs through is not a candidate — a chain visits a
+        # subject once, so there is always something else to drop.
+        if len(existing) > self._max_per_subject:
+            load_bearing = self._chain_signatures()
+            while len(existing) > self._max_per_subject:
+                victim = next((c for c in existing
+                               if c.signature not in load_bearing), existing[0])
+                existing.remove(victim)
         self._touch(key)
         self._enforce_bounds()
-        self._chains.clear()
         return True
 
     def _touch(self, key: bytes) -> None:
@@ -67,12 +76,30 @@ class CertStore:
         if entry is not None:
             self._certs[key] = entry
 
+    def _chain_signatures(self) -> set[bytes]:
+        """The certificates our own chain is made of. Memoised with the chain."""
+        return {c.signature for c in (self.get_chain_to_root(self._own_id) or [])}
+
+    def _own_chain_subjects(self) -> set[bytes]:
+        """Every subject our own chain runs through.
+
+        Not just us and the root: the issuers in between are what joins the two.
+        Losing one leaves us presenting a chain that stops short of a root,
+        which no peer can verify — we would go on authenticating everyone else
+        while nobody could authenticate us, and no error would be raised
+        anywhere. Memoised with the chain, so this costs a lookup."""
+        chain = self.get_chain_to_root(self._own_id) or []
+        subjects = {c.subject_id.raw for c in chain}
+        subjects.update(c.issuer_id.raw for c in chain)
+        subjects.add(self._own_id.raw)
+        return subjects
+
     def _pinned(self, key: bytes) -> bool:
-        """Subjects eviction may never take: the roots, and ourselves.
+        """Subjects eviction may never take: the roots, and our own chain.
 
         Losing a root means every chain anchored there stops verifying; losing
-        our own certificates means we can no longer present a chain at all."""
-        return key in self._roots or key == self._own_id.raw
+        any link of our own chain means we can no longer present one at all."""
+        return key in self._roots or key in self._own_chain_subjects()
 
     def _enforce_bounds(self) -> None:
         while len(self._certs) > self._max_subjects:

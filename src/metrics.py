@@ -56,10 +56,17 @@ class LinkQuality:
     reads: last, best, worst, and jitter. Loss is counted separately, because a
     probe that never comes back has no round trip to average.
 
+    Loss is counted two ways because they answer different questions. The
+    lifetime share (`loss`) is what an operator reads. The run of probes since
+    the last answer (`since_pong`) is what decides whether the link is still a
+    link: a link that carried traffic for an hour and then died never shows a
+    high lifetime share — a thousand good probes outvote the dead ones — so the
+    ratio alone can never notice that it stopped answering.
+
     Every method is O(1) and called at most once per liveness probe, never on
     the packet path."""
 
-    __slots__ = ("_samples", "pings", "pongs", "last")
+    __slots__ = ("_samples", "pings", "pongs", "last", "since_pong")
 
     HISTORY = 32
 
@@ -68,14 +75,27 @@ class LinkQuality:
         self.pings = 0
         self.pongs = 0
         self.last: float | None = None
+        self.since_pong = 0
 
     def on_ping(self) -> None:
         self.pings += 1
+        self.since_pong += 1
 
     def on_pong(self, rtt: float) -> None:
         self.pongs += 1
+        self.since_pong = 0
         self.last = rtt
         self._samples.append(rtt)
+
+    def on_answer(self) -> None:
+        """A probe came back too late to be timed.
+
+        Once the next probe has gone out there is no round trip left to
+        measure — but the answer is still proof the link carries traffic both
+        ways, and the whole point of the run is to tell a slow link from a dead
+        one. Counting it as silence would cut the slow one."""
+        self.pongs += 1
+        self.since_pong = 0
 
     @property
     def samples(self) -> list:
@@ -109,6 +129,7 @@ class LinkQuality:
             "jitter_ms": ms(self.jitter()),
             "loss": None if self.loss() is None else round(self.loss(), 3),
             "probes": self.pings,
+            "unanswered": self.since_pong,
             "samples_ms": [ms(value) for value in samples],
         }
 
