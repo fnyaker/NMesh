@@ -365,6 +365,27 @@ class WebConsole:
             self._gc_tokens()
         return token
 
+    def issue_session_for_grant(self) -> str:
+        """Mint a session for an operator the *fleet ledger* already authorised.
+
+        The only place a console session is created without a password, and it
+        exists because of a machine nobody can type one on: a node this operator
+        provisioned generated its password on first start and printed it to a
+        log the operator never read. The password is not the authority here —
+        the grant is, and it was given by a human on this machine (capability
+        ``passwordless``, see :mod:`src.apps.fleet_state`).
+
+        This is deliberately **not** reachable over HTTP: the caller is the
+        fleet app running in this process, which has already verified the mesh
+        session, the ledger entry and a fresh signature over the request. A
+        route would turn all three into one bearer token on a socket."""
+        return self._issue_token()
+
+    def revoke_session_for_grant(self, token: str) -> None:
+        """End a session issued above, when the grant behind it is taken back."""
+        if isinstance(token, str) and token:
+            self._revoke_token(token)
+
     def _valid_token(self, token: str | None) -> bool:
         if not token:
             return False
@@ -1730,9 +1751,12 @@ def _make_handler(console: WebConsole):
                         return
                     result = console._call(node.install_release(publisher),
                                            timeout=400.0)
-                    # An operator pressed Install and is watching. The
-                    # unattended path (the release loop) never restarts — that
-                    # is where a bad release could become a restart loop.
+                    # An operator pressed Install and is watching, so the
+                    # restart is immediate. The unattended path restarts too,
+                    # but only after writing the attempt down: a release that
+                    # installs and never becomes the running version is given
+                    # up on rather than restarted into for ever (`node.py`,
+                    # `AutoInstallJournal`).
                     restarting = console.restart()
                     self._json(200, {"ok": True, **result,
                                      "restarting": restarting})
@@ -2068,10 +2092,13 @@ def _make_handler(console: WebConsole):
                 return
             if action == "connect":
                 password = data.get("password")
-                if not isinstance(password, str) or not password:
-                    self._json(400, {"error": "the remote console password is required"})
+                if password is not None and not isinstance(password, str):
+                    self._json(400, {"error": "the password must be text"})
                     return
-                ok, detail = fleet.remote_connect(session, node, password)
+                # No password is a request, not an omission: the bridge checks
+                # that the node actually granted `passwordless` and refuses
+                # otherwise, so an empty field cannot become a way in.
+                ok, detail = fleet.remote_connect(session, node, password or None)
                 self._json(200 if ok else 403, {"ok": ok, "error": detail})
                 return
             if action == "disconnect":
@@ -2197,6 +2224,10 @@ def _make_handler(console: WebConsole):
                 sudo_password=data.get("sudo_password") or None,
                 mode="user" if data.get("mode") == "user" else "system",
                 caps=data.get("caps"),
+                # On unless the operator turned it off: a machine nobody will
+                # log into again is a machine that has to be able to update
+                # itself, and it can only be told whose code to take now.
+                auto_update=data.get("auto_update", True) is not False,
                 join_uris=data.get("join_uris"),
                 join_code=data.get("join_code"),
             )

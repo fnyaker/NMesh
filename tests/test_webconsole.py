@@ -137,6 +137,37 @@ class TestAuth:
         finally:
             console.stop(); await node.stop()
 
+    async def test_a_session_issued_for_a_grant_is_an_ordinary_session(self):
+        """The fleet app mints one for an operator granted `passwordless`. It
+        skips the password, nothing else: the console's own session rules still
+        decide what it opens and when it stops."""
+        node, console = await _make_console()
+        try:
+            token = console.issue_session_for_grant()
+            status, _, _, snap = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert status == 200 and snap["id"] == node.id.raw.hex()
+            console.revoke_session_for_grant(token)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_no_route_hands_out_a_grant_session(self):
+        """It is minted in-process, by a caller that has already checked the
+        mesh session, the ledger and a signature. A route would be a token
+        anybody on the machine could ask for."""
+        node, console = await _make_console()
+        try:
+            for path in ("/api/session", "/api/remote/session",
+                         "/api/login/grant"):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", path, None, {})
+                assert status in (401, 404)
+        finally:
+            console.stop(); await node.stop()
+
     async def test_bad_token_rejected(self):
         node, console = await _make_console()
         try:

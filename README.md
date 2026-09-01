@@ -34,7 +34,9 @@ cryptography; relays never see the content.
   authenticate its peers: signed assertions, scoped, fresh, single-use.
 - **Fleet management & deployment** — the *Fleet* app: enrol nodes with
   capabilities, read their status, update them, open a shell, discover the LAN
-  and install NMesh over SSH.
+  and install NMesh over SSH. A machine deployed this way comes up trusting the
+  operator who installed it, accepting their release publishers, and reachable
+  from their console without a password nobody ever typed on it.
 - **Minimal dependencies** — Python stdlib + `liboqs-python` + `cryptography`.
 
 ## Quick start
@@ -50,7 +52,10 @@ separately (Ubuntu, Debian, Alpine, Arch)** — and builds liboqs. The full list
 of cases it handles is in [`Docs/Setup/guide`](Docs/Setup/guide).
 
 On the first run the console password is **generated and printed once** — write
-it down. Then open the URL it prints (the web console, over HTTPS).
+it down. Then open the URL it prints (the web console, over HTTPS). (A machine
+installed remotely from another node's *Fleet* page prints it where nobody is
+looking, which is why that route grants the deploying operator a way in that
+does not need it — see [`Docs/Apps/fleet`](Docs/Apps/fleet).)
 
 Useful options (every argument is passed through to the launcher):
 

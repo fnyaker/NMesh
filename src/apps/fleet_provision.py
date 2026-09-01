@@ -24,8 +24,11 @@ The trust hand-off
 The point of provisioning is that the new node ends up trusting the operator who
 created it — without a human clicking "accept" on a machine that has no screen.
 The pre-authorisation file carries the operator's **node id and public key**
-(delivered over the authenticated SSH channel, which is the root of trust here)
-plus a **single-use token**. On first start the new node enrols the operator with
+(delivered over the authenticated SSH channel, which is the root of trust here),
+the **release publishers** the machine should accept, and a **single-use
+token**. The publishers ride along for the same reason as everything else here:
+there is nobody on that machine to paste a key into a console later, so a box
+told nothing accepts no code from the mesh, for ever. On first start the new node enrols the operator with
 the granted capabilities, proves possession of the token so the operator can bind
 this brand-new mesh identity to the provisioning run it just performed, and then
 deletes the file. The token is not a long-term secret: it exists to answer "is
@@ -66,6 +69,12 @@ _TAIL_LINES = 60
 _TAIL_LINE_CHARS = 500
 TOKEN_LEN = 32
 PROVISION_TIMEOUT = 1800.0            # dependency builds are slow on small boxes
+# Publisher keys the pre-authorisation may carry. A machine with no operator in
+# front of it cannot be told later whose code it accepts, so it is told now —
+# bounded, because this document is written once and read by a machine.
+MAX_PREAUTH_PUBLISHERS = 8
+MAX_PUBLISHER_KEY_HEX = 8192 * 2
+MAX_PUBLISHER_NAME = 64
 
 PREAUTH_FILENAME = "fleet_preauth.json"
 
@@ -118,12 +127,19 @@ def _payload_filter(info: tarfile.TarInfo):
 
 def make_preauth(operator_id: bytes, operator_pub: bytes, *,
                  capabilities: list[str], join_uris: list[str],
-                 join_code: str | None, label: str = "") -> tuple[dict, bytes]:
+                 join_code: str | None, label: str = "",
+                 publishers: list[dict] | None = None) -> tuple[dict, bytes]:
     """Build the pre-authorisation document and its single-use token.
 
     Returns ``(document, token)``. The **operator keeps** ``sha256(token)``; the
     token itself only ever exists in the payload and on the new node, where it is
-    consumed once and deleted."""
+    consumed once and deleted.
+
+    ``publishers`` are the release publishers this machine should accept, each
+    ``{"key", "name", "auto"}``. They ride the same SSH channel as the operator's
+    own key and are therefore trusted on the same grounds — and they have to
+    ride *something*: a headless box has nobody to paste a publisher key into a
+    console, so without this it would install nothing from the mesh, for ever."""
     token = secrets.token_bytes(TOKEN_LEN)
     document = {
         "v": 1,
@@ -133,10 +149,45 @@ def make_preauth(operator_id: bytes, operator_pub: bytes, *,
         "join_uris": [str(u)[:256] for u in join_uris][:8],
         "join_code": (join_code or "")[:64],
         "label": str(label)[:128],
+        "publishers": clean_publishers(publishers),
         "token": token.hex(),
         "issued_at": int(time.time()),
     }
     return document, token
+
+
+def clean_publishers(publishers) -> list[dict]:
+    """Normalise a publisher list from anywhere — a UI, a mesh request, a file.
+
+    A key that is not hex, or is implausibly large, is dropped rather than
+    carried: the node reading this document has no operator to ask, so anything
+    it cannot make sense of must simply not be there. Duplicates collapse on the
+    key, so one publisher cannot fill the list on its own."""
+    if not isinstance(publishers, (list, tuple)):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for entry in publishers:
+        if len(out) >= MAX_PREAUTH_PUBLISHERS:
+            break
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if not isinstance(key, str) or not 0 < len(key) <= MAX_PUBLISHER_KEY_HEX:
+            continue
+        try:
+            bytes.fromhex(key)
+        except ValueError:
+            continue
+        key = key.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        name = entry.get("name")
+        out.append({"key": key,
+                    "name": (name if isinstance(name, str) else "")[:MAX_PUBLISHER_NAME],
+                    "auto": entry.get("auto") is True})
+    return out
 
 
 def token_digest(token: bytes) -> str:
@@ -186,6 +237,7 @@ def parse_preauth(document) -> dict | None:
                      if isinstance(join_uris, list) else [],
         "join_code": str(document.get("join_code") or "")[:64],
         "label": str(document.get("label") or "")[:128],
+        "publishers": clean_publishers(document.get("publishers")),
     }
 
 

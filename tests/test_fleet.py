@@ -335,10 +335,20 @@ class StubConsole:
         self.calls = []
         self.status, self.body, self.ctype = status, body, ctype
         self.available = True
+        self.issued = []
+        self.revoked = []
 
     def call(self, method, path, body, token, timeout=None):
         self.calls.append((method, path, body, token))
         return self.status, self.ctype, self.body
+
+    def issue_session(self):
+        token = "session-%d" % len(self.issued)
+        self.issued.append(token)
+        return token
+
+    def revoke_session(self, token):
+        self.revoked.append(token)
 
 
 async def deliver_both(a: Peer, b: Peer, rounds: int = 6) -> None:
@@ -517,6 +527,119 @@ class TestRemoteConsole:
         with pytest.raises(ConsoleProxyError) as failure:
             await task
         assert "in flight" in str(failure.value)
+
+
+class TestPasswordlessSession:
+    """A machine an operator provisioned has a console password nobody typed.
+    `passwordless` is the second key for exactly that case — and it is a key,
+    not a hole: every gate that guards `manage` still guards this."""
+
+    async def test_the_grant_mints_a_session(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        assert await task == "session-0"
+        assert console.issued == ["session-0"]
+        # Minting a session is not a call: nothing was replayed on the console.
+        assert console.calls == []
+
+    async def test_without_the_capability_nothing_is_minted(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "not authorised for passwordless" in str(failure.value)
+        assert console.issued == []
+
+    async def test_passwordless_without_manage_mints_nothing(self, operator, agent):
+        """A session that could only be spent somewhere else is a secret handed
+        out for no reason."""
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "not authorised for manage" in str(failure.value)
+        assert console.issued == []
+
+    async def test_the_session_is_spent_like_any_other_token(self, operator, agent):
+        console = StubConsole(body=b'{"id":"abc"}')
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        token = await task
+        call = asyncio.ensure_future(operator.app.console_call(
+            agent.id, "GET", "/api/state", token=token))
+        await deliver_both(operator, agent)
+        _status, _ctype, body = await call
+        assert body == b'{"id":"abc"}'
+        assert console.calls == [("GET", "/api/state", None, "session-0")]
+
+    async def test_taking_the_right_back_ends_the_session(self, operator, agent):
+        """Otherwise revoking would only stop the *next* one."""
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        token = await task
+        await agent.app.set_operator_capabilities(operator.id.raw.hex(),
+                                                  ["manage"])
+        assert console.revoked == [token]
+
+    async def test_cutting_the_operator_off_ends_the_session(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        token = await task
+        assert await agent.app.revoke(operator.id.raw.hex()) is True
+        assert console.revoked == [token]
+
+    async def test_sessions_one_operator_holds_are_bounded(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        for _ in range(fleet.MAX_GRANT_SESSIONS + 2):
+            task = asyncio.ensure_future(operator.app.console_session(agent.id))
+            await deliver_both(operator, agent)
+            await task
+        held = agent.app._granted_sessions[operator.id.raw.hex()]
+        assert len(held) == fleet.MAX_GRANT_SESSIONS
+        # The ones pushed out were not merely forgotten: they were ended.
+        assert console.revoked == ["session-0", "session-1"]
+
+    async def test_a_node_with_no_console_says_so(self, operator, agent):
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as failure:
+            await task
+        assert "no console" in str(failure.value)
+
+    async def test_a_session_nobody_asked_for_is_dropped(self, operator, agent):
+        """An unsolicited token is a token an attacker chose."""
+        stranger = Peer()
+        agent.app._local_console = StubConsole()
+        await enrol(operator, agent, caps=["manage", "passwordless"])
+        task = asyncio.ensure_future(operator.app.console_session(agent.id))
+        await settle()
+        rid = next(iter(operator.app._session_calls))
+        stranger.app._reply(operator.id, fleet.CONSOLE_SESSION_ISSUED,
+                            {"rid": rid, "token": "forged"})
+        await deliver(stranger, operator)
+        assert not operator.app._session_calls[rid].done()
+        await deliver_both(operator, agent)
+        assert await task == "session-0"
 
 
 class TestUpdateRefusalIsUseful:
@@ -892,6 +1015,79 @@ def _close_shells(agent, operator):
 # ---------------------------------------------------------------------------
 # Pre-authorisation (a provisioned machine coming online)
 # ---------------------------------------------------------------------------
+
+class TestPublishersTravelWithTheGrant:
+    """A machine installed from here has nobody to paste a publisher key into a
+    console. Whose signed code it accepts is settled at provisioning or never,
+    and it is the *operator's* answer — never the relay's."""
+
+    def _operator(self, listed):
+        peer = Peer()
+        peer.app._release_publishers = lambda: listed
+        return peer
+
+    def test_the_list_is_this_node_s_pins(self):
+        peer = self._operator([{"key": "ab" * 32, "name": "ops", "auto": False}])
+        assert peer.app.local_publishers() == [
+            {"key": "ab" * 32, "name": "ops", "auto": True}]
+
+    def test_the_new_machine_s_auto_flag_is_the_deployer_s_choice(self):
+        peer = self._operator([{"key": "ab" * 32, "name": "ops", "auto": True}])
+        assert peer.app.local_publishers(auto=False)[0]["auto"] is False
+
+    def test_a_node_that_cannot_answer_hands_over_nothing(self):
+        assert Peer().app.local_publishers() == []
+        broken = Peer()
+
+        def explode():
+            raise RuntimeError("no releases here")
+
+        broken.app._release_publishers = explode
+        assert broken.app.local_publishers() == []
+
+    async def test_a_request_carries_them_to_the_relay(self, operator, agent):
+        """The node running the SSH relays the list; it never adds to it."""
+        operator.app._release_publishers = lambda: [
+            {"key": "ab" * 32, "name": "ops", "auto": True}]
+        await enrol(operator, agent, caps=["provision"])
+        operator.take_sent()
+        await operator.app.request_provision(
+            agent.id, targets=[{"ip": "10.0.0.5"}], username="bob",
+            password="pw", publishers=operator.app.local_publishers())
+        (_target, payload), = operator.take_sent()
+        # type(1) ‖ alen(2) ‖ assertion ‖ json_body
+        alen = fleet._LEN.unpack_from(payload, 1)[0]
+        document = json.loads(payload[1 + fleet._LEN.size + alen:])
+        assert document["publishers"] == [
+            {"key": "ab" * 32, "name": "ops", "auto": True}]
+
+    async def test_a_provisioned_node_pins_what_it_was_given(self):
+        """The end of the hand-off: the document a new machine reads names the
+        publishers, and `scripts/nmesh_node.py` pins them before anything else."""
+        from scripts.nmesh_node import _pin_publishers
+
+        class _Node:
+            def __init__(self):
+                self.pinned = []
+
+            def trust_publisher(self, key, name="", auto=False):
+                if key == "bad":
+                    raise ValueError("not a key")
+                self.pinned.append((key, name, auto))
+
+        node = _Node()
+        assert _pin_publishers(node, {"publishers": [
+            {"key": "ab" * 32, "name": "ops", "auto": True},
+            {"key": "bad", "name": "junk", "auto": True},
+            {"key": "cd" * 32, "name": "", "auto": False},
+        ]}) == 2
+        assert node.pinned == [("ab" * 32, "ops", True),
+                               ("cd" * 32, "", False)]
+
+    async def test_a_document_with_no_publishers_pins_nothing(self):
+        from scripts.nmesh_node import _pin_publishers
+        assert _pin_publishers(object(), {}) == 0
+
 
 class TestPreauth:
     def _document(self, operator: Peer, caps=("status", "update")):

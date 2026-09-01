@@ -316,6 +316,8 @@ class TestFleetRoutes:
             ids = [entry["id"] for entry in data["targets"]]
             assert ids == [managed]
             assert data["targets"][0]["connected"] is False
+            # The page has to know which of two things to ask for.
+            assert data["targets"][0]["passwordless"] is False
         finally:
             console.stop()
             await host.stop_all()
@@ -332,15 +334,41 @@ class TestFleetRoutes:
             status, _, _, data = await _post(console, "/api/remote/connect", token,
                                              {"node": "ee" * 20, "password": "x" * 12})
             assert status == 403 and "granted" in data["error"]
-            # A password is not optional.
+            # `manage` alone does not make the password optional.
             built["app"].state.add_managed("ee" * 20, caps=["manage"])
             status, _, _, data = await _post(console, "/api/remote/connect", token,
                                              {"node": "ee" * 20})
-            assert status == 400
+            assert status == 403 and "password" in data["error"]
             # Nor is a real node id.
             status, _, _, _ = await _post(console, "/api/remote/connect", token,
                                           {"node": "nothex", "password": "x" * 12})
             assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_passwordless_grant_connects_with_no_password(self):
+        """A machine this operator provisioned never had a password they could
+        type: the grant is the key, and the page must be able to use it."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            target = "ee" * 20
+            built["app"].state.add_managed(target,
+                                           caps=["manage", "passwordless"])
+
+            async def session(node_id):
+                assert node_id.raw.hex() == target
+                return "granted-token"
+
+            built["app"].console_session = session
+            status, _, _, data = await _post(console, "/api/remote/connect",
+                                             token, {"node": target})
+            assert status == 200 and data["ok"] is True
+            _s, _h, _b, targets = await _get(console, "/api/remote/targets", token)
+            row = targets["targets"][0]
+            assert row["passwordless"] is True and row["connected"] is True
         finally:
             console.stop()
             await host.stop_all()

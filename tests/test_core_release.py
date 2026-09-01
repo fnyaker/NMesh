@@ -420,6 +420,86 @@ class TestPinnedPublishers:
         assert len(cr.TrustedPublishers(str(path), max_publishers=3)) == 3
 
 
+class TestTheAutoInstallJournal:
+    """The record that outlives the exit an automatic install ends in."""
+
+    def test_an_attempt_survives_a_restart(self, tmp_path):
+        path = str(tmp_path / "autoinstall.json")
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        cr.AutoInstallJournal(path).record(rid, "1.2.3")
+        assert cr.AutoInstallJournal(path).attempts(rid) == 1
+
+    def test_a_release_that_never_takes_is_abandoned(self, tmp_path):
+        path = str(tmp_path / "autoinstall.json")
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        for _ in range(cr.MAX_AUTO_ATTEMPTS):
+            journal = cr.AutoInstallJournal(path)
+            assert journal.exhausted(rid) is False
+            journal.record(rid, "1.2.3")
+            # Every boot reads it back against the version actually running.
+            assert journal.settle("0.0.1") == ["1.2.3"]
+        assert cr.AutoInstallJournal(path).exhausted(rid) is True
+
+    def test_a_release_that_took_is_forgotten(self, tmp_path):
+        path = str(tmp_path / "autoinstall.json")
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        cr.AutoInstallJournal(path).record(rid, "1.2.3")
+        journal = cr.AutoInstallJournal(path)
+        assert journal.settle("1.2.3") == []
+        assert cr.AutoInstallJournal(path).attempts(rid) == 0
+
+    def test_forgetting_one_clears_its_count(self, tmp_path):
+        path = str(tmp_path / "autoinstall.json")
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        journal = cr.AutoInstallJournal(path)
+        journal.record(rid, "1.2.3")
+        journal.forget(rid)
+        assert cr.AutoInstallJournal(path).attempts(rid) == 0
+
+    def test_a_release_id_that_is_not_one_is_refused(self, tmp_path):
+        journal = cr.AutoInstallJournal(str(tmp_path / "autoinstall.json"))
+        for bad in ("", "zz", "AB" * cr.PUBLISHER_ID_LEN, None):
+            assert journal.record(bad, "1.2.3") == 0
+        assert len(journal) == 0
+
+    def test_it_is_bounded(self, tmp_path):
+        journal = cr.AutoInstallJournal(str(tmp_path / "autoinstall.json"),
+                                        max_entries=2)
+        for index in range(4):
+            journal.record(f"{index:02x}" * cr.PUBLISHER_ID_LEN, "1.2.3")
+        assert len(journal) == 2
+
+    def test_a_corrupt_journal_means_nothing_attempted(self, tmp_path):
+        """Fail-open here costs one extra attempt, which the count then bounds
+        — never an unbounded number of them."""
+        path = tmp_path / "autoinstall.json"
+        for junk in ("", "[]", "not json", '{"a": 1}',
+                     json.dumps({"ab" * cr.PUBLISHER_ID_LEN: {"version": 2}})):
+            path.write_text(junk)
+            assert len(cr.AutoInstallJournal(str(path))) == 0
+
+    def test_a_doctored_count_cannot_exceed_the_ceiling(self, tmp_path):
+        path = tmp_path / "autoinstall.json"
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        path.write_text(json.dumps({rid: {"version": "1.2.3",
+                                          "attempts": 10 ** 9}}))
+        assert cr.AutoInstallJournal(str(path)).attempts(rid) == \
+            cr.MAX_AUTO_ATTEMPTS
+
+    def test_the_file_is_owner_only(self, tmp_path):
+        import stat
+        path = str(tmp_path / "autoinstall.json")
+        cr.AutoInstallJournal(path).record("ab" * cr.PUBLISHER_ID_LEN, "1.2.3")
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    def test_with_no_path_it_still_works(self):
+        """A node with no state directory keeps the guard for this process."""
+        journal = cr.AutoInstallJournal()
+        rid = "ab" * cr.PUBLISHER_ID_LEN
+        assert journal.record(rid, "1.2.3") == 1
+        assert journal.attempts(rid) == 1
+
+
 class TestTheCatalogue:
     def test_a_release_is_kept_and_worth_gossiping_once(self):
         idn = CryptoIdentity()
