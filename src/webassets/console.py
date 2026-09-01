@@ -1142,14 +1142,71 @@ function edgeLabelAt(from, to, share){
 
 let MAP_NAMES = {};
 
+// What decides the drawing: which nodes are on it, where each sits, and what
+// they are called. Everything else — a stroke that thickens, a latency in a
+// label, an uptime — is written into the drawing that is already there.
+function graphShape(state, size){
+  const topology = state.topology || {};
+  return JSON.stringify([size.w, !!size.labels, state.id,
+    (topology.direct || []).map((node) => [node.id, node.pseudo || ""]),
+    (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""])]);
+}
+
+// The numbers on a drawing that has not changed shape.
+function patchGraph(svg, state, size){
+  const topology = state.topology || {};
+  (topology.direct || []).forEach((node) => {
+    const counters = node.counters || {}, quality = node.quality || {};
+    const line = svg.querySelector('[data-edge="' + CSS.escape(node.id) + '"]');
+    if(line){
+      line.setAttribute("stroke-width",
+        graphWeight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2));
+      line.classList.toggle("lossy",
+        (quality.loss || 0) >= 0.1 || (quality.jitter_ms || 0) > 150);
+    }
+    const label = svg.querySelector('[data-elabel="' + CSS.escape(node.id) + '"]');
+    if(label) label.textContent = edgeLabelText(node);
+    const caption = svg.querySelector('[data-caption="' + CSS.escape(node.id) + '"]');
+    if(caption) caption.textContent = node.since ? "up " + fmtDuration(node.since) : "";
+  });
+  graphSummary(state, size);
+}
+
+function edgeLabelText(node){
+  const quality = node.quality || {};
+  return (node.transport || "?") +
+    (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
+    (quality.loss ? " · " + Math.round(quality.loss * 100) + "% loss" : "");
+}
+
+// Thickness carries volume: a fat pale line is a busy healthy link.
+const graphWeight = (bytes) => Math.min(5, 1.2 + Math.log10(1 + (bytes || 0) / 1024) * 0.7);
+
+function graphSummary(state, size){
+  const topology = state.topology || {};
+  const direct = (topology.direct || []).length, routed = (topology.routed || []).length;
+  // Both are node counts: the map draws one dot per identity, however many
+  // links that identity holds. The card's sub-line says so in words.
+  const summary = direct + " direct" + (routed ? " · " + routed + " routed" : "");
+  if(size.labels) $("map-summary").textContent = summary;
+  else $("map-count").textContent = summary;
+}
+
 function renderGraph(svg, state, size){
-  svg.replaceChildren();
-  svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
   const topology = state.topology || {}, direct = topology.direct || [], routed = topology.routed || [];
-  const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   // Node labels are drawn from ids alone deeper in, so collect the names here.
   MAP_NAMES = {};
   for(const node of direct.concat(routed)) if(node.pseudo) MAP_NAMES[node.id] = node.pseudo;
+  // Rebuilt only when the drawing is a different drawing. Replacing the whole
+  // SVG every two seconds took the keyboard focus off a node with it, so a node
+  // could be tabbed to and never pressed, and a click landing mid-rebuild hit
+  // an element that was no longer in the document.
+  const shape = graphShape(state, size);
+  if(svg.dataset.graphShape === shape){ patchGraph(svg, state, size); return; }
+  svg.dataset.graphShape = shape;
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
+  const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
     const step = Math.PI * 2 / Math.max(1, direct.length);
@@ -1163,9 +1220,7 @@ function renderGraph(svg, state, size){
     place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx2,
                         y:centre.y + Math.sin(angle) * size.ry2});
   });
-  // Thickness carries volume, colour carries health: a fat pale line is a busy
-  // healthy link, a thin amber one is a link losing probes.
-  const weight = (bytes) => Math.min(5, 1.2 + Math.log10(1 + (bytes || 0) / 1024) * 0.7);
+  // Colour carries health beside it: a thin amber line is a link losing probes.
   direct.forEach((node) => {
     const point = place.get(node.id);
     const counters = node.counters || {};
@@ -1174,14 +1229,12 @@ function renderGraph(svg, state, size){
     const line = svgEl("line", {
       x1:centre.x, y1:centre.y, x2:point.x, y2:point.y,
       class:"edge" + (lossy ? " lossy" : ""), "data-edge":node.id,
-      "stroke-width":weight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2)});
+      "stroke-width":graphWeight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2)});
     svg.appendChild(line);
     if(size.labels){
       const label = svgEl("text", Object.assign(
-        edgeLabelAt(centre, point), {class:"elabel"}));
-      label.textContent = (node.transport || "?") +
-        (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
-        (quality.loss ? " · " + Math.round(quality.loss * 100) + "% loss" : "");
+        edgeLabelAt(centre, point), {class:"elabel", "data-elabel":node.id}));
+      label.textContent = edgeLabelText(node);
       svg.appendChild(label);
     }
   });
@@ -1212,8 +1265,12 @@ function renderGraph(svg, state, size){
     text.textContent = kind === "self" ? "this node"
                                        : nodeLabel(id, (MAP_NAMES[id] || ""));
     group.appendChild(text);
-    if(caption && size.labels){
-      const under = svgEl("text", {x:point.x, y:point.y + size.r + 22, class:"elabel"});
+    // A string, even an empty one, means "this node has a caption slot": a link
+    // that has no uptime yet gets one anyway, so the value can be written into
+    // it later without redrawing the whole map.
+    if(typeof caption === "string" && size.labels){
+      const under = svgEl("text", {x:point.x, y:point.y + size.r + 22,
+                                   class:"elabel", "data-caption":id});
       under.textContent = caption;
       group.appendChild(under);
     }
@@ -1223,7 +1280,7 @@ function renderGraph(svg, state, size){
                                "Direct link to " + node.id,
                                node.since ? "up " + fmtDuration(node.since) : ""));
   routed.forEach((node) => dot(node.id, place.get(node.id), "routed",
-                               "Routed session with " + node.id + " via " + node.via));
+                               "Routed session with " + node.id + " via " + node.via, null));
   dot(state.id, centre, "self", "This node");
   if(!direct.length && !routed.length){
     const text = svgEl("text", {x:centre.x, y:centre.y + size.self + 34, class:"lonely"});
@@ -1232,12 +1289,7 @@ function renderGraph(svg, state, size){
     text.textContent = "no links yet";
     svg.appendChild(text);
   }
-  // Both are node counts: the map draws one dot per identity, however many
-  // links that identity holds. The card's sub-line says so in words.
-  const summary = direct.length + " direct" +
-    (routed.length ? " · " + routed.length + " routed" : "");
-  if(size.labels) $("map-summary").textContent = summary;
-  else $("map-count").textContent = summary;
+  graphSummary(state, size);
 }
 
 // ---- the expanded map ------------------------------------------------------
