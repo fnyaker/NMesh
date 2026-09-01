@@ -227,6 +227,7 @@ _TARPIT_MAX          = 180.0
 # flood itself.
 _ACCUSE_MIN_GAP      = 300.0
 _ACCUSE_TRACKED      = 256
+_ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -1390,6 +1391,11 @@ class MeshNode:
         self._witnesses: set[bytes] = set()
         self._accusations_sent: OrderedDict[bytes, float] = OrderedDict()
         self._abuse_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        # Accusations already absorbed, by digest. This is what makes the
+        # epidemic terminate — and what stops one record being counted twice,
+        # which for a designated witness would otherwise be an unbounded score
+        # from a single signature replayed all hour.
+        self._abuse_seen: OrderedDict[bytes, None] = OrderedDict()
         self._gossip_abuse = gossip_abuse
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
@@ -7546,6 +7552,28 @@ class MeshNode:
         return self._gossip_allowed(self._abuse_rate, peer,
                                     _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
 
+    def _is_accusation_seen(self, parsed: dict) -> bool:
+        """Have we already absorbed this statement? Records it if not.
+
+        Keyed on **what it says** — accuser, subject, moment — and not on the
+        bytes. ML-DSA signatures are randomised, so signing one statement twice
+        gives two different records: a byte-wise check would have stopped a
+        relay loop and nothing else, while re-signing stayed a way to be counted
+        again. This way one accuser saying one thing at one moment is one
+        report, whoever carries it and however many times.
+
+        A digest rather than the fields, because this table is sized to survive
+        a flood and an accusation is ~5 kB of key and signature."""
+        digest = hashlib.sha256(
+            parsed["accuser_id"].raw + parsed["subject_id"].raw
+            + struct.pack("!Q", parsed["issued_at"])).digest()[:16]
+        if digest in self._abuse_seen:
+            return True
+        self._abuse_seen[digest] = None
+        while len(self._abuse_seen) > _ACCUSE_SEEN_MAX:
+            self._abuse_seen.popitem(last=False)
+        return False
+
     async def _handle_abuse_report(self, peer: '_Peer', packet: Packet) -> None:
         """Somebody says a node is misbehaving.
 
@@ -7565,6 +7593,16 @@ class MeshNode:
         parsed = accusation.parse(raw, self._identity.verify)
         if parsed is None:
             return self._charge_abuse(peer)
+        # Absorbed once, whoever brings it and however often. This is both what
+        # makes the epidemic die out — otherwise one accusation circulates
+        # between neighbours for the whole hour it stays valid — and what keeps
+        # a single signature worth a single report: without it, replaying one
+        # designated witness's record was an unbounded score from one signature.
+        # Claimed after the signature, never before: everything above it is
+        # anybody's to write, and claiming first would let unsigned rubbish
+        # evict live entries — the same rule as the app-auth nonce cache.
+        if self._is_accusation_seen(parsed):
+            return
         accuser, subject = parsed["accuser_id"], parsed["subject_id"]
         if subject == self._id:
             # Somebody is telling the mesh we are the problem. Not something to
