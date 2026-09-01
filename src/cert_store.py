@@ -15,6 +15,21 @@ MAX_SUBJECTS = 4096          # distinct subjects we keep certificates for
 MAX_PER_SUBJECT = 8          # certificates kept for one subject
 
 
+def _life(cert) -> float:
+    """How long a certificate has left, as a sort key. ``expires_at == 0`` is a
+    root: it never dies, so it outranks everything."""
+    return float("inf") if cert.expires_at == 0 else float(cert.expires_at)
+
+
+def _earliest_expiry(chain) -> int:
+    """When the first certificate of ``chain`` dies. 0 when none of them does.
+
+    A chain is worth exactly its shortest-lived link: one expired certificate
+    and every `verify_chain` on the network refuses the whole thing."""
+    stamps = [c.expires_at for c in (chain or ()) if c.expires_at]
+    return min(stamps) if stamps else 0
+
+
 class CertStore:
     """
     Holds the known certificates and the trusted roots — the whole of what this
@@ -33,10 +48,15 @@ class CertStore:
         self._roots: set[bytes] = {own_id.raw}
         self._max_subjects = max_subjects
         self._max_per_subject = max_per_subject
-        # `get_chain_to_root` memoised per subject. Cleared on any change: a
-        # stale chain is a chain that no longer verifies, which is worse than
-        # recomputing one.
-        self._chains: dict[bytes, list[Certificate] | None] = {}
+        # `get_chain_to_root` memoised per subject, as (chain, good_until).
+        # Cleared on any change: a stale chain is a chain that no longer
+        # verifies, which is worse than recomputing one. `good_until` closes the
+        # one way a cached chain can rot with nothing changing — a certificate
+        # in it expiring — so the walk is redone once the clock passes it rather
+        # than serving a chain every peer now refuses. 0 means "nothing in it
+        # expires"; a `None` result is only ever undone by an `add`, which
+        # clears the cache anyway.
+        self._chains: dict[bytes, tuple[list[Certificate] | None, int]] = {}
 
     def add_root(self, node_id: NodeID) -> None:
         self._roots.add(node_id.raw)
@@ -45,7 +65,20 @@ class CertStore:
     def is_root(self, node_id: NodeID) -> bool:
         return node_id.raw in self._roots
 
+    def root_count(self) -> int:
+        return len(self._roots)
+
+    def certs_for(self, node_id: NodeID) -> list[Certificate]:
+        """Every certificate held for one subject, expired ones included. A
+        copy: the caller must not be able to edit the store by iterating it."""
+        return list(self._certs.get(node_id.raw, ()))
+
     def add(self, cert: Certificate) -> bool:
+        # An expired certificate proves nothing and never will again, but it
+        # still costs a slot in a bounded list — so a peer replaying old
+        # certificates could crowd out the live one for a subject it chose.
+        if cert.is_expired():
+            return False
         key = cert.subject_id.raw
         existing = self._certs.setdefault(key, [])
         for e in existing:
@@ -113,10 +146,15 @@ class CertStore:
         for cert in certs:
             self.add(cert)
 
-    def get_chain_to_root(self, target: NodeID) -> list[Certificate] | None:
+    def get_chain_to_root(self, target: NodeID,
+                          now: int | None = None) -> list[Certificate] | None:
         """
         A BFS over the issuance graph, looking for a path from target up to a
         known root.
+
+        ``now`` answers "what would we present at that moment?" — the renewal
+        sweep and the console use it to see an expiry coming. It bypasses the
+        cache rather than poisoning it with an answer for another time.
 
         We prefer a chain anchored on an **external** root (the network): a node
         that joined a network is also its own self-signed root, but presenting
@@ -127,26 +165,82 @@ class CertStore:
 
         Returns [cert_target, ..., cert_root_self_signed] or None.
 
+        **Expired certificates are not walked.** A chain carrying one is refused
+        by every `verify_chain` on the network, so returning it is not a
+        degraded answer, it is a wrong one: the node would go on presenting a
+        chain nobody accepts while a shorter live path sat unused beside it.
+
+        **Of the live ones, the longest-lived wins.** A renewal arrives beside
+        the certificate it replaces, both valid; walking insertion order kept
+        presenting the old one until the day it died, so the renewal changed
+        nothing an operator could see, the countdown never moved, and the sweep
+        went on asking every six hours for the rest of the old one's life.
+
         Memoised per subject: this is a BFS over the issuance graph and
         `_handle_find_node` runs it once per candidate it considers (up to
         `_FIND_NODE_SCAN`), so recomputing it per query made one small packet
         buy a great deal of walking. The cache is dropped whenever the graph or
-        the root set changes.
+        the root set changes, and expires with the earliest certificate in it.
         """
-        if target.raw in self._chains:
-            return self._chains[target.raw]
-        chain = self._build_chain_to_root(target)
-        self._chains[target.raw] = chain
+        if now is not None:
+            return self._build_chain_to_root(target, now)
+        now = int(time.time())
+        cached = self._chains.get(target.raw)
+        if cached is not None and (cached[1] == 0 or now <= cached[1]):
+            return cached[0]
+        chain = self._build_chain_to_root(target, now)
+        self._chains[target.raw] = (chain, _earliest_expiry(chain))
         return chain
 
-    def _build_chain_to_root(self, target: NodeID) -> list[Certificate] | None:
-        target_certs = self._certs.get(target.raw)
+    def chain_expires_at(self, target: NodeID) -> int | None:
+        """When the chain we would present for ``target`` stops verifying.
+
+        ``0`` for a chain nothing expires (a bare self-signed root), ``None``
+        when there is no chain at all. This is what tells a node its own
+        membership is running out while it can still do something about it —
+        the alternative is finding out from peers that stop authenticating it,
+        which looks exactly like a network fault."""
+        chain = self.get_chain_to_root(target)
+        if chain is None:
+            return None
+        return _earliest_expiry(chain)
+
+    def prune_expired(self, now: int | None = None) -> int:
+        """Drop every certificate that has expired. Returns how many went.
+
+        Nothing verifies against them any more, but `save` wrote them back for
+        ever and they still counted against `MAX_PER_SUBJECT` — so a subject
+        whose certificate had been renewed a few times could fill its own slot
+        list with corpses and start evicting the live one."""
+        stamp = int(time.time()) if now is None else now
+        removed = 0
+        for key, certs in list(self._certs.items()):
+            live = [c for c in certs if not c.is_expired(stamp)]
+            if len(live) == len(certs):
+                continue
+            removed += len(certs) - len(live)
+            if live:
+                self._certs[key] = live
+            else:
+                del self._certs[key]
+        if removed:
+            self._chains.clear()
+        return removed
+
+    def _build_chain_to_root(self, target: NodeID,
+                             now: int | None = None) -> list[Certificate] | None:
+        now = int(time.time()) if now is None else now
+        target_certs = [c for c in self._certs.get(target.raw, ())
+                        if not c.is_expired(now)]
         if not target_certs:
             return None
 
         visited: set[bytes] = {target.raw}
-        # Prefer certs with external issuer so we find the network-wide chain
-        sorted_certs = sorted(target_certs, key=lambda c: 1 if c.is_self_signed else 0)
+        # An external issuer first (the network chain is the only one a peer can
+        # verify), then the longest-lived — a renewal must take over from the
+        # certificate it replaces, not wait for it to die.
+        sorted_certs = sorted(
+            target_certs, key=lambda c: (1 if c.is_self_signed else 0, -_life(c)))
         queue: deque[tuple[bytes, list[Certificate]]] = deque(
             (c.issuer_id.raw, [c]) for c in sorted_certs
         )
@@ -161,7 +255,7 @@ class CertStore:
                     chain = path
                 else:
                     chain = None
-                    for rc in self._certs.get(current_raw, []):
+                    for rc in self._live(current_raw, now):
                         if rc.is_self_signed:
                             chain = path + [rc]
                             break
@@ -169,7 +263,7 @@ class CertStore:
                         # Root known but no self-signed cert yet — keep BFS going
                         if current_raw not in visited:
                             visited.add(current_raw)
-                            for cert in self._certs.get(current_raw, []):
+                            for cert in self._live(current_raw, now):
                                 queue.append((cert.issuer_id.raw, path + [cert]))
                         continue
                 if current_raw != self._own_id.raw:
@@ -182,10 +276,17 @@ class CertStore:
                 continue
             visited.add(current_raw)
 
-            for cert in self._certs.get(current_raw, []):
+            for cert in self._live(current_raw, now):
                 queue.append((cert.issuer_id.raw, path + [cert]))
 
         return self_anchored
+
+    def _live(self, key: bytes, now: int) -> list[Certificate]:
+        """The certificates held for one subject that have not expired,
+        longest-lived first — so a walk that stops at the first usable one
+        stops at the best one."""
+        return sorted((c for c in self._certs.get(key, ())
+                       if not c.is_expired(now)), key=_life, reverse=True)
 
     def verify_chain(self, chain: list[Certificate]) -> NodeID | None:
         """
@@ -204,7 +305,7 @@ class CertStore:
 
         now = int(time.time())
         for cert in chain:
-            if cert.expires_at != 0 and now > cert.expires_at:
+            if cert.is_expired(now):
                 return None
 
         for i in range(len(chain) - 1):
@@ -234,6 +335,10 @@ class CertStore:
 
     @classmethod
     def load(cls, path: str, own_id: NodeID) -> 'CertStore':
+        """Read a store back, treating the file as hostile: anything that does
+        not parse, or no longer verifies, is skipped rather than raised. Expired
+        certificates never make it in — `add` refuses them — so a file does not
+        accumulate corpses across restarts."""
         store = cls(own_id)
         try:
             with open(path) as f:

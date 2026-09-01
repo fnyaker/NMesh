@@ -237,6 +237,17 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">What this node tells other nodes about itself</div></div></div>
           <div class="card-body"><dl id="addressing" class="kv"></dl></div>
         </article>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Membership</h2>
+            <div class="sub">The certificate chain this node presents to prove it belongs</div></div></div>
+          <div class="card-body">
+            <p class="muted small">A membership is issued for a year and renewed automatically a
+              month before it runs out, from the node that admitted this one. It is the one trust
+              failure a node can see coming: once the chain expires nothing will authenticate it,
+              and the only way back in is a fresh invitation.</p>
+            <dl id="trust" class="kv"></dl>
+          </div>
+        </article>
         <article class="card" id="refusals-card" hidden>
           <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
             <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
@@ -1813,7 +1824,31 @@ function paintReach(state){
       esc(key) + '"></dd>').join(""),
     Object.fromEntries(address.map(([key, value]) => ["addr:" + key, value])));
   paintTransportLive(state);
+  paintTrust(state);
   paintRefusals(state);
+}
+// The membership, said out loud: a node that is only its own root has joined
+// nothing, and one whose chain is running out has a deadline, not a status.
+function paintTrust(state){
+  const trust = state.trust || {};
+  let standing;
+  if(trust.self_rooted || !trust.chain_length) standing = "Own root only — not a member of any network";
+  else if(!trust.expires_at) standing = "Member, no expiry";
+  else if(!trust.seconds_left) standing = "Expired — re-join by invitation";
+  else standing = "Member, " + fmtDuration(trust.seconds_left) + " left";
+  const rows = [
+    ["Standing", standing],
+    ["Renewal", !trust.expires_at ? "Not needed"
+      : trust.renewing ? "Under way — asking the issuer" : "Not due yet"],
+    ["Issued by", trust.issuer ? shortId(trust.issuer) : "—"],
+    ["Anchored on", trust.anchor ? shortId(trust.anchor) : "—"],
+    ["Chain length", trust.chain_length || 0],
+    ["Trusted roots", trust.roots || 0],
+  ];
+  paintLive("trust", "trust",
+    () => rows.map(([key]) => "<dt>" + esc(key) + '</dt><dd data-v="trust:' +
+      esc(key) + '"></dd>').join(""),
+    Object.fromEntries(rows.map(([key, value]) => ["trust:" + key, value])));
 }
 // Refusals are a table of *reasons*, so the row key is the reason: a count that
 // climbs must climb in place rather than redraw the list under a reader.
