@@ -1260,10 +1260,26 @@ function patchValues(root, values){
   });
 }
 
+// Comparing the string we built against `innerHTML` is not comparing like with
+// like: the browser serialises what it parsed, and `esc()` writes `&#39;` where
+// the serialiser writes `'`. So every string carrying an apostrophe — most of
+// the copy on these pages — compared unequal to itself, and `setHTML` quietly
+// became `innerHTML`: the empty state of the chat list was replaced by an
+// identical copy of itself twice a second.
+//
+// So the candidate is parsed once, detached, and compared in the form the
+// element would actually hold. A detached parse costs nothing near what
+// replacing live nodes costs — it triggers no layout, no paint, and it does not
+// take the element under somebody's finger with it.
+const HTML_PROBE = document.createElement("div");
 function setHTML(target, html){
   const element = typeof target === "string" ? $(target) : target;
-  if(!element || element.innerHTML === html) return element;
-  element.innerHTML = html;
+  if(!element) return element;
+  HTML_PROBE.innerHTML = html;
+  const wanted = HTML_PROBE.innerHTML;
+  HTML_PROBE.textContent = "";
+  if(element.innerHTML === wanted) return element;
+  element.innerHTML = wanted;
   return element;
 }
 
@@ -1388,9 +1404,15 @@ const ROUTER = {
     const label = button ? (button.dataset.label || button.textContent.trim()) : "";
     return (label ? label + " · " : "") + (document.body.dataset.appName || "NMesh");
   },
+  // Called once per page — but a page that signs in again calls it again, and
+  // a second `hashchange` listener means every route change applied twice.
+  started: false,
   start(onChange){
     this.onChange = onChange || this.onChange;
-    window.addEventListener("hashchange", () => this.apply());
+    if(!this.started){
+      this.started = true;
+      window.addEventListener("hashchange", () => this.apply());
+    }
     this.apply();
   },
 };
@@ -1650,14 +1672,21 @@ const REFRESH = {
   // what makes the interval a *statistics* interval rather than the only thing
   // keeping the page true. A page with no control of its own still calls it:
   // the cadence is a per-browser preference and applies wherever numbers move.
+  mounted: false,
   mount(job){
     this.on(job);
-    const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
-    if(field) field.addEventListener("change", (event) => this.set(event.target.value));
-    if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
-    // Off is a choice, not a dead end: one press still reads the node.
-    if(now) now.addEventListener("click", () => this.run());
-    EVENTS.onLive = (streaming) => this.live(streaming);
+    // Bound once. Mounting again — which is what signing in a second time does
+    // — would leave two listeners on one field, and the interval would be
+    // applied twice for every change of it.
+    if(!this.mounted){
+      this.mounted = true;
+      const field = $("refresh-secs"), pick = $("refresh-pick"), now = $("refresh-now");
+      if(field) field.addEventListener("change", (event) => this.set(event.target.value));
+      if(pick) pick.addEventListener("change", (event) => this.set(event.target.value));
+      // Off is a choice, not a dead end: one press still reads the node.
+      if(now) now.addEventListener("click", () => this.run());
+      EVENTS.onLive = (streaming) => this.live(streaming);
+    }
     this.set(this.read());
     this.run();
     EVENTS.start();
@@ -1714,8 +1743,24 @@ const MENU = {
 // ---- shell wiring ----------------------------------------------------------
 // Done once here rather than per page: the chrome is the same everywhere, so it
 // should not be three near-identical copies that drift.
+//
+// And **once per document**, not once per call. The apps mount the shell from
+// the function that runs after signing in, which runs again whenever a session
+// is lost and taken up again — and every listener below would then be there
+// twice: the theme button toggled twice (so it appeared dead), the palette
+// moved two rows per arrow, a subtab routed twice. A page that has been signed
+// into twice is not a page with two sets of chrome.
+let SHELL_MOUNTED = false;
 function mountShell(){
   THEME.paint();
+  if(SHELL_MOUNTED){
+    // The parts that are *state*, not wiring, still have to be re-applied: a
+    // fresh sign-in reads the stored context again.
+    CONTEXT.restore();
+    CONTEXT.paint();
+    return;
+  }
+  SHELL_MOUNTED = true;
   const toggle = $("theme-toggle");
   if(toggle) toggle.addEventListener("click", () => THEME.toggle());
 

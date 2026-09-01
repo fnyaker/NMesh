@@ -613,10 +613,16 @@ function paintPickers(){
     managed.filter((node) => (node.caps || []).includes("scan"))
            .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)])));
 }
+// Rewritten only when the options actually differ. This runs on every poll, and
+// replacing the options of a `<select>` closes it — so a dropdown opened to pick
+// a node shut itself a second later, every second, on the page whose whole job
+// is picking a node.
 function fill(select, pairs){
   const keep = select.value;
-  select.innerHTML = pairs.map((pair) =>
+  const html = pairs.map((pair) =>
     '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
+  if(select.innerHTML === html) return;
+  select.innerHTML = html;
   if(pairs.some((pair) => pair[0] === keep)) select.value = keep;
 }
 function paintLog(){
@@ -690,14 +696,17 @@ function paintJobs(){
 
 function paintNotifList(items){
   const list = items || notifications();
-  $("notif-list").innerHTML = list.length ? list.map((item) =>
+  // Repainted while the menu is open, so it has to leave alone what has not
+  // changed: these rows are buttons, and one replaced under a finger is a tap
+  // that lands on nothing.
+  setHTML("notif-list", list.length ? list.map((item) =>
     '<button class="item notif" data-notif-tab="' + esc(item.tab) + '" data-menu-close>' +
     '<i class="dot ' + esc(item.kind) + '"></i>' +
     '<span class="grow"><b class="truncate">' + esc(item.title) + "</b>" +
     '<span class="tiny muted">' + esc(item.detail) + "</span></span>" +
     (item.at ? '<span class="tiny muted flex-none">' + esc(fmtTime(item.at)) + "</span>" : "") +
     "</button>").join("")
-    : '<div class="none">Nothing waiting. Jobs and access requests show up here.</div>';
+    : '<div class="none">Nothing waiting. Jobs and access requests show up here.</div>');
 }
 
 function markNotifRead(){
@@ -818,7 +827,6 @@ async function uploadKey(file){
   setMessage("key-note", ok
     ? "Key " + (data.key ? data.key.name : "") + " added — it will be used to deploy."
     : "Could not store that key.", !ok);
-  paintKeys();
 }
 async function removeKey(){
   const id = $("ssh-key").value;
