@@ -230,7 +230,7 @@ class Principal:
 def verify_assertion(blob: bytes, verifier, *, app_id: bytes,
                      audience: bytes | NodeID, purpose: str | None = None,
                      ctx: bytes | None = None, nonces: "NonceCache | None" = None,
-                     trust=None, now: float | None = None) -> Principal | None:
+                     now: float | None = None) -> Principal | None:
     """Verify an assertion end to end. Returns a :class:`Principal`, or ``None``
     if *anything* fails to check out (reject by default — the caller never has
     to distinguish "invalid" from "malformed").
@@ -244,8 +244,12 @@ def verify_assertion(blob: bytes, verifier, *, app_id: bytes,
     4. states the ``purpose`` we asked about, and the ``ctx`` we expected;
     5. is fresh: issued no further ahead than ``MAX_SKEW`` and not expired;
     6. its nonce has not been seen before (single use);
-    7. its signature verifies under the presented key;
-    8. that key is consistent with what we already knew of the subject (TOFU).
+    7. its signature verifies under the presented key.
+
+    There is no step comparing that key against one remembered for this id.
+    There cannot be a useful one: :attr:`Assertion.subject` *derives* the id
+    from the key that signed, so the two can never disagree. A first-use table
+    here would only ever fire on an entry something else had written wrongly.
     """
     parsed = parse_assertion(blob)
     if parsed is None:
@@ -277,10 +281,7 @@ def verify_assertion(blob: bytes, verifier, *, app_id: bytes,
     if nonces is not None and not nonces.claim(parsed.nonce, parsed.expires_at,
                                                now=stamp):
         return None
-    subject = parsed.subject
-    if trust is not None and not trust.add(subject, parsed.subject_pub):
-        return None  # same id, different key — impersonation or compromise
-    return Principal(subject, parsed.subject_pub, parsed.app_id, parsed.purpose,
+    return Principal(parsed.subject, parsed.subject_pub, parsed.app_id, parsed.purpose,
                      parsed.ctx, parsed.issued_at, parsed.expires_at)
 
 
@@ -372,14 +373,13 @@ class AppAuth:
     """
 
     def __init__(self, identity, app_id: bytes, node_id: NodeID, *,
-                 trust=None, session_ttl: float = SESSION_TTL,
+                 session_ttl: float = SESSION_TTL,
                  max_sessions: int = MAX_SESSIONS) -> None:
         if len(app_id) != APP_ID_LEN:
             raise AppAuthError("app_id must be APP_ID_LEN bytes")
         self._identity = identity
         self._app_id = bytes(app_id)
         self._node_id = node_id
-        self._trust = trust
         self._ttl = session_ttl
         self._max_sessions = max(1, max_sessions)
         self._nonces = NonceCache()
@@ -415,7 +415,7 @@ class AppAuth:
         return verify_assertion(
             blob, self._identity.verify, app_id=self._app_id,
             audience=self._node_id if audience is None else audience,
-            purpose=purpose, ctx=ctx, nonces=self._nonces, trust=self._trust)
+            purpose=purpose, ctx=ctx, nonces=self._nonces)
 
     # -- mutual login -----------------------------------------------------
 

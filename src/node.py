@@ -3323,11 +3323,15 @@ class MeshNode:
                 and self._pseudo_store is None):
             return
         if self._state_task is None or self._state_task.done():
+            coro = self._state_writer_loop()
             try:
-                self._state_task = asyncio.create_task(self._state_writer_loop())
+                self._state_task = asyncio.create_task(coro)
             except RuntimeError:
-                # No running loop (construction, teardown). Write inline: this
-                # is the one place where there is nothing to block.
+                # No running loop (construction, teardown). Give the coroutine
+                # back before anything else — one nobody awaits is a warning at
+                # collection time, from a line that has nothing to do with it.
+                # Then write inline: this is the one place with nothing to block.
+                coro.close()
                 self._state_task = None
                 self._write_state_now()
                 self._write_certs_now()
@@ -4655,24 +4659,43 @@ class MeshNode:
             return False
         if not cert.is_self_signed:
             return False
-        self._cert_add(cert)
-        self._cert_store.add_root(cert.subject_id)
+        self._cert_store.add(cert)
+        self._trust_root(cert.subject_id)
         return True
 
     def _cert_add(self, cert: Certificate) -> bool:
-        """Take one certificate and mark the store for writing.
+        """Take one certificate and mark the store for writing."""
+        ok = self._cert_store.add(cert)
+        if ok:
+            self._note_cert_change()
+        return ok
+
+    def _trust_root(self, node_id: NodeID) -> None:
+        """Pin a trust root and mark the store for writing.
+
+        Never call `CertStore.add_root` directly. The root set is persisted
+        state exactly like the certificates are, but only `add` used to be
+        paired with a mark, by convention — and `console_add_root` marked
+        *before* pinning, so on the path that writes inline the file went out
+        with the root still missing and the dirty flag already cleared. A
+        mutation nobody marks is a root that is gone at the next restart, and
+        the symptom is a peer that stops authenticating for no visible reason."""
+        self._cert_store.add_root(node_id)
+        self._note_cert_change()
+
+    def _note_cert_change(self) -> None:
+        """The cert store changed — get it to disk, eventually.
 
         `CertStore.save` serialises the *whole* store to hex JSON and writes it,
         synchronously. Doing that per certificate meant absorbing one chain of
         six re-wrote a multi-megabyte file six times, inside a receive loop.
         Same shape as `_persist_state`: mark dirty, let one task write."""
-        ok = self._cert_store.add(cert)
-        if ok and self._cert_store_path:
-            self._certs_dirty = True
-            self._ensure_state_writer()
-            if self._state_task is None:
-                self._write_certs_now()   # no loop to write on
-        return ok
+        if not self._cert_store_path:
+            return
+        self._certs_dirty = True
+        self._ensure_state_writer()
+        if self._state_task is None:
+            self._write_certs_now()   # no loop to write on
 
     def _write_certs_now(self) -> None:
         if not self._cert_store_path:
@@ -6999,7 +7022,7 @@ class MeshNode:
             if server_chain:
                 last = server_chain[-1]
                 if last.is_self_signed:
-                    self._cert_store.add_root(last.subject_id)
+                    self._trust_root(last.subject_id)
             self._cert_add(issued_cert)
         else:
             if not server_chain:

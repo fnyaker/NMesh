@@ -20,7 +20,6 @@ from src.app_auth import (
 from src.app_channel import builtin_id
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
-from src.trust import TrustTable
 
 APP = builtin_id("test-auth")
 OTHER_APP = builtin_id("test-auth-other")
@@ -203,22 +202,20 @@ class TestKeyBinding:
                             parsed.ttl, parsed.ctx, parsed.signature)
         assert _verify(swapped.serialize(), b_id, audience=b_node) is None
 
-    def test_tofu_conflict_rejected(self, alice, bob):
-        """Same node id, different key → impersonation or compromise."""
+    def test_the_subject_id_follows_the_key(self, alice, bob):
+        """There is no id field to disagree with the key, which is why this
+        layer needs no remembered-key table: swapping the key moves the
+        identity rather than stealing one, and the signature stops checking."""
         a_id, a_node = alice
         b_id, b_node = bob
-        trust = TrustTable()
-        trust.add(a_node, b"a-completely-different-key")
-        blob = make_assertion(a_id, APP, audience=b_node, purpose="p").serialize()
-        assert _verify(blob, b_id, audience=b_node, trust=trust) is None
-
-    def test_tofu_records_first_sight(self, alice, bob):
-        a_id, a_node = alice
-        b_id, b_node = bob
-        trust = TrustTable()
-        blob = make_assertion(a_id, APP, audience=b_node, purpose="p").serialize()
-        assert _verify(blob, b_id, audience=b_node, trust=trust) is not None
-        assert trust.get_key(a_node) == a_id.dsa_public_key
+        parsed = parse_assertion(
+            make_assertion(a_id, APP, audience=b_node, purpose="p").serialize())
+        assert parsed.subject == a_node
+        swapped = Assertion(parsed.app_id, b_id.dsa_public_key, parsed.audience,
+                            parsed.purpose, parsed.nonce, parsed.issued_at,
+                            parsed.ttl, parsed.ctx, parsed.signature)
+        assert swapped.subject != a_node
+        assert _verify(swapped.serialize(), b_id, audience=b_node) is None
 
 
 class TestMintingBounds:

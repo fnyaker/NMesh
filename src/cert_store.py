@@ -17,8 +17,8 @@ MAX_PER_SUBJECT = 8          # certificates kept for one subject
 
 class CertStore:
     """
-    Holds the known certificates and the trusted roots.
-    Replaces TrustTable in a self-rooted P2P PKI model.
+    Holds the known certificates and the trusted roots — the whole of what this
+    node will accept as proof of membership, in a self-rooted P2P PKI.
     """
 
     def __init__(self, own_id: NodeID,
