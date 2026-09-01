@@ -204,6 +204,13 @@ FLEET_HTML = """<!doctype html>
           <div class="field"><span>Capabilities the new machines grant you</span>
             <div id="deploy-caps" class="chips"></div></div>
 
+          <label class="check"><input id="deploy-auto" type="checkbox" checked>
+            <span>Keep them updated from the publishers this node accepts</span></label>
+          <p class="muted small">The new machines pin the same release publishers as this node
+            (and this node itself), and install their signed releases on their own. It is set
+            here or nowhere: a headless box has nobody to paste a publisher key into a console,
+            and would accept nothing from the mesh for ever.</p>
+
           <div class="btn-row">
             <button id="deploy-btn" class="primary">Deploy to <span id="deploy-count-2">0</span> machine(s)</button>
             <span id="deploy-state" class="msg"></span>
@@ -372,7 +379,10 @@ async function poll(){
   $("me").textContent = shortId(data.me);
   $("me").title = data.me || "";
   if(first){
-    capBoxes($("deploy-caps"), ["status", "update"]);
+    // A machine installed from here has no operator in front of it and a
+    // console password nobody typed: without `manage` and `passwordless`,
+    // whoever deployed it cannot reach the console it just started.
+    capBoxes($("deploy-caps"), ["status", "update", "manage", "passwordless"]);
   }
   paintInbox(); paintNodes(); paintOperators(); paintPickers(); paintLog(); paintJobs();
   if(first) paintHosts(null);
@@ -866,6 +876,7 @@ async function deploy(event){
     sudo_password:$("ssh-sudo").checked ? null : ($("sudo-pass").value || null),
     mode:(document.querySelector('input[name="dep-mode"]:checked') || {}).value || "system",
     caps:capsOf($("deploy-caps")),
+    auto_update:$("deploy-auto").checked,
   };
   if(!body.username){ setMessage("deploy-state", "An SSH user is required.", true); return; }
   if(!body.password && !body.key_id){

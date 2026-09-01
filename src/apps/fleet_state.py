@@ -38,7 +38,7 @@ import time
 
 # What an operator may be granted. Ordered from harmless to total.
 CAPABILITIES = ("status", "invite", "update", "scan", "provision", "shell",
-                "manage")
+                "manage", "passwordless")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
@@ -53,6 +53,13 @@ CAP_DESCRIPTIONS = {
     # password. The grant opens the channel; the password opens the session.
     "manage": "drive this node's web console remotely (its console password is "
               "still required)",
+    # The one grant that removes a key instead of adding one. A machine nobody
+    # ever typed a password on — one this operator provisioned — has a console
+    # password only its own log ever saw, so without this the `manage` grant
+    # opens a door nobody holds the second key to. Useless on its own: it mints
+    # a session, and `manage` is what carries a call.
+    "passwordless": "open this node's console with no password — the grant is "
+                    "the only key (needs `manage` too)",
 }
 
 MAX_OPERATORS = 64

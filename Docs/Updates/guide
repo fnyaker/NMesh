@@ -110,7 +110,9 @@ hand over. Everything else happens on demand.
 ## Pinning a publisher
 
 Console → **Settings → Updates → Publishers you accept**. Paste the key, name
-it, and decide separately whether their releases install automatically.
+it, and decide separately whether their releases install automatically — that
+box is ticked by default, because a pinned publisher whose releases nobody ever
+installs is a fleet that quietly stops being updated.
 
 Pinning is the only way a key enters that list — no packet, no peer, no app can
 add one. The file (`<data>/publishers.json`, mode 0600) holds public keys and
@@ -216,7 +218,8 @@ a crash would take, which is why it only does that when something is watching:
 |---|---|---|
 | you press **Install** (mesh or GitHub) | yes, if `NMESH_SERVICE_MANAGED` | you asked, you are watching, and `.nmesh-previous` is there if it goes wrong |
 | you press Install with no service manager | no | exiting with nothing to bring it back is worse than running yesterday's code — the console says so and waits for you |
-| an **automatic** install | never | this is what stops one bad release becoming a restart loop nobody is present to break |
+| an **automatic** install | yes, if `NMESH_SERVICE_MANAGED` | a tree written and never started is an update that did not happen — and on an unattended machine, "something will restart it eventually" means never |
+| an automatic install with no service manager | no | same reason as above; the node says "restart this node to run it" in its release log |
 
 The restart answers the operator first, then stops the node properly (bounded,
 so a peer refusing to close cannot keep the old code running for ever) and
@@ -226,11 +229,56 @@ variable is the node's only way of knowing anything will catch it.
 
 ### Automatic installs
 
-Per publisher, off by default. A pass runs every `_RELEASE_TICK` seconds,
-installs at most one release, and remembers the release ids it has already tried
-so a failing one is not retried in a loop. Failures are recorded (visible in the
-console) rather than raised: this loop dying would silently stop the updates an
-operator asked for.
+Per publisher. The console's **Pin publisher** form ticks *"Install their
+releases automatically"* by default, and a machine provisioned from *Fleet →
+Discover & deploy* is handed its operator's publishers with that flag on
+([`../Apps/fleet`](../Apps/fleet)) — a headless box has nobody to paste a
+publisher key into a console, so if it is not told at install time it accepts
+nothing, for ever. Pinning and auto-installing stay two separate decisions; the
+default answer to the second one is now yes.
+
+A pass installs at most one release and remembers the release ids it has already
+tried, so a failing one is not retried in a loop. Failures are recorded (visible
+in the console) rather than raised: this loop dying would silently stop the
+updates an operator asked for.
+
+**What wakes it.** Waiting out a fixed tick was most of why automatic updates
+felt like they did not work: a release could sit for five minutes, then install,
+and then wait for a restart that never came. Now:
+
+| | When |
+|---|---|
+| a release **arrives** from a publisher marked `auto` | the announce wakes the pass (`_RELEASE_SETTLE`, 3 s, so a peer catching us up with a burst costs one pass, not one per release) |
+| the first pass after start | `_RELEASE_FIRST_TICK`, 20 s — enough to have peers, soon enough that a node rebooting into an update does not sit on the old version |
+| the sweep | every `_RELEASE_TICK` (300 s), which covers a release we already held and any wake-up that went missing |
+
+An announce from a publisher that is **not** pinned for automatic installation
+wakes nothing: arrival must not be a lever a stranger can pull.
+
+### The restart guard
+
+Install-then-restart is a loop waiting to happen. The dangerous shape is not a
+bad release — it is one that installs cleanly and **never becomes the running
+version** (a tree the service manager does not start from, a swap something
+shadows): the node would install it, restart, come back on the old code, and do
+it again, for ever, on a machine nobody is watching. In-memory bookkeeping
+cannot see that, because the process it would have to outlive is the one that
+exits.
+
+So the attempt is written to `<data>/autoinstall.json` (0600) **before** the node
+leaves, and read back when it returns:
+
+- the entry names the version the running one now **is** → it worked, forget it;
+- it names a version this node is **not** running → say so in the release log
+  ("did not take"), and count it;
+- `MAX_AUTO_ATTEMPTS` (2) attempts without ever taking → **abandoned**, and the
+  release is skipped from then on.
+
+Installing by hand clears that record for the release: a deliberate act is a
+fresh start, and an abandoned release must not be abandoned for ever. The
+journal is bounded (`MAX_AUTO_JOURNAL`, 8), owner-only, and a corrupt one reads
+as "nothing attempted" — fail-open in the harmless direction only, since the
+count is what bounds it.
 
 ## Console API
 
@@ -264,6 +312,10 @@ rule that lives in Python.
 | `MAX_CATALOG` | 64 | publishers tracked, trusted-first |
 | `_RELEASE_RATE_MAX` | 32 / 10 s | signature verifications one link may ask for |
 | `_RELEASE_TRIED_MAX` | 32 | release ids remembered as already attempted |
+| `_RELEASE_FIRST_TICK` | 20 s | before the first automatic pass after start |
+| `_RELEASE_SETTLE` | 3 s | a burst of announces becomes one pass |
+| `MAX_AUTO_ATTEMPTS` | 2 | automatic installs of a release that never takes |
+| `MAX_AUTO_JOURNAL` | 8 | releases the restart guard remembers attempting |
 
 ## What this does not solve
 
@@ -286,7 +338,10 @@ rule that lives in Python.
   trusted-first eviction, hostile blobs and random bytes.
 - [`tests/test_release_mesh.py`](../../tests/test_release_mesh.py) — publishing,
   gossip that terminates, relaying what we do not trust, anti-rollback, the
-  three install gates, and the automatic pass.
+  three install gates, the automatic pass, the restart it ends in (and what
+  happens when there is nothing to restart into), the announce that wakes it,
+  the stranger's announce that does not, and the guard that abandons a release
+  which never takes.
 - [`tests/test_updater.py`](../../tests/test_updater.py) — the swap itself:
   paths that reach outside, a failed swap restoring the previous tree, state and
   virtualenv untouched.

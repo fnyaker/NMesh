@@ -500,37 +500,59 @@ class FleetBridge:
         return fn(id_hex) if fn is not None else ""
 
     def remote_targets(self) -> list:
-        """Nodes that granted us ``manage``, and whether a session is open."""
+        """Nodes that granted us ``manage``, and whether a session is open.
+
+        ``passwordless`` rides along because the page has to know which of two
+        things to ask for: a password, or nothing at all."""
         with self._lock:
             open_now = {node for (_, node) in self._remote}
         return [
             {"id": entry["id"], "label": entry.get("label") or "",
              "pseudo": self._name_of(entry["id"]),
+             "passwordless": "passwordless" in (entry.get("caps") or []),
              "connected": entry["id"] in open_now}
             for entry in sorted(self._app.state.managed(),
                                 key=lambda item: item.get("label") or item["id"])
             if "manage" in (entry.get("caps") or [])
         ]
 
-    def remote_connect(self, session: str, node_hex: str, password: str) -> tuple:
-        """Log in to a remote node's console. ``(ok, detail)``.
+    def remote_connect(self, session: str, node_hex: str,
+                       password: str | None = None) -> tuple:
+        """Open a session on a remote node's console. ``(ok, detail)``.
 
-        The password is used once, here, and travels only inside the E2E mesh
-        session — it is never stored, never logged, and never handed back to the
-        browser."""
+        Two ways in, and the node decides which it offers. With a password: it
+        is used once, here, and travels only inside the E2E mesh session — never
+        stored, never logged, never handed back to the browser. With none: the
+        node granted ``passwordless`` and mints the session against the fleet
+        grant instead, which is the only thing an operator has on a machine they
+        provisioned and never typed a password on."""
         if not self._app.state.may_use(node_hex, "manage"):
             return False, "that node has not granted remote management"
-        status, _ctype, body = self._remote_raw(
-            node_hex, None, "POST", "/api/login",
-            _dump({"password": password}))
-        data = _load(body)
-        if status != 200 or not isinstance(data.get("token"), str):
-            return False, str(data.get("error") or "that password was refused")
+        if not password:
+            if not self._app.state.may_use(node_hex, "passwordless"):
+                return False, "that node wants its console password"
+            try:
+                token = self._call(self._app.console_session(self._node(node_hex)),
+                                   timeout=_CALL_TIMEOUT)
+            except ConsoleProxyError as exc:
+                return False, str(exc)[:200]
+            except ValueError:
+                return False, "bad node id"
+            except Exception as exc:            # noqa: BLE001 — never leak a trace
+                return False, f"could not reach that node ({type(exc).__name__})"
+        else:
+            status, _ctype, body = self._remote_raw(
+                node_hex, None, "POST", "/api/login",
+                _dump({"password": password}))
+            data = _load(body)
+            token = data.get("token")
+            if status != 200 or not isinstance(token, str):
+                return False, str(data.get("error") or "that password was refused")
         with self._lock:
             self._prune_remote()
             if len(self._remote) >= MAX_REMOTE_SESSIONS:
                 self._remote.popitem(last=False)
-            self._remote[(session, node_hex)] = {"token": data["token"],
+            self._remote[(session, node_hex)] = {"token": token,
                                                  "at": time.monotonic()}
         return True, ""
 
@@ -671,13 +693,17 @@ class FleetBridge:
                   key_passphrase: str | None = None,
                   can_sudo: bool = True, sudo_user: str | None = None,
                   sudo_password: str | None = None, mode: str = "system",
-                  caps=None,
+                  caps=None, auto_update: bool = True,
                   join_uris=None, join_code: str | None = None) -> str:
         """Kick off a provisioning run on a managed node.
 
         The credential passed in from the browser is handed straight to the app
         and never stored here — the bridge keeps a log of *steps*, never of the
-        login that produced them."""
+        login that produced them.
+
+        ``auto_update`` sends **this** node's publisher list along, so the new
+        machines accept the same code we do and install it on their own. The
+        relay running the SSH never contributes a key to that list."""
         path, material = self._resolve_key(key_id, key_path)
         return self._job(self._call(self._app.request_provision(
             self._node(node_hex), targets=targets, username=username,
@@ -685,6 +711,7 @@ class FleetBridge:
             key_passphrase=key_passphrase, can_sudo=can_sudo,
             sudo_user=sudo_user, sudo_password=sudo_password, mode=mode,
             caps=clean_caps(caps) if caps else None,
+            publishers=self._app.local_publishers() if auto_update else [],
             join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
     # -- local (this node's own LAN) --------------------------------------
@@ -712,6 +739,7 @@ class FleetBridge:
                         can_sudo: bool = True, sudo_user: str | None = None,
                         sudo_password: str | None = None,
                         mode: str = "system", caps=None,
+                        auto_update: bool = True,
                         join_uris=None, join_code: str | None = None) -> list:
         def on_progress(host: str, step: str) -> None:
             self._say("out", f"{host}: {step}", self.me)
@@ -722,6 +750,7 @@ class FleetBridge:
             key_data=material, key_passphrase=key_passphrase,
             can_sudo=can_sudo, sudo_user=sudo_user, sudo_password=sudo_password,
             mode=mode, caps=caps,
+            publishers=self._app.local_publishers() if auto_update else [],
             join_uris=join_uris, join_code=join_code,
             on_progress=on_progress), timeout=3600.0)
         ok = sum(1 for entry in results if entry.get("ok"))

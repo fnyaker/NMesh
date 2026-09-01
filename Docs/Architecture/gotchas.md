@@ -401,6 +401,31 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## Self-update: installing is not updating
+
+- **A tree written and never started is an update that did not happen.**
+  Replacing the files changes nothing in a process that already loaded its code,
+  so the automatic installer has to end in a restart. It did not, and the symptom
+  was "auto-update does not work": the release installed, the log said
+  `installed`, and the node went on serving the old version until somebody
+  restarted it by hand — which on an unattended machine is never.
+- **Install-then-restart needs a record that outlives the exit.** The dangerous
+  release is not a broken one; it is one that installs cleanly and never becomes
+  the running version, because the pair then repeats for ever. `_release_tried`
+  cannot see it — it lives in the process that exits. The attempt is written to
+  `<data>/autoinstall.json` **before** leaving and read back on the way in
+  (`core_release.AutoInstallJournal`), and a release that never takes is
+  abandoned after `MAX_AUTO_ATTEMPTS`.
+- **A fixed tick is a delay, not a schedule.** The pass ran every 300 s and
+  nothing else woke it, so an update published on the mesh sat for up to five
+  minutes before a node even looked at it. An announce from a publisher pinned
+  `auto` now wakes the loop (after a short settle, so one peer catching us up
+  costs one pass), and the first pass runs 20 s after start. The sweep stays as
+  the net under a missed wake-up.
+- **A test that patches `_RELEASE_TICK` must patch `_RELEASE_FIRST_TICK` and
+  `_RELEASE_SETTLE` too**, or it waits 20 s for the first pass and fails on the
+  timeout net rather than on what it was testing.
+
 ## Miscellaneous
 
 - `console.stop()` blocked for 0.5 s: `ThreadingHTTPServer.serve_forever()` polls

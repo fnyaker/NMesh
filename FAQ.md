@@ -113,6 +113,17 @@ A new password is generated and printed **once**. This is deliberately the only
 route: it requires access to the state directory, which is exactly the level of
 privilege such a power deserves.
 
+### I never had it — how do I reach a node I provisioned?
+
+You do not need it. A machine deployed from *Fleet → Discover & deploy*
+generates its own password on first start and prints it to a log nobody reads,
+so the deploy form grants `manage` **and** `passwordless` by default: pick that
+node in the console's context selector and it lets you straight in, on the
+strength of the grant. Set a password of your own from **Settings → Password**
+once you are there, and untick `passwordless` on that node if you would rather
+be asked for it. Deployed before this existed? Reset it on the machine as
+above, or grant `passwordless` from that node's own *Fleet* page.
+
 ---
 
 ## Network & reachability
@@ -159,9 +170,10 @@ granted you the `manage` capability. Otherwise there is nothing to pick. See
 ### "no session on that node — connect to it again"
 
 The remote session expired (an hour of inactivity), the remote node restarted,
-or its console password changed. Select it again: it will ask for the password.
-That is deliberate — the grant opens the channel, the password opens the
-session.
+its console password changed, or it took the `passwordless` right back. Select
+it again: it will ask for the password, or let you in on the grant alone if that
+right is still there. That is deliberate — the grant opens the channel, and the
+password (or `passwordless`) opens the session.
 
 ### A progress or memory bar stays empty
 

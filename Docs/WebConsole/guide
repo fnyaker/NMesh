@@ -82,6 +82,12 @@ capability, a **context selector** appears in the top bar. Choosing it asks for
 opens the session — and then the whole console talks about that node: overview,
 peers, transports, apps, configuration, trace.
 
+A node that also granted `passwordless` asks for nothing: there, the grant *is*
+the second key. That right exists for machines nobody can type a password on —
+the ones this operator provisioned, whose password was generated on first start
+and printed to a log on a box with no screen. Taking it back on that node ends
+the session immediately. See [`Docs/Apps/fleet`](../Apps/fleet).
+
 Technically the page adds an `X-NMesh-Node: <id>` header to every call; the
 console relays the call over the mesh, and the target node **replays it against
 its own console** over loopback. Nothing is reimplemented: same routes, same
@@ -583,8 +589,11 @@ gossip, the three gates before anything touches disk:
 Either way, installing replaces the files and then **restarts the node** so the
 new code is the code that runs — but only when a service manager is there to
 bring it back (`NMESH_SERVICE_MANAGED`). Without one, the node stays up and the
-page says to restart it yourself rather than pretending. Unattended installs
-from the mesh never restart at all.
+page says to restart it yourself rather than pretending. An unattended install
+restarts on the same terms: a tree written and never started is an update that
+did not happen. What keeps that from looping is a record written **before** the
+node leaves — a release that installs and never becomes the running version is
+retried once and then abandoned, and the log on the page says so.
 
 ### Restarting on demand (⋯ → *Restart this node*)
 

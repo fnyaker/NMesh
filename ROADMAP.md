@@ -221,7 +221,11 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 - Enrolment with **a notification and a human decision** on the target node;
   approving can narrow, never widen. The signed grant is kept on the operator's
   side as auditable proof of consent.
-- **Capabilities per action** (`status`, `update`, `scan`, `provision`, `shell`).
+- **Capabilities per action** (`status`, `invite`, `update`, `scan`, `provision`,
+  `shell`, `manage`, `passwordless`). `manage` relays the console and still
+  wants the target's password; `passwordless` replaces that password with the
+  grant itself, for the machine that has no password anybody ever typed — one
+  this operator provisioned. Taking either back ends the sessions it opened.
 - Three independent gates before execution: the mesh authenticated, enrolled
   with the capability, a fresh signature over the command's exact bytes.
 - Status (disk/RAM/load/uptime), update (a plan the node derives itself from its
@@ -238,7 +242,8 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   fingerprints presented to the operator, then provisioning: a self-extracting
   bootstrap in one SSH session, SHA-256 integrity verified before writing, the
   startup service installed, and **trust taken over** through a single-token
-  pre-authorisation.
+  pre-authorisation — which also carries the release publishers the new machine
+  should accept, since it is the only moment a box with no screen can be told.
 - SSH credentials: OpenSSH driven through a **pty**, never on disk, never in
   `argv`, never in the environment. Host keys pinned after human confirmation
   (`StrictHostKeyChecking=yes`), no `accept-new`.
@@ -394,9 +399,17 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   newer than the running one, and every byte verifies against the signed root —
   including the version the tree itself declares, so a release cannot announce
   one version and carry another.
-- Installing never restarts: the node keeps running the code it started with, so
-  one bad release cannot become a restart loop. Automatic installation is opt-in
-  per publisher.
+- Installing ends in a **restart**, because a tree written and never started is
+  an update that did not happen — and only where a service manager will bring
+  the node back. What keeps that from looping is a journal written *before* the
+  node leaves: a release that installs and never becomes the running version is
+  retried once and then abandoned. Automatic installation stays a second
+  decision per publisher, taken after the pin; the console ticks it by default,
+  and a machine provisioned from the fleet page is handed its operator's
+  publishers so a headless box is not left accepting nothing for ever.
+- An announce from a publisher marked for automatic installation **wakes** the
+  pass; a stranger's announce does not. The periodic sweep is the net under a
+  missed wake-up, not the schedule.
 - GitHub remains as the first-run route only. Docs: `Docs/Updates/guide`.
 
 ### Long term
