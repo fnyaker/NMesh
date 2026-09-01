@@ -423,3 +423,22 @@ Default 32 MiB, settable in `nmesh.conf` between 1 and 4096. It was 128 MiB and
 not settable at all, which is a server's number in a project whose point is
 running over BLE, LoRa and a USB stick. Eviction is least-recently-used, so a
 smaller store does not fail — it forgets sooner.
+
+### `abuse_*` — how quick this node is to stop serving a peer
+
+Each application judges by its own thresholds — only chat knows what too many
+messages is — and reports the sender. These three say what those reports add up
+to, and like `dht_max_mb` they are a property of the deployment rather than of
+the protocol: a node on a hostile link and a node among machines its operator
+installed themselves want different numbers.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `abuse_suspect` | 8 | Score at which a peer stops being served: its traffic is dropped, it is told nothing, and the link is let go a little later |
+| `abuse_hostile` | 20 | Score at which it is also refused a fresh connection |
+| `abuse_halflife` | 3600 | Seconds for a complaint to lose half its weight, so a node that misbehaved once and then behaved comes back on its own |
+| `no_abuse_gossip` | off | Neither send nor act on other nodes' reports — judge only what this node saw itself |
+
+One report is worth at most 4, so it always takes several to reach either
+threshold. What the numbers mean, and why an accusation from a stranger counts
+for nothing: [`../Architecture/security.md`](../Architecture/security.md).

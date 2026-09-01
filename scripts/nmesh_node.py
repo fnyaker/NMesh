@@ -23,6 +23,7 @@ from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from src.spool_transport import SpoolTransport, SpoolServer
 from src.udp_transport import UDPTransport, UDPServer
+from src.reputation import DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT
 from src.webconsole import WebConsole
 from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
@@ -327,6 +328,13 @@ async def main() -> None:
         release_dir=args.data if args.data else None,
         pseudo=getattr(args, "pseudo", "") or None,
         dht_max_bytes=getattr(args, "dht_max_mb", 0) * 1024 * 1024 or None,
+        # How quick this node is to stop serving a peer that misbehaves. The
+        # apps decide what misbehaving means and report it; these say what the
+        # reports add up to (see Docs/Architecture/security.md).
+        abuse_suspect=getattr(args, "abuse_suspect", None) or DEFAULT_SUSPECT,
+        abuse_hostile=getattr(args, "abuse_hostile", None) or DEFAULT_HOSTILE,
+        abuse_halflife=getattr(args, "abuse_halflife", None) or DEFAULT_HALFLIFE,
+        gossip_abuse=not getattr(args, "no_abuse_gossip", False),
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

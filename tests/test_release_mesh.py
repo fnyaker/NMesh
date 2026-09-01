@@ -49,6 +49,7 @@ class _FakePeer:
         self.session = object()
         self.sent = []
         self.relay_only = False
+        self.tarpit_until = 0.0    # served, like any peer nothing is held against
 
     async def send(self, packet):
         self.sent.append(packet)

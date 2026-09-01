@@ -1314,6 +1314,19 @@ def _make_handler(console: WebConsole):
                                          int(data.get("reason") or 0)))
                 self._json(200 if ok else 400, {"ok": bool(ok)})
                 return
+            if path == "/api/trust/forgive":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_forgive,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/witness":
+                data = _parse_json(body) or {}
+                call = (console._node.console_remove_witness
+                        if data.get("remove") else console._node.console_add_witness)
+                ok = console._call(_wrap(call, str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
             if path == "/api/trust/untrust":
                 data = _parse_json(body) or {}
                 ok = console._call(_wrap(console._node.console_remove_root,

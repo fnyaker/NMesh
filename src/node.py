@@ -25,6 +25,10 @@ from .cert import Certificate
 from .cert_store import CertStore
 from . import revocation
 from .revocation import MAX_RECORD as _REVOCATION_MAX
+from . import accusation
+from .accusation import MAX_RECORD as _ACCUSATION_MAX
+from .reputation import (DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT,
+                         HOSTILE, OK, SUSPECT, RateGate, Reputation)
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
@@ -110,6 +114,7 @@ PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
 CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for me"
 CERT_RENEWED      = 0x23   # reply: the fresh certificate
 CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
+ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehaving"
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -177,7 +182,8 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE}
+                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE,
+                    ABUSE_REPORT}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -209,6 +215,18 @@ _PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
 _REVOKE_RATE_WINDOW  = 10.0     # seconds
 _REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
 _REVOKE_SYNC_MAX     = 256      # revocations pushed at a peer when it authenticates
+_ABUSE_RATE_WINDOW   = 10.0     # seconds
+_ABUSE_RATE_MAX      = 32       # accusations one link may gossip at us per window
+# How long traffic from a peer we hold as suspect is dropped before the link is
+# quietly let go. Randomised per link so the delay itself is not a signal an
+# attacker can time — a fixed one is a message, just a slower one.
+_TARPIT_MIN          = 45.0
+_TARPIT_MAX          = 180.0
+# We say something about a node at most this often, however much it does. An
+# accusation is a broadcast: a node under attack must not answer by becoming the
+# flood itself.
+_ACCUSE_MIN_GAP      = 300.0
+_ACCUSE_TRACKED      = 256
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -1087,6 +1105,12 @@ class _Peer:
         # opened it closes the loser, so the duplicate reaper leaves it alone.
         self.probation: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
+        # When this link stopped being served. Non-zero means everything that
+        # arrives is dropped without a word — the link stays open and quiet
+        # rather than closing, so the far end cannot tell "I have been found
+        # out" from "the network is bad today", and keeps spending its effort
+        # on a socket that leads nowhere. Cleared only by the link ending.
+        self.tarpit_until: float = 0.0
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         # Handshakes this link has been allowed to make us verify. A joiner
@@ -1315,7 +1339,11 @@ class MeshNode:
                  app_store_dir: str | None = None,
                  release_dir: str | None = None,
                  pseudo: str | None = None,
-                 dht_max_bytes: int | None = None) -> None:
+                 dht_max_bytes: int | None = None,
+                 abuse_suspect: float = DEFAULT_SUSPECT,
+                 abuse_hostile: float = DEFAULT_HOSTILE,
+                 abuse_halflife: float = DEFAULT_HALFLIFE,
+                 gossip_abuse: bool = True) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1348,6 +1376,21 @@ class MeshNode:
         self._cert_store = (CertStore.load(cert_store_path, self._id)
                             if cert_store_path else CertStore(self._id))
         self._cert_store.add(self._identity.self_signed_cert())
+        # What this node thinks of the nodes it talks to. A membership says an
+        # issuer vouched for an identity once; it says nothing about how that
+        # identity behaves afterwards, and an authenticated peer is precisely
+        # the adversary the threat model names. See `reputation.py`.
+        self._reputation = Reputation(suspect=abuse_suspect,
+                                      hostile=abuse_hostile,
+                                      halflife=abuse_halflife)
+        # Nodes whose accusations count as if we had seen it ourselves. Empty by
+        # default and only ever filled by a local decision — the natural entries
+        # are the operators this node is enrolled with in Fleet, which is where
+        # "I trust this specific node" already lives.
+        self._witnesses: set[bytes] = set()
+        self._accusations_sent: OrderedDict[bytes, float] = OrderedDict()
+        self._abuse_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        self._gossip_abuse = gossip_abuse
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -2260,11 +2303,14 @@ class MeshNode:
             for peer in peers:
                 if peer.authenticated_id is None or peer.session is None:
                     continue
+                if peer.tarpit_until:
+                    continue     # a tarpitted link is not kept alive, only held
                 try:
                     await self.ping(peer)
                 except Exception:
                     pass
             self._reap_silent_links()
+            self._reap_expired_tarpits()
             # Only nudge maintenance while it is still finding things. A mesh
             # smaller than the floor is below it permanently, and nudging every
             # keepalive there means a certificate-carrying lookup every 20 s
@@ -3494,6 +3540,7 @@ class MeshNode:
             "transport_details": self._transport_details(),
             "handshake_refusals": self.handshake_refusals(),
             "trust": self.trust_status(),
+            "abuse": self.abuse_status(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
@@ -4771,6 +4818,13 @@ class MeshNode:
         self._defer_route(packet, decrement=True, exclude=from_peer)
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
+        # Before anything else, and before any work is spent: a peer this node
+        # holds as suspect gets its traffic dropped, silently. No error, no
+        # close, nothing it can measure — a node told it has been detected
+        # changes identity and starts again, so the one thing worth protecting
+        # here is how long it takes to notice. See `_tarpit`.
+        if peer.tarpit_until:
+            return
         if packet.type == INVITE_SEEK:
             # Pre-auth, token-gated, bounded — handled entirely on its own.
             await self._handle_invite_seek(peer, packet)
@@ -6372,9 +6426,21 @@ class MeshNode:
         task.add_done_callback(self._detached.discard)
 
     def _charge_abuse(self, peer: '_Peer') -> None:
-        """Count a protocol violation and cut the peer once they pile up. Never
-        inline: we are inside that peer's own receive task, which must not be
-        cancelled from here (see :meth:`_reap_peer`)."""
+        """Count a protocol violation, against the link and against the node.
+
+        Two counters, because they answer different questions. The link's is
+        what cuts *this connection* when it turns to noise, and it is all we
+        have for a peer that has not authenticated. The node's outlives the
+        socket: a peer that reconnects to shed an exhausted count is exactly the
+        behaviour the per-link counter cannot see, and one node holding four
+        links used to get four separate allowances.
+
+        Never inline: we are inside that peer's own receive task, which must not
+        be cancelled from here (see :meth:`_reap_peer`)."""
+        if peer.authenticated_id is not None:
+            self.report_abuse(peer.authenticated_id, 1.0,
+                              "protocol violations",
+                              kind=accusation.KIND_MALFORMED)
         if peer.note_abuse():
             self._spawn_bounded(self._reap_peer(peer))
 
@@ -6947,6 +7013,13 @@ class MeshNode:
         if claimed_id != NodeID(packet.src_id):
             return self._refuse_handshake(
                 packet, "the id claimed is not the hash of the key presented")
+        # A node we hold as hostile does not get a fresh link. Placed here on
+        # purpose: after the two SHA-256s that prove which identity is asking,
+        # and before the post-quantum verification, so the refusal costs us
+        # almost nothing and reconnecting is not a way to reset an allowance.
+        if self._reputation.is_hostile(claimed_id):
+            return self._refuse_handshake(
+                packet, "this node is held as hostile here")
         if not peer.note_handshake_attempt():
             return self._refuse_handshake(packet, "this link had used its tries")
         if not self._identity.verify(peer.pending_challenge + kem_pub + bob_dsa_pub,
@@ -7357,6 +7430,215 @@ class MeshNode:
         self._announce_revocation(raw)
         self._enforce_revocation(subject)
         return True
+
+    # -----------------------------------------------------------------------
+    # Zero trust: what this node thinks of the nodes it talks to
+    # -----------------------------------------------------------------------
+
+    def report_abuse(self, node_id: NodeID, weight: float = 1.0,
+                     reason: str = "", *,
+                     kind: int = accusation.KIND_UNSPECIFIED) -> str:
+        """Record that a node did something a correct one does not. Returns its
+        standing afterwards (``ok`` / ``suspect`` / ``hostile``).
+
+        The one door for the whole product: the core calls it for protocol
+        violations it sees itself, and every application calls it through the
+        connector when its *own* thresholds are exceeded — only chat knows what
+        too many messages is, only fleet knows what too many commands is. What
+        an app does not get to decide is what happens next, because weighing one
+        app's complaint against another's is a node-wide judgement.
+
+        Never for ourselves: a bug in an app must not be able to make a node
+        stop serving its own operator."""
+        if node_id == self._id:
+            return OK
+        before = self._reputation.standing(node_id)
+        after = self._reputation.note(node_id, weight, reason)
+        if after != before:
+            self._on_standing_changed(node_id, after, reason, kind)
+        return after
+
+    def _on_standing_changed(self, node_id: NodeID, standing: str,
+                             reason: str, kind: int) -> None:
+        """A node has just crossed a threshold. Act, quietly."""
+        if standing == OK:
+            return
+        for peer in [p for p in self._peers if p.authenticated_id == node_id]:
+            self._tarpit(peer)
+        self._note_change("links")
+        # Say so to the network — but only about what we saw ourselves. Passing
+        # on somebody else's accusation as if it were ours would turn one node's
+        # opinion into as many as there are relays, which is exactly the number
+        # the receiver is trying to count.
+        if self._gossip_abuse and self._claim_accusation(node_id):
+            self._announce_accusation(node_id, standing, kind)
+
+    def _tarpit(self, peer: '_Peer') -> None:
+        """Stop serving a link, without telling it.
+
+        Not a close: a peer that is disconnected knows the moment it happens,
+        changes identity and starts again, so the useful thing to take away is
+        not the connection but the feedback. Everything it sends is dropped at
+        the top of `_handle_packet`, nothing is answered, and the link is let go
+        after a delay drawn at random — a fixed one is a message too, only
+        slower."""
+        if peer.tarpit_until:
+            return
+        peer.tarpit_until = time.monotonic() + random.uniform(_TARPIT_MIN,
+                                                              _TARPIT_MAX)
+
+    def _reap_expired_tarpits(self) -> None:
+        """Let go of the links whose hold has run out. Never raises, never
+        awaits — the keepalive sweep already walks every peer.
+
+        A task per tarpitted link would have been the obvious shape and the
+        wrong one: each would sit asleep for minutes holding one of the
+        `_MAX_DETACHED` slots the whole node shares, so a flood arriving from
+        many identities would starve the fan-outs and teardowns that budget
+        exists for. One timer that already runs costs nothing extra."""
+        now = time.monotonic()
+        for peer in [p for p in self._peers
+                     if p.tarpit_until and now >= p.tarpit_until]:
+            self._spawn_bounded(self._reap_peer(peer))
+
+    def _claim_accusation(self, node_id: NodeID) -> bool:
+        """One accusation per node per `_ACCUSE_MIN_GAP`.
+
+        An accusation is a broadcast, and the node making one is by definition
+        under pressure: a node being flooded must not answer by becoming the
+        flood itself."""
+        now = time.monotonic()
+        last = self._accusations_sent.get(node_id.raw)
+        if last is not None and now - last < _ACCUSE_MIN_GAP:
+            return False
+        self._accusations_sent[node_id.raw] = now
+        while len(self._accusations_sent) > _ACCUSE_TRACKED:
+            self._accusations_sent.popitem(last=False)
+        return True
+
+    def _announce_accusation(self, node_id: NodeID, standing: str,
+                             kind: int) -> None:
+        severity = accusation.MAX_SEVERITY if standing == HOSTILE else 1
+        try:
+            raw = accusation.build(node_id, self._identity.dsa_public_key,
+                                   self._identity.sign,
+                                   severity=severity, kind=kind)
+        except (ValueError, TypeError):
+            return
+        # Everyone but the node it names. It will find out — its traffic stops
+        # being answered — but not from us, and not with a timestamp it can use
+        # to work out which of the things it tried was the one that was noticed.
+        targets = [p for p in self._gossip_targets(None, _GOSSIP_FANOUT)
+                   if p.authenticated_id != node_id]
+        if not targets:
+            return
+        self._spawn_bounded(self._gossip_accusation(raw, targets))
+
+    async def _gossip_accusation(self, raw: bytes, targets) -> None:
+        pkt = Packet.create(ABUSE_REPORT, self._id.raw, _BROADCAST_ID, raw)
+        for p in targets:
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    def _abuse_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._abuse_rate, peer,
+                                    _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
+
+    async def _handle_abuse_report(self, peer: '_Peer', packet: Packet) -> None:
+        """Somebody says a node is misbehaving.
+
+        Weighed, never obeyed. An accusation from a node the operator
+        designated counts as if we had seen it ourselves; from an ordinary
+        member of our own network it counts as *one accuser*, capped strictly
+        below the threshold that cuts anybody off; from a node we cannot place
+        in our network, or one we already hold as suspect, it counts as
+        nothing. If hearsay alone could get a node cut off, anybody able to
+        speak could cut anybody off, and this would be a censorship primitive
+        with a reputation label on it."""
+        if not self._gossip_abuse or not self._abuse_allowed(peer):
+            return
+        raw = packet.payload
+        if not raw or len(raw) > _ACCUSATION_MAX:
+            return self._charge_abuse(peer)
+        parsed = accusation.parse(raw, self._identity.verify)
+        if parsed is None:
+            return self._charge_abuse(peer)
+        accuser, subject = parsed["accuser_id"], parsed["subject_id"]
+        if subject == self._id:
+            # Somebody is telling the mesh we are the problem. Not something to
+            # act on and not something to relay: a node cannot be asked to
+            # spread the case against itself, and a receiver that did would make
+            # every accusation self-amplifying.
+            return
+        if self._reputation.is_suspect(accuser):
+            return
+        before = self._reputation.standing(subject)
+        label = accusation.KIND_NAMES.get(parsed["kind"], "")
+        if accuser.raw in self._witnesses:
+            after = self._reputation.note(subject, parsed["severity"],
+                                          f"{label} (witness)".strip())
+        elif self._cert_store.get_chain_to_root(accuser) is not None:
+            after = self._reputation.note_accusation(subject, accuser, 1.0,
+                                                     label)
+        else:
+            return          # a stranger's opinion of a stranger is not evidence
+        if after != before:
+            self._on_standing_changed(subject, after, label, parsed["kind"])
+        self._spawn_bounded(self._gossip_accusation(
+            raw, [p for p in self._gossip_targets(peer, _GOSSIP_FANOUT)
+                  if p.authenticated_id != subject]))
+
+    def console_add_witness(self, node_hex: str) -> bool:
+        """Count this node's accusations as if we had seen it ourselves.
+
+        A local decision and only ever local. The natural entries are the
+        operators this node is enrolled with in Fleet — that is already where
+        "I trust this specific node" lives, and it is the one relationship a
+        human established deliberately."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if node_id == self._id or len(self._witnesses) >= 64:
+            return False
+        self._witnesses.add(node_id.raw)
+        return True
+
+    def console_remove_witness(self, node_hex: str) -> bool:
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if node_id.raw not in self._witnesses:
+            return False
+        self._witnesses.discard(node_id.raw)
+        return True
+
+    def console_forgive(self, node_hex: str) -> bool:
+        """Drop everything held against a node — the operator overruling us.
+
+        There has to be one, and it has to be local: every input to this table
+        is a judgement made under pressure by software, and some of them will be
+        wrong about somebody's node."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if not self._reputation.forgive(node_id):
+            return False
+        self._accusations_sent.pop(node_id.raw, None)
+        self._note_change("links")
+        return True
+
+    def abuse_status(self) -> dict:
+        """The suspicion table, for the console."""
+        return {
+            "gossip": self._gossip_abuse,
+            "witnesses": sorted(raw.hex() for raw in self._witnesses),
+            "nodes": self._reputation.rows(),
+        }
 
     def console_remove_root(self, node_hex: str) -> bool:
         """Stop trusting an anchor. A local decision, and only ever local:
@@ -7884,4 +8166,5 @@ _HANDLERS = {
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
     CERT_REVOKE:       MeshNode._handle_cert_revoke,
+    ABUSE_REPORT:      MeshNode._handle_abuse_report,
 }

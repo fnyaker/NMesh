@@ -60,6 +60,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
+from ..accusation import KIND_FLOOD as ABUSE_FLOOD
 from ..app_auth import ctx_hash
 from ..app_channel import builtin_id
 from ..node_id import NodeID
@@ -657,9 +658,28 @@ class FleetApp:
             count, window = 0, now
         if count >= MAX_REQUESTS:
             table[key] = (count, window)
+            # Refusing here protects this app and nothing else: the same sender
+            # walks straight on to the next one. So the node is told, once per
+            # spent window rather than per refused request — the ceiling is
+            # ours to set, since only this app knows what too many signed
+            # commands is, and what the reports add up to is the node's.
+            if count == MAX_REQUESTS:
+                table[key] = (count + 1, window)
+                self._report_abuse(src, "too many signed requests")
             return False
         table[key] = (count + 1, window)
         return True
+
+    def _report_abuse(self, src: NodeID, reason: str) -> None:
+        """Hand a flood up to the node. Never fatal, never awaited inline: an
+        app that noticed a problem must not become one."""
+        report = getattr(self._client, "report_abuse", None)
+        if report is None:
+            return
+        try:
+            self._spawn(report(src, weight=2, kind=ABUSE_FLOOD, reason=reason))
+        except Exception:
+            pass
 
     def _authorised(self, src: NodeID, capability: str, rid: str) -> bool:
         """Gate 2: the ledger. Gate 3 (the signature) already passed by the time
