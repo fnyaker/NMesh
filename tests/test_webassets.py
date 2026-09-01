@@ -150,6 +150,17 @@ def test_no_page_paints_a_live_container_with_raw_innerhtml():
             f"{element} is repainted on a timer: paint it through setHTML/paintLive"
 
 
+def test_the_graph_is_rebuilt_only_when_it_changes_shape():
+    """`replaceChildren` on the cadence took the keyboard focus off a node with
+    it: a node could be tabbed to and never pressed, because the element was
+    gone before the key arrived."""
+    source = webassets.CONSOLE_PAGE_JS if hasattr(webassets, "CONSOLE_PAGE_JS") \
+        else webassets.APP_JS
+    body = source.split("function renderGraph(")[1][:900]
+    assert "graphShape(" in body and "svg.dataset.graphShape" in body
+    assert "patchGraph(" in body
+
+
 def test_the_terminal_never_renders_unescaped_markup():
     """The output comes from a remote machine: it is written into the DOM as
     innerHTML, so escaping is not cosmetic."""

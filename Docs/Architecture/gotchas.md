@@ -428,6 +428,12 @@ before and after.
   registered twice: the theme button toggled twice and looked dead, the palette
   moved two rows per arrow, a subtab routed twice. **Any wiring inside a
   function that can run twice needs a guard.**
+- **An SVG rebuilt on the cadence loses the keyboard.** The topology graph
+  called `replaceChildren()` every tick, so a node dot — `tabindex="0"`,
+  `role="button"` — could be tabbed to and never pressed: measured, focus was
+  gone within two ticks. It now rebuilds only when the drawing is a *different*
+  drawing (which nodes, where, what they are called) and writes the numbers into
+  the one already on screen.
 - **A camera outlives the panel it belongs to.** The QR scanner kept the stream
   and its detection interval running after the operator left the section — a
   light on somebody's phone with nothing on screen to explain it. It is stopped
