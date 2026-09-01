@@ -39,7 +39,8 @@ from .app_package import (
 from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .app_catalog import AppCatalog, InstalledApps
 from .version import is_newer as _is_newer
-from .core_release import (ReleaseCatalog, ReleaseStore, TrustedPublishers,
+from .core_release import (AutoInstallJournal, ReleaseCatalog, ReleaseStore,
+                           TrustedPublishers, MAX_AUTO_ATTEMPTS,
                            ReleaseError, PUBLISHER_ID_LEN as _RELEASE_ID_LEN,
                            build_package as _core_build_package,
                            build_release as _core_build_release,
@@ -162,7 +163,14 @@ _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
 _RELEASE_RATE_MAX    = 32       # release announces one link may push per window
-_RELEASE_TICK        = 300.0    # seconds between auto-install passes
+_RELEASE_TICK        = 300.0    # seconds between auto-install sweeps
+# A release that arrives wakes the pass instead of waiting out a whole sweep,
+# and the first pass runs shortly after start rather than five minutes in — a
+# node that reboots into an update it was told to take should not spend the
+# next tick running the version it was meant to leave behind. The settle is
+# what keeps a burst of announces (a peer catching us up) to one pass.
+_RELEASE_FIRST_TICK  = 20.0     # seconds before the first pass after start
+_RELEASE_SETTLE      = 3.0      # seconds an announce waits for its neighbours
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
 _RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
 _RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
@@ -1372,6 +1380,18 @@ class MeshNode:
         self._release_task: asyncio.Task | None = None
         self._release_tried: OrderedDict[bytes, str] = OrderedDict()
         self._release_log: list[dict] = []
+        # An automatic install only takes effect when the node comes back on
+        # the tree it wrote, so the loop restarts the node — and the journal is
+        # what stops that pair from becoming a loop: it survives the exit the
+        # in-memory `_release_tried` cannot.
+        self._auto_journal = AutoInstallJournal(
+            os.path.join(release_dir, "autoinstall.json") if release_dir else None)
+        for version in self._auto_journal.settle(_running_version()):
+            self._note_release(version, "did not take",
+                               "installed automatically, but this node came "
+                               f"back on {_running_version()}")
+        self._release_wake = asyncio.Event()
+        self._restart_hook = None
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
         # Pseudos: the changeable name beside the unchangeable id. One book
         # holds every claim we have verified — our own included — and answers
@@ -5658,6 +5678,12 @@ class MeshNode:
                 bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex())
             self._spawn_bounded(self._gossip_release(
                 release_bytes, exclude=peer, have=held))
+            # Only for a publisher this operator marked for automatic
+            # installation: a stranger's release must not be able to make us do
+            # work on arrival, and this is the difference between an update
+            # landing in seconds and landing at the end of the next sweep.
+            if self._publishers.auto_for(doc["publisher"]):
+                self._wake_release_pass()
 
     def _release_have_byte(self, release_bytes: bytes) -> bytes:
         """Do we hold this release's package? Re-answered at every hop, because
@@ -5957,13 +5983,21 @@ class MeshNode:
                                   "outcome": outcome, "detail": detail[:200]})
         del self._release_log[:-16]
 
-    async def install_release(self, publisher_id_hex: str) -> dict:
+    async def install_release(self, publisher_id_hex: str, *,
+                              unattended: bool = False) -> dict:
         """Install a release from a pinned publisher.
 
         Three gates, in this order: the publisher is pinned, the version is
         strictly newer than the one running, and every byte verifies against the
         signed root. Only then does anything touch disk — and even then the
-        previous tree is kept and restored if the swap fails."""
+        previous tree is kept and restored if the swap fails.
+
+        ``unattended`` marks the automatic path: the attempt is written to the
+        journal before the node restarts onto it, so a release that installs
+        and never becomes the running version can be given up on. An operator
+        pressing Install is the other case, and it clears that record — a
+        deliberate act is a fresh start, and the console restarts on its own
+        once it has answered them."""
         from . import updater
         entry = self._releases.get(publisher_id_hex)
         if entry is None:
@@ -5979,8 +6013,16 @@ class MeshNode:
             raise ReleaseError("the release content could not be fetched")
         _entry, files = fetched
         result = await updater.apply_files(files, entry["version"])
-        self._note_release(entry["version"], "installed",
-                           f"from {publisher_id_hex[:12]}")
+        if unattended:
+            # Written before we leave: an attempt recorded after the exit is an
+            # attempt nobody ever counts, and counting them is the whole guard.
+            self._auto_journal.record(entry["release_id"].hex(),
+                                      entry["version"])
+            self._restart_after_install(entry["version"])
+        else:
+            self._auto_journal.forget(entry["release_id"].hex())
+            self._note_release(entry["version"], "installed",
+                               f"from {publisher_id_hex[:12]}")
         return {**result, "version": entry["version"],
                 "publisher_id": publisher_id_hex}
 
@@ -6001,15 +6043,28 @@ class MeshNode:
     async def _release_loop(self) -> None:
         """Install what pinned publishers marked for automatic installation.
 
-        Installing is not restarting: the node keeps running the code it
-        started with until something restarts it. That is deliberate — a node
-        that swaps its own code and immediately exits turns one bad release
-        into a restart loop nobody is present to break.
+        Two things wake it: a release arriving (:meth:`_wake_release_pass`, so
+        an update an operator published lands in seconds rather than at the end
+        of a five-minute sweep) and the sweep itself, which is what covers a
+        release we already held when we started and anything a missed wake-up
+        would have dropped.
 
         Never raises: this loop dying would silently stop the updates an
         operator asked for."""
+        delay = _RELEASE_FIRST_TICK
         while self._running:
-            await asyncio.sleep(_RELEASE_TICK)
+            try:
+                await asyncio.wait_for(self._release_wake.wait(), delay)
+                # A peer catching us up sends every release it holds; waiting a
+                # moment turns that burst into one pass instead of one per
+                # announce.
+                await asyncio.sleep(_RELEASE_SETTLE)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            delay = _RELEASE_TICK
+            self._release_wake.clear()
             try:
                 await self._release_pass()
             except asyncio.CancelledError:
@@ -6017,9 +6072,23 @@ class MeshNode:
             except Exception:
                 pass
 
+    def _wake_release_pass(self) -> None:
+        """A release worth acting on just arrived — do not wait out the sweep."""
+        try:
+            self._release_wake.set()
+        except Exception:                     # noqa: BLE001 — never crash a handler
+            pass
+
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
-        one twice. Returns the version installed, or None."""
+        one twice. Returns the version installed, or None.
+
+        An install that succeeds ends in a restart, because a tree that is
+        written and never started is an update that did not happen. What keeps
+        that from becoming a loop is the journal: an attempt is written down
+        before the node leaves, and a release that has been installed
+        :data:`MAX_AUTO_ATTEMPTS` times without ever becoming the running
+        version is abandoned instead of tried again."""
         for listed in self._releases.list():
             entry = self._releases.get(listed["publisher_id"])
             if entry is None:
@@ -6032,16 +6101,62 @@ class MeshNode:
             release_id = entry["release_id"]
             if release_id in self._release_tried:
                 continue        # already tried this one — don't loop on it
+            if self._auto_journal.exhausted(release_id.hex()):
+                # Installed before, and this node is still not running it.
+                # Trying again would only cost another restart. Said once, and
+                # in the log the operator already reads: an automatic update
+                # that has quietly given up looks exactly like one that never
+                # started.
+                self._release_tried[release_id] = entry["version"]
+                self._note_release(
+                    entry["version"], "abandoned",
+                    f"installed {MAX_AUTO_ATTEMPTS} times and never became the "
+                    f"running version — install it by hand to try again")
+                continue
             self._release_tried[release_id] = entry["version"]
             while len(self._release_tried) > _RELEASE_TRIED_MAX:
                 self._release_tried.popitem(last=False)
             try:
-                await self.install_release(listed["publisher_id"])
+                await self.install_release(listed["publisher_id"],
+                                           unattended=True)
                 return entry["version"]
             except Exception as exc:
                 self._note_release(entry["version"], "failed", str(exc))
                 return None
         return None
+
+    def set_restart_hook(self, hook) -> None:
+        """Who can make this process leave so something starts it again.
+
+        A process cannot restart itself; only whatever supervises it can. The
+        console owns that route (it stops the node properly, then exits, and
+        the service manager brings it back), and an automatic install is
+        pointless without it — the new tree would sit on disk while the old
+        code kept running. ``hook()`` returns whether a restart was actually
+        scheduled; ``None`` unhooks."""
+        self._restart_hook = hook
+
+    def _restart_after_install(self, version: str) -> None:
+        """Leave, so we come back on the code just installed.
+
+        Nothing here decides whether that is safe: the hook refuses when no
+        service manager would bring the node back, and says so, because exiting
+        with nothing to catch us is worse than running yesterday's code."""
+        hook = self._restart_hook
+        if hook is None:
+            self._note_release(version, "installed",
+                               "restart this node to run it")
+            return
+        try:
+            scheduled = hook()
+        except Exception as exc:              # noqa: BLE001 — never crash the loop
+            self._note_release(version, "installed",
+                               f"restart failed ({type(exc).__name__})")
+            return
+        self._note_release(
+            version, "installed",
+            "restarting onto it" if scheduled
+            else "restart this node to run it (no service manager)")
 
     # -- pseudos (the changeable name beside the unchangeable id) ---------
     #

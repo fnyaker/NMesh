@@ -503,12 +503,14 @@ INDEX_HTML = """<!doctype html>
               <label class="field"><span>Name</span>
                 <input id="pin-name" placeholder="who this is" autocomplete="off"></label>
             </div>
-            <label class="check"><input id="pin-auto" type="checkbox">
+            <label class="check"><input id="pin-auto" type="checkbox" checked>
               <span>Install their releases automatically</span></label>
-            <p class="muted small">Automatic installs never restart the node — that is what keeps
-              one bad release from becoming a restart loop nobody is present to break. Installing
-              by hand does restart it. Trusting a publisher and letting them install while nobody
-              is watching are two separate decisions.</p>
+            <p class="muted small">An automatic install takes effect the way any other does — the
+              node restarts onto the new code, if a service manager is there to bring it back.
+              A release that installs and never becomes the running version is retried once and
+              then abandoned, so that pair can never become a restart loop. Trusting a publisher
+              and letting them install while nobody is watching stay two separate decisions;
+              this box is the second one, and it starts ticked.</p>
             <div class="btn-row"><button id="pin-add" class="primary">Pin publisher</button></div>
             <p id="pin-status" class="msg"></p>
           </div>
@@ -2510,7 +2512,7 @@ $("pin-add").addEventListener("click", (event) => withBusy(event.target, async (
     const {ok, data} = await apiJson("/api/releases/trust", "POST",
       {key, name:$("pin-name").value.trim(), auto:$("pin-auto").checked});
     setMessage("pin-status", ok ? "Pinned." : (data.error || "Could not pin that key"), !ok);
-    if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = false; }
+    if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = true; }
   }catch(_){ setMessage("pin-status", "The node did not answer.", true); }
   await refreshReleases();
 }));
@@ -2889,6 +2891,10 @@ $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async
 // here. Switching is not a login by itself: the target's own console password
 // is asked for, and the token it returns never reaches this page — it stays in
 // the local console's memory for as long as this session lasts.
+// A node that also granted `passwordless` mints that session against the grant
+// instead, which is the only key an operator holds on a machine they
+// provisioned: its password was generated on first start, on a box with no
+// screen, and printed to a log nobody read.
 let TARGETS = [];
 
 async function loadTargets(){
@@ -2900,7 +2906,7 @@ async function loadTargets(){
   const select = $("ctx-node");
   const options = [["", "This node"]].concat(TARGETS.map((target) =>
     [target.id, (target.label || shortId(target.id)) +
-     (target.connected ? "" : " — password needed")]));
+     (target.connected || target.passwordless ? "" : " — password needed")]));
   const keep = select.value;
   select.innerHTML = options.map((pair) =>
     '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
@@ -2943,26 +2949,33 @@ function askForContext(node){
   if(!target){ $("ctx-node").value = CONTEXT.node; return; }
   if(target.connected){ CONTEXT.set(node, target.label); return; }
   const name = target.label || shortId(node);
+  const free = !!target.passwordless;
   $("modal-title").textContent = "Manage " + name;
   $("modal-body").innerHTML =
-    '<p class="muted small">That node granted this one the <b>manage</b> capability. ' +
-    "It still wants its own console password — the grant opens the channel, the " +
-    "password opens the session. It is used once, over the encrypted mesh link, and " +
-    "never stored here.</p>" +
+    '<p class="muted small">' + (free
+      ? "That node granted this one <b>manage</b> and <b>passwordless</b>: the grant " +
+        "is the key, and its console asks for nothing more. Take the right back on " +
+        "that node and the session ends with it."
+      : "That node granted this one the <b>manage</b> capability. " +
+        "It still wants its own console password — the grant opens the channel, the " +
+        "password opens the session. It is used once, over the encrypted mesh link, and " +
+        "never stored here.") + "</p>" +
     '<p class="mono tiny muted">' + esc(node) + "</p>" +
-    '<label class="field"><span>Console password of ' + esc(name) + "</span>" +
-    '<input id="ctx-pass" type="password" autocomplete="off"></label>' +
+    (free ? "" :
+      '<label class="field"><span>Console password of ' + esc(name) + "</span>" +
+      '<input id="ctx-pass" type="password" autocomplete="off"></label>') +
     '<div class="btn-row"><button id="ctx-go" class="primary">Connect</button>' +
     '<button id="ctx-no">Cancel</button></div><p id="ctx-msg" class="msg"></p>';
   const finish = () => { $("modal").close(); $("ctx-node").value = CONTEXT.node; };
   $("ctx-go").addEventListener("click", (event) => withBusy(event.target, async () => {
-    const password = $("ctx-pass").value;
-    if(!password){ setMessage("ctx-msg", "A password is needed.", true); return; }
+    const password = free ? null : $("ctx-pass").value;
+    if(!free && !password){ setMessage("ctx-msg", "A password is needed.", true); return; }
     setMessage("ctx-msg", "Connecting over the mesh…");
     const {ok, data} = await apiJson("/api/remote/connect", "POST", {node, password});
-    $("ctx-pass").value = "";
+    if(!free) $("ctx-pass").value = "";
     if(!ok || !data.ok){
-      setMessage("ctx-msg", data.error || "That node refused the password.", true);
+      setMessage("ctx-msg", data.error ||
+        (free ? "That node refused the grant." : "That node refused the password."), true);
       return;
     }
     $("modal").close();
@@ -2973,7 +2986,7 @@ function askForContext(node){
   $("modal").addEventListener("close", () => { $("ctx-node").value = CONTEXT.node; },
                               {once:true});
   $("modal").showModal();
-  $("ctx-pass").focus();
+  if(!free) $("ctx-pass").focus();
 }
 
 $("ctx-node").addEventListener("change", (event) => {

@@ -41,6 +41,15 @@ trips paid up front, for nodes that may never ask. One blob moves that cost to
 whoever actually wants the release, compresses 1.8 MB to about 0.5, and lets a
 publisher sign a release with no peers at all.
 
+Installing is not restarting — and yet it has to be
+--------------------------------------------------
+A release replaces files a running process already loaded, so an install only
+takes effect when the node starts again. The unattended installer therefore ends
+in a restart, and :class:`AutoInstallJournal` is what keeps that pair from
+becoming a loop: an attempt is written down before the node leaves and read back
+when it returns, so a release that installs and never becomes the running
+version is abandoned instead of restarted into for ever.
+
 Anti-rollback
 -------------
 The descriptor carries a signed ``ts`` and a ``version``. The catalogue keeps
@@ -79,6 +88,11 @@ MAX_PUBLISHERS = 32          # pinned keys an operator may hold
 MAX_CATALOG = 64             # publishers tracked in the gossiped catalogue
 MAX_HELD_PACKAGES = 4        # packages this node keeps to serve others
 PUBLISHER_ID_LEN = 20
+# An automatic install ends in a restart, so it must be able to give up: a
+# release that installs and never becomes the running version is tried this
+# many times and then abandoned, rather than restarting the node for ever.
+MAX_AUTO_ATTEMPTS = 2
+MAX_AUTO_JOURNAL = 8         # releases the journal remembers attempting
 
 # What a release is made of. The same list the updater swaps in: the node's
 # state, its virtualenv and anything an operator left in the install directory
@@ -499,6 +513,140 @@ class TrustedPublishers:
     def list(self) -> list[dict]:
         return sorted((dict(e) for e in self._entries.values()),
                       key=lambda e: (e["name"].lower(), e["id"]))
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# What the unattended installer has already tried
+# ---------------------------------------------------------------------------
+
+class AutoInstallJournal:
+    """Automatic installs attempted, remembered **across restarts**.
+
+    An automatic install only takes effect when the node comes back on the tree
+    it just wrote, so the loop that installs also has to leave. That pair —
+    install, restart — is a loop waiting to happen: a release that installs
+    cleanly and yet never becomes the running version (a tree the service
+    manager does not start from, a swap that a stale copy shadows) would be
+    installed and restarted into, for ever, on a machine nobody is watching.
+    In-memory bookkeeping cannot see it, because the process it would have to
+    outlive is the one that exits.
+
+    So each attempt is written down **before** the node leaves and read back
+    when it returns. A release whose version is the one now running worked and
+    is forgotten; one that has been attempted :data:`MAX_AUTO_ATTEMPTS` times
+    without that ever happening is abandoned, and stays abandoned until an
+    operator installs something by hand.
+
+    Bounded like everything else, and fail-open in the harmless direction only:
+    an unreadable journal means "nothing attempted yet", which costs one extra
+    attempt, never an unbounded number."""
+
+    def __init__(self, path: str | None = None,
+                 max_entries: int = MAX_AUTO_JOURNAL) -> None:
+        self._path = path
+        self._max = max_entries
+        self._entries: dict[str, dict] = self._load()
+
+    def _load(self) -> dict[str, dict]:
+        if not self._path:
+            return {}
+        try:
+            with open(self._path) as handle:
+                doc = json.load(handle)
+        except (FileNotFoundError, OSError, ValueError):
+            return {}
+        if not isinstance(doc, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for key, value in doc.items():
+            if len(out) >= self._max:
+                break
+            entry = self._clean(key, value)
+            if entry is not None:
+                out[key] = entry
+        return out
+
+    def _clean(self, key: str, value) -> dict | None:
+        if not isinstance(key, str) or not _HEX_ID.fullmatch(key):
+            return None
+        if not isinstance(value, dict):
+            return None
+        version = value.get("version")
+        attempts = value.get("attempts")
+        if not isinstance(version, str) or len(version) > MAX_VERSION_LEN:
+            return None
+        if not isinstance(attempts, int) or isinstance(attempts, bool):
+            return None
+        return {"version": version,
+                "attempts": max(0, min(attempts, MAX_AUTO_ATTEMPTS)),
+                "at": int(value["at"]) if isinstance(value.get("at"), int)
+                      and not isinstance(value.get("at"), bool) else 0}
+
+    def _save(self) -> None:
+        if not self._path:
+            return
+        tmp = f"{self._path}.tmp.{os.getpid()}"
+        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(handle, "w") as stream:
+                json.dump(self._entries, stream)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, self._path)
+
+    def settle(self, running_version: str) -> list[str]:
+        """Read the journal against what is actually running, at startup.
+
+        Every entry naming the running version did what it was written for, and
+        is dropped. Returns the versions that did **not** take, so the node can
+        say so rather than quietly trying again."""
+        stale = []
+        for key, entry in list(self._entries.items()):
+            if entry["version"] == running_version:
+                del self._entries[key]
+            else:
+                stale.append(entry["version"])
+        if stale or not self._entries:
+            self._save()
+        return stale
+
+    def attempts(self, release_id_hex: str) -> int:
+        entry = self._entries.get(release_id_hex)
+        return entry["attempts"] if entry else 0
+
+    def exhausted(self, release_id_hex: str) -> bool:
+        return self.attempts(release_id_hex) >= MAX_AUTO_ATTEMPTS
+
+    def record(self, release_id_hex: str, version: str) -> int:
+        """Note one attempt, on disk, and return how many there have been.
+
+        Called **before** the node restarts into it: an attempt written after
+        the exit is an attempt nobody ever counts."""
+        if not _HEX_ID.fullmatch(release_id_hex or ""):
+            return 0
+        entry = self._entries.get(release_id_hex)
+        attempts = (entry["attempts"] if entry else 0) + 1
+        self._entries[release_id_hex] = {
+            "version": str(version)[:MAX_VERSION_LEN],
+            "attempts": min(attempts, MAX_AUTO_ATTEMPTS),
+            "at": int(time.time()),
+        }
+        while len(self._entries) > self._max:
+            self._entries.pop(next(iter(self._entries)))
+        self._save()
+        return attempts
+
+    def forget(self, release_id_hex: str) -> None:
+        """Drop one entry — an operator installing by hand is a fresh start."""
+        if self._entries.pop(release_id_hex, None) is not None:
+            self._save()
 
     def __len__(self) -> int:
         return len(self._entries)
