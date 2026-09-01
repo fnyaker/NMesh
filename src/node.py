@@ -23,6 +23,8 @@ from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
 from .cert import Certificate
 from .cert_store import CertStore
+from . import revocation
+from .revocation import MAX_RECORD as _REVOCATION_MAX
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
@@ -107,6 +109,7 @@ RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
 PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
 CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for me"
 CERT_RENEWED      = 0x23   # reply: the fresh certificate
+CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -174,7 +177,7 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE}
+                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -203,6 +206,9 @@ _PSEUDO_RATE_WINDOW  = 10.0     # seconds
 _PSEUDO_RATE_MAX     = 64       # pseudo claims one link may gossip at us per window
 _PSEUDO_SEARCH_MAX   = 50       # results one search may return
 _PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
+_REVOKE_RATE_WINDOW  = 10.0     # seconds
+_REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
+_REVOKE_SYNC_MAX     = 256      # revocations pushed at a peer when it authenticates
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -1426,6 +1432,7 @@ class MeshNode:
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
         self._dir_rate: OrderedDict[bytes, tuple] = OrderedDict()      # _rate_key(peer)->(n,win)
         self._pseudo_rate: OrderedDict[bytes, tuple] = OrderedDict()   # _rate_key(peer)->(n,win)
+        self._revoke_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._detached: set = set()   # fire-and-forget tasks, bounded
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
@@ -6322,6 +6329,10 @@ class MeshNode:
         return self._gossip_allowed(self._pseudo_rate, peer,
                                     _PSEUDO_RATE_WINDOW, _PSEUDO_RATE_MAX)
 
+    def _revoke_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._revoke_rate, peer,
+                                    _REVOKE_RATE_WINDOW, _REVOKE_RATE_MAX)
+
     def _absorb_claim(self, peer: '_Peer', raw: bytes):
         """Verify a claim that arrived from ``peer`` and file it.
 
@@ -6990,6 +7001,7 @@ class MeshNode:
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
+        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zero crash).
@@ -7081,6 +7093,7 @@ class MeshNode:
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
+        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------
@@ -7227,6 +7240,137 @@ class MeshNode:
         if self._cert_add(cert):
             self._note_change("nodes")
 
+    # -----------------------------------------------------------------------
+    # Revocation
+    # -----------------------------------------------------------------------
+
+    async def _handle_cert_revoke(self, peer: '_Peer', packet: Packet) -> None:
+        """A signed "I no longer vouch for this node", from its issuer.
+
+        Absorbed and passed on only when it tells us something new, so the
+        epidemic dies out instead of circulating for ever — the same shape as a
+        pseudo claim, and charged the same way: an honest relay verifies before
+        re-sending, so whoever hands us an unverifiable one either forged it or
+        forwarded without looking."""
+        if not self._revoke_allowed(peer):
+            return
+        raw = packet.payload
+        if not raw or len(raw) > _REVOCATION_MAX:
+            return self._charge_abuse(peer)
+        parsed = self._cert_store.revoke(raw, self._identity.verify)
+        if parsed is None:
+            # Either it does not verify — the peer's fault — or we already knew,
+            # which is the ordinary end of an epidemic and nobody's fault.
+            if revocation.parse(raw, self._identity.verify) is None:
+                self._charge_abuse(peer)
+            return
+        self._note_cert_change()
+        self._announce_revocation(raw, exclude=peer)
+        self._enforce_revocation(parsed["subject_id"])
+
+    def _announce_revocation(self, raw: bytes,
+                             exclude: '_Peer | None' = None) -> None:
+        """Choose who to pass it on to **now**, send in the background.
+
+        The order matters and the choosing does too. Enforcing a revocation
+        tears down every link to the node it names, so a fan-out list computed
+        when the background task finally ran could be empty — on a node whose
+        only link *was* that node, the revocation died where it was issued and
+        nobody else ever heard. Picking the peers synchronously, before
+        enforcement, is what makes "revoke and disconnect" survive being the
+        same act."""
+        targets = self._gossip_targets(exclude, _GOSSIP_FANOUT)
+        if not targets:
+            return          # nobody to tell yet; the next peer to authenticate
+                            # gets it from `_schedule_revocation_sync`
+        self._spawn_bounded(self._gossip_revocation(raw, targets))
+
+    async def _gossip_revocation(self, raw: bytes, targets) -> None:
+        # Re-stamped to us at each hop, so the next node's direct-type gate
+        # (src_id must be the immediate sender) accepts it.
+        pkt = Packet.create(CERT_REVOKE, self._id.raw, _BROADCAST_ID, raw)
+        for p in targets:
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    def _enforce_revocation(self, subject: NodeID) -> None:
+        """Act on a revocation we have just accepted.
+
+        A revocation that only changes what future handshakes decide has revoked
+        nothing an attacker is currently using: the compromised node already
+        holds live links, a live E2E session, and a place in our routing table.
+        Same judgement as the Fleet app tearing down the shells a withdrawn
+        capability had opened."""
+        if subject == self._id:
+            return          # nobody can revoke us out of our own store
+        self._forget_e2e(subject)
+        self._routing.remove(subject)
+        for peer in [p for p in self._peers if p.authenticated_id == subject]:
+            self._spawn_bounded(self._reap_peer(peer))
+        self._note_change("links")
+        self._note_change("nodes")
+
+    def _schedule_revocation_sync(self, peer: '_Peer') -> None:
+        """Catch a freshly authenticated peer up on what we know is revoked.
+
+        A node that was offline for the compromise learns of it from whoever it
+        reconnects to, rather than from the next handshake it wrongly accepts."""
+        if not self._cert_store.revocations():
+            return
+        try:
+            self._spawn_bounded(self._sync_revocations_to(peer))
+        except RuntimeError:
+            pass          # no running loop (teardown) — nothing to sync
+
+    async def _sync_revocations_to(self, peer: '_Peer') -> None:
+        for raw in self._cert_store.revocations()[:_REVOKE_SYNC_MAX]:
+            try:
+                await peer.send(Packet.create(CERT_REVOKE, self._id.raw,
+                                              _BROADCAST_ID, raw))
+            except Exception:
+                return          # link gone — the next one to authenticate gets it
+
+    def console_revoke_member(self, node_hex: str,
+                              reason: int = revocation.REASON_UNSPECIFIED) -> bool:
+        """Take back a membership *we* issued, and tell the network.
+
+        Only ours to take back: the signature is what carries the statement, so
+        this can never reach a node somebody else admitted. For an anchor gone
+        bad the tool is `console_remove_root` — a root's certificate is
+        self-signed, so there is nobody but itself entitled to revoke it."""
+        try:
+            subject = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if subject == self._id:
+            return False
+        try:
+            raw = revocation.build(subject, self._identity.dsa_public_key,
+                                   self._identity.sign, reason=int(reason))
+        except (ValueError, TypeError):
+            return False
+        if self._cert_store.revoke(raw, self._identity.verify) is None:
+            return False
+        self._note_cert_change()
+        self._announce_revocation(raw)
+        self._enforce_revocation(subject)
+        return True
+
+    def console_remove_root(self, node_hex: str) -> bool:
+        """Stop trusting an anchor. A local decision, and only ever local:
+        there is nobody above a root to appeal to."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if not self._cert_store.remove_root(node_id):
+            return False
+        self._note_cert_change()
+        self._enforce_revocation(node_id)
+        return True
+
     def trust_status(self) -> dict:
         """What this node can prove about itself, for the console.
 
@@ -7249,6 +7393,9 @@ class MeshNode:
             "renewing": bool(expires) and (
                 expires - int(time.time()) <= _CERT_RENEW_WINDOW),
             "roots": self._cert_store.root_count(),
+            "root_ids": [r for r in self._cert_store.roots()
+                         if r != self._id.raw.hex()],
+            "revoked": len(self._cert_store.revocations()),
         }
 
     # -----------------------------------------------------------------------
@@ -7736,4 +7883,5 @@ _HANDLERS = {
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
+    CERT_REVOKE:       MeshNode._handle_cert_revoke,
 }
