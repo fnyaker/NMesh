@@ -812,6 +812,20 @@ class TestManagement:
             console.stop(); await node.stop()
 
 
+class TestDownloadNames:
+    """A filename from a machine somebody else runs decides nothing here."""
+
+    def test_a_name_cannot_end_the_header_it_travels_in(self):
+        from src.webconsole import _safe_filename
+        assert _safe_filename('a"; drop\r\nX-Evil: 1') == "a dropX-Evil 1"
+        # Separators go; dots stay, so `.bashrc` keeps the name it has.
+        assert "/" not in _safe_filename("../../etc/passwd")
+        assert _safe_filename(".bashrc") == ".bashrc"
+        assert _safe_filename("") == "download"
+        assert _safe_filename(None) == "None"        # a string, never empty
+        assert _safe_filename("notes 2026 (final).txt") == "notes 2026 (final).txt"
+
+
 class TestHardening:
     async def test_oversized_body_rejected(self):
         node, console = await _make_console()

@@ -231,6 +231,7 @@ FLEET_HTML = """<!doctype html>
         <div class="card-head">
           <label class="field grow"><span class="sr-only">Node</span><select id="shell-node"></select></label>
           <button id="shell-open" class="primary">Open shell</button>
+          <button id="shell-full" class="ghost">Full screen</button>
           <button id="shell-kill" class="danger">Close</button>
         </div>
         <div class="card-body tight">
@@ -292,19 +293,6 @@ FLEET_HTML = """<!doctype html>
 
 
 FLEET_PAGE_CSS = """
-/* The terminal is the one place with its own colour world: it renders bytes a
-   remote shell chose, so it keeps a fixed dark ground in both themes rather
-   than recolouring somebody else's output. */
-.term{--page-term-bg:#0a0f16;--page-term-fg:#cfe0f7;
-  margin:0;padding:var(--s-4);min-height:440px;max-height:62vh;overflow:auto;
-  background:var(--page-term-bg);color:var(--page-term-fg);
-  font:13px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;
-  border-bottom:1px solid var(--border)}
-.term:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
-.t-c0{color:#5b6b80}.t-c1{color:#ff8079}.t-c2{color:#5fd39a}.t-c3{color:#f2c261}
-.t-c4{color:#79b0ff}.t-c5{color:#d79bff}.t-c6{color:#5fd9d0}.t-c7{color:#e8eef5}
-.t-b{font-weight:700}.t-cur{background:#cfe0f7;color:#0a0f16}
-
 .log{max-height:64vh;overflow:auto;font-size:var(--fs-sm)}
 .log .line{display:grid;grid-template-columns:76px 62px minmax(0,1fr);gap:var(--s-3);
   padding:var(--s-2) var(--s-4);border-bottom:1px solid var(--border)}
@@ -341,7 +329,7 @@ FLEET_PAGE_JS = r"""
 // tell the truth, so two operators looking at the same node see the same thing.
 
 let VER = 0, ST = {};
-let SHELL = {sid:null, node:null, off:0}, PICKED = {}, HOSTS = [], KEYS = [];
+let PICKED = {}, HOSTS = [], KEYS = [];
 let SCAN_AT = null;              // when the selected node last reported a scan
 let DEPLOY_RID = null;           // the remote deployment we are waiting on
 
@@ -399,12 +387,6 @@ async function poll(){
     }
   }
 }
-
-// A terminal is not a status page. It keeps its own cadence — faster than the
-// ledger's, and running only while a session is open — so the interval in the
-// top bar cannot be set to zero and freeze somebody's shell.
-const SHELL_TICK = 600;
-setInterval(() => { if(SHELL.node) pollShell(); }, SHELL_TICK);
 
 // ---- decisions waiting on a human ------------------------------------------
 function paintInbox(){
@@ -912,246 +894,17 @@ async function deploy(event){
   });
 }
 
-// ---- a small terminal ------------------------------------------------------
-// Written rather than depended on: a shell you can type `sudo` into needs a
-// terminal, not a log pane, and pulling in an emulator library for it would
-// cost a name in the supply chain this project keeps deliberately short.
-//
-// What it implements is what a shell session actually uses: printable text,
-// CR/LF/BS/TAB/BEL, cursor movement, the two erase commands, and SGR colours.
-// Anything else is consumed and ignored rather than printed — an unknown escape
-// must never end up on screen as garbage.
-function Term(cols,rows){
-  this.cols=cols; this.rows=rows;
-  this.x=0; this.y=0; this.sgr=""; this.scrollback=[];
-  this.grid=[]; for(let i=0;i<rows;i++)this.grid.push(this.blankRow());
-  this.pending="";
-}
-Term.prototype.blankRow=function(){
-  const row=[]; for(let i=0;i<this.cols;i++)row.push({ch:" ",cls:""});
-  return row;
-};
-Term.prototype.newline=function(){
-  this.y++;
-  if(this.y>=this.rows){
-    this.scrollback.push(this.grid.shift());
-    if(this.scrollback.length>2000)this.scrollback.shift();
-    this.grid.push(this.blankRow());
-    this.y=this.rows-1;
-  }
-};
-Term.prototype.put=function(ch){
-  if(this.x>=this.cols){this.x=0;this.newline();}
-  this.grid[this.y][this.x]={ch:ch,cls:this.sgr};
-  this.x++;
-};
-Term.prototype.eraseLine=function(mode){
-  const row=this.grid[this.y];
-  const from=mode===1?0:(mode===2?0:this.x);
-  const to=mode===0?this.cols:(mode===1?this.x+1:this.cols);
-  for(let i=from;i<to&&i<this.cols;i++)row[i]={ch:" ",cls:""};
-};
-Term.prototype.eraseDisplay=function(mode){
-  if(mode===2||mode===3){
-    for(let y=0;y<this.rows;y++)this.grid[y]=this.blankRow();
-    if(mode===2){this.x=0;this.y=0;}
-    return;
-  }
-  this.eraseLine(mode===1?1:0);
-  if(mode===0)for(let y=this.y+1;y<this.rows;y++)this.grid[y]=this.blankRow();
-  else for(let y=0;y<this.y;y++)this.grid[y]=this.blankRow();
-};
-Term.prototype.sgrClass=function(params){
-  // Only the attributes that make output readable: reset, bold, and the eight
-  // foreground colours (plus their bright forms).
-  let cls=this.sgr;
-  for(const raw of params){
-    const n=raw===""?0:parseInt(raw,10);
-    if(n===0)cls="";
-    else if(n===1)cls=(cls+" t-b").trim();
-    else if(n>=30&&n<=37)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-30);
-    else if(n>=90&&n<=97)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-90)+" t-b";
-    else if(n===39)cls=cls.replace(/t-c\d/g,"").trim();
-  }
-  return cls.replace(/\s+/g," ").trim();
-};
-Term.prototype.write=function(text){
-  let data=this.pending+text; this.pending="";
-  for(let i=0;i<data.length;i++){
-    const ch=data[i];
-    if(ch==="\x1b"){
-      // An escape may be split across two chunks: keep the tail and retry.
-      const rest=data.slice(i);
-      const csi=/^\x1b\[([0-9;?]*)([ -\/]*)([@-~])/.exec(rest);
-      if(csi){ this.csi(csi[1],csi[3]); i+=csi[0].length-1; continue; }
-      const osc=/^\x1b\][^\x07\x1b]*(\x07|\x1b\\)/.exec(rest);
-      if(osc){ i+=osc[0].length-1; continue; }        // window title and friends
-      const two=/^\x1b[=>()#][0-9A-Za-z]?/.exec(rest);
-      if(two){ i+=two[0].length-1; continue; }
-      if(rest.length<8){ this.pending=rest; return; }  // incomplete, wait
-      continue;                                        // unknown: drop it
-    }
-    if(ch==="\n"){ this.newline(); continue; }
-    if(ch==="\r"){ this.x=0; continue; }
-    if(ch==="\b"){ if(this.x>0)this.x--; continue; }
-    if(ch==="\t"){ const next=(Math.floor(this.x/8)+1)*8;
-                   while(this.x<next&&this.x<this.cols)this.put(" ");
-                   continue; }
-    if(ch==="\x07")continue;                          // bell
-    if(ch<" ")continue;                                // other control bytes
-    this.put(ch);
-  }
-};
-Term.prototype.csi=function(paramText,final){
-  const params=paramText.replace("?","").split(";");
-  const n=Math.max(1,parseInt(params[0]||"1",10)||1);
-  switch(final){
-    case "A": this.y=Math.max(0,this.y-n); break;
-    case "B": this.y=Math.min(this.rows-1,this.y+n); break;
-    case "C": this.x=Math.min(this.cols-1,this.x+n); break;
-    case "D": this.x=Math.max(0,this.x-n); break;
-    case "G": this.x=Math.min(this.cols-1,Math.max(0,n-1)); break;
-    case "H": case "f": {
-      const row=Math.max(1,parseInt(params[0]||"1",10)||1);
-      const col=Math.max(1,parseInt(params[1]||"1",10)||1);
-      this.y=Math.min(this.rows-1,row-1); this.x=Math.min(this.cols-1,col-1);
-      break;
-    }
-    case "J": this.eraseDisplay(parseInt(params[0]||"0",10)||0); break;
-    case "K": this.eraseLine(parseInt(params[0]||"0",10)||0); break;
-    case "m": this.sgr=this.sgrClass(params); break;
-    default: break;                                    // consumed, never printed
-  }
-};
-Term.prototype.render=function(showCursor){
-  const rows=this.scrollback.slice(-800).concat(this.grid);
-  // Where the cursor is, in the concatenated view. Drawn because a terminal you
-  // type into without one is disorienting — and because on a password prompt
-  // the cursor not moving is the visible sign that echo is off.
-  const cursorRow=showCursor===false?-1:this.scrollback.slice(-800).length+this.y;
-  const out=[];
-  for(let index=0;index<rows.length;index++){
-    const row=rows[index];
-    let line="",cls=null,run="";
-    const flush=()=>{
-      if(!run)return;
-      line+=cls?('<span class="'+cls+'">'+escHtml(run)+"</span>"):escHtml(run);
-      run="";
-    };
-    for(let column=0;column<row.length;column++){
-      const cell=row[column];
-      const isCursor=index===cursorRow&&column===this.x;
-      const cellCls=isCursor?(cell.cls+" t-cur").trim():cell.cls;
-      if(cellCls!==cls){flush();cls=cellCls;}
-      run+=cell.ch;
-    }
-    flush();
-    // Trailing blanks are trimmed: a row is `cols` cells wide, and padding
-    // every line to the full width would make the pane scroll sideways for
-    // nothing. The cursor cell survives because it carries a class.
-    out.push(line.replace(/(\s|&nbsp;)+$/,""));
-  }
-  return out.join("\n");
-};
-function escHtml(text){
-  return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}
+// ---- shell -----------------------------------------------------------------
+// The emulator, the session driver and the key mapping are shared with the
+// full-screen page (`webassets/terminal.py`): one terminal, drawn in two
+// places. What is here is this panel's wiring and nothing else.
+let TERM_SESSION = null;
 
-// ---- shell ----
-let TERM = null;
-function termSize(){
-  // Measured from the pane rather than assumed: the remote pty is told these
-  // dimensions, and a shell that thinks it has a different width redraws wrong.
-  const box = $("term");
-  const probe = document.createElement("span");
-  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
-  probe.textContent = "0".repeat(80);
-  box.appendChild(probe);
-  const charWidth = (probe.getBoundingClientRect().width / 80) || 8;
-  const lineHeight = parseFloat(getComputedStyle(box).lineHeight) || 16;
-  box.removeChild(probe);
-  return {
-    cols: Math.max(20, Math.min(200, Math.floor((box.clientWidth - 24) / charWidth))),
-    rows: Math.max(10, Math.min(60, Math.floor((box.clientHeight - 24) / lineHeight))),
-  };
-}
 async function openShell(){
   const node = $("shell-node").value;
   if(!node){ $("term").textContent = "No node has granted you a shell."; return; }
-  const size = termSize();
-  TERM = new Term(size.cols, size.rows);
-  $("term").textContent = "";
-  SHELL = {sid:null, node, off:0};
-  try{ await api("/api/fleet/shell", "POST", {node, cols:size.cols, rows:size.rows}); }
-  catch(_){ $("term").textContent = "Could not open a shell."; return; }
-  $("term").focus();
-}
-async function pollShell(){
-  if(!SHELL.node) return;
-  if(!SHELL.sid){
-    const open = (ST.shells || []).filter((entry) => entry.node === SHELL.node && entry.open).pop();
-    if(!open) return;
-    SHELL.sid = open.sid; SHELL.off = 0;
-  }
-  let data;
-  try{
-    data = (await apiJson("/api/fleet/shell?sid=" + encodeURIComponent(SHELL.sid) +
-                          "&offset=" + SHELL.off)).data;
-  }catch(_){ return; }
-  if(!data) return;
-  if(data.data){
-    const raw = atob(data.data);
-    let text;
-    try{ text = new TextDecoder().decode(Uint8Array.from(raw, (c) => c.charCodeAt(0))); }
-    catch(_){ text = raw; }
-    const box = $("term");
-    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-    if(!TERM) TERM = new Term(80, 24);
-    TERM.write(text);
-    box.innerHTML = TERM.render();
-    if(atEnd) box.scrollTop = box.scrollHeight;
-  }
-  SHELL.off = data.seq;
-  if(!data.open){
-    $("term").textContent += "\n[session closed]\n";
-    SHELL.sid = null; SHELL.node = null;
-  }
-}
-async function sendBytes(text){
-  if(!SHELL.sid) return;
-  const encoded = new TextEncoder().encode(text);
-  let binary = "";
-  encoded.forEach((byte) => { binary += String.fromCharCode(byte); });
-  await api("/api/fleet/input", "POST", {node:SHELL.node, sid:SHELL.sid, data:btoa(binary)});
-}
-
-// What a key sends. Nothing is echoed locally: the remote pty decides what
-// comes back, which is exactly why a password prompt stays invisible — the pty
-// turns echo off and there is nothing on this side to show it anyway.
-function keyBytes(event){
-  if(event.ctrlKey && !event.altKey && event.key.length === 1){
-    const code = event.key.toUpperCase().charCodeAt(0);
-    if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
-    if(event.key === "?") return "\x7f";
-  }
-  switch(event.key){
-    case "Enter": return "\r";
-    case "Backspace": return "\x7f";
-    case "Tab": return "\t";
-    case "Escape": return "\x1b";
-    case "ArrowUp": return "\x1b[A";
-    case "ArrowDown": return "\x1b[B";
-    case "ArrowRight": return "\x1b[C";
-    case "ArrowLeft": return "\x1b[D";
-    case "Home": return "\x1b[H";
-    case "End": return "\x1b[F";
-    case "Delete": return "\x1b[3~";
-    case "PageUp": return "\x1b[5~";
-    case "PageDown": return "\x1b[6~";
-    default: break;
-  }
-  if(event.key.length === 1 && !event.ctrlKey && !event.metaKey) return event.key;
-  return null;
+  if(!TERM_SESSION) TERM_SESSION = new ShellSession($("term"), {});
+  if(await TERM_SESSION.open(node)) $("term").focus();
 }
 
 // ---- wiring ----------------------------------------------------------------
@@ -1304,32 +1057,37 @@ $("ssh-key").addEventListener("change", paintKeys);
 $("ssh-sudo").addEventListener("change", syncSudoFields);
 $("deploy-btn").addEventListener("click", deploy);
 $("shell-open").addEventListener("click", openShell);
+$("shell-full").addEventListener("click", () => {
+  // A tab, never a window: this button exists because a terminal in a panel is
+  // a terminal in a box, and a 700px pop-up is the same box with a title bar.
+  const node = $("shell-node").value;
+  window.open("/term" + (node ? "?node=" + encodeURIComponent(node) : ""),
+              "_blank", "noopener");
+});
 $("shell-kill").addEventListener("click", async () => {
-  if(!SHELL.sid) return;
-  await api("/api/fleet/close", "POST", {node:SHELL.node, sid:SHELL.sid});
-  SHELL = {sid:null, node:null, off:0};
+  if(TERM_SESSION) await TERM_SESSION.stop();
 });
 $("term-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const line = $("term-in").value;
   $("term-in").value = "";
-  await sendBytes(line + "\n");
+  if(TERM_SESSION) await TERM_SESSION.send(line + "\n");
 });
 // Raw keystrokes: this is what makes it a terminal rather than a form. The pane
 // is focusable, so a click puts the keyboard where the user is looking.
 $("term").addEventListener("keydown", async (event) => {
-  if(!SHELL.sid) return;
+  if(!TERM_SESSION || !TERM_SESSION.live()) return;
   if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
      window.getSelection().toString()) return;          // let copy/paste through
   const bytes = keyBytes(event);
   if(bytes === null) return;
   event.preventDefault();
-  await sendBytes(bytes);
+  await TERM_SESSION.send(bytes);
 });
 $("term").addEventListener("paste", async (event) => {
-  if(!SHELL.sid) return;
+  if(!TERM_SESSION || !TERM_SESSION.live()) return;
   event.preventDefault();
-  await sendBytes((event.clipboardData || window.clipboardData).getData("text"));
+  await TERM_SESSION.send((event.clipboardData || window.clipboardData).getData("text"));
 });
 
 [["Nodes you control", "nodes"], ["Who controls this node", "access"],

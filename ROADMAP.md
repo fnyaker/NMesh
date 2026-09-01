@@ -231,6 +231,16 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 - Status (disk/RAM/load/uptime), update (a plan the node derives itself from its
   own facts — apt/dnf/pacman/zypper/apk/xbps/brew/pkg, argv never a shell
   string), an interactive shell on a bounded pty.
+- The shell **full screen** in a tab of its own (`/term`), built for a phone:
+  a real field behind the screen so Android raises its keyboard, input read from
+  `input` events because an IME reports no usable key, a Termux-style row for
+  Esc/Tab/Ctrl/Alt/arrows with sticky modifiers, `visualViewport` tracking, and
+  copy/paste both ways with a fallback for browsers that refuse a silent
+  clipboard read.
+- **Files under the same `shell` right**: browse, download, upload, new folder.
+  Bounded (32 MiB a transfer, sliced), regular files only, and an upload lands
+  in a temporary beside its target so an interrupted one never half-replaces
+  what was there.
 - SSH LAN discovery over **every attached network**, at the prefix actually in
   use (`/proc/net/route`, ioctl, `ip`/`ifconfig`, a fallback) — a `/22` is no
   longer scanned as a `/24`, and a second card or a VPN is no longer missed.

@@ -896,6 +896,14 @@ const ICONS = {
   person:     '<circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
   server:     '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
   window:     '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
+  // Directions are shapes, not words: the terminal's key row draws them rather
+  // than typing an arrow character, so they come from the one icon set like
+  // everything else on screen.
+  folder:     '<path d="M3 7.5a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+  arrowUp:    '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  arrowDown:  '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  arrowLeft:  '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+  arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
 };
 // `title` is what a screen reader announces; without one the icon is decorative
 // and hidden, because a button beside it already carries the label.

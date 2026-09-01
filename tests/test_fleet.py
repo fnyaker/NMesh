@@ -24,7 +24,7 @@ from src.apps.fleet import (
     console_path_refusal,
 )
 from src.apps.fleet_state import CAPABILITIES, FleetState
-from src.apps import fleet_provision
+from src.apps import fleet_files, fleet_provision
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 
@@ -640,6 +640,152 @@ class TestPasswordlessSession:
         assert not operator.app._session_calls[rid].done()
         await deliver_both(operator, agent)
         assert await task == "session-0"
+
+
+class TestFiles:
+    """Navigating and moving files is the `shell` right shown as a surface: the
+    same authority, the same gates, and bounds of its own because every call
+    arrives as a string somebody else chose."""
+
+    async def _granted(self, operator, agent, caps=("shell",)):
+        await enrol(operator, agent, caps=list(caps))
+        operator.take_sent()
+
+    async def _run(self, operator, agent, coro, rounds=8):
+        task = asyncio.ensure_future(coro)
+        await deliver_both(operator, agent, rounds=rounds)
+        return await task
+
+    async def test_listing_needs_the_shell_right(self, operator, agent, tmp_path):
+        await self._granted(operator, agent, caps=["status"])
+        with pytest.raises(fleet.FileTransferError) as failure:
+            await self._run(operator, agent,
+                            operator.app.list_files(agent.id, str(tmp_path)))
+        assert "not authorised for shell" in str(failure.value)
+
+    async def test_a_listing_comes_back_with_directories_first(
+            self, operator, agent, tmp_path):
+        (tmp_path / "zebra.txt").write_text("hi")
+        (tmp_path / "alpha").mkdir()
+        await self._granted(operator, agent)
+        listed = await self._run(operator, agent,
+                                 operator.app.list_files(agent.id, str(tmp_path)))
+        assert [entry["name"] for entry in listed["entries"]] == ["alpha", "zebra.txt"]
+        assert listed["entries"][0]["kind"] == "dir"
+        assert listed["entries"][1]["size"] == 2
+        assert listed["path"] == str(tmp_path)
+
+    async def test_a_relative_path_is_refused(self, operator, agent):
+        """It would resolve against a working directory the operator cannot
+        see — a different file on every node."""
+        await self._granted(operator, agent)
+        with pytest.raises(fleet.FileTransferError) as failure:
+            await self._run(operator, agent,
+                            operator.app.list_files(agent.id, "etc/passwd"))
+        assert "absolute" in str(failure.value)
+
+    async def test_a_new_directory_is_created(self, operator, agent, tmp_path):
+        await self._granted(operator, agent)
+        reply = await self._run(operator, agent,
+                                operator.app.make_dir(agent.id, str(tmp_path), "logs"))
+        assert reply["path"] == str(tmp_path / "logs")
+        assert (tmp_path / "logs").is_dir()
+
+    @pytest.mark.parametrize("name", ["../escape", "a/b", "", ".", "..", "x" * 300])
+    async def test_a_name_that_is_not_a_name_is_refused(self, operator, agent,
+                                                        tmp_path, name):
+        await self._granted(operator, agent)
+        with pytest.raises(fleet.FileTransferError):
+            await self._run(operator, agent,
+                            operator.app.make_dir(agent.id, str(tmp_path), name))
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_a_file_is_read_slice_by_slice(self, operator, agent, tmp_path):
+        body = os.urandom(fleet_files.READ_SLICE + 500)
+        (tmp_path / "blob.bin").write_bytes(body)
+        await self._granted(operator, agent)
+        first = await self._run(operator, agent, operator.app.read_file(
+            agent.id, str(tmp_path / "blob.bin")))
+        assert first["data"] == body[:fleet_files.READ_SLICE]
+        assert first["eof"] is False and first["size"] == len(body)
+        second = await self._run(operator, agent, operator.app.read_file(
+            agent.id, str(tmp_path / "blob.bin"), fleet_files.READ_SLICE))
+        assert second["data"] == body[fleet_files.READ_SLICE:]
+        assert second["eof"] is True
+
+    async def test_only_a_regular_file_can_be_read(self, operator, agent, tmp_path):
+        """A fifo would block the handler that opened it and a device would
+        never end. Neither is a file transfer."""
+        os.mkfifo(str(tmp_path / "pipe"))
+        await self._granted(operator, agent)
+        with pytest.raises(fleet.FileTransferError) as failure:
+            await self._run(operator, agent,
+                            operator.app.read_file(agent.id, str(tmp_path / "pipe")))
+        assert "regular file" in str(failure.value)
+
+    async def test_an_upload_lands_only_when_it_is_whole(self, operator, agent,
+                                                         tmp_path):
+        await self._granted(operator, agent)
+        first = b"a" * fleet_files.WRITE_SLICE
+        reply = await self._run(operator, agent, operator.app.write_file(
+            agent.id, str(tmp_path), "up.bin", "u1", 0, first, False))
+        assert reply["done"] is False and reply["written"] == len(first)
+        # Nothing under that name yet: a half-arrived file must never look
+        # like a complete one.
+        assert not (tmp_path / "up.bin").exists()
+        reply = await self._run(operator, agent, operator.app.write_file(
+            agent.id, str(tmp_path), "up.bin", "u1", len(first), b"tail", True))
+        assert reply["done"] is True
+        assert (tmp_path / "up.bin").read_bytes() == first + b"tail"
+        # And the temporary is gone.
+        assert [p.name for p in tmp_path.iterdir()] == ["up.bin"]
+
+    async def test_a_slice_out_of_order_ends_the_upload(self, operator, agent,
+                                                        tmp_path):
+        await self._granted(operator, agent)
+        await self._run(operator, agent, operator.app.write_file(
+            agent.id, str(tmp_path), "up.bin", "u1", 0, b"head", False))
+        with pytest.raises(fleet.FileTransferError):
+            await self._run(operator, agent, operator.app.write_file(
+                agent.id, str(tmp_path), "up.bin", "u1", 9999, b"tail", True))
+        assert list(tmp_path.iterdir()) == []
+        assert agent.app._uploads == {}
+
+    async def test_losing_the_right_drops_the_transfers_it_opened(
+            self, operator, agent, tmp_path):
+        await self._granted(operator, agent)
+        await self._run(operator, agent, operator.app.write_file(
+            agent.id, str(tmp_path), "up.bin", "u1", 0, b"head", False))
+        assert len(agent.app._uploads) == 1
+        await agent.app.set_operator_capabilities(operator.id.raw.hex(),
+                                                  ["status"])
+        assert agent.app._uploads == {}
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_the_agent_bounds_operations_in_flight(self, operator, agent,
+                                                         tmp_path):
+        await self._granted(operator, agent)
+        agent.app._file_hosted[operator.id.raw.hex()] = fleet.MAX_FILE_CALLS
+        with pytest.raises(fleet.FileTransferError) as failure:
+            await self._run(operator, agent,
+                            operator.app.list_files(agent.id, str(tmp_path)))
+        assert "in flight" in str(failure.value)
+
+    async def test_an_answer_nobody_asked_for_is_dropped(self, operator, agent,
+                                                         tmp_path):
+        await self._granted(operator, agent)
+        stranger = Peer()
+        task = asyncio.ensure_future(
+            operator.app.list_files(agent.id, str(tmp_path)))
+        await settle()
+        rid = next(iter(operator.app._file_calls))
+        stranger.app._reply(operator.id, fleet.FILE_REPLY,
+                            {"rid": rid, "op": "list", "entries": [{"name": "x"}]})
+        await deliver(stranger, operator)
+        assert not operator.app._file_calls[rid].done()
+        await deliver_both(operator, agent)
+        listed = await task
+        assert listed["entries"] == []
 
 
 class TestUpdateRefusalIsUseful:

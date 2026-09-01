@@ -105,7 +105,13 @@ def test_both_themes_define_the_same_semantic_tokens():
 def test_no_page_redefines_a_token():
     """Tokens have one definition point: everything else consumes them."""
     from src import webassets
-    for name in ("CONSOLE_PAGE_CSS", "CHAT_PAGE_CSS", "FLEET_PAGE_CSS"):
-        page = getattr(webassets, name)
+    from src.webassets import terminal
+    blocks = {name: getattr(webassets, name)
+              for name in ("CONSOLE_PAGE_CSS", "CHAT_PAGE_CSS", "FLEET_PAGE_CSS")}
+    # The terminal is shared rather than a page, and bound by the same rule:
+    # a block mounted by two pages redefining a token would break both.
+    blocks["terminal.CSS"] = terminal.CSS
+    blocks["terminal.PAGE_CSS"] = terminal.PAGE_CSS
+    for name, page in blocks.items():
         for declaration in re.findall(r"(--[a-z0-9-]+)\s*:", page):
             assert declaration.startswith("--page-"), f"{name} redefines {declaration}"

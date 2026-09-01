@@ -50,9 +50,11 @@ from .node import MESSAGE_NAMES
 from .pseudo import MAX_PSEUDO, PseudoError
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
-                        CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS)
+                        CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS,
+                        TERM_HTML, TERM_JS, TERM_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
-from .apps.fleet import console_path_refusal as fleet_console_refusal
+from .apps.fleet import (console_path_refusal as fleet_console_refusal,
+                         FileTransferError as FleetFileError)
 from . import transport as transport_option
 
 # The page names the node it is driving with this header. Absent (or naming us)
@@ -72,10 +74,25 @@ def _is_node_hex(value) -> bool:
     return (isinstance(value, str) and len(value) == 40
             and all(c in "0123456789abcdef" for c in value))
 
+
+def _safe_filename(name) -> str:
+    """A name fit for a ``Content-Disposition`` header.
+
+    It comes off a machine somebody else runs, so it decides nothing here: a
+    quote or a newline in it would end the header and start writing whatever
+    followed as another one. Kept to plain characters, and never empty."""
+    cleaned = "".join(ch for ch in str(name)[:100]
+                      if ch.isalnum() or ch in "._- ()[]").strip()
+    return cleaned or "download"
+
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
 _MAX_CHAT_UPLOAD = 64 * 1024 * 1024   # chat file/avatar uploads (base64)
 _MAX_KEY_UPLOAD = 128 * 1024          # one private key, generously bounded
+# One file pushed to a managed node. `fleet_files.MAX_TRANSFER` (32 MiB) is what
+# actually crosses the mesh; this is that, base64-encoded, plus the JSON around
+# it — so an oversized body is refused by the socket rather than after a decode.
+_MAX_FILE_UPLOAD = 46 * 1024 * 1024
 _APP_CALL_TIMEOUT = 60.0          # DHT publish/fetch can touch several peers
 _TOKEN_TTL = 3600.0            # session idle lifetime, seconds
 _LOGIN_MAX_FAILURES = 5
@@ -761,6 +778,11 @@ _FLEET_STATIC = {
     "/fleet": ("text/html; charset=utf-8", FLEET_HTML),
     "/fleet.js": ("application/javascript; charset=utf-8", FLEET_JS),
     "/fleet.css": ("text/css; charset=utf-8", FLEET_CSS),
+    # The terminal with the whole screen. Same session, same right, opened in a
+    # tab of its own because that is what a terminal on a phone needs.
+    "/term": ("text/html; charset=utf-8", TERM_HTML),
+    "/term.js": ("application/javascript; charset=utf-8", TERM_JS),
+    "/term.css": ("text/css; charset=utf-8", TERM_CSS),
 }
 
 
@@ -1228,6 +1250,8 @@ def _make_handler(console: WebConsole):
                 cap = _MAX_APP_BODY
             elif path in ("/api/chat/file", "/api/chat/profile"):
                 cap = _MAX_CHAT_UPLOAD
+            elif path == "/api/fleet/upload":
+                cap = _MAX_FILE_UPLOAD
             elif path == "/api/fleet/keys":
                 cap = _MAX_KEY_UPLOAD
             else:
@@ -1961,14 +1985,57 @@ def _make_handler(console: WebConsole):
                 return
             if path == "/api/fleet/shell":
                 sid = (query.get("sid") or [""])[0]
+                node = (query.get("node") or [""])[0]
+                # A page that has just asked for a shell knows the node, not the
+                # session: the open answers asynchronously. Naming the node is
+                # how a terminal draws itself without polling the whole ledger.
+                if not sid and node:
+                    sid = console._fleet.newest_shell(node)
+                    if not sid:
+                        self._json(404, {"error": "no session"})
+                        return
                 data = console._fleet.shell_data(sid, _int_param(query, "offset", 0))
                 self._json(200 if data else 404, data or {"error": "no session"})
+                return
+            if path in ("/api/fleet/files", "/api/fleet/file"):
+                self._handle_files_get(path, query)
                 return
             if path == "/api/fleet/keys":
                 # Paths and comments of local SSH keys — never key material.
                 self._json(200, {"keys": console._fleet.local_keys()})
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_files_get(self, path: str, query: dict) -> None:
+            """Browsing and downloading, under the ``shell`` right.
+
+            Two routes and one reason for the split: a listing is JSON a page
+            redraws, a file is bytes a browser saves. Serving both from one
+            route would mean guessing which one the caller wanted."""
+            node = (query.get("node") or [""])[0]
+            if not _is_node_hex(node):
+                self._json(400, {"error": "bad node id"})
+                return
+            target = (query.get("path") or [""])[0]
+            try:
+                if path == "/api/fleet/files":
+                    self._json(200, console._fleet.files_list(node, target))
+                    return
+                name, data = console._fleet.files_download(node, target)
+            except FleetFileError as exc:
+                self._json(502, {"error": str(exc)[:200]})
+                return
+            except TimeoutError:
+                self._json(504, {"error": "that node did not answer in time"})
+                return
+            except Exception as exc:            # noqa: BLE001 — never leak a trace
+                self._json(500, {"error": f"that failed ({type(exc).__name__})"})
+                return
+            # Named on the way out, and only ever as an attachment: a file from
+            # somebody else's machine is not something this page should render.
+            self._send(200, "application/octet-stream", data, [
+                ("Content-Disposition",
+                 "attachment; filename=\"%s\"" % _safe_filename(name))])
 
         # -- remote consoles ---------------------------------------------
 
@@ -2155,6 +2222,12 @@ def _make_handler(console: WebConsole):
                         self._json(200, {"rid": fleet.scan(node, targets)})
                     else:
                         self._json(200, fleet.scan_local(targets))
+                elif action == "mkdir":
+                    self._json(200, fleet.files_mkdir(
+                        node, str(data.get("path") or "")[:4096],
+                        str(data.get("name") or "")[:255]))
+                elif action == "upload":
+                    self._handle_file_upload(fleet, node, data)
                 elif action == "shell":
                     self._json(200, {"rid": fleet.open_shell(
                         node, _dim_param(data.get("cols"), 80),
@@ -2192,10 +2265,31 @@ def _make_handler(console: WebConsole):
                     self._handle_provision(fleet, node, data)
                 else:
                     self._json(404, {"error": "not found"})
+            except FleetFileError as exc:
+                # The far node refused, or never answered. Not this console
+                # failing, and an operator has to be able to tell them apart.
+                self._json(502, {"error": str(exc)[:200]})
             except ValueError:
                 self._json(400, {"error": "bad request"})
             except Exception as exc:
                 self._json(503, {"error": str(exc)[:200]})
+
+        def _handle_file_upload(self, fleet, node: str, data) -> None:
+            """Push one file onto a node that granted ``shell``.
+
+            The bytes arrive base64-encoded in the request body, like a chat
+            attachment: one request, one file, and a cap on it, because the
+            console holds the whole thing while it slices it onto the mesh."""
+            raw = _b64_field(data.get("data"), _MAX_FILE_UPLOAD)
+            if raw is None:
+                self._json(400, {"error": "no file in that request"})
+                return
+            name = str(data.get("name") or "")[:255]
+            if not name:
+                self._json(400, {"error": "a name is required"})
+                return
+            self._json(200, fleet.files_upload(
+                node, str(data.get("path") or "")[:4096], name, raw))
 
         def _handle_provision(self, fleet, node: str, data) -> None:
             """Start a provisioning run.
@@ -2472,10 +2566,15 @@ def _dim_param(value, default: int) -> int:
         return default
 
 
-def _b64_field(value) -> bytes | None:
+def _b64_field(value, limit: int = _MAX_BODY) -> bytes | None:
     """Decode a base64 field from a request body. Terminal input is bytes, not
-    text, so it travels base64-encoded; anything undecodable is refused."""
-    if not isinstance(value, str) or len(value) > _MAX_BODY:
+    text, so it travels base64-encoded; anything undecodable is refused.
+
+    ``limit`` is the encoded length this field may have. It defaults to the
+    ordinary body cap — a field that may be a whole file passes its own, and
+    passing it here rather than after the decode is what keeps a hostile field
+    from being expanded before it is refused."""
+    if not isinstance(value, str) or len(value) > limit:
         return None
     try:
         return base64.b64decode(value, validate=True)
