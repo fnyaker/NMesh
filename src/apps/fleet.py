@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 
 from ..accusation import KIND_FLOOD as ABUSE_FLOOD
 from ..app_auth import ctx_hash
+from ..app_guard import AppGuard, Limit
 from ..app_channel import builtin_id
 from ..node_id import NodeID
 from . import fleet_console, fleet_files, fleet_host, fleet_provision, fleet_ssh
@@ -419,8 +420,14 @@ class FleetApp:
         self._file_calls: dict[str, asyncio.Future] = {}
         self._file_hosted: dict[str, int] = {}
         self._uploads: dict[tuple, "fleet_files.Upload"] = {}
-        # node id -> (count, window start). See _request_allowed.
-        self._request_rate: dict[bytes, tuple[int, float]] = {}
+        # What one sender may ask of us, and the one place a breach is reported.
+        # Fleet has a single kind, because every inbound frame here costs the
+        # same thing: one ML-DSA verification before any handler sees it.
+        self._guard = AppGuard(
+            client, {"signed requests": Limit(MAX_REQUESTS, REQUEST_WINDOW,
+                                              weight=2,
+                                              max_senders=MAX_REQUEST_SENDERS)},
+            kind=ABUSE_FLOOD, spawn=self._spawn)
 
     # -- lifecycle --------------------------------------------------------
 
@@ -643,43 +650,14 @@ class FleetApp:
         Every one of these costs an ML-DSA verification in `_open_signed`
         before any handler sees it, and node ids are free to mint — so without a
         ceiling a stranger can spend our CPU without limit and, on the enrolment
-        plane, fill the queue a human is supposed to read. Bounded and pruned,
-        like the node's own gossip valves."""
-        now = time.monotonic()
-        table = self._request_rate
-        for key in [k for k, (_, ws) in table.items()
-                    if now - ws > REQUEST_WINDOW]:
-            del table[key]
-        while len(table) > MAX_REQUEST_SENDERS:
-            table.pop(next(iter(table)), None)
-        key = src.raw
-        count, window = table.get(key, (0, now))
-        if now - window > REQUEST_WINDOW:
-            count, window = 0, now
-        if count >= MAX_REQUESTS:
-            table[key] = (count, window)
-            # Refusing here protects this app and nothing else: the same sender
-            # walks straight on to the next one. So the node is told, once per
-            # spent window rather than per refused request — the ceiling is
-            # ours to set, since only this app knows what too many signed
-            # commands is, and what the reports add up to is the node's.
-            if count == MAX_REQUESTS:
-                table[key] = (count + 1, window)
-                self._report_abuse(src, "too many signed requests")
-            return False
-        table[key] = (count + 1, window)
-        return True
+        plane, fill the queue a human is supposed to read.
 
-    def _report_abuse(self, src: NodeID, reason: str) -> None:
-        """Hand a flood up to the node. Never fatal, never awaited inline: an
-        app that noticed a problem must not become one."""
-        report = getattr(self._client, "report_abuse", None)
-        if report is None:
-            return
-        try:
-            self._spawn(report(src, weight=2, kind=ABUSE_FLOOD, reason=reason))
-        except Exception:
-            pass
+        The ceiling is this app's to set, since only fleet knows what too many
+        signed commands is; the loop that enforces it and the report that
+        follows are not, and both now live in `AppGuard`. Refusing here protects
+        this app and nothing else — the same sender walks straight on to the
+        next one — so what makes it cost anything is the node being told."""
+        return self._guard.allow("signed requests", src)
 
     def _authorised(self, src: NodeID, capability: str, rid: str) -> bool:
         """Gate 2: the ledger. Gate 3 (the signature) already passed by the time

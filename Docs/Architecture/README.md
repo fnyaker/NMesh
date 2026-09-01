@@ -27,6 +27,7 @@ is therefore safe to accept from strangers.
 | `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots, expiry, revocation). |
 | `revocation.py` | A signed "I no longer vouch for this node", from its issuer and nobody else. |
 | `reputation.py` | What this node thinks of the nodes it talks to: a bounded, decaying score fed by the core and by the apps, plus `RateGate`. |
+| `app_guard.py` | An app's per-kind allowances per sender, and the one place a breach is reported to the node. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |

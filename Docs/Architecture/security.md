@@ -216,9 +216,12 @@ holding four links from four nodes.
   own numbers and reports the sender — in-process through
   `MeshNode.report_abuse`, or from another process through the connector's
   `_ABUSE` frame, where the app id comes from the session and never the frame,
-  as for the drawer and the per-app DHT. `reputation.RateGate` is the shared
-  shape of "an allowance per sender", so each app stops writing it slightly
-  differently; the numbers stay the app's.
+  as for the drawer and the per-app DHT. `app_guard.AppGuard` is that loop
+  written once with the reporting attached, so each app stops writing it
+  slightly differently and stops forgetting the report — two of the three did.
+  Its limits are **per kind**, not one bucket: a typing notice and a file offer
+  are not comparable, and a shared ceiling sized for the loudest hands that same
+  allowance to the expensive ones. The numbers stay the app's.
 - **The node owns what the reports add up to.** Weighing one app's complaint
   against another's is not something one app can do. Thresholds live in
   `nmesh.conf` (`abuse_suspect`, `abuse_hostile`, `abuse_halflife`,

@@ -131,9 +131,13 @@ take down the app that noticed. The weight is clamped on the way in, so a bug in
 an app's own accounting cannot bring a peer down in one call, and a report
 naming the node itself is refused outright.
 
-`RateGate(max_events, window)` in `src/reputation.py` is the shared shape of "an
-allowance per sender", so each app stops writing that loop slightly differently.
-The numbers stay the app's.
+`AppGuard` in `src/app_guard.py` is that loop written once, with the reporting
+attached — an app declares `{kind: Limit(max, window, weight)}` and calls
+`allow(kind, sender)`; over the ceiling it drops the message and the node has
+been told, once per spent window. Limits are **per kind** deliberately: the
+messages an app receives are not comparable, and one shared bucket has to be
+sized for the loudest of them, which hands that same allowance to the expensive
+ones. Chat and fleet both go through it. The numbers stay the app's.
 
 The `PSEUDO_*` frames read **names** — `my_pseudo()`, `lookup_pseudo(query,
 wide=…)` (ranked, partial, case- and accent-insensitive), `pseudos_of(ids)`, and
