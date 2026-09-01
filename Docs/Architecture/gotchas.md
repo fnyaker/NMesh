@@ -401,6 +401,39 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## The console's pages: what a repaint quietly destroys
+
+Four bugs of one family, all invisible until somebody is *using* the page while
+it repaints. Each was measured with a `MutationObserver` over eight seconds
+before and after.
+
+- **`setHTML` was comparing a built string against a serialised one.** It exists
+  to skip the write when nothing changed, and it did — for markup with no
+  apostrophe in it. `esc()` writes `&#39;`; `innerHTML` hands back `'`. So every
+  string carrying an apostrophe compared unequal to itself and `setHTML` became
+  plain `innerHTML`: the chat list's empty state was replaced by an identical
+  copy of itself about twice a second. It now parses the candidate into a
+  detached element and compares the form the element would actually hold.
+- **A repaint on the cadence must leave alone what it did not change.** Painting
+  a live container with `innerHTML` replaces its buttons between the press and
+  the click, drops the text somebody selected, and closes an open `<select>` —
+  the fleet page rebuilt its node picker every two seconds, so a dropdown opened
+  to choose a node shut itself a moment later, for ever. Measured before:
+  metrics 8/8 elements replaced per tick, addressing 6/6, the app tiles, the
+  transport listener chips (each carries a button), the fleet pickers. After: 0,
+  and the only thing that moves is the text of a number that moved.
+- **`mountShell`, `REFRESH.mount` and `ROUTER.start` must be idempotent.** The
+  apps call them from the function that runs after signing in, and that runs
+  again whenever a session is lost and taken up again. Every listener was then
+  registered twice: the theme button toggled twice and looked dead, the palette
+  moved two rows per arrow, a subtab routed twice. **Any wiring inside a
+  function that can run twice needs a guard.**
+- **A camera outlives the panel it belongs to.** The QR scanner kept the stream
+  and its detection interval running after the operator left the section — a
+  light on somebody's phone with nothing on screen to explain it. It is stopped
+  on the route change and on a context switch, beside the trace polling that
+  already was.
+
 ## The terminal in a browser
 
 - **One request per keystroke delivers them out of order.** Every key fired its

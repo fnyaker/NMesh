@@ -32,6 +32,24 @@ TERM_CSS  = ui.CSS + terminal.CSS + terminal.PAGE_CSS  TERM_JS  = ui.JS + termin
 A token changed once changes every page. A page cannot quietly grow a second
 button style: there is one within reach.
 
+## Repainting
+
+> A view on the cadence **writes values into what is there**. It does not
+> rebuild markup that has not changed.
+
+`setHTML` skips the write when the markup is identical; `paintLive` goes
+further and rewrites only when the *shape* changes, patching the numbers into
+the elements already on screen (`data-v`). Assigning `innerHTML` on a timer is
+the bug both exist to prevent: it replaces the button between the press and the
+click, drops the text somebody was selecting, and closes a `<select>` they had
+just opened. There is a test — `test_no_page_paints_a_live_container_with_raw_innerhtml`
+— naming the containers that are repainted on the cadence.
+
+The same rule covers wiring: `mountShell`, `REFRESH.mount` and `ROUTER.start`
+are called by the apps from the function that runs after signing in, which runs
+again after a session is lost and taken up again. They are idempotent, and
+anything that registers a listener from such a function has to be.
+
 What is allowed in a page's own CSS: what exists only there — the graph and the
 throughput canvas (console), the host list (fleet), the key row and the file
 list (terminal), the conversation bubbles (chat). If it starts to look reusable, it moves up into

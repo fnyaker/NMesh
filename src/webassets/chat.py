@@ -852,19 +852,41 @@ function flash(id){
 }
 
 // ---- sending ---------------------------------------------------------------
+// The box is cleared first so typing feels immediate — which means a send that
+// fails has to give the text back. Losing what somebody wrote, with nothing on
+// screen to say so, is the worst thing a composer can do.
 async function sendText(){
   const box = $("msg"), text = box.value.trim();
   if(!text || !sel) return;
+  const conv = sel, reply = replyTo;
   box.value = ""; autoGrow();
-  const reply = replyTo; replyTo = null; setReplyBar();
-  await api("/api/chat/send", "POST", {conv:sel, text, reply}).catch(() => {});
+  replyTo = null; setReplyBar();
+  let sent = false;
+  try{
+    const response = await api("/api/chat/send", "POST", {conv, text, reply});
+    sent = response.ok;
+  }catch(_){}
+  if(!sent){
+    if(!box.value.trim()){ box.value = text; autoGrow(); }
+    replyTo = reply; setReplyBar();
+    toast("That message was not sent — it is back in the box", "danger");
+    return;
+  }
   toBottom($("log")); poll();
 }
 async function sendFile(file){
   if(!file || !sel) return;
-  const b64 = await toB64(file);
-  await api("/api/chat/file", "POST",
-            {conv:sel, name:file.name, data:b64, reply:replyTo}).catch(() => {});
+  const conv = sel, reply = replyTo;
+  let b64;
+  try{ b64 = await toB64(file); }
+  catch(_){ toast("That file could not be read", "danger"); return; }
+  let sent = false;
+  try{
+    const response = await api("/api/chat/file", "POST",
+                               {conv, name:file.name, data:b64, reply});
+    sent = response.ok;
+  }catch(_){}
+  if(!sent){ toast(file.name + " was not sent", "danger"); return; }
   replyTo = null; setReplyBar(); toBottom($("log")); poll();
 }
 function toB64(file){
@@ -933,17 +955,34 @@ function ctxAction(action){
   if(!rec) return;
   if(action === "reply"){ replyTo = mid; setReplyBar(); }
   else if(action === "copy"){ copyText(rec.text || ""); }
-  else if(action === "edit"){
-    const text = prompt("Edit message", rec.text || "");
-    if(text != null && text.trim())
-      api("/api/chat/edit", "POST", {conv:sel, mid, text:text.trim()}).then(poll);
-  }else if(action === "delete"){
+  else if(action === "edit"){ editMessage(mid, rec); }else if(action === "delete"){
     confirmAction({title:"Delete this message for everyone?",
       body:'<p class="muted small">It is replaced by a tombstone on every node that has it.</p>',
       confirmLabel:"Delete", danger:true}).then((yes) => {
         if(yes) api("/api/chat/delete", "POST", {conv:sel, mid}).then(poll);
       });
   }else if(action === "react"){ openEmoji(mid); }
+}
+// In the page, not through `prompt()`: a browser dialog cannot be styled, and a
+// browser that has decided this page asks too often simply stops showing them —
+// which would make editing quietly do nothing.
+function editMessage(mid, rec){
+  const conv = sel;
+  confirmAction({
+    title:"Edit this message",
+    confirmLabel:"Save",
+    body:'<label class="field"><span class="sr-only">Message</span>' +
+      '<textarea id="edit-text" rows="3" class="mono"></textarea></label>',
+  }).then((agreed) => {
+    const box = $("edit-text");
+    const text = box ? box.value.trim() : "";
+    if(!agreed || !text || text === (rec.text || "")) return;
+    api("/api/chat/edit", "POST", {conv, mid, text}).then(poll).catch(() => {
+      toast("That edit was not saved", "danger");
+    });
+  });
+  const box = $("edit-text");
+  if(box){ box.value = rec.text || ""; box.focus(); }
 }
 function openEmoji(mid){
   const pop = $("emoji-pop");
@@ -989,7 +1028,8 @@ function resizeImage(file, size){
       URL.revokeObjectURL(url);
       res(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
     };
-    img.onerror = rej; img.src = url;
+    img.onerror = (error) => { URL.revokeObjectURL(url); rej(error); };
+    img.src = url;
   });
 }
 async function saveProfile(){

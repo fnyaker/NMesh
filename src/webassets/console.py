@@ -923,6 +923,10 @@ $("logout").addEventListener("click", async () => {
 
 // ---- polling ---------------------------------------------------------------
 function onRoute(section, sub){
+  // Leaving the panel that opened it stops the camera: a scanner still running
+  // behind a hidden section is a light on somebody's phone with nothing on
+  // screen to explain it.
+  if(section !== "network" || sub !== "join") stopScan();
   if(section === "network" && sub === "peers") refreshPeers();
   if(section === "network" && sub === "reach") loadTransportOptions();
   if(section === "settings" && sub === "appearance") paintPrefs();
@@ -1034,9 +1038,17 @@ function paintMetrics(state){
     ["CPU", load.cpu_percent == null ? "—" : Math.round(load.cpu_percent) + "%", ""],
     ["Memory", fmtBytes(load.rss_bytes), ""],
   ];
-  $("metrics").innerHTML = cards.map(([label, value, tone]) =>
-    '<div class="stat ' + tone + '"><span class="v">' + esc(value) +
-    '</span><span class="k">' + esc(label) + "</span></div>").join("");
+  // The cards are the shape; the numbers are written into them. Rewriting the
+  // markup every two seconds replaced eight elements that had not changed —
+  // losing any text selected in them, and the element under a click about to
+  // land.
+  const values = {};
+  cards.forEach(([label, value]) => { values["metric:" + label] = String(value); });
+  paintLive("metrics", cards.map(([label]) => label).join("|"),
+    () => cards.map(([label, , tone]) =>
+      '<div class="stat ' + tone + '"><span class="v" data-v="metric:' + esc(label) +
+      '"></span><span class="k">' + esc(label) + "</span></div>").join(""),
+    values);
   $("rate-now").textContent = fmtRate(state._rates.inbound) + " in · " +
     fmtRate(state._rates.outbound) + " out";
 }
@@ -1449,7 +1461,6 @@ $("graph").addEventListener("click", (event) => {
   const node = event.target.closest && event.target.closest("[data-node-id]");
   if(node){ openNode(node.dataset.nodeId); return; }
   // Clicking the card itself is the obvious way to ask for a bigger one.
-  // Clicking the map itself is the obvious way to ask for a bigger one.
   $("map-open").click();
 });
 $("graph").addEventListener("keydown", (event) => {
@@ -1740,12 +1751,15 @@ function paintReach(state){
   TRANSPORT_LIVE = byScheme;
   $("dyn-toggle").textContent = "Dynamic addressing: " + (state.dynamic_address ? "on" : "off");
   paintBalance(state);
-  $("addressing").innerHTML = [
+  const address = [
     ["Advertised", (state.advertised || []).join("\n") || "None"],
     ["Local IPs", (state.local_ips || []).join(", ") || "None"],
     ["Schemes", (state.transports || []).join(", ") || "None"],
-  ].map(([key, value]) => "<dt>" + esc(key) + '</dt><dd class="mono pre">' +
-    esc(value) + "</dd>").join("");
+  ];
+  paintLive("addressing", "addressing",
+    () => address.map(([key]) => "<dt>" + esc(key) + '</dt><dd class="mono pre" data-v="addr:' +
+      esc(key) + '"></dd>').join(""),
+    Object.fromEntries(address.map(([key, value]) => ["addr:" + key, value])));
   paintTransportLive(state);
   paintRefusals(state);
 }
@@ -1789,12 +1803,12 @@ function paintBalance(state){
     slider.value = state.transport_balance == null ? 50 : state.transport_balance;
   showBalance(Number(slider.value));
   const order = state.transport_preference || [];
-  $("balance-order").innerHTML = order.length
+  setHTML("balance-order", order.length
     ? "Tried in this order, all else equal: " + order.map((entry) =>
         '<span class="chip">' + esc(entry.scheme) +
         '<span class="muted">' + (entry.priority > 0 ? "+" : "") +
         esc(entry.priority) + "</span></span>").join(" ")
-    : "";
+    : "");
 }
 function showBalance(value){
   $("balance-value").textContent = value === 0 ? "Latency only"
@@ -2068,27 +2082,30 @@ function paintTransportLive(state){
       ? Math.round(live.rtt.reduce((a, b) => a + b, 0) / live.rtt.length * 10) / 10 : null;
     const mine = listening.filter((uri) => uri.split("://")[0] === scheme);
     const links = info.links || 0;
-    block.querySelector("[data-summary]").innerHTML =
+    setHTML(block.querySelector("[data-summary]"),
       badge(plural(links, "link"), links ? "accent" : "") + " " +
       badge(plural(mine.length, "listener"), "") +
-      (info.hole_punch ? " " + badge("hole punching", "ok") : "");
-    block.querySelector("[data-stats]").innerHTML = [
+      (info.hole_punch ? " " + badge("hole punching", "ok") : ""));
+    setHTML(block.querySelector("[data-stats]"), [
       ["Links", links],
       ["Latency", rtt == null ? "—" : rtt + " ms"],
       ["Carried", fmtBytes(live.bytes)],
       ["Ports", (info.ports || []).length ? info.ports.join(", ") : "—"],
     ].map(([key, value]) => '<div class="stat sm"><span class="v">' + esc(value) +
-      '</span><span class="k">' + esc(key) + "</span></div>").join("");
+      '</span><span class="k">' + esc(key) + "</span></div>").join(""));
     const facts = SCHEME_FACTS[scheme];
     setHTML(block.querySelector("[data-facts]"), facts
       ? facts(state).map(([key, value]) => "<dt>" + esc(key) + "</dt><dd>" +
           esc(value) + "</dd>").join("") : "");
-    block.querySelector("[data-listeners]").innerHTML = mine.length ? mine.map((uri) =>
+    // These chips carry a button each: rebuilt on the cadence, "remove this
+    // listener" was a button that could be replaced between the press and the
+    // click.
+    setHTML(block.querySelector("[data-listeners]"), mine.length ? mine.map((uri) =>
       '<span class="chip">' + esc(uri) + '<button class="icon sm" data-remove-listener="' +
       esc(uri) + '" aria-label="Remove listener ' + esc(uri) + '">' + icon("close") +
     "</button></span>").join("")
       : '<span class="small muted">Nothing bound — this node cannot be dialled over ' +
-        esc(scheme) + ".</span>";
+        esc(scheme) + ".</span>");
     if(scheme !== "udp") return;
     const on = details.some((item) => item.hole_punch);
     const port = block.querySelector("[data-udp-port]");
@@ -2133,12 +2150,15 @@ async function applyTransport(scheme, button){
 // ---- apps ------------------------------------------------------------------
 function paintApps(state){
   const apps = state.apps || [];
-  $("builtin-apps").innerHTML = apps.length ? apps.map(appTile).join("")
-    : emptyHTML("No built-in app", "This build ships without optional applications.");
+  // `setHTML`, not `innerHTML`: this runs on the cadence, and a tile rewritten
+  // when nothing about the app changed takes its own buttons with it — the one
+  // being pressed included.
+  setHTML("builtin-apps", apps.length ? apps.map(appTile).join("")
+    : emptyHTML("No built-in app", "This build ships without optional applications."));
   const links = apps.filter((app) => app.running !== false && app.installed)
     .map((app) => '<a href="' + esc(app.path) + '">' + esc(app.name) + "</a>").join("");
-  $("app-links").innerHTML = links;
-  $("more-apps").innerHTML = links ? '<div class="sep"></div>' + links : "";
+  setHTML("app-links", links);
+  setHTML("more-apps", links ? '<div class="sep"></div>' + links : "");
 }
 function appTile(app){
   const known = typeof app.enabled === "boolean";
@@ -2751,13 +2771,13 @@ function paintTrace(data){
       (status.running ? " · " + Math.round(status.seconds_left) + "s left" : "")
     : (status.running ? "Recording — nothing seen yet." : "Not recording."));
   const rows = summary.rows || [];
-  $("trace-summary").innerHTML = rows.length ? rows.map((row) =>
+  setHTML("trace-summary", rows.length ? rows.map((row) =>
     "<tr><td>" + (row.direction === "in" ? "← " : "→ ") + esc(row.type) + "</td>" +
     '<td class="num">' + esc(row.packets) + "</td>" +
     '<td class="num">' + esc(fmtBytes(row.bytes)) + "</td>" +
     '<td class="num">' + esc(fmtRate(row.bytes_per_second)) + "</td></tr>").join("")
     : spanRow(4, emptyHTML("Nothing recorded",
-        "Start a recording to see which message types this node exchanges."));
+        "Start a recording to see which message types this node exchanges.")));
 }
 async function loadTrace(){
   try{
@@ -2927,6 +2947,8 @@ CONTEXT.subscribe(() => {
   // are the ones an operator is about to press.
   NODEVIEW.apps = {};
   stopTracePolling();
+  // A camera is not something to leave running behind a hidden panel.
+  stopScan();
   ["active", "known", "catalog", "installed"].forEach((kind) => {
     PAGES[kind].offset = 0; PAGES[kind].query = "";
     LINKS_OPEN[kind] && LINKS_OPEN[kind].clear();

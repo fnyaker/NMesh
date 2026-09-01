@@ -98,6 +98,58 @@ def test_the_terminal_reads_back_what_a_shell_writes(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# The shared layer is what every page repaints through. Two of its contracts are
+# invisible until they break, and when they break they break quietly — a page
+# that still works, but replaces what it did not change, or wires itself twice.
+
+def test_set_html_compares_what_the_element_would_hold():
+    """`innerHTML` hands back what the browser *serialised*, not the string we
+    built: `esc()` writes `&#39;` where the serialiser writes `'`. Comparing the
+    two made setHTML a no-op only for markup with no apostrophe in it — which is
+    almost none of the copy here — so it quietly became `innerHTML` and replaced
+    live nodes twice a second."""
+    source = webassets.ui.JS
+    body = source.split("function setHTML(")[1].split("\nfunction ")[0]
+    assert "HTML_PROBE" in body, "the candidate has to be parsed before it is compared"
+    assert "element.innerHTML === wanted" in body
+    assert "element.innerHTML === html" not in body
+
+
+@pytest.mark.parametrize("mount,guard", [
+    ("function mountShell(", "SHELL_MOUNTED"),
+    ("  mount(job){", "this.mounted"),
+    ("  start(onChange){", "this.started"),
+])
+def test_the_shared_mounts_are_idempotent(mount, guard):
+    """An app calls these from the function that runs after signing in — which
+    runs again when a session is lost and taken up again. Without a guard every
+    listener is registered twice: the theme button toggles twice and looks dead,
+    the palette moves two rows per arrow press, a subtab routes twice."""
+    source = webassets.ui.JS
+    body = source.split(mount)[1][:1200]
+    assert guard in body, f"{mount.strip()} can be called twice; it needs a guard"
+
+
+def test_no_page_paints_a_live_container_with_raw_innerhtml():
+    """A repaint on the cadence goes through `setHTML` or `paintLive`, so it
+    leaves alone what has not changed. Assigning `innerHTML` on a timer replaces
+    the element under the reader's finger — and its buttons, and any text they
+    had selected."""
+    from src.webassets import console, fleet
+    live = [
+        (console.CONSOLE_PAGE_JS, "metrics"),        # every tick
+        (console.CONSOLE_PAGE_JS, "addressing"),
+        (console.CONSOLE_PAGE_JS, "builtin-apps"),
+        (console.CONSOLE_PAGE_JS, "app-links"),
+        (console.CONSOLE_PAGE_JS, "balance-order"),
+        (console.CONSOLE_PAGE_JS, "trace-summary"),
+        (fleet.FLEET_PAGE_JS, "notif-list"),         # every poll
+    ]
+    for source, element in live:
+        assert f'$("{element}").innerHTML =' not in source, \
+            f"{element} is repainted on a timer: paint it through setHTML/paintLive"
+
+
 def test_the_terminal_never_renders_unescaped_markup():
     """The output comes from a remote machine: it is written into the DOM as
     innerHTML, so escaping is not cosmetic."""
