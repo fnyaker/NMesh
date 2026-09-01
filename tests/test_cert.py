@@ -280,3 +280,86 @@ class TestStoreBounds:
         store.add(root.issue_cert(subject_id, subject.dsa_public_key))
         chain = store.get_chain_to_root(subject_id)
         assert chain and store.verify_chain(chain) == root_id
+
+
+class TestTheBoundNeverCostsUsOurOwnChain:
+    """A store full of strangers must not cost us the certificates that prove
+    who we are.
+
+    The bound evicts the subject nobody has mentioned for longest, and pinned
+    the roots and ourselves. It did not pin what joins the two: the issuer that
+    invited us, and its issuer, and so on up. Evict one of those and the chain
+    we present stops short of a root — every peer refuses it, in silence,
+    because a chain that does not reach a trusted anchor is exactly what a
+    forged one looks like. Nothing errors; the node simply stops being able to
+    connect to anything, for good."""
+
+    def _fleet(self, depth: int):
+        """A chain `depth` issuers long: root invites A, A invites B, …"""
+        root = CryptoIdentity()
+        root_id = NodeID.from_public_key(root.dsa_public_key)
+        certs = [root.issue_cert(root_id, root.dsa_public_key)]
+        issuer, issuer_id = root, root_id
+        line = [root_id]
+        for _ in range(depth):
+            member = CryptoIdentity()
+            member_id = NodeID.from_public_key(member.dsa_public_key)
+            certs.append(issuer.issue_cert(member_id, member.dsa_public_key))
+            issuer, issuer_id = member, member_id
+            line.append(member_id)
+        return root_id, line, certs, issuer
+
+    def _fill(self, store, count):
+        """Certificates for `count` strangers, each its own self-signed root."""
+        for _ in range(count):
+            stranger = CryptoIdentity()
+            sid = NodeID.from_public_key(stranger.dsa_public_key)
+            store.add(stranger.issue_cert(sid, stranger.dsa_public_key))
+
+    def test_an_intermediate_is_never_evicted(self):
+        root_id, line, certs, _issuer = self._fleet(2)
+        own_id = line[-1]
+        store = CertStore(own_id, max_subjects=6)
+        store.add_root(root_id)
+        store.add_all(certs)
+        assert store.get_chain_to_root(own_id) is not None
+        self._fill(store, 20)          # far past the bound
+        chain = store.get_chain_to_root(own_id)
+        assert chain is not None
+        assert chain[-1].subject_id == root_id
+
+    def test_the_chain_still_verifies_after_the_store_fills(self):
+        """The only test that matters to a peer: it has to accept what we send."""
+        root_id, line, certs, _issuer = self._fleet(2)
+        own_id = line[-1]
+        store = CertStore(own_id, max_subjects=6)
+        store.add_root(root_id)
+        store.add_all(certs)
+        self._fill(store, 20)
+        far_end = CertStore(NodeID(b"\x09" * 20))
+        far_end.add_root(root_id)
+        assert far_end.verify_chain(store.get_chain_to_root(own_id)) == root_id
+
+    def test_a_strangers_certificates_are_still_evicted(self):
+        """Pinning what we need must not turn the bound off."""
+        root_id, line, certs, _issuer = self._fleet(1)
+        store = CertStore(line[-1], max_subjects=4)
+        store.add_root(root_id)
+        store.add_all(certs)
+        self._fill(store, 30)
+        assert len(store._certs) <= 4
+
+    def test_our_own_certificate_survives_a_run_of_new_ones(self):
+        """Re-joining issues a fresh certificate for us each time. The per-
+        subject bound must drop one of those, never the one in use."""
+        root_id, line, certs, issuer = self._fleet(1)
+        own_id = line[-1]
+        store = CertStore(own_id, max_per_subject=3)
+        store.add_root(root_id)
+        store.add_all(certs)
+        in_use = store.get_chain_to_root(own_id)[0]
+        for _ in range(10):
+            spare = CryptoIdentity()
+            store.add(spare.issue_cert(own_id, certs[-1].subject_pub))
+        assert in_use.signature in {c.signature for c in store._certs[own_id.raw]}
+        assert len(store._certs[own_id.raw]) <= 3
