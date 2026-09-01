@@ -425,6 +425,5 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 ### Long term
 - **Signing GitHub releases too** (or dropping that route once a node can always
   reach a publisher it trusts on the mesh).
-- A trust score per node + revocation on betrayal.
-- Persisting the trust/cert table on disk.
+- A trust score per node, fed by what each app judges abusive.
 - meshnet-daemon: embeds the library, listens on a socket, multi-client.

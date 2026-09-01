@@ -135,6 +135,67 @@ a neighbour a year on) close it:
   countdown, issuer, anchor, chain length. A deadline an operator can act on
   rather than a fault they diagnose afterwards.
 
+## Revocation: taking a membership back (`revocation.py`)
+
+Expiry is the slow way out of a network. It is far too slow for the case this
+exists for — a key that leaked this morning — and until it existed there was no
+fast way at all: once a certificate was signed nothing in the tree could undo
+it, and a compromised node stayed a full member until the following year.
+
+A revocation is one signed sentence: **"I, the issuer, no longer vouch for this
+subject, as of this moment."** Domain `nmesh-revocation-v1`.
+
+- **Only the issuer may say it.** That is not a new authority, it is the one it
+  already exercised by signing; and it needs no arbiter, because the signature
+  *is* the claim and the issuer id derives from the key that made it. Nobody can
+  revoke anybody else's members — which is exactly what stops this being a
+  primitive for cutting nodes off the network. A revocation signed by a stranger
+  names a pair we hold nothing for and voids nothing.
+- **It names a moment, not a certificate.** Everything that issuer signed for
+  that subject at or before its timestamp is void. Naming one certificate would
+  leave whichever copy the attacker kept quiet about, and a subject may hold
+  several from one issuer. A certificate issued *after* stands: an issuer that
+  changes its mind signs again, so readmission stays a deliberate act.
+- **A root cannot be revoked this way.** A root's certificate is self-signed, so
+  the only node entitled to revoke it is itself — no use when the point is that
+  it has gone bad, and `parse` refuses a record whose issuer and subject are the
+  same node. Distrusting an anchor is `CertStore.remove_root`, a local decision
+  by whoever runs the node, because there is nobody above a root to appeal to.
+  Our own id is not removable: a node that is not its own root can present
+  nothing at all.
+- **`_usable(cert, now)` is the single predicate** — not expired *and* not
+  revoked — asked by the chain walk, by `verify_chain` and by `add`. One
+  revoked link voids the whole chain, not just its own hop: everything below it
+  was vouched for *through* the node just disowned.
+- **Bounded, pinned, persisted.** Revocations are kept for pairs whose
+  certificates we may never have seen — forgetting one means accepting the
+  certificate it voided next time somebody presents it — so `MAX_REVOCATIONS` is
+  its own bound, and records signed by a **root we trust are pinned** against
+  eviction: otherwise anyone able to mint revocations of their own members could
+  flush the table and bring a revoked node back. They are saved with the store
+  and **re-verified at load**, before the certificates, so `add` refuses what the
+  same file says is void. A revocation that only held while the process happened
+  to be running would be undone by a restart — the one moment a compromised
+  member most wants.
+- **Gossiped like a pseudo claim** (`CERT_REVOKE`, a direct type re-stamped at
+  each hop, rate limited per link, bounded fan-out): passed on only when it told
+  us something new, so the epidemic dies out. A record that does not verify is
+  charged to the peer that sent it (an honest relay verifies before re-sending);
+  one we already knew costs it nothing, because that is the ordinary end of an
+  epidemic. `_schedule_revocation_sync` catches a freshly authenticated peer up,
+  so a node that was offline for the compromise learns of it on reconnecting
+  rather than from the next handshake it wrongly accepts.
+- **Enforced, not merely recorded.** `_enforce_revocation` drops the E2E
+  session, the routing entry and every live link to that node. A revocation that
+  only changed what future handshakes decide has revoked nothing an attacker is
+  currently using — the same judgement as the Fleet app tearing down the shells
+  a withdrawn capability had opened.
+- **Announce before you enforce.** `_announce_revocation` picks the fan-out
+  *synchronously*, then sends in the background. Enforcing tears down every link
+  to the node named, so a list computed when the background task finally ran
+  could be empty: on a node whose only link was that node, the revocation died
+  where it was issued and nobody else ever heard.
+
 There is **no TOFU table**. There used to be one (`trust.py`, `NodeID → DSA
 key`), documented here as a live defence, wired to nothing and imported only by
 its own tests. It could not have helped anywhere it was offered: every identity

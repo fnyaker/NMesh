@@ -24,7 +24,8 @@ is therefore safe to accept from strangers.
 | `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |
-| `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots). |
+| `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots, expiry, revocation). |
+| `revocation.py` | A signed "I no longer vouch for this node", from its issuer and nobody else. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |

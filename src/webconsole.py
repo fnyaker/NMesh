@@ -1307,6 +1307,19 @@ def _make_handler(console: WebConsole):
                 ok = console._call(_wrap(console._node.console_add_root, cert_hex))
                 self._json(200 if ok else 400, {"ok": bool(ok)})
                 return
+            if path == "/api/trust/revoke":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_revoke_member,
+                                         str(data.get("node", "")),
+                                         int(data.get("reason") or 0)))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/untrust":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_remove_root,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
             if path == "/api/ticket":
                 self._handle_ticket(_parse_json(body))
                 return

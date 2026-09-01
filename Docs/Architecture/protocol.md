@@ -87,14 +87,15 @@ receipt for routable types (see the gates).
 | RELEASE_FETCH / _DATA | 0x1F / 0x20 | "send me this release's package from this offset" and a slice in answer — **routable**, so a holder several hops away is reachable |
 | PSEUDO_ANNOUNCE | 0x21 | gossip of a **signed claim** binding a node's chosen name to its id (see [`routing.md`](routing.md)) |
 | CERT_RENEW / _RENEWED | 0x22 / 0x23 | "re-issue the membership you signed for me", and the fresh certificate — **routable**, the issuer is rarely still a neighbour a year on (see [`security.md`](security.md)) |
+| CERT_REVOKE | 0x24 | gossip of a **signed revocation**: an issuer taking back a membership it granted (see [`security.md`](security.md)) |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
   peer and `src_id == the authenticated peer`**. Only what is intrinsically
   per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
-  (`PUNCH_*`, `REACH_PROBE*`), and the three gossip planes `CATALOG_ANNOUNCE` /
-  `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` (re-stamped at every hop during
-  epidemic gossip).
+  (`PUNCH_*`, `REACH_PROBE*`), and the four gossip planes `CATALOG_ANNOUNCE` /
+  `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` / `CERT_REVOKE` (re-stamped at every
+  hop during epidemic gossip).
 - `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
   towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/

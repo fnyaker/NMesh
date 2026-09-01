@@ -4,6 +4,7 @@ import time
 from collections import deque
 from .node_id import NodeID
 from .cert import Certificate
+from . import revocation
 
 
 # Bounds. Certificates arrive from the network — three handlers absorb them
@@ -13,6 +14,13 @@ from .cert import Certificate
 # FIND_NODE: a 28-byte packet buying an unbounded graph walk.
 MAX_SUBJECTS = 4096          # distinct subjects we keep certificates for
 MAX_PER_SUBJECT = 8          # certificates kept for one subject
+# Revocations are kept for issuer/subject pairs whose certificates we may never
+# have seen — that is the whole point, since forgetting one means accepting the
+# certificate it voided the next time somebody presents it. So this bound is
+# separate from the certificates', and revocations signed by a root we trust are
+# pinned: an attacker minting revocations of its own members must not be able to
+# push out the one that matters.
+MAX_REVOCATIONS = 4096
 
 
 def _life(cert) -> float:
@@ -38,7 +46,8 @@ class CertStore:
 
     def __init__(self, own_id: NodeID,
                  max_subjects: int = MAX_SUBJECTS,
-                 max_per_subject: int = MAX_PER_SUBJECT) -> None:
+                 max_per_subject: int = MAX_PER_SUBJECT,
+                 max_revocations: int = MAX_REVOCATIONS) -> None:
         self._own_id = own_id
         # Insertion-ordered, oldest first: eviction takes the subject nobody has
         # mentioned for longest. Roots and every subject our own chain runs
@@ -57,6 +66,12 @@ class CertStore:
         # expires"; a `None` result is only ever undone by an `add`, which
         # clears the cache anyway.
         self._chains: dict[bytes, tuple[list[Certificate] | None, int]] = {}
+        # (issuer_id.raw, subject_id.raw) → {"issued_at", "reason", "record"}.
+        # The raw record is kept so the revocation can be re-gossiped verbatim:
+        # re-signing somebody else's statement is not something we could do, and
+        # a revocation nobody passes on protects only the node that heard it.
+        self._revoked: dict[tuple[bytes, bytes], dict] = {}
+        self._max_revocations = max_revocations
 
     def add_root(self, node_id: NodeID) -> None:
         self._roots.add(node_id.raw)
@@ -65,8 +80,105 @@ class CertStore:
     def is_root(self, node_id: NodeID) -> bool:
         return node_id.raw in self._roots
 
+    def remove_root(self, node_id: NodeID) -> bool:
+        """Stop trusting an anchor. Returns whether it was one.
+
+        The counterpart to a revocation, and the only thing that works on a
+        root: a root's certificate is self-signed, so the one node entitled to
+        revoke it is itself — no use when the point is that it has gone bad.
+        There is nobody above a root to appeal to, so distrusting one is a
+        decision by whoever runs this node and nobody else. Our own id is not
+        removable: a node that is not its own root can no longer present
+        anything at all."""
+        if node_id == self._own_id or node_id.raw not in self._roots:
+            return False
+        self._roots.discard(node_id.raw)
+        self._chains.clear()
+        return True
+
+    def roots(self) -> list[str]:
+        """The anchors this node trusts, as hex. For the console."""
+        return sorted(raw.hex() for raw in self._roots)
+
     def root_count(self) -> int:
         return len(self._roots)
+
+    # -- revocation -------------------------------------------------------
+
+    def revoke(self, record: bytes, verify) -> dict | None:
+        """Absorb a signed revocation. Returns the parsed record if it told us
+        something new, ``None`` if it was invalid, stale or already known.
+
+        "New" is what decides whether the caller re-gossips, so an epidemic dies
+        out instead of circulating for ever — the same shape as a pseudo claim.
+        And like a pseudo claim, a revocation may only move **forward** in time
+        per issuer/subject pair: replaying an older one must not walk back a
+        newer statement by the same issuer."""
+        parsed = revocation.parse(record, verify)
+        if parsed is None:
+            return None
+        key = (parsed["issuer_id"].raw, parsed["subject_id"].raw)
+        held = self._revoked.get(key)
+        if held is not None and parsed["issued_at"] <= held["issued_at"]:
+            return None
+        self._revoked[key] = {"issued_at": parsed["issued_at"],
+                              "reason": parsed["reason"],
+                              "record": bytes(record)}
+        self._chains.clear()
+        self._enforce_revocation_bound()
+        # Drop what it just voided. Filtering them out of every walk would be
+        # enough to be *correct*, but they would go on occupying slots in a
+        # bounded list and being written to disk for ever — the same reason
+        # `prune_expired` exists.
+        voided = [c for c in self._certs.get(parsed["subject_id"].raw, ())
+                  if self.is_revoked(c)]
+        if voided:
+            live = [c for c in self._certs[parsed["subject_id"].raw]
+                    if c not in voided]
+            if live:
+                self._certs[parsed["subject_id"].raw] = live
+            else:
+                del self._certs[parsed["subject_id"].raw]
+        return parsed
+
+    def _enforce_revocation_bound(self) -> None:
+        """Oldest heard goes first, except what a trusted root said.
+
+        Without the exception, anyone able to mint revocations of their own
+        members could flush the table and bring a revoked node back."""
+        while len(self._revoked) > self._max_revocations:
+            victim = next((k for k in self._revoked if k[0] not in self._roots),
+                          None)
+            if victim is None:
+                return          # everything left was said by an anchor we trust
+            del self._revoked[victim]
+
+    def is_revoked(self, cert: Certificate) -> bool:
+        """Has this certificate's issuer taken it back?
+
+        A revocation names a **moment**, not a certificate: everything that
+        issuer signed for that subject at or before it is void. Naming one
+        certificate would leave whichever copy the attacker kept quiet about,
+        and a subject may hold several from one issuer. A certificate issued
+        *after* the revocation stands — an issuer that changes its mind does so
+        by signing again, which keeps readmission a deliberate act."""
+        held = self._revoked.get((cert.issuer_id.raw, cert.subject_id.raw))
+        return held is not None and cert.issued_at <= held["issued_at"]
+
+    def revocation_for(self, subject: NodeID) -> dict | None:
+        """The most recent revocation held against a subject, whoever issued
+        it — what the console shows and what a link check asks."""
+        best = None
+        for (_issuer, subject_raw), held in self._revoked.items():
+            if subject_raw != subject.raw:
+                continue
+            if best is None or held["issued_at"] > best["issued_at"]:
+                best = held
+        return best
+
+    def revocations(self) -> list[bytes]:
+        """Every record we hold, verbatim — for catching a peer up."""
+        return [held["record"] for held in self._revoked.values()]
 
     def certs_for(self, node_id: NodeID) -> list[Certificate]:
         """Every certificate held for one subject, expired ones included. A
@@ -77,7 +189,7 @@ class CertStore:
         # An expired certificate proves nothing and never will again, but it
         # still costs a slot in a bounded list — so a peer replaying old
         # certificates could crowd out the live one for a subject it chose.
-        if cert.is_expired():
+        if cert.is_expired() or self.is_revoked(cert):
             return False
         key = cert.subject_id.raw
         existing = self._certs.setdefault(key, [])
@@ -231,7 +343,7 @@ class CertStore:
                              now: int | None = None) -> list[Certificate] | None:
         now = int(time.time()) if now is None else now
         target_certs = [c for c in self._certs.get(target.raw, ())
-                        if not c.is_expired(now)]
+                        if self._usable(c, now)]
         if not target_certs:
             return None
 
@@ -281,12 +393,19 @@ class CertStore:
 
         return self_anchored
 
+    def _usable(self, cert: Certificate, now: int) -> bool:
+        """Is this certificate worth walking? One predicate, asked everywhere
+        the graph is traversed: an expired or revoked certificate is refused by
+        every `verify_chain` on the network, so a chain built on one is not a
+        weaker answer but a wrong one."""
+        return not cert.is_expired(now) and not self.is_revoked(cert)
+
     def _live(self, key: bytes, now: int) -> list[Certificate]:
-        """The certificates held for one subject that have not expired,
-        longest-lived first — so a walk that stops at the first usable one
-        stops at the best one."""
+        """The certificates held for one subject that are still worth
+        presenting, longest-lived first — so a walk that stops at the first
+        usable one stops at the best one."""
         return sorted((c for c in self._certs.get(key, ())
-                       if not c.is_expired(now)), key=_life, reverse=True)
+                       if self._usable(c, now)), key=_life, reverse=True)
 
     def verify_chain(self, chain: list[Certificate]) -> NodeID | None:
         """
@@ -298,14 +417,18 @@ class CertStore:
           2. Unbroken issuance links.
           3. The last cert is self-signed.
           4. The last cert.subject_id is in roots.
-          5. No expired cert.
+          5. No expired cert, and none its issuer has taken back.
+
+        A revoked link anywhere voids the whole chain, not just the hop it sits
+        on: everything below it was vouched for *through* the node that has just
+        been disowned.
         """
         if not chain:
             return None
 
         now = int(time.time())
         for cert in chain:
-            if cert.is_expired(now):
+            if not self._usable(cert, now):
                 return None
 
         for i in range(len(chain) - 1):
@@ -330,7 +453,9 @@ class CertStore:
         }
         tmp = path + ".tmp"
         with open(tmp, 'w') as f:
-            json.dump({"roots": roots, "certs": certs_json}, f)
+            json.dump({"roots": roots, "certs": certs_json,
+                       "revocations": [held["record"].hex()
+                                       for held in self._revoked.values()]}, f)
         os.replace(tmp, path)
 
     @classmethod
@@ -338,7 +463,13 @@ class CertStore:
         """Read a store back, treating the file as hostile: anything that does
         not parse, or no longer verifies, is skipped rather than raised. Expired
         certificates never make it in — `add` refuses them — so a file does not
-        accumulate corpses across restarts."""
+        accumulate corpses across restarts.
+
+        **Revocations are read before the certificates**, and re-verified like
+        everything else here. A revocation that only took effect while the
+        process happened to be running would be undone by a restart, which is
+        the one moment a compromised member most wants us to have."""
+        from .crypto import verify_signature
         store = cls(own_id)
         try:
             with open(path) as f:
@@ -346,6 +477,11 @@ class CertStore:
             for root_hex in data.get("roots", []):
                 try:
                     store._roots.add(bytes.fromhex(root_hex))
+                except ValueError:
+                    pass
+            for record_hex in data.get("revocations", []):
+                try:
+                    store.revoke(bytes.fromhex(record_hex), verify_signature)
                 except ValueError:
                     pass
             for subject_hex, cert_list in data.get("certs", {}).items():

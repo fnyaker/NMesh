@@ -348,6 +348,28 @@ INDEX_HTML = """<!doctype html>
             <textarea id="cert-out" class="mono" rows="3" readonly></textarea>
             <textarea id="trust-in" class="mono" rows="3" placeholder="Paste a root certificate to trust"></textarea>
             <div class="btn-row"><button id="trust-btn">Trust certificate</button></div>
+            <hr>
+            <h3>Anchors this node trusts</h3>
+            <p class="muted small">Every chain that ends on one of these authenticates. Dropping an
+              anchor is a decision only whoever runs this node can take — a root's certificate is
+              signed by itself, so there is nobody above it to take it back.</p>
+            <div id="roots-list" class="stack"></div>
+            <hr>
+            <h3>Take back a membership</h3>
+            <p class="muted small">Only for a node this one admitted: the statement is signed, so it
+              cannot reach anybody else's members. It travels the mesh, ends the links that node
+              holds here, and every node that hears it stops accepting its chain.</p>
+            <div class="toolbar">
+              <label class="field grow"><span class="sr-only">Node</span>
+                <input id="revoke-node" class="mono" placeholder="Node id" spellcheck="false"></label>
+              <label class="field"><span class="sr-only">Reason</span>
+                <select id="revoke-reason">
+                  <option value="1">Key compromised</option>
+                  <option value="3">Left the network</option>
+                  <option value="2">Superseded</option>
+                  <option value="0">Unspecified</option>
+                </select></label>
+              <button id="revoke-btn" class="danger">Revoke</button></div>
             <p id="manage-status" class="msg"></p>
           </div>
         </details>
@@ -1843,8 +1865,10 @@ function paintTrust(state){
     ["Issued by", trust.issuer ? shortId(trust.issuer) : "—"],
     ["Anchored on", trust.anchor ? shortId(trust.anchor) : "—"],
     ["Chain length", trust.chain_length || 0],
-    ["Trusted roots", trust.roots || 0],
+    ["Trusted anchors", trust.roots || 0],
+    ["Revocations held", trust.revoked || 0],
   ];
+  paintRoots(state);
   paintLive("trust", "trust",
     () => rows.map(([key]) => "<dt>" + esc(key) + '</dt><dd data-v="trust:' +
       esc(key) + '"></dd>').join(""),
@@ -2953,6 +2977,50 @@ $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async
   setMessage("manage-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
+$("revoke-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const node = $("revoke-node").value.trim().toLowerCase();
+  if(!node){ setMessage("manage-status", "A node id is required.", true); return; }
+  if(!await confirmAction({title:"Take back this membership?",
+      body:'<p>Every node that hears this stops accepting that node’s chain, and the links it '
+        + 'holds here end now. Only an invitation can let it back in.</p>'
+        + '<p class="mono small">' + esc(node) + "</p>",
+      confirmLabel:"Revoke", danger:true})) return;
+  const {ok} = await apiJson("/api/trust/revoke", "POST",
+    {node, reason:Number($("revoke-reason").value)});
+  setMessage("manage-status",
+    ok ? "Membership revoked and announced."
+       : "Nothing to revoke — this node did not issue that membership.", !ok);
+  if(ok) $("revoke-node").value = "";
+}));
+// Anchors are rendered from the state snapshot, so the list follows a root
+// adopted by a join without the page having to be told twice.
+function paintRoots(state){
+  const roots = (state.trust || {}).root_ids || [];
+  const host = $("roots-list");
+  if(!host) return;
+  if(!roots.length){
+    host.innerHTML = '<p class="muted small">None yet — this node trusts only itself.</p>';
+    return;
+  }
+  host.innerHTML = roots.map((id) =>
+    '<div class="toolbar"><code class="mono grow">' + esc(shortId(id)) +
+    '</code><button class="danger" data-untrust="' + esc(id) + '">Stop trusting</button></div>'
+  ).join("");
+}
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-untrust]");
+  if(!target) return;
+  withBusy(target, async () => {
+    const node = target.dataset.untrust;
+    if(!await confirmAction({title:"Stop trusting this anchor?",
+        body:'<p>Every membership that chains up to it stops authenticating here, including nodes '
+          + 'you reach through it today. This node only; nothing is announced.</p>'
+          + '<p class="mono small">' + esc(node) + "</p>",
+        confirmLabel:"Stop trusting", danger:true})) return;
+    const {ok} = await apiJson("/api/trust/untrust", "POST", {node});
+    setMessage("manage-status", ok ? "Anchor dropped." : "Not an anchor of this node.", !ok);
+  });
+});
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
   if(!uri || !code){ setMessage("manage-status", "An address and an invite code are required.", true); return; }
