@@ -259,6 +259,17 @@ and a receiver that did would make every accusation self-amplifying. Records
 carry a timestamp and are refused when stale (`MAX_AGE`) or ahead of us
 (`MAX_SKEW`): an old accusation is a replay, not evidence.
 
+**One statement is absorbed once**, and passed on once, keyed on *what it says*
+— accuser, subject, moment — rather than on its bytes. Two things need it. An
+accusation stays valid for an hour, so a record re-gossiped unconditionally
+circulates between neighbours for that whole hour. And ML-DSA signatures are
+randomised, so signing one statement twice gives two different records: a
+byte-wise check would have stopped the relay loop and nothing else, leaving
+re-signing as a way to be counted again — which for a designated witness, whose
+word counts as direct evidence, was an unbounded score from one statement. The
+digest is claimed **after** the signature verifies, never before, so unsigned
+rubbish cannot evict live entries — the same rule as the app-auth nonce cache.
+
 ### What it costs the accused: as little information as possible
 
 `SUSPECT` **tarpits** the link. Not a close: everything it sends is dropped at

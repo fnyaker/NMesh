@@ -30,6 +30,11 @@ def _identity_and_id():
     return identity, NodeID.from_public_key(identity.dsa_public_key)
 
 
+def parsed_at(raw: bytes) -> int:
+    """The moment a record claims, so a test can re-sign the same statement."""
+    return accusation.parse(raw, verify_signature)["issued_at"]
+
+
 def _condemn(node, node_id, times: int = 12) -> str:
     """Report a node until it is held hostile.
 
@@ -360,9 +365,13 @@ class TestPropagation:
         assert node.console_add_witness(accuser_id.raw.hex()) is True
         subject = NodeID.generate()
         try:
-            for _ in range(8):
+            # Distinct moments, because one accuser saying one thing at one
+            # moment counts once however it is re-signed or re-carried.
+            now = int(time.time())
+            for offset in range(8):
                 await self._accuse(node, node._peers[0], accuser, subject,
-                                   severity=accusation.MAX_SEVERITY)
+                                   severity=accusation.MAX_SEVERITY,
+                                   issued_at=now - offset)
             # Eight reports from one node, and it gets there — where two hundred
             # ordinary members could not. That gap is the operator's decision,
             # made once, and it is the only thing that opens it.
@@ -425,6 +434,41 @@ class TestPropagation:
                 _condemn(node, subject)
             await settle(node)
             assert len([p for p in other.sent if p.type == ABUSE_REPORT]) <= 1
+        finally:
+            await node.stop()
+
+    async def test_the_same_record_is_absorbed_once_however_often_it_arrives(self):
+        """Two things at once. An accusation stays valid for an hour, so a
+        record re-gossiped unconditionally circulates between neighbours for
+        that whole hour; and without this a single designated witness's
+        statement, re-signed, was an unbounded score.
+
+        Deduplication is on **what it says**, not on the bytes: ML-DSA
+        signatures are randomised, so signing one statement twice gives two
+        different records and a byte-wise check would have caught the relay loop
+        and nothing else."""
+        node, _link, other = await _node_with_two_peers()
+        accuser, accuser_id = _identity_and_id()
+        node._cert_store.add(node._identity.issue_cert(
+            accuser_id, accuser.dsa_public_key))
+        assert node.console_add_witness(accuser_id.raw.hex()) is True
+        subject = NodeID.generate()
+        raw = accusation.build(subject, accuser.dsa_public_key, accuser.sign,
+                               severity=accusation.MAX_SEVERITY)
+        packet = Packet.create(ABUSE_REPORT, node._peers[0].authenticated_id.raw,
+                               node._id.raw, raw)
+        try:
+            other.sent.clear()
+            for _ in range(30):
+                await node._handle_abuse_report(node._peers[0], packet)
+            # …and the same statement signed afresh is still the same statement.
+            for _ in range(30):
+                await self._accuse(node, node._peers[0], accuser, subject,
+                                   severity=accusation.MAX_SEVERITY,
+                                   issued_at=parsed_at(raw))
+            await settle(node)
+            assert node._reputation.standing(subject) != HOSTILE
+            assert len([p for p in other.sent if p.type == ABUSE_REPORT]) == 1
         finally:
             await node.stop()
 
