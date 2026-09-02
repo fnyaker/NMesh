@@ -262,15 +262,16 @@ INDEX_HTML = """<!doctype html>
             <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
               <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
             <tbody id="abuse-list"></tbody></table></div>
-            <div id="habit-block" hidden>
-              <h3>Habits that changed</h3>
-              <p class="muted small">A node whose traffic suddenly looks like a different machine.
-                Usually that <em>is</em> a different machine — you upgraded it, or changed what it
-                does — and this node cannot tell that apart from a stolen key, so it says so instead
-                of deciding. It is the only signal here that would catch a peer that was already
-                trusted; everything else only catches strangers. Nothing is held against them:
-                confirming just makes what they do now the new normal.</p>
-              <div id="habit-list" class="stack"></div>
+            <div id="notice-block" hidden>
+              <h3>Noticed, not judged</h3>
+              <p class="muted small">Things this node saw and will not decide about, because the
+                honest explanation is usually you: a peer whose traffic suddenly looks like a
+                different machine (you upgraded it), or a member of the network that admitted far
+                more nodes at once than it ever has (you rolled some out). It cannot tell either
+                apart from a stolen key or a minted crowd, so it says so instead of acting.
+                Nothing is held against anyone here: confirming just makes what they do now the
+                new normal.</p>
+              <div id="notice-list" class="stack"></div>
             </div>
             <dl id="behaviour" class="kv"></dl>
           </div>
@@ -1921,7 +1922,7 @@ function paintAbuse(state){
 // nothing to report.
 function paintBehaviour(state){
   const behaviour = state.behaviour || {};
-  paintHabits(behaviour.notices || []);
+  paintNotices(behaviour.notices || []);
   const rules = behaviour.rules || [];
   if(!rules.length) return;
   const rows = rules.map((rule) => [rule.id,
@@ -1933,16 +1934,19 @@ function paintBehaviour(state){
       esc(id) + '"></dd>').join(""),
     Object.fromEntries(rows.map(([id, text]) => ["rule:" + id, text])));
 }
-// A habit change is a question for the operator, not a verdict — so the row
-// offers the only answer this node cannot work out for itself.
-function paintHabits(notices){
-  const host = $("habit-list");
+// A notice is a question for the operator, not a verdict — so the row offers
+// the only answer this node cannot work out for itself. Each row carries what
+// the rule actually saw: two families land here now, and one heading cannot
+// say what both of them mean.
+function paintNotices(notices){
+  const host = $("notice-list");
   if(!host) return;
-  $("habit-block").hidden = notices.length === 0;
+  $("notice-block").hidden = notices.length === 0;
   if(!notices.length) return;
-  setHTML("habit-list", notices.map((notice) =>
-    '<div class="toolbar"><code class="mono grow">' + esc(shortId(notice.node)) +
-    '</code><span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - notice.at)) +
+  setHTML("notice-list", notices.map((notice) =>
+    '<div class="toolbar"><code class="mono">' + esc(shortId(notice.node)) +
+    '</code><span class="muted small grow">' + esc(notice.summary || "") +
+    '</span><span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - notice.at)) +
     '</span><button data-accepted="' + esc(notice.node) + '">That was me</button></div>'
   ).join(""));
 }

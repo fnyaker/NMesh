@@ -357,7 +357,7 @@ counters the links already keep, on the keepalive sweep — the receive loop's
 whole contribution is three integer increments, because a detector that costs
 latency has already done more damage than what it detects.
 
-Four things make it deployable rather than merely clever, and each is structural:
+Five things make it deployable rather than merely clever, and each is structural:
 
 - **A peer is compared to the median of its own transport class.** Absolute
   thresholds are wrong on every deployment but the one they were tuned on, and
@@ -373,11 +373,57 @@ Four things make it deployable rather than merely clever, and each is structural
 - **Every rule states what would make it wrong** (`Rule.wrong_when`), and a test
   asserts it is non-empty: a rule whose honest lookalike cannot be stated is a
   superstition, and this is how that gets caught rather than argued about.
+- **A condition is charged once, not once per sweep** (M5, `RULE_RECHARGE`).
+  Every rule reads a counter that only goes up, so a rule that becomes true
+  stays true — and the sweep runs every twenty seconds against a ledger that
+  halves every hour. Charged per sweep, a rule worth 1.0 settles around **260**
+  against a hostile threshold of 20: "weak" and "strong" described nothing, and
+  D2 — whose own `wrong_when` says it means nothing on its own — would have cut
+  off a quiet consumer in under seven minutes. One charge per subject per rule
+  per half-life makes a permanently firing rule converge on *twice its weight*,
+  and `test_no_single_rule_can_reach_suspect` asserts that this is below the
+  point where anything happens. "No single rule ever bans" stops being a promise
+  and becomes arithmetic.
 
 Live today: **C1** (used a plane it announced it does not speak — only
 expressible because of the capability negotiation, and counted at zero for a
 peer that announced nothing), **D2** (traffic asymmetry against the group),
-**E1** (answers routing queries mostly with itself) and **D5** (below).
+**E1** (answers routing queries mostly with itself), **E2** and **A1** (below),
+and **D5** (below).
+
+**E2 — the peer whose view of the network nobody shares.** A Kademlia round
+already holds several answers to one question, so comparing them costs the
+lookup a set intersection over ids it has in hand and the receive loop nothing
+at all (`MeshNode._note_answer_overlap`). Overlap is measured as a *share* of
+the answer and never as an empty intersection: a peer steering us into a region
+it controls can pad its answer with one id everybody knows, and a test for
+emptiness is cleared by exactly that. Answers smaller than three ids are not
+judged — two honest nodes may name two different closest candidates — and an
+answer that reached us through relays is not charged to the node that signed it,
+because the path handled it too. The honest lookalike, a partitioned mesh,
+answers itself before the disarm has to: a majority that sees a different
+network *is* the median it would be compared against, so nobody is an outlier
+against it.
+
+**A1 — the burst under one signature.** Identities are free; a plausible
+ancestry is not, and the certificate store has always been a graph of who
+vouched for whom. `IssuerBook` keeps, per issuer, a slow average of how many
+subjects it certified that were new to us per sweep, and notices a window far
+beyond that issuer's own rate. Four things decide whether it defends or attacks:
+an issuer is compared to **itself** and never to other issuers (a hobbyist root
+admitting one node a month and a datacentre's admitting thirty a day are both
+correct); joining a network is itself a burst, so an issuer earns the right to
+be judged by being watched over `ISSUER_MATURITY` windows — which is also what
+gives a first-seen issuer no accusation, with no special case for it; a window
+in which an issuer admitted nobody is folded in at zero, or a burst hides behind
+the quiet before it; and it **notifies and never scores**, because the honest
+lookalike is a real deployment rolling out fifty machines on a Tuesday.
+
+An arrival is an `(issuer, subject)` **pair** held in a bounded set until the
+next sweep, and that is where the bound is: a peer that could make us count one
+subject twice — by offering it again after the store's own limits evicted it —
+could otherwise manufacture a burst under any issuer it chose. It can still cost
+that issuer a notice, which is all A1 ever produces.
 
 **D5 — the peer that was already trusted.** Every other rule detects a
 *stranger*. This one detects a compromise of something already accepted, and it
@@ -397,7 +443,10 @@ scores** — the honest lookalike is "the operator upgraded that machine", and
 scoring it would punish somebody for administering their own fleet. The console
 shows the change and offers the one answer this node cannot work out for itself
 (`console_accept_change`, "that was me"), which drops the notice and the history
-behind it so what the peer does now becomes what it is expected to do.
+behind it — profile, issuer rate and the rule's charge alike — so what the peer
+does now becomes what it is expected to do. A1 lands in the same place and
+answers to the same button, which is why the console block says "noticed, not
+judged" rather than naming one of the two.
 
 The catalogue of what else is worth measuring, with the anti-rules that must
 never become signals, is [`behaviour-rules.md`](behaviour-rules.md).

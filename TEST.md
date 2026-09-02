@@ -16,7 +16,7 @@ ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
 hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Around 1600 tests in ~30 seconds.
+Around 2500 tests in ~30 seconds.
 
 ---
 
@@ -112,8 +112,13 @@ tests/
 ├── test_behaviour.py                                  — the detection frame: a
 │     rule that fires on everyone disarms itself, transport classes judged
 │     apart, being new / quiet / unfamiliar are never signals, every rule
-│     states what would make it wrong; and D5, the profile break — the only
-│     signal that catches a stolen key, which notifies rather than scores
+│     states what would make it wrong, and a condition is charged **once** and
+│     not once per sweep — the inequality that makes "no single rule ever bans"
+│     true rather than intended; then D5, the profile break, the only signal
+│     that catches a stolen key; E2, the peer whose view of the network nobody
+│     shares (padding with one famous id does not clear it, a partition says
+│     nothing); and A1, the burst of members under one issuer, compared to that
+│     issuer's own history and never to anybody else's
 ├── test_features.py                                   — capability negotiation:
 │     silence means the classic set, a name we do not know is not an offence,
 │     nothing security-critical is negotiable

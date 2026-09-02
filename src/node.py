@@ -236,7 +236,11 @@ _ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
 # quorum. Above half is the honest line: at half, two families disagree and a
 # human decides; above it, one family decides alone while looking like several.
 _FAMILY_SHARE        = 0.5
-_BEHAVIOUR_NOTICES   = 64       # habit changes held for the operator to read
+_BEHAVIOUR_NOTICES   = 64       # findings held for the operator, never scored
+# Subjects whose arrival under an issuer we remember between two sweeps (rule
+# A1). A bound and not a target: a real window holds a handful, and a peer
+# pushing certificates at us must not be able to grow this one.
+_CERT_ARRIVALS_MAX   = 4096
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -1138,6 +1142,11 @@ class _Peer:
         self.undeclared: int = 0        # messages of a plane it said it lacks
         self.found_entries: int = 0     # routing candidates it has handed us
         self.found_self: int = 0        # …of which it named itself
+        # Rule E2: answers we could hold beside other peers' answers to the
+        # same question, and how many of them shared almost nothing with any of
+        # them. Incremented once per lookup round, never per packet.
+        self.answers_judged: int = 0
+        self.answers_disjoint: int = 0
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         # Handshakes this link has been allowed to make us verify. A joiner
@@ -1437,6 +1446,10 @@ class MeshNode:
         # average survives, and a notice repeated every sweep is one nobody
         # reads.
         self._behaviour_notices: OrderedDict[tuple, dict] = OrderedDict()
+        # (issuer, subject) pairs first seen since the last sweep — rule A1's
+        # only input, and drained by it. A set, so one subject counts once
+        # however many times it is offered.
+        self._cert_arrivals: set[tuple[bytes, bytes]] = set()
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -2930,6 +2943,7 @@ class MeshNode:
                 *[self._kad_query_node(nid, target) for nid in candidates],
                 return_exceptions=True,
             )
+            self._note_answer_overlap(candidates, results)
             for r in results:
                 if isinstance(r, list):
                     for entry in r:
@@ -2942,6 +2956,51 @@ class MeshNode:
                 break
             closest_seen = new_closest
         return sorted(shortlist, key=lambda n: target.distance(n))
+
+    def _note_answer_overlap(self, asked, results) -> None:
+        """Rule E2: whose answer to this question shared almost nothing with
+        anybody else's.
+
+        Only ever asked once a round has already gone out to several peers, so
+        it costs the lookup nothing it was not already doing: the answers are in
+        hand and the comparison is a set intersection over at most a few dozen
+        ids, on the timer of a lookup rather than of a packet.
+
+        Three restrictions, all of them about accusing the right node:
+
+        *An answer of fewer than `MIN_ANSWER_SIZE` ids is not judged.* Two
+        honest nodes may name two different closest candidates, and there is
+        nothing to disagree about yet.
+
+        *Only a peer we hold a direct link to is counted.* An answer that
+        reached us through relays was handled by nodes other than the one that
+        signed it, and charging the far end for what the path did would name
+        whoever is innocent.
+
+        *Overlap is measured as a share, not as emptiness.* A peer steering us
+        into a region it controls can always pad its answer with one id
+        everybody knows, and a test for an empty intersection is cleared by
+        exactly that."""
+        answers = [(node_id, {e.node_id for e in entries})
+                   for node_id, entries in zip(asked, results)
+                   if isinstance(entries, list) and entries]
+        if len(answers) < 2:
+            return          # one answer is not disjoint from anything
+        for index, (node_id, mine) in enumerate(answers):
+            if len(mine) < behaviour.MIN_ANSWER_SIZE:
+                continue    # two nodes may legitimately name two closest ids
+            peer = self._link_to(node_id)
+            if peer is None or peer.authenticated_id is None:
+                continue
+            others: set = set()
+            for other, (_id, theirs) in enumerate(answers):
+                if other != index:
+                    others |= theirs
+            if not others:
+                continue
+            peer.answers_judged += 1
+            if len(mine & others) / len(mine) < behaviour.DISJOINT_OVERLAP:
+                peer.answers_disjoint += 1
 
     async def bootstrap(self) -> None:
         """Kademlia join: advertise own addresses then iteratively populate routing table."""
@@ -4799,10 +4858,33 @@ class MeshNode:
 
     def _cert_add(self, cert: Certificate) -> bool:
         """Take one certificate and mark the store for writing."""
+        self._note_cert_arrival(cert)
         ok = self._cert_store.add(cert)
         if ok:
             self._note_cert_change()
         return ok
+
+    def _note_cert_arrival(self, cert: Certificate) -> None:
+        """Rule A1: one issuer admitted one subject we had never heard of.
+
+        Asked before the store is touched, because "new" means new *to us* and
+        a subject is only new once. One dict lookup and one set add — this sits
+        on the path that absorbs a routing answer, and the whole point of the
+        behavioural layer is that it costs the hot path integers.
+
+        A pair rather than a counter, and that is the bound: a peer that could
+        make us count the same subject twice — by handing it back after the
+        store's own limits evicted it — could manufacture a burst under any
+        issuer it liked. It can still cost the issuer a *notice*, which is all
+        A1 ever produces, and never a sanction."""
+        if cert.subject_id == cert.issuer_id or cert.issuer_id == self._id:
+            return          # a root vouching for itself admits nobody, and we
+                            # already know what we issued ourselves
+        if len(self._cert_arrivals) >= _CERT_ARRIVALS_MAX:
+            return
+        if self._cert_store.knows(cert.subject_id):
+            return
+        self._cert_arrivals.add((cert.issuer_id.raw, cert.subject_id.raw))
 
     def _trust_root(self, node_id: NodeID) -> None:
         """Pin a trust root and mark the store for writing.
@@ -7866,7 +7948,8 @@ class MeshNode:
                                     _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
 
     def _behaviour_sweep(self) -> None:
-        """Judge every authenticated link once, on the timer that already runs.
+        """Judge every authenticated link, and every issuer we watch, once on
+        the timer that already runs.
 
         Never raises: this loop dying would stop the keepalive with it, and a
         detector is not worth a link. Nothing here decides anything — each
@@ -7884,13 +7967,25 @@ class MeshNode:
                     undeclared=peer.undeclared,
                     found_entries=peer.found_entries,
                     found_self=peer.found_self,
+                    answers_judged=peer.answers_judged,
+                    answers_disjoint=peer.answers_disjoint,
                 )
                 for peer in self._peers
                 if peer.authenticated_id is not None and not peer.tarpit_until
             ]
-            if not observations:
-                return
-            self._behaviour.sweep(observations, self._on_behaviour_finding)
+            if observations:
+                self._behaviour.sweep(observations, self._on_behaviour_finding)
+            # Drained whether or not there was anybody to judge, and drained
+            # even when the sweep above found nothing: this is a window, and a
+            # window that is never emptied is a burst spread over the lifetime
+            # of the process — which is no burst at all.
+            arrivals: dict = {}
+            for issuer_raw, _subject_raw in self._cert_arrivals:
+                arrivals[issuer_raw] = arrivals.get(issuer_raw, 0) + 1
+            self._cert_arrivals.clear()
+            self._behaviour.sweep_issuers(
+                {NodeID(issuer): count for issuer, count in arrivals.items()},
+                self._on_behaviour_finding)
         except Exception:
             pass
 
