@@ -7,11 +7,19 @@ worth believing, because both decide whether it deserves to exist at all.
 
 **Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
 **M1** — the self-disarm, first, because it is what makes the rest safe to
-switch on — plus **C1**, **D2** and **E1**. **G2**, **G3** and **G4** live in
-the release path (`MeshNode.may_auto_install`), and the genealogy half of
-**A2/G1** is there too, as the independence test on a quorum
+switch on — plus **C1**, **D2**, **E1** and **D5**. **G2**, **G3** and **G4**
+live in the release path (`MeshNode.may_auto_install`), and the genealogy half
+of **A2/G1** is there too, as the independence test on a quorum
 (`CertStore.ancestors` / `shared_ancestor`). Everything else below is still a
 description.
+
+**D5 added a second response class.** Most rules score, and the ledger decides
+what the scores add up to. D5 can only ever *notify*: its honest lookalike is
+"the operator upgraded that machine", which is the common case by far, and
+scoring it would punish somebody for administering their own fleet. So a rule
+now carries `response` — `SCORE` or `NOTICE` — and a test asserts a notifying
+rule is worth nothing to the ledger, because otherwise the distinction would
+decay into a weight somebody quietly raised.
 
 The frame is the part that matters and it is done: rules are named, weighted,
 compared against the peer group rather than a constant, and hand their findings

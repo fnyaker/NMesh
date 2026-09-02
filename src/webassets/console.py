@@ -262,6 +262,16 @@ INDEX_HTML = """<!doctype html>
             <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
               <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
             <tbody id="abuse-list"></tbody></table></div>
+            <div id="habit-block" hidden>
+              <h3>Habits that changed</h3>
+              <p class="muted small">A node whose traffic suddenly looks like a different machine.
+                Usually that <em>is</em> a different machine — you upgraded it, or changed what it
+                does — and this node cannot tell that apart from a stolen key, so it says so instead
+                of deciding. It is the only signal here that would catch a peer that was already
+                trusted; everything else only catches strangers. Nothing is held against them:
+                confirming just makes what they do now the new normal.</p>
+              <div id="habit-list" class="stack"></div>
+            </div>
             <dl id="behaviour" class="kv"></dl>
           </div>
         </article>
@@ -1910,7 +1920,9 @@ function paintAbuse(state){
 // detector that goes quiet without explaining looks exactly like one with
 // nothing to report.
 function paintBehaviour(state){
-  const rules = ((state.behaviour || {}).rules) || [];
+  const behaviour = state.behaviour || {};
+  paintHabits(behaviour.notices || []);
+  const rules = behaviour.rules || [];
   if(!rules.length) return;
   const rows = rules.map((rule) => [rule.id,
     rule.disarmed ? "disarmed — it fired on most peers, so it is measuring this node"
@@ -1921,7 +1933,28 @@ function paintBehaviour(state){
       esc(id) + '"></dd>').join(""),
     Object.fromEntries(rows.map(([id, text]) => ["rule:" + id, text])));
 }
+// A habit change is a question for the operator, not a verdict — so the row
+// offers the only answer this node cannot work out for itself.
+function paintHabits(notices){
+  const host = $("habit-list");
+  if(!host) return;
+  $("habit-block").hidden = notices.length === 0;
+  if(!notices.length) return;
+  setHTML("habit-list", notices.map((notice) =>
+    '<div class="toolbar"><code class="mono grow">' + esc(shortId(notice.node)) +
+    '</code><span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - notice.at)) +
+    '</span><button data-accepted="' + esc(notice.node) + '">That was me</button></div>'
+  ).join(""));
+}
 document.addEventListener("click", (event) => {
+  const accepted = event.target.closest("[data-accepted]");
+  if(accepted){
+    withBusy(accepted, async () => {
+      await apiJson("/api/trust/accept-change", "POST",
+        {node:accepted.dataset.accepted});
+    });
+    return;
+  }
   const target = event.target.closest("[data-forgive]");
   if(!target) return;
   withBusy(target, async () => {

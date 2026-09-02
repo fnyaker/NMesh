@@ -1314,6 +1314,12 @@ def _make_handler(console: WebConsole):
                                          int(data.get("reason") or 0)))
                 self._json(200 if ok else 400, {"ok": bool(ok)})
                 return
+            if path == "/api/trust/accept-change":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_accept_change,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
             if path == "/api/trust/forgive":
                 data = _parse_json(body) or {}
                 ok = console._call(_wrap(console._node.console_forgive,

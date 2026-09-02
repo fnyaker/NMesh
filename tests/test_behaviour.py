@@ -32,7 +32,7 @@ def _obs(**kwargs):
 
 def _collect(watch, observations):
     found = []
-    watch.sweep(observations, lambda node, weight, rule, summary:
+    watch.sweep(observations, lambda node, weight, rule, summary, response:
                 found.append((node, rule, weight)))
     return found
 
@@ -91,7 +91,7 @@ class TestTheFrame:
         watch = BehaviourWatch()
         reasons = []
         watch.sweep([_obs(undeclared=3)] + [_obs() for _ in range(5)],
-                    lambda node, weight, rule, summary:
+                    lambda node, weight, rule, summary, response:
                         reasons.append((rule, summary)))
         assert reasons and reasons[0][0] == "C1"
         assert "announced" in reasons[0][1]
@@ -101,7 +101,13 @@ class TestTheFrame:
         and this is how that gets caught rather than discussed."""
         for rule in behaviour.RULES:
             assert rule.wrong_when.strip(), rule.id
-            assert rule.weight > 0, rule.id
+            assert rule.response in (behaviour.SCORE, behaviour.NOTICE), rule.id
+            # A scoring rule must be worth something; a notifying one must not
+            # be, because nothing it says ever reaches the ledger.
+            if rule.response == behaviour.SCORE:
+                assert rule.weight > 0, rule.id
+            else:
+                assert rule.weight == 0, rule.id
 
 
 class TestTheAntiRules:
@@ -279,7 +285,188 @@ class TestOnANode:
         try:
             node._behaviour_sweep()
             rules = node.behaviour_status()["rules"]
-            assert {rule["id"] for rule in rules} == {"C1", "D2", "E1"}
+            assert {rule["id"] for rule in rules} == {"C1", "D2", "E1", "D5"}
             assert all(rule["wrong_when"] for rule in rules)
+        finally:
+            await node.stop()
+
+
+# ---------------------------------------------------------------------------
+# D5 — the peer that was already trusted
+# ---------------------------------------------------------------------------
+
+def _settled(book, node_id, *, packets=100, size=500, out=0.5):
+    """Feed one peer a steady diet until it has habits worth comparing."""
+    totals = [0, 0, 0]
+    for _ in range(behaviour.PROFILE_MATURITY + 2):
+        totals[0] += packets
+        totals[1] += packets * size
+        totals[2] += int(packets * size * out)
+        book.observe(_obs(node_id=node_id, packets_in=totals[0],
+                          bytes_in=totals[1], bytes_out=totals[2]))
+    return totals
+
+
+class TestProfileBook:
+    def test_a_peer_with_no_history_is_never_a_break(self):
+        """Being new is the first anti-rule, and a profile is worth exactly its
+        history."""
+        book = behaviour.ProfileBook()
+        node = NodeID.generate()
+        totals = [0, 0, 0]
+        for _ in range(behaviour.PROFILE_MATURITY - 1):
+            totals[0] += 100
+            totals[1] += 50_000
+            totals[2] += 25_000
+            assert book.observe(_obs(node_id=node, packets_in=totals[0],
+                                     bytes_in=totals[1],
+                                     bytes_out=totals[2])) is False
+
+    def test_steady_habits_never_look_like_a_break(self):
+        book = behaviour.ProfileBook()
+        node = NodeID.generate()
+        totals = _settled(book, node)
+        for _ in range(10):
+            totals[0] += 100
+            totals[1] += 50_000
+            totals[2] += 25_000
+            assert book.observe(_obs(node_id=node, packets_in=totals[0],
+                                     bytes_in=totals[1],
+                                     bytes_out=totals[2])) is False
+
+    def test_a_different_node_behind_the_same_key_is_seen(self):
+        """The compromise signal. Everything else in this file detects a
+        stranger; this detects the peer that was already trusted, because an
+        attacker who steals a key gets the identity and not the habits."""
+        book = behaviour.ProfileBook()
+        node = NodeID.generate()
+        totals = _settled(book, node)
+        totals[0] += 5000            # rate, size and direction all move
+        totals[1] += 5000 * 20
+        totals[2] += 5000 * 20 * 40
+        assert book.observe(_obs(node_id=node, packets_in=totals[0],
+                                 bytes_in=totals[1],
+                                 bytes_out=totals[2])) is True
+
+    def test_one_dimension_moving_is_weather(self):
+        """A rule that fired on a busy afternoon would fire on everybody."""
+        book = behaviour.ProfileBook()
+        node = NodeID.generate()
+        totals = _settled(book, node)
+        totals[0] += 100             # same rate and shape…
+        totals[1] += 50_000
+        totals[2] += 25_000 * 20     # …only the direction moved
+        assert book.observe(_obs(node_id=node, packets_in=totals[0],
+                                 bytes_in=totals[1],
+                                 bytes_out=totals[2])) is False
+
+    def test_an_idle_sweep_teaches_nothing(self):
+        """A peer that said nothing has not changed its habits — it has been
+        quiet, and counting that as a change would fire on every idle link."""
+        book = behaviour.ProfileBook()
+        node = NodeID.generate()
+        totals = _settled(book, node)
+        for _ in range(5):
+            assert book.observe(_obs(node_id=node, packets_in=totals[0],
+                                     bytes_in=totals[1],
+                                     bytes_out=totals[2])) is False
+
+    def test_going_quiet_counts_as_much_as_flooding(self):
+        """A compromise can look like either, so `_moved` is symmetric."""
+        assert behaviour._moved(1.0, 100.0) is True
+        assert behaviour._moved(100.0, 1.0) is True
+        assert behaviour._moved(0.0, 100.0) is True
+        assert behaviour._moved(0.0, 0.0) is False
+
+    def test_the_book_is_bounded_and_keeps_the_established(self):
+        """Backwards from the usual eviction, deliberately: a profile is worth
+        its history, so throwing away the longest-observed peer to make room
+        for one seen once would spend the only thing this rule has."""
+        book = behaviour.ProfileBook(max_profiles=4)
+        veteran = NodeID.generate()
+        _settled(book, veteran)
+        for _ in range(50):
+            book.observe(_obs(node_id=NodeID.generate()))
+        assert len(book) <= 4
+        assert book.mature() == 1
+
+
+class TestD5Notifies:
+    async def test_a_habit_change_notifies_and_never_scores(self):
+        """The honest lookalike is "the operator upgraded that machine", which
+        is the common case by far — scoring it would punish somebody for
+        administering their own fleet."""
+        node, _first, _second = await _two_peers()
+        peer = node._peers[0]
+        try:
+            for _ in range(behaviour.PROFILE_MATURITY + 2):
+                peer.counters.pkts_in += 100
+                peer.counters.bytes_in += 50_000
+                peer.counters.bytes_out += 25_000
+                node._behaviour_sweep()
+            assert node.behaviour_status()["notices"] == []
+            peer.counters.pkts_in += 5000
+            peer.counters.bytes_in += 5000 * 20
+            peer.counters.bytes_out += 5000 * 20 * 40
+            node._behaviour_sweep()
+            notices = node.behaviour_status()["notices"]
+            assert [n["rule"] for n in notices] == ["D5"]
+            assert notices[0]["node"] == peer.authenticated_id.raw.hex()
+            # …and nothing reached the ledger.
+            assert node._reputation.score(peer.authenticated_id) == 0.0
+        finally:
+            await node.stop()
+
+    async def test_the_notice_is_not_repeated_every_sweep(self):
+        """A peer whose habits changed keeps looking changed for as long as its
+        old average survives, and a notice repeated every twenty seconds is a
+        notice nobody reads."""
+        node, _first, _second = await _two_peers()
+        peer = node._peers[0]
+        try:
+            for _ in range(behaviour.PROFILE_MATURITY + 2):
+                peer.counters.pkts_in += 100
+                peer.counters.bytes_in += 50_000
+                peer.counters.bytes_out += 25_000
+                node._behaviour_sweep()
+            for _ in range(5):
+                peer.counters.pkts_in += 5000
+                peer.counters.bytes_in += 5000 * 20
+                peer.counters.bytes_out += 5000 * 20 * 40
+                node._behaviour_sweep()
+            assert len(node.behaviour_status()["notices"]) == 1
+        finally:
+            await node.stop()
+
+    async def test_the_operator_can_say_it_was_them(self):
+        """There has to be such a button and it has to be local: the whole
+        point of D5 is that it cannot tell a compromise from an upgrade, and
+        the only thing that can is the person who did or did not do it."""
+        node, _first, _second = await _two_peers()
+        peer = node._peers[0]
+        try:
+            for _ in range(behaviour.PROFILE_MATURITY + 2):
+                peer.counters.pkts_in += 100
+                peer.counters.bytes_in += 50_000
+                peer.counters.bytes_out += 25_000
+                node._behaviour_sweep()
+            peer.counters.pkts_in += 5000
+            peer.counters.bytes_in += 5000 * 20
+            peer.counters.bytes_out += 5000 * 20 * 40
+            node._behaviour_sweep()
+            assert node.behaviour_status()["notices"]
+            node_hex = peer.authenticated_id.raw.hex()
+            assert node.console_accept_change(node_hex) is True
+            assert node.behaviour_status()["notices"] == []
+            assert node.console_accept_change(node_hex) is False
+        finally:
+            await node.stop()
+
+    async def test_notices_are_bounded(self):
+        node, _first, _second = await _two_peers()
+        try:
+            for _ in range(200):
+                node._note_behaviour(NodeID.generate(), "D5", "changed")
+            assert len(node.behaviour_status()["notices"]) <= 64
         finally:
             await node.stop()

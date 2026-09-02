@@ -112,7 +112,8 @@ tests/
 ├── test_behaviour.py                                  — the detection frame: a
 │     rule that fires on everyone disarms itself, transport classes judged
 │     apart, being new / quiet / unfamiliar are never signals, every rule
-│     states what would make it wrong
+│     states what would make it wrong; and D5, the profile break — the only
+│     signal that catches a stolen key, which notifies rather than scores
 ├── test_features.py                                   — capability negotiation:
 │     silence means the classic set, a name we do not know is not an offence,
 │     nothing security-critical is negotiable

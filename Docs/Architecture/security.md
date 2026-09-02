@@ -376,10 +376,31 @@ Four things make it deployable rather than merely clever, and each is structural
 
 Live today: **C1** (used a plane it announced it does not speak — only
 expressible because of the capability negotiation, and counted at zero for a
-peer that announced nothing), **D2** (traffic asymmetry against the group) and
-**E1** (answers routing queries mostly with itself). The catalogue of what else
-is worth measuring, with the anti-rules that must never become signals, is
-[`behaviour-rules.md`](behaviour-rules.md).
+peer that announced nothing), **D2** (traffic asymmetry against the group),
+**E1** (answers routing queries mostly with itself) and **D5** (below).
+
+**D5 — the peer that was already trusted.** Every other rule detects a
+*stranger*. This one detects a compromise of something already accepted, and it
+is the only thing in the trust system that can: an attacker who steals a key
+gets the identity and not the habits. `ProfileBook` keeps a slow exponential
+average of three numbers read off counters already kept — packets per sweep,
+bytes out per byte in, mean inbound packet size — and a break needs *two of the
+three* to move together, because one number wandering is weather. Deltas, never
+totals, or the average flattens and stops noticing; an idle sweep teaches
+nothing, because a peer that said nothing has not changed its habits. It is held
+in memory only: a profile restored from disk would be compared against a network
+that moved on while we were away, so the first sweep back would accuse
+everybody.
+
+Its response class is different, and that is the point. D5 **notifies and never
+scores** — the honest lookalike is "the operator upgraded that machine", and
+scoring it would punish somebody for administering their own fleet. The console
+shows the change and offers the one answer this node cannot work out for itself
+(`console_accept_change`, "that was me"), which drops the notice and the history
+behind it so what the peer does now becomes what it is expected to do.
+
+The catalogue of what else is worth measuring, with the anti-rules that must
+never become signals, is [`behaviour-rules.md`](behaviour-rules.md).
 
 `console_forgive` drops everything held against a node. There has to be such a
 thing and it has to be local: every input to this table is a judgement made

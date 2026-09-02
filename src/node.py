@@ -236,6 +236,7 @@ _ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
 # quorum. Above half is the honest line: at half, two families disagree and a
 # human decides; above it, one family decides alone while looking like several.
 _FAMILY_SHARE        = 0.5
+_BEHAVIOUR_NOTICES   = 64       # habit changes held for the operator to read
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -1431,6 +1432,11 @@ class MeshNode:
         # state: the counters live on the links, and a second place for a peer's
         # history would be a second answer.
         self._behaviour = behaviour.BehaviourWatch()
+        # (node id, rule) → what to show the operator. Bounded and
+        # de-duplicated: a habit change stays visible for as long as the old
+        # average survives, and a notice repeated every sweep is one nobody
+        # reads.
+        self._behaviour_notices: OrderedDict[tuple, dict] = OrderedDict()
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -7889,15 +7895,64 @@ class MeshNode:
             pass
 
     def _on_behaviour_finding(self, node_id, weight: float, rule_id: str,
-                              summary: str) -> None:
-        """One rule, one peer. The id travels with the report so an operator
-        reading "reported for C1" can go and read C1 and disagree."""
+                              summary: str, response: str) -> None:
+        """One rule, one peer. The id travels with the finding so an operator
+        reading "reported for C1" can go and read C1 and disagree.
+
+        Two classes, because two rules can be equally true and call for
+        opposite handling. Most score, and the ledger decides what the scores
+        add up to. A profile break only ever *notifies*: its honest lookalike
+        is "the operator upgraded that machine", and scoring it would punish
+        them for administering their own fleet."""
+        if response == behaviour.NOTICE:
+            self._note_behaviour(node_id, rule_id, summary)
+            return
         self.report_abuse(node_id, weight, f"{rule_id}: {summary}",
                           kind=accusation.KIND_UNSPECIFIED)
 
+    def _note_behaviour(self, node_id, rule_id: str, summary: str) -> None:
+        """Put something in front of the operator, once per node per rule.
+
+        Bounded and de-duplicated: a peer whose habits changed will keep
+        looking changed for as long as its old average survives, and a notice
+        repeated every twenty seconds is a notice nobody reads."""
+        key = (node_id.raw, rule_id)
+        if key in self._behaviour_notices:
+            self._behaviour_notices.move_to_end(key)
+            return
+        self._behaviour_notices[key] = {
+            "node": node_id.raw.hex(), "rule": rule_id,
+            "summary": summary, "at": time.time(),
+        }
+        while len(self._behaviour_notices) > _BEHAVIOUR_NOTICES:
+            self._behaviour_notices.popitem(last=False)
+        self._note_change("links")
+
+    def console_accept_change(self, node_hex: str) -> bool:
+        """"That change was me." Drops the notice and the history behind it, so
+        what the node does now becomes what it is expected to do.
+
+        There has to be such a button and it has to be local: the whole point
+        of D5 is that it cannot tell a compromise from an upgrade, and the only
+        thing in the world that can is the person who did or did not perform
+        the upgrade."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        dropped = [key for key in self._behaviour_notices
+                   if key[0] == node_id.raw]
+        for key in dropped:
+            del self._behaviour_notices[key]
+        self._behaviour.forget(node_id)
+        if dropped:
+            self._note_change("links")
+        return bool(dropped)
+
     def behaviour_status(self) -> dict:
         """What each rule did on the last sweep, for the console."""
-        return self._behaviour.status()
+        return {**self._behaviour.status(),
+                "notices": list(reversed(self._behaviour_notices.values()))}
 
     def _is_accusation_seen(self, parsed: dict) -> bool:
         """Have we already absorbed this statement? Records it if not.
