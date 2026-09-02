@@ -8,6 +8,8 @@ worth believing, because both decide whether it deserves to exist at all.
 **Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
 **M1** — the self-disarm, first, because it is what makes the rest safe to
 switch on — plus **M5**, **A1**, **C1**, **D2**, **E1**, **E2** and **D5**.
+**F3** (volume and retaliation) and **F4** live in the ledger
+(`reputation.py`), where the genealogy decides how many voices a crowd is.
 **G2**, **G3** and **G4** live in the release path
 (`MeshNode.may_auto_install`), and the genealogy half of **A2/G1** is there too,
 as the independence test on a quorum (`CertStore.ancestors` /
@@ -489,6 +491,24 @@ these are its three tells: volume, targeting, and retaliation.
 **Cost** sweep · **Confidence** strong — and the response is to **stop counting
 its accusations**, which is already how the ledger treats a suspect accuser.
 
+**Two of the three are built** (`reputation.py`). *Volume*: an accuser naming
+more than `MAX_SUBJECTS` distinct nodes inside a half-life has its later
+accusations recorded at nothing. The record is kept — reach is counted from it,
+so discarding it would let the flooder fall back under the limit on its next
+accusation and be believed again — and surfaced nowhere, because a table listing
+everybody a flooder named is a console the flooder gets to write.
+*Retaliation*: two nodes accusing each other stop counting in **both**
+directions, symmetrically. Treating the later accusation as the retaliation
+would make accusing first a shield, which is strictly better than behaving; and
+a voice already discounted cannot cancel one that counts, or counter-accusing
+everybody would silence the mesh one honest node at a time. Neither ever touches
+the direct bucket: accusing us back may not erase what we watched happen.
+*Targeting* (accusing only within one subtree) is still a description.
+
+**Neither is an accusation against the accuser**, and that is not a detail: a
+node that talks too much is not a hostile node, and the response is that it
+stops being counted — nothing more. Doctrine M3.
+
 ### F4 — Choreographed accusations
 **Signal** Several nodes emitting near-identical accusations inside a tight
 window, especially when they share an ancestor (→ A5).
@@ -496,6 +516,27 @@ window, especially when they share an ancestor (→ A5).
 200 nodes" attack seen from the receiving end.
 **Cost** sweep · **Confidence** strong, as a *group* signal that discounts the
 whole group's testimony.
+
+**Built, and structurally rather than as a rule.** The window and the
+near-identical wording turned out to be the weak half of the signal — an
+attacker can space its accusations out and vary them freely, and neither costs
+it anything. What it cannot vary for free is *where its identities came from*.
+So the ledger counts an accusation per **family** — whoever heads that node's
+line just below a root (`CertStore.family`) — and takes the most any one family
+says rather than the sum: two hundred identities minted under one issuer are one
+voice. No window, nothing to time, nothing to evade.
+
+It also fixed what this entry was aimed at from the other end. The rumour cap
+sat just below `hostile`, which read as "a swarm may make us wary but never cut
+anyone off" — except that being wary *is* the tarpit. Eight certified identities
+were enough to get any node dropped in silence. The cap is now below **suspect**,
+so hearsay brings a node to the edge of the judgement and what we saw ourselves
+carries it over.
+
+A root's direct children are each their own family, and deliberately: they are
+as independent as the network can make them, and grouping everybody in a flat
+network under its one root would turn hearsay off altogether rather than make it
+honest.
 
 ### F5 — Testimony about the unreachable
 **Signal** Reporting abuse from a node it has no plausible path to.
