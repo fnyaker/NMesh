@@ -232,6 +232,16 @@ tests/
 │     (an absurd measurement does not flatten the real differences), the order
 │     shown to the operator being the one that dials, and a transport manager that
 │     cannot answer stopping nothing
+├── test_reconnect.py                                  — getting a node back the
+│     moment its link dies: an established link lost under us is chased from half
+│     a second, doubling to a ceiling and giving up at the end of its window; a
+│     link we cut ourselves (tarpitted, or cut for noise) is never dialled back;
+│     losing one of two media to a node is not losing the node; our own evidence
+│     decides and the crowd's does not; a second loss extends the window without
+│     re-arming the backoff; and the bounds hold — the book, the dials in flight,
+│     the wait between passes — with a dial that raises not killing the loop.
+│     Plus the two ways a chase must end early: a membership its issuer took
+│     back, and a node the operator forgot
 ├── test_ui_contrast.py                                — colour tokens: the WCAG
 │     ratio of every text/background pair in both themes, and no page redefining
 │     a token of the system
