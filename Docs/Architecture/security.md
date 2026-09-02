@@ -301,12 +301,72 @@ equal:
   (`console_add_witness`; the natural entries are the Fleet operators this node
   is enrolled with, which is already where "I trust this specific node" lives).
   Only this bucket can reach hostile.
-- **rumour** — ordinary members of our own network accusing. Counted as **how
-  many distinct members**, never how many times: repeating an accusation is free
-  to send, so counting repetitions would price the mechanism at whatever the
-  loudest node feels like paying. Hard-capped strictly below the hostile
-  threshold, so a swarm can make this node wary and can never make it cut anyone
-  off.
+- **rumour** — ordinary members of our own network accusing. Never counted as
+  how many *times*: repeating an accusation is free to send, so counting
+  repetitions would price the mechanism at whatever the loudest node feels like
+  paying. And no longer counted as how many *members* either — see below.
+  Hard-capped strictly below the **suspect** threshold, so a swarm can bring a
+  node to the edge of the judgement and never past it.
+
+#### Two things that had to change here, and both were live
+
+**The cap was one threshold too high.** It sat just below `hostile`, which read
+as "a swarm can make this node wary but never cut anyone off" — except that
+being wary is what `SUSPECT` *is*: a suspect peer has its traffic dropped and
+its link tarpitted, in silence, which from where it is standing is being cut
+off. Hearsay alone was decisive, and the price was eight certified identities.
+The cap is now `suspect` minus a margin: what we saw ourselves is what carries a
+node over, which is what "hearsay is never authority" was always supposed to
+mean. Rumour still matters, and matters a great deal — it is what makes a single
+first-hand observation enough.
+
+**A verdict reached on hearsay was re-broadcast under our own key.** The
+announcement fired on any crossing of the *combined* standing, so a crowd
+convinced us, we signed their conclusion ourselves, and our neighbours counted
+us as one more independent accuser. One node's opinion became as many as there
+are hops, which is exactly the number the receiver is trying to count.
+Announcing is now decided on the **direct** bucket alone and on its own
+crossing (`MeshNode._maybe_announce`, which only `report_abuse` calls, so
+nothing on the accusation-handling path can reach it). A designated witness is
+believed here as if we had seen it — its word goes in the direct bucket — and is
+still not repeated under our name: our neighbours did not designate it, and to
+them our signature would be a second independent observation of one event.
+
+#### How many voices a crowd is
+
+"How many distinct members" was still the wrong count. It prices a voice at one
+certified identity, and one compromised issuer mints those in an afternoon. What
+makes several observations worth more than one is that they are **independent**,
+so that is what is counted: the most any one *family* says, summed over the
+families. A family is whoever heads that node's line just below a root
+(`CertStore.family`) — the same independence test the release quorum already
+applies to signers, asked here of witnesses. Two hundred identities minted under
+one issuer are one voice.
+
+Not because they are guilty of anything: a family is not a conspiracy. They are
+simply not two hundred independent observations, and independence is the only
+thing that made counting them mean anything. A node certified **directly** by a
+root is its own family — a root's direct children are as independent as the
+network can make them, each having cost the root a membership — and inserting
+levels buys nothing, because the family is read at the top of the line and not
+at the bottom.
+
+Two more ways a voice stops counting, both from the catalogue's F3:
+
+- **Volume.** An accuser that names more than `MAX_SUBJECTS` distinct nodes
+  inside a half-life is not testifying, it is voting. Its later accusations are
+  recorded at nothing — recorded, because the record is what its own reach is
+  counted from, and discarding it would let the flooder drop back under the
+  limit on its next accusation and be believed again. Shown nowhere, because a
+  table listing everybody a flooder named is a console it gets to write.
+- **Retaliation.** Two nodes accusing each other tell us that one of them is
+  lying and nothing about which, so **both** directions stop counting.
+  Symmetric on purpose: treating the later one as the retaliation would make
+  accusing first a shield, which is strictly better than behaving. And a voice
+  already discounted cannot cancel one that counts, or counter-accusing
+  everybody would silence the mesh one honest node at a time. The direct bucket
+  is untouched by any of it — accusing us back may not erase what we watched
+  happen.
 
 An accuser we already hold as suspect counts for nothing. A node we cannot place
 in our own network counts for nothing. An accusation naming *us* is neither

@@ -213,6 +213,28 @@ class CertStore:
         best = max(counts, key=counts.get)
         return best, counts[best]
 
+    def family(self, node_id: NodeID) -> bytes | None:
+        """The identity at the top of this node's line, just below a root.
+
+        `ancestors` answers "who vouched for this node, at any depth"; this
+        answers "whose *side* is it on", which is the question you have to ask
+        before counting several nodes as several voices. A node certified
+        directly by a root is its own family — a root's direct children are as
+        independent as the network can make them. Anything deeper belongs to
+        the identity the root vouched for, however many hands the membership
+        passed through afterwards: an attacker who inserts levels to look like
+        several families still had to get *one* membership from the root, and
+        that is the cost the grouping is meant to charge.
+
+        ``None`` for a node whose chain we cannot walk, which the callers read
+        as "no family" and never as "the same family as somebody else"."""
+        chain = self.get_chain_to_root(node_id)
+        if not chain:
+            return None
+        # The chain runs node → … → root, so the certificate before the root's
+        # own is the one the root issued: its subject heads the line.
+        return chain[-2].subject_id.raw if len(chain) >= 2 else node_id.raw
+
     def certs_for(self, node_id: NodeID) -> list[Certificate]:
         """Every certificate held for one subject, expired ones included. A
         copy: the caller must not be able to edit the store by iterating it."""
