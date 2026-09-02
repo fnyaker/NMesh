@@ -7,11 +7,11 @@ worth believing, because both decide whether it deserves to exist at all.
 
 **Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
 **M1** — the self-disarm, first, because it is what makes the rest safe to
-switch on — plus **C1**, **D2**, **E1** and **D5**. **G2**, **G3** and **G4**
-live in the release path (`MeshNode.may_auto_install`), and the genealogy half
-of **A2/G1** is there too, as the independence test on a quorum
-(`CertStore.ancestors` / `shared_ancestor`). Everything else below is still a
-description.
+switch on — plus **M5**, **A1**, **C1**, **D2**, **E1**, **E2** and **D5**.
+**G2**, **G3** and **G4** live in the release path
+(`MeshNode.may_auto_install`), and the genealogy half of **A2/G1** is there too,
+as the independence test on a quorum (`CertStore.ancestors` /
+`shared_ancestor`). Everything else below is still a description.
 
 **D5 added a second response class.** Most rules score, and the ledger decides
 what the scores add up to. D5 can only ever *notify*: its honest lookalike is
@@ -20,6 +20,15 @@ scoring it would punish somebody for administering their own fleet. So a rule
 now carries `response` — `SCORE` or `NOTICE` — and a test asserts a notifying
 rule is worth nothing to the ledger, because otherwise the distinction would
 decay into a weight somebody quietly raised.
+
+**M5 made the weights mean something.** Every rule here reads a *cumulative*
+counter, so a rule that becomes true tends to stay true — and the sweep runs
+every twenty seconds against a ledger that halves every hour. Charging per
+sweep, the weakest rule in the file reached the hostile threshold on its own in
+under seven minutes, whatever its weight said and whatever its `wrong_when`
+promised. A rule now charges one subject at most once per half-life, so a rule
+that never stops firing converges on *twice its weight* — and doctrine 3 stops
+being a promise and becomes an inequality a test asserts.
 
 The frame is the part that matters and it is done: rules are named, weighted,
 compared against the peer group rather than a constant, and hand their findings
@@ -35,7 +44,7 @@ capability negotiation), [`routing.md`](routing.md), [`protocol.md`](protocol.md
 
 ## The doctrine
 
-Six rules about the rules. Every entry below is subordinate to these, and an
+Seven rules about the rules. Every entry below is subordinate to these, and an
 entry that cannot satisfy them does not get implemented however clever it is.
 
 **1. A rule may never cost latency.** The hot path increments integer counters
@@ -65,7 +74,15 @@ an afterthought.
 fires on most of our peers at once, it is measuring **us** — our clock, our
 config, our uplink. Such a rule must disarm itself (see M1).
 
-**6. Every rule is falsifiable and named.** It states what would make it wrong,
+**6. A condition is charged once, not once per sweep.** A rule fires on a
+state, and every state here is read off a counter that only goes up: once true
+it stays true long after the peer stopped. The sweep, meanwhile, runs on the
+keepalive. Charge per sweep and the *repetition* decides, not the weight — see
+M5. Charge once per half-life and a permanent condition settles at twice the
+rule's weight, which is the arithmetic that makes doctrine 3 true rather than
+intended.
+
+**7. Every rule is falsifiable and named.** It states what would make it wrong,
 and its identifier travels with the report, so an operator reading "cut off for
 G2" can go and read G2 and disagree.
 
@@ -98,6 +115,29 @@ attack *is*, and the certificate chain is where it is visible.
 the signal is the *deviation from that issuer's own history*, and a first-seen
 issuer has no history, so it gets no accusation — only a lower weight in
 anything else it says.
+
+**Built** (`IssuerBook`, and `MeshNode._note_cert_arrival` on the counting
+side). Four things decide whether it defends or attacks:
+
+- **An issuer is compared to itself, never to other issuers.** A hobbyist's
+  root admitting one node a month and a datacentre's admitting thirty a day are
+  both correct, and the constant that separates them does not exist.
+- **Joining a network is itself a burst** — on the first day everything is new
+  to us — so an issuer earns the right to be judged by being watched over
+  `ISSUER_MATURITY` windows. The same maturity requirement is what gives a
+  first-seen issuer the answer above, without a special case for it.
+- **A window in which an issuer admitted nobody is folded in at zero.** Leave
+  those windows out and a burst hides behind the quiet that preceded it.
+- **It notifies; it never scores.** The honest lookalike is provisioning day,
+  and a rule that sanctions an operator for administering their own fleet is
+  worse than no rule. The console offers "that was me", which drops the notice
+  and the issuer's rate with it.
+
+The counting side is where the bound is. An arrival is an `(issuer, subject)`
+*pair*, held in a bounded set until the next sweep: a peer that could make us
+count one subject twice — by offering it again after the store's own limits
+evicted it — could otherwise manufacture a burst under any issuer it chose. It
+can still cost that issuer a **notice**, which is all A1 ever produces.
 
 ### A2 — Correlated novelty: new subtree, new signing key
 **Signal** A group of nodes sharing a common ancestor (at any depth) appears,
@@ -148,6 +188,12 @@ keeps presenting chains through a dead issuer is either not updating or hoping.
 back-dated chain, or a badly broken clock.
 **Cost** O(1) at parse · **Confidence** strong
 **Wrong when** Clocks. Which is why it is a *strict* inversion beyond skew.
+**Correction, from building the renewal:** an issuer whose own certificate was
+renewed carries an `issued_at` **later** than the certificates it signed before
+the renewal, and every one of those chains is honest. So the inversion this
+entry describes is a normal state of a healthy network, and refusing on it would
+have cut off every node whose issuer renewed. It survives only as something to
+*count*, weakly, and never as a verification rule.
 
 ### A8 — Certificate older than first sighting, by a lot
 **Signal** A node presenting a year-old certificate that nobody in our view has
@@ -367,6 +413,35 @@ steering us into a region it controls (also interesting).
 **Wrong when** A genuinely partitioned mesh — which this same signal is the best
 way to *notice*.
 
+**Built.** Counted in `MeshNode._note_answer_overlap`, on the lookup's own timer
+and never on a packet's: a Kademlia round already holds several answers to one
+question, so the comparison costs a set intersection over ids we have in hand.
+Three things it does not do:
+
+- **It does not test for an empty intersection.** A peer steering us into a
+  region it controls can pad its answer with one id everybody knows, and
+  emptiness is cleared by exactly that. Overlap is a *share* of the answer.
+- **It does not judge a small answer.** Two honest nodes may name two different
+  closest candidates; below `MIN_ANSWER_SIZE` there is nothing to disagree
+  about.
+- **It does not charge a node we only reach through relays.** That answer was
+  handled by nodes other than the one that signed it, and charging the far end
+  for what the path did names whoever is innocent.
+
+The partition case answers itself, and before the disarm has to: a majority
+that sees a different network *is* the median it is compared against, so nobody
+is an outlier against it. The rule does not fire and then get silenced — it does
+not fire.
+
+**Known limit, stated rather than hidden:** two colluding answerers in one round
+can make an *honest* third look disjoint, because "everybody else" is whoever
+else we happened to ask. There is no fix inside this rule — independence between
+answerers is exactly what we do not know — so the answer is the one M5 gives
+every rule here: the framed peer accrues at most twice E2's weight however long
+it goes on, which is not enough to reach any threshold on its own. A signal that
+can be gamed and cannot sanction alone is worth having; the same signal able to
+sanction alone would be a weapon handed to whoever can afford two identities.
+
 ### E3 — Omniscience
 **Signal** A peer answering usefully for every region of the keyspace.
 **Why** Real routing tables have shape. A node closest to everything is lying.
@@ -550,6 +625,24 @@ Any score change carries the rule id that caused it, and the console shows it.
 An operator must be able to read why, disagree, and clear it — the ledger
 already has `console_forgive` for exactly this.
 
+### M5 — A condition is charged once, not once per sweep
+**Signal** The same rule firing on the same subject, sweep after sweep, over a
+state that has not changed.
+**Why** Doctrine 6, and the arithmetic behind doctrine 3. Every rule in this
+catalogue reads a counter that only goes up, so a rule that becomes true stays
+true; the sweep runs every twenty seconds and the ledger halves every hour.
+Charged per sweep, a rule worth 1.0 settles at about **260** against a hostile
+threshold of 20 — so "weak" and "strong" described nothing and every rule
+sanctioned alone within minutes. D2, whose entry says in as many words that it
+means nothing without something else, would have cut off a quiet consumer.
+**Response** One charge per subject per rule per half-life. A permanently
+firing rule then converges on twice its weight, and
+`test_no_single_rule_can_reach_suspect` asserts that this is below the point
+where anything happens — so corroboration between rules is what crosses a
+threshold, which is what the catalogue said all along.
+**Note** The charge is dropped when an operator answers a notice ("that was
+me"), or the next finding would be dated from before they answered.
+
 ---
 
 ## The anti-rules
@@ -581,7 +674,7 @@ real mistake in some real system.
 |---|---|
 | weak, alone | Counted. Nothing else. Visible in the console. |
 | moderate, alone | Counted, and the peer is deprioritised for routing — we prefer others, we do not refuse it. |
-| strong, alone | Score contribution large enough to matter, still below the tarpit on its own. |
+| strong, alone | Score contribution large enough to matter — and, by M5, still below the tarpit on its own however long it goes on. |
 | corroborated (M2) | May cross `abuse_suspect` → the peer stops being served, silently. |
 | first-hand + corroborated | May cross `abuse_hostile` → refused a fresh link. |
 | any group signal | Discounts the group's *testimony* only (M3). |

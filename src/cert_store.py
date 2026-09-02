@@ -218,6 +218,14 @@ class CertStore:
         copy: the caller must not be able to edit the store by iterating it."""
         return list(self._certs.get(node_id.raw, ()))
 
+    def knows(self, node_id: NodeID) -> bool:
+        """Do we hold any certificate at all for this subject?
+
+        Asked on the path that absorbs a routing answer (rule A1 counts
+        subjects that are new *to us*), so it answers from the index and never
+        builds the list `certs_for` returns."""
+        return bool(self._certs.get(node_id.raw))
+
     def add(self, cert: Certificate) -> bool:
         # An expired certificate proves nothing and never will again, but it
         # still costs a slot in a bounded list — so a peer replaying old

@@ -470,7 +470,7 @@ works on a machine with no internet.
 | POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
 | POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
 | POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node |
-| POST    | `/api/trust/accept-change` | `{node}` — "that habit change was me": drops the notice and the history behind it |
+| POST    | `/api/trust/accept-change` | `{node}` — "that was me": clears one entry of *Noticed, not judged* and the history behind it (the peer's profile, an issuer's admission rate, and the rule's charge) |
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
