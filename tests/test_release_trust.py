@@ -21,6 +21,7 @@ from src import core_release as cr
 from src import publisher_key
 from src.crypto import CryptoError, CryptoIdentity
 from src.node import MeshNode
+from src.node_id import NodeID
 from tests.conftest import make_manager
 
 
@@ -238,6 +239,66 @@ class TestUnattendedInstall:
                                    _package(tmp_path, "b",
                                             marker="# not the code\n"))
             assert node.may_auto_install(entry)[0] is False
+        finally:
+            await node.stop()
+
+    async def test_a_quorum_of_one_family_is_not_a_quorum(self, tmp_path):
+        """The rule this whole pass was asked for. A group of nodes signed —
+        not necessarily directly, but through however many hands — by one
+        issuer, turning up together behind a release, is one party wearing
+        several hats however many of them an operator ticked.
+
+        Not an accusation: a family is not a conspiracy. The answer is to stop
+        counting them as several."""
+        node = _node(quorum=3)
+        package = _package(tmp_path, "a")
+        try:
+            # An issuer that is not a root of ours, and three publishers it
+            # certified — the "x fils" case: they chain to us through it.
+            parent = CryptoIdentity()
+            parent_id = NodeID.from_public_key(parent.dsa_public_key)
+            node._cert_store.add(node._identity.issue_cert(
+                parent_id, parent.dsa_public_key))
+            entry = None
+            for _ in range(3):
+                child = CryptoIdentity()
+                child_id = NodeID.from_public_key(child.dsa_public_key)
+                node._cert_store.add(parent.issue_cert(child_id,
+                                                       child.dsa_public_key))
+                node.trust_publisher(child.dsa_public_key.hex(), endorsed=True)
+                entry = await self._catalogued(node, child, package)
+            allowed, why = node.may_auto_install(entry)
+            assert allowed is False
+            assert "one issuer" in why and "independent" in why
+        finally:
+            await node.stop()
+
+    async def test_unrelated_signers_are_a_quorum(self):
+        """The reassuring half: genuinely unrelated keys share nothing below a
+        root, and a network's root is shared by everybody in it — so a common
+        root must never read as a common family."""
+        node = _node(quorum=2)
+        try:
+            first, second = CryptoIdentity(), CryptoIdentity()
+            ids = []
+            for identity in (first, second):
+                node_id = NodeID.from_public_key(identity.dsa_public_key)
+                node._cert_store.add(node._identity.issue_cert(
+                    node_id, identity.dsa_public_key))
+                ids.append(cr.publisher_id(identity.dsa_public_key).hex())
+            assert node._publisher_family(ids) == (None, 0)
+        finally:
+            await node.stop()
+
+    async def test_a_signer_we_cannot_place_counts_as_independent(self):
+        """Erring towards installing rather than refusing on a suspicion we
+        cannot support: a publisher key that does not publish from its node
+        simply is not in our graph, and saying so beats guessing."""
+        node = _node(quorum=2)
+        try:
+            strangers = [CryptoIdentity() for _ in range(3)]
+            ids = [cr.publisher_id(s.dsa_public_key).hex() for s in strangers]
+            assert node._publisher_family(ids) == (None, 0)
         finally:
             await node.stop()
 
