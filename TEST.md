@@ -124,9 +124,14 @@ tests/
 │     nothing security-critical is negotiable
 ├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
 │     the rate gate, the signed accusation, and above all what hearsay may NOT
-│     do — no crowd of members can get a node cut off, an accusation naming us
-│     is neither acted on nor relayed, the accused is never told; plus an app's
-│     own per-kind allowances, reported once per window and never fatally
+│     do — hearsay alone sanctions nobody (it stops below the *first* threshold,
+│     not the last, because being "wary" already means dropping the peer's
+│     traffic), a verdict a crowd reached for us is never re-broadcast under our
+│     own key, one line of descent is one voice however many identities it
+│     holds, an accuser that names everybody stops being counted, two nodes
+│     accusing each other cancel both ways, an accusation naming us is neither
+│     acted on nor relayed, the accused is never told; plus an app's own
+│     per-kind allowances, reported once per window and never fatally
 ├── test_cert_renewal.py / test_revocation.py          — certificate lifecycle:
 │     expiry, pruning, the renewal exchange and its refusals; and taking a
 │     membership back: who may say it, what it may not reach, a root that can

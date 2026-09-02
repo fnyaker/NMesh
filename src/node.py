@@ -7853,25 +7853,51 @@ class MeshNode:
         if node_id == self._id:
             return OK
         before = self._reputation.standing(node_id)
+        was_ours = self._reputation.direct_standing(node_id)
         after = self._reputation.note(node_id, weight, reason)
         if after != before:
             self._on_standing_changed(node_id, after, reason, kind)
+        # Speaking is decided on its own evidence and its own crossing. It has
+        # to be separate: the combined standing may have crossed on hearsay
+        # long before we had seen anything, and a node whose own eyes caught up
+        # afterwards would then never say so.
+        self._maybe_announce(node_id, was_ours, kind)
         return after
 
     def _on_standing_changed(self, node_id: NodeID, standing: str,
                              reason: str, kind: int) -> None:
-        """A node has just crossed a threshold. Act, quietly."""
+        """A node has just crossed a threshold. Act, quietly — and locally.
+
+        Nothing here talks to the network, and that is the point: this is
+        reached from the accusation handler too, so anything it broadcast would
+        be somebody else's opinion going out under our signature. See
+        `_maybe_announce`, which only `report_abuse` calls."""
         if standing == OK:
             return
         for peer in [p for p in self._peers if p.authenticated_id == node_id]:
             self._tarpit(peer)
         self._note_change("links")
-        # Say so to the network — but only about what we saw ourselves. Passing
-        # on somebody else's accusation as if it were ours would turn one node's
-        # opinion into as many as there are relays, which is exactly the number
-        # the receiver is trying to count.
+
+    def _maybe_announce(self, node_id: NodeID, was: str, kind: int) -> None:
+        """Tell the network, if what *we* saw has just crossed a threshold.
+
+        Only what we saw ourselves, and that is a question about the evidence
+        rather than about which code path we arrived on. The announcement used
+        to fire on any crossing of the *combined* standing, hearsay included: a
+        crowd convinced us, we re-signed their verdict under our own key, and
+        our neighbours counted us as one more independent accuser. One node's
+        opinion became as many as there are hops — which is exactly the number
+        the receiver is trying to count.
+
+        A witness the operator designated is believed here as if we had seen it
+        (its word goes in the direct bucket), and is still not repeated under
+        our name: our neighbours did not designate it, and to them our signature
+        would be a second independent observation of one event."""
+        direct = self._reputation.direct_standing(node_id)
+        if direct == OK or direct == was:
+            return
         if self._gossip_abuse and self._claim_accusation(node_id):
-            self._announce_accusation(node_id, standing, kind)
+            self._announce_accusation(node_id, direct, kind)
 
     def _tarpit(self, peer: '_Peer') -> None:
         """Stop serving a link, without telling it.
@@ -8115,8 +8141,14 @@ class MeshNode:
             after = self._reputation.note(subject, parsed["severity"],
                                           f"{label} (witness)".strip())
         elif self._cert_store.get_chain_to_root(accuser) is not None:
-            after = self._reputation.note_accusation(subject, accuser, 1.0,
-                                                     label)
+            # Grouped by whose line it belongs to, not counted one by one. The
+            # rumour bucket is capped below the hostile threshold but not below
+            # the *suspect* one, so eight certified identities — an afternoon's
+            # work for one compromised issuer — used to be enough to make this
+            # node stop serving anybody they agreed to name.
+            after = self._reputation.note_accusation(
+                subject, accuser, 1.0, label,
+                family=self._cert_store.family(accuser))
         else:
             return          # a stranger's opinion of a stranger is not evidence
         if after != before:

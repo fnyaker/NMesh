@@ -16,18 +16,27 @@ import time
 import pytest
 
 from src import accusation
+from src.cert_store import CertStore
 from src.crypto import CryptoIdentity, SessionKey, verify_signature
 from src.node import ABUSE_REPORT, PONG, PING, _encode_addresses
 from src.node_id import NodeID
 from src.packet import Packet
-from src.reputation import (DEFAULT_SUSPECT, HOSTILE, MAX_WEIGHT, OK, SUSPECT,
-                            RateGate, Reputation)
+from src.reputation import (DEFAULT_SUSPECT, HOSTILE, MAX_SUBJECTS, MAX_WEIGHT,
+                            OK, SUSPECT, RateGate, Reputation)
 from tests.conftest import FakeTransport, make_node, settle
 
 
 def _identity_and_id():
     identity = CryptoIdentity()
     return identity, NodeID.from_public_key(identity.dsa_public_key)
+
+
+def _said_by(packet):
+    """Who signed the accusation a packet carries. Relaying somebody else's
+    record and signing one of our own are the same message type and the same
+    `src_id`; only the statement inside says which of the two happened."""
+    parsed = accusation.parse(packet.payload, verify_signature)
+    return None if parsed is None else parsed["accuser_id"]
 
 
 def parsed_at(raw: bytes) -> int:
@@ -87,24 +96,35 @@ class TestTheLedger:
             rep.note_accusation(node, accuser)
         assert rep.score(node) <= 1.0
 
-    def test_hearsay_alone_never_reaches_hostile(self):
-        """The whole safety property. A swarm of accusers may make this node
-        wary; it may never make it cut anybody off."""
+    def test_hearsay_alone_sanctions_nobody(self):
+        """The whole safety property, and it used to be written one threshold
+        too high.
+
+        The cap sat just below `hostile`, which read as "a swarm may make this
+        node wary but never cut anybody off" — except that being wary is what
+        SUSPECT *is*: a suspect peer has its traffic dropped and its link
+        tarpitted, in silence, which from where it is standing is being cut off.
+        Hearsay alone was decisive, and eight certified identities were the
+        whole price. It must not reach the first threshold either."""
         rep = Reputation(suspect=3.0, hostile=6.0)
         node = NodeID.generate()
         for _ in range(500):
             rep.note_accusation(node, NodeID.generate())
-        assert rep.standing(node) == SUSPECT
-        assert rep.standing(node) != HOSTILE
+        assert rep.standing(node) == OK
+        assert rep.score(node) < DEFAULT_SUSPECT
 
-    def test_hearsay_plus_something_we_saw_does_reach_hostile(self):
+    def test_hearsay_carries_what_we_saw_over_and_never_carries_it_alone(self):
         """The cap is not a wall against evidence, only against evidence we did
-        not gather. A crowd corroborating what we saw ourselves counts."""
+        not gather. What we saw ourselves must be enough to be worth acting on
+        *and* short of the threshold; then the crowd is what makes the
+        difference, which is the whole use for it."""
         rep = Reputation(suspect=3.0, hostile=6.0)
-        node = NodeID.generate()
+        node, alone = NodeID.generate(), NodeID.generate()
+        rep.note(alone, MAX_WEIGHT)
+        assert rep.standing(alone) != HOSTILE      # our eyes alone: not enough
         for _ in range(20):
             rep.note_accusation(node, NodeID.generate())
-        rep.note(node, 2.0)
+        rep.note(node, MAX_WEIGHT)
         assert rep.standing(node) == HOSTILE
 
     def test_nobody_accuses_themselves(self):
@@ -532,5 +552,314 @@ class TestConsoleSurface:
         node, _link, _other = await _node_with_two_peers()
         try:
             assert node.console_add_witness(node._id.raw.hex()) is False
+        finally:
+            await node.stop()
+
+
+class TestHowManyVoicesACrowdIs:
+    """Counting distinct members was still the wrong count.
+
+    "How many members say it" prices a voice at one certified identity, and one
+    compromised issuer mints those in an afternoon. What makes several
+    observations worth more than one is that they are *independent*, so that is
+    what gets counted: the most one family says, summed over the families.
+    Never an accusation against the family — a family is not a conspiracy.
+    """
+
+    def test_a_line_of_descent_is_one_voice_however_many_it_holds(self):
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        one_line = b"issuer" + b"\x00" * 14
+        for _ in range(200):
+            rep.note_accusation(node, NodeID.generate(), family=one_line)
+        assert rep.voices(node) == 1
+        assert rep.score(node) <= 1.0
+
+    def test_unrelated_accusers_still_add_up(self):
+        """The grouping must not quietly turn hearsay off: independent
+        observations are the one thing it was ever for."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        for index in range(5):
+            rep.note_accusation(node, NodeID.generate(),
+                                family=bytes([index]) * 20)
+        assert rep.voices(node) == 5
+        assert rep.score(node) > 1.0
+
+    def test_an_accuser_we_cannot_place_is_its_own_family(self):
+        """Erring the other way would file every stranger in one crowd
+        together, which is a claim about them we have no basis for."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        for _ in range(4):
+            rep.note_accusation(node, NodeID.generate(), family=None)
+        assert rep.voices(node) == 4
+
+    def test_the_console_is_told_both_numbers(self):
+        """How many nodes said it and how many voices that came to are two
+        different claims, and the score only agrees with one of them."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        for _ in range(6):
+            rep.note_accusation(node, NodeID.generate(), family=b"x" * 20)
+        rep.note(node, 1.0)
+        row = next(row for row in rep.rows() if row["node"] == node.raw.hex())
+        assert (row["accusers"], row["voices"]) == (6, 1)
+
+
+class TestAVoiceThatStopsCounting:
+    def test_an_accuser_that_names_everybody_is_voting_not_testifying(self):
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        accuser = NodeID.generate()
+        for _ in range(MAX_SUBJECTS):
+            rep.note_accusation(NodeID.generate(), accuser)
+        late = NodeID.generate()
+        rep.note_accusation(late, accuser)
+        assert rep.score(late) == 0.0
+
+    def test_what_it_names_is_never_put_in_front_of_the_operator(self):
+        """The record is kept, and shown nowhere. A table listing everybody a
+        flooder named is a console the flooder gets to write."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        accuser = NodeID.generate()
+        for _ in range(MAX_SUBJECTS):
+            rep.note_accusation(NodeID.generate(), accuser)
+        late = NodeID.generate()
+        rep.note_accusation(late, accuser, reason="flood")
+        assert [row for row in rep.rows(limit=4096)
+                if row["node"] == late.raw.hex()] == []
+
+    def test_the_ratchet_only_turns_one_way(self):
+        """Reach counts what it *said*, not what we credited. Count only the
+        ones we believed and an accuser over the limit would drop back under it
+        on its very next accusation, and be believed again."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        accuser = NodeID.generate()
+        for _ in range(MAX_SUBJECTS * 3):
+            rep.note_accusation(NodeID.generate(), accuser)
+        last = NodeID.generate()
+        rep.note_accusation(last, accuser)
+        assert rep.score(last) == 0.0
+
+    def test_a_node_that_names_a_few_is_believed(self):
+        """The honest lookalike is a node at the centre of a real flood, so the
+        allowance is generous on purpose."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        accuser = NodeID.generate()
+        for _ in range(MAX_SUBJECTS - 1):
+            rep.note_accusation(NodeID.generate(), accuser)
+        subject = NodeID.generate()
+        rep.note_accusation(subject, accuser)
+        assert rep.score(subject) > 0.0
+
+
+class TestTwoNodesAccusingEachOther:
+    def test_a_mutual_accusation_counts_for_neither(self):
+        """One of them is lying and this says nothing about which."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        first, second = NodeID.generate(), NodeID.generate()
+        rep.note_accusation(second, first)
+        assert rep.score(second) > 0.0
+        rep.note_accusation(first, second)
+        assert rep.score(first) == 0.0
+        assert rep.score(second) == 0.0
+
+    def test_accusing_first_is_not_a_shield(self):
+        """Treating the later one as the retaliation would make speaking first
+        strictly better than behaving."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        first, second = NodeID.generate(), NodeID.generate()
+        rep.note_accusation(second, first)
+        rep.note_accusation(first, second)
+        assert (rep.score(first), rep.score(second)) == (0.0, 0.0)
+
+    def test_a_voice_we_do_not_count_cannot_cancel_one_we_do(self):
+        """Otherwise counter-accusing everybody would silence the mesh one
+        honest node at a time, at no cost."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        flooder, honest = NodeID.generate(), NodeID.generate()
+        for _ in range(MAX_SUBJECTS):
+            rep.note_accusation(NodeID.generate(), flooder, now=1.0)
+        rep.note_accusation(flooder, honest, now=1.0)   # the honest one speaks
+        before = rep.score(flooder, now=1.0)
+        rep.note_accusation(honest, flooder, now=1.0)   # …and is accused back
+        assert before > 0.0
+        assert rep.score(flooder, now=1.0) == before
+        assert rep.score(honest, now=1.0) == 0.0
+
+    def test_a_third_party_is_untouched(self):
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        first, second = NodeID.generate(), NodeID.generate()
+        third = NodeID.generate()
+        rep.note_accusation(second, first)
+        rep.note_accusation(first, second)
+        rep.note_accusation(second, third)
+        assert rep.score(second) > 0.0
+
+    def test_what_we_saw_ourselves_survives_a_counter_accusation(self):
+        """The cancellation is about testimony. It may not reach the direct
+        bucket, or accusing us back would be a way to erase what we watched
+        happen."""
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        first, second = NodeID.generate(), NodeID.generate()
+        rep.note(second, MAX_WEIGHT, now=1.0)
+        rep.note_accusation(second, first, now=1.0)
+        rep.note_accusation(first, second, now=1.0)
+        assert rep.score(second, now=1.0) == MAX_WEIGHT
+
+
+class TestHearsayNeverBecomesTestimony:
+    def test_a_standing_we_reached_on_hearsay_is_not_ours_to_repeat(self):
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        for index in range(8):
+            rep.note_accusation(node, NodeID.generate(),
+                                family=bytes([index]) * 20)
+        rep.note(node, 2.9)
+        assert rep.standing(node) != OK          # we act on it locally…
+        assert rep.direct_standing(node) == OK   # …and say nothing about it
+
+    def test_what_we_saw_ourselves_is_ours_to_repeat(self):
+        rep = Reputation(suspect=3.0, hostile=6.0)
+        node = NodeID.generate()
+        rep.note(node, MAX_WEIGHT)
+        assert rep.direct_standing(node) == SUSPECT
+
+
+class TestFamilyOnANode:
+    """The grouping, end to end: who the node decides an accuser's line is."""
+
+    def test_a_root_s_direct_child_is_its_own_family(self):
+        """A root's direct children are as independent as the network can make
+        them: each one cost a membership the root had to issue."""
+        node_identity, node_id = _identity_and_id()
+        store = CertStore(node_id)
+        store.add(node_identity.self_signed_cert())
+        member, member_id = _identity_and_id()
+        store.add(node_identity.issue_cert(member_id, member.dsa_public_key))
+        assert store.family(member_id) == member_id.raw
+
+    def test_a_node_below_an_issuer_belongs_to_that_issuer(self):
+        node_identity, node_id = _identity_and_id()
+        store = CertStore(node_id)
+        store.add(node_identity.self_signed_cert())
+        org, org_id = _identity_and_id()
+        store.add(node_identity.issue_cert(org_id, org.dsa_public_key))
+        member, member_id = _identity_and_id()
+        store.add(org.issue_cert(member_id, member.dsa_public_key))
+        assert store.family(member_id) == org_id.raw
+
+    def test_inserting_levels_does_not_buy_a_second_family(self):
+        """The whole point: an attacker who builds a hierarchy to look like
+        several voices still had to get one membership from the root."""
+        node_identity, node_id = _identity_and_id()
+        store = CertStore(node_id)
+        store.add(node_identity.self_signed_cert())
+        org, org_id = _identity_and_id()
+        store.add(node_identity.issue_cert(org_id, org.dsa_public_key))
+        middle, middle_id = _identity_and_id()
+        store.add(org.issue_cert(middle_id, middle.dsa_public_key))
+        leaf, leaf_id = _identity_and_id()
+        store.add(middle.issue_cert(leaf_id, leaf.dsa_public_key))
+        assert store.family(leaf_id) == org_id.raw
+        assert store.family(middle_id) == org_id.raw
+
+    def test_a_node_we_cannot_place_has_no_family(self):
+        _node_identity, node_id = _identity_and_id()
+        store = CertStore(node_id)
+        assert store.family(NodeID.generate()) is None
+
+
+class TestACrowdOnANode(TestPropagation):
+    async def _member_of(self, node, issuer_identity):
+        accuser, accuser_id = _identity_and_id()
+        node._cert_store.add(issuer_identity.issue_cert(
+            accuser_id, accuser.dsa_public_key))
+        return accuser, accuser_id
+
+    async def test_one_issuer_s_members_are_one_voice(self):
+        """The answer to "I create two hundred malicious nodes", seen from the
+        receiving end. Not an accusation against the issuer: they are simply
+        not two hundred independent observations."""
+        node, _link, _other = await _node_with_two_peers()
+        org, org_id = _identity_and_id()
+        node._cert_store.add(node._identity.issue_cert(
+            org_id, org.dsa_public_key))
+        subject = NodeID.generate()
+        try:
+            for _ in range(4):
+                accuser, _accuser_id = await self._member_of(node, org)
+                await self._accuse(node, node._peers[0], accuser, subject,
+                                   severity=accusation.MAX_SEVERITY)
+            assert node._reputation.voices(subject) == 1
+            assert node._reputation.score(subject) <= 1.0
+        finally:
+            await node.stop()
+
+    async def test_members_of_different_lines_still_count_separately(self):
+        node, _link, _other = await _node_with_two_peers()
+        subject = NodeID.generate()
+        try:
+            for _ in range(3):
+                org, org_id = _identity_and_id()
+                node._cert_store.add(node._identity.issue_cert(
+                    org_id, org.dsa_public_key))
+                accuser, _accuser_id = await self._member_of(node, org)
+                await self._accuse(node, node._peers[0], accuser, subject)
+            assert node._reputation.voices(subject) == 3
+        finally:
+            await node.stop()
+
+
+class TestHearsayIsNotRepeatedAsOurOwn(TestPropagation):
+    async def test_a_verdict_a_crowd_reached_for_us_is_not_broadcast(self):
+        """This was the censorship primitive. A crowd convinced us, we re-signed
+        the verdict under our own key, and our neighbours counted us as one more
+        independent accuser — so one node's opinion became as many as there are
+        hops, which is exactly the number the receiver is trying to count."""
+        node, _link, other = await _node_with_two_peers()
+        subject = NodeID.generate()
+        try:
+            other.sent.clear()
+            for index in range(8):
+                org, org_id = _identity_and_id()
+                node._cert_store.add(node._identity.issue_cert(
+                    org_id, org.dsa_public_key))
+                accuser, accuser_id = _identity_and_id()
+                node._cert_store.add(org.issue_cert(
+                    accuser_id, accuser.dsa_public_key))
+                await self._accuse(node, node._peers[0], accuser, subject,
+                                   severity=accusation.MAX_SEVERITY)
+            # The crowd alone leaves it short of the first threshold…
+            assert node._reputation.standing(subject) == OK
+            # …and what we saw ourselves is what carries it over, and is also
+            # the only thing we are willing to put our own name to.
+            _condemn(node, subject, times=3)
+            assert node._reputation.direct_standing(subject) != OK
+            await settle(node)
+            assert [p for p in other.sent
+                    if p.type == ABUSE_REPORT and _said_by(p) == node._id]
+        finally:
+            await node.stop()
+
+    async def test_nothing_is_said_when_only_the_crowd_says_it(self):
+        node, _link, other = await _node_with_two_peers()
+        subject = NodeID.generate()
+        try:
+            for index in range(8):
+                org, org_id = _identity_and_id()
+                node._cert_store.add(node._identity.issue_cert(
+                    org_id, org.dsa_public_key))
+                accuser, accuser_id = _identity_and_id()
+                node._cert_store.add(org.issue_cert(
+                    accuser_id, accuser.dsa_public_key))
+                await self._accuse(node, node._peers[0], accuser, subject,
+                                   severity=accusation.MAX_SEVERITY)
+            await settle(node)
+            assert node._reputation.direct_standing(subject) == OK
+            # Their records travel on — relaying somebody's signed statement is
+            # not the same act as making one. Nothing carries *our* signature.
+            assert not [p for p in other.sent
+                        if p.type == ABUSE_REPORT and _said_by(p) == node._id]
         finally:
             await node.stop()
