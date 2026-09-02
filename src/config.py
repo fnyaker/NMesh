@@ -174,6 +174,18 @@ def _as_seconds(raw: str) -> float:
     return value
 
 
+def _as_quorum(raw: str) -> int:
+    """How many endorsed publishers must agree. 0 disables the route entirely.
+
+    Bounded by `MAX_PUBLISHERS`: a quorum larger than the number of keys this
+    node can even hold is the feature switched off by arithmetic rather than by
+    decision, which is the worst way to switch anything off."""
+    value = int(str(raw).strip())
+    if not 0 <= value <= 32:
+        raise ValueError("between 0 and 32 publishers")
+    return value
+
+
 def _as_path(raw: str):
     value = raw.strip()
     if not value:
@@ -249,6 +261,14 @@ SETTINGS = {
                         "(file only)"),
     "no_abuse_gossip": (_as_bool, False, True,
                         "Neither send nor act on other nodes' abuse reports"),
+    # Updating from parties none of whom you would hand the machine to alone.
+    # 0 is off, and off is the default: an operator asks for this deliberately,
+    # because it is the setting that lets code install itself without a key this
+    # node has pinned for that. What it counts is endorsed *signatures* over the
+    # same content, never nodes serving it — mirroring bytes is free.
+    "release_quorum":  (_as_quorum, 0, True,
+                        "Endorsed publishers that must independently sign the "
+                        "same release before it installs itself (0 = never)"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),
@@ -477,7 +497,8 @@ def apply_edits(current: dict, edits) -> tuple[dict, list]:
 
 
 _KINDS = {_as_bool: "bool", _as_port: "int", _as_optional_port: "int",
-          _as_store_mb: "int", _as_score: "text", _as_seconds: "text"}
+          _as_store_mb: "int", _as_score: "text", _as_seconds: "text",
+          _as_quorum: "int"}
 
 
 def _kind_of(name: str) -> str:

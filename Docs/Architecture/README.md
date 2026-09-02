@@ -29,6 +29,7 @@ is therefore safe to accept from strangers.
 | `reputation.py` | What this node thinks of the nodes it talks to: a bounded, decaying score fed by the core and by the apps, plus `RateGate`. |
 | `app_guard.py` | An app's per-kind allowances per sender, and the one place a breach is reported to the node. |
 | `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. |
+| `publisher_key.py` | A release-signing key kept encrypted at rest, unlocked only to sign. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
