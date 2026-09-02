@@ -72,6 +72,11 @@ is therefore safe to accept from strangers.
 5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
    blocking network probes, hole-punch races, parallelising the tests).
    **Start here before debugging a hang or a flaky test.**
+6. **[behaviour-rules.md](behaviour-rules.md)** — a catalogue, *not yet
+   implemented*: what a node could measure to notice one that is not playing the
+   protocol. Chain-of-trust genealogy, signature correlation, protocol
+   conformance, traffic shape, routing, gossip, the update chain — with the
+   anti-rules that must never become signals, and why.
 
 ## The four layers (bottom to top)
 
