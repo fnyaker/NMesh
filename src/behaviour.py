@@ -56,6 +56,25 @@ UNIVERSAL_SHARE = 0.5
 # honest node, and the rules that matter most are not the noisy ones.
 OUTLIER_FACTOR = 8.0
 
+# What a rule does when it fires. Two classes, because two rules can be equally
+# true and call for opposite handling.
+SCORE = "score"      # hand a weight to the ledger; the ledger decides
+NOTICE = "notice"    # tell the operator, and nothing else
+
+# Profiling (rule D5). Sweeps a peer must contribute before it has habits worth
+# comparing against — under this it is simply new, and being new is the first
+# anti-rule.
+PROFILE_MATURITY = 12
+# How much the exponential average moves per sweep. Slow: a profile that
+# followed a peer closely would follow it straight through a compromise.
+PROFILE_ALPHA = 0.15
+# How far a dimension must move to count as changed, and how many dimensions
+# must move together. One number wandering is weather; three at once is a
+# different node behind the same key.
+PROFILE_BREAK = 4.0
+PROFILE_DIMENSIONS = 2
+MAX_PROFILES = 1024
+
 
 @dataclass
 class Observation:
@@ -77,6 +96,9 @@ class Observation:
     # Routing answers, and how many of them named the answerer itself.
     found_entries: int = 0
     found_self: int = 0
+    # Set by the watch, from the profile book — not measured here, because it
+    # is the one thing that cannot be read off a single moment.
+    profile_break: bool = False
 
     @property
     def ratio_out(self) -> float:
@@ -119,12 +141,123 @@ class Rule:
     weight: float
     wrong_when: str
     test: object = field(repr=False, default=None)
+    # What firing *means*. Most rules score, and the ledger decides what the
+    # scores add up to. A few can only ever notify: where the honest lookalike
+    # is "the operator changed what this node does", scoring would punish the
+    # operator for administering their own fleet, and the useful thing to do
+    # with the signal is show it to them.
+    response: str = SCORE
 
     def fires(self, observation: Observation, group: Group) -> bool:
         try:
             return bool(self.test(observation, group))
         except Exception:
             return False       # a rule that raises judges nobody, and says so
+
+
+class ProfileBook:
+    """What a peer has been like, so a change of habits becomes visible.
+
+    Every other rule in this file detects a *stranger*. This one detects the
+    peer that was already trusted — and it is the only thing here that can,
+    because an attacker who steals a key gets the identity and not the habits.
+    Nothing else in the trust system has anything to say about a compromise of
+    something it already accepted.
+
+    Three dimensions, all read off counters that were already being kept:
+
+      - **rate** — packets per sweep;
+      - **direction** — bytes out per byte in;
+      - **shape** — mean inbound packet size.
+
+    None of them is interesting alone. What is interesting is several moving at
+    once, which is why a break needs `PROFILE_DIMENSIONS` of them: one number
+    wandering is weather, and a rule that fired on one would fire on everybody
+    with a busy afternoon.
+
+    **Deltas, never totals.** The counters are cumulative, so a profile built
+    from them would flatten out and stop noticing anything; what is averaged is
+    what happened *since the last sweep*. An idle sweep contributes nothing —
+    a peer that said nothing has not changed its habits, it has been quiet.
+
+    **In memory only, on purpose.** After a restart this node has no history
+    and must not pretend otherwise: a profile restored from disk would be
+    compared against a network that moved on while we were away, and the first
+    sweep back would accuse everybody. Losing it is the correct behaviour, not
+    a limitation."""
+
+    __slots__ = ("_profiles", "_max")
+
+    def __init__(self, max_profiles: int = MAX_PROFILES) -> None:
+        # identity → [packets_in, bytes_in, bytes_out, rate, ratio, size, n]
+        self._profiles: dict = {}
+        self._max = max(1, int(max_profiles))
+
+    def observe(self, observation: Observation) -> bool:
+        """Fold one sweep in. ``True`` when this peer's habits just changed."""
+        key = getattr(observation.node_id, "raw", observation.node_id)
+        held = self._profiles.get(key)
+        totals = (observation.packets_in, observation.bytes_in,
+                  observation.bytes_out)
+        if held is None:
+            self._profiles[key] = [*totals, 0.0, 0.0, 0.0, 0]
+            self._evict()
+            return False
+        packets = observation.packets_in - held[0]
+        if packets <= 0:
+            return False          # nothing happened; that is not a change
+        bytes_in = max(0, observation.bytes_in - held[1])
+        bytes_out = max(0, observation.bytes_out - held[2])
+        rate = float(packets)
+        ratio = (bytes_out / bytes_in) if bytes_in else 0.0
+        size = bytes_in / packets
+        held[0], held[1], held[2] = totals
+        broke = False
+        if held[6] >= PROFILE_MATURITY:
+            moved = sum(1 for now, before in ((rate, held[3]),
+                                              (ratio, held[4]),
+                                              (size, held[5]))
+                        if _moved(now, before))
+            broke = moved >= PROFILE_DIMENSIONS
+        for index, value in ((3, rate), (4, ratio), (5, size)):
+            held[index] = (value if not held[6]
+                           else held[index] * (1 - PROFILE_ALPHA)
+                           + value * PROFILE_ALPHA)
+        held[6] += 1
+        return broke
+
+    def forget(self, node_id) -> None:
+        self._profiles.pop(getattr(node_id, "raw", node_id), None)
+
+    def mature(self) -> int:
+        return sum(1 for held in self._profiles.values()
+                   if held[6] >= PROFILE_MATURITY)
+
+    def __len__(self) -> int:
+        return len(self._profiles)
+
+    def _evict(self) -> None:
+        """The least-established profile goes first.
+
+        Backwards from the usual, and deliberately: a profile is worth what its
+        history is worth, so throwing away the longest-observed peer to make
+        room for one seen once would spend the only thing this rule has."""
+        while len(self._profiles) > self._max:
+            victim = min(self._profiles, key=lambda k: self._profiles[k][6])
+            del self._profiles[victim]
+
+
+def _moved(now: float, before: float) -> bool:
+    """Has one dimension changed enough to mean something?
+
+    Both directions: a peer that suddenly goes quiet has changed as much as one
+    that suddenly floods, and a compromise can look like either. Zero is not a
+    special case to skip — going from something to nothing is the change."""
+    if before <= 0.0 and now <= 0.0:
+        return False
+    if before <= 0.0 or now <= 0.0:
+        return True
+    return max(now / before, before / now) > PROFILE_BREAK
 
 
 def _median(values: list) -> float:
@@ -162,6 +295,10 @@ def _self_promotion(observation: Observation, group: Group) -> bool:
     return observation.self_promotion > floor
 
 
+def _profile_break(observation: Observation, _group: Group) -> bool:
+    return observation.profile_break
+
+
 RULES = (
     Rule(
         id="C1",
@@ -189,6 +326,17 @@ RULES = (
                    "to most keys — hence the group comparison and the floor",
         test=_self_promotion,
     ),
+    Rule(
+        id="D5",
+        summary="an established peer's habits changed abruptly",
+        weight=0.0,
+        wrong_when="the operator upgraded it, or changed what it does — which "
+                   "is the common case by far, and why this one notifies "
+                   "rather than scores: an operator administering their own "
+                   "fleet must not be punished for it",
+        test=_profile_break,
+        response=NOTICE,
+    ),
 )
 
 
@@ -200,9 +348,14 @@ class BehaviourWatch:
     peer's history to live, and two places is two answers."""
 
     def __init__(self, rules=RULES, *,
-                 universal_share: float = UNIVERSAL_SHARE) -> None:
+                 universal_share: float = UNIVERSAL_SHARE,
+                 profiles=None) -> None:
         self._rules = tuple(rules)
         self._universal = universal_share
+        # The one piece of state this layer keeps, and it keeps it here rather
+        # than on the links: a compromise follows the *identity*, so a profile
+        # that died with a reconnect would miss exactly what it exists for.
+        self._profiles = profiles if profiles is not None else ProfileBook()
         # id → how many peers it fired on, last sweep. For the console, and for
         # an operator asking why a rule stopped saying anything.
         self._fired: dict[str, int] = {}
@@ -214,6 +367,11 @@ class BehaviourWatch:
 
         Returns what was reported, for the caller's tests and console."""
         observations = list(observations)
+        # Fold every peer into its profile first, and *before* any rule runs:
+        # the book must see every sweep, or the averages it compares against
+        # would themselves depend on what the rules happened to decide.
+        for observation in observations:
+            observation.profile_break = self._profiles.observe(observation)
         groups = self._groups(observations)
         # Every rule is evaluated against every peer *before* anything is
         # reported, because whether a rule may speak at all depends on how many
@@ -242,9 +400,14 @@ class BehaviourWatch:
                 self._disarmed[rule.id] = len(hits)
                 continue
             for observation in hits:
-                report(observation.node_id, rule.weight, rule.id, rule.summary)
+                report(observation.node_id, rule.weight, rule.id, rule.summary,
+                       rule.response)
                 reported.append((observation.node_id, rule.id, rule.weight))
         return reported
+
+    def forget(self, node_id) -> None:
+        """Drop a peer's history — an operator saying "that change was me"."""
+        self._profiles.forget(node_id)
 
     def _groups(self, observations) -> dict:
         """Medians per transport class. A LoRa peer and a TCP peer share no
@@ -272,6 +435,9 @@ class BehaviourWatch:
                 "fired": self._fired.get(rule.id, 0),
                 "disarmed": rule.id in self._disarmed,
                 "wrong_when": rule.wrong_when,
+                "response": rule.response,
             } for rule in self._rules],
             "disarmed": sorted(self._disarmed),
+            "profiles": len(self._profiles),
+            "profiled": self._profiles.mature(),
         }
