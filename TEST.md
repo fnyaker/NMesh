@@ -104,6 +104,11 @@ tests/
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
 ├── test_invite*.py / test_cert_store.py               — invitations & trust
+├── test_release_trust.py                              — what may replace this
+│     node's code: corroboration counted in signatures and never in mirrors, a
+│     quorum of endorsed keys that 200 minted publishers cannot reach, a
+│     disputed version refused by both routes, and a publisher key that stays
+│     encrypted at rest
 ├── test_features.py                                   — capability negotiation:
 │     silence means the classic set, a name we do not know is not an offence,
 │     nothing security-critical is negotiable

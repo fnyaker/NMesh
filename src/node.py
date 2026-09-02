@@ -1357,7 +1357,8 @@ class MeshNode:
                  abuse_suspect: float = DEFAULT_SUSPECT,
                  abuse_hostile: float = DEFAULT_HOSTILE,
                  abuse_halflife: float = DEFAULT_HALFLIFE,
-                 gossip_abuse: bool = True) -> None:
+                 gossip_abuse: bool = True,
+                 release_quorum: int = 0) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1410,6 +1411,10 @@ class MeshNode:
         # from a single signature replayed all hour.
         self._abuse_seen: OrderedDict[bytes, None] = OrderedDict()
         self._gossip_abuse = gossip_abuse
+        # Endorsed publishers that must independently sign one release before it
+        # may install itself. 0 — the default — means that route is closed and
+        # only a key pinned for automatic install can replace this node's code.
+        self._release_quorum = max(0, int(release_quorum))
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -5887,23 +5892,52 @@ class MeshNode:
         except RuntimeError:
             pass  # no running loop (e.g. teardown) — nothing to sync
 
+    def _release_signer(self, key_path: str | None, passphrase: str | None):
+        """The identity that will sign a release: ours, or an unlocked
+        publisher key. The caller closes it when it is not ours."""
+        if not key_path:
+            return self._identity
+        from . import publisher_key
+        from .crypto import CryptoIdentity
+        try:
+            public, secret = publisher_key.load(key_path, passphrase or "")
+        except publisher_key.PublisherKeyError as exc:
+            raise ReleaseError(str(exc)) from None
+        return CryptoIdentity.from_pair(public, secret)
+
     async def publish_release(self, root: str | None = None, notes: str = "",
-                              ts: int | None = None) -> dict:
+                              ts: int | None = None, *,
+                              key_path: str | None = None,
+                              passphrase: str | None = None) -> dict:
         """Publish this node's own code as a signed release, and announce it.
 
-        The tree is read, content-addressed onto the DHT, and a descriptor
-        signed with **this node's identity** binds that content to us. Whoever
-        has pinned our key can then fetch and install it. Raises
-        :class:`ReleaseError` if the tree is not something we can publish."""
+        The tree is read, content-addressed onto the DHT, and a signed
+        descriptor binds that content to a publisher. Whoever has pinned that
+        key can then fetch and install it. Raises :class:`ReleaseError` if the
+        tree is not something we can publish.
+
+        By default the signer is **this node's identity**, which is the simple
+        case and the weaker one: that key is loaded the whole time the node
+        runs, because it has to be. ``key_path`` + ``passphrase`` sign with a
+        separate publisher key instead, unlocked here and dropped when this
+        call returns — see :mod:`src.publisher_key`. Of everything a key in
+        this project signs, a release is the only thing that replaces somebody
+        else's code, and it is the one signed least often; it has no business
+        sharing the key that has to stay unlocked."""
         from .dht import MAX_VALUE
         from . import updater
         files = _core_read_tree(root or updater.install_root())
         version = _core_version_of(files)
         _core_check_tree(files, version)          # what we sign is what we carry
         package = _core_build_package(files)
-        release_bytes = _core_build_release(
-            package, version, self._identity.dsa_public_key,
-            self._identity.sign, ts, notes)
+        signer = self._release_signer(key_path, passphrase)
+        try:
+            release_bytes = _core_build_release(
+                package, version, signer.dsa_public_key, signer.sign, ts, notes)
+            publisher_key = signer.dsa_public_key
+        finally:
+            if signer is not self._identity:
+                signer.close()
         if len(release_bytes) > MAX_VALUE:
             raise ReleaseError("release descriptor too large")
         release_id = _core_release_id(package)
@@ -5919,8 +5953,8 @@ class MeshNode:
         return {
             "version": version,
             "release_id": release_id.hex(),
-            "publisher_id": _core_publisher_id(
-                self._identity.dsa_public_key).hex(),
+            "publisher_id": _core_publisher_id(publisher_key).hex(),
+            "publisher_key": publisher_key.hex(),
             "files": len(files),
             "bytes": sum(len(value) for value in files.values()),
             "package_bytes": len(package),
@@ -6097,8 +6131,21 @@ class MeshNode:
             if entry is None:
                 continue
             state, action = self._release_state(entry)
+            allowed, why = self.may_auto_install(entry)
+            # Who else has put their key behind these exact bytes, and whether
+            # anybody claims this version with different ones. Both are what an
+            # operator needs to judge a key they have not pinned.
+            attesters = self._releases.attesters(entry["version"],
+                                                 entry["sha256"])
             releases.append({**listed, "state": state, "action": action,
-                             "trusted": state != "untrusted"})
+                             "trusted": state != "untrusted",
+                             "attesters": len(attesters),
+                             "endorsed_attesters": len(
+                                 self._publishers.endorsed_among(attesters)),
+                             "disputed": self._releases.contradicts(
+                                 entry["version"], entry["sha256"]),
+                             "unattended": allowed,
+                             "unattended_why": why})
         from . import updater
         ok, reason = updater.updatable()
         return {
@@ -6107,6 +6154,7 @@ class MeshNode:
                 self._identity.dsa_public_key).hex(),
             "publisher_key": self._identity.dsa_public_key.hex(),
             "publishers": self._publishers.list(),
+            "quorum": self._release_quorum,
             "releases": releases,
             "log": list(self._release_log),
             "updatable": ok,
@@ -6114,14 +6162,18 @@ class MeshNode:
         }
 
     def trust_publisher(self, key_hex: str, name: str = "",
-                        auto: bool = False) -> dict:
+                        auto: bool = False, endorsed: bool = False) -> dict:
         """Pin a publisher key. The only way a key enters this list is here —
-        an operator acting locally, never a packet."""
+        an operator acting locally, never a packet.
+
+        ``auto`` and ``endorsed`` are different statements and neither implies
+        the other: the first hands this one key a scheduled restart, the second
+        only lets its word count towards a quorum."""
         try:
             public_key = bytes.fromhex(key_hex)
         except (ValueError, TypeError) as exc:
             raise ReleaseError("that is not a public key") from exc
-        entry = self._publishers.add(public_key, name, auto)
+        entry = self._publishers.add(public_key, name, auto, endorsed)
         self._releases.retrust(self._trusts_publisher)
         return entry
 
@@ -6133,6 +6185,15 @@ class MeshNode:
 
     def set_publisher_auto(self, publisher_id_hex: str, auto: bool) -> bool:
         return self._publishers.set_auto(publisher_id_hex, auto)
+
+    def set_publisher_endorsed(self, publisher_id_hex: str,
+                               endorsed: bool) -> bool:
+        """Whether this key's signature counts towards the quorum.
+
+        Manual, one key at a time, and that is the whole defence: a quorum made
+        of keys a human chose cannot be reached by minting identities, only by
+        compromising chosen ones."""
+        return self._publishers.set_endorse(publisher_id_hex, endorsed)
 
     def _note_release(self, version: str, outcome: str, detail: str = "") -> None:
         self._release_log.append({"ts": int(time.time()), "version": version,
@@ -6235,6 +6296,54 @@ class MeshNode:
         except Exception:                     # noqa: BLE001 — never crash a handler
             pass
 
+    def may_auto_install(self, entry: dict) -> tuple[bool, str]:
+        """May this release replace our code with nobody watching?
+
+        Two independent routes in, and they answer different questions.
+
+        **A pinned publisher marked ``auto``.** One key an operator decided to
+        hand a scheduled restart to. Fast, and it is exactly as strong as that
+        one key: whoever holds it can replace this node's code.
+
+        **A quorum of endorsed publishers over the same content.** This is the
+        route for code from parties none of whom we would hand the machine to
+        alone. It counts **signatures over the same `(version, sha256)`**, never
+        nodes serving the package — mirroring bytes is free, the content hash
+        already makes them safe to fetch from anyone, and a thousand mirrors say
+        nothing one does not. A second signature means a second party put their
+        key behind the same code.
+
+        Endorsement is manual, one key at a time, which is what stops the
+        obvious attack: a quorum of keys a human chose cannot be reached by
+        minting two hundred identities, only by compromising chosen ones.
+
+        Two refusals apply to **both** routes, because they say the code itself
+        is in question rather than the messenger:
+
+          - somebody claims this version with different content — a fork, or a
+            build of somebody's own wearing a version everyone recognises;
+          - the publisher we would install from contradicts itself.
+
+        Neither accuses anybody. Two honest publishers can disagree by accident,
+        and the answer to that is the same as to an attack: stop, and let a
+        human look. Refusing an update is recoverable; installing a hostile one
+        is not."""
+        publisher = entry.get("publisher")
+        version, digest = entry.get("version", ""), entry.get("sha256", "")
+        if self._releases.contradicts(version, digest):
+            return False, "another publisher signed different content for this version"
+        attesters = self._releases.attesters(version, digest)
+        if self._publishers.auto_for(publisher):
+            return True, "signed by a publisher pinned for automatic install"
+        if self._release_quorum <= 0:
+            return False, "no publisher pinned for automatic install"
+        endorsed = self._publishers.endorsed_among(attesters)
+        if len(endorsed) < self._release_quorum:
+            return False, (f"{len(endorsed)} of {self._release_quorum} endorsed "
+                           f"publishers have signed this exact content")
+        return True, (f"{len(endorsed)} endorsed publishers independently "
+                      f"signed this exact content")
+
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
         one twice. Returns the version installed, or None.
@@ -6252,7 +6361,8 @@ class MeshNode:
             state, _action = self._release_state(entry)
             if state != "available":
                 continue
-            if not self._publishers.auto_for(entry["publisher"]):
+            allowed, _why = self.may_auto_install(entry)
+            if not allowed:
                 continue
             release_id = entry["release_id"]
             if release_id in self._release_tried:

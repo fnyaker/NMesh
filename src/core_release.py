@@ -442,6 +442,7 @@ class TrustedPublishers:
             "key": public.hex(),
             "name": (name if isinstance(name, str) else "")[:MAX_NAME_LEN],
             "auto": value.get("auto") is True,
+            "endorsed": value.get("endorsed") is True,
             "added": int(value["added"]) if isinstance(value.get("added"), int)
                      and not isinstance(value.get("added"), bool) else 0,
         }
@@ -460,11 +461,19 @@ class TrustedPublishers:
             raise
         os.replace(tmp, self._path)
 
-    def add(self, public_key: bytes, name: str = "", auto: bool = False) -> dict:
+    def add(self, public_key: bytes, name: str = "", auto: bool = False,
+            endorsed: bool = False) -> dict:
         """Pin a publisher. Raises when the key is unusable or the list is full.
 
-        Re-pinning a key already held updates its label and auto flag rather
-        than adding a second entry for the same identity."""
+        Re-pinning a key already held updates its label and flags rather than
+        adding a second entry for the same identity.
+
+        The two flags are different statements and neither implies the other.
+        ``auto`` says "this key alone may replace my code without asking me".
+        ``endorsed`` says "this key's word counts towards a quorum" — much
+        weaker on its own, and it is the answer to somebody minting two hundred
+        publishers: a quorum made of keys a human chose one at a time cannot be
+        reached by creating identities, only by compromising chosen ones."""
         if not isinstance(public_key, (bytes, bytearray)) or not public_key:
             raise ReleaseError("publisher key invalid")
         public_key = bytes(public_key)
@@ -477,6 +486,7 @@ class TrustedPublishers:
             "key": public_key.hex(),
             "name": str(name or existing.get("name", ""))[:MAX_NAME_LEN],
             "auto": bool(auto),
+            "endorsed": bool(endorsed),
             "added": existing.get("added") or int(time.time()),
         }
         self._save()
@@ -498,6 +508,33 @@ class TrustedPublishers:
         entry["auto"] = bool(auto)
         self._save()
         return True
+
+    def set_endorse(self, key_id_hex: str, endorsed: bool) -> bool:
+        """Whether this key's attestation counts towards a quorum."""
+        entry = self._entries.get(key_id_hex)
+        if entry is None:
+            return False
+        entry["endorsed"] = bool(endorsed)
+        self._save()
+        return True
+
+    def endorsed_among(self, public_keys) -> list[str]:
+        """Which of these keys this operator has endorsed, by id.
+
+        By id and de-duplicated, because the quantity that means something is
+        *how many distinct endorsed parties* said it — the same key signing
+        twice is one party, and counting it twice would price a quorum at one
+        compromised machine."""
+        found = []
+        for key in public_keys:
+            try:
+                key_id = publisher_id(bytes(key)).hex()
+            except (TypeError, ValueError):
+                continue
+            entry = self._entries.get(key_id)
+            if entry is not None and entry["endorsed"] and key_id not in found:
+                found.append(key_id)
+        return found
 
     def entry(self, public_key: bytes) -> dict | None:
         found = self._entries.get(publisher_id(public_key).hex())
@@ -852,6 +889,29 @@ class ReleaseCatalog:
 
     def releases(self) -> list[bytes]:
         return [entry["release"] for entry in self._entries.values()]
+
+    def attesters(self, version: str, sha256: str) -> list[bytes]:
+        """The publisher keys that have signed **this exact content**.
+
+        This is what corroboration is counted in. Not the nodes serving the
+        package: mirroring bytes is free and the content hash already makes
+        them safe to fetch from anyone, so a thousand mirrors say nothing that
+        one does not. A second *signature* over the same hash says a second
+        party put their key behind the same code, and that is the only thing
+        here an attacker cannot get for nothing."""
+        return [entry["publisher"] for entry in self._entries.values()
+                if entry["version"] == version and entry["sha256"] == sha256]
+
+    def contradicts(self, version: str, sha256: str) -> bool:
+        """Does anybody claim this version with *different* content?
+
+        Either the network has forked or somebody is signing a build of their
+        own under a version everyone recognises. Both are things to stop an
+        unattended install for, and neither is a reason to accuse anybody: two
+        honest publishers can disagree by accident, and the answer to that is
+        also to stop and let a human look."""
+        return any(entry["version"] == version and entry["sha256"] != sha256
+                   for entry in self._entries.values())
 
     def list(self) -> list[dict]:
         """UI-facing metadata (no raw bytes), newest first."""
