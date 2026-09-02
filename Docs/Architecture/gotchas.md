@@ -352,6 +352,19 @@ asserting on `sent[0]`. Anything that reads position rather than type is an
 ordering constraint in disguise, and it will be violated by whatever gets added
 to the opening exchange next.
 
+### 10. "Find a free port, close it, then bind it" is a race, not a helper
+A test helper bound port 0, read the number back, **closed the socket** and
+returned the number for the node to bind a moment later. Between the close and
+the bind, anything on the machine can take that port — and under `pytest-xdist`
+the thing that takes it is another worker running the same helper. CI went red
+on `test_join_with_no_shared_relay` with `OSError: [Errno 98] Address already in
+use`, in a commit that touched neither UDP nor ports: the worst kind of red,
+because it points at the innocent and invites the reviewer to call it a flake.
+→ Ask for port **0** and read back what was actually bound (`node.udp_port()`).
+The port is never released, so there is no window at all. The general rule: a
+helper that hands out a *number* for somebody else to bind later is handing out
+a promise the kernel never made.
+
 ## Hole punching (see also `transports.md`)
 
 - **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a
