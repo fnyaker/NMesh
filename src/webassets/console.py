@@ -262,6 +262,7 @@ INDEX_HTML = """<!doctype html>
             <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
               <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
             <tbody id="abuse-list"></tbody></table></div>
+            <dl id="behaviour" class="kv"></dl>
           </div>
         </article>
         <article class="card" id="refusals-card" hidden>
@@ -1891,6 +1892,7 @@ function paintAbuse(state){
     values[row.node + ":accusers"] = row.accusers;
     values[row.node + ":reason"] = row.reason || "—";
   });
+  paintBehaviour(state);
   paintLive("abuse-list", rows.map((row) => row.node).join("|"),
     () => rows.map((row) =>
       '<tr><td class="mono">' + esc(shortId(row.node)) +
@@ -1901,6 +1903,23 @@ function paintAbuse(state){
       '</td><td><button data-forgive="' + esc(row.node) + '">Clear</button></td></tr>'
     ).join(""),
     values);
+}
+// One line per rule: what it noticed last sweep, and whether it was told to
+// stop talking. A rule that fires on most peers is measuring this node — its
+// clock, its uplink — so it disarms itself, and saying so is the point: a
+// detector that goes quiet without explaining looks exactly like one with
+// nothing to report.
+function paintBehaviour(state){
+  const rules = ((state.behaviour || {}).rules) || [];
+  if(!rules.length) return;
+  const rows = rules.map((rule) => [rule.id,
+    rule.disarmed ? "disarmed — it fired on most peers, so it is measuring this node"
+                  : (rule.fired ? rule.fired + " peer(s): " + rule.summary
+                                : "nothing: " + rule.summary)]);
+  paintLive("behaviour", rules.map((rule) => rule.id).join("|"),
+    () => rows.map(([id]) => "<dt>" + esc(id) + '</dt><dd data-v="rule:' +
+      esc(id) + '"></dd>').join(""),
+    Object.fromEntries(rows.map(([id, text]) => ["rule:" + id, text])));
 }
 document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-forgive]");

@@ -29,6 +29,7 @@ is therefore safe to accept from strangers.
 | `reputation.py` | What this node thinks of the nodes it talks to: a bounded, decaying score fed by the core and by the apps, plus `RateGate`. |
 | `app_guard.py` | An app's per-kind allowances per sender, and the one place a breach is reported to the node. |
 | `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. |
+| `behaviour.py` | Named rules over counters the links already keep, swept on the keepalive timer. Compares a peer to its transport class, never to a constant; a rule that fires on everyone disarms itself. |
 | `publisher_key.py` | A release-signing key kept encrypted at rest, unlocked only to sign. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
@@ -73,9 +74,9 @@ is therefore safe to accept from strangers.
 5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
    blocking network probes, hole-punch races, parallelising the tests).
    **Start here before debugging a hang or a flaky test.**
-6. **[behaviour-rules.md](behaviour-rules.md)** — a catalogue, *not yet
-   implemented*: what a node could measure to notice one that is not playing the
-   protocol. Chain-of-trust genealogy, signature correlation, protocol
+6. **[behaviour-rules.md](behaviour-rules.md)** — what a node measures to
+   notice one that is not playing the protocol. Partly implemented
+   (`behaviour.py`), mostly still a catalogue. Chain-of-trust genealogy, signature correlation, protocol
    conformance, traffic shape, routing, gossip, the update chain — with the
    anti-rules that must never become signals, and why.
 

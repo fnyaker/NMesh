@@ -29,6 +29,7 @@ from . import accusation
 from .accusation import MAX_RECORD as _ACCUSATION_MAX
 from .reputation import (DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT,
                          HOSTILE, OK, SUSPECT, RateGate, Reputation)
+from . import behaviour
 from . import features
 from .features import MAX_RECORD as _FEATURES_MAX
 from .transport_manager import TransportManager
@@ -1125,6 +1126,13 @@ class _Peer:
         # as it did. Absence is never read as refusal (see `features.py`).
         self.features: frozenset | None = None
         self.agreed: frozenset | None = None
+        # What the behavioural sweep reads. Three integers, incremented in the
+        # receive loop and nowhere else: everything they feed is computed later,
+        # on a timer that already runs. A detector that costs the hot path
+        # anything has already done more damage than what it detects.
+        self.undeclared: int = 0        # messages of a plane it said it lacks
+        self.found_entries: int = 0     # routing candidates it has handed us
+        self.found_self: int = 0        # …of which it named itself
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         # Handshakes this link has been allowed to make us verify. A joiner
@@ -1415,6 +1423,10 @@ class MeshNode:
         # may install itself. 0 — the default — means that route is closed and
         # only a key pinned for automatic install can replace this node's code.
         self._release_quorum = max(0, int(release_quorum))
+        # The behavioural rules, run on the keepalive sweep. Holds no per-peer
+        # state: the counters live on the links, and a second place for a peer's
+        # history would be a second answer.
+        self._behaviour = behaviour.BehaviourWatch()
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -2335,6 +2347,7 @@ class MeshNode:
                     pass
             self._reap_silent_links()
             self._reap_expired_tarpits()
+            self._behaviour_sweep()
             # Only nudge maintenance while it is still finding things. A mesh
             # smaller than the floor is below it permanently, and nudging every
             # keepalive there means a certificate-carrying lookup every 20 s
@@ -3570,6 +3583,7 @@ class MeshNode:
             "handshake_refusals": self.handshake_refusals(),
             "trust": self.trust_status(),
             "abuse": self.abuse_status(),
+            "behaviour": self.behaviour_status(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
@@ -4883,6 +4897,14 @@ class MeshNode:
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
                 await self._forward_packet(peer, packet)
                 return
+        # One dict lookup and a set test, and only for a peer that has actually
+        # announced something — this is the whole hot-path cost of rule C1. A
+        # peer that announced nothing is counted at zero, because "I have never
+        # heard what you speak" is not evidence about you (see `features.py`).
+        if peer.agreed is not None:
+            plane = _MESSAGE_PLANE.get(packet.type)
+            if plane is not None and plane not in peer.agreed:
+                peer.undeclared += 1
         handler = _HANDLERS.get(packet.type)
         if handler:
             await handler(self, peer, packet)
@@ -5438,6 +5460,14 @@ class MeshNode:
             return
         valid_entries: list[NodeEntry] = []
         learned_new = False
+        # Two integers for rule E1. Counted over every entry offered, valid or
+        # not: what the rule asks is what this peer's answers are *made of*, and
+        # dropping the ones that failed verification would let a peer improve
+        # the ratio by padding it with rubbish.
+        peer.found_entries += len(entries)
+        if peer.authenticated_id is not None:
+            peer.found_self += sum(1 for e in entries
+                                   if e.node_id == peer.authenticated_id)
         for entry in entries:
             if not entry.cert_chain:
                 continue
@@ -7789,6 +7819,46 @@ class MeshNode:
         return self._gossip_allowed(self._abuse_rate, peer,
                                     _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
 
+    def _behaviour_sweep(self) -> None:
+        """Judge every authenticated link once, on the timer that already runs.
+
+        Never raises: this loop dying would stop the keepalive with it, and a
+        detector is not worth a link. Nothing here decides anything — each
+        finding goes to the ledger as a weight, and the ledger decides, which is
+        the difference between a detector and a censor."""
+        try:
+            observations = [
+                behaviour.Observation(
+                    node_id=peer.authenticated_id,
+                    transport=self._peer_scheme(peer) or "",
+                    packets_in=peer.counters.pkts_in,
+                    packets_out=peer.counters.pkts_out,
+                    bytes_in=peer.counters.bytes_in,
+                    bytes_out=peer.counters.bytes_out,
+                    undeclared=peer.undeclared,
+                    found_entries=peer.found_entries,
+                    found_self=peer.found_self,
+                )
+                for peer in self._peers
+                if peer.authenticated_id is not None and not peer.tarpit_until
+            ]
+            if not observations:
+                return
+            self._behaviour.sweep(observations, self._on_behaviour_finding)
+        except Exception:
+            pass
+
+    def _on_behaviour_finding(self, node_id, weight: float, rule_id: str,
+                              summary: str) -> None:
+        """One rule, one peer. The id travels with the report so an operator
+        reading "reported for C1" can go and read C1 and disagree."""
+        self.report_abuse(node_id, weight, f"{rule_id}: {summary}",
+                          kind=accusation.KIND_UNSPECIFIED)
+
+    def behaviour_status(self) -> dict:
+        """What each rule did on the last sweep, for the console."""
+        return self._behaviour.status()
+
     def _is_accusation_seen(self, parsed: dict) -> bool:
         """Have we already absorbed this statement? Records it if not.
 
@@ -8444,4 +8514,27 @@ _HANDLERS = {
     CERT_REVOKE:       MeshNode._handle_cert_revoke,
     ABUSE_REPORT:      MeshNode._handle_abuse_report,
     CAPABILITIES:      MeshNode._handle_capabilities,
+}
+
+# Which plane of the protocol each message belongs to — the map rule C1 reads.
+# Only the *optional* planes appear: `features.CORE` is never negotiable, so a
+# core message can never be "undeclared", and a type absent from this table is
+# one whose plane nobody has named yet. Absence means silence, not suspicion.
+_MESSAGE_PLANE = {
+    FIND_NODE: features.KADEMLIA, FOUND_NODE: features.KADEMLIA,
+    FIND_VALUE: features.KADEMLIA, FOUND_VALUE: features.KADEMLIA,
+    STORE: features.KADEMLIA,
+    E2E_HANDSHAKE: features.E2E, E2E_HANDSHAKE_ACK: features.E2E,
+    DIR_STORE: features.DIRECTORY, DIR_FIND: features.DIRECTORY,
+    DIR_FOUND: features.DIRECTORY,
+    PSEUDO_ANNOUNCE: features.PSEUDO,
+    CATALOG_ANNOUNCE: features.CATALOG,
+    RELEASE_ANNOUNCE: features.RELEASE, RELEASE_FETCH: features.RELEASE,
+    RELEASE_DATA: features.RELEASE,
+    PUNCH_REQUEST: features.PUNCH, PUNCH_RELAY: features.PUNCH,
+    REACH_PROBE: features.REACH, REACH_PROBE_ACK: features.REACH,
+    INVITE_SEEK: features.RELAY, RELAY_CARRY: features.RELAY,
+    CERT_RENEW: features.RENEW, CERT_RENEWED: features.RENEW,
+    CERT_REVOKE: features.REVOKE,
+    ABUSE_REPORT: features.ABUSE,
 }

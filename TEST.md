@@ -109,6 +109,10 @@ tests/
 │     quorum of endorsed keys that 200 minted publishers cannot reach, a
 │     disputed version refused by both routes, and a publisher key that stays
 │     encrypted at rest
+├── test_behaviour.py                                  — the detection frame: a
+│     rule that fires on everyone disarms itself, transport classes judged
+│     apart, being new / quiet / unfamiliar are never signals, every rule
+│     states what would make it wrong
 ├── test_features.py                                   — capability negotiation:
 │     silence means the classic set, a name we do not know is not an offence,
 │     nothing security-critical is negotiable

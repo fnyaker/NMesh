@@ -350,6 +350,37 @@ under attack must not answer by becoming the flood — and never to the node it
 names: it will find out when its traffic stops being answered, but not from us,
 and not with a timestamp telling it which of the things it tried was noticed.
 
+### Behavioural rules (`behaviour.py`)
+
+The core reports what it *sees*; this is what it *notices*. Named rules run over
+counters the links already keep, on the keepalive sweep — the receive loop's
+whole contribution is three integer increments, because a detector that costs
+latency has already done more damage than what it detects.
+
+Four things make it deployable rather than merely clever, and each is structural:
+
+- **A peer is compared to the median of its own transport class.** Absolute
+  thresholds are wrong on every deployment but the one they were tuned on, and
+  they punish the slow medium rather than the bad actor.
+- **A rule that fires on most peers disarms itself** (M1, `UNIVERSAL_SHARE`). If
+  most peers look wrong, we are wrong — our clock, our uplink, our config — and
+  a detector that keeps accusing then turns a local fault into a network-wide
+  fight. The console says a rule went quiet and why, because a detector that
+  goes silent without explaining looks exactly like one with nothing to report.
+- **No rule bans.** Each returns a weight, handed to `report_abuse`; the ledger
+  decides. A rule acting directly would be a rule whose false-positive rate is
+  an outage.
+- **Every rule states what would make it wrong** (`Rule.wrong_when`), and a test
+  asserts it is non-empty: a rule whose honest lookalike cannot be stated is a
+  superstition, and this is how that gets caught rather than argued about.
+
+Live today: **C1** (used a plane it announced it does not speak — only
+expressible because of the capability negotiation, and counted at zero for a
+peer that announced nothing), **D2** (traffic asymmetry against the group) and
+**E1** (answers routing queries mostly with itself). The catalogue of what else
+is worth measuring, with the anti-rules that must never become signals, is
+[`behaviour-rules.md`](behaviour-rules.md).
+
 `console_forgive` drops everything held against a node. There has to be such a
 thing and it has to be local: every input to this table is a judgement made
 under pressure by software, and some of them will be wrong about somebody's
