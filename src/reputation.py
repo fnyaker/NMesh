@@ -41,6 +41,38 @@ So evidence lands in two buckets and they are not equal:
 An accuser we already hold as suspect is not counted at all. A stranger — a
 node we cannot place in our own network — is not counted at all either.
 
+How many voices a crowd is
+--------------------------
+"How many distinct members" was still the wrong count, and it was the live
+hole in this file: the cap is *hostile* minus one, and the threshold that
+stops us serving a peer is far below that. Eight members saying it reached
+`SUSPECT` — so eight certified identities, which one compromised issuer mints
+in an afternoon, could get any node on the mesh dropped by us in silence.
+
+So an accusation is now counted **per family** and not per member: the max one
+family says, summed across families. A family is whoever heads that node's
+line just below a root (`CertStore.family`), which is the same independence
+test the release quorum already applies to signers, asked here of witnesses.
+Two hundred identities minted under one issuer are one voice — not because
+they are guilty of anything, but because they are not two hundred *independent*
+observations, and it is only independence that made counting them meaningful.
+
+Two more things a voice can lose (catalogue F3):
+
+  - **Volume.** An accuser that names more than `MAX_SUBJECTS` distinct nodes
+    inside a half-life is not testifying, it is voting. Its later accusations
+    are recorded at nothing.
+  - **Retaliation.** Two nodes accusing each other tell us that one of them is
+    lying and nothing about which, so **both** directions stop counting. It is
+    symmetric on purpose: making the *later* one the retaliation would hand
+    anybody who accuses first a shield against the node they attacked. A voice
+    already discounted cannot cancel anything, or counter-accusing everybody
+    would be a way to silence the mesh one honest node at a time.
+
+None of this ever *accuses* the accuser: a family is not a conspiracy, and a
+node that talks too much is not a hostile node. It stops being counted, and
+that is the whole of it.
+
 What it costs the accused
 -------------------------
 Nothing they can measure, which is the point. `SUSPECT` means their traffic is
@@ -87,6 +119,10 @@ MAX_WEIGHT = 4.0
 MAX_TRACKED = 4096              # identities we hold an opinion about
 MAX_ACCUSERS = 64               # distinct accusers remembered per subject
 MAX_REASON = 64                 # characters of the reason we keep, for the console
+# Distinct subjects one accuser may name inside a half-life before we stop
+# believing it. Deliberately generous: a node at the centre of a real flood
+# honestly sees a lot, and the cost of being wrong here is ignoring a witness.
+MAX_SUBJECTS = 16
 
 
 def _decay(value: float, age: float, halflife: float) -> float:
@@ -104,9 +140,10 @@ class _Standing:
 
     def __init__(self) -> None:
         self.direct: float = 0.0
-        # accuser_id.raw → (weight, when). Weight, not a count: one accuser
-        # saying it ten times is still one accuser.
-        self.accusers: dict[bytes, tuple[float, float]] = {}
+        # accuser_id.raw → (weight, when, family). Weight, not a count: one
+        # accuser saying it ten times is still one accuser — and `family`, so
+        # that a hundred accusers who are one line of descent are one voice.
+        self.accusers: dict[bytes, tuple[float, float, bytes]] = {}
         self.at: float = 0.0            # when `direct` was last brought forward
         self.reason: str = ""           # the most recent, for an operator to read
         self.reports: int = 0           # how many complaints in total, ever
@@ -126,9 +163,16 @@ class Reputation:
         self._max_tracked = max(1, int(max_tracked))
         self._standings: dict[bytes, _Standing] = {}
         # Rumour may carry a node up to here and no further. Strictly below the
-        # hostile threshold, so no amount of hearsay alone ever cuts a node off;
-        # combined with something we saw ourselves, it can.
-        self._rumour_ceiling = self._hostile - 1.0
+        # *suspect* threshold, and that word matters: the ceiling used to sit
+        # just below `hostile`, which read as "hearsay can make us wary but
+        # never cut anybody off" — except that being wary is what SUSPECT is,
+        # and a suspect peer already has its traffic dropped and its link
+        # tarpitted, in silence. Hearsay alone was therefore decisive, and eight
+        # certified identities were the price. Below `suspect`, a crowd can
+        # bring a node to the edge of the judgement and never past it: what we
+        # saw ourselves is what carries it over, which is what "hearsay is never
+        # authority" was always supposed to mean.
+        self._rumour_ceiling = max(0.0, self._suspect - 0.1)
 
     # -- reporting --------------------------------------------------------
 
@@ -151,27 +195,88 @@ class Reputation:
 
     def note_accusation(self, node_id: NodeID, accuser: NodeID,
                         weight: float = 1.0, reason: str = "",
-                        *, now: float | None = None) -> str:
+                        *, family: bytes | None = None,
+                        now: float | None = None) -> str:
         """Record that ``accuser`` says ``node_id`` is misbehaving.
 
         Kept per accuser and overwritten, never added: the quantity that means
         something is *how many distinct members* are saying it. Repeating an
         accusation is free to send, so counting repetitions would price the
-        whole mechanism at whatever the loudest node feels like paying."""
+        whole mechanism at whatever the loudest node feels like paying.
+
+        ``family`` is who heads the accuser's line below a root, and it is what
+        the score is grouped by — see the module note. ``None`` means we could
+        not place the accuser, and an unplaceable accuser is its own family:
+        erring the other way would put every stranger in one crowd together."""
         if accuser == node_id:
             return self.standing(node_id, now=now)   # nobody accuses themselves
         stamp = time.monotonic() if now is None else now
+        allowance = max(0.0, min(float(weight), MAX_WEIGHT))
+        if self._reach(accuser.raw, stamp) >= MAX_SUBJECTS:
+            # It is not testifying, it is voting. Recorded at nothing rather
+            # than thrown away: the record is what its own reach is counted
+            # from, so discarding it would let the flooder drop back under the
+            # limit on its next accusation and be believed again. It is not
+            # surfaced anywhere either, and that is deliberate — a table of
+            # everyone a flooder named is a console it gets to write.
+            allowance = 0.0
         entry = self._entry(node_id.raw)
-        entry.accusers[accuser.raw] = (
-            max(0.0, min(float(weight), MAX_WEIGHT)), stamp)
+        entry.accusers[accuser.raw] = (allowance, stamp,
+                                       family if family else accuser.raw)
         while len(entry.accusers) > MAX_ACCUSERS:
             oldest = min(entry.accusers, key=lambda k: entry.accusers[k][1])
             del entry.accusers[oldest]
+        if allowance > 0.0:
+            self._cancel_if_mutual(node_id.raw, accuser.raw)
         entry.reports += 1
         if reason:
             entry.reason = str(reason)[:MAX_REASON]
         self._enforce_bound()
         return self.standing(node_id, now=stamp)
+
+    def _reach(self, accuser_raw: bytes, now: float) -> int:
+        """How many distinct nodes this accuser has named inside a half-life.
+
+        Derived from the table rather than tallied beside it: a second count of
+        the same events is a second chance to disagree with the first, and this
+        one would be an attacker-sized table of its own.
+
+        It counts what the accuser *said*, not what we credited it with. Count
+        only the accusations we believed and an accuser over the limit would see
+        its own reach fall back under it on the next thing it said, and be
+        believed again — a ratchet that only ever turns one way is the point.
+
+        The table it walks is bounded, so the ratchet is too: enough eviction
+        pressure eventually forgets what a flooder said. Reaching that state
+        costs an attacker `MAX_TRACKED` entries that outscore its own, which it
+        cannot manufacture from one family — the same bound, doing the same work
+        twice."""
+        count = 0
+        for entry in self._standings.values():
+            held = entry.accusers.get(accuser_raw)
+            if held is not None and now - held[1] <= self._halflife:
+                count += 1
+                if count >= MAX_SUBJECTS:
+                    break     # the answer is already "too many"
+        return count
+
+    def _cancel_if_mutual(self, subject_raw: bytes, accuser_raw: bytes) -> None:
+        """They have accused each other. Neither says anything about the other.
+
+        One of the two is lying and this tells us nothing about which, so the
+        pair stops counting in **both** directions. Symmetric on purpose:
+        treating the later accusation as the retaliation would make accusing
+        first a shield, which is a strictly better move than behaving."""
+        mirror = self._standings.get(accuser_raw)
+        if mirror is None:
+            return
+        held = mirror.accusers.get(subject_raw)
+        if held is None or held[0] <= 0.0:
+            return
+        mirror.accusers[subject_raw] = (0.0, held[1], held[2])
+        entry = self._standings[subject_raw]
+        ours = entry.accusers[accuser_raw]
+        entry.accusers[accuser_raw] = (0.0, ours[1], ours[2])
 
     def forgive(self, node_id: NodeID) -> bool:
         """Drop everything held against a node — an operator overruling us."""
@@ -185,9 +290,30 @@ class Reputation:
             return 0.0
         stamp = time.monotonic() if now is None else now
         direct = _decay(entry.direct, stamp - entry.at, self._halflife)
-        rumour = sum(_decay(weight, stamp - at, self._halflife)
-                     for weight, at in entry.accusers.values())
+        rumour = sum(self._by_family(entry, stamp).values())
         return direct + min(rumour, self._rumour_ceiling)
+
+    def _by_family(self, entry: '_Standing', now: float) -> dict:
+        """The most any one family says, per family. Never the sum over
+        accusers — see the module note; that count is what two hundred minted
+        identities were priced at nothing to buy."""
+        loudest: dict[bytes, float] = {}
+        for weight, at, family in entry.accusers.values():
+            value = _decay(weight, now - at, self._halflife)
+            if value > loudest.get(family, 0.0):
+                loudest[family] = value
+        return {family: value for family, value in loudest.items() if value > 0.0}
+
+    def voices(self, node_id: NodeID, *, now: float | None = None) -> int:
+        """Independent families accusing this node, out of however many nodes
+        did. The number the score is actually made of — computed from the same
+        grouping the score is, so the two cannot come to disagree — and shown
+        beside the other one rather than instead of it."""
+        entry = self._standings.get(node_id.raw)
+        if entry is None:
+            return 0
+        stamp = time.monotonic() if now is None else now
+        return len(self._by_family(entry, stamp))
 
     def standing(self, node_id: NodeID, *, now: float | None = None) -> str:
         value = self.score(node_id, now=now)
@@ -196,6 +322,25 @@ class Reputation:
         if value >= self._suspect:
             return SUSPECT
         return OK
+
+    def direct_standing(self, node_id: NodeID, *,
+                        now: float | None = None) -> str:
+        """The standing this node would have on **our own evidence alone**.
+
+        Asked before we tell the network anything. A node that crossed a
+        threshold because other people said so has been judged by us, which is
+        our business; repeating it under our own signature would make it
+        everybody's, and each hop would turn one node's opinion into a fresh
+        independent accuser. That is how hearsay launders into testimony, and
+        it is the shape of a censorship primitive."""
+        entry = self._standings.get(node_id.raw)
+        if entry is None:
+            return OK
+        stamp = time.monotonic() if now is None else now
+        value = _decay(entry.direct, stamp - entry.at, self._halflife)
+        if value >= self._hostile:
+            return HOSTILE
+        return SUSPECT if value >= self._suspect else OK
 
     def is_hostile(self, node_id: NodeID) -> bool:
         return self.standing(node_id) == HOSTILE
@@ -218,6 +363,7 @@ class Reputation:
                 "standing": (HOSTILE if value >= self._hostile
                              else SUSPECT if value >= self._suspect else OK),
                 "accusers": len(entry.accusers),
+                "voices": self.voices(NodeID(raw), now=now),
                 "reports": entry.reports,
                 "reason": entry.reason,
             })

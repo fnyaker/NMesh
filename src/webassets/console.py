@@ -1900,7 +1900,12 @@ function paintAbuse(state){
   rows.forEach((row) => {
     values[row.node + ":standing"] = label[row.standing] || row.standing;
     values[row.node + ":score"] = row.score;
-    values[row.node + ":accusers"] = row.accusers;
+    // Both numbers, because they are two different claims: how many nodes said
+    // it, and how many independent voices that came to. When a crowd turns out
+    // to be one line of descent, showing only the first would be a number the
+    // score does not agree with.
+    values[row.node + ":accusers"] = row.voices < row.accusers
+      ? row.accusers + " (" + row.voices + " independent)" : row.accusers;
     values[row.node + ":reason"] = row.reason || "—";
   });
   paintBehaviour(state);
