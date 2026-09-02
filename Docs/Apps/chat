@@ -101,6 +101,41 @@ exchange with the sender.
 | `DELETE`       | scope(16), msg_id(16)                                         |
 | `REACTION`     | scope(16), msg_id(16), emoji (empty removes it)               |
 
+### How much of it one peer may send
+
+Chat is the most exposed application on a node: any authenticated member can
+send it anything, unasked. Every field was bounded in *size* and nothing was
+bounded in *rate*, so one member could hold the receive loop with profile
+updates for as long as it liked, and nothing anywhere counted.
+
+Each type now draws on its own allowance per sender (`_LIMITS`, ten-second
+windows), and the ceilings are **per kind rather than one bucket** because these
+messages are not comparable: a typing notice is a byte and arrives constantly, a
+file offer allocates a reassembly buffer and should arrive rarely, a media frame
+is the highest-rate thing on the mesh and throttling it breaks a call. A single
+shared ceiling would have to be set for the loudest of them — which hands that
+same allowance to the expensive ones, so the two that actually cost something
+would never be reached.
+
+| Kind | Per 10 s | Weight |
+|---|---|---|
+| messages, group texts | 40 | 1 |
+| reactions, read receipts | 60 | 1 |
+| edits, deletions, typing notices | 30 | 1 |
+| call frames | 3000 | 1 |
+| file chunks | 2000 | 1 |
+| file offers | 8 | 2 |
+| group invitations | 10 | 3 |
+| profile updates | 5 | 3 |
+
+Over the ceiling, chat **drops the message and reports the sender** to the node
+(`AppGuard`, `src/app_guard.py`), once per spent window rather than per refused
+message. The weight says what the breach is worth: flooding text is rude and
+might be a stuck client; flooding profile updates or group invitations is not
+something a correct client does at all, so it says more about the sender. What
+the reports add up to, and what happens next, is the node's —
+[`Docs/Architecture/security.md`](../Architecture/security.md).
+
 Solidity: every application message is validated and bounded; a malformed one is
 ignored, never fatal (the charter applies at app level too). File integrity is
 verified (SHA-256) before delivery. The sensitive primitives are guarded: a

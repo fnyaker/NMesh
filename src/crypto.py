@@ -61,6 +61,39 @@ class CryptoIdentity:
         self._signer = oqs.Signature(DSA_ALG)
         self._dsa_public: bytes = self._signer.generate_keypair()
 
+    @classmethod
+    def from_pair(cls, public_key: bytes, secret_key: bytes) -> 'CryptoIdentity':
+        """An identity from a key pair held elsewhere — a publisher key just
+        unlocked from disk, not the node's own.
+
+        The pair is checked against itself, as `load` does, and for the same
+        reason: a mismatched pair signs things nobody can verify, and the only
+        symptom is a release the whole network quietly refuses. `close` gives
+        the native state back; liboqs frees nothing on collection."""
+        identity = cls.__new__(cls)
+        identity._signer = oqs.Signature(DSA_ALG, bytes(secret_key))
+        identity._dsa_public = bytes(public_key)
+        probe = identity.sign(b"nmesh-publisher-self-test")
+        if not identity.verify(b"nmesh-publisher-self-test", probe, public_key):
+            identity.close()
+            raise CryptoError("the public key does not match the secret")
+        return identity
+
+    def close(self) -> None:
+        """Give the liboqs context back, and with it the secret-key buffer.
+
+        Not optional for a key that was unlocked on purpose: nothing frees it on
+        collection, so an identity dropped without this leaves the secret in
+        native memory for the life of the process — which is the whole thing a
+        passphrase-locked key exists to avoid."""
+        signer = getattr(self, "_signer", None)
+        if signer is not None:
+            try:
+                signer.free()
+            except Exception:
+                pass
+            self._signer = None
+
     @property
     def dsa_public_key(self) -> bytes:
         return self._dsa_public

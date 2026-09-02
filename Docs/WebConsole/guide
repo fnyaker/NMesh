@@ -357,6 +357,42 @@ medium is backend work that has not been done.
 What belongs to no medium stays apart: the **Addressing** card says what this
 node claims about itself (advertised addresses, local IPs, schemes).
 
+The **Membership** card says what this node can prove about *itself*: whether it
+belongs to a network at all or is only its own root, who admitted it, what its
+chain anchors on, and — the part that matters — how long its certificate has
+left. A membership lasts a year and renews itself a month before it runs out
+(see [`../Architecture/security.md`](../Architecture/security.md)); should that
+ever fail, this is where it shows as a countdown rather than as peers quietly
+refusing to authenticate a week later. Once it hits zero the only way back in is
+a fresh invitation.
+
+Under **Invite codes and certificates** sit the two ways trust is taken back,
+and they are not the same act:
+
+- **Take back a membership** revokes a node *this one admitted*. The statement is
+  signed, so it can never reach somebody else's members; it travels the mesh,
+  every node that hears it stops accepting that node's chain, and the links it
+  holds here end immediately rather than at the next handshake. Only an
+  invitation lets it back in.
+- **Anchors this node trusts** drops a root. That is local and only local — a
+  root's certificate is signed by itself, so there is nobody above it to take it
+  back, and nothing is announced. Dropping one stops *every* membership that
+  chains up to it from authenticating here. This node's own id is not in the
+  list: a node that is not its own root can present nothing at all.
+
+**Nodes under suspicion** is what the applications and the core have reported.
+Being in the network is not being trusted: each app sets its own idea of too
+much and reports the sender, and this node decides what the reports add up to
+(the thresholds are `abuse_suspect` / `abuse_hostile` / `abuse_halflife` in
+`nmesh.conf`). A node past the first threshold **stops being served, silently** —
+it is told nothing, so it learns as late as possible — and past the second it is
+refused a fresh link too. Complaints fade on their own, so a node that
+misbehaved once and then behaved comes back with nobody doing anything;
+`Clear` drops everything held against one, because every entry here is a
+judgement made under pressure by software and some of them will be wrong about
+somebody's node. The card is hidden while the table is empty, which is its
+normal state.
+
 **Refused handshakes** is the card to open when nothing will connect. A node
 drops anything it cannot verify — that is the design — but a mesh whose nodes
 all refuse each other looks, from outside, exactly like a mesh nobody is
@@ -417,7 +453,7 @@ works on a machine with no internet.
 |---------|------------------|------------------------------------------------|
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`) |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
@@ -431,6 +467,11 @@ works on a machine with no internet.
 | POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
 | GET     | `/api/rootcert`  | our root certificate (hex) to share            |
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
+| POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
+| POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
+| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node |
+| POST    | `/api/trust/accept-change` | `{node}` — "that was me": clears one entry of *Noticed, not judged* and the history behind it (the peer's profile, an issuer's admission rate, and the rule's charge) |
+| POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
 | GET     | `/api/store`       | app store view: `{catalog:[…state,action], installed:[…]}` |
@@ -467,7 +508,7 @@ works on a machine with no internet.
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, this node's own publisher key |
 | POST    | `/api/releases/publish` | `{notes}` — signs the installed tree and announces it to the mesh |
 | POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
-| POST    | `/api/releases/trust` / `untrust` / `auto` | pin a publisher key, take it back, or let their releases install by themselves |
+| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
 | GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node. **409** with the reason when nothing would start it again |

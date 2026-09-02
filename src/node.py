@@ -23,6 +23,15 @@ from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
 from .cert import Certificate
 from .cert_store import CertStore
+from . import revocation
+from .revocation import MAX_RECORD as _REVOCATION_MAX
+from . import accusation
+from .accusation import MAX_RECORD as _ACCUSATION_MAX
+from .reputation import (DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT,
+                         HOSTILE, OK, SUSPECT, RateGate, Reputation)
+from . import behaviour
+from . import features
+from .features import MAX_RECORD as _FEATURES_MAX
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
@@ -105,6 +114,11 @@ RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
 RELEASE_FETCH     = 0x1F   # "send me this release's package, from here"
 RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
 PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
+CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for me"
+CERT_RENEWED      = 0x23   # reply: the fresh certificate
+CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
+ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehaving"
+CAPABILITIES      = 0x26   # "here is what I can speak" — the base negotiation
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -131,6 +145,20 @@ _POOL_INDEX   = struct.Struct('!H')
 _ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
 _ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
+# Certificate renewal. A membership certificate lasts a year
+# (`CryptoIdentity.issue_cert`) and nothing renewed it: at T+365 days a node went
+# on presenting a chain every peer refuses, dropped out of the mesh with no
+# diagnostic anywhere, and only a fresh invitation could bring it back.
+# The two windows differ on purpose. A node starts asking a month out; the
+# issuer will act on anything within three, so clock skew, a slow relayed path
+# and a few missed sweeps can never turn a request made in time into a refusal.
+_CERT_RENEW_WINDOW  = 30 * 86400    # we start asking this long before expiry
+_CERT_RENEW_ACCEPT  = 90 * 86400    # we serve a request this close to expiry
+_CERT_RENEW_TICK    = 6 * 3600.0    # seconds between renewal sweeps
+_CERT_RENEW_FIRST   = 30.0          # first sweep, shortly after start
+_CERT_RENEW_MIN_GAP = 3600.0        # one renewal served per subject per hour
+_CERT_RENEW_TRACKED = 512           # subjects whose last renewal we remember
+_CERT_RENEW_MAX     = 16 * 1024     # bytes of a renewal payload, before any parse
 # Per-cert length prefix inside a chain blob
 _CERT_LEN    = struct.Struct('!H')
 # Address length prefix inside address lists
@@ -158,7 +186,8 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE}
+                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE,
+                    ABUSE_REPORT}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -187,6 +216,31 @@ _PSEUDO_RATE_WINDOW  = 10.0     # seconds
 _PSEUDO_RATE_MAX     = 64       # pseudo claims one link may gossip at us per window
 _PSEUDO_SEARCH_MAX   = 50       # results one search may return
 _PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
+_REVOKE_RATE_WINDOW  = 10.0     # seconds
+_REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
+_REVOKE_SYNC_MAX     = 256      # revocations pushed at a peer when it authenticates
+_ABUSE_RATE_WINDOW   = 10.0     # seconds
+_ABUSE_RATE_MAX      = 32       # accusations one link may gossip at us per window
+# How long traffic from a peer we hold as suspect is dropped before the link is
+# quietly let go. Randomised per link so the delay itself is not a signal an
+# attacker can time — a fixed one is a message, just a slower one.
+_TARPIT_MIN          = 45.0
+_TARPIT_MAX          = 180.0
+# We say something about a node at most this often, however much it does. An
+# accusation is a broadcast: a node under attack must not answer by becoming the
+# flood itself.
+_ACCUSE_MIN_GAP      = 300.0
+_ACCUSE_TRACKED      = 256
+_ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
+# How much of a quorum may descend from one issuer before it stops being a
+# quorum. Above half is the honest line: at half, two families disagree and a
+# human decides; above it, one family decides alone while looking like several.
+_FAMILY_SHARE        = 0.5
+_BEHAVIOUR_NOTICES   = 64       # findings held for the operator, never scored
+# Subjects whose arrival under an issuer we remember between two sweeps (rule
+# A1). A bound and not a target: a real window holds a handful, and a peer
+# pushing certificates at us must not be able to grow this one.
+_CERT_ARRIVALS_MAX   = 4096
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -194,7 +248,10 @@ _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_R
                     DIR_STORE, DIR_FIND, DIR_FOUND,
                     # A package comes from whoever has it, which may be several
                     # hops away — the publisher, or any node that kept a copy.
-                    RELEASE_FETCH, RELEASE_DATA}
+                    RELEASE_FETCH, RELEASE_DATA,
+                    # The issuer of a membership is rarely still a neighbour by
+                    # the time it needs renewing.
+                    CERT_RENEW, CERT_RENEWED}
 _DHT_K              = 6      # replication: store/fetch across this many closest nodes
 _DHT_QUERY_TIMEOUT  = 5.0
 _POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
@@ -427,6 +484,10 @@ _CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per wi
 # AutoNAT: confirm reachability by having a peer dial us back at the address it
 # observed us come from (never an arbitrary address → no amplification).
 _REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
+# Opening packets a dial-back will look through for the challenge. Small: a node
+# answering a fresh connection says a couple of things and one of them is the
+# challenge. What this bounds is a peer answering with an endless dribble.
+_REACH_DIAL_PACKETS   = 4
 _REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
 _REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
 # How long an answer to a probe we sent is still worth believing, and how many
@@ -1062,6 +1123,30 @@ class _Peer:
         # opened it closes the loser, so the duplicate reaper leaves it alone.
         self.probation: bool = False
         self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
+        # When this link stopped being served. Non-zero means everything that
+        # arrives is dropped without a word — the link stays open and quiet
+        # rather than closing, so the far end cannot tell "I have been found
+        # out" from "the network is bad today", and keeps spending its effort
+        # on a socket that leads nowhere. Cleared only by the link ending.
+        self.tarpit_until: float = 0.0
+        # What this peer said it can speak, and what that leaves us both able to
+        # use. `None` — not an empty set — means it has said nothing, which is a
+        # node from before the negotiation existed and must keep working exactly
+        # as it did. Absence is never read as refusal (see `features.py`).
+        self.features: frozenset | None = None
+        self.agreed: frozenset | None = None
+        # What the behavioural sweep reads. Three integers, incremented in the
+        # receive loop and nowhere else: everything they feed is computed later,
+        # on a timer that already runs. A detector that costs the hot path
+        # anything has already done more damage than what it detects.
+        self.undeclared: int = 0        # messages of a plane it said it lacks
+        self.found_entries: int = 0     # routing candidates it has handed us
+        self.found_self: int = 0        # …of which it named itself
+        # Rule E2: answers we could hold beside other peers' answers to the
+        # same question, and how many of them shared almost nothing with any of
+        # them. Incremented once per lookup round, never per packet.
+        self.answers_judged: int = 0
+        self.answers_disjoint: int = 0
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         # Handshakes this link has been allowed to make us verify. A joiner
@@ -1290,7 +1375,12 @@ class MeshNode:
                  app_store_dir: str | None = None,
                  release_dir: str | None = None,
                  pseudo: str | None = None,
-                 dht_max_bytes: int | None = None) -> None:
+                 dht_max_bytes: int | None = None,
+                 abuse_suspect: float = DEFAULT_SUSPECT,
+                 abuse_hostile: float = DEFAULT_HOSTILE,
+                 abuse_halflife: float = DEFAULT_HALFLIFE,
+                 gossip_abuse: bool = True,
+                 release_quorum: int = 0) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1323,6 +1413,43 @@ class MeshNode:
         self._cert_store = (CertStore.load(cert_store_path, self._id)
                             if cert_store_path else CertStore(self._id))
         self._cert_store.add(self._identity.self_signed_cert())
+        # What this node thinks of the nodes it talks to. A membership says an
+        # issuer vouched for an identity once; it says nothing about how that
+        # identity behaves afterwards, and an authenticated peer is precisely
+        # the adversary the threat model names. See `reputation.py`.
+        self._reputation = Reputation(suspect=abuse_suspect,
+                                      hostile=abuse_hostile,
+                                      halflife=abuse_halflife)
+        # Nodes whose accusations count as if we had seen it ourselves. Empty by
+        # default and only ever filled by a local decision — the natural entries
+        # are the operators this node is enrolled with in Fleet, which is where
+        # "I trust this specific node" already lives.
+        self._witnesses: set[bytes] = set()
+        self._accusations_sent: OrderedDict[bytes, float] = OrderedDict()
+        self._abuse_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        # Accusations already absorbed, by digest. This is what makes the
+        # epidemic terminate — and what stops one record being counted twice,
+        # which for a designated witness would otherwise be an unbounded score
+        # from a single signature replayed all hour.
+        self._abuse_seen: OrderedDict[bytes, None] = OrderedDict()
+        self._gossip_abuse = gossip_abuse
+        # Endorsed publishers that must independently sign one release before it
+        # may install itself. 0 — the default — means that route is closed and
+        # only a key pinned for automatic install can replace this node's code.
+        self._release_quorum = max(0, int(release_quorum))
+        # The behavioural rules, run on the keepalive sweep. Holds no per-peer
+        # state: the counters live on the links, and a second place for a peer's
+        # history would be a second answer.
+        self._behaviour = behaviour.BehaviourWatch()
+        # (node id, rule) → what to show the operator. Bounded and
+        # de-duplicated: a habit change stays visible for as long as the old
+        # average survives, and a notice repeated every sweep is one nobody
+        # reads.
+        self._behaviour_notices: OrderedDict[tuple, dict] = OrderedDict()
+        # (issuer, subject) pairs first seen since the last sweep — rule A1's
+        # only input, and drained by it. A set, so one subject counts once
+        # however many times it is offered.
+        self._cert_arrivals: set[tuple[bytes, bytes]] = set()
         self._seen_msgs: OrderedDict[int, None] = OrderedDict()
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
@@ -1342,6 +1469,11 @@ class MeshNode:
         self._state_dirty: bool = False
         self._certs_dirty: bool = False
         self._state_task: asyncio.Task | None = None
+        # Certificate renewal: the sweep that keeps our own membership alive,
+        # and — as an issuer — when we last re-signed for each subject. Keyed by
+        # subject rather than by link, so reconnecting buys no fresh allowance.
+        self._cert_task: asyncio.Task | None = None
+        self._renewals_served: dict[bytes, float] = {}
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
@@ -1402,6 +1534,7 @@ class MeshNode:
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
         self._dir_rate: OrderedDict[bytes, tuple] = OrderedDict()      # _rate_key(peer)->(n,win)
         self._pseudo_rate: OrderedDict[bytes, tuple] = OrderedDict()   # _rate_key(peer)->(n,win)
+        self._revoke_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._detached: set = set()   # fire-and-forget tasks, bounded
         self._transport_manager = transport_manager
         self._metrics = NodeMetrics()
@@ -1554,6 +1687,7 @@ class MeshNode:
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_release_watch()
+        self._ensure_cert_renewal()
         self._announce_own_pseudo()   # peers that were already up learn our name
 
     def _on_network_change(self, status: dict, changes: dict) -> None:
@@ -1977,6 +2111,7 @@ class MeshNode:
         await self._stop_address_retry()
         await self._stop_address_steering()
         await self._stop_release_watch()
+        await self._stop_cert_renewal()
         await self._stop_deferred_routes()
         await self._stop_state_writer()
         # Concurrently: each peer.stop() is individually bounded, and stopping
@@ -2227,11 +2362,15 @@ class MeshNode:
             for peer in peers:
                 if peer.authenticated_id is None or peer.session is None:
                     continue
+                if peer.tarpit_until:
+                    continue     # a tarpitted link is not kept alive, only held
                 try:
                     await self.ping(peer)
                 except Exception:
                     pass
             self._reap_silent_links()
+            self._reap_expired_tarpits()
+            self._behaviour_sweep()
             # Only nudge maintenance while it is still finding things. A mesh
             # smaller than the floor is below it permanently, and nudging every
             # keepalive there means a certificate-carrying lookup every 20 s
@@ -2804,6 +2943,7 @@ class MeshNode:
                 *[self._kad_query_node(nid, target) for nid in candidates],
                 return_exceptions=True,
             )
+            self._note_answer_overlap(candidates, results)
             for r in results:
                 if isinstance(r, list):
                     for entry in r:
@@ -2816,6 +2956,51 @@ class MeshNode:
                 break
             closest_seen = new_closest
         return sorted(shortlist, key=lambda n: target.distance(n))
+
+    def _note_answer_overlap(self, asked, results) -> None:
+        """Rule E2: whose answer to this question shared almost nothing with
+        anybody else's.
+
+        Only ever asked once a round has already gone out to several peers, so
+        it costs the lookup nothing it was not already doing: the answers are in
+        hand and the comparison is a set intersection over at most a few dozen
+        ids, on the timer of a lookup rather than of a packet.
+
+        Three restrictions, all of them about accusing the right node:
+
+        *An answer of fewer than `MIN_ANSWER_SIZE` ids is not judged.* Two
+        honest nodes may name two different closest candidates, and there is
+        nothing to disagree about yet.
+
+        *Only a peer we hold a direct link to is counted.* An answer that
+        reached us through relays was handled by nodes other than the one that
+        signed it, and charging the far end for what the path did would name
+        whoever is innocent.
+
+        *Overlap is measured as a share, not as emptiness.* A peer steering us
+        into a region it controls can always pad its answer with one id
+        everybody knows, and a test for an empty intersection is cleared by
+        exactly that."""
+        answers = [(node_id, {e.node_id for e in entries})
+                   for node_id, entries in zip(asked, results)
+                   if isinstance(entries, list) and entries]
+        if len(answers) < 2:
+            return          # one answer is not disjoint from anything
+        for index, (node_id, mine) in enumerate(answers):
+            if len(mine) < behaviour.MIN_ANSWER_SIZE:
+                continue    # two nodes may legitimately name two closest ids
+            peer = self._link_to(node_id)
+            if peer is None or peer.authenticated_id is None:
+                continue
+            others: set = set()
+            for other, (_id, theirs) in enumerate(answers):
+                if other != index:
+                    others |= theirs
+            if not others:
+                continue
+            peer.answers_judged += 1
+            if len(mine & others) / len(mine) < behaviour.DISJOINT_OVERLAP:
+                peer.answers_disjoint += 1
 
     async def bootstrap(self) -> None:
         """Kademlia join: advertise own addresses then iteratively populate routing table."""
@@ -3118,6 +3303,11 @@ class MeshNode:
         self._peers.append(peer)
         self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
+        # Our capabilities ride the same round trip as the challenge, so the
+        # negotiation costs no extra exchange and no latency. A peer that does
+        # not know this message drops it and carries on, which is exactly the
+        # behaviour that lets it reach a node older than itself.
+        await self._announce_capabilities(peer)
         challenge = self._invite.generate_challenge()
         peer.pending_challenge = challenge
         packet = Packet.create(CHALLENGE, self._id.raw,
@@ -3323,11 +3513,15 @@ class MeshNode:
                 and self._pseudo_store is None):
             return
         if self._state_task is None or self._state_task.done():
+            coro = self._state_writer_loop()
             try:
-                self._state_task = asyncio.create_task(self._state_writer_loop())
+                self._state_task = asyncio.create_task(coro)
             except RuntimeError:
-                # No running loop (construction, teardown). Write inline: this
-                # is the one place where there is nothing to block.
+                # No running loop (construction, teardown). Give the coroutine
+                # back before anything else — one nobody awaits is a warning at
+                # collection time, from a line that has nothing to do with it.
+                # Then write inline: this is the one place with nothing to block.
+                coro.close()
                 self._state_task = None
                 self._write_state_now()
                 self._write_certs_now()
@@ -3456,6 +3650,9 @@ class MeshNode:
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
             "handshake_refusals": self.handshake_refusals(),
+            "trust": self.trust_status(),
+            "abuse": self.abuse_status(),
+            "behaviour": self.behaviour_status(),
             "reachability": self.reachability(),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
@@ -4655,24 +4852,66 @@ class MeshNode:
             return False
         if not cert.is_self_signed:
             return False
-        self._cert_add(cert)
-        self._cert_store.add_root(cert.subject_id)
+        self._cert_store.add(cert)
+        self._trust_root(cert.subject_id)
         return True
 
     def _cert_add(self, cert: Certificate) -> bool:
-        """Take one certificate and mark the store for writing.
+        """Take one certificate and mark the store for writing."""
+        self._note_cert_arrival(cert)
+        ok = self._cert_store.add(cert)
+        if ok:
+            self._note_cert_change()
+        return ok
+
+    def _note_cert_arrival(self, cert: Certificate) -> None:
+        """Rule A1: one issuer admitted one subject we had never heard of.
+
+        Asked before the store is touched, because "new" means new *to us* and
+        a subject is only new once. One dict lookup and one set add — this sits
+        on the path that absorbs a routing answer, and the whole point of the
+        behavioural layer is that it costs the hot path integers.
+
+        A pair rather than a counter, and that is the bound: a peer that could
+        make us count the same subject twice — by handing it back after the
+        store's own limits evicted it — could manufacture a burst under any
+        issuer it liked. It can still cost the issuer a *notice*, which is all
+        A1 ever produces, and never a sanction."""
+        if cert.subject_id == cert.issuer_id or cert.issuer_id == self._id:
+            return          # a root vouching for itself admits nobody, and we
+                            # already know what we issued ourselves
+        if len(self._cert_arrivals) >= _CERT_ARRIVALS_MAX:
+            return
+        if self._cert_store.knows(cert.subject_id):
+            return
+        self._cert_arrivals.add((cert.issuer_id.raw, cert.subject_id.raw))
+
+    def _trust_root(self, node_id: NodeID) -> None:
+        """Pin a trust root and mark the store for writing.
+
+        Never call `CertStore.add_root` directly. The root set is persisted
+        state exactly like the certificates are, but only `add` used to be
+        paired with a mark, by convention — and `console_add_root` marked
+        *before* pinning, so on the path that writes inline the file went out
+        with the root still missing and the dirty flag already cleared. A
+        mutation nobody marks is a root that is gone at the next restart, and
+        the symptom is a peer that stops authenticating for no visible reason."""
+        self._cert_store.add_root(node_id)
+        self._note_cert_change()
+
+    def _note_cert_change(self) -> None:
+        """The cert store changed — get it to disk, eventually.
 
         `CertStore.save` serialises the *whole* store to hex JSON and writes it,
         synchronously. Doing that per certificate meant absorbing one chain of
         six re-wrote a multi-megabyte file six times, inside a receive loop.
         Same shape as `_persist_state`: mark dirty, let one task write."""
-        ok = self._cert_store.add(cert)
-        if ok and self._cert_store_path:
-            self._certs_dirty = True
-            self._ensure_state_writer()
-            if self._state_task is None:
-                self._write_certs_now()   # no loop to write on
-        return ok
+        if not self._cert_store_path:
+            return
+        self._certs_dirty = True
+        self._ensure_state_writer()
+        if self._state_task is None:
+            self._write_certs_now()   # no loop to write on
 
     def _write_certs_now(self) -> None:
         if not self._cert_store_path:
@@ -4714,6 +4953,13 @@ class MeshNode:
         self._defer_route(packet, decrement=True, exclude=from_peer)
 
     async def _handle_packet(self, peer: _Peer, packet: Packet) -> None:
+        # Before anything else, and before any work is spent: a peer this node
+        # holds as suspect gets its traffic dropped, silently. No error, no
+        # close, nothing it can measure — a node told it has been detected
+        # changes identity and starts again, so the one thing worth protecting
+        # here is how long it takes to notice. See `_tarpit`.
+        if peer.tarpit_until:
+            return
         if packet.type == INVITE_SEEK:
             # Pre-auth, token-gated, bounded — handled entirely on its own.
             await self._handle_invite_seek(peer, packet)
@@ -4743,6 +4989,14 @@ class MeshNode:
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
                 await self._forward_packet(peer, packet)
                 return
+        # One dict lookup and a set test, and only for a peer that has actually
+        # announced something — this is the whole hot-path cost of rule C1. A
+        # peer that announced nothing is counted at zero, because "I have never
+        # heard what you speak" is not evidence about you (see `features.py`).
+        if peer.agreed is not None:
+            plane = _MESSAGE_PLANE.get(packet.type)
+            if plane is not None and plane not in peer.agreed:
+                peer.undeclared += 1
         handler = _HANDLERS.get(packet.type)
         if handler:
             await handler(self, peer, packet)
@@ -5104,15 +5358,32 @@ class MeshNode:
 
     async def _dial_back(self, scheme: str, ip: str, port: int) -> bool:
         """Open a connection to ip:port and confirm an NMesh node answers (it
-        challenges on accept). Bounded by a timeout; always cleaned up."""
+        challenges on accept). Bounded by a timeout; always cleaned up.
+
+        It looks for the challenge **among** the opening packets rather than
+        insisting it is the first one. It used to read exactly one and compare,
+        which made "nothing may ever precede the challenge on the wire" an
+        unwritten protocol invariant — and the first thing to precede it, the
+        capability announcement, silently turned every reachability probe into a
+        failure. A node then believed itself unreachable, stopped advertising
+        itself as a relay, and nothing anywhere named the cause. Bounded in
+        packets *and* by one deadline for the whole exchange, so a peer that
+        answers with an endless dribble cannot hold the dial open."""
         from .ip_utils import _fmt_host
         addr = f"{scheme}://{_fmt_host(ip)}:{port}"
         transport = None
         try:
             transport = await asyncio.wait_for(
                 self._transport_manager.connect(addr), _REACH_DIAL_TIMEOUT)
-            pkt = await asyncio.wait_for(transport.receive(), _REACH_DIAL_TIMEOUT)
-            return pkt.type == CHALLENGE
+            deadline = time.monotonic() + _REACH_DIAL_TIMEOUT
+            for _ in range(_REACH_DIAL_PACKETS):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                pkt = await asyncio.wait_for(transport.receive(), left)
+                if pkt.type == CHALLENGE:
+                    return True
+            return False
         except Exception:
             return False
         finally:
@@ -5281,6 +5552,14 @@ class MeshNode:
             return
         valid_entries: list[NodeEntry] = []
         learned_new = False
+        # Two integers for rule E1. Counted over every entry offered, valid or
+        # not: what the rule asks is what this peer's answers are *made of*, and
+        # dropping the ones that failed verification would let a peer improve
+        # the ratio by padding it with rubbish.
+        peer.found_entries += len(entries)
+        if peer.authenticated_id is not None:
+            peer.found_self += sum(1 for e in entries
+                                   if e.node_id == peer.authenticated_id)
         for entry in entries:
             if not entry.cert_chain:
                 continue
@@ -5514,7 +5793,7 @@ class MeshNode:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(CATALOG_ANNOUNCE, self._id.raw, _BROADCAST_ID, release_bytes)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.CATALOG):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5535,6 +5814,8 @@ class MeshNode:
     def _schedule_catalog_sync(self, peer: '_Peer') -> None:
         if not self._catalog.releases():
             return
+        if not self.peer_speaks(peer, features.CATALOG):
+            return      # it does not run the app store — this is noise to it
         try:
             self._spawn_bounded(self._sync_catalog_to(peer))
         except RuntimeError:
@@ -5705,7 +5986,7 @@ class MeshNode:
             else self._release_have_byte(release_bytes)
         pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
                             flag + release_bytes)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.RELEASE):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5726,28 +6007,59 @@ class MeshNode:
     def _schedule_release_sync(self, peer: '_Peer') -> None:
         if not self._releases.releases():
             return
+        if not self.peer_speaks(peer, features.RELEASE):
+            return
         try:
             self._spawn_bounded(self._sync_releases_to(peer))
         except RuntimeError:
             pass  # no running loop (e.g. teardown) — nothing to sync
 
+    def _release_signer(self, key_path: str | None, passphrase: str | None):
+        """The identity that will sign a release: ours, or an unlocked
+        publisher key. The caller closes it when it is not ours."""
+        if not key_path:
+            return self._identity
+        from . import publisher_key
+        from .crypto import CryptoIdentity
+        try:
+            public, secret = publisher_key.load(key_path, passphrase or "")
+        except publisher_key.PublisherKeyError as exc:
+            raise ReleaseError(str(exc)) from None
+        return CryptoIdentity.from_pair(public, secret)
+
     async def publish_release(self, root: str | None = None, notes: str = "",
-                              ts: int | None = None) -> dict:
+                              ts: int | None = None, *,
+                              key_path: str | None = None,
+                              passphrase: str | None = None) -> dict:
         """Publish this node's own code as a signed release, and announce it.
 
-        The tree is read, content-addressed onto the DHT, and a descriptor
-        signed with **this node's identity** binds that content to us. Whoever
-        has pinned our key can then fetch and install it. Raises
-        :class:`ReleaseError` if the tree is not something we can publish."""
+        The tree is read, content-addressed onto the DHT, and a signed
+        descriptor binds that content to a publisher. Whoever has pinned that
+        key can then fetch and install it. Raises :class:`ReleaseError` if the
+        tree is not something we can publish.
+
+        By default the signer is **this node's identity**, which is the simple
+        case and the weaker one: that key is loaded the whole time the node
+        runs, because it has to be. ``key_path`` + ``passphrase`` sign with a
+        separate publisher key instead, unlocked here and dropped when this
+        call returns — see :mod:`src.publisher_key`. Of everything a key in
+        this project signs, a release is the only thing that replaces somebody
+        else's code, and it is the one signed least often; it has no business
+        sharing the key that has to stay unlocked."""
         from .dht import MAX_VALUE
         from . import updater
         files = _core_read_tree(root or updater.install_root())
         version = _core_version_of(files)
         _core_check_tree(files, version)          # what we sign is what we carry
         package = _core_build_package(files)
-        release_bytes = _core_build_release(
-            package, version, self._identity.dsa_public_key,
-            self._identity.sign, ts, notes)
+        signer = self._release_signer(key_path, passphrase)
+        try:
+            release_bytes = _core_build_release(
+                package, version, signer.dsa_public_key, signer.sign, ts, notes)
+            publisher_key = signer.dsa_public_key
+        finally:
+            if signer is not self._identity:
+                signer.close()
         if len(release_bytes) > MAX_VALUE:
             raise ReleaseError("release descriptor too large")
         release_id = _core_release_id(package)
@@ -5763,8 +6075,8 @@ class MeshNode:
         return {
             "version": version,
             "release_id": release_id.hex(),
-            "publisher_id": _core_publisher_id(
-                self._identity.dsa_public_key).hex(),
+            "publisher_id": _core_publisher_id(publisher_key).hex(),
+            "publisher_key": publisher_key.hex(),
             "files": len(files),
             "bytes": sum(len(value) for value in files.values()),
             "package_bytes": len(package),
@@ -5941,8 +6253,21 @@ class MeshNode:
             if entry is None:
                 continue
             state, action = self._release_state(entry)
+            allowed, why = self.may_auto_install(entry)
+            # Who else has put their key behind these exact bytes, and whether
+            # anybody claims this version with different ones. Both are what an
+            # operator needs to judge a key they have not pinned.
+            attesters = self._releases.attesters(entry["version"],
+                                                 entry["sha256"])
             releases.append({**listed, "state": state, "action": action,
-                             "trusted": state != "untrusted"})
+                             "trusted": state != "untrusted",
+                             "attesters": len(attesters),
+                             "endorsed_attesters": len(
+                                 self._publishers.endorsed_among(attesters)),
+                             "disputed": self._releases.contradicts(
+                                 entry["version"], entry["sha256"]),
+                             "unattended": allowed,
+                             "unattended_why": why})
         from . import updater
         ok, reason = updater.updatable()
         return {
@@ -5951,6 +6276,7 @@ class MeshNode:
                 self._identity.dsa_public_key).hex(),
             "publisher_key": self._identity.dsa_public_key.hex(),
             "publishers": self._publishers.list(),
+            "quorum": self._release_quorum,
             "releases": releases,
             "log": list(self._release_log),
             "updatable": ok,
@@ -5958,14 +6284,18 @@ class MeshNode:
         }
 
     def trust_publisher(self, key_hex: str, name: str = "",
-                        auto: bool = False) -> dict:
+                        auto: bool = False, endorsed: bool = False) -> dict:
         """Pin a publisher key. The only way a key enters this list is here —
-        an operator acting locally, never a packet."""
+        an operator acting locally, never a packet.
+
+        ``auto`` and ``endorsed`` are different statements and neither implies
+        the other: the first hands this one key a scheduled restart, the second
+        only lets its word count towards a quorum."""
         try:
             public_key = bytes.fromhex(key_hex)
         except (ValueError, TypeError) as exc:
             raise ReleaseError("that is not a public key") from exc
-        entry = self._publishers.add(public_key, name, auto)
+        entry = self._publishers.add(public_key, name, auto, endorsed)
         self._releases.retrust(self._trusts_publisher)
         return entry
 
@@ -5977,6 +6307,15 @@ class MeshNode:
 
     def set_publisher_auto(self, publisher_id_hex: str, auto: bool) -> bool:
         return self._publishers.set_auto(publisher_id_hex, auto)
+
+    def set_publisher_endorsed(self, publisher_id_hex: str,
+                               endorsed: bool) -> bool:
+        """Whether this key's signature counts towards the quorum.
+
+        Manual, one key at a time, and that is the whole defence: a quorum made
+        of keys a human chose cannot be reached by minting identities, only by
+        compromising chosen ones."""
+        return self._publishers.set_endorse(publisher_id_hex, endorsed)
 
     def _note_release(self, version: str, outcome: str, detail: str = "") -> None:
         self._release_log.append({"ts": int(time.time()), "version": version,
@@ -6079,6 +6418,90 @@ class MeshNode:
         except Exception:                     # noqa: BLE001 — never crash a handler
             pass
 
+    def may_auto_install(self, entry: dict) -> tuple[bool, str]:
+        """May this release replace our code with nobody watching?
+
+        Two independent routes in, and they answer different questions.
+
+        **A pinned publisher marked ``auto``.** One key an operator decided to
+        hand a scheduled restart to. Fast, and it is exactly as strong as that
+        one key: whoever holds it can replace this node's code.
+
+        **A quorum of endorsed publishers over the same content.** This is the
+        route for code from parties none of whom we would hand the machine to
+        alone. It counts **signatures over the same `(version, sha256)`**, never
+        nodes serving the package — mirroring bytes is free, the content hash
+        already makes them safe to fetch from anyone, and a thousand mirrors say
+        nothing one does not. A second signature means a second party put their
+        key behind the same code.
+
+        Endorsement is manual, one key at a time, which is what stops the
+        obvious attack: a quorum of keys a human chose cannot be reached by
+        minting two hundred identities, only by compromising chosen ones.
+
+        Two refusals apply to **both** routes, because they say the code itself
+        is in question rather than the messenger:
+
+          - somebody claims this version with different content — a fork, or a
+            build of somebody's own wearing a version everyone recognises;
+          - the publisher we would install from contradicts itself.
+
+        Neither accuses anybody. Two honest publishers can disagree by accident,
+        and the answer to that is the same as to an attack: stop, and let a
+        human look. Refusing an update is recoverable; installing a hostile one
+        is not."""
+        publisher = entry.get("publisher")
+        version, digest = entry.get("version", ""), entry.get("sha256", "")
+        if self._releases.contradicts(version, digest):
+            return False, "another publisher signed different content for this version"
+        attesters = self._releases.attesters(version, digest)
+        if self._publishers.auto_for(publisher):
+            return True, "signed by a publisher pinned for automatic install"
+        if self._release_quorum <= 0:
+            return False, "no publisher pinned for automatic install"
+        endorsed = self._publishers.endorsed_among(attesters)
+        if len(endorsed) < self._release_quorum:
+            return False, (f"{len(endorsed)} of {self._release_quorum} endorsed "
+                           f"publishers have signed this exact content")
+        family, count = self._publisher_family(endorsed)
+        if family is not None:
+            # A quorum is a count of *independent* parties. Keys that all trace
+            # back to one issuer are one party wearing several hats, however
+            # many of them an operator ticked — and a subtree grown in order to
+            # have somewhere to publish from is exactly what that looks like.
+            # Not an accusation: a family is not a conspiracy, and the answer is
+            # to stop counting them as several, not to hold anything against
+            # them.
+            return False, (f"{count} of {len(endorsed)} endorsed signers trace "
+                           f"back to one issuer ({family[:8]}…), so they are "
+                           f"not {len(endorsed)} independent parties")
+        return True, (f"{len(endorsed)} endorsed publishers independently "
+                      f"signed this exact content")
+
+    def _publisher_family(self, publisher_ids) -> tuple[str | None, int]:
+        """Do these signers trace back to one issuer? ``(id_hex, count)``.
+
+        Only the ones we can place in our own certificate graph are looked at: a
+        publisher id is built like a node id, so a key that publishes from its
+        node resolves and one that does not simply cannot be judged here. Saying
+        so is better than guessing — an unplaceable signer is counted as
+        independent, which is the answer that errs towards installing rather
+        than towards refusing on a suspicion we cannot support."""
+        placed = []
+        for key_id in publisher_ids:
+            try:
+                placed.append(NodeID.from_hex(key_id))
+            except ValueError:
+                continue
+        if len(placed) < 2:
+            return None, 0
+        family, count = self._cert_store.shared_ancestor(placed)
+        if family is None or count < 2:
+            return None, 0
+        if count <= len(placed) * _FAMILY_SHARE:
+            return None, 0
+        return family.hex(), count
+
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
         one twice. Returns the version installed, or None.
@@ -6096,7 +6519,8 @@ class MeshNode:
             state, _action = self._release_state(entry)
             if state != "available":
                 continue
-            if not self._publishers.auto_for(entry["publisher"]):
+            allowed, _why = self.may_auto_install(entry)
+            if not allowed:
                 continue
             release_id = entry["release_id"]
             if release_id in self._release_tried:
@@ -6272,6 +6696,10 @@ class MeshNode:
         return self._gossip_allowed(self._pseudo_rate, peer,
                                     _PSEUDO_RATE_WINDOW, _PSEUDO_RATE_MAX)
 
+    def _revoke_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._revoke_rate, peer,
+                                    _REVOKE_RATE_WINDOW, _REVOKE_RATE_MAX)
+
     def _absorb_claim(self, peer: '_Peer', raw: bytes):
         """Verify a claim that arrived from ``peer`` and file it.
 
@@ -6311,9 +6739,21 @@ class MeshNode:
         task.add_done_callback(self._detached.discard)
 
     def _charge_abuse(self, peer: '_Peer') -> None:
-        """Count a protocol violation and cut the peer once they pile up. Never
-        inline: we are inside that peer's own receive task, which must not be
-        cancelled from here (see :meth:`_reap_peer`)."""
+        """Count a protocol violation, against the link and against the node.
+
+        Two counters, because they answer different questions. The link's is
+        what cuts *this connection* when it turns to noise, and it is all we
+        have for a peer that has not authenticated. The node's outlives the
+        socket: a peer that reconnects to shed an exhausted count is exactly the
+        behaviour the per-link counter cannot see, and one node holding four
+        links used to get four separate allowances.
+
+        Never inline: we are inside that peer's own receive task, which must not
+        be cancelled from here (see :meth:`_reap_peer`)."""
+        if peer.authenticated_id is not None:
+            self.report_abuse(peer.authenticated_id, 1.0,
+                              "protocol violations",
+                              kind=accusation.KIND_MALFORMED)
         if peer.note_abuse():
             self._spawn_bounded(self._reap_peer(peer))
 
@@ -6325,7 +6765,8 @@ class MeshNode:
         if self._absorb_claim(peer, packet.payload) is not None:
             self._spawn_bounded(self._gossip_pseudo(packet.payload, exclude=peer))
 
-    def _gossip_targets(self, exclude: '_Peer | None', fanout: int) -> list['_Peer']:
+    def _gossip_targets(self, exclude: '_Peer | None', fanout: int,
+                        feature: str | None = None) -> list['_Peer']:
         """Which peers an epidemic goes to next — a bounded sample, not all.
 
         Sending to every peer turns one accepted claim into (peers − 1)
@@ -6337,7 +6778,8 @@ class MeshNode:
         costing a fixed amount per hop."""
         live = [p for p in self._peers
                 if p is not exclude and p.authenticated_id is not None
-                and p.session is not None]
+                and p.session is not None
+                and (feature is None or self.peer_speaks(p, feature))]
         if len(live) <= fanout:
             return live
         return random.sample(live, fanout)
@@ -6347,7 +6789,7 @@ class MeshNode:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(PSEUDO_ANNOUNCE, self._id.raw, _BROADCAST_ID, raw)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.PSEUDO):
             try:
                 await p.send(pkt)
             except Exception:
@@ -6374,6 +6816,8 @@ class MeshNode:
 
     def _schedule_pseudo_sync(self, peer: '_Peer') -> None:
         if not len(self._pseudo_book):
+            return
+        if not self.peer_speaks(peer, features.PSEUDO):
             return
         try:
             self._spawn_bounded(self._sync_pseudos_to(peer))
@@ -6674,6 +7118,9 @@ class MeshNode:
             return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
+        # Our half of the negotiation, on the round trip that was happening
+        # anyway. The server announced with its challenge; this is the answer.
+        await self._announce_capabilities(peer)
         if peer.join_code is None:
             # Reconnecting routing peer — present our chain directly
             await self.initiate_handshake(peer)
@@ -6886,6 +7333,13 @@ class MeshNode:
         if claimed_id != NodeID(packet.src_id):
             return self._refuse_handshake(
                 packet, "the id claimed is not the hash of the key presented")
+        # A node we hold as hostile does not get a fresh link. Placed here on
+        # purpose: after the two SHA-256s that prove which identity is asking,
+        # and before the post-quantum verification, so the refusal costs us
+        # almost nothing and reconnecting is not a way to reset an allowance.
+        if self._reputation.is_hostile(claimed_id):
+            return self._refuse_handshake(
+                packet, "this node is held as hostile here")
         if not peer.note_handshake_attempt():
             return self._refuse_handshake(packet, "this link had used its tries")
         if not self._identity.verify(peer.pending_challenge + kem_pub + bob_dsa_pub,
@@ -6937,9 +7391,16 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        # Say what we speak again, now that the link is authenticated. The
+        # pre-auth announcement was unsigned — a machine in the middle could
+        # have stripped names from it — and this one is the record that counts.
+        # Stripping can only ever take away an optional plane, never a check,
+        # which is why nothing security-critical is negotiable.
+        self._spawn_bounded(self._announce_capabilities(peer))
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
+        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zero crash).
@@ -6999,7 +7460,7 @@ class MeshNode:
             if server_chain:
                 last = server_chain[-1]
                 if last.is_self_signed:
-                    self._cert_store.add_root(last.subject_id)
+                    self._trust_root(last.subject_id)
             self._cert_add(issued_cert)
         else:
             if not server_chain:
@@ -7028,10 +7489,732 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        # Say what we speak again, now that the link is authenticated. The
+        # pre-auth announcement was unsigned — a machine in the middle could
+        # have stripped names from it — and this one is the record that counts.
+        # Stripping can only ever take away an optional plane, never a check,
+        # which is why nothing security-critical is negotiable.
+        self._spawn_bounded(self._announce_capabilities(peer))
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
+        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         self._persist_state()  # persist the newly-known peer for restart recovery
+
+    # -----------------------------------------------------------------------
+    # Capability negotiation
+    # -----------------------------------------------------------------------
+
+    async def _announce_capabilities(self, peer: '_Peer') -> None:
+        """Tell one link what this build can speak. Never fatal: a link that
+        cannot carry the announcement is a link, not an error."""
+        try:
+            await peer.send(Packet.create(CAPABILITIES, self._id.raw,
+                                          _BROADCAST_ID,
+                                          features.encode(features.SPOKEN)))
+        except Exception:
+            pass
+
+    async def _handle_capabilities(self, peer: '_Peer', packet: Packet) -> None:
+        """A peer says what it speaks.
+
+        Reachable **before** authentication, on purpose: the point of the
+        negotiation is to know what to send during the join itself, and there is
+        nothing here worth protecting — the record names planes of the protocol,
+        contains no secret, and grants nothing. It is still parsed like any
+        hostile input, and it is bounded before it is parsed.
+
+        A second announcement arrives once the link is authenticated, and that
+        one is the record that counts: until then the claim is unsigned, so a
+        machine in the middle could strip names from it. That can only ever take
+        *away* optional planes — never a check, never a verification, never an
+        authorisation — which is the whole reason nothing security-critical is
+        allowed to be negotiable."""
+        if len(packet.payload) > _FEATURES_MAX:
+            return self._charge_abuse(peer)
+        theirs = features.decode(packet.payload)
+        if theirs is None:
+            return self._charge_abuse(peer)
+        peer.features = theirs
+        peer.agreed = features.agree(theirs)
+
+    def peer_speaks(self, peer: '_Peer', feature: str) -> bool:
+        """May we use ``feature`` with this peer?
+
+        **Silence means yes.** A peer that has announced nothing is not a peer
+        with no features, it is one from before this existed, and it must keep
+        receiving exactly what it received before. Reading absence as refusal
+        would have made the negotiation an upgrade that cuts off everyone who
+        has not taken it — which is the failure it is meant to prevent."""
+        return peer.agreed is None or feature in peer.agreed
+
+    def negotiation_status(self) -> list[dict]:
+        """What each live link agreed to, for the console."""
+        rows = []
+        for peer in self._peers:
+            if peer.authenticated_id is None:
+                continue
+            rows.append({
+                "node": peer.authenticated_id.raw.hex(),
+                "announced": peer.features is not None,
+                "shared": sorted(peer.agreed) if peer.agreed else [],
+                # What they have and we do not: the honest reading of a node
+                # that is ahead of us, or one that is simply not us.
+                "theirs_only": (sorted(peer.features - features.SPOKEN)
+                                if peer.features else []),
+                "ours_only": (sorted(features.SPOKEN - peer.features)
+                              if peer.features else []),
+            })
+        return rows
+
+    # -----------------------------------------------------------------------
+    # Certificate renewal
+    # -----------------------------------------------------------------------
+
+    def _ensure_cert_renewal(self) -> None:
+        if self._cert_task is None or self._cert_task.done():
+            self._cert_task = asyncio.create_task(self._cert_renewal_loop())
+
+    async def _stop_cert_renewal(self) -> None:
+        task = self._cert_task
+        self._cert_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _cert_renewal_loop(self) -> None:
+        """Keep our own membership alive, and forget the certificates that are
+        not.
+
+        Never raises: this loop dying is the outage it exists to prevent, and it
+        would be invisible until the day the chain expired."""
+        await asyncio.sleep(_CERT_RENEW_FIRST)
+        while self._running:
+            try:
+                await self._renew_own_membership()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass          # a sweep that fails is retried at the next tick
+            await asyncio.sleep(_CERT_RENEW_TICK)
+
+    async def _renew_own_membership(self) -> bool:
+        """Ask our issuer for a fresh certificate when ours is running out.
+
+        The asking has to happen **while the chain still verifies**: a node whose
+        membership has expired cannot authenticate to anybody, so it has no link
+        left to ask on and no relay willing to carry for it. That is why the
+        window is a month and the sweep is six-hourly — by the time it matters,
+        the node has had sixty chances. Past expiry the only way back in is a
+        fresh invitation, which is the same thing as saying an expired
+        membership really is one.
+
+        Returns whether a request went out."""
+        if self._cert_store.prune_expired():
+            self._note_cert_change()
+        chain = self._cert_store.get_chain_to_root(self._id)
+        if not chain:
+            return False
+        mine = chain[0]
+        # A self-signed first link means we are only our own root: nobody issued
+        # us anything, so there is nothing to renew and nobody to ask.
+        if mine.is_self_signed or not mine.expires_at:
+            return False
+        if mine.expires_at - int(time.time()) > _CERT_RENEW_WINDOW:
+            return False
+        await self._route_outbound(
+            Packet.create(CERT_RENEW, self._id.raw, mine.issuer_id.raw,
+                          mine.serialize()))
+        return True
+
+    def _claim_renewal(self, subject: NodeID) -> bool:
+        """One renewal served per subject per `_CERT_RENEW_MIN_GAP`.
+
+        Per subject and not per link: the work is an ML-DSA signature spent on
+        an identity, and a peer that drops the connection and dials again must
+        not buy itself a fresh allowance — which is exactly the hole the invite
+        lockout had before it was counted node-wide."""
+        now = time.monotonic()
+        last = self._renewals_served.get(subject.raw)
+        if last is not None and now - last < _CERT_RENEW_MIN_GAP:
+            return False
+        self._renewals_served[subject.raw] = now
+        while len(self._renewals_served) > _CERT_RENEW_TRACKED:
+            self._renewals_served.pop(next(iter(self._renewals_served)), None)
+        return True
+
+    async def _handle_cert_renew(self, peer: '_Peer', packet: Packet) -> None:
+        """A node we certified asks us to sign the same binding again.
+
+        This hands out no authority we have not already handed out. Everything
+        the new certificate says is fixed by the old one: the subject, its key,
+        and us as the issuer — and `Certificate.deserialize` refuses one whose
+        ids do not derive from its keys or whose signature does not check, so
+        `issuer_id == our id` is proof we signed it ourselves.
+
+        What it does cost is one post-quantum signature and a routed reply, so
+        the request is bounded before it is parsed and rate limited per subject
+        afterwards. Anything refused is dropped in silence — the sender is
+        typically several hops away, and the peer that handed us the packet only
+        relayed it, so there is nobody here to charge for it."""
+        if len(packet.payload) > _CERT_RENEW_MAX:
+            return
+        try:
+            cert = Certificate.deserialize(packet.payload)
+        except Exception:
+            return
+        if cert.issuer_id != self._id or cert.is_self_signed:
+            return          # not a binding of ours to re-make
+        if cert.subject_id != NodeID(packet.src_id):
+            return          # only the subject may ask for its own
+        # An expired membership is not renewed. It is how a node that left stops
+        # being a member, and re-signing one would be a readmission with no
+        # human anywhere in it — the way back in is an invitation.
+        remaining = cert.expires_at - int(time.time())
+        if not cert.expires_at or remaining <= 0 or remaining > _CERT_RENEW_ACCEPT:
+            return
+        if not self._claim_renewal(cert.subject_id):
+            return
+        fresh = self._identity.issue_cert(cert.subject_id, cert.subject_pub)
+        self._cert_add(fresh)
+        await self._route_outbound(
+            Packet.create(CERT_RENEWED, self._id.raw, packet.src_id,
+                          fresh.serialize()),
+            blocking=False)   # we are inside a receive loop
+
+    async def _handle_cert_renewed(self, peer: '_Peer', packet: Packet) -> None:
+        """Our issuer answered.
+
+        Taken only if it renews the binding we already had: us as the subject,
+        our own key, and an issuer that has certified us before. An unsolicited
+        certificate from a stranger authenticates nothing anyway — it anchors on
+        a root we do not trust — but absorbing one would let any node fill our
+        own bounded slot list with certificates we can never present."""
+        if len(packet.payload) > _CERT_RENEW_MAX:
+            return
+        try:
+            cert = Certificate.deserialize(packet.payload)
+        except Exception:
+            return
+        if cert.subject_id != self._id or cert.is_self_signed:
+            return
+        if cert.subject_pub != self._identity.dsa_public_key:
+            return
+        if cert.issuer_id != NodeID(packet.src_id):
+            return
+        if not any(held.issuer_id == cert.issuer_id
+                   for held in self._cert_store.certs_for(self._id)):
+            return          # an issuer that never certified us is not renewing
+        if self._cert_add(cert):
+            self._note_change("nodes")
+
+    # -----------------------------------------------------------------------
+    # Revocation
+    # -----------------------------------------------------------------------
+
+    async def _handle_cert_revoke(self, peer: '_Peer', packet: Packet) -> None:
+        """A signed "I no longer vouch for this node", from its issuer.
+
+        Absorbed and passed on only when it tells us something new, so the
+        epidemic dies out instead of circulating for ever — the same shape as a
+        pseudo claim, and charged the same way: an honest relay verifies before
+        re-sending, so whoever hands us an unverifiable one either forged it or
+        forwarded without looking."""
+        if not self._revoke_allowed(peer):
+            return
+        raw = packet.payload
+        if not raw or len(raw) > _REVOCATION_MAX:
+            return self._charge_abuse(peer)
+        parsed = self._cert_store.revoke(raw, self._identity.verify)
+        if parsed is None:
+            # Either it does not verify — the peer's fault — or we already knew,
+            # which is the ordinary end of an epidemic and nobody's fault.
+            if revocation.parse(raw, self._identity.verify) is None:
+                self._charge_abuse(peer)
+            return
+        self._note_cert_change()
+        self._announce_revocation(raw, exclude=peer)
+        self._enforce_revocation(parsed["subject_id"])
+
+    def _announce_revocation(self, raw: bytes,
+                             exclude: '_Peer | None' = None) -> None:
+        """Choose who to pass it on to **now**, send in the background.
+
+        The order matters and the choosing does too. Enforcing a revocation
+        tears down every link to the node it names, so a fan-out list computed
+        when the background task finally ran could be empty — on a node whose
+        only link *was* that node, the revocation died where it was issued and
+        nobody else ever heard. Picking the peers synchronously, before
+        enforcement, is what makes "revoke and disconnect" survive being the
+        same act."""
+        targets = self._gossip_targets(exclude, _GOSSIP_FANOUT, features.REVOKE)
+        if not targets:
+            return          # nobody to tell yet; the next peer to authenticate
+                            # gets it from `_schedule_revocation_sync`
+        self._spawn_bounded(self._gossip_revocation(raw, targets))
+
+    async def _gossip_revocation(self, raw: bytes, targets) -> None:
+        # Re-stamped to us at each hop, so the next node's direct-type gate
+        # (src_id must be the immediate sender) accepts it.
+        pkt = Packet.create(CERT_REVOKE, self._id.raw, _BROADCAST_ID, raw)
+        for p in targets:
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    def _enforce_revocation(self, subject: NodeID) -> None:
+        """Act on a revocation we have just accepted.
+
+        A revocation that only changes what future handshakes decide has revoked
+        nothing an attacker is currently using: the compromised node already
+        holds live links, a live E2E session, and a place in our routing table.
+        Same judgement as the Fleet app tearing down the shells a withdrawn
+        capability had opened."""
+        if subject == self._id:
+            return          # nobody can revoke us out of our own store
+        self._forget_e2e(subject)
+        self._routing.remove(subject)
+        for peer in [p for p in self._peers if p.authenticated_id == subject]:
+            self._spawn_bounded(self._reap_peer(peer))
+        self._note_change("links")
+        self._note_change("nodes")
+
+    def _schedule_revocation_sync(self, peer: '_Peer') -> None:
+        """Catch a freshly authenticated peer up on what we know is revoked.
+
+        A node that was offline for the compromise learns of it from whoever it
+        reconnects to, rather than from the next handshake it wrongly accepts."""
+        if not self._cert_store.revocations():
+            return
+        if not self.peer_speaks(peer, features.REVOKE):
+            return
+        try:
+            self._spawn_bounded(self._sync_revocations_to(peer))
+        except RuntimeError:
+            pass          # no running loop (teardown) — nothing to sync
+
+    async def _sync_revocations_to(self, peer: '_Peer') -> None:
+        for raw in self._cert_store.revocations()[:_REVOKE_SYNC_MAX]:
+            try:
+                await peer.send(Packet.create(CERT_REVOKE, self._id.raw,
+                                              _BROADCAST_ID, raw))
+            except Exception:
+                return          # link gone — the next one to authenticate gets it
+
+    def console_revoke_member(self, node_hex: str,
+                              reason: int = revocation.REASON_UNSPECIFIED) -> bool:
+        """Take back a membership *we* issued, and tell the network.
+
+        Only ours to take back: the signature is what carries the statement, so
+        this can never reach a node somebody else admitted. For an anchor gone
+        bad the tool is `console_remove_root` — a root's certificate is
+        self-signed, so there is nobody but itself entitled to revoke it."""
+        try:
+            subject = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if subject == self._id:
+            return False
+        try:
+            raw = revocation.build(subject, self._identity.dsa_public_key,
+                                   self._identity.sign, reason=int(reason))
+        except (ValueError, TypeError):
+            return False
+        if self._cert_store.revoke(raw, self._identity.verify) is None:
+            return False
+        self._note_cert_change()
+        self._announce_revocation(raw)
+        self._enforce_revocation(subject)
+        return True
+
+    # -----------------------------------------------------------------------
+    # Zero trust: what this node thinks of the nodes it talks to
+    # -----------------------------------------------------------------------
+
+    def report_abuse(self, node_id: NodeID, weight: float = 1.0,
+                     reason: str = "", *,
+                     kind: int = accusation.KIND_UNSPECIFIED) -> str:
+        """Record that a node did something a correct one does not. Returns its
+        standing afterwards (``ok`` / ``suspect`` / ``hostile``).
+
+        The one door for the whole product: the core calls it for protocol
+        violations it sees itself, and every application calls it through the
+        connector when its *own* thresholds are exceeded — only chat knows what
+        too many messages is, only fleet knows what too many commands is. What
+        an app does not get to decide is what happens next, because weighing one
+        app's complaint against another's is a node-wide judgement.
+
+        Never for ourselves: a bug in an app must not be able to make a node
+        stop serving its own operator."""
+        if node_id == self._id:
+            return OK
+        before = self._reputation.standing(node_id)
+        after = self._reputation.note(node_id, weight, reason)
+        if after != before:
+            self._on_standing_changed(node_id, after, reason, kind)
+        return after
+
+    def _on_standing_changed(self, node_id: NodeID, standing: str,
+                             reason: str, kind: int) -> None:
+        """A node has just crossed a threshold. Act, quietly."""
+        if standing == OK:
+            return
+        for peer in [p for p in self._peers if p.authenticated_id == node_id]:
+            self._tarpit(peer)
+        self._note_change("links")
+        # Say so to the network — but only about what we saw ourselves. Passing
+        # on somebody else's accusation as if it were ours would turn one node's
+        # opinion into as many as there are relays, which is exactly the number
+        # the receiver is trying to count.
+        if self._gossip_abuse and self._claim_accusation(node_id):
+            self._announce_accusation(node_id, standing, kind)
+
+    def _tarpit(self, peer: '_Peer') -> None:
+        """Stop serving a link, without telling it.
+
+        Not a close: a peer that is disconnected knows the moment it happens,
+        changes identity and starts again, so the useful thing to take away is
+        not the connection but the feedback. Everything it sends is dropped at
+        the top of `_handle_packet`, nothing is answered, and the link is let go
+        after a delay drawn at random — a fixed one is a message too, only
+        slower."""
+        if peer.tarpit_until:
+            return
+        peer.tarpit_until = time.monotonic() + random.uniform(_TARPIT_MIN,
+                                                              _TARPIT_MAX)
+
+    def _reap_expired_tarpits(self) -> None:
+        """Let go of the links whose hold has run out. Never raises, never
+        awaits — the keepalive sweep already walks every peer.
+
+        A task per tarpitted link would have been the obvious shape and the
+        wrong one: each would sit asleep for minutes holding one of the
+        `_MAX_DETACHED` slots the whole node shares, so a flood arriving from
+        many identities would starve the fan-outs and teardowns that budget
+        exists for. One timer that already runs costs nothing extra."""
+        now = time.monotonic()
+        for peer in [p for p in self._peers
+                     if p.tarpit_until and now >= p.tarpit_until]:
+            self._spawn_bounded(self._reap_peer(peer))
+
+    def _claim_accusation(self, node_id: NodeID) -> bool:
+        """One accusation per node per `_ACCUSE_MIN_GAP`.
+
+        An accusation is a broadcast, and the node making one is by definition
+        under pressure: a node being flooded must not answer by becoming the
+        flood itself."""
+        now = time.monotonic()
+        last = self._accusations_sent.get(node_id.raw)
+        if last is not None and now - last < _ACCUSE_MIN_GAP:
+            return False
+        self._accusations_sent[node_id.raw] = now
+        while len(self._accusations_sent) > _ACCUSE_TRACKED:
+            self._accusations_sent.popitem(last=False)
+        return True
+
+    def _announce_accusation(self, node_id: NodeID, standing: str,
+                             kind: int) -> None:
+        severity = accusation.MAX_SEVERITY if standing == HOSTILE else 1
+        try:
+            raw = accusation.build(node_id, self._identity.dsa_public_key,
+                                   self._identity.sign,
+                                   severity=severity, kind=kind)
+        except (ValueError, TypeError):
+            return
+        # Everyone but the node it names. It will find out — its traffic stops
+        # being answered — but not from us, and not with a timestamp it can use
+        # to work out which of the things it tried was the one that was noticed.
+        targets = [p for p in self._gossip_targets(None, _GOSSIP_FANOUT,
+                                                   features.ABUSE)
+                   if p.authenticated_id != node_id]
+        if not targets:
+            return
+        self._spawn_bounded(self._gossip_accusation(raw, targets))
+
+    async def _gossip_accusation(self, raw: bytes, targets) -> None:
+        pkt = Packet.create(ABUSE_REPORT, self._id.raw, _BROADCAST_ID, raw)
+        for p in targets:
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    def _abuse_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._abuse_rate, peer,
+                                    _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
+
+    def _behaviour_sweep(self) -> None:
+        """Judge every authenticated link, and every issuer we watch, once on
+        the timer that already runs.
+
+        Never raises: this loop dying would stop the keepalive with it, and a
+        detector is not worth a link. Nothing here decides anything — each
+        finding goes to the ledger as a weight, and the ledger decides, which is
+        the difference between a detector and a censor."""
+        try:
+            observations = [
+                behaviour.Observation(
+                    node_id=peer.authenticated_id,
+                    transport=self._peer_scheme(peer) or "",
+                    packets_in=peer.counters.pkts_in,
+                    packets_out=peer.counters.pkts_out,
+                    bytes_in=peer.counters.bytes_in,
+                    bytes_out=peer.counters.bytes_out,
+                    undeclared=peer.undeclared,
+                    found_entries=peer.found_entries,
+                    found_self=peer.found_self,
+                    answers_judged=peer.answers_judged,
+                    answers_disjoint=peer.answers_disjoint,
+                )
+                for peer in self._peers
+                if peer.authenticated_id is not None and not peer.tarpit_until
+            ]
+            if observations:
+                self._behaviour.sweep(observations, self._on_behaviour_finding)
+            # Drained whether or not there was anybody to judge, and drained
+            # even when the sweep above found nothing: this is a window, and a
+            # window that is never emptied is a burst spread over the lifetime
+            # of the process — which is no burst at all.
+            arrivals: dict = {}
+            for issuer_raw, _subject_raw in self._cert_arrivals:
+                arrivals[issuer_raw] = arrivals.get(issuer_raw, 0) + 1
+            self._cert_arrivals.clear()
+            self._behaviour.sweep_issuers(
+                {NodeID(issuer): count for issuer, count in arrivals.items()},
+                self._on_behaviour_finding)
+        except Exception:
+            pass
+
+    def _on_behaviour_finding(self, node_id, weight: float, rule_id: str,
+                              summary: str, response: str) -> None:
+        """One rule, one peer. The id travels with the finding so an operator
+        reading "reported for C1" can go and read C1 and disagree.
+
+        Two classes, because two rules can be equally true and call for
+        opposite handling. Most score, and the ledger decides what the scores
+        add up to. A profile break only ever *notifies*: its honest lookalike
+        is "the operator upgraded that machine", and scoring it would punish
+        them for administering their own fleet."""
+        if response == behaviour.NOTICE:
+            self._note_behaviour(node_id, rule_id, summary)
+            return
+        self.report_abuse(node_id, weight, f"{rule_id}: {summary}",
+                          kind=accusation.KIND_UNSPECIFIED)
+
+    def _note_behaviour(self, node_id, rule_id: str, summary: str) -> None:
+        """Put something in front of the operator, once per node per rule.
+
+        Bounded and de-duplicated: a peer whose habits changed will keep
+        looking changed for as long as its old average survives, and a notice
+        repeated every twenty seconds is a notice nobody reads."""
+        key = (node_id.raw, rule_id)
+        if key in self._behaviour_notices:
+            self._behaviour_notices.move_to_end(key)
+            return
+        self._behaviour_notices[key] = {
+            "node": node_id.raw.hex(), "rule": rule_id,
+            "summary": summary, "at": time.time(),
+        }
+        while len(self._behaviour_notices) > _BEHAVIOUR_NOTICES:
+            self._behaviour_notices.popitem(last=False)
+        self._note_change("links")
+
+    def console_accept_change(self, node_hex: str) -> bool:
+        """"That change was me." Drops the notice and the history behind it, so
+        what the node does now becomes what it is expected to do.
+
+        There has to be such a button and it has to be local: the whole point
+        of D5 is that it cannot tell a compromise from an upgrade, and the only
+        thing in the world that can is the person who did or did not perform
+        the upgrade."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        dropped = [key for key in self._behaviour_notices
+                   if key[0] == node_id.raw]
+        for key in dropped:
+            del self._behaviour_notices[key]
+        self._behaviour.forget(node_id)
+        if dropped:
+            self._note_change("links")
+        return bool(dropped)
+
+    def behaviour_status(self) -> dict:
+        """What each rule did on the last sweep, for the console."""
+        return {**self._behaviour.status(),
+                "notices": list(reversed(self._behaviour_notices.values()))}
+
+    def _is_accusation_seen(self, parsed: dict) -> bool:
+        """Have we already absorbed this statement? Records it if not.
+
+        Keyed on **what it says** — accuser, subject, moment — and not on the
+        bytes. ML-DSA signatures are randomised, so signing one statement twice
+        gives two different records: a byte-wise check would have stopped a
+        relay loop and nothing else, while re-signing stayed a way to be counted
+        again. This way one accuser saying one thing at one moment is one
+        report, whoever carries it and however many times.
+
+        A digest rather than the fields, because this table is sized to survive
+        a flood and an accusation is ~5 kB of key and signature."""
+        digest = hashlib.sha256(
+            parsed["accuser_id"].raw + parsed["subject_id"].raw
+            + struct.pack("!Q", parsed["issued_at"])).digest()[:16]
+        if digest in self._abuse_seen:
+            return True
+        self._abuse_seen[digest] = None
+        while len(self._abuse_seen) > _ACCUSE_SEEN_MAX:
+            self._abuse_seen.popitem(last=False)
+        return False
+
+    async def _handle_abuse_report(self, peer: '_Peer', packet: Packet) -> None:
+        """Somebody says a node is misbehaving.
+
+        Weighed, never obeyed. An accusation from a node the operator
+        designated counts as if we had seen it ourselves; from an ordinary
+        member of our own network it counts as *one accuser*, capped strictly
+        below the threshold that cuts anybody off; from a node we cannot place
+        in our network, or one we already hold as suspect, it counts as
+        nothing. If hearsay alone could get a node cut off, anybody able to
+        speak could cut anybody off, and this would be a censorship primitive
+        with a reputation label on it."""
+        if not self._gossip_abuse or not self._abuse_allowed(peer):
+            return
+        raw = packet.payload
+        if not raw or len(raw) > _ACCUSATION_MAX:
+            return self._charge_abuse(peer)
+        parsed = accusation.parse(raw, self._identity.verify)
+        if parsed is None:
+            return self._charge_abuse(peer)
+        # Absorbed once, whoever brings it and however often. This is both what
+        # makes the epidemic die out — otherwise one accusation circulates
+        # between neighbours for the whole hour it stays valid — and what keeps
+        # a single signature worth a single report: without it, replaying one
+        # designated witness's record was an unbounded score from one signature.
+        # Claimed after the signature, never before: everything above it is
+        # anybody's to write, and claiming first would let unsigned rubbish
+        # evict live entries — the same rule as the app-auth nonce cache.
+        if self._is_accusation_seen(parsed):
+            return
+        accuser, subject = parsed["accuser_id"], parsed["subject_id"]
+        if subject == self._id:
+            # Somebody is telling the mesh we are the problem. Not something to
+            # act on and not something to relay: a node cannot be asked to
+            # spread the case against itself, and a receiver that did would make
+            # every accusation self-amplifying.
+            return
+        if self._reputation.is_suspect(accuser):
+            return
+        before = self._reputation.standing(subject)
+        label = accusation.KIND_NAMES.get(parsed["kind"], "")
+        if accuser.raw in self._witnesses:
+            after = self._reputation.note(subject, parsed["severity"],
+                                          f"{label} (witness)".strip())
+        elif self._cert_store.get_chain_to_root(accuser) is not None:
+            after = self._reputation.note_accusation(subject, accuser, 1.0,
+                                                     label)
+        else:
+            return          # a stranger's opinion of a stranger is not evidence
+        if after != before:
+            self._on_standing_changed(subject, after, label, parsed["kind"])
+        self._spawn_bounded(self._gossip_accusation(
+            raw, [p for p in self._gossip_targets(peer, _GOSSIP_FANOUT,
+                                                  features.ABUSE)
+                  if p.authenticated_id != subject]))
+
+    def console_add_witness(self, node_hex: str) -> bool:
+        """Count this node's accusations as if we had seen it ourselves.
+
+        A local decision and only ever local. The natural entries are the
+        operators this node is enrolled with in Fleet — that is already where
+        "I trust this specific node" lives, and it is the one relationship a
+        human established deliberately."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if node_id == self._id or len(self._witnesses) >= 64:
+            return False
+        self._witnesses.add(node_id.raw)
+        return True
+
+    def console_remove_witness(self, node_hex: str) -> bool:
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if node_id.raw not in self._witnesses:
+            return False
+        self._witnesses.discard(node_id.raw)
+        return True
+
+    def console_forgive(self, node_hex: str) -> bool:
+        """Drop everything held against a node — the operator overruling us.
+
+        There has to be one, and it has to be local: every input to this table
+        is a judgement made under pressure by software, and some of them will be
+        wrong about somebody's node."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if not self._reputation.forgive(node_id):
+            return False
+        self._accusations_sent.pop(node_id.raw, None)
+        self._note_change("links")
+        return True
+
+    def abuse_status(self) -> dict:
+        """The suspicion table, for the console."""
+        return {
+            "gossip": self._gossip_abuse,
+            "witnesses": sorted(raw.hex() for raw in self._witnesses),
+            "nodes": self._reputation.rows(),
+        }
+
+    def console_remove_root(self, node_hex: str) -> bool:
+        """Stop trusting an anchor. A local decision, and only ever local:
+        there is nobody above a root to appeal to."""
+        try:
+            node_id = NodeID.from_hex(node_hex)
+        except ValueError:
+            return False
+        if not self._cert_store.remove_root(node_id):
+            return False
+        self._note_cert_change()
+        self._enforce_revocation(node_id)
+        return True
+
+    def trust_status(self) -> dict:
+        """What this node can prove about itself, for the console.
+
+        A membership that is running out is the one trust failure a node can see
+        coming, and the only one it can still do something about — so it is
+        shown as a date and a countdown, not discovered from peers that quietly
+        stop authenticating."""
+        chain = self._cert_store.get_chain_to_root(self._id) or []
+        expires = self._cert_store.chain_expires_at(self._id)
+        rooted = bool(chain) and chain[-1].subject_id != self._id
+        return {
+            "chain_length": len(chain),
+            "self_rooted": bool(chain) and not rooted,
+            "anchor": chain[-1].subject_id.raw.hex() if chain else None,
+            "issuer": (chain[0].issuer_id.raw.hex()
+                       if chain and not chain[0].is_self_signed else None),
+            "expires_at": expires,
+            "seconds_left": (None if not expires
+                             else max(0, expires - int(time.time()))),
+            "renewing": bool(expires) and (
+                expires - int(time.time()) <= _CERT_RENEW_WINDOW),
+            "roots": self._cert_store.root_count(),
+            "root_ids": [r for r in self._cert_store.roots()
+                         if r != self._id.raw.hex()],
+            "revoked": len(self._cert_store.revocations()),
+        }
 
     # -----------------------------------------------------------------------
     # Hole-punching handlers
@@ -7516,4 +8699,32 @@ _HANDLERS = {
     DIR_FOUND:         MeshNode._handle_dir_found,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
+    CERT_RENEW:        MeshNode._handle_cert_renew,
+    CERT_RENEWED:      MeshNode._handle_cert_renewed,
+    CERT_REVOKE:       MeshNode._handle_cert_revoke,
+    ABUSE_REPORT:      MeshNode._handle_abuse_report,
+    CAPABILITIES:      MeshNode._handle_capabilities,
+}
+
+# Which plane of the protocol each message belongs to — the map rule C1 reads.
+# Only the *optional* planes appear: `features.CORE` is never negotiable, so a
+# core message can never be "undeclared", and a type absent from this table is
+# one whose plane nobody has named yet. Absence means silence, not suspicion.
+_MESSAGE_PLANE = {
+    FIND_NODE: features.KADEMLIA, FOUND_NODE: features.KADEMLIA,
+    FIND_VALUE: features.KADEMLIA, FOUND_VALUE: features.KADEMLIA,
+    STORE: features.KADEMLIA,
+    E2E_HANDSHAKE: features.E2E, E2E_HANDSHAKE_ACK: features.E2E,
+    DIR_STORE: features.DIRECTORY, DIR_FIND: features.DIRECTORY,
+    DIR_FOUND: features.DIRECTORY,
+    PSEUDO_ANNOUNCE: features.PSEUDO,
+    CATALOG_ANNOUNCE: features.CATALOG,
+    RELEASE_ANNOUNCE: features.RELEASE, RELEASE_FETCH: features.RELEASE,
+    RELEASE_DATA: features.RELEASE,
+    PUNCH_REQUEST: features.PUNCH, PUNCH_RELAY: features.PUNCH,
+    REACH_PROBE: features.REACH, REACH_PROBE_ACK: features.REACH,
+    INVITE_SEEK: features.RELAY, RELAY_CARRY: features.RELAY,
+    CERT_RENEW: features.RENEW, CERT_RENEWED: features.RENEW,
+    CERT_REVOKE: features.REVOKE,
+    ABUSE_REPORT: features.ABUSE,
 }

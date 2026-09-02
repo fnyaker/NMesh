@@ -167,14 +167,17 @@ class TestCodecFuzz:
 # A live node under a hostile packet stream
 # ---------------------------------------------------------------------------
 
-def _auth_peer(node: MeshNode):
-    """Promote the node's injected peer to an authenticated, session-bearing
-    state so fuzzed packets reach the deep handlers (decrypt, decoders)."""
-    peer = node._peers[0]
+def _auth_peer_at(peer):
+    """Promote one peer to an authenticated, session-bearing state so fuzzed
+    packets reach the deep handlers (decrypt, decoders)."""
     peer.authenticated_id = NodeID(os.urandom(20))
     peer.session = SessionKey(os.urandom(32))
     peer.dsa_pub = os.urandom(64)
     return peer
+
+
+def _auth_peer(node: MeshNode):
+    return _auth_peer_at(node._peers[0])
 
 
 class TestNodeHandlerFuzz:
@@ -196,21 +199,37 @@ class TestNodeHandlerFuzz:
         await node.stop()
 
     async def test_node_alive_after_flood(self):
-        # After a burst of garbage a valid PING must still elicit a PONG,
-        # proving the node did not wedge.
-        node, fake = await make_node()
-        peer = _auth_peer(node)
-        src = peer.authenticated_id.raw
+        # A burst of garbage must not wedge the node — but it must cost the
+        # peer that sent it. So liveness is proved from an *honest* link: the
+        # flooder is held as hostile and stops being served, and everybody else
+        # gets the same node they had before.
+        node, flooder_link = await make_node()
+        honest_link = FakeTransport()
+        await node._inject_peer(honest_link)
+        flooder, honest = node._peers[0], node._peers[1]
+        _auth_peer_at(flooder)
+        _auth_peer_at(honest)
+
         rng = random.Random(0x999)
         for _ in range(500):
-            pkt = Packet.create(rng.choice(_ALL_TYPES), src,
+            pkt = Packet.create(rng.choice(_ALL_TYPES), flooder.authenticated_id.raw,
                                 node.id.raw, _random_bytes(rng, 256))
-            await node._handle_packet(peer, pkt)
-        fake.sent.clear()
+            await node._handle_packet(flooder, pkt)
+
         from src.node import _encode_addresses
-        ping = Packet.create(PING, src, b"\xff" * 20, _encode_addresses(["tcp://127.0.0.1:1"]))
-        await node._handle_packet(peer, ping)
-        assert any(p.type == PONG for p in fake.sent)
+        addresses = _encode_addresses(["tcp://127.0.0.1:1"])
+        flooder_link.sent.clear()
+        honest_link.sent.clear()
+
+        await node._handle_packet(honest, Packet.create(
+            PING, honest.authenticated_id.raw, b"\xff" * 20, addresses))
+        assert any(p.type == PONG for p in honest_link.sent)
+
+        await node._handle_packet(flooder, Packet.create(
+            PING, flooder.authenticated_id.raw, b"\xff" * 20, addresses))
+        assert not any(p.type == PONG for p in flooder_link.sent)
+        assert node._reputation.is_suspect(flooder.authenticated_id)
+        assert flooder.tarpit_until    # held, not closed: it learns nothing
         await node.stop()
 
     async def test_tampered_msg_id_dropped(self):

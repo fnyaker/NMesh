@@ -78,6 +78,8 @@ _ID_LEN = 20
 _MAX_NAME_IDS = 512   # ids one resolve call may ask about (bounded, like everything)
 _AUTH_ASSERT = 0x0C   # body = audience(20) ‖ ctx(32) ‖ ttl(4) ‖ purpose(utf-8)
 _AUTH_VERIFY = 0x0D   # body = flags(1) ‖ ctx(32) ‖ plen(2) ‖ purpose ‖ assertion
+_ABUSE = 0x0F         # body = node_id(20) ‖ weight(B) ‖ kind(B) ‖ reason(utf-8)
+_ABUSE_REASON_MAX = 64   # characters of explanation kept, for an operator to read
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
@@ -299,6 +301,8 @@ class DataConnector:
                     # DHT: the app id comes from the AUTH session, never the
                     # frame, so an app can only ever speak for its own section.
                     await self._handle_app_auth(writer, app_id, ftype, body)
+                elif ftype == _ABUSE:
+                    self._handle_abuse(app_id, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -404,6 +408,35 @@ class DataConnector:
                 content = None
             present = b"\x01" if content is not None else b"\x00"
             await _write_frame(writer, _APP_DHT_VALUE, present + (content or b""))
+
+    def _handle_abuse(self, app_id: bytes, body: bytes) -> None:
+        """An app says a node is abusing it.
+
+        The app owns the *threshold* — only chat knows what too many messages
+        is, only fleet knows what too many commands is — and the node owns what
+        the reports add up to, because weighing one app's complaint against
+        another's is not something one app can do.
+
+        Nothing is answered. A reply would tell the app whether its report moved
+        the needle, and an app is not always the honest party here: a compromised
+        one that could read the standing back would have a probe for finding out
+        exactly how much it can get away with. The report is also bounded on the
+        way in, so a buggy app cannot bring a peer down in one call — the weight
+        is clamped, and `MeshNode.report_abuse` refuses our own id outright."""
+        if len(body) < 22:
+            return
+        try:
+            target = NodeID(body[:20])
+        except ValueError:
+            return
+        weight, kind = body[20], body[21]
+        reason = body[22:_ABUSE_REASON_MAX + 22].decode("utf-8", "replace")
+        try:
+            self._node.report_abuse(target, float(weight),
+                                    f"{reason} ({app_id.hex()[:8]})".strip(),
+                                    kind=kind)
+        except Exception:
+            pass          # a report must never break the client's connection
 
     def _auth_for(self, app_id: bytes):
         """The app-auth service for this section, created once and kept.
@@ -712,6 +745,28 @@ class ConnectorClient:
             return {}
         return {k: v for k, v in out.items()
                 if isinstance(k, str) and isinstance(v, str)} if isinstance(out, dict) else {}
+
+    async def report_abuse(self, node, weight: int = 1, *, kind: int = 0,
+                           reason: str = "") -> None:
+        """Tell the node that a peer is abusing *this* app.
+
+        The threshold is yours: only this app knows what too much of it looks
+        like. What the reports add up to is the node's, and it is deliberately
+        not readable back — an app that could watch its own reports land would
+        be a probe for finding out exactly how much a peer can get away with.
+
+        Fire and forget, and never fatal: a report that cannot be sent must not
+        take down the app that noticed."""
+        raw = bytes.fromhex(node) if isinstance(node, str) else bytes(node)
+        if len(raw) != _ID_LEN:
+            return
+        body = (raw + bytes([max(0, min(int(weight), 255)),
+                             max(0, min(int(kind), 255))])
+                + reason.encode("utf-8")[:_ABUSE_REASON_MAX])
+        try:
+            await _write_frame(self._writer, _ABUSE, body)
+        except Exception:
+            pass
 
     def name_of(self, id_hex) -> str:
         """The last name we read for a node id, or "". Synchronous on purpose:

@@ -1307,6 +1307,38 @@ def _make_handler(console: WebConsole):
                 ok = console._call(_wrap(console._node.console_add_root, cert_hex))
                 self._json(200 if ok else 400, {"ok": bool(ok)})
                 return
+            if path == "/api/trust/revoke":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_revoke_member,
+                                         str(data.get("node", "")),
+                                         int(data.get("reason") or 0)))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/accept-change":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_accept_change,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/forgive":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_forgive,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/witness":
+                data = _parse_json(body) or {}
+                call = (console._node.console_remove_witness
+                        if data.get("remove") else console._node.console_add_witness)
+                ok = console._call(_wrap(call, str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
+            if path == "/api/trust/untrust":
+                data = _parse_json(body) or {}
+                ok = console._call(_wrap(console._node.console_remove_root,
+                                         str(data.get("node", ""))))
+                self._json(200 if ok else 400, {"ok": bool(ok)})
+                return
             if path == "/api/ticket":
                 self._handle_ticket(_parse_json(body))
                 return
@@ -1794,7 +1826,8 @@ def _make_handler(console: WebConsole):
                     entry = console._call(_wrap(
                         node.trust_publisher, key.strip(),
                         name if isinstance(name, str) else "",
-                        data.get("auto") is True))
+                        data.get("auto") is True,
+                        data.get("endorsed") is True))
                     self._json(200, {"ok": True, "publisher": entry})
                     return
                 if path == "/api/releases/untrust":
@@ -1812,6 +1845,16 @@ def _make_handler(console: WebConsole):
                         return
                     ok = console._call(_wrap(node.set_publisher_auto, publisher,
                                              data.get("auto") is True))
+                    self._json(200 if ok else 404, {"ok": ok})
+                    return
+                if path == "/api/releases/endorse":
+                    publisher = data.get("publisher_id")
+                    if not isinstance(publisher, str):
+                        self._json(400, {"error": "publisher_id required"})
+                        return
+                    ok = console._call(_wrap(node.set_publisher_endorsed,
+                                             publisher,
+                                             data.get("endorsed") is True))
                     self._json(200 if ok else 404, {"ok": ok})
                     return
             except ReleaseError as exc:

@@ -25,6 +25,8 @@ import struct
 import time
 from dataclasses import dataclass, field
 
+from ..accusation import KIND_FLOOD as ABUSE_FLOOD
+from ..app_guard import AppGuard, Limit
 from ..node_id import NodeID
 from .chat_state import ChatState
 
@@ -44,6 +46,54 @@ _REACTION = 0x0E       # set/clear my emoji reaction on a message
 MSG_ID_LEN = 16
 GROUP_ID_LEN = 16
 _ZERO_GID = b"\x00" * GROUP_ID_LEN
+
+# What one sender may send us, per kind, in ten seconds. Sized per kind and not
+# as one bucket on purpose: these messages are not comparable. A typing notice
+# is a byte and arrives constantly; a file offer allocates a reassembly buffer
+# and should arrive rarely; a media frame is the highest-rate thing on the mesh
+# and throttling it breaks a call. One shared ceiling would have to be set for
+# the loudest of them, which hands that same allowance to the expensive ones —
+# so the two that actually cost something would never be reached.
+#
+# The weights say what a breach is worth to the node. Flooding text is rude and
+# might be a stuck client; flooding profile updates or group invitations is not
+# something a correct client does at all, so it says more about the sender.
+_LIMITS = {
+    "messages":     Limit(40, 10.0),
+    "group texts":  Limit(40, 10.0),
+    "edits":        Limit(30, 10.0),
+    "deletions":    Limit(30, 10.0),
+    "reactions":    Limit(60, 10.0),
+    "read receipts": Limit(60, 10.0),
+    "typing notices": Limit(30, 10.0),
+    # Real-time media. High, because a codec is legitimately fast — 300/s is far
+    # above any of them — and finite, because "unbounded" is where a flood hides.
+    "call frames":  Limit(3000, 10.0),
+    # Bulk transfer: the chunk rate has to allow a file to actually move. What
+    # bounds a transfer is `_MAX_TRANSFERS`, its declared size and its digest,
+    # not this.
+    "file chunks":  Limit(2000, 10.0),
+    # The expensive and the rare. A correct client sends a handful of these.
+    "file offers":  Limit(8, 10.0, weight=2),
+    "group invitations": Limit(10, 10.0, weight=3),
+    "profile updates":   Limit(5, 10.0, weight=3),
+}
+
+# Which allowance each message type draws on.
+_KINDS = {
+    _TEXT: "messages",
+    _FILE_OFFER: "file offers",
+    _FILE_CHUNK: "file chunks",
+    _STREAM: "call frames",
+    _PROFILE: "profile updates",
+    _GROUP_INVITE: "group invitations",
+    _GROUP_TEXT: "group texts",
+    _RECEIPT: "read receipts",
+    _TYPING: "typing notices",
+    _EDIT: "edits",
+    _DELETE: "deletions",
+    _REACTION: "reactions",
+}
 
 # FILE_OFFER body: msg_id(16) | reply_to(16) | transfer_id(4) | total_chunks(4)
 #                  | size(8) | sha256(32) | name_len(2) | name
@@ -78,6 +128,7 @@ _MAX_RECEIPT_IDS = 256
 
 _DELIVERED = 1
 _READ = 2
+_MAX_JOBS = 16          # short background jobs alive at once (abuse reports)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +288,13 @@ class ChatApp:
         self._next_tid = 1
         self._task: asyncio.Task | None = None
         self._names_task: asyncio.Task | None = None
+        self._jobs: set = set()
+        # Chat is the most exposed app on the node: any authenticated member can
+        # send it anything, unasked. It had size bounds on every field and no
+        # rate limit at all, so one member could hold the receive loop with
+        # profile updates for as long as it liked and nothing anywhere counted.
+        self._guard = AppGuard(client, _LIMITS, kind=ABUSE_FLOOD,
+                               spawn=self._spawn)
 
     # -- event fan-out (everything the app receives flows through here) ----
 
@@ -277,6 +335,13 @@ class ChatApp:
             except (asyncio.CancelledError, Exception):
                 pass
             setattr(self, attr, None)
+        # Nothing outlives the app, background reports included.
+        jobs = list(self._jobs)
+        self._jobs.clear()
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _names_loop(self) -> None:
         """Keep the mirrored names fresh.
@@ -502,13 +567,38 @@ class ChatApp:
             except Exception:
                 pass  # malformed app message — drop, keep going
 
+    def _spawn(self, coro) -> None:
+        """Run a short job off the receive loop, bounded, cancelled at stop.
+
+        There is exactly one caller today — reporting a flood to the node — and
+        it is precisely the call that must not be awaited inline: the peer being
+        reported is the one whose messages we are in the middle of reading."""
+        if len(self._jobs) >= _MAX_JOBS:
+            coro.close()
+            return
+        try:
+            task = asyncio.create_task(coro)
+        except RuntimeError:
+            coro.close()      # no running loop (teardown) — nothing to run on
+            return
+        self._jobs.add(task)
+        task.add_done_callback(self._jobs.discard)
+
     def _dispatch(self, src: NodeID, payload: bytes) -> None:
         if not payload:
             return
         mtype, body = payload[0], payload[1:]
         handler = _HANDLERS.get(mtype)
-        if handler is not None:
-            handler(self, src, body)
+        if handler is None:
+            return
+        # The allowance is claimed before the handler, not inside it: what has
+        # to be bounded is how often this peer makes us do the work, and half
+        # of these handlers allocate. An unknown type is not gated because it
+        # was already dropped above — and dropping it is all we do, since a
+        # type we do not know may simply be one a newer peer has and we do not.
+        if not self._guard.allow(_KINDS.get(mtype, ""), src):
+            return
+        handler(self, src, body)
 
     # text / files -------------------------------------------------------
 
