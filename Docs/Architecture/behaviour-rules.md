@@ -1,10 +1,21 @@
 # Detecting a node that is not playing the protocol
 
-**Status: a catalogue, not an implementation.** Nothing here is wired up yet.
-It is the list of things worth measuring, written down before any of it is
-built, so that what does get built is chosen rather than accumulated. Each rule
-carries what it costs and how much it is worth believing, because both decide
-whether it deserves to exist at all.
+**Status: mostly a catalogue.** It is the list of things worth measuring,
+written down before any of it is built, so that what does get built is chosen
+rather than accumulated. Each rule carries what it costs and how much it is
+worth believing, because both decide whether it deserves to exist at all.
+
+**Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
+**M1** — the self-disarm, first, because it is what makes the rest safe to
+switch on — plus **C1**, **D2** and **E1**. **G2**, **G3** and **G4** live in
+the release path (`MeshNode.may_auto_install`). Everything else below is still
+a description.
+
+The frame is the part that matters and it is done: rules are named, weighted,
+compared against the peer group rather than a constant, and hand their findings
+to the ledger rather than acting. Adding a rule is now writing a `Rule` and its
+`wrong_when` — and a test asserts every rule has one, because a rule whose
+honest lookalike cannot be stated is a superstition.
 
 Related, and already built:
 [`security.md`](security.md) (the reputation ledger, the accusation format, the
