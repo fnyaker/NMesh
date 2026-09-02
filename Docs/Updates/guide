@@ -123,6 +123,99 @@ tampered file cannot slip a publisher in under a familiar id.
 Failing closed there costs an operator one re-pin. Failing open costs them the
 machine.
 
+### Two flags, two different statements
+
+A pinned key carries **`auto`** and **`endorsed`**, and neither implies the
+other:
+
+- **`auto`** — "this one key may replace my code without asking me". Fast, and
+  exactly as strong as that key: whoever holds it holds the machine.
+- **`endorsed`** — "this key's word counts towards a quorum". Much weaker alone,
+  and it is the route for code from parties none of whom you would hand the
+  machine to individually.
+
+## Installing from people you do not individually trust
+
+`release_quorum` in `nmesh.conf` (0 = off, and off is the default) says how many
+**endorsed publishers must independently sign the same `(version, sha256)`**
+before a release may install itself unattended.
+
+**Serving is not vouching**, and this is the distinction the obvious design gets
+wrong. Mirroring a package is free, and content addressing already makes the
+bytes safe to fetch from anyone — a thousand mirrors say nothing that one does
+not. What costs an attacker something is a second *key* put behind the same
+content. So the quorum counts signatures, never servers, and the same key
+signing twice is one party.
+
+Endorsement is manual, one key at a time. That is the whole defence against the
+obvious attack: minting two hundred publishers is as cheap as minting two
+hundred identities, but a quorum made of keys a human chose cannot be reached by
+creating anything — only by compromising keys that were already chosen.
+
+### A quorum has to be independent to be a quorum
+
+Counting to K is not enough if the K are one party. A group of publishers signed
+— not necessarily directly, but through however many hands — by a single issuer
+is one family wearing several hats, however many of them an operator ticked; and
+a subtree grown in order to have somewhere to publish from is exactly what that
+looks like from outside.
+
+So before a quorum counts, the endorsed signers are traced through the
+certificate store, which has always been a graph of who vouched for whom and had
+never been queried as one (`CertStore.ancestors` / `shared_ancestor`). If more
+than half of them descend from one issuer **below a root**, the quorum is
+refused and the reason names the issuer.
+
+Two deliberate limits on this. A network's root is shared by everybody in it, so
+roots are excluded — a common root must never read as a common family. And a
+publisher key that does not publish from its node cannot be placed in the graph
+at all; such a signer is counted as **independent**, which errs towards
+installing rather than refusing on a suspicion we cannot support.
+
+It is not an accusation. A family is not a conspiracy, and nothing here is held
+against anybody: the answer is simply to stop counting them as several.
+
+Two further refusals apply to **both** routes, because they say the *code* is in
+question rather than the messenger:
+
+- somebody claims this version with **different content** — a fork, or somebody's
+  own build wearing a version everyone recognises;
+- the publisher we would install from **contradicts itself**.
+
+Neither accuses anybody: two honest publishers can disagree by accident, and the
+answer to that is the same as to an attack — stop, and let a human look.
+Refusing an update is recoverable; installing a hostile one is not.
+
+The console shows, per release, how many keys signed that exact content, how
+many of them are endorsed, whether anyone disputes the version, and in one
+sentence why it would or would not install itself.
+
+## Signing with a key that is not in memory
+
+The node's identity key has to stay loaded — it signs handshakes, certificates
+and directory claims continuously. A **publisher** key is the opposite case: it
+is used a few times a year and it decides what code every node pinning it will
+run. Sharing one key for both made the most consequential secret in the project
+also the most exposed.
+
+`src/publisher_key.py` keeps a publisher key on disk encrypted under a
+passphrase (scrypt → AES-256-GCM), and `publish_release(key_path=…,
+passphrase=…)` unlocks it for exactly as long as it takes to sign, then gives
+the liboqs context back. Nothing in the running node holds it.
+
+The whole header — salt and scrypt cost parameters included — is the AEAD's
+associated data, so an attacker who can edit the file cannot lower the
+derivation cost and hand it back to be opened cheaply. The cost parameters are
+*stored*, never assumed: a file written today must still open in five years on a
+build whose defaults have moved. The public half is readable without the
+passphrase, because "which key is this" is a public question.
+
+What the passphrase buys is the case that actually happens: the file is copied —
+a backup, a stolen laptop, a misconfigured share. It buys nothing against an
+attacker present *while you publish*; at that moment the key is in memory by
+necessity, and an operator who needs that property needs a machine that is not
+the node.
+
 ## What the mesh offers
 
 `RELEASE_ANNOUNCE` (0x1E) carries a descriptor between **direct authenticated**
@@ -287,9 +380,10 @@ count is what bounds it.
 | GET | `/api/releases` | what the mesh offers, who is pinned, this node's own publisher key, and whether this install can update itself |
 | POST | `/api/releases/publish` | `{notes}` → sign the installed tree and announce it |
 | POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
-| POST | `/api/releases/trust` | `{key, name?, auto?}` → pin a publisher |
+| POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher |
 | POST | `/api/releases/untrust` | `{publisher_id}` |
-| POST | `/api/releases/auto` | `{publisher_id, auto}` |
+| POST | `/api/releases/auto` | `{publisher_id, auto}` — hand this one key a scheduled restart |
+| POST | `/api/releases/endorse` | `{publisher_id, endorsed}` — let its signature count towards `release_quorum` |
 
 Every route sits behind the console session, and every decision is made in the
 node: each release row arrives with its own `state` (`available` / `running` /
@@ -319,9 +413,17 @@ rule that lives in Python.
 
 ## What this does not solve
 
-- **A compromised publisher.** Pinning a key says you accept their code; if
-  their machine is taken, so is yours. Pin few keys, and pin people you would
-  already let run commands on the box.
+- **A compromised publisher.** Pinning a key with `auto` says you accept their
+  code; if their machine is taken, so is yours. Pin few such keys, and pin
+  people you would already let run commands on the box. A `release_quorum` over
+  endorsed keys is what turns one compromise into *not enough* — but it costs
+  every publisher agreeing on one build, so it is off by default.
+- **A publisher that lies with a quorum behind it.** Corroboration says several
+  chosen parties signed the same bytes. It does not say the bytes are good, and
+  no amount of counting will. Reproducible builds are the only thing that would
+  (see `Docs/Architecture/behaviour-rules.md` G9); comparing a build to source
+  you already have proves similarity, never good faith — an attacker's build is
+  mostly the real code by construction.
 - **A compromised local machine.** If the adversary owns the node, they own the
   identity key that signs and the file that decides who is trusted.
   [`todo/peer-integrity.md`](../../todo/peer-integrity.md) covers that wider

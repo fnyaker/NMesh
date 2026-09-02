@@ -237,6 +237,45 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">What this node tells other nodes about itself</div></div></div>
           <div class="card-body"><dl id="addressing" class="kv"></dl></div>
         </article>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Membership</h2>
+            <div class="sub">The certificate chain this node presents to prove it belongs</div></div></div>
+          <div class="card-body">
+            <p class="muted small">A membership is issued for a year and renewed automatically a
+              month before it runs out, from the node that admitted this one. It is the one trust
+              failure a node can see coming: once the chain expires nothing will authenticate it,
+              and the only way back in is a fresh invitation.</p>
+            <dl id="trust" class="kv"></dl>
+          </div>
+        </article>
+        <article class="card" id="abuse-card" hidden>
+          <div class="card-head"><div class="grow"><h2>Nodes under suspicion</h2>
+            <div class="sub">What the applications and the core have reported</div></div></div>
+          <div class="card-body">
+            <p class="muted small">Being in the network is not being trusted. Each application sets
+              its own idea of too much — only chat knows what too many messages is — and reports
+              the sender; this node decides what the reports add up to. A node past the first
+              threshold stops being served, silently: it is told nothing, so it learns as late as
+              possible. Complaints fade on their own, so a node that misbehaved once and then
+              behaved comes back without anyone doing anything.</p>
+            <div class="table-wrap"><table class="rows">
+            <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
+              <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
+            <tbody id="abuse-list"></tbody></table></div>
+            <div id="notice-block" hidden>
+              <h3>Noticed, not judged</h3>
+              <p class="muted small">Things this node saw and will not decide about, because the
+                honest explanation is usually you: a peer whose traffic suddenly looks like a
+                different machine (you upgraded it), or a member of the network that admitted far
+                more nodes at once than it ever has (you rolled some out). It cannot tell either
+                apart from a stolen key or a minted crowd, so it says so instead of acting.
+                Nothing is held against anyone here: confirming just makes what they do now the
+                new normal.</p>
+              <div id="notice-list" class="stack"></div>
+            </div>
+            <dl id="behaviour" class="kv"></dl>
+          </div>
+        </article>
         <article class="card" id="refusals-card" hidden>
           <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
             <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
@@ -337,6 +376,28 @@ INDEX_HTML = """<!doctype html>
             <textarea id="cert-out" class="mono" rows="3" readonly></textarea>
             <textarea id="trust-in" class="mono" rows="3" placeholder="Paste a root certificate to trust"></textarea>
             <div class="btn-row"><button id="trust-btn">Trust certificate</button></div>
+            <hr>
+            <h3>Anchors this node trusts</h3>
+            <p class="muted small">Every chain that ends on one of these authenticates. Dropping an
+              anchor is a decision only whoever runs this node can take — a root's certificate is
+              signed by itself, so there is nobody above it to take it back.</p>
+            <div id="roots-list" class="stack"></div>
+            <hr>
+            <h3>Take back a membership</h3>
+            <p class="muted small">Only for a node this one admitted: the statement is signed, so it
+              cannot reach anybody else's members. It travels the mesh, ends the links that node
+              holds here, and every node that hears it stops accepting its chain.</p>
+            <div class="toolbar">
+              <label class="field grow"><span class="sr-only">Node</span>
+                <input id="revoke-node" class="mono" placeholder="Node id" spellcheck="false"></label>
+              <label class="field"><span class="sr-only">Reason</span>
+                <select id="revoke-reason">
+                  <option value="1">Key compromised</option>
+                  <option value="3">Left the network</option>
+                  <option value="2">Superseded</option>
+                  <option value="0">Unspecified</option>
+                </select></label>
+              <button id="revoke-btn" class="danger">Revoke</button></div>
             <p id="manage-status" class="msg"></p>
           </div>
         </details>
@@ -490,11 +551,21 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">Whose signature may replace this node's code</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th><th></th></tr></thead>
+              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th>
+                <th>Counts towards a quorum</th><th></th></tr></thead>
                 <tbody id="publisher-rows"></tbody></table>
             </div>
             <p id="publisher-empty" class="empty" hidden>No publisher pinned — this node installs
               nothing from the mesh.</p>
+            <p class="muted small">The two columns are different statements.
+              <strong>Install automatically</strong> hands that one key a scheduled restart: whoever
+              holds it holds this machine. <strong>Counts towards a quorum</strong> is far weaker —
+              it only lets the key's word count when several endorsed publishers have independently
+              signed the <em>same</em> release, which is how code from people you would not trust
+              individually can still install itself. Set <code>release_quorum</code> in the
+              configuration to say how many must agree; 0 turns that route off. Endorsing is done
+              by hand, one key at a time, because that is what somebody minting two hundred
+              publishers cannot get around.</p>
             <div class="form-grid">
               <label class="field"><span>Publisher key</span>
                 <input id="pin-key" placeholder="the public key they gave you" autocomplete="off">
@@ -1813,7 +1884,113 @@ function paintReach(state){
       esc(key) + '"></dd>').join(""),
     Object.fromEntries(address.map(([key, value]) => ["addr:" + key, value])));
   paintTransportLive(state);
+  paintTrust(state);
+  paintAbuse(state);
   paintRefusals(state);
+}
+// Worst first, and hidden entirely while there is nothing: an empty table is
+// the normal state of this list and should read as one.
+function paintAbuse(state){
+  const rows = ((state.abuse || {}).nodes) || [];
+  $("abuse-card").hidden = rows.length === 0;
+  if(!rows.length) return;
+  const cell = (key) => '<span data-v="' + esc(key) + '"></span>';
+  const label = {ok:"watched", suspect:"not served", hostile:"refused"};
+  const values = {};
+  rows.forEach((row) => {
+    values[row.node + ":standing"] = label[row.standing] || row.standing;
+    values[row.node + ":score"] = row.score;
+    values[row.node + ":accusers"] = row.accusers;
+    values[row.node + ":reason"] = row.reason || "—";
+  });
+  paintBehaviour(state);
+  paintLive("abuse-list", rows.map((row) => row.node).join("|"),
+    () => rows.map((row) =>
+      '<tr><td class="mono">' + esc(shortId(row.node)) +
+      "</td><td>" + cell(row.node + ":standing") +
+      '</td><td class="num">' + cell(row.node + ":score") +
+      '</td><td class="num">' + cell(row.node + ":accusers") +
+      "</td><td>" + cell(row.node + ":reason") +
+      '</td><td><button data-forgive="' + esc(row.node) + '">Clear</button></td></tr>'
+    ).join(""),
+    values);
+}
+// One line per rule: what it noticed last sweep, and whether it was told to
+// stop talking. A rule that fires on most peers is measuring this node — its
+// clock, its uplink — so it disarms itself, and saying so is the point: a
+// detector that goes quiet without explaining looks exactly like one with
+// nothing to report.
+function paintBehaviour(state){
+  const behaviour = state.behaviour || {};
+  paintNotices(behaviour.notices || []);
+  const rules = behaviour.rules || [];
+  if(!rules.length) return;
+  const rows = rules.map((rule) => [rule.id,
+    rule.disarmed ? "disarmed — it fired on most peers, so it is measuring this node"
+                  : (rule.fired ? rule.fired + " peer(s): " + rule.summary
+                                : "nothing: " + rule.summary)]);
+  paintLive("behaviour", rules.map((rule) => rule.id).join("|"),
+    () => rows.map(([id]) => "<dt>" + esc(id) + '</dt><dd data-v="rule:' +
+      esc(id) + '"></dd>').join(""),
+    Object.fromEntries(rows.map(([id, text]) => ["rule:" + id, text])));
+}
+// A notice is a question for the operator, not a verdict — so the row offers
+// the only answer this node cannot work out for itself. Each row carries what
+// the rule actually saw: two families land here now, and one heading cannot
+// say what both of them mean.
+function paintNotices(notices){
+  const host = $("notice-list");
+  if(!host) return;
+  $("notice-block").hidden = notices.length === 0;
+  if(!notices.length) return;
+  setHTML("notice-list", notices.map((notice) =>
+    '<div class="toolbar"><code class="mono">' + esc(shortId(notice.node)) +
+    '</code><span class="muted small grow">' + esc(notice.summary || "") +
+    '</span><span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - notice.at)) +
+    '</span><button data-accepted="' + esc(notice.node) + '">That was me</button></div>'
+  ).join(""));
+}
+document.addEventListener("click", (event) => {
+  const accepted = event.target.closest("[data-accepted]");
+  if(accepted){
+    withBusy(accepted, async () => {
+      await apiJson("/api/trust/accept-change", "POST",
+        {node:accepted.dataset.accepted});
+    });
+    return;
+  }
+  const target = event.target.closest("[data-forgive]");
+  if(!target) return;
+  withBusy(target, async () => {
+    const {ok} = await apiJson("/api/trust/forgive", "POST",
+      {node:target.dataset.forgive});
+    if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
+  });
+});
+// The membership, said out loud: a node that is only its own root has joined
+// nothing, and one whose chain is running out has a deadline, not a status.
+function paintTrust(state){
+  const trust = state.trust || {};
+  let standing;
+  if(trust.self_rooted || !trust.chain_length) standing = "Own root only — not a member of any network";
+  else if(!trust.expires_at) standing = "Member, no expiry";
+  else if(!trust.seconds_left) standing = "Expired — re-join by invitation";
+  else standing = "Member, " + fmtDuration(trust.seconds_left) + " left";
+  const rows = [
+    ["Standing", standing],
+    ["Renewal", !trust.expires_at ? "Not needed"
+      : trust.renewing ? "Under way — asking the issuer" : "Not due yet"],
+    ["Issued by", trust.issuer ? shortId(trust.issuer) : "—"],
+    ["Anchored on", trust.anchor ? shortId(trust.anchor) : "—"],
+    ["Chain length", trust.chain_length || 0],
+    ["Trusted anchors", trust.roots || 0],
+    ["Revocations held", trust.revoked || 0],
+  ];
+  paintRoots(state);
+  paintLive("trust", "trust",
+    () => rows.map(([key]) => "<dt>" + esc(key) + '</dt><dd data-v="trust:' +
+      esc(key) + '"></dd>').join(""),
+    Object.fromEntries(rows.map(([key, value]) => ["trust:" + key, value])));
 }
 // Refusals are a table of *reasons*, so the row key is the reason: a count that
 // climbs must climb in place rather than redraw the list under a reader.
@@ -2429,6 +2606,9 @@ function publisherRowHTML(entry){
     "</td><td><code>" + esc(shortId(entry.id)) + "</code></td><td>" +
     '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
     (entry.auto ? " checked" : "") + '><span class="sr-only">Install automatically</span></label>' +
+    '</td><td><label class="check"><input type="checkbox" data-endorse="' + esc(entry.id) + '"' +
+    (entry.endorsed ? " checked" : "") +
+    '><span class="sr-only">Counts towards a quorum</span></label>' +
     '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
 }
 // ---- the node's own name ---------------------------------------------------
@@ -2570,12 +2750,21 @@ $("publisher-rows").addEventListener("click", async (event) => {
 });
 $("publisher-rows").addEventListener("change", async (event) => {
   const box = event.target.closest("[data-auto]");
-  if(!box) return;
-  const {ok} = await apiJson("/api/releases/auto", "POST",
-    {publisher_id:box.dataset.auto, auto:box.checked});
-  if(!ok) box.checked = !box.checked;
-  else toast(box.checked ? "Their releases will install automatically"
-                         : "Automatic installs off for this publisher");
+  if(box){
+    const {ok} = await apiJson("/api/releases/auto", "POST",
+      {publisher_id:box.dataset.auto, auto:box.checked});
+    if(!ok) box.checked = !box.checked;
+    else toast(box.checked ? "Their releases will install automatically"
+                           : "Automatic installs off for this publisher");
+    return;
+  }
+  const endorse = event.target.closest("[data-endorse]");
+  if(!endorse) return;
+  const {ok} = await apiJson("/api/releases/endorse", "POST",
+    {publisher_id:endorse.dataset.endorse, endorsed:endorse.checked});
+  if(!ok) endorse.checked = !endorse.checked;
+  else toast(endorse.checked ? "Their signature now counts towards a quorum"
+                             : "Their signature no longer counts towards a quorum");
 });
 $("pin-add").addEventListener("click", (event) => withBusy(event.target, async () => {
   const key = $("pin-key").value.trim();
@@ -2918,6 +3107,50 @@ $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async
   setMessage("manage-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
+$("revoke-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const node = $("revoke-node").value.trim().toLowerCase();
+  if(!node){ setMessage("manage-status", "A node id is required.", true); return; }
+  if(!await confirmAction({title:"Take back this membership?",
+      body:'<p>Every node that hears this stops accepting that node’s chain, and the links it '
+        + 'holds here end now. Only an invitation can let it back in.</p>'
+        + '<p class="mono small">' + esc(node) + "</p>",
+      confirmLabel:"Revoke", danger:true})) return;
+  const {ok} = await apiJson("/api/trust/revoke", "POST",
+    {node, reason:Number($("revoke-reason").value)});
+  setMessage("manage-status",
+    ok ? "Membership revoked and announced."
+       : "Nothing to revoke — this node did not issue that membership.", !ok);
+  if(ok) $("revoke-node").value = "";
+}));
+// Anchors are rendered from the state snapshot, so the list follows a root
+// adopted by a join without the page having to be told twice.
+function paintRoots(state){
+  const roots = (state.trust || {}).root_ids || [];
+  const host = $("roots-list");
+  if(!host) return;
+  if(!roots.length){
+    host.innerHTML = '<p class="muted small">None yet — this node trusts only itself.</p>';
+    return;
+  }
+  host.innerHTML = roots.map((id) =>
+    '<div class="toolbar"><code class="mono grow">' + esc(shortId(id)) +
+    '</code><button class="danger" data-untrust="' + esc(id) + '">Stop trusting</button></div>'
+  ).join("");
+}
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-untrust]");
+  if(!target) return;
+  withBusy(target, async () => {
+    const node = target.dataset.untrust;
+    if(!await confirmAction({title:"Stop trusting this anchor?",
+        body:'<p>Every membership that chains up to it stops authenticating here, including nodes '
+          + 'you reach through it today. This node only; nothing is announced.</p>'
+          + '<p class="mono small">' + esc(node) + "</p>",
+        confirmLabel:"Stop trusting", danger:true})) return;
+    const {ok} = await apiJson("/api/trust/untrust", "POST", {node});
+    setMessage("manage-status", ok ? "Anchor dropped." : "Not an anchor of this node.", !ok);
+  });
+});
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
   if(!uri || !code){ setMessage("manage-status", "An address and an invite code are required.", true); return; }

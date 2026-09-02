@@ -1,4 +1,4 @@
-"""Tests de CertStore — remplace les anciens tests TrustTable."""
+"""CertStore basics: roots, the issuance graph, and what verifies against it."""
 import pytest
 from src.cert_store import CertStore
 from src.crypto import CryptoIdentity
@@ -30,6 +30,17 @@ class TestCertStoreBasics:
         cert = identity.self_signed_cert()
         store.add(cert)
         assert store.add(cert)  # second add is idempotent
+
+    def test_knows_answers_without_building_a_list(self):
+        """Asked on the path that absorbs a routing answer (rule A1 counts the
+        subjects that are new *to us*), so it must not allocate to answer."""
+        identity = _make_identity()
+        own_id = NodeID.from_public_key(identity.dsa_public_key)
+        store = CertStore(own_id)
+        assert store.knows(own_id) is False
+        store.add(identity.self_signed_cert())
+        assert store.knows(own_id) is True
+        assert store.knows(NodeID.generate()) is False
 
     def test_add_root(self):
         identity = _make_identity()

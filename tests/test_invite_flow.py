@@ -23,14 +23,18 @@ class TestOnNewConnection:
         fake2 = FakeTransport()
         await node._on_new_transport(fake2)
         await node.stop()
-        assert fake2.sent[0].type == CHALLENGE
+        # By type, not by position: the capability announcement rides the same
+        # round trip, so what matters is that a connecting link is challenged,
+        # not that the challenge is the first thing on the wire.
+        assert any(p.type == CHALLENGE for p in fake2.sent)
 
     async def test_challenge_payload_is_32_bytes(self):
         node, _ = await make_node()
         fake2 = FakeTransport()
         await node._on_new_transport(fake2)
         await node.stop()
-        assert len(fake2.sent[0].payload) == 32
+        challenge = next(p for p in fake2.sent if p.type == CHALLENGE)
+        assert len(challenge.payload) == 32
 
     async def test_stores_pending_challenge(self):
         node, _ = await make_node()

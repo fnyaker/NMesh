@@ -10,7 +10,6 @@ end-to-end connect between two UDP nodes.
 import asyncio
 import base64
 import json
-import socket
 
 import pytest
 
@@ -28,12 +27,21 @@ def _udp_manager() -> TransportManager:
     return m
 
 
-def _free_udp_port() -> int:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+async def _udp_node() -> tuple:
+    """A node listening on a port the kernel chose, and that port.
+
+    Never "find a free port, close it, then bind it again": between the close
+    and the bind anything on the machine can take it, and under `pytest-xdist`
+    the thing that takes it is another worker running this same helper. That
+    raced into `Errno 98` in CI, on a test with nothing to do with whatever
+    change was being tested — the worst kind of red, because it points at the
+    innocent. Asking for port 0 and reading back what was bound never releases
+    it at all."""
+    node = MeshNode(transport_manager=_udp_manager())
+    await node.start_udp(0, "127.0.0.1")
+    port = node.udp_port()
+    node._addresses = [f"udp://127.0.0.1:{port}"]
+    return node, port
 
 
 async def _udp_authed(node, other):
@@ -129,13 +137,8 @@ class TestConnectFlow:
 class TestConnectEndToEnd:
     async def test_two_step_connect_no_relay(self):
         """B joins A with two copy-pastes and no shared relay."""
-        pa, pb = _free_udp_port(), _free_udp_port()
-        A = MeshNode(transport_manager=_udp_manager())
-        B = MeshNode(transport_manager=_udp_manager())
-        await A.start_udp(pa, "127.0.0.1")
-        await B.start_udp(pb, "127.0.0.1")
-        A._addresses = [f"udp://127.0.0.1:{pa}"]
-        B._addresses = [f"udp://127.0.0.1:{pb}"]
+        A, pa = await _udp_node()
+        B, _pb = await _udp_node()
         try:
             # 1. B creates a request; 2. A accepts → invite; 3. B completes
             req = B.console_connect_request()

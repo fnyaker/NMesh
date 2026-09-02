@@ -16,7 +16,7 @@ ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
 hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Around 1600 tests in ~30 seconds.
+Around 2500 tests in ~30 seconds.
 
 ---
 
@@ -103,7 +103,34 @@ tests/
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
-├── test_invite*.py / test_trust.py                    — invitations & trust
+├── test_invite*.py / test_cert_store.py               — invitations & trust
+├── test_release_trust.py                              — what may replace this
+│     node's code: corroboration counted in signatures and never in mirrors, a
+│     quorum of endorsed keys that 200 minted publishers cannot reach, a
+│     disputed version refused by both routes, and a publisher key that stays
+│     encrypted at rest
+├── test_behaviour.py                                  — the detection frame: a
+│     rule that fires on everyone disarms itself, transport classes judged
+│     apart, being new / quiet / unfamiliar are never signals, every rule
+│     states what would make it wrong, and a condition is charged **once** and
+│     not once per sweep — the inequality that makes "no single rule ever bans"
+│     true rather than intended; then D5, the profile break, the only signal
+│     that catches a stolen key; E2, the peer whose view of the network nobody
+│     shares (padding with one famous id does not clear it, a partition says
+│     nothing); and A1, the burst of members under one issuer, compared to that
+│     issuer's own history and never to anybody else's
+├── test_features.py                                   — capability negotiation:
+│     silence means the classic set, a name we do not know is not an offence,
+│     nothing security-critical is negotiable
+├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
+│     the rate gate, the signed accusation, and above all what hearsay may NOT
+│     do — no crowd of members can get a node cut off, an accusation naming us
+│     is neither acted on nor relayed, the accused is never told; plus an app's
+│     own per-kind allowances, reported once per window and never fatally
+├── test_cert_renewal.py / test_revocation.py          — certificate lifecycle:
+│     expiry, pruning, the renewal exchange and its refusals; and taking a
+│     membership back: who may say it, what it may not reach, a root that can
+│     only be dropped locally, records that survive a restart
 ├── test_fuzz.py                                       — hostile inputs
 ├── test_spool.py                                      — bundle & file transport
 ├── test_webconsole.py / test_data_connector.py        — console & connector

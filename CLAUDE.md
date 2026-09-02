@@ -27,7 +27,17 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
 
 - Anything arriving from a peer is **presumed malicious** until validated.
 - An authenticated peer may behave as an adversary (a relay that alters,
-  replays, amplifies or floods). Authentication is not trust.
+  replays, amplifies or floods). **Authentication is not trust, and joining a
+  network is not being trusted**: a membership says an issuer vouched for an
+  identity once, and says nothing about how it behaves afterwards. Nothing is
+  trusted by default; what trust exists is named, local and revocable — the
+  anchors an operator pinned, the capabilities a human granted in Fleet, the
+  witnesses they designated.
+- **Hearsay is never authority.** A node's opinion of another node travels, and
+  is weighed by whoever receives it — never obeyed. If a report from a stranger
+  could get a node cut off, anybody able to speak could cut anybody off, and the
+  reputation system would be a censorship primitive. Only what we saw ourselves,
+  or what a witness the operator named saw, is ever decisive.
 - We defend against the device itself: sensitive keys kept in memory where
   possible, minimal attack surface, no secret in the clear on disk without a
   reason.
@@ -55,8 +65,17 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   node must **repair itself** (auto-recovery): purge the corrupted state,
   reconnect on demand, resume service.
 - **Active peer rejection.** A peer that sends noise, invalid packets or abuses
-  the protocol is counted and then disconnected. We do not endure an adversary;
-  we cut them off.
+  the protocol is counted and then cut off. We do not endure an adversary.
+  Counted **per identity**, not per link: a peer that reconnects to shed an
+  exhausted count is the whole point of counting. And cut off **silently** — its
+  traffic is dropped with no error and the link is let go a little later, at a
+  random moment. A node told it has been detected changes identity and starts
+  again, so the thing worth taking away is the feedback, not the socket.
+- **Every app judges, the node decides.** Only chat knows what too many messages
+  is; only fleet knows what too many commands is. An app sets its own thresholds
+  and reports the sender (`report_abuse`); what the reports add up to, and what
+  happens next, belongs to the node. An app never gets to read the standing back
+  — that would be a probe for finding out how much a peer can get away with.
 - **Bounds everywhere.** Every queue, cache, buffer and counter has a hard
   limit. Nothing that can grow without end under an attacker's pressure (no
   memory exhaustion, no amplification).

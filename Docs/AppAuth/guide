@@ -77,8 +77,11 @@ An app therefore cannot steer the signer outside the app-auth space, nor outside
 5. freshness;
 6. **the nonce is unseen** — burnt only here, once the cheap tests have passed,
    so a flood of junk cannot evict live entries from a bounded cache;
-7. the ML-DSA signature;
-8. TOFU consistency of the key (`TrustTable`, optional).
+7. the ML-DSA signature.
+
+There is no eighth step comparing the key against one remembered for this id.
+There cannot be a useful one: the subject id is *derived* from the key that
+signed, so the two never disagree.
 
 Any failure returns `None`. No hostile byte raises: the caller never has to tell
 "invalid" from "malformed".

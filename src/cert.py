@@ -36,10 +36,17 @@ class Certificate:
     def is_self_signed(self) -> bool:
         return self.subject_id == self.issuer_id
 
-    def is_expired(self) -> bool:
+    def is_expired(self, now: int | None = None) -> bool:
+        """``expires_at == 0`` means never — that is what a self-signed root
+        carries. Everything else dies on schedule.
+
+        The one definition of "expired" in the tree: the store's chain walk, its
+        pruning and `verify_chain` all ask here rather than each comparing the
+        field themselves. Two expressions for one quantity is two chances to
+        disagree about which certificates are still worth presenting."""
         if self.expires_at == 0:
             return False
-        return int(time.time()) > self.expires_at
+        return (int(time.time()) if now is None else now) > self.expires_at
 
     def signed_body(self) -> bytes:
         return (
