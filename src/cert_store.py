@@ -180,6 +180,39 @@ class CertStore:
         """Every record we hold, verbatim — for catching a peer up."""
         return [held["record"] for held in self._revoked.values()]
 
+    def ancestors(self, node_id: NodeID) -> set[bytes]:
+        """Who vouched for this node, directly or through however many hands.
+
+        The certificate store has always been a graph of who vouched for whom,
+        and nothing has ever queried it as one. This is the cheap half: the
+        chain we would present for a node already names its whole line of
+        descent, and it is memoised, so an ancestry lookup costs a dictionary
+        hit. Roots are excluded — everybody in a network shares its root, so
+        "they have a common ancestor" is only ever interesting below it."""
+        chain = self.get_chain_to_root(node_id)
+        if not chain:
+            return set()
+        line = {cert.issuer_id.raw for cert in chain}
+        line.discard(node_id.raw)
+        return line - self._roots
+
+    def shared_ancestor(self, node_ids) -> tuple[bytes | None, int]:
+        """The issuer the most of these nodes descend from, and how many.
+
+        ``(None, 0)`` when they have nothing below a root in common — which is
+        what a set of genuinely unrelated nodes looks like, and the answer that
+        should reassure. What the caller does with a high count is never to
+        accuse the nodes: a family is not a conspiracy. It is to notice that
+        several voices it was about to count as independent are one."""
+        counts: dict[bytes, int] = {}
+        for node_id in node_ids:
+            for ancestor in self.ancestors(node_id):
+                counts[ancestor] = counts.get(ancestor, 0) + 1
+        if not counts:
+            return None, 0
+        best = max(counts, key=counts.get)
+        return best, counts[best]
+
     def certs_for(self, node_id: NodeID) -> list[Certificate]:
         """Every certificate held for one subject, expired ones included. A
         copy: the caller must not be able to edit the store by iterating it."""

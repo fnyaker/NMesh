@@ -8,8 +8,10 @@ worth believing, because both decide whether it deserves to exist at all.
 **Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
 **M1** — the self-disarm, first, because it is what makes the rest safe to
 switch on — plus **C1**, **D2** and **E1**. **G2**, **G3** and **G4** live in
-the release path (`MeshNode.may_auto_install`). Everything else below is still
-a description.
+the release path (`MeshNode.may_auto_install`), and the genealogy half of
+**A2/G1** is there too, as the independence test on a quorum
+(`CertStore.ancestors` / `shared_ancestor`). Everything else below is still a
+description.
 
 The frame is the part that matters and it is done: rules are named, weighted,
 compared against the peer group rather than a constant, and hand their findings

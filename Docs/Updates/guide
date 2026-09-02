@@ -152,7 +152,30 @@ obvious attack: minting two hundred publishers is as cheap as minting two
 hundred identities, but a quorum made of keys a human chose cannot be reached by
 creating anything — only by compromising keys that were already chosen.
 
-Two refusals apply to **both** routes, because they say the *code* is in
+### A quorum has to be independent to be a quorum
+
+Counting to K is not enough if the K are one party. A group of publishers signed
+— not necessarily directly, but through however many hands — by a single issuer
+is one family wearing several hats, however many of them an operator ticked; and
+a subtree grown in order to have somewhere to publish from is exactly what that
+looks like from outside.
+
+So before a quorum counts, the endorsed signers are traced through the
+certificate store, which has always been a graph of who vouched for whom and had
+never been queried as one (`CertStore.ancestors` / `shared_ancestor`). If more
+than half of them descend from one issuer **below a root**, the quorum is
+refused and the reason names the issuer.
+
+Two deliberate limits on this. A network's root is shared by everybody in it, so
+roots are excluded — a common root must never read as a common family. And a
+publisher key that does not publish from its node cannot be placed in the graph
+at all; such a signer is counted as **independent**, which errs towards
+installing rather than refusing on a suspicion we cannot support.
+
+It is not an accusation. A family is not a conspiracy, and nothing here is held
+against anybody: the answer is simply to stop counting them as several.
+
+Two further refusals apply to **both** routes, because they say the *code* is in
 question rather than the messenger:
 
 - somebody claims this version with **different content** — a fork, or somebody's

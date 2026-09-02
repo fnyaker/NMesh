@@ -232,6 +232,10 @@ _TARPIT_MAX          = 180.0
 _ACCUSE_MIN_GAP      = 300.0
 _ACCUSE_TRACKED      = 256
 _ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
+# How much of a quorum may descend from one issuer before it stops being a
+# quorum. Above half is the honest line: at half, two families disagree and a
+# human decides; above it, one family decides alone while looking like several.
+_FAMILY_SHARE        = 0.5
 _MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
 _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
@@ -6371,8 +6375,44 @@ class MeshNode:
         if len(endorsed) < self._release_quorum:
             return False, (f"{len(endorsed)} of {self._release_quorum} endorsed "
                            f"publishers have signed this exact content")
+        family, count = self._publisher_family(endorsed)
+        if family is not None:
+            # A quorum is a count of *independent* parties. Keys that all trace
+            # back to one issuer are one party wearing several hats, however
+            # many of them an operator ticked — and a subtree grown in order to
+            # have somewhere to publish from is exactly what that looks like.
+            # Not an accusation: a family is not a conspiracy, and the answer is
+            # to stop counting them as several, not to hold anything against
+            # them.
+            return False, (f"{count} of {len(endorsed)} endorsed signers trace "
+                           f"back to one issuer ({family[:8]}…), so they are "
+                           f"not {len(endorsed)} independent parties")
         return True, (f"{len(endorsed)} endorsed publishers independently "
                       f"signed this exact content")
+
+    def _publisher_family(self, publisher_ids) -> tuple[str | None, int]:
+        """Do these signers trace back to one issuer? ``(id_hex, count)``.
+
+        Only the ones we can place in our own certificate graph are looked at: a
+        publisher id is built like a node id, so a key that publishes from its
+        node resolves and one that does not simply cannot be judged here. Saying
+        so is better than guessing — an unplaceable signer is counted as
+        independent, which is the answer that errs towards installing rather
+        than towards refusing on a suspicion we cannot support."""
+        placed = []
+        for key_id in publisher_ids:
+            try:
+                placed.append(NodeID.from_hex(key_id))
+            except ValueError:
+                continue
+        if len(placed) < 2:
+            return None, 0
+        family, count = self._cert_store.shared_ancestor(placed)
+        if family is None or count < 2:
+            return None, 0
+        if count <= len(placed) * _FAMILY_SHARE:
+            return None, 0
+        return family.hex(), count
 
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
