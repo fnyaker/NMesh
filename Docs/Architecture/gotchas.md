@@ -653,3 +653,31 @@ before and after.
   neighbourhood maintenance scan above can relearn the same node as soon as it
   contacts this one again. A real ban would need a persistent exclusion list
   consulted by `RoutingTable.add`/PONG, which does not exist today.
+- **Maintenance is not reconnection, and used to be mistaken for it.** Above the
+  floor a cycle does nothing, and the node a person was actually talking to is
+  rarely one of the three XOR-nearest — so when its link died, *nothing dialled
+  it back*. The address-retry loop only runs on media that declared a
+  `retry_interval` (`0`, off, by default) and on-demand routing only wakes when
+  an app sends again, so a conversation stayed dead until somebody typed into
+  it. The fix is a separate book (`_reconnect`, see
+  [`routing.md`](routing.md)): an established link lost involuntarily is chased
+  from `0.5 s`, doubling, for two minutes. When you are looking at "it takes
+  ages to come back", look there and not at `_maintain_neighbors`.
+- **A link *we* cut must never enter that book.** `_reap_peer` is the teardown
+  path for a dead socket **and** for a tarpitted peer whose hold expired
+  (`_reap_expired_tarpits`) — so `_note_node_lost` checks `peer.tarpit_until`
+  and `_malformed > _MAX_MALFORMED` before enrolling anything. Dialling back a
+  peer we just cut undoes the cut and tells it what we noticed, which is
+  precisely what the tarpit exists to withhold. **Revocation is the same trap
+  one layer up**: `_enforce_revocation` tears down every link to the node it
+  names through that same reaper, so a node whose membership was just taken
+  back would have gone straight into the book. It is refused there
+  (`revocation_for`) *and* dropped from the book before the teardown starts —
+  either alone leaves a hole, because the reaper runs detached and lands after
+  the enforcement returns.
+- **Judge a node lost only once every dead link is out of `_peers`.**
+  `_reap_silent_links` can cut two links to one node in the same sweep; while
+  both were still listed, each one's "is this node still reached?" test saw the
+  other and answered yes, so the node was never enrolled. The sweep now removes
+  them all first and judges afterwards. The same shape is why the other two
+  call sites pass `exclude=peer`.
