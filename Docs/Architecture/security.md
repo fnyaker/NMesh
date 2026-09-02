@@ -196,6 +196,59 @@ subject, as of this moment."** Domain `nmesh-revocation-v1`.
   could be empty: on a node whose only link was that node, the revocation died
   where it was issued and nobody else ever heard.
 
+## Capability negotiation: two nodes build the protocol they share
+
+Source: `features.py`, `CAPABILITIES` in `node.py`.
+
+A version number was the obvious answer and the wrong one. It puts every build
+on one line and forces a comparison — *newer* or *older* — which answers the
+wrong question twice: it has nothing to say about a node implementing half the
+protocol plus one thing of its own, and it turns "I do not know this message"
+into "you are ahead of me", one short step from treating an unfamiliar peer as a
+broken one.
+
+So a node announces **a set of names for what it can speak**, and two nodes work
+in the intersection (`features.agree`). A build with an extra plane and a build
+without it agree on everything they share; a node with something entirely of its
+own is not mis-versioned, it is a node whose set contains a name we do not
+recognise, and that costs nobody anything.
+
+**This is what makes behavioural judgement possible at all.** Without it, "a
+message I do not understand" and "a message I should not have been sent" are the
+same event, and anything judging behaviour has to guess which one it is looking
+at. Guess one way and a node running tomorrow's build is reported by every node
+running today's; guess the other and the judgement is worthless, because
+everything unrecognised is excused.
+
+Three rules, and they are load-bearing:
+
+1. **The envelope never changes.** `BASE_VERSION` exists so a node can refuse a
+   negotiation it cannot parse, and for nothing else. Everything that evolves
+   evolves as a name in the set — a second version of this format would be the
+   very problem it removes.
+2. **Silence means the classic set.** `peer_speaks` returns True for a peer that
+   has announced nothing: that is a node from before this existed, not one with
+   no features. Read the other way, the negotiation would be an upgrade that
+   cuts off everyone who has not taken it.
+3. **Negotiation may only ever add.** No name switches off a check, weakens a
+   cipher, skips a verification or widens an authorisation. The announcement
+   happens *before* anybody has proved anything, so a name that could weaken
+   something would be the way in. What is negotiated is only which **optional
+   messages** are worth sending — the gossip planes, the directory, renewal,
+   revocation, abuse reports. A test asserts no feature name reads like a check.
+
+Mechanics: the announcement rides the round trip that was happening anyway (the
+server sends it with its `CHALLENGE`, the client answers it on receiving one), so
+it costs no extra exchange and no latency. It is reachable **pre-authentication**
+on purpose — the point is knowing what to send *during* a join — and carries no
+secret and grants nothing. It is re-sent once the link is authenticated, and
+that record is the one that counts: until then the claim is unsigned, so a
+machine in the middle could strip names from it. Stripping can only ever take
+away an optional plane, which is exactly why rule 3 is not optional.
+
+`node.negotiation_status()` shows, per link, what is shared, what they have that
+we do not, and what we have that they do not.
+
 ## Zero trust: being in the network is not being trusted
 
 Source: `reputation.py`, `accusation.py`, and `MeshNode.report_abuse`.

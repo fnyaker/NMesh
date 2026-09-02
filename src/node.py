@@ -29,6 +29,8 @@ from . import accusation
 from .accusation import MAX_RECORD as _ACCUSATION_MAX
 from .reputation import (DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT,
                          HOSTILE, OK, SUSPECT, RateGate, Reputation)
+from . import features
+from .features import MAX_RECORD as _FEATURES_MAX
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
@@ -115,6 +117,7 @@ CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for
 CERT_RENEWED      = 0x23   # reply: the fresh certificate
 CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
 ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehaving"
+CAPABILITIES      = 0x26   # "here is what I can speak" — the base negotiation
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -471,6 +474,10 @@ _CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per wi
 # AutoNAT: confirm reachability by having a peer dial us back at the address it
 # observed us come from (never an arbitrary address → no amplification).
 _REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
+# Opening packets a dial-back will look through for the challenge. Small: a node
+# answering a fresh connection says a couple of things and one of them is the
+# challenge. What this bounds is a peer answering with an endless dribble.
+_REACH_DIAL_PACKETS   = 4
 _REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
 _REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
 # How long an answer to a probe we sent is still worth believing, and how many
@@ -1112,6 +1119,12 @@ class _Peer:
         # out" from "the network is bad today", and keeps spending its effort
         # on a socket that leads nowhere. Cleared only by the link ending.
         self.tarpit_until: float = 0.0
+        # What this peer said it can speak, and what that leaves us both able to
+        # use. `None` — not an empty set — means it has said nothing, which is a
+        # node from before the negotiation existed and must keep working exactly
+        # as it did. Absence is never read as refusal (see `features.py`).
+        self.features: frozenset | None = None
+        self.agreed: frozenset | None = None
         self._invite_failures: int = 0
         self._invite_lockout_ts: float = 0.0
         # Handshakes this link has been allowed to make us verify. A joiner
@@ -3203,6 +3216,11 @@ class MeshNode:
         self._peers.append(peer)
         self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
+        # Our capabilities ride the same round trip as the challenge, so the
+        # negotiation costs no extra exchange and no latency. A peer that does
+        # not know this message drops it and carries on, which is exactly the
+        # behaviour that lets it reach a node older than itself.
+        await self._announce_capabilities(peer)
         challenge = self._invite.generate_challenge()
         peer.pending_challenge = challenge
         packet = Packet.create(CHALLENGE, self._id.raw,
@@ -5221,15 +5239,32 @@ class MeshNode:
 
     async def _dial_back(self, scheme: str, ip: str, port: int) -> bool:
         """Open a connection to ip:port and confirm an NMesh node answers (it
-        challenges on accept). Bounded by a timeout; always cleaned up."""
+        challenges on accept). Bounded by a timeout; always cleaned up.
+
+        It looks for the challenge **among** the opening packets rather than
+        insisting it is the first one. It used to read exactly one and compare,
+        which made "nothing may ever precede the challenge on the wire" an
+        unwritten protocol invariant — and the first thing to precede it, the
+        capability announcement, silently turned every reachability probe into a
+        failure. A node then believed itself unreachable, stopped advertising
+        itself as a relay, and nothing anywhere named the cause. Bounded in
+        packets *and* by one deadline for the whole exchange, so a peer that
+        answers with an endless dribble cannot hold the dial open."""
         from .ip_utils import _fmt_host
         addr = f"{scheme}://{_fmt_host(ip)}:{port}"
         transport = None
         try:
             transport = await asyncio.wait_for(
                 self._transport_manager.connect(addr), _REACH_DIAL_TIMEOUT)
-            pkt = await asyncio.wait_for(transport.receive(), _REACH_DIAL_TIMEOUT)
-            return pkt.type == CHALLENGE
+            deadline = time.monotonic() + _REACH_DIAL_TIMEOUT
+            for _ in range(_REACH_DIAL_PACKETS):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                pkt = await asyncio.wait_for(transport.receive(), left)
+                if pkt.type == CHALLENGE:
+                    return True
+            return False
         except Exception:
             return False
         finally:
@@ -5631,7 +5666,7 @@ class MeshNode:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(CATALOG_ANNOUNCE, self._id.raw, _BROADCAST_ID, release_bytes)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.CATALOG):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5652,6 +5687,8 @@ class MeshNode:
     def _schedule_catalog_sync(self, peer: '_Peer') -> None:
         if not self._catalog.releases():
             return
+        if not self.peer_speaks(peer, features.CATALOG):
+            return      # it does not run the app store — this is noise to it
         try:
             self._spawn_bounded(self._sync_catalog_to(peer))
         except RuntimeError:
@@ -5822,7 +5859,7 @@ class MeshNode:
             else self._release_have_byte(release_bytes)
         pkt = Packet.create(RELEASE_ANNOUNCE, self._id.raw, _BROADCAST_ID,
                             flag + release_bytes)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.RELEASE):
             try:
                 await p.send(pkt)
             except Exception:
@@ -5842,6 +5879,8 @@ class MeshNode:
 
     def _schedule_release_sync(self, peer: '_Peer') -> None:
         if not self._releases.releases():
+            return
+        if not self.peer_speaks(peer, features.RELEASE):
             return
         try:
             self._spawn_bounded(self._sync_releases_to(peer))
@@ -6458,7 +6497,8 @@ class MeshNode:
         if self._absorb_claim(peer, packet.payload) is not None:
             self._spawn_bounded(self._gossip_pseudo(packet.payload, exclude=peer))
 
-    def _gossip_targets(self, exclude: '_Peer | None', fanout: int) -> list['_Peer']:
+    def _gossip_targets(self, exclude: '_Peer | None', fanout: int,
+                        feature: str | None = None) -> list['_Peer']:
         """Which peers an epidemic goes to next — a bounded sample, not all.
 
         Sending to every peer turns one accepted claim into (peers − 1)
@@ -6470,7 +6510,8 @@ class MeshNode:
         costing a fixed amount per hop."""
         live = [p for p in self._peers
                 if p is not exclude and p.authenticated_id is not None
-                and p.session is not None]
+                and p.session is not None
+                and (feature is None or self.peer_speaks(p, feature))]
         if len(live) <= fanout:
             return live
         return random.sample(live, fanout)
@@ -6480,7 +6521,7 @@ class MeshNode:
         # Re-stamp src_id to us at each hop so the next node's direct-type gate
         # (src_id must equal the immediate sender) accepts it.
         pkt = Packet.create(PSEUDO_ANNOUNCE, self._id.raw, _BROADCAST_ID, raw)
-        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT):
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.PSEUDO):
             try:
                 await p.send(pkt)
             except Exception:
@@ -6507,6 +6548,8 @@ class MeshNode:
 
     def _schedule_pseudo_sync(self, peer: '_Peer') -> None:
         if not len(self._pseudo_book):
+            return
+        if not self.peer_speaks(peer, features.PSEUDO):
             return
         try:
             self._spawn_bounded(self._sync_pseudos_to(peer))
@@ -6807,6 +6850,9 @@ class MeshNode:
             return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
+        # Our half of the negotiation, on the round trip that was happening
+        # anyway. The server announced with its challenge; this is the answer.
+        await self._announce_capabilities(peer)
         if peer.join_code is None:
             # Reconnecting routing peer — present our chain directly
             await self.initiate_handshake(peer)
@@ -7077,6 +7123,12 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        # Say what we speak again, now that the link is authenticated. The
+        # pre-auth announcement was unsigned — a machine in the middle could
+        # have stripped names from it — and this one is the record that counts.
+        # Stripping can only ever take away an optional plane, never a check,
+        # which is why nothing security-critical is negotiable.
+        self._spawn_bounded(self._announce_capabilities(peer))
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
@@ -7169,11 +7221,83 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        # Say what we speak again, now that the link is authenticated. The
+        # pre-auth announcement was unsigned — a machine in the middle could
+        # have stripped names from it — and this one is the record that counts.
+        # Stripping can only ever take away an optional plane, never a check,
+        # which is why nothing security-critical is negotiable.
+        self._spawn_bounded(self._announce_capabilities(peer))
         self._schedule_catalog_sync(peer)  # catch this peer up on known apps
         self._schedule_release_sync(peer)  # …and on known releases
         self._schedule_pseudo_sync(peer)   # …and on who is called what
         self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         self._persist_state()  # persist the newly-known peer for restart recovery
+
+    # -----------------------------------------------------------------------
+    # Capability negotiation
+    # -----------------------------------------------------------------------
+
+    async def _announce_capabilities(self, peer: '_Peer') -> None:
+        """Tell one link what this build can speak. Never fatal: a link that
+        cannot carry the announcement is a link, not an error."""
+        try:
+            await peer.send(Packet.create(CAPABILITIES, self._id.raw,
+                                          _BROADCAST_ID,
+                                          features.encode(features.SPOKEN)))
+        except Exception:
+            pass
+
+    async def _handle_capabilities(self, peer: '_Peer', packet: Packet) -> None:
+        """A peer says what it speaks.
+
+        Reachable **before** authentication, on purpose: the point of the
+        negotiation is to know what to send during the join itself, and there is
+        nothing here worth protecting — the record names planes of the protocol,
+        contains no secret, and grants nothing. It is still parsed like any
+        hostile input, and it is bounded before it is parsed.
+
+        A second announcement arrives once the link is authenticated, and that
+        one is the record that counts: until then the claim is unsigned, so a
+        machine in the middle could strip names from it. That can only ever take
+        *away* optional planes — never a check, never a verification, never an
+        authorisation — which is the whole reason nothing security-critical is
+        allowed to be negotiable."""
+        if len(packet.payload) > _FEATURES_MAX:
+            return self._charge_abuse(peer)
+        theirs = features.decode(packet.payload)
+        if theirs is None:
+            return self._charge_abuse(peer)
+        peer.features = theirs
+        peer.agreed = features.agree(theirs)
+
+    def peer_speaks(self, peer: '_Peer', feature: str) -> bool:
+        """May we use ``feature`` with this peer?
+
+        **Silence means yes.** A peer that has announced nothing is not a peer
+        with no features, it is one from before this existed, and it must keep
+        receiving exactly what it received before. Reading absence as refusal
+        would have made the negotiation an upgrade that cuts off everyone who
+        has not taken it — which is the failure it is meant to prevent."""
+        return peer.agreed is None or feature in peer.agreed
+
+    def negotiation_status(self) -> list[dict]:
+        """What each live link agreed to, for the console."""
+        rows = []
+        for peer in self._peers:
+            if peer.authenticated_id is None:
+                continue
+            rows.append({
+                "node": peer.authenticated_id.raw.hex(),
+                "announced": peer.features is not None,
+                "shared": sorted(peer.agreed) if peer.agreed else [],
+                # What they have and we do not: the honest reading of a node
+                # that is ahead of us, or one that is simply not us.
+                "theirs_only": (sorted(peer.features - features.SPOKEN)
+                                if peer.features else []),
+                "ours_only": (sorted(features.SPOKEN - peer.features)
+                              if peer.features else []),
+            })
+        return rows
 
     # -----------------------------------------------------------------------
     # Certificate renewal
@@ -7358,7 +7482,7 @@ class MeshNode:
         nobody else ever heard. Picking the peers synchronously, before
         enforcement, is what makes "revoke and disconnect" survive being the
         same act."""
-        targets = self._gossip_targets(exclude, _GOSSIP_FANOUT)
+        targets = self._gossip_targets(exclude, _GOSSIP_FANOUT, features.REVOKE)
         if not targets:
             return          # nobody to tell yet; the next peer to authenticate
                             # gets it from `_schedule_revocation_sync`
@@ -7397,6 +7521,8 @@ class MeshNode:
         A node that was offline for the compromise learns of it from whoever it
         reconnects to, rather than from the next handshake it wrongly accepts."""
         if not self._cert_store.revocations():
+            return
+        if not self.peer_speaks(peer, features.REVOKE):
             return
         try:
             self._spawn_bounded(self._sync_revocations_to(peer))
@@ -7534,7 +7660,8 @@ class MeshNode:
         # Everyone but the node it names. It will find out — its traffic stops
         # being answered — but not from us, and not with a timestamp it can use
         # to work out which of the things it tried was the one that was noticed.
-        targets = [p for p in self._gossip_targets(None, _GOSSIP_FANOUT)
+        targets = [p for p in self._gossip_targets(None, _GOSSIP_FANOUT,
+                                                   features.ABUSE)
                    if p.authenticated_id != node_id]
         if not targets:
             return
@@ -7625,7 +7752,8 @@ class MeshNode:
         if after != before:
             self._on_standing_changed(subject, after, label, parsed["kind"])
         self._spawn_bounded(self._gossip_accusation(
-            raw, [p for p in self._gossip_targets(peer, _GOSSIP_FANOUT)
+            raw, [p for p in self._gossip_targets(peer, _GOSSIP_FANOUT,
+                                                  features.ABUSE)
                   if p.authenticated_id != subject]))
 
     def console_add_witness(self, node_hex: str) -> bool:
@@ -8205,4 +8333,5 @@ _HANDLERS = {
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
     CERT_REVOKE:       MeshNode._handle_cert_revoke,
     ABUSE_REPORT:      MeshNode._handle_abuse_report,
+    CAPABILITIES:      MeshNode._handle_capabilities,
 }
