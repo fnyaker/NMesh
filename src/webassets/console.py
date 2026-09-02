@@ -539,11 +539,21 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">Whose signature may replace this node's code</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th><th></th></tr></thead>
+              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th>
+                <th>Counts towards a quorum</th><th></th></tr></thead>
                 <tbody id="publisher-rows"></tbody></table>
             </div>
             <p id="publisher-empty" class="empty" hidden>No publisher pinned — this node installs
               nothing from the mesh.</p>
+            <p class="muted small">The two columns are different statements.
+              <strong>Install automatically</strong> hands that one key a scheduled restart: whoever
+              holds it holds this machine. <strong>Counts towards a quorum</strong> is far weaker —
+              it only lets the key's word count when several endorsed publishers have independently
+              signed the <em>same</em> release, which is how code from people you would not trust
+              individually can still install itself. Set <code>release_quorum</code> in the
+              configuration to say how many must agree; 0 turns that route off. Endorsing is done
+              by hand, one key at a time, because that is what somebody minting two hundred
+              publishers cannot get around.</p>
             <div class="form-grid">
               <label class="field"><span>Publisher key</span>
                 <input id="pin-key" placeholder="the public key they gave you" autocomplete="off">
@@ -2540,6 +2550,9 @@ function publisherRowHTML(entry){
     "</td><td><code>" + esc(shortId(entry.id)) + "</code></td><td>" +
     '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
     (entry.auto ? " checked" : "") + '><span class="sr-only">Install automatically</span></label>' +
+    '</td><td><label class="check"><input type="checkbox" data-endorse="' + esc(entry.id) + '"' +
+    (entry.endorsed ? " checked" : "") +
+    '><span class="sr-only">Counts towards a quorum</span></label>' +
     '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
 }
 // ---- the node's own name ---------------------------------------------------
@@ -2681,12 +2694,21 @@ $("publisher-rows").addEventListener("click", async (event) => {
 });
 $("publisher-rows").addEventListener("change", async (event) => {
   const box = event.target.closest("[data-auto]");
-  if(!box) return;
-  const {ok} = await apiJson("/api/releases/auto", "POST",
-    {publisher_id:box.dataset.auto, auto:box.checked});
-  if(!ok) box.checked = !box.checked;
-  else toast(box.checked ? "Their releases will install automatically"
-                         : "Automatic installs off for this publisher");
+  if(box){
+    const {ok} = await apiJson("/api/releases/auto", "POST",
+      {publisher_id:box.dataset.auto, auto:box.checked});
+    if(!ok) box.checked = !box.checked;
+    else toast(box.checked ? "Their releases will install automatically"
+                           : "Automatic installs off for this publisher");
+    return;
+  }
+  const endorse = event.target.closest("[data-endorse]");
+  if(!endorse) return;
+  const {ok} = await apiJson("/api/releases/endorse", "POST",
+    {publisher_id:endorse.dataset.endorse, endorsed:endorse.checked});
+  if(!ok) endorse.checked = !endorse.checked;
+  else toast(endorse.checked ? "Their signature now counts towards a quorum"
+                             : "Their signature no longer counts towards a quorum");
 });
 $("pin-add").addEventListener("click", (event) => withBusy(event.target, async () => {
   const key = $("pin-key").value.trim();
