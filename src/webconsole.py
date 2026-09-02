@@ -1820,7 +1820,8 @@ def _make_handler(console: WebConsole):
                     entry = console._call(_wrap(
                         node.trust_publisher, key.strip(),
                         name if isinstance(name, str) else "",
-                        data.get("auto") is True))
+                        data.get("auto") is True,
+                        data.get("endorsed") is True))
                     self._json(200, {"ok": True, "publisher": entry})
                     return
                 if path == "/api/releases/untrust":
@@ -1838,6 +1839,16 @@ def _make_handler(console: WebConsole):
                         return
                     ok = console._call(_wrap(node.set_publisher_auto, publisher,
                                              data.get("auto") is True))
+                    self._json(200 if ok else 404, {"ok": ok})
+                    return
+                if path == "/api/releases/endorse":
+                    publisher = data.get("publisher_id")
+                    if not isinstance(publisher, str):
+                        self._json(400, {"error": "publisher_id required"})
+                        return
+                    ok = console._call(_wrap(node.set_publisher_endorsed,
+                                             publisher,
+                                             data.get("endorsed") is True))
                     self._json(200 if ok else 404, {"ok": ok})
                     return
             except ReleaseError as exc:

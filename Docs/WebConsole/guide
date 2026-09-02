@@ -507,7 +507,7 @@ works on a machine with no internet.
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, this node's own publisher key |
 | POST    | `/api/releases/publish` | `{notes}` — signs the installed tree and announces it to the mesh |
 | POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
-| POST    | `/api/releases/trust` / `untrust` / `auto` | pin a publisher key, take it back, or let their releases install by themselves |
+| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
 | GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node. **409** with the reason when nothing would start it again |

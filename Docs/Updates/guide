@@ -357,9 +357,10 @@ count is what bounds it.
 | GET | `/api/releases` | what the mesh offers, who is pinned, this node's own publisher key, and whether this install can update itself |
 | POST | `/api/releases/publish` | `{notes}` → sign the installed tree and announce it |
 | POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
-| POST | `/api/releases/trust` | `{key, name?, auto?}` → pin a publisher |
+| POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher |
 | POST | `/api/releases/untrust` | `{publisher_id}` |
-| POST | `/api/releases/auto` | `{publisher_id, auto}` |
+| POST | `/api/releases/auto` | `{publisher_id, auto}` — hand this one key a scheduled restart |
+| POST | `/api/releases/endorse` | `{publisher_id, endorsed}` — let its signature count towards `release_quorum` |
 
 Every route sits behind the console session, and every decision is made in the
 node: each release row arrives with its own `state` (`available` / `running` /
