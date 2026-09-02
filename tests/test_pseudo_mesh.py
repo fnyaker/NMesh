@@ -33,6 +33,10 @@ class _FakePeer:
         self._malformed = 0
         self.stopped = False
         self.tarpit_until = 0.0    # served, like any peer nothing is held against
+        # Never announced anything, which means "the classic set" — an old
+        # peer must keep receiving exactly what it received before.
+        self.features = None
+        self.agreed = None
 
     def note_abuse(self) -> bool:
         self._malformed += 1

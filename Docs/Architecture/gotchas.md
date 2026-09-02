@@ -338,6 +338,20 @@ already "seen").
 cursor: in order → deliver; ahead → a bounded buffer (`_MAX_REORDER`); behind →
 a duplicate, re-ACK. No set, bounded state by construction.
 
+### 9. A probe that reads packet *position* makes ordering an invariant
+`_dial_back` (AutoNAT) opened a connection, read **exactly one** packet and
+asserted it was a `CHALLENGE`. That quietly turned "nothing may ever precede the
+challenge on the wire" into a protocol invariant nobody had written down — and
+the first thing that ever did precede it, the capability announcement, made
+every reachability probe fail. The node then believed itself unreachable,
+stopped advertising as a relay, and nothing named the cause: a probe that
+answers `False` looks exactly like a peer that is genuinely not there.
+→ Look for the packet **by type, among the opening packets**, bounded in count
+*and* under one deadline for the whole exchange. The same rule caught two tests
+asserting on `sent[0]`. Anything that reads position rather than type is an
+ordering constraint in disguise, and it will be violated by whatever gets added
+to the opening exchange next.
+
 ## Hole punching (see also `transports.md`)
 
 - **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a

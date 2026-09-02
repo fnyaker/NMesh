@@ -89,6 +89,7 @@ receipt for routable types (see the gates).
 | CERT_RENEW / _RENEWED | 0x22 / 0x23 | "re-issue the membership you signed for me", and the fresh certificate — **routable**, the issuer is rarely still a neighbour a year on (see [`security.md`](security.md)) |
 | CERT_REVOKE | 0x24 | gossip of a **signed revocation**: an issuer taking back a membership it granted (see [`security.md`](security.md)) |
 | ABUSE_REPORT | 0x25 | gossip of a **signed accusation**: one node's opinion that another is misbehaving. Carries no authority — the receiver weighs it (see [`security.md`](security.md)) |
+| CAPABILITIES | 0x26 | "here is what I can speak": a **set of feature names**, not a version. Sent pre-auth alongside the challenge and again once authenticated; silence means the classic set (see [`security.md`](security.md)) |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated

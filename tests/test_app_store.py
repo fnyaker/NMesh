@@ -217,6 +217,11 @@ class _FakePeer:
         self.session = object()
         self.sent = []
         self.relay_only = False
+        self.tarpit_until = 0.0    # served, like any peer nothing is held against
+        # Never announced anything, which means "the classic set" — a peer from
+        # before the negotiation must keep receiving what it received before.
+        self.features = None
+        self.agreed = None
     async def send(self, pkt):
         self.sent.append(pkt)
     async def stop(self):
