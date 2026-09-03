@@ -20,7 +20,7 @@ is therefore safe to accept from strangers.
 
 | File | Role |
 |---|---|
-| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**. |
+| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**. |
 | `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |

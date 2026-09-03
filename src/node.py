@@ -358,6 +358,26 @@ _NEIGHBOR_IDLE_MAX        = 300.0
 _NEIGHBOR_RETRY_MIN       = 2.0
 _NEIGHBOR_RETRY_MAX       = 60.0
 _NEIGHBOR_RETRY_TRACKED   = 128
+# Getting a node back after its link died under us. Neighbourhood maintenance
+# does not cover this and is not meant to: it dials to hold `_NEIGHBOR_FLOOR`
+# links and to promote an XOR-nearer identity, so the node a person was
+# actually talking to — usually neither — produced no dial at all when its link
+# went, and the address-retry loop below only runs on media that declared a
+# `retry_interval` (0, off, by default). The link went away and nothing went
+# looking for it until an app happened to send again.
+# So an established link lost involuntarily enrols its identity here and is
+# chased hard for a short while: the first attempt within a second, doubling
+# from there, and after `_RECONNECT_WINDOW` the ordinary machinery has it back.
+# Everything about it is bounded — this is a loop that a peer disconnecting can
+# start, and no such loop may run flat out (see gotchas §12).
+_RECONNECT_FIRST_DELAY    = 0.5    # a socket still closing is not dialled
+_RECONNECT_BACKOFF_MAX    = 15.0
+_RECONNECT_WINDOW         = 120.0  # how long one identity is chased at this rate
+_RECONNECT_NODES_TRACKED  = 16
+_RECONNECT_MAX_IN_FLIGHT  = 4      # dials this loop may hold open at once
+# A pass leaves whatever the in-flight cap did not reach still due, so the wait
+# it computes can be zero. The floor is what keeps that from spinning.
+_RECONNECT_MIN_TICK       = 0.25
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
@@ -1590,6 +1610,12 @@ class MeshNode:
         self._neighbor_retry: OrderedDict[NodeID, tuple[int, float]] = OrderedDict()
         # Candidate neighbours spotted in transit (node_id -> observation time).
         self._neighbor_watch: OrderedDict[NodeID, float] = OrderedDict()
+        # Nodes whose established link died under us, and what we owe them:
+        # node_id -> (attempts, next_try, give_up_at). Bounded and LRU — a
+        # partition that costs us every link must not cost us memory too.
+        self._reconnect: OrderedDict[NodeID, tuple[int, float, float]] = OrderedDict()
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_wakeup = asyncio.Event()
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -1684,6 +1710,7 @@ class MeshNode:
         self._ensure_link_keepalive()
         self._ensure_e2e_retry()
         self._ensure_neighbor_maintenance()
+        self._ensure_reconnect()
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_release_watch()
@@ -1992,6 +2019,8 @@ class MeshNode:
         self._running = True
         self._ensure_link_keepalive()
         self._ensure_e2e_retry()
+        # A node that joined over one link is the node that most needs it back.
+        self._ensure_reconnect()
         await peer.start(self._handle_packet)
         return peer
 
@@ -2108,6 +2137,7 @@ class MeshNode:
         await self._stop_link_keepalive()
         await self._stop_e2e_retry()
         await self._stop_neighbor_maintenance()
+        await self._stop_reconnect()
         await self._stop_address_retry()
         await self._stop_address_steering()
         await self._stop_release_watch()
@@ -2261,6 +2291,9 @@ class MeshNode:
         book) entry and any E2E/session state, and close a live link to it if one
         exists. Persists so the deletion survives restart.
 
+        Also stops any reconnection chase running for it: dialling a node back
+        twice a second is not forgetting it.
+
         Not a permanent ban: gossip/PONG merge (any authenticated contact) and
         neighbour maintenance can re-learn the node later if it's still
         reachable — see gotchas.md."""
@@ -2277,6 +2310,7 @@ class MeshNode:
         self._e2e_pending_nonce.pop(nid, None)
         self._e2e_pending_data.pop(nid, None)
         self._route_hints.pop(nid, None)
+        self._stop_chasing(nid)
         for peer in list(self._peers):
             if peer.authenticated_id == nid:
                 existed = True
@@ -2405,9 +2439,16 @@ class MeshNode:
             if silent >= _DEAD_LINK_PROBES:
                 dead.append(peer)
         for peer in dead:
+            if peer in self._peers:
+                self._peers.remove(peer)
+        # Removed first, then judged: two dead links to one node would each see
+        # the other still listed and conclude the node was still reached.
+        for peer in dead:
+            self._note_node_lost(peer)
             self._spawn_bounded(self._safe_stop_peer(peer))
         if dead:
-            self._note_change("nodes")   # the link itself is noted by the stop
+            self._note_change("links")
+            self._note_change("nodes")
             self._wake_neighbor_maintenance()
 
     async def _stop_link_keepalive(self) -> None:
@@ -2747,6 +2788,139 @@ class MeshNode:
             self._neighbor_retry.move_to_end(node_id)
             while len(self._neighbor_retry) > _NEIGHBOR_RETRY_TRACKED:
                 self._neighbor_retry.popitem(last=False)
+
+    # -- getting back a node whose link just died ---------------------------
+    #
+    # What is chased here is the **node**, not the link: a node reached over
+    # two media has lost nothing while one of them stands, and `_ensure_route_to`
+    # already works down every address we hold for it and then tries a hole
+    # punch, so one entry covers every way back there is.
+    #
+    # Only a link that was established and lost *involuntarily* enrols. A link
+    # we cut ourselves is never chased: dialling back a peer we just tarpitted
+    # would undo the cut and tell it what we noticed, which is the one thing
+    # worth taking away from it (see `_tarpit`).
+
+    def _note_node_lost(self, peer: '_Peer') -> None:
+        """An established link died under us — chase that identity for a while.
+
+        Never raises, never awaits: every caller is a teardown path and one of
+        them is a receive loop.
+
+        An identity already in the book keeps its schedule. Re-arming it on each
+        loss would hand a peer that connects and drops a fresh dial per drop,
+        and no loop driven by what a peer does may run flat out."""
+        node_id = peer.authenticated_id
+        if node_id is None or peer.session is None or node_id == self._id:
+            return                      # never was a link to a node we can dial
+        if peer.relay_only or peer.probation:
+            return                      # not this node's link to that node
+        if peer.tarpit_until or peer._malformed > _MAX_MALFORMED:
+            return                      # we cut this one; getting it back is not a goal
+        if self._cert_store.revocation_for(node_id) is not None:
+            return                      # its issuer took the membership back
+        if not self._running or self._link_to(node_id, exclude=peer) is not None:
+            return                      # still reached — the node is not lost
+        if self._reputation.direct_standing(node_id) != OK:
+            return                      # what we saw ourselves says do not chase
+        now = time.monotonic()
+        held = self._reconnect.get(node_id)
+        if held is not None:
+            self._reconnect[node_id] = (held[0], held[1], now + _RECONNECT_WINDOW)
+            return
+        self._reconnect[node_id] = (0, now + _RECONNECT_FIRST_DELAY,
+                                    now + _RECONNECT_WINDOW)
+        while len(self._reconnect) > _RECONNECT_NODES_TRACKED:
+            self._reconnect.popitem(last=False)
+        self._reconnect_wakeup.set()
+
+    def _stop_chasing(self, node_id: NodeID | None) -> None:
+        """Drop an identity from the book — the link is back, or there is no
+        longer a reason to want it (the operator forgot the node, its issuer
+        took the membership back)."""
+        if node_id is not None:
+            self._reconnect.pop(node_id, None)
+
+    def _ensure_reconnect(self) -> None:
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _stop_reconnect(self) -> None:
+        task = self._reconnect_task
+        self._reconnect_task = None
+        self._reconnect_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _reconnect_loop(self) -> None:
+        """Dial the nodes in the book as their attempts come due.
+
+        Never raises: this loop dying would be a silent loss of recovery. It
+        sleeps on the book's own next due time, so an empty book costs one
+        wait rather than a tick a second."""
+        while self._running:
+            self._reconnect_wakeup.clear()
+            try:
+                await self._reconnect_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                async with asyncio.timeout(self._reconnect_wait()):
+                    await self._reconnect_wakeup.wait()
+            except TimeoutError:
+                pass
+
+    def _reconnect_wait(self) -> float:
+        """Seconds until the next attempt is due, never below the tick floor."""
+        if not self._reconnect:
+            return _RECONNECT_WINDOW
+        due = min(entry[1] for entry in self._reconnect.values())
+        return max(_RECONNECT_MIN_TICK, due - time.monotonic())
+
+    def _reconnect_due(self, now: float) -> list[NodeID]:
+        """The identities to dial this pass — and the place the book is pruned.
+
+        An entry goes when its window runs out or when the node is reached
+        again by any other path (an app dialled it, or it dialled us)."""
+        due: list[NodeID] = []
+        for node_id, (_, next_try, give_up_at) in list(self._reconnect.items()):
+            if now >= give_up_at or self._link_to(node_id) is not None:
+                del self._reconnect[node_id]
+                continue
+            if now >= next_try:
+                due.append(node_id)
+        return due[:_RECONNECT_MAX_IN_FLIGHT]
+
+    async def _reconnect_pass(self) -> None:
+        """One bounded round of dials, `_RECONNECT_MAX_IN_FLIGHT` at a time."""
+        due = self._reconnect_due(time.monotonic())
+        if not due:
+            return
+        results = await asyncio.gather(
+            *(self._ensure_route_to(node_id) for node_id in due),
+            return_exceptions=True,
+        )
+        # Scheduled from *after* the dials: they take seconds, and a delay
+        # counted from before them would already have expired on arrival —
+        # the backoff would exist on paper only.
+        now = time.monotonic()
+        for node_id, result in zip(due, results):
+            if isinstance(result, _Peer) and result.session is not None:
+                self._reconnect.pop(node_id, None)
+                continue
+            held = self._reconnect.get(node_id)
+            if held is None:
+                continue            # the link came back while we were dialling
+            attempts = held[0] + 1
+            delay = min(_RECONNECT_BACKOFF_MAX,
+                        _RECONNECT_FIRST_DELAY * (2 ** min(attempts - 1, 8)))
+            self._reconnect[node_id] = (attempts, now + delay, held[2])
 
     async def find_node(self, target: NodeID) -> None:
         qid = os.urandom(_QID_LEN)
@@ -3102,6 +3276,7 @@ class MeshNode:
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
+        self._note_node_lost(peer)
         self._wake_neighbor_maintenance()
         self._spawn_bounded(self._safe_stop_peer(peer))
 
@@ -3454,6 +3629,7 @@ class MeshNode:
         except Exception:
             pass
         self._forget_hints_via(peer.authenticated_id)
+        self._note_node_lost(peer)
         self._poke_net("peer-lost")
         self._note_change("links")
         self._wake_neighbor_maintenance()
@@ -7388,6 +7564,7 @@ class MeshNode:
         self._note_punch_link_up(peer)
         self._routing.add(claimed_id, [], bob_dsa_pub)
         self._collapse_redundant_links(peer)
+        self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
@@ -7486,6 +7663,7 @@ class MeshNode:
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
         self._collapse_redundant_links(peer)
+        self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
@@ -7778,6 +7956,9 @@ class MeshNode:
             return          # nobody can revoke us out of our own store
         self._forget_e2e(subject)
         self._routing.remove(subject)
+        # Before the links go: reaping one enrols the node for reconnection, and
+        # a node whose membership was taken back is the last one to chase.
+        self._stop_chasing(subject)
         for peer in [p for p in self._peers if p.authenticated_id == subject]:
             self._spawn_bounded(self._reap_peer(peer))
         self._note_change("links")

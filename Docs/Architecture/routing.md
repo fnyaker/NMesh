@@ -278,6 +278,68 @@ of the three.
   `FOUND_NODE` until it stabilises; the results feed `_connect_routing` and the
   routing table.
 
+### Getting back a node whose link just died (`_reconnect`)
+
+Maintenance answers a different question from "the node I was talking to has
+gone". It dials to *hold three links* and to promote an XOR-nearer identity —
+the node carrying a conversation is usually neither, so its link going away
+produced **no dial at all**. The address-retry loop (`_address_retry_loop`)
+only runs on media that declared a `retry_interval`, which is `0` (off) by
+default, and on-demand routing only wakes when an app sends again. A
+conversation therefore stayed dead until somebody typed into it.
+
+So an **established link lost involuntarily** enrols its identity in a small
+book (`_reconnect`) that is chased hard and briefly:
+
+- **What is chased is the node, not the link.** A node reached over two media
+  has lost nothing while one of them stands (`_link_to(node_id, exclude=peer)`),
+  and one entry covers every way back there is: `_ensure_route_to` works down
+  every address we hold and then tries a hole punch.
+- **The cadence.** First attempt `_RECONNECT_FIRST_DELAY = 0.5 s` after the
+  loss (a socket still closing is not dialled), then doubling per failure to a
+  `_RECONNECT_BACKOFF_MAX = 15 s` ceiling, and the chase stops after
+  `_RECONNECT_WINDOW = 120 s`. The delay is counted from **after** the dial
+  returns, not before it: a dial takes seconds, and a delay counted from before
+  would already have expired on arrival — a backoff that exists on paper only.
+- **Where a loss is noticed.** `_reap_peer` (the receive loop exited),
+  `_drop_failed_peer` (a send failed) and `_reap_silent_links` (probes stopped
+  coming back) all call `_note_node_lost`. The silent-link sweep removes every
+  dead link from `_peers` *before* judging any of them: two dead links to one
+  node would otherwise each see the other still listed and call the node
+  reached.
+- **What is never chased.** A link we cut ourselves — tarpitted
+  (`peer.tarpit_until`) or cut for noise (`_malformed > _MAX_MALFORMED`) —
+  because dialling it back undoes the cut *and* tells it what we noticed, which
+  is the one thing worth taking away from it (see
+  [`security.md`](security.md)). Nor a node whose issuer took the membership
+  back (`revocation_for`) — enforcing a revocation tears its links down through
+  the same reaper a dead socket uses, so without that check revoking a node
+  would have dialled it straight back. Nor an identity **our own** evidence
+  calls suspect (`direct_standing`): what the crowd says is deliberately not
+  asked, since accusations that could stop us reconnecting would let anybody
+  able to speak keep two nodes apart. Nor a `relay_only` or `probation` link —
+  neither is this node's link to that node.
+- **Bounds.** This is a loop a peer disconnecting can start, so every part of
+  it is capped: `_RECONNECT_NODES_TRACKED = 16` identities (LRU — a partition
+  that costs every link must not cost memory too),
+  `_RECONNECT_MAX_IN_FLIGHT = 4` dials open at once, and a
+  `_RECONNECT_MIN_TICK = 0.25 s` floor on the wait between passes, because a
+  pass leaves whatever the in-flight cap did not reach still due. An identity
+  **already in the book keeps its schedule**: a fresh loss extends the window
+  but never re-arms the backoff, or a peer that connects and drops would buy a
+  dial per drop (gotchas §12 again — no loop driven by what a peer does may run
+  flat out).
+- **When it ends.** `_stop_chasing` is the one way out of the book, and three
+  things ask for it: a handshake completing (the link is back, by our dial or
+  by theirs), the operator forgetting the node (`console_forget_node` — dialling
+  it back twice a second is not forgetting it), and a revocation being enforced
+  (`_enforce_revocation`, which drops the entry *before* tearing the links down,
+  since the teardown itself would otherwise enrol it). Otherwise the window
+  runs out. After that the ordinary machinery still holds the identity, its
+  addresses and its on-demand path — this book is the *urgent* phase only.
+
+Locked down by `tests/test_reconnect.py`.
+
 ## The size of a `FOUND_NODE` (a post-quantum constraint)
 
 An ML-DSA-65 certificate weighs **~7.3 kB** (subject key + issuer key +
