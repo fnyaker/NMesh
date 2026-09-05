@@ -19,6 +19,7 @@ from .node_id import NodeID
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
 from .packet import Packet
+from .seen import SeenSet
 from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
 from .cert import Certificate
@@ -392,6 +393,7 @@ _DIAL_LOG_ADDRESSES       = 8      # addresses remembered per node
 _RETRY_TICK               = 5.0
 _RETRY_MAX_PER_PASS       = 4
 _RETRY_NODES_SCANNED      = 64
+_RETRY_IDLE_MAX           = 300.0  # ceiling on a wait nothing is expected to end
 _RETRY_DIAL_TIMEOUT       = 8.0
 # Distinct refusal reasons remembered. The vocabulary is this file's own, so
 # the bound is a formality — it is here so that adding a reason can never turn
@@ -1482,7 +1484,7 @@ class MeshNode:
         # only input, and drained by it. A set, so one subject counts once
         # however many times it is offered.
         self._cert_arrivals: set[tuple[bytes, bytes]] = set()
-        self._seen_msgs: OrderedDict[int, None] = OrderedDict()
+        self._seen_msgs = SeenSet(_MSG_DEDUP_MAX)
         self._data_queue: asyncio.Queue[tuple[NodeID, bytes]] = asyncio.Queue(
             _MAX_DATA_QUEUE)
         self._e2e_sessions: dict[NodeID, SessionKey] = {}
@@ -1501,6 +1503,20 @@ class MeshNode:
         self._state_dirty: bool = False
         self._certs_dirty: bool = False
         self._state_task: asyncio.Task | None = None
+        # Set by whoever marks something dirty. The writer waits on it instead
+        # of on a clock: at rest there is nothing to find, and a tick that
+        # exists to find nothing is one the node pays for every two seconds
+        # for as long as it runs.
+        self._state_wakeup = asyncio.Event()
+        # Set when data is queued for a peer we have no session with, and when
+        # a route appears that a stalled handshake may now travel.
+        self._e2e_wakeup = asyncio.Event()
+        # Set when a link drops (its addresses are retryable again) or a
+        # medium's retry setting changes.
+        self._retry_wakeup = asyncio.Event()
+        # Set when address steering is switched on: it is off by default, so
+        # the loop should wait on the switch rather than on a clock.
+        self._steer_wakeup = asyncio.Event()
         # Certificate renewal: the sweep that keeps our own membership alive,
         # and — as an issuer — when we last re-signed for each subject. Keyed by
         # subject rather than by link, so reconnecting buys no fresh allowance.
@@ -1600,6 +1616,7 @@ class MeshNode:
             self._pseudo_store = PseudoStore(pseudo_store_path, self._identity)
             self._restore_pseudos(self._pseudo_store.load())
         transport_manager.on_new_connection = self._on_new_transport
+        transport_manager.on_settings_changed = self._wake_address_retry
         # UDP hole-punching state
         self._udp_server: 'UDPServer | None' = None
         self._udp_listen_uri: str | None = None
@@ -2243,6 +2260,7 @@ class MeshNode:
                 del queue[0]  # drop oldest — bounded backlog per target
             if self._should_initiate_e2e(target):
                 await self._initiate_e2e_handshake(target)
+            self._wake_e2e_retry()   # schedule the next attempt on its own clock
             self._persist_state()
             return
         session = self._e2e_sessions[target]
@@ -2884,6 +2902,11 @@ class MeshNode:
         An identity already in the book keeps its schedule. Re-arming it on each
         loss would hand a peer that connects and drops a fresh dial per drop,
         and no loop driven by what a peer does may run flat out."""
+        # Whatever we decide below, a link just went: the addresses behind it
+        # can come due again, so the retry loop's schedule is stale. The wake
+        # only asks it to recompute — `_retry_pass` still applies its own rules
+        # to every address, and the floor still applies to the loop.
+        self._wake_address_retry()
         node_id = peer.authenticated_id
         if node_id is None or peer.session is None or node_id == self._id:
             return                      # never was a link to a node we can dial
@@ -3503,13 +3526,50 @@ class MeshNode:
         if self._e2e_retry_task is None or self._e2e_retry_task.done():
             self._e2e_retry_task = asyncio.create_task(self._e2e_retry_loop())
 
+    def _wake_e2e_retry(self) -> None:
+        """Something changed that a stalled handshake was waiting for — data
+        queued, or a route that did not exist a moment ago. Never awaits: one
+        caller is a receive loop.
+
+        Waking does not bypass the cadence. The loop still asks
+        `_should_initiate_e2e`, so a link that flaps cannot turn into a
+        handshake per flap; what the wake buys is the *stalled* case, where the
+        last attempt is already older than the interval and the retry would
+        otherwise sit out the rest of a tick that has nothing to do with it."""
+        self._e2e_wakeup.set()
+
+    def _e2e_retry_wait(self) -> float | None:
+        """Seconds until the earliest queued target is worth retrying, or None
+        when nothing is queued at all — which is the normal state, and the one
+        the loop should spend asleep rather than scanning two empty dicts."""
+        soonest: float | None = None
+        now = time.monotonic()
+        for target in self._e2e_pending_data:
+            if target in self._e2e_sessions:
+                continue
+            last = self._e2e_attempt.get(target)
+            due = 0.0 if last is None else max(
+                0.0, last + _E2E_RETRY_INTERVAL - now)
+            if soonest is None or due < soonest:
+                soonest = due
+                if soonest <= 0.0:
+                    break
+        return soonest
+
     async def _e2e_retry_loop(self) -> None:
         """Re-drive stalled E2E handshakes: any target with data still queued but
         no session gets its handshake re-sent on a bounded cadence. Re-initiating
         also nudges ``_route_outbound`` to look for a (possibly newly-available)
-        path to the peer. Never raises."""
+        path to the peer. Never raises.
+
+        It sleeps on the earliest target's own due time, and on nothing at all
+        when the queue is empty. The fixed tick it replaced woke every
+        `_E2E_RETRY_INTERVAL` to walk two dicts that are empty whenever the node
+        is healthy — and `send_data` already sends the first handshake itself,
+        so the tick was never what got a message moving, only what got it moving
+        again."""
         while self._running:
-            await asyncio.sleep(_E2E_RETRY_INTERVAL)
+            self._e2e_wakeup.clear()
             # Prune bookkeeping for targets that are done (session up / no backlog).
             for t in [t for t in self._e2e_attempt
                       if t in self._e2e_sessions or t not in self._e2e_pending_data]:
@@ -3520,6 +3580,22 @@ class MeshNode:
                         await self._initiate_e2e_handshake(target)
                     except Exception:
                         pass
+            wait = self._e2e_retry_wait()
+            if wait is not None and wait <= 0:
+                # A target was due and the pass could not act on it — a node
+                # with no chain to present cannot handshake at all, and
+                # `_initiate_e2e_handshake` returns without recording an
+                # attempt. Waiting the floor is what separates a retry from a
+                # busy loop at one hundred percent of a core.
+                wait = _E2E_RETRY_INTERVAL
+            try:
+                if wait is None:
+                    await self._e2e_wakeup.wait()
+                else:
+                    async with asyncio.timeout(wait):
+                        await self._e2e_wakeup.wait()
+            except TimeoutError:
+                pass
 
     async def _stop_e2e_retry(self) -> None:
         task = self._e2e_retry_task
@@ -3772,7 +3848,7 @@ class MeshNode:
         if self._session_store is None:
             return
         self._state_dirty = True
-        self._ensure_state_writer()
+        self._wake_state_writer()
 
     def _ensure_state_writer(self) -> None:
         if (self._session_store is None and not self._cert_store_path
@@ -3793,13 +3869,43 @@ class MeshNode:
                 self._write_certs_now()
                 self._write_pseudos_now()
 
+    def _state_is_dirty(self) -> bool:
+        """Is anything waiting to be written? One expression, asked by the
+        writer and by the loop that decides whether to keep it alive."""
+        return self._state_dirty or self._certs_dirty or self._pseudo_dirty
+
+    def _wake_state_writer(self) -> None:
+        """Something needs persisting. Never awaits: every caller is marking a
+        change from wherever it happened, one of them a receive loop."""
+        self._state_wakeup.set()
+        self._ensure_state_writer()
+
     async def _state_writer_loop(self) -> None:
-        """Write what has changed, at most every `_STATE_WRITE_INTERVAL`.
+        """Write what has changed, once the changes stop coming.
 
         Off the loop thread (`to_thread`): both writes end in an `fsync`, and
-        the medium may be a slow one."""
-        while (self._running or self._state_dirty or self._certs_dirty
-               or self._pseudo_dirty):
+        the medium may be a slow one.
+
+        Driven by the flags, not by a clock. It used to wake every
+        `_STATE_WRITE_INTERVAL` and test three booleans — at rest, a tick whose
+        whole purpose was to find nothing — and the half that actually cost
+        something was the other way round: a change sat unwritten for whatever
+        remained of the tick it arrived in. Now the first change wakes the loop
+        and the debounce absorbs the burst behind it (one handshake marks three
+        things dirty in a row), so a write lands one debounce after the *first*
+        change instead of up to a full interval after the last, and a node with
+        nothing to persist does not tick at all.
+
+        Shutdown needs no special case here: `_stop_state_writer` cancels this
+        and then flushes whatever is still dirty."""
+        while True:
+            if not self._state_is_dirty():
+                if not self._running:
+                    return
+                self._state_wakeup.clear()
+                if not self._state_is_dirty():   # set between test and clear
+                    await self._state_wakeup.wait()
+                continue
             await asyncio.sleep(_STATE_WRITE_INTERVAL)
             if self._state_dirty:
                 await asyncio.to_thread(self._write_state_now)
@@ -4257,6 +4363,41 @@ class MeshNode:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    def _wake_address_retry(self, _scheme: str | None = None) -> None:
+        """A link dropped, or a medium's settings changed. Never awaits: one
+        caller is a peer teardown and another is the console's thread."""
+        self._retry_wakeup.set()
+
+    def _retry_wait(self) -> float | None:
+        """Seconds until an address is next due for a retry, or ``None`` when
+        none can ever be due.
+
+        ``None`` is the default configuration and not an edge case: every
+        transport ships `retry_interval` at 0, so a stock node has nothing this
+        loop may act on, and should be asleep rather than walking the routing
+        table to rediscover that twelve times a minute."""
+        now = time.monotonic()
+        linked = {peer.authenticated_id for peer in self._peers
+                  if peer.authenticated_id is not None and peer.session is not None}
+        soonest: float | None = None
+        for entry in self._routing.all_entries()[:_RETRY_NODES_SCANNED]:
+            node_id = entry.node_id
+            if node_id == self._id or node_id in linked:
+                continue
+            book = self._dial_log.get(node_id.raw.hex()) or {}
+            for uri in self._known_addresses(node_id):
+                interval = self._retry_interval(uri)
+                if interval <= 0:
+                    continue
+                record = book.get(uri)
+                due = 0.0 if record is None else max(
+                    0.0, record["at"] + interval - now)
+                if soonest is None or due < soonest:
+                    soonest = due
+                    if soonest <= 0.0:
+                        return 0.0
+        return soonest
+
     async def _address_retry_loop(self) -> None:
         """Re-dial the addresses of nodes we know but are not linked to.
 
@@ -4267,9 +4408,38 @@ class MeshNode:
         that a pass costs at most `_RETRY_MAX_PER_PASS` dials however many nodes
         are waiting, and that a node already linked is never dialled again.
 
-        Never raises: this loop dying would be a silent loss of recovery."""
+        Never raises: this loop dying would be a silent loss of recovery.
+
+        It waits on the next address actually due, and on nothing at all when no
+        medium has asked to be retried — which is every stock node, because
+        `retry_interval` ships at 0 on every transport. The fixed tick it
+        replaced woke twelve times a minute to walk sixty-four routing entries
+        and rediscover, each time, that there was nothing it was allowed to do.
+        `_RETRY_TICK` survives as the floor rather than the period: a medium
+        that asks for a millisecond does not get one."""
         while self._running:
-            await asyncio.sleep(_RETRY_TICK)
+            self._retry_wakeup.clear()
+            wait = self._retry_wait()
+            if wait is None:
+                # Nothing retryable. A dropped link or a changed setting is what
+                # makes that untrue, and both wake us; the ceiling is only so
+                # that a wake we somehow miss costs a delay and not the feature.
+                try:
+                    async with asyncio.timeout(_RETRY_IDLE_MAX):
+                        await self._retry_wakeup.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                async with asyncio.timeout(max(wait, _RETRY_TICK)):
+                    await self._retry_wakeup.wait()
+                # Woken early. The wake says something is worth looking at, not
+                # that the medium's cadence stops applying — `_retry_pass` tests
+                # it per address anyway, and the floor keeps a flapping link
+                # from buying a table scan per flap.
+                await asyncio.sleep(_RETRY_TICK)
+            except TimeoutError:
+                pass
             try:
                 await self._retry_pass()
             except asyncio.CancelledError:
@@ -4373,6 +4543,7 @@ class MeshNode:
     def set_dynamic_address(self, enabled: bool) -> None:
         """Turn latency-based address steering on or off on a running node."""
         self._dynamic_address = bool(enabled)
+        self._steer_wakeup.set()
         if not self._dynamic_address:
             self._steer_seen.clear()
 
@@ -4394,6 +4565,14 @@ class MeshNode:
         not a better address. The loser is closed either way, so the node never
         keeps two links to one peer beyond the measurement."""
         while self._running:
+            if not self._dynamic_address:
+                # Off is the default and the normal state. Waiting on the switch
+                # costs nothing; waking every minute to read a boolean costs a
+                # timer for the life of the process.
+                self._steer_wakeup.clear()
+                if not self._dynamic_address:   # flipped between test and clear
+                    await self._steer_wakeup.wait()
+                continue
             await asyncio.sleep(_ADDR_STEER_INTERVAL)
             if not self._dynamic_address:
                 continue
@@ -5175,7 +5354,7 @@ class MeshNode:
         if not self._cert_store_path:
             return
         self._certs_dirty = True
-        self._ensure_state_writer()
+        self._wake_state_writer()
         if self._state_task is None:
             self._write_certs_now()   # no loop to write on
 
@@ -5191,14 +5370,11 @@ class MeshNode:
     def _is_seen(self, msg_id: int) -> bool:
         """Have we handled this exact packet already? Records it if not.
 
-        A set of ids, FIFO-evicted. It used to store `time.monotonic()` against
-        each one — a value nothing ever read, paid for on every routable packet."""
-        if msg_id in self._seen_msgs:
-            return True
-        if len(self._seen_msgs) >= _MSG_DEDUP_MAX:
-            self._seen_msgs.popitem(last=False)
-        self._seen_msgs[msg_id] = None
-        return False
+        One pass over a flat table rather than a lookup and an insert into an
+        `OrderedDict` — the ids are already 64 bits, and boxing each one cost
+        about a hundred bytes to store eight (`seen.py`). Still exact: this is
+        not a place to spend a false positive."""
+        return self._seen_msgs.add(msg_id)
 
     async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
         if packet.ttl <= 1:
@@ -6888,7 +7064,7 @@ class MeshNode:
         if self._pseudo_store is None:
             return
         self._pseudo_dirty = True
-        self._ensure_state_writer()
+        self._wake_state_writer()
 
     def _write_pseudos_now(self) -> None:
         if self._pseudo_store is None:
@@ -7667,6 +7843,7 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        self._wake_e2e_retry()
         if kept:
             # Say what we speak again, now that the link is authenticated. The
             # pre-auth announcement was unsigned — a machine in the middle could
@@ -7777,6 +7954,7 @@ class MeshNode:
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
+        self._wake_e2e_retry()
         if kept:
             # Say what we speak again, now that the link is authenticated. The
             # pre-auth announcement was unsigned — a machine in the middle could
