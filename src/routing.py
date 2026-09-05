@@ -100,6 +100,26 @@ class RoutingTable:
         if index >= 0:
             self._buckets[index].remove(node_id)
 
+    def drop_address(self, node_id: NodeID, address: str) -> bool:
+        """Forget one address of a node, keeping the node. Returns whether it
+        was there.
+
+        For an address that answered as somebody else: that is not a slow
+        address, it is the wrong one, and leaving it in the entry means dialling
+        it again on the next pass and paying a whole post-quantum handshake to
+        learn the same thing. The entry stays — the node is real, its other
+        addresses may be good, and a punch can still reach it.
+
+        The entry is edited rather than re-added: ``add`` builds a fresh
+        ``NodeEntry``, whose ``last_seen`` defaults to now, so re-adding would
+        report a node we have just failed to reach as the most recently seen
+        one."""
+        entry = self.get(node_id)
+        if entry is None or address not in entry.addresses:
+            return False
+        entry.addresses = [a for a in entry.addresses if a != address]
+        return True
+
     def all_entries(self) -> list[NodeEntry]:
         entries: list[NodeEntry] = []
         for bucket in self._buckets:

@@ -248,6 +248,19 @@ class CertStore:
         builds the list `certs_for` returns."""
         return bool(self._certs.get(node_id.raw))
 
+    def has_issued(self) -> bool:
+        """Has this node ever vouched for somebody else?
+
+        What separates a network's founder from a node that never joined:
+        both are their own root and trust nobody else, so a chain of one
+        self-signed certificate is all either can present — and the founder's
+        authenticates everywhere its members are, while the fresh node's
+        authenticates nowhere. Nothing else in the store tells them apart, and
+        an operator shown the same sentence for both cannot act on it."""
+        own = self._own_id.raw
+        return any(cert.issuer_id.raw == own and not cert.is_self_signed
+                   for certs in self._certs.values() for cert in certs)
+
     def add(self, cert: Certificate) -> bool:
         # An expired certificate proves nothing and never will again, but it
         # still costs a slot in a bounded list — so a peer replaying old
