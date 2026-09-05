@@ -398,3 +398,62 @@ class TestTrustStatus:
             assert status["renewing"] is False
         finally:
             await node.stop()
+
+
+class TestWhereThisNodeStands:
+    """`self_rooted` is one flag over three situations — a network's founder, a
+    node whose membership lapsed, and a node that never joined. Two of those are
+    broken and one is normal, and an operator shown the same sentence for all
+    three cannot act on any of them. `standing` is the word that separates them,
+    and it is computed in the node so nothing downstream re-derives it."""
+
+    async def test_a_membership_from_someone_else_is_being_a_member(self):
+        node, _fake, _root, _root_id, _cert = await _member_node(ttl=365 * DAY)
+        try:
+            assert node.trust_status()["standing"] == "member"
+        finally:
+            await node.stop()
+
+    async def test_a_fresh_node_has_joined_nothing(self):
+        node, _fake = await make_node()
+        try:
+            assert node.trust_status()["standing"] == "none"
+        finally:
+            await node.stop()
+
+    async def test_an_anchor_we_trust_with_no_chain_to_it_means_it_lapsed(self):
+        """What an expired membership leaves behind. The certificate itself is
+        gone — `add` refuses to read an expired one back and `prune_expired`
+        deletes it — but the root we were admitted under is persisted, and that
+        is what says we were once in."""
+        node, _fake = await make_node()
+        root, root_id = _identity_and_id()
+        node._cert_store.add(root.self_signed_cert())
+        node._cert_store.add_root(root_id)
+        try:
+            status = node.trust_status()
+            assert status["standing"] == "expired"
+            assert status["self_rooted"] is True   # indistinguishable without it
+        finally:
+            await node.stop()
+
+    async def test_a_node_that_has_vouched_for_others_is_a_root(self):
+        """A founder presents one self-signed certificate, exactly like a node
+        that never joined — and unlike it, that certificate authenticates
+        everywhere its members are."""
+        node, _fake = await make_node()
+        member, member_id = _identity_and_id()
+        node._cert_store.add(node._identity.issue_cert(
+            member_id, member.dsa_public_key, ttl_seconds=365 * DAY))
+        try:
+            assert node.trust_status()["standing"] == "root"
+        finally:
+            await node.stop()
+
+    async def test_our_own_self_signed_certificate_is_not_vouching(self):
+        """Every node signs its own root. That is not having admitted anybody."""
+        node, _fake = await make_node()
+        try:
+            assert node._cert_store.has_issued() is False
+        finally:
+            await node.stop()

@@ -206,5 +206,48 @@ class TestCollapsing:
         assert via in node._route_hints
 
 
+class TestWhatALosingLinkIsOwed:
+    """Nothing. It is about to close.
+
+    A fresh link is owed the capability record and the four catch-up syncs, and
+    the handshake handlers handed them out before anyone asked whether the link
+    would still be there. On a node that kept redialling a peer it already held
+    — the far end owned the canonical link, so every new one lost — that was
+    ~60 kB out and ~33 kB in resent per attempt, five attempts in twenty
+    seconds, to a peer that already had all of it. Two thirds of everything the
+    node sent."""
+
+    def test_the_keeper_is_reported_kept(self):
+        node = _node()
+        target = _bigger_than(node)
+        _link(node, target, outbound=True)
+        theirs = _link(node, target, outbound=False, uri="fake://b:2")
+        assert node._collapse_redundant_links(theirs) is True
+
+    def test_the_loser_is_reported_superseded(self):
+        """We are the smaller id, so the link we dialled loses to theirs."""
+        node = _node()
+        target = _bigger_than(node)
+        _link(node, target, outbound=False, uri="fake://b:2")
+        mine = _link(node, target, outbound=True)
+        assert node._collapse_redundant_links(mine) is False
+
+    def test_a_lone_link_is_always_kept(self):
+        node = _node()
+        peer = _link(node, _bigger_than(node), outbound=True)
+        assert node._collapse_redundant_links(peer) is True
+
+    def test_two_links_we_dialled_keep_the_older_one(self):
+        """The shape a redial storm makes: both ours, so the oldest is the
+        agreed survivor and the new one is owed nothing."""
+        node = _node()
+        target = _bigger_than(node)
+        now = time.monotonic()
+        old = _link(node, target, outbound=True, uri="fake://a:1", at=now - 5)
+        new = _link(node, target, outbound=True, uri="fake://b:2", at=now)
+        assert node._collapse_redundant_links(new) is False
+        assert old in node._peers
+
+
 def _uris(peers):
     return sorted(peer.remote_addr for peer in peers)

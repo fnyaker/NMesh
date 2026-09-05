@@ -357,14 +357,31 @@ medium is backend work that has not been done.
 What belongs to no medium stays apart: the **Addressing** card says what this
 node claims about itself (advertised addresses, local IPs, schemes).
 
-The **Membership** card says what this node can prove about *itself*: whether it
-belongs to a network at all or is only its own root, who admitted it, what its
-chain anchors on, and — the part that matters — how long its certificate has
-left. A membership lasts a year and renews itself a month before it runs out
-(see [`../Architecture/security.md`](../Architecture/security.md)); should that
-ever fail, this is where it shows as a countdown rather than as peers quietly
-refusing to authenticate a week later. Once it hits zero the only way back in is
-a fresh invitation.
+The **Membership** card says what this node can prove about *itself*: where it
+stands, who admitted it, what its chain anchors on, and — the part that matters —
+how long its certificate has left. Standing is one of four words, and three of
+them look identical in every other field on the card:
+
+- **Member of a network** — a chain up to a root somebody else signed.
+- **This network's own root** — this node founded a network and has admitted
+  members, so its own root is a root for them.
+- **Membership has run out** — it still trusts the anchor it was admitted under,
+  but can no longer build a chain to it.
+- **Not a member of any network** — it has joined nothing yet.
+
+A membership lasts a year and renews itself a month before it runs out (see
+[`../Architecture/security.md`](../Architecture/security.md)); should that ever
+fail, this shows as a countdown rather than as peers quietly refusing to
+authenticate a week later. Once it hits zero the only way back in is a fresh
+invitation — a lapsed membership is never re-signed.
+
+The last two standings mean **nothing on the network will authenticate this
+node**, and every symptom of that turns up somewhere else looking like a broken
+network: links that will not form, a topology that stays empty, dials that all
+report no answer. So they are said in a bar across the top of whatever page you
+are on, with what to do next, rather than waiting to be found on this card. On a
+node with nothing connected, Overview says the same thing as an ordered list of
+the steps — and both disappear the moment a link authenticates.
 
 Under **Invite codes and certificates** sit the two ways trust is taken back,
 and they are not the same act:
@@ -463,7 +480,7 @@ works on a machine with no internet.
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
 | POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
 | POST    | `/api/invite`    | generates an invitation code                   |
-| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network  |
+| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
 | POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
 | GET     | `/api/rootcert`  | our root certificate (hex) to share            |
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |

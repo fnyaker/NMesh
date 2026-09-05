@@ -407,6 +407,13 @@ tbody tr[data-clickable]{cursor:pointer}
 .empty .t{font-weight:620;color:var(--text);font-size:var(--fs-md)}
 .empty .h{font-size:var(--fs-sm);max-width:44ch}
 .empty.error .t{color:var(--danger)}
+/* The first console a node shows is empty by definition, and an empty page
+   explains nothing. What goes there is instructions, so they are numbered and
+   left-aligned rather than centred like an ordinary empty state. */
+.steps{margin:0;padding-left:var(--s-5);display:flex;flex-direction:column;
+  gap:var(--s-2);color:var(--text-muted);font-size:var(--fs-sm);max-width:76ch}
+.steps li{padding-left:var(--s-1)}
+.steps li::marker{color:var(--text);font-weight:620}
 .skel{background:linear-gradient(90deg,var(--surface-2),var(--surface-3),var(--surface-2));
   background-size:200% 100%;animation:nm-skel 1.3s linear infinite;border-radius:var(--r-sm);
   height:12px}
@@ -679,6 +686,17 @@ SHELL = """
 .ctx-bar .ctx-note{font-weight:500;color:var(--text-muted)}
 .ctx-bar .ctx-note:empty{display:none}
 .ctx-bar button{margin-left:auto}
+/* Standing: the one thing that makes every other page a lie when it is wrong.
+   A node that is not a member authenticates to nobody, and every symptom of
+   that looks like a network fault — so it is said across the top of whatever
+   page the reader is on, not filed under Network. */
+.standing-bar{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;
+  padding:var(--s-3) var(--s-5);background:var(--danger-soft);color:var(--danger);
+  border-bottom:1px solid var(--border);font-size:var(--fs-sm)}
+.standing-bar.warn{background:var(--warn-soft);color:var(--warn)}
+.standing-bar b{font-weight:600}
+.standing-bar .what{font-weight:400;opacity:.9}
+.standing-bar button{margin-left:auto;flex:none}
 .shell.remote .mark{background:var(--warn);color:var(--warn-soft)}
 .ctx-pick{display:flex;align-items:center;gap:var(--s-2);min-width:0}
 .ctx-pick select{min-height:var(--ctl-h-sm);font-size:var(--fs-sm);max-width:220px;

@@ -109,10 +109,16 @@ one probe is in flight: a pending probe is not 100% loss.
 A node advertising four addresses of which one works is the normal case on a
 real network, and "which one, and why not the others" is the first question
 anybody asks. Every attempt is therefore recorded: `connected`, `no-answer`,
-`timeout`, `refused`, with the reason and the duration. A live link beats the
+`wrong node`, `timeout`, `refused`, with the reason and the duration. A live link beats the
 log (an address carrying traffic is `in-use`, whatever it did last week), and an
 address never tried is `untried`, not broken. Bounded twice over: 128 nodes,
 8 addresses each.
+
+`wrong node` is the one that used to hide: an address that connects, completes
+the handshake and turns out to belong to somebody else — or to this node itself
+— failed in a way `no-answer` describes as its opposite. The reason names the
+identity actually reached, and the address is dropped from the entry, because
+that entry is wrong rather than slow (see `gotchas.md` and `routing.md`).
 
 Three further outcomes never reach the medium and are recorded anyway, because
 a blank line next to an address that does not work teaches nothing: `invalid`
