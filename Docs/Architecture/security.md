@@ -134,6 +134,20 @@ a neighbour a year on) close it:
 - `node.trust_status()` puts it on the console (Network → Membership): standing,
   countdown, issuer, anchor, chain length. A deadline an operator can act on
   rather than a fault they diagnose afterwards.
+- **`standing` is one word for the whole answer**, computed there so nothing
+  downstream re-derives it: `member` (a chain to a root somebody else signed),
+  `root` (our own root, and we have vouched for others, so it *is* a root out
+  there), `expired` (our own root only, but we still trust an anchor we did not
+  sign — we were admitted once and are not any more), `none` (our own root only,
+  and we trust nobody else's: nothing on the network will authenticate us).
+  The last three all present a single self-signed certificate and are
+  indistinguishable in every other field, while one of them works everywhere and
+  two work nowhere. They are told apart by the anchors we trust and the
+  certificates we have issued — both persisted — never by the expired
+  certificate, which `add` refuses to read back and `prune_expired` deletes.
+  A node whose standing is `expired` or `none` is refused in silence by every
+  peer, which from the inside looks exactly like a broken network, so the
+  console says it across the top of every page and not only on that card.
 
 ## Revocation: taking a membership back (`revocation.py`)
 

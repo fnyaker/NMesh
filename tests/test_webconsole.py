@@ -1436,6 +1436,22 @@ class TestJoinTicket:
         finally:
             console.stop(); await node.stop()
 
+    async def test_a_join_that_reaches_nothing_is_not_reported_as_success(self):
+        """`join` returns as soon as the socket is open, and the endpoint used
+        to report that as success — so a join about to be refused for every
+        reason there is answered "Joined", and the operator was left with a
+        console that showed nothing connected and said nothing about why."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/join", token,
+                {"uri": "tcp://127.0.0.1:1", "code": "no-such-code"})
+            assert status == 502
+            assert body["error"] == "that address could not be reached"
+        finally:
+            console.stop(); await node.stop()
+
     async def test_joining_still_accepts_a_uri_and_a_code(self):
         """The ticket adds to the full join, it does not replace it."""
         node, console = await _make_console()
