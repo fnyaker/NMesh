@@ -44,6 +44,42 @@ Start there. "The certificate chain reaches no root we trust" and "no
 certificate chain was presented" are the two that mean the two nodes are not in
 the same network any more; the rest are a stranger knocking.
 
+### A chain of one certificate means two opposite things
+Read the sizes before reading anything else: a `HANDSHAKE` is
+`6 + kem_pub + dsa_pub + chain + sig`, so with ML-KEM-768 and ML-DSA-65 a
+certificate is 7275 bytes and the packet is 13808 for a chain of one, 21085 for
+two, 28362 for three. A trace gives the chain length without a single log line.
+
+A chain of **one** is a lone self-signed root, and whether that works depends
+entirely on whose root it is. A network's founder presents exactly that and
+authenticates everywhere its members are; a node that never joined — or whose
+membership lapsed — presents exactly that too and authenticates nowhere.
+`CertStore.__init__` puts our own id in `_roots` unconditionally, so the second
+kind still completes a handshake **with itself**, which is the one link it can
+ever form and looks in a trace like proof that everything works.
+
+`trust_status()["standing"]` is the word that separates them: `member`, `root`
+(we have issued memberships, so our root is a root out there), `expired` (we
+still trust an anchor we did not sign, so we were let in once), `none`. Told
+apart by the anchors we trust and the certificates we have issued — both
+persisted — never by the expired certificate, which `add` refuses to read back
+and `prune_expired` deletes.
+
+### The address that answers as somebody else
+Routing entries come from gossip and an entry can name the wrong machine —
+including this one. `_wait_for_peer_authenticated` only says yes or no, so
+"nobody answered" and "somebody else answered" arrived at the dial log as the
+same word, `no-answer`, against an address that had connected on every single
+attempt. Nothing about it is hostile, which is why it went unnoticed for so
+long.
+
+Both halves of the handshake now refuse our own identity, `_dial_uri` records
+`wrong node` with the identity it actually reached, and the address is dropped
+from the entry: it is the wrong address, not a slow one, and left in it buys a
+whole post-quantum handshake per pass to learn the same thing. `answered_as` on
+the peer is what carries the proven identity past a refusal — `authenticated_id`
+is only set for a link we keep.
+
 ### A trusted root can be evicted out from under you
 `CertStore._pinned` protected the roots and our own certificates, and its
 comment claimed it protected "our own chain". It did not protect the
@@ -53,6 +89,27 @@ self-signed chain, which nobody trusts: we go on authenticating everyone else
 while nobody can authenticate us, and nothing errors anywhere. `_pinned` now
 covers every subject the chain runs through, and the per-subject trim never
 drops the certificate the chain is using.
+
+## A link that keeps being rebuilt
+
+### A link about to close is owed nothing
+Both handshake handlers ended with the same five lines: announce capabilities,
+then schedule the catalog, release, pseudo and revocation syncs. Unconditional,
+and **per link** rather than per node.
+
+`_collapse_redundant_links` runs three lines above them and already knows the
+answer. When the far end holds the canonical link — `_redundant_links` gives it
+to the larger id's dial, and falls back to the oldest when both links run the
+same way — every link this side opens is the loser. So a node that kept
+redialling a peer it already held paid a full handshake *and* resent its whole
+catalogue, ~60 kB out and ~33 kB in, five times in twenty seconds, for links
+closed moments later. Two thirds of everything that node sent; with the
+Kademlia lookups it was 98% of the trace and none of it was work.
+
+`_collapse_redundant_links` returns whether `peer` survived, and the handlers
+give a fresh link what it is owed only if it will be there to use it.
+
+> Anything a handshake hands out, ask first whether the link will still exist.
 
 ## Hangs (the job/node "never finishes")
 

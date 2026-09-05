@@ -1356,11 +1356,23 @@ def _make_handler(console: WebConsole):
                 if "uri" not in data or "code" not in data:
                     self._json(400, {"error": "uri and code required"})
                     return
+                # Waits for the session rather than for the socket: `join`
+                # returns as soon as the link is open, and reporting that as
+                # success told an operator "Joined" for a join that was about
+                # to be refused (see `console_join`).
                 try:
-                    console._call(console._node.join(data["uri"], data["code"]))
-                    self._json(200, {"ok": True})
+                    result = console._call(
+                        console._node.console_join(data["uri"], data["code"]))
                 except Exception as exc:
                     self._json(502, {"ok": False, "error": str(exc)[:200]})
+                    return
+                if not result.get("ok"):
+                    detail = result.get("detail") or ""
+                    self._json(502, {"ok": False,
+                                     "error": result.get("reason", "join failed"),
+                                     "detail": detail[:200]})
+                    return
+                self._json(200, result)
                 return
             if path == "/api/reachability/probe":
                 try:

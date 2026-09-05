@@ -143,11 +143,36 @@ def test_no_page_paints_a_live_container_with_raw_innerhtml():
         (console.CONSOLE_PAGE_JS, "app-links"),
         (console.CONSOLE_PAGE_JS, "balance-order"),
         (console.CONSOLE_PAGE_JS, "trace-summary"),
+        (console.CONSOLE_PAGE_JS, "first-run-steps"),
         (fleet.FLEET_PAGE_JS, "notif-list"),         # every poll
     ]
     for source, element in live:
         assert f'$("{element}").innerHTML =' not in source, \
             f"{element} is repainted on a timer: paint it through setHTML/paintLive"
+
+
+def test_the_console_does_not_re_derive_where_the_node_stands():
+    """`standing` is computed once, in `trust_status`, and rendered here.
+
+    The page used to build that sentence itself out of `self_rooted` and
+    `chain_length`, and so said the same thing for a network's founder, a
+    membership that had lapsed, and a node that never joined — one working state
+    and two broken ones, under one label. Two expressions for one quantity is
+    two chances to disagree."""
+    source = webassets.CONSOLE_PAGE_JS
+    assert "trust.standing" in source
+    assert "self_rooted" not in source
+
+
+def test_a_node_that_cannot_authenticate_says_so_on_every_page():
+    """The standing bar sits outside the panels on purpose: a node that is not a
+    member authenticates to nobody, and every symptom of that turns up somewhere
+    else looking like a broken network."""
+    html = webassets.INDEX_HTML
+    bar = html.split('id="standing-bar"')[0]
+    assert 'id="panel-overview"' not in bar, \
+        "the standing bar is inside a panel: it would only show on that page"
+    assert 'id="standing-bar"' in html
 
 
 def test_the_graph_is_rebuilt_only_when_it_changes_shape():

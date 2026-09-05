@@ -104,6 +104,10 @@ INDEX_HTML = """<!doctype html>
     </header>
 
 """ + ui.CTX_BAR + """
+    <div id="standing-bar" class="standing-bar" role="status" hidden>
+      <span><b id="standing-head"></b> <span id="standing-what" class="what"></span></span>
+      <button id="standing-go" class="sm">Join or invite</button>
+    </div>
 
     <!-- ── Overview ─────────────────────────────────────────────────────── -->
     <section id="panel-overview" class="content panel" role="tabpanel" data-panel="overview">
@@ -118,6 +122,14 @@ INDEX_HTML = """<!doctype html>
           <button id="go-join" class="primary">Add a node</button>
         </div>
       </div>
+      <article id="first-run" class="card" hidden>
+        <div class="card-head"><div class="grow"><h2 id="first-run-title"></h2>
+          <div class="sub" id="first-run-sub"></div></div></div>
+        <div class="card-body">
+          <ol class="steps" id="first-run-steps"></ol>
+          <div class="btn-row"><button id="first-run-go" class="primary">Add a node</button></div>
+        </div>
+      </article>
       <div id="metrics" class="stats"></div>
       <div class="split wide-first">
         <article class="card">
@@ -1035,7 +1047,8 @@ async function tick(sample){
     STATE = await response.json();
     if(sample === false) STATE._rates = RATE_NOW;
     else trackRates(STATE);
-    paintHeader(STATE); paintMetrics(STATE); drawChart(); drawGraph(STATE);
+    paintHeader(STATE); paintMetrics(STATE); paintFirstRun(STATE);
+    drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
     if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
@@ -1090,12 +1103,58 @@ function paintHeader(state){
     ? (links ? plural(links, "link") + " up" : "Online, not connected")
     : "Node stopped");
   $("nav-peers").textContent = nodes || "";
+  // "Looking for a neighbour" was true for a member with nobody around and a
+  // lie for a node that has joined nothing — that one is not looking, it cannot
+  // authenticate anybody — and it read as a network fault to the one reader who
+  // most needed to be told otherwise. Neither the title nor the lede tries to
+  // explain an empty node any more: `paintFirstRun` puts the reason and the
+  // steps in the card directly below, where they can be said properly.
   $("overview-title").textContent = nodes
     ? "Connected to " + plural(nodes, "node")
-    : "Looking for a neighbour";
+    : "Nothing connected";
   $("overview-lede").textContent = nodes
     ? "Health, throughput, and the " + plural(links, "link") + " this node has authenticated."
-    : "This node is running but has no authenticated link yet. Add one from Network → Add a node.";
+    : "What this node is doing, and what it is talking to.";
+}
+// The first console a node shows has nothing on it: no throughput, no peers, an
+// empty graph. That is not a fault and it is not an explanation either, and a
+// person who has just installed this has no way to tell which of the two it is.
+// So while nothing is connected, say where the node stands and what the next
+// move is — and get out of the way the moment a link authenticates.
+//
+// Two situations, and they need different sentences. A node that cannot
+// authenticate has to get into a network first; one that can is simply alone,
+// which is a normal state with a different next step. A brand-new node and
+// somebody about to found a network look identical from here — nothing in the
+// store tells them apart — so both paths are offered rather than guessed at.
+function paintFirstRun(state){
+  const card = $("first-run");
+  if(!card) return;
+  card.hidden = (state.node_count || 0) > 0;
+  if(card.hidden) return;
+  const standing = (state.trust || {}).standing;
+  const joined = standing === "member" || standing === "root";
+  $("first-run-title").textContent = joined
+    ? "Nothing is connected right now"
+    : "This node is not in a network yet";
+  $("first-run-sub").textContent = joined
+    ? "This node can prove who it is — it has nobody to prove it to"
+    : "There are two ways in, and either one is fine";
+  const steps = joined ? [
+    "Add an address for a node you know, under Network → Add a node.",
+    "Or leave it: an address this node already knows is redialled on its own, "
+      + "and a link that comes back fills this page in.",
+  ] : [
+    "Joining a network somebody else runs: ask them for a join ticket, then "
+      + "paste it under Network → Add a node.",
+    "Starting one here: create a join ticket on that same page and give it to "
+      + "the node you want to bring in. Whoever admits the first node becomes "
+      + "the network's root.",
+    "Either way, this page fills itself in as soon as a link authenticates.",
+  ];
+  // Through setHTML: this repaints on the cadence, and assigning innerHTML on a
+  // timer replaces the list under the reader's finger and drops any selection.
+  setHTML("first-run-steps", steps.map((step) => "<li>" + esc(step) + "</li>").join(""));
 }
 function paintMetrics(state){
   const load = state.load || {};
@@ -1827,6 +1886,8 @@ $("ping-btn").addEventListener("click", (event) => withBusy(event.target, async 
   }catch(_){ toast("Ping failed", "danger"); }
 }));
 $("go-join").addEventListener("click", () => ROUTER.go("network", "join"));
+$("standing-go").addEventListener("click", () => ROUTER.go("network", "join"));
+$("first-run-go").addEventListener("click", () => ROUTER.go("network", "join"));
 
 // ---- node details ----------------------------------------------------------
 let DETAIL_ID = null;
@@ -1972,18 +2033,76 @@ document.addEventListener("click", (event) => {
     if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
   });
 });
-// The membership, said out loud: a node that is only its own root has joined
-// nothing, and one whose chain is running out has a deadline, not a status.
+// The membership, said out loud — and said in one place. `standing` is the
+// node's own word for where this node stands (see `trust_status`); the console
+// renders it and never re-derives it, because two expressions for one quantity
+// is two chances to disagree about what the node is.
+//
+// "Only our own root" used to be one sentence covering three different
+// situations — a founder, a node whose membership lapsed, and a node that never
+// joined — of which two are broken and one is normal, and all three read the
+// same. They are separate words now.
+const STANDING_TEXT = {
+  member:  {label: "Member of a network"},
+  root:    {label: "This network's own root"},
+  expired: {label: "Membership has run out",
+            head: "This node's membership has run out.",
+            what: "Nothing on the network will authenticate it any more, and every "
+                + "link it tries is refused without a word. A membership that has "
+                + "lapsed cannot be renewed — the way back in is a fresh invitation "
+                + "from a node that is still a member.",
+            level: "danger"},
+  none:    {label: "Not a member of any network",
+            head: "This node has not joined a network.",
+            what: "It can prove nothing to anybody, so every link it tries is refused "
+                + "without a word — which looks exactly like a network fault. Use a "
+                + "join ticket from a member, or issue one here to start a network of "
+                + "your own.",
+            level: "danger"},
+};
+// The two broken standings, plus the deadline that has stopped being a
+// countdown. Anything else returns nothing and the bar stays down.
+function standingNotice(trust){
+  if(trust.standing === "member" && trust.seconds_left
+     && trust.seconds_left <= 3 * 86400){
+    // Renewal starts a month out and asks again every six hours, so by three
+    // days it has gone unanswered something like a hundred times. That is not a
+    // countdown any more, it is a fault with a deadline on it.
+    return {level: "warn",
+            head: "This node's membership expires in " + fmtDuration(trust.seconds_left) + ".",
+            what: "It has been asking the node that admitted it since a month before "
+                + "the deadline, without an answer. Check that node is still reachable: "
+                + "once the membership lapses, only a fresh invitation gets it back."};
+  }
+  const known = STANDING_TEXT[trust.standing];
+  return known && known.level ? known : null;
+}
+// Across the top of whatever page the reader is on, not filed under Network: a
+// node that cannot authenticate has no working page, and every symptom of it
+// shows up somewhere else as something that looks like a broken network.
+function paintStandingBar(state){
+  const bar = $("standing-bar");
+  if(!bar) return;
+  const notice = standingNotice(state.trust || {});
+  bar.hidden = !notice;
+  if(!notice) return;
+  bar.classList.toggle("warn", notice.level === "warn");
+  $("standing-head").textContent = notice.head;
+  $("standing-what").textContent = notice.what || "";
+}
 function paintTrust(state){
   const trust = state.trust || {};
-  let standing;
-  if(trust.self_rooted || !trust.chain_length) standing = "Own root only — not a member of any network";
-  else if(!trust.expires_at) standing = "Member, no expiry";
-  else if(!trust.seconds_left) standing = "Expired — re-join by invitation";
-  else standing = "Member, " + fmtDuration(trust.seconds_left) + " left";
+  const known = STANDING_TEXT[trust.standing];
+  let standing = known ? known.label : "Unknown";
+  if(trust.standing === "member"){
+    standing += trust.expires_at
+      ? " — " + fmtDuration(trust.seconds_left) + " left" : " — no expiry";
+  }
+  paintStandingBar(state);
   const rows = [
     ["Standing", standing],
-    ["Renewal", !trust.expires_at ? "Not needed"
+    ["Renewal", trust.standing !== "member" ? "Nothing to renew"
+      : !trust.expires_at ? "Not needed"
       : trust.renewing ? "Under way — asking the issuer" : "Not due yet"],
     ["Issued by", trust.issuer ? shortId(trust.issuer) : "—"],
     ["Anchored on", trust.anchor ? shortId(trust.anchor) : "—"],
@@ -2915,15 +3034,44 @@ $("tk-make").addEventListener("click", (event) => withBusy(event.target, async (
   }catch(_){ setMessage("tk-status", "Could not create a ticket", true); }
 }));
 $("tk-copy").addEventListener("click", () => copyText($("tk-text").textContent));
+// A join fails in a handful of ways and every one of them used to reach the
+// reader as "Join failed" — or, worse, as "Joined." for a join that was about
+// to be refused. The node names which one it was (see `console_join`); this
+// adds the only thing it cannot know, which is what the person does next.
+const JOIN_NEXT = {
+  "the invitation was refused":
+    "Ask for a new ticket: each one works once, and expires.",
+  "that address could not be reached":
+    "Check the other node is running, and reachable from this network.",
+  "the other node closed the link":
+    "It may be full, or it may already hold this node as hostile.",
+  "the handshake was never finished":
+    "Something answered but proved nothing — a stale address, or not an NMesh node.",
+  "this node refused the answer":
+    "That ticket belongs to a different network than the one this node is in.",
+};
+function joinFailure(data){
+  const reason = data.error || "the join failed";
+  const parts = [reason.charAt(0).toUpperCase() + reason.slice(1) + "."];
+  if(data.detail) parts.push("(" + data.detail + ")");
+  if(JOIN_NEXT[reason]) parts.push(JOIN_NEXT[reason]);
+  return parts.join(" ");
+}
 $("tk-join").addEventListener("click", (event) => withBusy(event.target, async () => {
   const ticket = $("tk-in").value.trim();
   if(!ticket){ setMessage("tk-scan-status", "Paste or scan a ticket first.", true); return; }
-  setMessage("tk-scan-status", "Joining…");
+  setMessage("tk-scan-status", "Joining — the handshake is post-quantum, give it a moment…");
   try{
     const {ok, data} = await apiJson("/api/join", "POST", {ticket});
-    setMessage("tk-scan-status", ok ? "Joined." : (data.error || "Join failed"), !ok);
-    if(ok){ $("tk-in").value = ""; toast("Joining the node from the ticket"); }
-  }catch(_){ setMessage("tk-scan-status", "Join failed", true); }
+    if(!ok){ setMessage("tk-scan-status", joinFailure(data), true); return; }
+    $("tk-in").value = "";
+    setMessage("tk-scan-status",
+      "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
+    toast("Joined the network");
+    tick(false);
+  }catch(_){ setMessage("tk-scan-status",
+    "The console stopped answering while joining. Check Network → Peers before "
+    + "trying again — the join may have gone through.", true); }
 }));
 
 // Scanning uses the browser's own BarcodeDetector — no library, consistent with
@@ -3160,7 +3308,10 @@ $("join-btn").addEventListener("click", (event) => withBusy(event.target, async 
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
   if(!uri || !code){ setMessage("manage-status", "An address and an invite code are required.", true); return; }
   const {ok, data} = await apiJson("/api/join", "POST", {uri, code});
-  setMessage("manage-status", ok ? "Join started." : (data.error || "Join failed"), !ok);
+  if(!ok){ setMessage("manage-status", joinFailure(data), true); return; }
+  setMessage("manage-status",
+    "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
+  tick(false);
 }));
 
 // ---- raw content transfer --------------------------------------------------

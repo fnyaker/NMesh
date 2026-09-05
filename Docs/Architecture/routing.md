@@ -15,6 +15,13 @@ Kademlia with 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
 - `RoutingTable.add(id, addresses, dsa_pub)`: **merges** the addresses
   (`dict.fromkeys(existing + new)`) and the DSA key; creates a fresh `NodeEntry`
   → `last_seen` refreshed. Ignores adding ourselves.
+- `RoutingTable.drop_address(id, address)`: forgets **one** address, keeping the
+  node. For an address that answered as somebody else — that is the wrong
+  address, not a slow one, and left in the entry it buys a whole post-quantum
+  handshake per pass to learn the same thing (`gotchas.md`, "The address that
+  answers as somebody else"). Edits the entry in place rather than re-adding it,
+  precisely because `add` refreshes `last_seen`: re-adding would report a node
+  we have just failed to reach as the most recently seen one.
 - `all_entries()`, `get_closest(target, k)` (sorted by XOR distance),
   `export_entries`/`import_entries` (persistence; only entries with a DSA key
   are exportable — without a key we cannot re-authenticate).

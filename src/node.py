@@ -1126,8 +1126,20 @@ class _Peer:
         self.pending_challenge: bytes | None = None
         self.received_challenge: bytes | None = None
         self.authenticated_id: NodeID | None = None
+        # Who this link proved to be, whether or not we went on to serve it.
+        # `authenticated_id` is only set for a link we keep; one refused because
+        # it answered as somebody else — or as us — has still proved an identity
+        # (the signature over our own challenge), and that is the one thing that
+        # tells the dialler "wrong address" from "nobody answered".
+        self.answered_as: NodeID | None = None
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
+        # Our code came back rejected. Read only by the join that presented it,
+        # to tell an operator the one thing that goes wrong most: a code is used
+        # once and expires. The far end chose to send that byte, so keeping it
+        # discloses nothing new — throwing it away only cost the person holding
+        # a dead ticket any way of finding out.
+        self.invite_refused: bool = False
         # We presented an invitation code on THIS link and it was accepted.
         # Only then may the answer's issued certificate make its self-signed
         # root a root of ours: the alternative — believing whoever we happen to
@@ -2024,6 +2036,54 @@ class MeshNode:
         await peer.start(self._handle_packet)
         return peer
 
+    async def console_join(self, address: str, code: str,
+                           timeout: float | None = None) -> dict:
+        """Join through one address, and say what actually happened.
+
+        `join` opens the link and returns; the handshake it starts finishes, or
+        fails, some time afterwards. The console reported that return as success
+        — so a node refused for every reason there is (a code already spent, an
+        address that answers as somebody else, a far end that never replied) was
+        told "Joined", and then sat there with nothing connected and nothing to
+        read. Every one of those looks like a broken network to the person
+        holding the ticket.
+
+        So: wait for the session, bounded, and when it does not come name which
+        way it failed. The link is torn down unless it authenticated — a
+        half-open join is not a link, it is a leak, and it is exactly what the
+        node would go on to count under "connected"."""
+        deadline = time.monotonic() + (timeout or self._join_try_timeout)
+        before = {row["reason"]: row["count"] for row in self.handshake_refusals()}
+        try:
+            peer = await self.join(address, code)
+        except Exception as exc:
+            return {"ok": False, "reason": "that address could not be reached",
+                    "detail": (str(exc) or type(exc).__name__)[:120]}
+        try:
+            while time.monotonic() < deadline:
+                if peer.session is not None and peer.authenticated_id is not None:
+                    return {"ok": True, "node": peer.authenticated_id.raw.hex()}
+                if peer.invite_refused:
+                    return {"ok": False, "reason": "the invitation was refused",
+                            "detail": "a code is good for one use and expires"}
+                if peer not in self._peers:
+                    return {"ok": False, "reason": "the other node closed the link"}
+                await asyncio.sleep(_AUTH_POLL_INTERVAL)
+            # Refusals are counted per reason, so what grew during this attempt
+            # is what this node objected to in the answer. Nothing grew means
+            # the far end simply never finished — which is the one case where
+            # this side genuinely knows nothing.
+            fresh = [row["reason"] for row in self.handshake_refusals()
+                     if row["count"] > before.get(row["reason"], 0)]
+            if fresh:
+                return {"ok": False, "reason": "this node refused the answer",
+                        "detail": "; ".join(fresh[:3])}
+            return {"ok": False, "reason": "the handshake was never finished",
+                    "detail": "the address answered but proved nothing"}
+        finally:
+            if peer.session is None:
+                await self._safe_stop_peer(peer)
+
     async def _connect_for_join(self, address: str) -> BaseTransport:
         """Open a transport for a join. A ``udp://`` target reuses the shared
         listener socket (not a fresh one) so it traverses any NAT hole already
@@ -2587,11 +2647,25 @@ class MeshNode:
             keep = newest      # the keeper is a ghost; the newest one is proven
         return [p for p in same if p is not keep]
 
-    def _collapse_redundant_links(self, peer: '_Peer') -> None:
-        """Close whatever ``peer`` supersedes. Never raises, never awaits: it
-        is called from the handshake handlers, which run on the receive loop."""
+    def _collapse_redundant_links(self, peer: '_Peer') -> bool:
+        """Close whatever ``peer`` supersedes, and say whether ``peer`` itself
+        survived. Never raises, never awaits: it is called from the handshake
+        handlers, which run on the receive loop.
+
+        The answer is what the caller owes the link. A fresh link is owed the
+        capability record and the four catch-up syncs — but only if it will
+        still be there to use them, and ``peer`` is the loser whenever the
+        canonical link already stands (see `_redundant_links` for which one
+        that is). Handing them out regardless is what made a node redial a peer
+        it already held and resend the whole catalogue to it: ~60 kB out and
+        ~33 kB in per attempt, five attempts in twenty seconds, for a link
+        closed moments later. See `gotchas.md`."""
+        superseded = False
         for loser in self._redundant_links(peer):
+            if loser is peer:
+                superseded = True
             self._spawn_bounded(self._safe_stop_peer(loser))
+        return not superseded
 
     def _live_neighbors(self) -> list[NodeID]:
         """Identities we hold a live authenticated link with, nearest first."""
@@ -3564,9 +3638,25 @@ class MeshNode:
                     self._note_dial(node_hex, uri, "connected",
                                     elapsed=time.monotonic() - started)
                     return peer
-                self._note_dial(node_hex, uri, "no-answer",
-                                "connected but never authenticated",
-                                time.monotonic() - started)
+                # An address that answers as somebody else is a different
+                # failure from one that never answers, and an operator reading
+                # "no-answer" against an address that connected every single
+                # time has been told the opposite of what happened. Name it,
+                # and stop dialling it: the entry is wrong, not slow. Left in,
+                # it buys a whole post-quantum handshake per pass to learn the
+                # same thing — that is the shape a real trace showed.
+                found = peer.answered_as
+                if found is not None and node_id is not None and found != node_id:
+                    self._note_dial(node_hex, uri, "wrong node",
+                                    "this address is this node itself"
+                                    if found == self._id else
+                                    "answered as " + found.raw.hex(),
+                                    time.monotonic() - started)
+                    self._routing.drop_address(node_id, uri)
+                else:
+                    self._note_dial(node_hex, uri, "no-answer",
+                                    "connected but never authenticated",
+                                    time.monotonic() - started)
         except asyncio.TimeoutError:
             self._note_dial(node_hex, uri, "timeout", "",
                             time.monotonic() - started)
@@ -7343,6 +7433,8 @@ class MeshNode:
             peer.join_code = None
             peer.joined_by_invite = True
             await self.initiate_handshake(peer)
+        else:
+            peer.invite_refused = True
 
     async def _handle_e2e_handshake(self, peer: _Peer, packet: Packet) -> None:
         try:
@@ -7509,6 +7601,13 @@ class MeshNode:
         if claimed_id != NodeID(packet.src_id):
             return self._refuse_handshake(
                 packet, "the id claimed is not the hash of the key presented")
+        if claimed_id == self._id:
+            # An address of ours answered: we dialled ourselves. Nothing here is
+            # hostile — our own store holds our own id as a root, so without this
+            # the handshake *succeeds*, and the node counts itself among the
+            # nodes it is connected to. It cost two ML-DSA verifications, an
+            # ML-KEM encapsulation and ~27 kB per attempt in a real trace.
+            return self._refuse_handshake(packet, "the identity presented is our own")
         # A node we hold as hostile does not get a fresh link. Placed here on
         # purpose: after the two SHA-256s that prove which identity is asking,
         # and before the post-quantum verification, so the refusal costs us
@@ -7563,21 +7662,22 @@ class MeshNode:
 
         self._note_punch_link_up(peer)
         self._routing.add(claimed_id, [], bob_dsa_pub)
-        self._collapse_redundant_links(peer)
+        kept = self._collapse_redundant_links(peer)
         self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
-        # Say what we speak again, now that the link is authenticated. The
-        # pre-auth announcement was unsigned — a machine in the middle could
-        # have stripped names from it — and this one is the record that counts.
-        # Stripping can only ever take away an optional plane, never a check,
-        # which is why nothing security-critical is negotiable.
-        self._spawn_bounded(self._announce_capabilities(peer))
-        self._schedule_catalog_sync(peer)  # catch this peer up on known apps
-        self._schedule_release_sync(peer)  # …and on known releases
-        self._schedule_pseudo_sync(peer)   # …and on who is called what
-        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
+        if kept:
+            # Say what we speak again, now that the link is authenticated. The
+            # pre-auth announcement was unsigned — a machine in the middle could
+            # have stripped names from it — and this one is the record that counts.
+            # Stripping can only ever take away an optional plane, never a check,
+            # which is why nothing security-critical is negotiable.
+            self._spawn_bounded(self._announce_capabilities(peer))
+            self._schedule_catalog_sync(peer)  # catch this peer up on known apps
+            self._schedule_release_sync(peer)  # …and on known releases
+            self._schedule_pseudo_sync(peer)   # …and on who is called what
+            self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
         # this observability bookkeeping break the handshake (zero crash).
@@ -7617,6 +7717,16 @@ class MeshNode:
             return self._refuse_handshake(
                 packet, "the answering id is not the hash of the key presented")
         server_id = NodeID(packet.src_id)
+        # Proved, from here on: the signature above is over our own challenge
+        # and the id derives from the key that made it. Recorded before the
+        # refusals below so the dialler can name what it reached.
+        peer.answered_as = server_id
+        if server_id == self._id:
+            # The address we dialled is one of ours. Both ends of that link are
+            # this node, so both handlers must refuse it — the server half alone
+            # would still leave this half holding a link whose authenticated id
+            # is our own, which every count of "nodes connected" would believe.
+            return self._refuse_handshake(packet, "the identity presented is our own")
 
         # Adopting a root is the one irreversible thing a handshake can do to
         # this node: from then on every chain anchored there authenticates. So
@@ -7662,21 +7772,22 @@ class MeshNode:
                                                                 peer.pending_kem_secret)
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
-        self._collapse_redundant_links(peer)
+        kept = self._collapse_redundant_links(peer)
         self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")
         self._wake_neighbor_maintenance()
-        # Say what we speak again, now that the link is authenticated. The
-        # pre-auth announcement was unsigned — a machine in the middle could
-        # have stripped names from it — and this one is the record that counts.
-        # Stripping can only ever take away an optional plane, never a check,
-        # which is why nothing security-critical is negotiable.
-        self._spawn_bounded(self._announce_capabilities(peer))
-        self._schedule_catalog_sync(peer)  # catch this peer up on known apps
-        self._schedule_release_sync(peer)  # …and on known releases
-        self._schedule_pseudo_sync(peer)   # …and on who is called what
-        self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
+        if kept:
+            # Say what we speak again, now that the link is authenticated. The
+            # pre-auth announcement was unsigned — a machine in the middle could
+            # have stripped names from it — and this one is the record that counts.
+            # Stripping can only ever take away an optional plane, never a check,
+            # which is why nothing security-critical is negotiable.
+            self._spawn_bounded(self._announce_capabilities(peer))
+            self._schedule_catalog_sync(peer)  # catch this peer up on known apps
+            self._schedule_release_sync(peer)  # …and on known releases
+            self._schedule_pseudo_sync(peer)   # …and on who is called what
+            self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         self._persist_state()  # persist the newly-known peer for restart recovery
 
     # -----------------------------------------------------------------------
@@ -8408,11 +8519,43 @@ class MeshNode:
         A membership that is running out is the one trust failure a node can see
         coming, and the only one it can still do something about — so it is
         shown as a date and a countdown, not discovered from peers that quietly
-        stop authenticating."""
+        stop authenticating.
+
+        ``standing`` is the whole answer in one word, computed here rather than
+        re-derived from four booleans by whoever displays it:
+
+        ``member``   a chain to a root somebody else signed — the ordinary case.
+        ``root``     our own root, and we have vouched for others, so it *is* a
+                     root out there: a founder's one-certificate chain
+                     authenticates everywhere its members are.
+        ``expired``  our own root only, but we still trust a root we did not
+                     sign: we were admitted to a network and are not any more.
+        ``none``     our own root only, and we trust nobody else's — nothing on
+                     the network will authenticate this node.
+
+        The last two look identical in every other field, and they are the
+        difference between "your membership ran out" and "you never joined",
+        which are different next actions. They are told apart by the anchors we
+        trust and the certificates we have issued, both of which are persisted —
+        never by the expired certificate itself, which `add` refuses to read
+        back and `prune_expired` deletes."""
         chain = self._cert_store.get_chain_to_root(self._id) or []
         expires = self._cert_store.chain_expires_at(self._id)
         rooted = bool(chain) and chain[-1].subject_id != self._id
+        foreign_roots = [r for r in self._cert_store.roots()
+                         if r != self._id.raw.hex()]
+        if rooted:
+            standing = "member"
+        elif not chain:
+            standing = "none"          # nothing to present at all
+        elif self._cert_store.has_issued():
+            standing = "root"
+        elif foreign_roots:
+            standing = "expired"
+        else:
+            standing = "none"
         return {
+            "standing": standing,
             "chain_length": len(chain),
             "self_rooted": bool(chain) and not rooted,
             "anchor": chain[-1].subject_id.raw.hex() if chain else None,
@@ -8424,8 +8567,7 @@ class MeshNode:
             "renewing": bool(expires) and (
                 expires - int(time.time()) <= _CERT_RENEW_WINDOW),
             "roots": self._cert_store.root_count(),
-            "root_ids": [r for r in self._cert_store.roots()
-                         if r != self._id.raw.hex()],
+            "root_ids": foreign_roots,
             "revoked": len(self._cert_store.revocations()),
         }
 
