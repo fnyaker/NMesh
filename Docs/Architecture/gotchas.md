@@ -111,6 +111,51 @@ give a fresh link what it is owed only if it will be there to use it.
 
 > Anything a handshake hands out, ask first whether the link will still exist.
 
+## Timers that exist to find nothing
+
+A node at rest woke **58 times a minute**, and 55 of those were timers whose
+whole job was to discover there was nothing to do: three booleans to test every
+two seconds, two empty dictionaries to walk every five, sixty-four routing
+entries to scan every five and rediscover each time that no medium had asked to
+be retried (`retry_interval` ships at 0 on every transport, so a stock node can
+never act on that loop at all). It is now **3.2**, and three of those are the
+link keepalive, which has to exist — its job *is* to emit traffic.
+
+The half that actually cost something was the other direction. A change waited
+out whatever remained of the tick it landed in: a state change up to two seconds
+unwritten, a stalled E2E handshake up to five before anything re-drove it.
+Waiting for a clock to come round is not the same as waiting for the thing you
+are waiting for.
+
+So each of these waits on an `asyncio.Event`, or on the moment the next piece of
+work is genuinely due (`_e2e_retry_wait`, `_retry_wait`) — the shape
+`_reconnect_loop` and `_neighbor_maintenance_loop` already had. Three traps come
+with it, and all three are cheap to hit.
+
+### A due-time loop with no floor is a busy loop
+The work being due is not the same as the work being possible.
+`_initiate_e2e_handshake` returns without recording an attempt when this node
+has no chain to present, so the target stays due for ever — and a loop that
+sleeps "until the next due time" then sleeps for zero, wakes, fails again, and
+burns a whole core. On exactly the node that was already broken, and silently.
+
+> Every due-time wait takes `max(due, floor)`, and a pass that could not act
+> still waits the floor.
+
+### Clear the event *before* reading the state
+`clear()` then compute then `wait()`. The other order loses a wake that lands
+between the read and the clear, and the loop then sleeps through the very thing
+it was told about. Anything mutated before the wake is visible to a read that
+happens after the clear, so this order cannot miss one.
+
+### A loop asleep on "nothing can ever be due" still needs a ceiling
+`_address_retry_loop` waits indefinitely when no medium wants retries — which
+is true until somebody changes a setting, through a path that has to remember to
+wake it (`TransportManager.on_settings_changed`). A path that forgets is a
+feature that never turns on, with nothing anywhere saying why.
+`_RETRY_IDLE_MAX` bounds that to a delay instead of a fault. The wake is what
+makes it prompt; the ceiling is what makes it recoverable.
+
 ## Hangs (the job/node "never finishes")
 
 ### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections

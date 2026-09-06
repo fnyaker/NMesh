@@ -22,6 +22,7 @@ is therefore safe to accept from strangers.
 |---|---|
 | `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**. |
 | `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
+| `seen.py` | The replay window: a bounded, **exact** set of 64-bit ids in a flat table, generational eviction, seeded buckets. Sixteen bytes an id where boxing them cost a hundred. |
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
 | `crypto.py` | `CryptoIdentity` (ML-DSA sign, ML-KEM), `SessionKey` (AES-256-GCM + HKDF). |
 | `cert.py` / `cert_store.py` | Certificates + self-rooted P2P PKI (chains, verification, roots, expiry, revocation). |

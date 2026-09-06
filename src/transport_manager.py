@@ -15,6 +15,10 @@ class TransportManager:
         # several addresses of the same scheme (e.g. two spool:// directories).
         self._servers: dict[str, BaseServer] = {}
         self.on_new_connection: Callable[[BaseTransport], Awaitable[None]] | None = None
+        # Told which scheme, after a setting was applied. Synchronous and
+        # best-effort: it exists so a loop whose schedule a setting decides can
+        # be woken instead of rediscovering it on a tick.
+        self.on_settings_changed: Callable[[str], None] | None = None
 
     def register(self, scheme: str, transport_cls: type[BaseTransport],
                  server_cls: type[BaseServer]) -> None:
@@ -48,11 +52,24 @@ class TransportManager:
         return out
 
     def configure(self, scheme: str, values: dict) -> dict:
-        """Apply settings to one transport. ``{"applied": …, "rejected": …}``."""
+        """Apply settings to one transport. ``{"applied": …, "rejected": …}``.
+
+        Anything watching a medium's settings is told afterwards. The node uses
+        it for the loops whose whole schedule a setting decides: `retry_interval`
+        ships at 0 everywhere, so the address-retry loop has nothing it may ever
+        do until somebody turns it on, and a loop asleep on that fact needs to
+        hear that the fact changed."""
         entry = self._registry.get(scheme)
         if entry is None:
             raise TransportError(f"scheme not registered: {scheme!r}")
-        return entry[0].configure(values or {})
+        result = entry[0].configure(values or {})
+        callback = self.on_settings_changed
+        if callback is not None:
+            try:
+                callback(scheme)
+            except Exception:
+                pass      # a watcher must never break the setting being applied
+        return result
 
     def setting(self, scheme: str, name: str):
         """One value in force for one medium, or ``None`` if it has no such

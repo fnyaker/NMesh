@@ -151,6 +151,48 @@ def test_no_page_paints_a_live_container_with_raw_innerhtml():
             f"{element} is repainted on a timer: paint it through setHTML/paintLive"
 
 
+def test_every_status_line_a_script_writes_to_exists():
+    """`setMessage` on an id that matches nothing fails silently — the console
+    keeps working and the operator is simply never told anything. Splitting one
+    status line shared by ten unrelated actions into two is exactly the change
+    that leaves a handler writing into nowhere."""
+    import re
+    pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML",
+             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML"}
+    for script_name, html_name in pages.items():
+        html = getattr(webassets, html_name)
+        source = getattr(webassets, script_name)[len(webassets.ui.JS):]
+        # Only whole literals: `setMessage("opt-msg-" + scheme, …)` names an
+        # element built per transport, and the page has no such id to hold.
+        for match in re.finditer(r'setMessage\("([a-z0-9-]+)"\s*,', source):
+            element = match.group(1)
+            if f'id="{element}"' in source:
+                continue          # the script mints this one itself
+            assert f'id="{element}"' in html, \
+                f"{script_name} writes a message into {element}, which {html_name} has no room for"
+
+
+def test_the_running_version_is_actually_painted():
+    """It was declared in the markup and assigned by nothing, so Settings →
+    Updates showed an empty badge beside the one question that page exists to
+    answer."""
+    assert 'id="version-pill"' in webassets.INDEX_HTML
+    assert "version-pill" in webassets.CONSOLE_PAGE_JS.split(
+        'id="version-pill"')[-1], "the version pill is never assigned"
+
+
+def test_a_refresh_does_not_overwrite_what_an_action_just_said():
+    """Every action on the updates page ends by calling `refreshReleases`. While
+    that function wrote the install's *standing* into the same line the action
+    reports through, pressing Install replaced "installed, restarting" with
+    something unrelated before the reader got to it."""
+    source = webassets.CONSOLE_PAGE_JS
+    body = source.split("async function refreshReleases(")[1].split("\n}")[0]
+    assert 'setMessage("release-status"' not in body, \
+        "refreshReleases writes into the line actions report through"
+    assert 'setMessage("update-standing"' in body
+
+
 def test_the_console_does_not_re_derive_where_the_node_stands():
     """`standing` is computed once, in `trust_status`, and rendered here.
 

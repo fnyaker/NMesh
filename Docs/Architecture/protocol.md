@@ -140,16 +140,17 @@ The exact order applied to every packet received:
 > because `_is_seen` is not a query — it *inserts*, into the node-wide dedup
 > table. These handlers run before every authentication gate, so any socket that
 > connects reaches them; with the limit below the insert, an unauthenticated
-> peer could flush the whole replay window (`_MSG_DEDUP_MAX`, FIFO) at line
-> rate, and dedup is what stops a routed packet looping and a relay
-> re-injecting the same payload. The expensive ML-DSA verification stays last.
+> peer could flush the whole replay window (`_MSG_DEDUP_MAX`) at line rate, and
+> dedup is what stops a routed packet looping and a relay re-injecting the same
+> payload. The expensive ML-DSA verification stays last.
 3. If `type ∈ _DIRECT_TYPES`: reject if the peer is not authenticated, or if
    `src_id != authenticated_id`. ("reject by default".)
 4. If `type ∈ _ROUTABLE_TYPES`:
    - an authenticated peer is required;
    - `msg_id == compute_msg_id()` or reject (anti-amplification);
    - `_is_seen(msg_id)` → already seen → reject (bounded deduplication,
-     `_MSG_DEDUP_MAX = 10 000`, FIFO eviction);
+     `_MSG_DEDUP_MAX = 10 000`, generational eviction — see `seen.py` and the
+     note below);
    - `_learn_reverse_path`: the ingress link is remembered as the return path
      towards `src_id` (bounded/dated, see `routing.md`);
    - if `dst_id` is neither us nor broadcast → `_forward_packet`, then return.
@@ -192,6 +193,36 @@ without the budget the reply exceeded the packet ceiling and was never sent. The
 sender **includes itself** among the candidates (ranked by distance): a routed
 `FIND_NODE` may come from a seeker who only reaches it through a relay and who
 would otherwise never learn its entry (see `routing.md`).
+
+### The replay window (`seen.py`)
+
+`_is_seen` is asked once per routable packet, so what it costs is paid on the
+hot path and how much it holds is how far back the window reaches. It was an
+`OrderedDict[int, None]` — exact, and about a hundred bytes an entry to store
+eight, almost all of it CPython boxing. That overhead is what capped
+`_MSG_DEDUP_MAX` at ten thousand.
+
+A `msg_id` is already 64 bits, so it fits a flat table with no boxing: one
+`bytearray` of 8-byte slots, open addressing, linear probing, sixteen bytes an
+entry at half load. Eviction is generational rather than FIFO — everything new
+goes into the young table, a lookup asks both, and a full young table becomes
+the old one — so an id survives between `capacity` and `2 × capacity` further
+insertions, which is the same "roughly the last N" the FIFO gave without paying
+to order them.
+
+Two properties are deliberate:
+
+- **Exact.** A Bloom filter would be six times smaller again, and this is not
+  where to spend a false positive — not because a dropped packet would hurt, but
+  because this is the structure anything else bounded by identity gets modelled
+  on, and a false positive on anything punitive is an innocent node cut off with
+  no way to find out. See also `gotchas.md`.
+- **The bucket is seeded.** The obvious index is the id's own low bits, and they
+  are uniform — it is a SHA-256 truncation. But the attacker chooses the payload
+  the digest covers, so they can grind ids into one bucket for a few thousand
+  hashes each and turn every lookup into a walk. The index goes through a
+  per-process random seed instead. The stored value is still the whole id, so
+  exactness is untouched; only *where* it lands is unpredictable.
 
 ## Invariants (reminder, see CLAUDE.md)
 
