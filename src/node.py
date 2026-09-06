@@ -6678,11 +6678,18 @@ class MeshNode:
 
         Trust is read from the pins **now**, not from the flag cached on the
         entry when it arrived: that flag exists to be displayed, and a stale one
-        must never be what authorises an install."""
-        if not self._trusts_publisher(entry["publisher"]):
-            return "untrusted", None
+        must never be what authorises an install.
+
+        **Already running wins over unpinned**, and the order matters only for
+        what an operator is told: there is nothing to install and no trust to
+        decide about a version this node is executing, so answering "publisher
+        not pinned" describes the wrong thing. It is what a node that had just
+        published its own code saw about it. Neither state offers an action, so
+        the reordering hands out nothing."""
         if entry["version"] == _running_version():
             return "running", None
+        if not self._trusts_publisher(entry["publisher"]):
+            return "untrusted", None
         if not _is_newer(entry["version"], _running_version()):
             return "older", None
         return "available", "install"
@@ -6702,7 +6709,13 @@ class MeshNode:
             attesters = self._releases.attesters(entry["version"],
                                                  entry["sha256"])
             releases.append({**listed, "state": state, "action": action,
-                             "trusted": state != "untrusted",
+                             # Asked of the pins, never inferred from `state`.
+                             # Deriving it from the word meant that any state
+                             # other than "untrusted" painted a green *pinned*
+                             # badge — so a release simply because we run it
+                             # would have claimed a key we never pinned.
+                             "trusted": self._trusts_publisher(entry["publisher"]),
+                             "mine": entry["publisher"] == self._identity.dsa_public_key,
                              "attesters": len(attesters),
                              "endorsed_attesters": len(
                                  self._publishers.endorsed_among(attesters)),
