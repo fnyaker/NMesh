@@ -1289,13 +1289,26 @@ function patchValues(root, values){
 // element would actually hold. A detached parse costs nothing near what
 // replacing live nodes costs — it triggers no layout, no paint, and it does not
 // take the element under somebody's finger with it.
-const HTML_PROBE = document.createElement("div");
+// **The probe is a `<template>`, and that is not a detail.** A `<div>` cannot
+// contain a `<tr>`, so assigning one to its `innerHTML` makes the parser drop
+// every `<tr>` and `<td>` and keep only what was inside the cells — and it is
+// the *probe's* readback that gets written into the real element. Every table
+// on these pages was therefore painted as a run of loose text: the releases
+// list showed "…13m agopublisher not pinned", two cells with the boundary that
+// separated them gone. A `<template>` parses its contents in a mode that keeps
+// table markup, which is what it exists for. Verified against Chromium: for
+// `<li>`, `<option>`, `<div>` and `<img>` the two agree exactly; for `<tr>`
+// only the template is right.
+const HTML_PROBE = document.createElement("template");
 function setHTML(target, html){
   const element = typeof target === "string" ? $(target) : target;
   if(!element) return element;
   HTML_PROBE.innerHTML = html;
   const wanted = HTML_PROBE.innerHTML;
-  HTML_PROBE.textContent = "";
+  // `innerHTML`, not `textContent`: a template's parsed nodes live in its
+  // `.content` fragment, which `textContent` does not reach — so clearing it
+  // that way would leave the last row in the probe for ever.
+  HTML_PROBE.innerHTML = "";
   if(element.innerHTML === wanted) return element;
   element.innerHTML = wanted;
   return element;
