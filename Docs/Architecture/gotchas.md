@@ -543,6 +543,26 @@ before and after.
   plain `innerHTML`: the chat list's empty state was replaced by an identical
   copy of itself about twice a second. It now parses the candidate into a
   detached element and compares the form the element would actually hold.
+- **…and the detached element it parsed into was a `<div>`, which cannot hold a
+  `<tr>`.** The fix above created a second bug the same size. What
+  `setHTML` writes into the page is the *probe's* readback, and the HTML parser
+  drops every `<tr>` and `<td>` assigned to a `<div>`, keeping only what was
+  inside the cells. So every table on these pages was painted as a run of loose
+  text: the releases list rendered `…13m agopublisher not pinned` — two cells,
+  with the boundary that separated them gone. Eight row builders were affected
+  (peers, refusals, releases, publishers, pseudo results, the empty and error
+  states that span a row).
+
+  The probe is a **`<template>`**: its contents are parsed in a mode that keeps
+  table markup, which is what a template is for. Checked against Chromium — for
+  `<li>`, `<option>`, `<div>` and `<img>` a div and a template agree exactly, and
+  only `<tr>` separates them. Clear it with `innerHTML = ""`, never
+  `textContent`: a template's parsed nodes live in its `.content` fragment,
+  which `textContent` does not reach, so the last row would stay in the probe
+  for ever.
+
+  > A probe that parses markup has to be able to *contain* it. "Detached" is
+  > not the same as "neutral".
 - **A repaint on the cadence must leave alone what it did not change.** Painting
   a live container with `innerHTML` replaces its buttons between the press and
   the click, drops the text somebody selected, and closes an open `<select>` —

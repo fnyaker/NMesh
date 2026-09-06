@@ -124,6 +124,57 @@ class TestPublishing:
         finally:
             await node.stop()
 
+    async def test_the_version_we_run_says_so_rather_than_unpinned(self, tmp_path):
+        """A node that had just published its own code was told "publisher not
+        pinned" about the very version it was executing. True, and about the
+        wrong thing: there is nothing to install and no trust to decide."""
+        from src.version import __version__ as running
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path), version=running))
+            entry = node.release_overview()["releases"][0]
+            assert entry["state"] == "running"
+            assert entry["action"] is None      # and still offers nothing
+        finally:
+            await node.stop()
+
+    async def test_saying_it_runs_here_does_not_claim_the_key_is_pinned(self, tmp_path):
+        """`trusted` used to be read off the state word, so any state other than
+        "untrusted" painted a green *pinned* badge — and the reordering above
+        would have made a release claim a key nobody had pinned. It is asked of
+        the pins."""
+        from src.version import __version__ as running
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path), version=running))
+            entry = node.release_overview()["releases"][0]
+            assert entry["state"] == "running"
+            assert entry["trusted"] is False
+        finally:
+            await node.stop()
+
+    async def test_our_own_release_is_marked_as_ours(self, tmp_path):
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            assert node.release_overview()["releases"][0]["mine"] is True
+        finally:
+            await node.stop()
+
+    async def test_somebody_else_s_release_is_not_ours(self, tmp_path):
+        publisher, node = _node(), _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            blob = publisher._releases.get(info["publisher_id"])["release"]
+            node._releases.offer(blob, node._identity.verify,
+                                 node._trusts_publisher)
+            entry = node.release_overview()["releases"][0]
+            assert entry["mine"] is False
+            assert entry["trusted"] is False
+        finally:
+            await publisher.stop()
+            await node.stop()
+
 
 class TestPublishingTouchesNothing:
     """Publishing is signing and announcing. The first cut of this pushed the

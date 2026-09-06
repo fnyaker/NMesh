@@ -2774,6 +2774,12 @@ function releaseRowHTML(entry){
   return "<tr><td><strong>" + esc(entry.version) + "</strong>" +
     (aside.length ? '<div class="tiny muted">' + aside.join(" · ") + "</div>" : "") +
     "</td><td><code>" + esc(shortId(entry.publisher_id)) + "</code>" +
+    // Three separate claims, and each says only what it knows. `pinned` is
+    // asked of the pins; `this node` is who signed it. A node that publishes
+    // its own code and has not pinned its own key is the ordinary case, and
+    // reading "unpinned" against your own release with nothing saying it is
+    // yours is what makes that page look broken.
+    (entry.mine ? ' <span class="badge">this node</span>' : "") +
     (entry.trusted ? ' <span class="badge ok">pinned</span>'
                    : ' <span class="badge">unpinned</span>') +
     "</td><td>" + fmtAgo(Date.now() / 1000 - entry.ts) + "</td><td>" + action + "</td></tr>";
