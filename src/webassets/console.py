@@ -305,6 +305,28 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="join" class="stack" hidden>
         <article class="card">
+          <div class="card-head"><div class="grow"><h2>Which way in?</h2>
+            <div class="sub">Four routes. Which one to try depends only on what can reach
+              what</div></div></div>
+          <div class="card-body">
+            <ol class="steps">
+              <li><strong>A join ticket</strong> — the usual way, and the only one with nothing to
+                type. One node makes it, the other pastes or scans it. It needs the inviting node
+                to have a confirmed public address; if it has none, this page will say so rather
+                than mint a ticket nobody can use.</li>
+              <li><strong>By hand</strong> — when neither node can reach the other yet. Three
+                blocks of text, moved over whatever channel you already trust. No address has to
+                work first, which is what makes it the fallback that always exists.</li>
+              <li><strong>Through a relay</strong> — when the joining node can reach some member of
+                the mesh, but not the one doing the inviting.</li>
+              <li><strong>An address and an invite code</strong> — the primitives the other three
+                are built on, for when you already know exactly what to dial.</li>
+            </ol>
+          </div>
+        </article>
+
+        <p class="eyebrow">The usual way</p>
+        <article class="card">
           <div class="card-head"><div class="grow"><h2>Quick join</h2>
             <div class="sub">One short string carrying the address and a single-use code</div></div></div>
           <div class="card-body">
@@ -345,6 +367,7 @@ INDEX_HTML = """<!doctype html>
             </div>
           </div>
         </article>
+        <p class="eyebrow">When the two cannot reach each other</p>
         <details class="card"><summary>Connect two nodes by hand</summary>
           <div class="card-body">
             <p class="muted small">For nodes that cannot see each other yet: three blocks of text,
@@ -373,6 +396,7 @@ INDEX_HTML = """<!doctype html>
               <button id="rly-join" class="primary">Join via relay</button></div>
           </div><p id="relay-status" class="msg"></p></div>
         </details>
+        <p class="eyebrow">The primitives</p>
         <details class="card"><summary>Invite codes and certificates</summary>
           <div class="card-body">
             <div class="toolbar"><button id="gen-invite">Generate invite code</button>
@@ -388,7 +412,15 @@ INDEX_HTML = """<!doctype html>
             <textarea id="cert-out" class="mono" rows="3" readonly></textarea>
             <textarea id="trust-in" class="mono" rows="3" placeholder="Paste a root certificate to trust"></textarea>
             <div class="btn-row"><button id="trust-btn">Trust certificate</button></div>
-            <hr>
+            <p id="invite-status" class="msg"></p>
+          </div>
+        </details>
+
+        <p class="eyebrow">Trust already given</p>
+        <details class="card"><summary>Anchors, and taking a membership back</summary>
+          <div class="card-body">
+            <p class="muted small">The other direction. Nothing here adds a node — these are the two
+              ways trust is withdrawn, and they are not the same act.</p>
             <h3>Anchors this node trusts</h3>
             <p class="muted small">Every chain that ends on one of these authenticates. Dropping an
               anchor is a decision only whoever runs this node can take — a root's certificate is
@@ -524,9 +556,22 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="updates" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Software updates</h2>
-            <div class="sub">Checks this project's published releases on GitHub</div></div>
-            <span id="version-pill" class="badge"></span></div>
+          <div class="card-head"><div class="grow"><h2>This node runs
+            <span id="version-pill" class="badge num"></span></h2>
+            <div class="sub">Two channels can replace that, and they are independent</div></div></div>
+          <div class="card-body">
+            <p class="muted small">The project's own releases come from GitHub and need this
+              machine to reach it. Mesh releases come from nodes, signed by a key you pinned, and
+              need no web host at all. Either can be the only one available; neither is a fallback
+              for the other.</p>
+            <p id="update-standing" class="msg"></p>
+          </div>
+        </article>
+
+        <p class="eyebrow">Getting an update</p>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>From the project</h2>
+            <div class="sub">This project's published releases, on GitHub</div></div></div>
           <div class="card-body">
             <p class="muted small">Nothing is installed without you confirming the exact version.
               Applying an update replaces the node's files, then restarts the node if something
@@ -558,6 +603,7 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
+        <p class="eyebrow">Who may replace this node's code</p>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Publishers you accept</h2>
             <div class="sub">Whose signature may replace this node's code</div></div></div>
@@ -599,6 +645,7 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
+        <p class="eyebrow">Giving one</p>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Publish this node's code</h2>
             <div class="sub">Sign what is installed here and offer it to the mesh</div></div></div>
@@ -1103,6 +1150,12 @@ function paintHeader(state){
     ? (links ? plural(links, "link") + " up" : "Online, not connected")
     : "Node stopped");
   $("nav-peers").textContent = nodes || "";
+  // The running version. It was declared in the markup and assigned by nothing,
+  // so Settings → Updates showed an empty badge next to the one question that
+  // page exists to answer. Written only when it changes: this runs every tick.
+  const versionPill = $("version-pill"), running = state.version || "";
+  if(versionPill && versionPill.textContent !== running)
+    versionPill.textContent = running;
   // "Looking for a neighbour" was true for a member with nobody around and a
   // lie for a node that has joined nothing — that one is not looking, it cannot
   // authenticate anybody — and it read as a network fault to the one reader who
@@ -2817,17 +2870,27 @@ async function refreshReleases(){
   try{
     const {ok, data} = await apiJson("/api/releases");
     if(!ok) return;
-    setHTML("release-rows", data.releases.map(releaseRowHTML).join(""));
-    $("release-empty").hidden = data.releases.length > 0;
-    setHTML("publisher-rows", data.publishers.map(publisherRowHTML).join(""));
-    $("publisher-empty").hidden = data.publishers.length > 0;
+    // Every field defaulted: one missing key used to throw inside this try,
+    // and the catch below is silent — so a single absent field left both tables
+    // painted with whatever they last held, for ever, with nothing said.
+    const releases = data.releases || [], publishers = data.publishers || [];
+    setHTML("release-rows", releases.map(releaseRowHTML).join(""));
+    $("release-empty").hidden = releases.length > 0;
+    setHTML("publisher-rows", publishers.map(publisherRowHTML).join(""));
+    $("publisher-empty").hidden = publishers.length > 0;
     $("publish-key").textContent = data.publisher_key || "";
-    if(!data.updatable && data.reason)
-      setMessage("release-status", "This install cannot update itself: " + data.reason, true);
-    const last = data.log[data.log.length - 1];
-    if(last && last.outcome === "installed")
-      setMessage("release-status", "Installed " + last.version +
-        " — restart the node to run it.");
+    // Standing, not feedback, and that is why it has its own line now. These
+    // two are conditions of the install and stay true until something changes
+    // them; written into `release-status` they wiped out whatever the operator
+    // had just been told, because every action on this page ends by calling
+    // this function.
+    const log = data.log || [], last = log[log.length - 1];
+    const blocked = !data.updatable && !!data.reason;
+    setMessage("update-standing",
+      blocked ? "This install cannot update itself: " + data.reason
+      : last && last.outcome === "installed"
+        ? "Installed " + last.version + " — restart the node to run it."
+        : "", blocked);
   }catch(_){}
 }
 $("release-rows").addEventListener("click", async (event) => {
@@ -3247,17 +3310,17 @@ $("gen-invite").addEventListener("click", (event) => withBusy(event.target, asyn
     const {data} = await apiJson("/api/invite", "POST");
     $("invite-out").textContent = data.code;
     await copyText(data.code);
-  }catch(_){ setMessage("manage-status", "Invite generation failed", true); }
+  }catch(_){ setMessage("invite-status", "Invite generation failed", true); }
 }));
 $("show-cert").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{ $("cert-out").value = (await apiJson("/api/rootcert")).data.cert_hex; }
-  catch(_){ setMessage("manage-status", "Certificate unavailable", true); }
+  catch(_){ setMessage("invite-status", "Certificate unavailable", true); }
 }));
 $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const cert_hex = $("trust-in").value.trim();
-  if(!cert_hex){ setMessage("manage-status", "Paste a certificate.", true); return; }
+  if(!cert_hex){ setMessage("invite-status", "Paste a certificate.", true); return; }
   const {ok} = await apiJson("/api/trust", "POST", {cert_hex});
-  setMessage("manage-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
+  setMessage("invite-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
 $("revoke-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -3306,10 +3369,10 @@ document.addEventListener("click", (event) => {
 });
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
-  if(!uri || !code){ setMessage("manage-status", "An address and an invite code are required.", true); return; }
+  if(!uri || !code){ setMessage("invite-status", "An address and an invite code are required.", true); return; }
   const {ok, data} = await apiJson("/api/join", "POST", {uri, code});
-  if(!ok){ setMessage("manage-status", joinFailure(data), true); return; }
-  setMessage("manage-status",
+  if(!ok){ setMessage("invite-status", joinFailure(data), true); return; }
+  setMessage("invite-status",
     "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
   tick(false);
 }));
