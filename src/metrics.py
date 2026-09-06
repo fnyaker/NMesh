@@ -14,13 +14,21 @@ from collections import deque
 class Counters:
     """Cumulative packet / byte counters. Plain ints, cheap to bump."""
 
-    __slots__ = ("pkts_in", "pkts_out", "bytes_in", "bytes_out", "dropped")
+    __slots__ = ("pkts_in", "pkts_out", "bytes_in", "bytes_out", "dropped",
+                 "pkts_relayed", "bytes_relayed")
 
     def __init__(self) -> None:
         self.pkts_in = 0
         self.pkts_out = 0
         self.bytes_in = 0
         self.bytes_out = 0
+        # Of what went out, how much was carried for somebody else. A *subset*
+        # of `bytes_out`, never a separate total — the name says whose traffic
+        # it is, not which direction. Relaying is the one thing a node spends
+        # its bandwidth on with nothing of its own to show for it, and it was
+        # indistinguishable from its own traffic in every number on screen.
+        self.pkts_relayed = 0
+        self.bytes_relayed = 0
         # Payloads a bound refused. A drop is not a failure to hide: it is the
         # only honest thing a full queue can do, and an operator watching this
         # climb is watching a consumer that cannot keep up.
@@ -37,6 +45,12 @@ class Counters:
     def on_drop(self) -> None:
         self.dropped += 1
 
+    def on_relay(self, nbytes: int) -> None:
+        """One packet forwarded for another node. `on_out` has already counted
+        it; this says who it was for."""
+        self.pkts_relayed += 1
+        self.bytes_relayed += nbytes
+
     def as_dict(self) -> dict:
         return {
             "pkts_in": self.pkts_in,
@@ -44,6 +58,8 @@ class Counters:
             "bytes_in": self.bytes_in,
             "bytes_out": self.bytes_out,
             "dropped": self.dropped,
+            "pkts_relayed": self.pkts_relayed,
+            "bytes_relayed": self.bytes_relayed,
         }
 
 

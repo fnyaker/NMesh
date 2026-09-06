@@ -332,7 +332,28 @@ def _swap_tree(source: str, root: str) -> str:
         path = os.path.join(root, script)
         if os.path.exists(path):
             os.chmod(path, 0o755)
+    _precompile(root)
     return backup
+
+
+def _precompile(root: str) -> None:
+    """Write the bytecode now rather than on the next start.
+
+    A node that has just replaced its tree starts with an empty `__pycache__`,
+    so the first run after every update compiles the whole of `src/` before it
+    can listen — measured at about a hundred milliseconds, which is roughly the
+    entire startup cost paid a second time, on the one start an operator is
+    most likely to be watching. Doing it here spends the same time while the
+    node is already stopped, and every later start reads the cache.
+
+    Never fatal: a read-only tree, a stale `.pyc`, a Python that refuses — none
+    of it stops the update. The node simply compiles on the way up, as it did
+    before."""
+    try:
+        import compileall
+        compileall.compile_dir(os.path.join(root, "src"), quiet=2, force=False)
+    except Exception:
+        pass
 
 
 def apply_sync(tag: str, *, root: str | None = None) -> dict:
