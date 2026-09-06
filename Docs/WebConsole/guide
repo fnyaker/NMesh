@@ -647,6 +647,22 @@ search box they already have.
 
 ## Updates (Settings → Updates)
 
+*Settings → Diagnostics* opens with **What is running**: every background job
+the node keeps, what it does, **what wakes it**, how many passes it has made and
+how long it has been idle. A process CPU figure says how much work is happening
+and never which part is doing it; this is the other half. Each loop declares
+itself when it starts and counts its own passes — two attribute writes, measured
+at about a hundred nanoseconds, and nothing on the path a packet takes. *Wakes
+on* matters more than it looks: since these loops stopped polling, what each one
+waits for is a real question, and the answer is read off the loop rather than
+kept in a second list somebody has to remember to update.
+
+Overview's tiles say **Relayed** — of what left this node, how much was carried
+for somebody else. Relaying is the one thing a node spends bandwidth on with
+nothing of its own to show for it, and it used to be indistinguishable from its
+own traffic in every number on the page. **CPU** and **Memory** are this
+process, never the machine.
+
 *Settings → Updates* opens by saying which version is running, because that is
 the question the page exists to answer. Under it the two channels are grouped
 apart, since they are independent and neither is a fallback for the other:
