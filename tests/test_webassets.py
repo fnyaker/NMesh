@@ -151,6 +151,34 @@ def test_no_page_paints_a_live_container_with_raw_innerhtml():
             f"{element} is repainted on a timer: paint it through setHTML/paintLive"
 
 
+def test_the_markup_probe_can_hold_a_table_row():
+    """`setHTML` parses the candidate into a detached element and writes *that
+    element's* readback into the page.
+
+    A `<div>` cannot contain a `<tr>`, so the parser drops every `<tr>` and
+    `<td>` and keeps only what was inside the cells — and since the readback is
+    what gets written, every table on these pages was painted as a run of loose
+    text. The releases list read "…13m agopublisher not pinned": two cells, with
+    the boundary that separated them gone. A `<template>` parses its contents in
+    a mode that keeps table markup, which is what it exists for. Checked against
+    Chromium: for `<li>`, `<option>`, `<div>` and `<img>` the two agree exactly;
+    for `<tr>` only the template is right."""
+    probe = webassets.ui.JS.split(
+        "const HTML_PROBE = document.createElement(")[1].split(")")[0]
+    assert probe == '"template"', (
+        f"the markup probe is a {probe}: every table row painted through "
+        "setHTML would be flattened into text")
+
+
+def test_the_probe_is_cleared_in_a_way_that_reaches_a_template():
+    """A template's parsed nodes live in its `.content` fragment, which
+    `textContent` does not reach — clearing it that way would leave the last row
+    in the probe for ever, and the next comparison would be against it."""
+    body = webassets.ui.JS.split("function setHTML(")[1].split("\n}")[0]
+    assert "HTML_PROBE.textContent" not in body
+    assert 'HTML_PROBE.innerHTML = ""' in body
+
+
 def test_every_status_line_a_script_writes_to_exists():
     """`setMessage` on an id that matches nothing fails silently — the console
     keeps working and the operator is simply never told anything. Splitting one
