@@ -5,6 +5,11 @@ Two halves, deliberately separate:
 
   - **check** is read-only and safe to run whenever. It asks the GitHub API for
     the latest release and compares its tag to :data:`src.version.__version__`.
+    An operator who does not want to wait for a release can name a branch
+    instead (``update_branch`` in the configuration, or ``NMESH_UPDATE_BRANCH``):
+    the answer then comes from the ``__version__`` declared in ``src/version.py``
+    at that branch, and installing takes the branch's tree. That file is read,
+    never executed — it arrives from the network like anything else.
   - **apply** replaces the installed tree. It never runs on its own: the caller
     must pass the exact version it is confirming, and that version must still be
     the one on offer. A page left open for an hour cannot install something the
@@ -29,7 +34,8 @@ every node that accepts an update. What limits it:
   - the repository is **pinned** (``NMESH_UPDATE_REPO`` exists for forks, but a
     peer cannot choose it — nothing on the mesh reaches this module);
   - an update from GitHub is **never automatic** — a human confirms a named
-    version;
+    version, and a branch (which moves) is refused if it no longer carries the
+    version that was confirmed;
   - the download is **bounded**, the archive is extracted with a filter that
     refuses paths outside the destination, and the unpacked tree is checked to
     look like NMesh before anything is replaced;
@@ -54,6 +60,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import tarfile
 import threading
@@ -61,15 +68,25 @@ import time
 import urllib.error
 import urllib.request
 
-from .version import __version__, is_newer
+from . import config
+from .version import __version__, is_newer, parse as parse_version
 
 DEFAULT_REPO = "fnyaker/NMesh"
 API_TIMEOUT = 15.0
 DOWNLOAD_TIMEOUT = 300.0
 MAX_API_BYTES = 1 * 1024 * 1024
+MAX_SOURCE_BYTES = 256 * 1024
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 MAX_NOTES = 8000
 _USER_AGENT = f"nmesh/{__version__}"
+UPDATE_BRANCH_ENV = "NMESH_UPDATE_BRANCH"
+
+# The one line wanted out of a `version.py`, wherever that file comes from.
+_VERSION_LINE = re.compile(rb"""^__version__\s*=\s*['"]([^'"\n]{1,64})['"]""",
+                           re.MULTILINE)
+# What such a line is allowed to say. Everything else is refused rather than
+# trimmed: this value is displayed, and comes back in the install request.
+_VERSION_TEXT = re.compile(r"[A-Za-z0-9.+-]{1,64}")
 
 # What an unpacked release must contain before we replace anything with it.
 REQUIRED_ENTRIES = ("src", "start.sh")
@@ -88,6 +105,30 @@ class UpdateError(Exception):
 
 def repo() -> str:
     return os.environ.get("NMESH_UPDATE_REPO") or DEFAULT_REPO
+
+
+def update_branch(config_path=None) -> str:
+    """The branch this node follows, or ``""`` when it follows releases.
+
+    ``NMESH_UPDATE_BRANCH`` wins over the file, the way a command-line flag wins
+    everywhere else in the project. A name the configuration would refuse counts
+    as not set: a half-valid ref is how a URL ends up asking somewhere nobody
+    chose, and falling back to the published releases is the safe reading."""
+    env = os.environ.get(UPDATE_BRANCH_ENV)
+    if env is not None:
+        return _validated_branch(env)
+    path = config_path or config.path_for(install_root())
+    values, _problems = config.load(path)
+    return _validated_branch(values.get("update_branch", ""))
+
+
+def _validated_branch(raw) -> str:
+    # Validated by the configuration module rather than again here: one
+    # definition of what a usable branch name is, whichever way it arrived.
+    try:
+        return config.validate("update_branch", raw)
+    except Exception:
+        return ""
 
 
 def install_root() -> str:
@@ -194,8 +235,60 @@ def _latest_release() -> dict:
     return document
 
 
-def check_sync() -> dict:
+def _source_version(branch: str) -> str:
+    """The version ``src/version.py`` declares at ``branch``.
+
+    Read with a regular expression, never executed: this is a file fetched from
+    the network, and the only thing wanted out of it is one string. A value that
+    does not parse as a version is an error rather than a candidate — something
+    unreadable must never come out looking newer than what is running."""
+    url = f"https://raw.githubusercontent.com/{repo()}/{branch}/src/version.py"
+    try:
+        raw = _fetch(url, timeout=API_TIMEOUT, max_bytes=MAX_SOURCE_BYTES,
+                     accept="text/plain")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise UpdateError(f"{repo()} has no src/version.py on "
+                              f"{branch}") from exc
+        raise UpdateError(f"GitHub answered {exc.code}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise UpdateError("could not reach GitHub: "
+                          f"{exc.reason if hasattr(exc, 'reason') else exc}") from exc
+    match = _VERSION_LINE.search(raw)
+    if match is None:
+        raise UpdateError(f"no version is declared in src/version.py on {branch}")
+    version = match.group(1).decode("utf-8", "replace")
+    # Two gates, not one: `parse` keeps whatever follows the numbers as a
+    # tie-break suffix, so it alone would accept a "version" carrying anything
+    # at all — and this string is shown on a page and repeated in a request.
+    if parse_version(version) is None or not _VERSION_TEXT.fullmatch(version):
+        raise UpdateError(f"{branch} declares a version that cannot be read")
+    return version
+
+
+def _check_branch(branch: str) -> dict:
+    """What a branch says the latest version is. Same shape as a release check,
+    so nothing downstream has to know which of the two it is looking at."""
+    latest = _source_version(branch)
+    return {
+        "current": __version__,
+        "latest": latest,
+        "available": is_newer(latest, __version__),
+        "url": f"https://github.com/{repo()}/tree/{branch}",
+        "published_at": "",
+        "notes": "",
+        "repo": repo(),
+        "source": "branch",
+        "branch": branch,
+        "checked_at": time.time(),
+    }
+
+
+def check_sync(branch=None) -> dict:
     """Blocking check. Prefer :func:`check`."""
+    branch = update_branch() if branch is None else _validated_branch(branch)
+    if branch:
+        return _check_branch(branch)
     document = _latest_release()
     tag = document.get("tag_name")
     if not isinstance(tag, str) or not tag:
@@ -209,30 +302,45 @@ def check_sync() -> dict:
         "published_at": str(document.get("published_at") or "")[:64],
         "notes": (notes[:MAX_NOTES] if isinstance(notes, str) else ""),
         "repo": repo(),
+        "source": "release",
+        "branch": "",
         "checked_at": time.time(),
     }
 
 
-async def check() -> dict:
-    """Ask GitHub what the latest release is. Read-only; changes nothing."""
-    return await _bounded(check_sync, API_TIMEOUT + 5)
+async def check(branch=None) -> dict:
+    """Ask GitHub what the latest version is. Read-only; changes nothing.
+
+    ``branch`` is the caller's answer to "which branch does *this* node follow?"
+    — the console knows its own configuration file, and reading a different one
+    here would answer for a node nobody is looking at. ``None`` means work it
+    out from the environment and the default file."""
+    return await _bounded(lambda: check_sync(branch), API_TIMEOUT + 5)
 
 
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
 
-def _download(tag: str) -> bytes:
-    url = f"https://codeload.github.com/{repo()}/tar.gz/refs/tags/{tag}"
+def _codeload(ref: str, what: str) -> bytes:
+    url = f"https://codeload.github.com/{repo()}/tar.gz/{ref}"
     try:
         return _fetch(url, timeout=DOWNLOAD_TIMEOUT,
                       max_bytes=MAX_DOWNLOAD_BYTES,
                       accept="application/octet-stream")
     except urllib.error.HTTPError as exc:
-        raise UpdateError(f"could not download {tag}: GitHub answered "
+        raise UpdateError(f"could not download {what}: GitHub answered "
                           f"{exc.code}") from exc
     except (urllib.error.URLError, OSError) as exc:
-        raise UpdateError(f"could not download {tag}: {exc}") from exc
+        raise UpdateError(f"could not download {what}: {exc}") from exc
+
+
+def _download(tag: str) -> bytes:
+    return _codeload(f"refs/tags/{tag}", tag)
+
+
+def _download_branch(branch: str) -> bytes:
+    return _codeload(f"refs/heads/{branch}", f"branch {branch}")
 
 
 def _extract(archive: bytes, dest: str) -> str:
@@ -289,6 +397,25 @@ def _verify_tree(path: str) -> None:
     if missing:
         raise UpdateError("the downloaded release is missing "
                           + ", ".join(missing))
+
+
+def _tree_version(path: str, expected: str) -> None:
+    """Refuse a tree that no longer carries the version somebody confirmed.
+
+    A tag names one commit for good, so downloading it is the whole check. A
+    branch is whatever was pushed to it last, and between the check an operator
+    read and the click that follows, that can be something else entirely —
+    installing it would put code on the machine nobody looked at."""
+    try:
+        with open(os.path.join(path, "src", "version.py"), "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES)
+    except OSError as exc:
+        raise UpdateError("the downloaded tree declares no version") from exc
+    match = _VERSION_LINE.search(raw)
+    found = match.group(1).decode("utf-8", "replace") if match else ""
+    if found != expected:
+        raise UpdateError(f"the branch now carries {found or 'no version'}, "
+                          f"not {expected} — check again and re-confirm")
 
 
 def _swap_tree(source: str, root: str) -> str:
@@ -356,19 +483,27 @@ def _precompile(root: str) -> None:
         pass
 
 
-def apply_sync(tag: str, *, root: str | None = None) -> dict:
-    """Download ``tag`` and put it in place. Returns what happened."""
+def apply_sync(tag: str, *, root: str | None = None, branch=None) -> dict:
+    """Download the confirmed version and put it in place. Returns what happened.
+
+    ``tag`` is what the operator confirmed: a release tag, or — when this node
+    follows a branch — the version that branch declared when it was checked.
+    Either way nothing else installs: a branch whose ``version.py`` has moved
+    since is refused, not installed under the name that was on screen."""
     root = root or install_root()
     ok, reason = updatable()
     if not ok:
         raise UpdateError(reason)
 
-    archive = _download(tag)
+    branch = update_branch() if branch is None else _validated_branch(branch)
+    archive = _download_branch(branch) if branch else _download(tag)
     stage = os.path.join(root, _STAGE_DIR)
     shutil.rmtree(stage, ignore_errors=True)
     try:
         source = _extract(archive, stage)
         _verify_tree(source)
+        if branch:
+            _tree_version(source, tag)
         backup = _swap_tree(source, root)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -444,9 +579,10 @@ def safe_relative(path) -> str | None:
     return norm
 
 
-async def apply(tag: str, *, root: str | None = None) -> dict:
-    """Install release ``tag``. The caller is responsible for having asked."""
-    return await _bounded(lambda: apply_sync(tag, root=root),
+async def apply(tag: str, *, root: str | None = None, branch=None) -> dict:
+    """Install the version ``tag`` names. The caller is responsible for having
+    asked, and for saying which branch this node follows (see :func:`check`)."""
+    return await _bounded(lambda: apply_sync(tag, root=root, branch=branch),
                           DOWNLOAD_TIMEOUT + 60)
 
 
