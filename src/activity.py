@@ -64,13 +64,55 @@ class Job:
         }
 
 
-class Activity:
-    """The node's jobs, by name. One instance per node."""
+# How many recent events are kept. A ring, so a node left running for a month
+# costs exactly what a node left running for a minute does.
+_MAX_RECENT = 64
 
-    __slots__ = ("_jobs",)
+
+class Activity:
+    """The node's jobs, by name, and the last few things worth saying.
+
+    One instance per node."""
+
+    __slots__ = ("_jobs", "_recent")
 
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
+        self._recent: list[dict] = []
+
+    # -- what just happened -------------------------------------------------
+
+    def note(self, kind: str, text: str) -> None:
+        """Record something an operator would want to have seen.
+
+        Called where the node already knows — a link came up, a handshake was
+        refused, a release arrived — never per packet. One list append, bounded.
+
+        **The text is always ours.** Node ids and our own vocabulary; nothing a
+        peer wrote reaches this, which is what keeps a log an adversary can
+        write into from existing at all.
+
+        Repeats coalesce onto the newest row rather than pushing everything else
+        out: a peer that connects and drops twice a second is one event that
+        keeps happening, and a ring full of it would have hidden the very thing
+        somebody came to read."""
+        text = str(text)[:_MAX_TEXT]
+        kind = str(kind)[:_MAX_NAME]
+        now = time.time()
+        if self._recent:
+            last = self._recent[-1]
+            if last["kind"] == kind and last["text"] == text:
+                last["count"] += 1
+                last["at"] = now
+                return
+        self._recent.append({"at": now, "kind": kind, "text": text, "count": 1})
+        if len(self._recent) > _MAX_RECENT:
+            del self._recent[0]
+
+    def recent(self, limit: int = _MAX_RECENT) -> list[dict]:
+        """The newest first, for a console."""
+        rows = self._recent[-max(1, min(int(limit), _MAX_RECENT)):]
+        return list(reversed(rows))
 
     def register(self, name: str, what: str, wakes_on: str) -> Job:
         """Declare a job, or return the one already declared under this name.

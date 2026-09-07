@@ -269,6 +269,17 @@ SETTINGS = {
     "release_quorum":  (_as_quorum, 0, True,
                         "Endorsed publishers that must independently sign the "
                         "same release before it installs itself (0 = never)"),
+    # Publishing this node's own code, unattended. Off, and off is the only
+    # sane default: a release is the one payload that replaces somebody else's
+    # program, and this signs it with the identity the node keeps unlocked for
+    # as long as it runs. Turning it on says "whoever holds this machine may
+    # offer its code to everyone who pinned it" — which is already true of
+    # anyone who can press the button, but pressing it is a decision and this
+    # is a standing one. It publishes each version once and announces nothing
+    # else; nobody installs it who has not pinned this key.
+    "release_auto_publish": (_as_bool, False, True,
+                        "Publish this node's own code to the mesh whenever its "
+                        "version changes (signed with the node identity)"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),

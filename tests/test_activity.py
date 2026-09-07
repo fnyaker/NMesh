@@ -145,3 +145,60 @@ class TestWhatThisNodeCarries:
         node = _node()
         node._metrics.total.on_out(900)
         assert node._metrics.total.as_dict()["bytes_relayed"] == 0
+
+
+class TestWhatJustHappened:
+    def test_it_keeps_the_newest_first(self):
+        activity = Activity()
+        activity.note("link", "one")
+        activity.note("link", "two")
+        assert [row["text"] for row in activity.recent()] == ["two", "one"]
+
+    def test_a_repeat_coalesces_rather_than_pushing_everything_out(self):
+        """A peer that connects and drops twice a second is one event that keeps
+        happening. A ring full of it would hide the thing somebody came to
+        read."""
+        activity = Activity()
+        activity.note("link", "something else")
+        for _ in range(500):
+            activity.note("refused", "handshake refused: no chain")
+        rows = activity.recent()
+        assert len(rows) == 2
+        assert rows[0]["count"] == 500
+        assert rows[1]["text"] == "something else"
+
+    def test_it_never_grows(self):
+        activity = Activity()
+        for i in range(5000):
+            activity.note("link", f"event {i}")
+        assert len(activity.recent(1000)) <= 64
+
+    def test_long_text_is_cut(self):
+        activity = Activity()
+        activity.note("k" * 200, "t" * 500)
+        row = activity.recent()[0]
+        assert len(row["text"]) <= 160 and len(row["kind"]) <= 40
+
+
+class TestTheNodeSaysWhatItDid:
+    async def test_a_refusal_is_noted_in_our_own_words(self):
+        node = _node()
+        try:
+            node._refuse_handshake(
+                type("P", (), {"src_id": b"\x01" * 20})(), "no chain was presented")
+            texts = [row["text"] for row in node._activity.recent()]
+            assert any("no chain was presented" in text for text in texts)
+        finally:
+            await node.stop()
+
+    async def test_nothing_a_peer_wrote_reaches_the_feed(self):
+        """The reasons are this file's own vocabulary — that is what keeps a log
+        an adversary can write into from existing at all."""
+        node = _node()
+        try:
+            node._refuse_handshake(
+                type("P", (), {"src_id": b"\x02" * 20})(), "handshake was malformed")
+            for row in node._activity.recent():
+                assert row["kind"] in {"link", "refused", "release", "warn"}
+        finally:
+            await node.stop()
