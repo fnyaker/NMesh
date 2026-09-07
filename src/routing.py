@@ -16,6 +16,16 @@ WRONG_ADDRESS_TTL = 600.0
 # grow this table.
 MAX_WRONG_ADDRESSES = 256
 
+# A node we have asked this many times, and which has never once answered, stops
+# being asked every round. Five is deliberately patient: a node reachable only
+# through a relay that is having a bad minute must not be written off, and the
+# cost of asking is one small packet.
+SILENT_AFTER = 5
+# It is then asked again at this interval instead of at every lookup — so a node
+# that comes back is found within five minutes, and one that never does costs
+# one packet per five minutes instead of one per ten seconds.
+SILENT_RETRY = 300.0
+
 
 @dataclass
 class NodeEntry:
@@ -27,6 +37,13 @@ class NodeEntry:
     # surface the most recently seen nodes. A fresh entry is created on every
     # add(), so this tracks recency of contact without a separate update path.
     last_seen: float = field(default_factory=time.monotonic)
+    # Whether this id has ever answered a lookup of ours, how many times running
+    # it has not, and when we last asked. Carried across `add`, which is the
+    # whole point: an id re-advertised by somebody else must not arrive with a
+    # clean sheet, or the count never reaches anything.
+    answered_at: float | None = None
+    unanswered: int = 0
+    asked_at: float = 0.0
 
 
 class KBucket:
@@ -108,9 +125,41 @@ class RoutingTable:
         merged_addrs = [a for a in merged_addrs
                         if self.wrong_address(node_id, a) is None][:_MAX_ADDRESSES]
         merged_pub = dsa_pub if dsa_pub else (existing.dsa_pub if existing else b"")
-        return self._buckets[self._bucket_index(node_id)].add(
-            NodeEntry(node_id, merged_addrs, merged_pub)
-        )
+        entry = NodeEntry(node_id, merged_addrs, merged_pub)
+        if existing is not None:
+            entry.answered_at = existing.answered_at
+            entry.unanswered = existing.unanswered
+            entry.asked_at = existing.asked_at
+        return self._buckets[self._bucket_index(node_id)].add(entry)
+
+    # -- ids that never answer ---------------------------------------------
+
+    def note_answered(self, node_id: NodeID) -> None:
+        """This id answered a lookup of ours. Nothing else counts as an answer:
+        being mentioned by a peer is what put it here in the first place."""
+        entry = self.get(node_id)
+        if entry is not None:
+            entry.answered_at = entry.asked_at = time.monotonic()
+            entry.unanswered = 0
+
+    def note_unanswered(self, node_id: NodeID) -> None:
+        entry = self.get(node_id)
+        if entry is not None:
+            entry.asked_at = time.monotonic()
+            entry.unanswered += 1
+
+    def is_silent(self, entry: NodeEntry, now: float | None = None) -> bool:
+        """Has this id never once answered, often enough that we should stop
+        asking for a while?
+
+        Never once, not lately: an id that has answered before is a node having
+        a bad minute, and the answer to that is patience. An id that has answered
+        *nothing*, ever, through every path we have, is what a routing table
+        looks like when it is still carrying somebody's previous identity —
+        re-advertised by everyone, asked after by everyone, for ever."""
+        if entry.answered_at is not None or entry.unanswered < SILENT_AFTER:
+            return False
+        return (time.monotonic() if now is None else now) - entry.asked_at < SILENT_RETRY
 
     # -- addresses that answered as somebody else --------------------------
 
@@ -197,9 +246,24 @@ class RoutingTable:
         `nsmallest`, not a full sort of a materialised copy of the table:
         `_handle_find_node` calls this for every FIND_NODE, which an
         authenticated peer may send `_QUERY_RATE_MAX` times a window, and the
-        table can hold 160 × K entries. Same answer, same order."""
+        table can hold 160 × K entries. Same answer, same order.
+
+        Silent ids are left out — of what we ask, of what we dial, and of what
+        we tell others. Not an accusation and nothing is held against the node:
+        we simply stop naming an id that answers nobody, which is how a dead one
+        leaves the network instead of being handed round it for ever. Anyone who
+        *can* reach it goes on naming it, and we ask again ourselves every
+        `SILENT_RETRY`."""
+        now = time.monotonic()
         return heapq.nsmallest(
-            count, self._iter_entries(), key=lambda e: target.distance(e.node_id))
+            count, (e for e in self._iter_entries() if not self.is_silent(e, now)),
+            key=lambda e: target.distance(e.node_id))
+
+    def silent_ids(self) -> list[str]:
+        """The ids we have stopped asking after, for a console to show."""
+        now = time.monotonic()
+        return [e.node_id.raw.hex() for e in self._iter_entries()
+                if self.is_silent(e, now)]
 
     def _iter_entries(self):
         for bucket in self._buckets:

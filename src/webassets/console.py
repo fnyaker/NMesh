@@ -1863,9 +1863,14 @@ function rowValues(node, inner, out){
   const key = rowKey(node, inner);
   const quality = (node.link || {}).quality || {};
   const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
-  out[key + ":state"] = {
-    text: node.connected ? "authenticated" : (node.has_key ? "key known" : "no key"),
-    tone: node.connected ? "ok" : (node.has_key ? "" : "warn")};
+  // "silent" is not a worse "no key" — it is a different fact, and the one that
+  // explains a row that never changes: this id has never once answered a lookup
+  // of ours, so we have stopped asking after it and stopped naming it to
+  // others. It says nothing about the node; anyone who can reach it still does.
+  out[key + ":state"] = node.silent
+    ? {text: "never answers", tone: "warn"}
+    : {text: node.connected ? "authenticated" : (node.has_key ? "key known" : "no key"),
+       tone: node.connected ? "ok" : (node.has_key ? "" : "warn")};
   out[key + ":loss"] = {html: loss ? badge(loss + "% loss", "warn") : ""};
   out[key + ":rtt"] = node.rtt_ms == null ? "—" : node.rtt_ms + " ms";
   out[key + ":jitter"] = quality.jitter_ms ? "±" + quality.jitter_ms + " ms" : "";

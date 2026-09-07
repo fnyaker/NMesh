@@ -33,6 +33,7 @@ from src.node import (
 )
 from src.node_id import NodeID
 from src.packet import Packet
+from src import routing as routing_mod
 from src.routing import NodeEntry
 from tests.conftest import FakeTransport, make_manager
 
@@ -824,3 +825,128 @@ class TestTheTailIsHostileInput:
         body = _POOL_COUNT.pack(1) + _CERT_LEN.pack(_CERT_REF) + b"\x00" * 4
         with pytest.raises(ValueError):
             _decode_entries(body, lambda d: None)
+
+
+# ---------------------------------------------------------------------------
+# 6 — an id that answers nobody stops being handed round
+# ---------------------------------------------------------------------------
+
+class TestAnIdThatNeverAnswers:
+    """A trace of an idle node: one id was asked in every lookup round for the
+    whole capture and never appeared as the source of a single packet. Every
+    answer from every peer re-taught it, every round asked after it again, and
+    every pass tried to dial it — at an address that turned out to be this very
+    machine's. That is what a routing table looks like when it is still carrying
+    somebody's previous identity."""
+
+    def _table(self, node, ids):
+        for node_id in ids:
+            node._routing.add(node_id, ["tcp://10.0.0.1:9000"], b"\x01" * 32)
+
+    def test_silence_is_counted_and_an_answer_clears_it(self):
+        node = MeshNode(transport_manager=make_manager())
+        ghost = NodeID(b"\x11" * 20)
+        self._table(node, [ghost])
+        for _ in range(routing_mod.SILENT_AFTER):
+            node._routing.note_unanswered(ghost)
+        assert node._routing.get(ghost).unanswered == routing_mod.SILENT_AFTER
+        node._routing.note_answered(ghost)
+        assert node._routing.get(ghost).unanswered == 0
+        assert node._routing.get(ghost).answered_at is not None
+
+    def test_it_drops_out_of_what_we_ask_dial_and_advertise(self):
+        node = MeshNode(transport_manager=make_manager())
+        ghost, live = NodeID(b"\x11" * 20), NodeID(b"\x22" * 20)
+        self._table(node, [ghost, live])
+        for _ in range(routing_mod.SILENT_AFTER):
+            node._routing.note_unanswered(ghost)
+            node._routing.note_unanswered(live)
+        node._routing.note_answered(live)
+        closest = [e.node_id for e in node._routing.get_closest(NodeID(b"\x00" * 20))]
+        assert ghost not in closest and live in closest
+        assert node._routing.silent_ids() == [ghost.raw.hex()]
+        # The entry is still there: the id is real, and somebody else may reach
+        # it. We have only stopped naming it.
+        assert node._routing.contains(ghost)
+
+    def test_one_that_answered_before_is_only_having_a_bad_minute(self):
+        """Never once, not lately. An id that has answered is a node with a
+        problem, and the answer to that is patience."""
+        node = MeshNode(transport_manager=make_manager())
+        flaky = NodeID(b"\x33" * 20)
+        self._table(node, [flaky])
+        node._routing.note_answered(flaky)
+        for _ in range(routing_mod.SILENT_AFTER * 4):
+            node._routing.note_unanswered(flaky)
+        assert node._routing.is_silent(node._routing.get(flaky)) is False
+
+    def test_being_re_advertised_does_not_wipe_the_count(self):
+        """The whole reason the count lives on the entry. Everyone on the mesh
+        re-teaches a ghost, and an entry rebuilt with a clean sheet on every
+        answer never reaches any threshold at all."""
+        node = MeshNode(transport_manager=make_manager())
+        ghost = NodeID(b"\x11" * 20)
+        self._table(node, [ghost])
+        for _ in range(routing_mod.SILENT_AFTER):
+            node._routing.note_unanswered(ghost)
+        node._routing.add(ghost, ["tcp://10.0.0.9:9000"], b"\x01" * 32)
+        assert node._routing.get(ghost).unanswered == routing_mod.SILENT_AFTER
+        assert node._routing.is_silent(node._routing.get(ghost)) is True
+
+    def test_it_is_asked_again_after_a_while(self, monkeypatch):
+        """A node that comes back is found within `SILENT_RETRY`, and one that
+        never does costs one packet per five minutes instead of one per ten
+        seconds."""
+        node = MeshNode(transport_manager=make_manager())
+        ghost = NodeID(b"\x11" * 20)
+        self._table(node, [ghost])
+        for _ in range(routing_mod.SILENT_AFTER):
+            node._routing.note_unanswered(ghost)
+        later = time.monotonic() + routing_mod.SILENT_RETRY + 1
+        monkeypatch.setattr(routing_mod.time, "monotonic", lambda: later)
+        assert node._routing.is_silent(node._routing.get(ghost)) is False
+        assert [e.node_id for e in
+                node._routing.get_closest(NodeID(b"\x00" * 20))] == [ghost]
+
+    async def test_a_lookup_counts_who_answered(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        answers, silent = NodeID(b"\x44" * 20), NodeID(b"\x55" * 20)
+        self._table(node, [answers, silent])
+
+        async def reply(node_id, target, timeout=5.0):
+            return [] if node_id == answers else None
+        node._kad_query_node = reply
+        await node.kad_lookup(NodeID(b"\x00" * 20), k=20, alpha=3, max_rounds=1)
+        await node.stop()
+        assert node._routing.get(answers).answered_at is not None
+        assert node._routing.get(answers).unanswered == 0
+        assert node._routing.get(silent).unanswered == 1
+
+    async def test_an_empty_answer_is_still_an_answer(self):
+        """A node with nothing to say about this target has said so. Reading
+        that as silence would retire the quiet edges of a small mesh."""
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        quiet = NodeID(b"\x66" * 20)
+        self._table(node, [quiet])
+        node._kad_query_node = lambda node_id, target, timeout=5.0: _empty()
+        await node.kad_lookup(NodeID(b"\x00" * 20), k=20, alpha=3, max_rounds=1)
+        await node.stop()
+        assert node._routing.get(quiet).answered_at is not None
+
+    async def test_the_console_says_so_rather_than_leaving_a_dead_row(self):
+        node = MeshNode(transport_manager=make_manager())
+        ghost = NodeID(b"\x11" * 20)
+        self._table(node, [ghost])
+        for _ in range(routing_mod.SILENT_AFTER):
+            node._routing.note_unanswered(ghost)
+        snapshot = await node.console_snapshot()
+        row = next(r for r in snapshot["routing"]
+                   if r["id"] == ghost.raw.hex())
+        await node.stop()
+        assert row["silent"] is True
+
+
+async def _empty():
+    return []

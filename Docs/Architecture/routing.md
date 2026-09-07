@@ -30,7 +30,22 @@ Kademlia with 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
   somebody, just not to the node it was filed under. Only ever called on
   something we established ourselves — our own address list, or an identity
   proved by a signature over our own challenge.
-- `all_entries()`, `get_closest(target, k)` (sorted by XOR distance),
+- `RoutingTable.note_answered(id)` / `note_unanswered(id)`: whether an id
+  answered a **lookup of ours**. Being mentioned by a peer is not an answer —
+  that is what put it in the table. `is_silent(entry)` is true for an entry that
+  has **never once** answered and has failed `SILENT_AFTER` times; such an entry
+  is left out of `get_closest` — so out of what we ask, what we dial and what we
+  tell others — and tried again every `SILENT_RETRY`.
+  Never *once*, not lately: an id that has answered before is a node having a
+  bad minute, and the answer to that is patience. The counters live on the entry
+  and are **carried across `add`**, which is the whole point — everyone on the
+  mesh re-teaches a dead id, and an entry rebuilt with a clean sheet on every
+  answer never reaches any threshold. Nothing is held against the node and no
+  standing moves; we stop *naming* an id that answers nobody, which is how a
+  dead one leaves the network instead of being handed round it for ever, and
+  anyone who can still reach it goes on naming it.
+- `all_entries()`, `get_closest(target, k)` (sorted by XOR distance, silent
+  entries omitted),
   `export_entries`/`import_entries` (persistence; only entries with a DSA key
   are exportable — without a key we cannot re-authenticate).
 - `last_seen` feeds the console ("Known nodes", the N most recent) and **must**
