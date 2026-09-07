@@ -3355,6 +3355,14 @@ class MeshNode:
                 *[self._kad_query_node(nid, target) for nid in candidates],
                 return_exceptions=True,
             )
+            # Who answered, and who never does. An empty answer is still an
+            # answer — a node with nothing to say about this target has said so
+            # — which is why `_kad_query_node` distinguishes `[]` from `None`.
+            for node_id, result in zip(candidates, results):
+                if isinstance(result, list):
+                    self._routing.note_answered(node_id)
+                else:
+                    self._routing.note_unanswered(node_id)
             self._note_answer_overlap(candidates, results)
             for r in results:
                 if isinstance(r, list):
@@ -4161,6 +4169,11 @@ class MeshNode:
                 "rtt_ms": (round(p.last_rtt * 1000, 1)
                            if p is not None and p.last_rtt is not None else None),
                 "has_key": bool(e.dsa_pub),
+                # Never once answered a lookup of ours. The row stays — the id
+                # is real and somebody else may reach it — but we have stopped
+                # asking after it, and an operator staring at a node that does
+                # nothing deserves to be told that rather than left guessing.
+                "silent": self._routing.is_silent(e, now),
                 "link": self._link_view(p, now) if p is not None else None,
             })
         return {
@@ -4560,7 +4573,8 @@ class MeshNode:
         soonest: float | None = None
         for entry in self._routing.all_entries()[:_RETRY_NODES_SCANNED]:
             node_id = entry.node_id
-            if node_id == self._id or node_id in linked:
+            if (node_id == self._id or node_id in linked
+                    or self._routing.is_silent(entry, now)):
                 continue
             book = self._dial_log.get(node_id.raw.hex()) or {}
             for uri in self._known_addresses(node_id):
@@ -4641,7 +4655,8 @@ class MeshNode:
             if budget <= 0:
                 break
             node_id = entry.node_id
-            if node_id == self._id or node_id in linked:
+            if (node_id == self._id or node_id in linked
+                    or self._routing.is_silent(entry, now)):
                 continue
             node_hex = node_id.raw.hex()
             book = self._dial_log.get(node_hex) or {}

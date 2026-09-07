@@ -104,6 +104,23 @@ The pair, never the address alone: in the trace the address was perfectly good �
 for the node that actually answers there. Holding it against everyone would have
 cut us off from the machine we could reach.
 
+### The id that answers nobody, asked after for ever
+The same trace: one id was queried in every lookup round of the whole capture
+and never appeared as the source of a single packet. Every answer from every
+peer re-taught it, every round asked after it again, every retry pass tried to
+dial it — at an address that turned out to be this very machine's. That is what
+a routing table looks like when it is still carrying somebody's **previous
+identity**: same address, new key, so the old id answers nowhere and nothing
+ever retires it.
+
+Kademlia's own answer is liveness, and this table had none: `last_seen` was set
+by `add`, so *being talked about* refreshed an entry exactly as being reachable
+would. `note_answered` / `note_unanswered` now count answers to our own lookups,
+`is_silent` retires an entry that has never once answered, and `get_closest`
+leaves it out — of what we ask, what we dial, and what we tell others. The
+counters live on the `NodeEntry` and survive `add`, because an entry rebuilt
+with a clean sheet on every re-advertisement never reaches any threshold.
+
 **Only what we established ourselves may strike an address off.** Our own
 address list, and an identity proved by a signature over our own challenge. A
 `CHALLENGE` naming an id is a claim on a link that has authenticated nothing, so

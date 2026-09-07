@@ -550,6 +550,16 @@ advertised to reach the node (wildcard listens expanded over each local IP), the
 listening URIs, the local IPs, and the registered transports (● = active). The
 snapshot exposes `advertised`, `listen`, `local_ips`, `transports`, `listening`.
 
+A row in **Known nodes** reads `authenticated`, `key known`, `no key` — or
+**never answers**, which is a different fact rather than a worse one and is the
+one that explains a row that never changes: that id has never once answered a
+lookup of ours, so the node has stopped asking after it, stopped dialling it and
+stopped naming it to others. It says nothing about the node itself; anybody who
+can reach it still names it, and we try again every few minutes. The usual cause
+is a machine that changed identity — the old id is still being gossiped, and
+answers nowhere. The snapshot carries it as `silent` on the routing row; see
+`Docs/Architecture/routing.md`.
+
 In a node's card (**Network → Peers**, the **Details** button), **Forget node**
 removes that node from the local routing table and cuts its session if it is
 live. It is **not a ban**: automatic merging into the routing table on receiving
