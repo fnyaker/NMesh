@@ -739,6 +739,22 @@ rm -rf "$INSTALL_DIR/_oqs_build" 2>/dev/null || true
 # as whoever runs the installer, so a lock-down that has already happened would
 # leave it owned by root and unreadable to the node's own account — the node
 # then starts on its defaults and every setting here is silently ignored.
+# Write the bytecode now rather than on the first start. `__pycache__` is
+# excluded from the copy on purpose — a .pyc from another interpreter is worse
+# than none — so without this the first run compiles the whole of src/ before it
+# can listen: about a hundred millisecond, roughly the entire startup cost paid
+# twice, on the one start somebody is actually watching. Done with the venv's
+# own python so the cache carries the right magic tag, and never fatal: a tree
+# that cannot be compiled here is compiled on the way up, exactly as before.
+if [ -x "$INSTALL_DIR/.venv/bin/python" ]; then
+    if "$INSTALL_DIR/.venv/bin/python" -m compileall -q "$INSTALL_DIR/src" \
+            >/dev/null 2>&1; then
+        ok "Bytecode precompiled — the first start does not pay for it"
+    else
+        warn "Could not precompile the bytecode — the first start will be slower"
+    fi
+fi
+
 CONFIG_FILE="$INSTALL_DIR/${NMESH_CONFIG_NAME:-nmesh.conf}"
 LEFTOVER=()
 if [ -x "$INSTALL_DIR/.venv/bin/python" ]; then

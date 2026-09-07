@@ -740,6 +740,24 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="diagnostics" class="stack" hidden>
         <article class="card">
+          <div class="card-head"><div class="grow"><h2>What is running</h2>
+            <div class="sub">Every background job this node keeps, and what wakes it</div></div>
+            <span id="activity-pill" class="badge"></span></div>
+          <div class="card-body">
+            <p class="muted small">A process CPU figure says how much, never what. Each loop
+              declares who it is when it starts and counts its own passes — two attribute writes,
+              nothing on the path a packet takes. <b>Wakes on</b> is the other half: since these
+              loops stopped polling, what each one waits for is a real question, and this is the
+              answer read off the loop itself rather than a second list kept in step by hand.</p>
+            <div class="table-wrap">
+              <table><thead><tr><th>Job</th><th>Does</th><th>Wakes on</th>
+                <th class="num">Passes</th><th class="num">Idle</th></tr></thead>
+                <tbody id="activity-rows"></tbody></table>
+            </div>
+            <p id="activity-empty" class="empty" hidden>Nothing registered — the node is not started.</p>
+          </div>
+        </article>
+        <article class="card">
           <div class="card-head"><div class="grow"><h2>Protocol trace</h2>
             <div class="sub">What this node actually sends and receives, by message type</div></div>
             <span id="trace-pill" class="badge"></span></div>
@@ -1218,8 +1236,13 @@ function paintMetrics(state){
     ["E2E sessions", (state.e2e_sessions || []).length, ""],
     ["Inbound", fmtRate(state._rates.inbound), ""],
     ["Outbound", fmtRate(state._rates.outbound), ""],
-    ["CPU", load.cpu_percent == null ? "—" : Math.round(load.cpu_percent) + "%", ""],
-    ["Memory", fmtBytes(load.rss_bytes), ""],
+    // Of what left this node, how much was somebody else's. Relaying is the
+    // one thing a node spends bandwidth on with nothing of its own to show for
+    // it, and it was indistinguishable from its own traffic in every number
+    // here. CPU and memory are this **process**, not the machine.
+    ["Relayed", fmtBytes((state.total || {}).bytes_relayed || 0), ""],
+    ["CPU (this node)", load.cpu_percent == null ? "—" : Math.round(load.cpu_percent) + "%", ""],
+    ["Memory (this node)", fmtBytes(load.rss_bytes), ""],
   ];
   // The cards are the shape; the numbers are written into them. Rewriting the
   // markup every two seconds replaced eight elements that had not changed —
@@ -1998,6 +2021,7 @@ function paintReach(state){
       esc(key) + '"></dd>').join(""),
     Object.fromEntries(address.map(([key, value]) => ["addr:" + key, value])));
   paintTransportLive(state);
+  paintActivity(state);
   paintTrust(state);
   paintAbuse(state);
   paintRefusals(state);
@@ -2142,6 +2166,23 @@ function paintStandingBar(state){
   bar.classList.toggle("warn", notice.level === "warn");
   $("standing-head").textContent = notice.head;
   $("standing-what").textContent = notice.what || "";
+}
+// Who is running, by name. The node keeps these counters anyway (`activity.py`)
+// and this only renders them — sorted busiest first there, so the order does not
+// reshuffle under a reader between two ticks.
+function paintActivity(state){
+  const jobs = state.activity || [];
+  const pill = $("activity-pill");
+  if(pill) pill.textContent = jobs.length ? jobs.length + " jobs" : "";
+  const empty = $("activity-empty");
+  if(empty) empty.hidden = jobs.length > 0;
+  setHTML("activity-rows", jobs.map((job) =>
+    "<tr><td><code>" + esc(job.name) + "</code></td>" +
+    '<td class="muted small">' + esc(job.what) + "</td>" +
+    '<td class="muted small">' + esc(job.wakes_on) + "</td>" +
+    '<td class="num">' + esc(String(job.runs)) + "</td>" +
+    '<td class="num muted">' + (job.idle_for == null ? "never"
+      : fmtDuration(job.idle_for)) + "</td></tr>").join(""));
 }
 function paintTrust(state){
   const trust = state.trust || {};
