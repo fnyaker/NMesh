@@ -22,9 +22,12 @@ import pytest
 
 from src.cert import Certificate
 from src.crypto import CryptoIdentity, SessionKey
+from src.cert import FINGERPRINT_LEN
 from src.node import (
     MeshNode, DATA, ECHO_REPLY, ECHO_REQUEST, FIND_NODE, FOUND_NODE,
-    _EntryPacker, _decode_entries, _encode_entries,
+    _CERT_HINT_MAX, _CERT_LEN, _CERT_REF, _EntryPacker, _HINTS_OK,
+    _HINT_PEERS_MAX, _POOL_COUNT, _decode_cert_hints, _decode_entries,
+    _encode_cert_hints, _encode_entries,
     _FOUND_NODE_MAX_BYTES, _MAX_DEFERRED_ROUTES, _PEER_STOP_TIMEOUT,
     _ROUTE_HINT_MAX, _ROUTE_HINT_TTL, _QID_LEN,
 )
@@ -83,7 +86,7 @@ class TestFoundNodeFitsThePacket:
 
         reply = next(p for p in fake.sent if p.type == FOUND_NODE)
         assert len(reply.payload) <= _FOUND_NODE_MAX_BYTES + _QID_LEN
-        entries = _decode_entries(reply.payload[_QID_LEN:])
+        entries, _used = _decode_entries(reply.payload[_QID_LEN:])
         assert entries, "a reply must still carry usable entries"
         for entry in entries:
             assert node._cert_store.verify_chain(entry.cert_chain) is not None
@@ -106,7 +109,7 @@ class TestFoundNodeFitsThePacket:
             peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
                                 node.id.raw, os.urandom(20) + os.urandom(_QID_LEN)))
 
-        entries = _decode_entries(
+        entries, _used = _decode_entries(
             next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
         assert entries and all(e.cert_chain for e in entries)
         await node.stop()
@@ -129,7 +132,7 @@ class TestEntryPacker:
         pooled = len(_encode_entries(entries))
         alone = sum(len(_encode_entries([e])) for e in entries)
         assert pooled < alone
-        assert len(_decode_entries(_encode_entries(entries))) == 3
+        assert len(_decode_entries(_encode_entries(entries))[0]) == 3
 
     def test_budget_is_never_exceeded(self):
         root = CryptoIdentity()
@@ -145,7 +148,7 @@ class TestEntryPacker:
     def test_round_trip_preserves_ids_addresses_and_chains(self):
         root = CryptoIdentity()
         entries = [self._entry(root, i) for i in range(2)]
-        decoded = _decode_entries(_encode_entries(entries))
+        decoded, _used = _decode_entries(_encode_entries(entries))
         assert [e.node_id for e in decoded] == [e.node_id for e in entries]
         assert [e.addresses for e in decoded] == [e.addresses for e in entries]
         assert [len(e.cert_chain) for e in decoded] == [2, 2]
@@ -346,7 +349,7 @@ class TestReversePathRouting:
         relay, _ = await _attach(node, NodeID(b"\xff" * 20))
         node._route_hints[target] = (relay.authenticated_id, time.monotonic())
 
-        assert await node._kad_query_node(target, target, timeout=0.1) == []
+        assert await node._kad_query_node(target, target, timeout=0.1) is None
         assert target not in node._route_hints
         await node.stop()
 
@@ -445,7 +448,7 @@ class TestResponderAnswersAboutItself:
             peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
                                 node.id.raw, node.id.raw + os.urandom(_QID_LEN)))
 
-        entries = _decode_entries(
+        entries, _used = _decode_entries(
             next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
         assert entries[0].node_id == node.id, "we are the closest entry to our own id"
         assert entries[0].cert_chain, "our entry must carry its chain or it is dropped"
@@ -464,7 +467,7 @@ class TestResponderAnswersAboutItself:
             peer, Packet.create(FIND_NODE, peer.authenticated_id.raw,
                                 node.id.raw, nearest.raw + os.urandom(_QID_LEN)))
 
-        entries = _decode_entries(
+        entries, _used = _decode_entries(
             next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
         assert entries[0].node_id == nearest
         await node.stop()
@@ -481,7 +484,7 @@ class TestResponderAnswersAboutItself:
                                 node.id.raw, node.id.raw + os.urandom(_QID_LEN)))
 
         own = next(e for e in _decode_entries(
-            next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])
+            next(p for p in fake.sent if p.type == FOUND_NODE).payload[_QID_LEN:])[0]
             if e.node_id == node.id)
         assert node._cert_store.verify_chain(own.cert_chain) is not None
         assert own.cert_chain[0].subject_id == node.id
@@ -617,3 +620,207 @@ class TestNoSelfInflictedLookupLoop:
         node._running = True
         node._wake_neighbor_maintenance()
         assert node._neighbor_idle_cycles == 0
+
+
+# ---------------------------------------------------------------------------
+# 5 — a certificate both ends hold travels as its name
+# ---------------------------------------------------------------------------
+
+class TestReferringToACertificateInsteadOfSendingIt:
+    """The largest thing on an idle node's wire was the same chains, again.
+
+    A trace of a node doing nothing: 29% of every byte was FOUND_NODE, and the
+    answers from one peer were byte-for-byte the same size at 8 s, 19 s and
+    105 s. Certificates are ~7 kB, chains overwhelmingly end on one root, and
+    the pool already stopped a *single* answer repeating one — but nothing
+    stopped the next answer repeating all of them."""
+
+    def _query(self, node, peer, target: bytes, tail: bytes = b""):
+        return Packet.create(FIND_NODE, peer.authenticated_id.raw, node.id.raw,
+                             target + os.urandom(_QID_LEN) + tail)
+
+    async def test_the_answer_shrinks_and_says_the_same_thing(self):
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 8)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+        target = os.urandom(20)
+        try:
+            await node._handle_find_node(peer, self._query(node, peer, target))
+            plain = next(p for p in fake.sent if p.type == FOUND_NODE)
+            classic, used = _decode_entries(plain.payload[_QID_LEN:],
+                                            node._cert_store.by_fingerprint)
+
+            fake.sent.clear()
+            hints = _encode_cert_hints(node._cert_store.fingerprints(_CERT_HINT_MAX))
+            await node._handle_find_node(peer, self._query(node, peer, target, hints))
+            short = next(p for p in fake.sent if p.type == FOUND_NODE)
+            referred, _ = _decode_entries(short.payload[_QID_LEN:],
+                                          node._cert_store.by_fingerprint)
+
+            assert len(short.payload) < len(plain.payload) / 10
+            # The same answer, and more of it: entries the byte budget had no
+            # room for now fit. Closest-first either way, so the shorter answer
+            # begins with exactly what the long one said.
+            assert [e.node_id for e in classic] == \
+                   [e.node_id for e in referred][:len(classic)]
+            assert all(node._cert_store.verify_chain(e.cert_chain)
+                       for e in referred)
+        finally:
+            await node.stop()
+
+    async def test_a_name_the_responder_does_not_hold_is_simply_not_used(self):
+        """The hint is an offer, never an instruction: what a querier names and
+        what a responder would send are two lists, and only their intersection
+        travels short."""
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 4)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+        try:
+            hints = _encode_cert_hints([b"\xaa" * FINGERPRINT_LEN])
+            await node._handle_find_node(
+                peer, self._query(node, peer, os.urandom(20), hints))
+            reply = next(p for p in fake.sent if p.type == FOUND_NODE)
+            # Nothing we hold is named `\xaa...`, so nothing was referred to and
+            # the answer is the classic one.
+            entries, _ = _decode_entries(reply.payload[_QID_LEN:], lambda d: None)
+            assert entries and all(e.cert_chain for e in entries)
+        finally:
+            await node.stop()
+
+    async def test_a_reference_the_receiver_cannot_resolve_voids_the_chain(self):
+        """Which is exactly what an unparseable certificate already did. A
+        reference can only ever find one this node verified and stored, so it
+        adds no authority — and finding nothing costs the sender its entry,
+        never the receiver anything."""
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 4)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+        try:
+            hints = _encode_cert_hints(node._cert_store.fingerprints(_CERT_HINT_MAX))
+            await node._handle_find_node(
+                peer, self._query(node, peer, os.urandom(20), hints))
+            reply = next(p for p in fake.sent if p.type == FOUND_NODE)
+            entries, _ = _decode_entries(reply.payload[_QID_LEN:], lambda d: None)
+            assert all(e.cert_chain == [] for e in entries)
+        finally:
+            await node.stop()
+
+
+class TestFindingOutWhoUnderstandsThem:
+    """A lookup is routed: the node that answers may be several hops away, so
+    the features two *links* agreed on say nothing about it. The answer itself
+    is what carries the news — as trailing bytes, which is precisely what a
+    build that has never heard of them reads it as."""
+
+    async def test_the_answer_carries_the_marker(self):
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 2)
+        peer, fake = await _attach(node, NodeID(os.urandom(20)))
+        try:
+            await node._handle_find_node(peer, Packet.create(
+                FIND_NODE, peer.authenticated_id.raw, node.id.raw,
+                os.urandom(20) + os.urandom(_QID_LEN)))
+            reply = next(p for p in fake.sent if p.type == FOUND_NODE)
+            _entries, used = _decode_entries(reply.payload[_QID_LEN:])
+            assert reply.payload[_QID_LEN + used:] == _HINTS_OK
+        finally:
+            await node.stop()
+
+    async def test_nothing_is_sent_to_a_node_that_has_not_said_so(self):
+        """A build that has not heard of fingerprints checks the payload length
+        exactly and drops anything longer — so a tail sent to one of those is
+        not a few wasted bytes, it is a lookup that never happens."""
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        far = NodeID(b"\x77" * 20)
+        relay, fake = await _attach(node, NodeID(b"\xff" * 20))
+        try:
+            await node._kad_query_node(far, far, timeout=0.05)
+            asked = next(p for p in fake.sent if p.type == FIND_NODE)
+            assert len(asked.payload) == 20 + _QID_LEN
+        finally:
+            await node.stop()
+
+    async def test_once_it_has_answered_we_start_naming_what_we_hold(self):
+        node = MeshNode(transport_manager=make_manager())
+        _certified_routing_table(node, 3)
+        node._running = True
+        far = NodeID(b"\x77" * 20)
+        relay, fake = await _attach(node, NodeID(b"\xff" * 20))
+        try:
+            node._note_cert_hints(far.raw)
+            await node._kad_query_node(far, far, timeout=0.05)
+            asked = next(p for p in fake.sent if p.type == FIND_NODE)
+            tail = asked.payload[20 + _QID_LEN:]
+            assert tail and len(tail) % FINGERPRINT_LEN == 0
+            assert _decode_cert_hints(tail) == frozenset(
+                node._cert_store.fingerprints(_CERT_HINT_MAX))
+        finally:
+            await node.stop()
+
+    async def test_the_marker_is_learned_from_an_answer(self):
+        node = MeshNode(transport_manager=make_manager())
+        peer, fake = await _attach(node, NodeID(b"\xff" * 20))
+        far = NodeID(b"\x77" * 20)
+        try:
+            query_id = os.urandom(_QID_LEN)
+            future = asyncio.get_event_loop().create_future()
+            node._pending_finds[query_id] = future
+            await node._handle_found_node(peer, Packet.create(
+                FOUND_NODE, far.raw, node.id.raw,
+                query_id + _encode_entries([]) + _HINTS_OK))
+            assert far.raw in node._cert_hint_peers
+        finally:
+            await node.stop()
+
+    async def test_an_answer_without_it_teaches_nothing(self):
+        node = MeshNode(transport_manager=make_manager())
+        peer, fake = await _attach(node, NodeID(b"\xff" * 20))
+        far = NodeID(b"\x77" * 20)
+        try:
+            query_id = os.urandom(_QID_LEN)
+            node._pending_finds[query_id] = asyncio.get_event_loop().create_future()
+            await node._handle_found_node(peer, Packet.create(
+                FOUND_NODE, far.raw, node.id.raw, query_id + _encode_entries([])))
+            assert far.raw not in node._cert_hint_peers
+        finally:
+            await node.stop()
+
+    def test_the_table_is_bounded(self):
+        node = MeshNode(transport_manager=make_manager())
+        for i in range(_HINT_PEERS_MAX + 40):
+            node._note_cert_hints(i.to_bytes(20, "big"))
+        assert len(node._cert_hint_peers) <= _HINT_PEERS_MAX
+
+
+class TestTheTailIsHostileInput:
+    """It arrives on a link that has authenticated, but authentication is not
+    trust: the tail is parsed like anything else off the wire."""
+
+    @pytest.mark.parametrize("tail", [
+        b"\x00", b"\xff" * (FINGERPRINT_LEN - 1),
+        b"\xff" * (FINGERPRINT_LEN + 1),
+        b"\xff" * (FINGERPRINT_LEN * (_CERT_HINT_MAX + 1)),
+    ])
+    def test_a_tail_that_is_not_a_list_of_names_is_refused(self, tail):
+        assert _decode_cert_hints(tail) is None
+
+    def test_the_classic_question_stays_valid_for_ever(self):
+        assert _decode_cert_hints(b"") == frozenset()
+
+    async def test_a_short_payload_is_dropped_rather_than_sliced(self):
+        """The length check the tail replaced was doing two jobs."""
+        node = MeshNode(transport_manager=make_manager())
+        peer, fake = await _attach(node, NodeID(b"\xff" * 20))
+        try:
+            for payload in (b"", b"x" * 8, b"y" * (19 + _QID_LEN)):
+                await node._handle_find_node(peer, Packet.create(
+                    FIND_NODE, peer.authenticated_id.raw, node.id.raw, payload))
+            assert not [p for p in fake.sent if p.type == FOUND_NODE]
+        finally:
+            await node.stop()
+
+    def test_a_truncated_reference_is_a_parse_error_not_a_crash(self):
+        body = _POOL_COUNT.pack(1) + _CERT_LEN.pack(_CERT_REF) + b"\x00" * 4
+        with pytest.raises(ValueError):
+            _decode_entries(body, lambda d: None)

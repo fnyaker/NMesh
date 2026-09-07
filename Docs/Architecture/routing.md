@@ -366,11 +366,20 @@ onwards, every lookup on the network timed out silently.
 
 The reply is therefore **budgeted**:
 
-- `_EntryPacker(budget)` stacks the nearest entries while they fit inside
+- `_EntryPacker(budget, known)` stacks the nearest entries while they fit inside
   `_FOUND_NODE_MAX_BYTES = 32 000`, and **shares certificates** through an
   indexed pool (every chain ends on the same network root: sending it once per
   entry doubled the packet). In practice ≈ 3 entries per reply instead of
   nothing at all.
+- The pool stopped *one* answer repeating a certificate. Nothing stopped the
+  **next** answer repeating all of them, and that was the largest single thing
+  on an idle node's wire: 29% of every byte, the same 22 kB from the same peer
+  at 8 s, 19 s and 105 s. A `FIND_NODE` now carries the fingerprints of the
+  certificates the querier already holds, and the pool sends 18 bytes instead of
+  ~7 300 for each of them (see `protocol.md`, "Naming a certificate instead of
+  sending it"). Measured on a table of 8 certified nodes: **29 238 → 592 bytes**,
+  and 9 entries where the budget used to fit 3 — so the lookup converges in
+  fewer rounds as well.
 - Entries **with no chain** are skipped: the receiver drops them anyway
   (`_handle_found_node` requires a verifiable chain), so there is no point
   spending the budget. Chains are built as we go, so the budget also caps the

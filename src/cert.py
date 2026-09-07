@@ -1,6 +1,14 @@
+import hashlib
 import struct
 import time
 from .node_id import NodeID
+
+# How many bytes of a certificate's fingerprint travel. A fingerprint only ever
+# names a certificate both ends already hold, and resolving one that names
+# nothing simply voids the chain — so this is a collision bound, not a security
+# boundary, and 128 bits of a hash over a signature is far past what the bound
+# needs.
+FINGERPRINT_LEN = 16
 
 _CERT_HEADER = struct.Struct('!20sH20sHQQH')
 # subject_id(20) | subject_pub_len(H) | issuer_id(20) | issuer_pub_len(H)
@@ -35,6 +43,23 @@ class Certificate:
     @property
     def is_self_signed(self) -> bool:
         return self.subject_id == self.issuer_id
+
+    def fingerprint(self) -> bytes:
+        """A short name for this certificate, so that two nodes can refer to
+        one they both hold instead of sending it again.
+
+        Over the **signature**, which is what the store already treats as a
+        certificate's identity: no two certificates share one, because a
+        signature only verifies against the body it was made over, and ML-DSA is
+        randomised so even re-signing the same body gives a different one.
+
+        Computed once. A certificate never changes after construction, and this
+        is asked of every certificate in the store on every lookup we send."""
+        cached = getattr(self, "_fingerprint", None)
+        if cached is None:
+            cached = hashlib.sha256(self.signature).digest()[:FINGERPRINT_LEN]
+            self._fingerprint = cached
+        return cached
 
     def is_expired(self, now: int | None = None) -> bool:
         """``expires_at == 0`` means never — that is what a self-signed root
