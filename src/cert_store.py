@@ -240,6 +240,39 @@ class CertStore:
         copy: the caller must not be able to edit the store by iterating it."""
         return list(self._certs.get(node_id.raw, ()))
 
+    def fingerprints(self, limit: int) -> list[bytes]:
+        """Short names for the certificates we hold, most recently useful first.
+
+        Sent with a lookup so the answer can refer to one instead of shipping it
+        again: a post-quantum certificate is ~7 kB, chains overwhelmingly end on
+        the same root, and a node re-learning the same handful of them every
+        lookup round was the single largest thing on an idle node's wire.
+
+        Most recently useful first because the list is capped and `_touch`
+        already orders subjects that way — the certificates a chain to us runs
+        through are the ones an answer will name."""
+        out: list[bytes] = []
+        if limit <= 0:
+            return out
+        for certs in reversed(list(self._certs.values())):
+            for cert in certs:
+                out.append(cert.fingerprint())
+                if len(out) >= limit:
+                    return out
+        return out
+
+    def by_fingerprint(self, fingerprint: bytes) -> Certificate | None:
+        """The certificate with this short name, if we hold it.
+
+        Nothing arriving from the network can put a certificate here — this only
+        ever finds one we already verified and stored, which is what makes it
+        safe to let a peer name one instead of sending it."""
+        for certs in self._certs.values():
+            for cert in certs:
+                if cert.fingerprint() == fingerprint:
+                    return cert
+        return None
+
     def knows(self, node_id: NodeID) -> bool:
         """Do we hold any certificate at all for this subject?
 

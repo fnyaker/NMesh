@@ -22,7 +22,7 @@ from .seen import SeenSet
 from .activity import Activity
 from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
-from .cert import Certificate
+from .cert import Certificate, FINGERPRINT_LEN
 from .cert_store import CertStore
 from . import revocation
 from .revocation import MAX_RECORD as _REVOCATION_MAX
@@ -144,6 +144,19 @@ _ENTRY_HEADER = struct.Struct('!20sBB')
 _POOL_COUNT   = struct.Struct('!H')
 _POOL_INDEX   = struct.Struct('!H')
 _ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
+# A pooled certificate may travel as a fingerprint instead of as ~7 kB, when the
+# querier said it already holds it. `cert_len == 0` is free as the marker: a
+# certificate shorter than its own header cannot be parsed, so no real one is
+# ever zero-length.
+_CERT_REF        = 0
+_CERT_HINT_MAX   = 32   # fingerprints a FIND_NODE may carry
+# One byte on the end of a FOUND_NODE saying "you may send me fingerprints".
+# Trailing bytes are what a build without this reads it as, and `_decode_entries`
+# has always stopped at the last entry — so this is how the two ends find out
+# about each other without a link-level negotiation they cannot have: a lookup
+# is routed, and the node that answers it may be several hops away.
+_HINTS_OK        = b"\x01"
+_HINT_PEERS_MAX  = 256  # nodes we remember as understanding fingerprints
 _ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
 # Certificate renewal. A membership certificate lasts a year
@@ -201,6 +214,7 @@ _RELEASE_TICK        = 300.0    # seconds between auto-install sweeps
 # what keeps a burst of announces (a peer catching us up) to one pass.
 _RELEASE_FIRST_TICK  = 20.0     # seconds before the first pass after start
 _RELEASE_SETTLE      = 3.0      # seconds an announce waits for its neighbours
+_AUTO_PUBLISH_RETRY  = 3600.0   # before re-attempting a version that failed
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
 _RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
 _RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
@@ -980,8 +994,12 @@ class _EntryPacker:
     hostile FOUND_NODE can make a receiver verify.
     """
 
-    def __init__(self, budget: int) -> None:
+    def __init__(self, budget: int, known: frozenset = frozenset()) -> None:
         self._budget = budget
+        self._known = known
+        # Keyed on the fingerprint rather than on the serialised bytes: it is
+        # what the store already treats as a certificate's identity, it is
+        # computed once per certificate, and it is what a reference names.
         self._pool: list[bytes] = []
         self._index: dict[bytes, int] = {}
         self._entries: list[bytes] = []
@@ -999,44 +1017,78 @@ class _EntryPacker:
         for addr in addrs:
             b = addr.encode('utf-8')
             blob += _ADDR_LEN.pack(len(b)) + b
-        added: list[bytes] = []
+        added: list[tuple[bytes, bytes]] = []
         cost = len(blob) + _POOL_INDEX.size * len(entry.cert_chain)
-        # Serialised once each. `serialize()` rebuilds a ~7 kB blob every call,
-        # and this ran it twice per certificate — the second time only to use it
-        # as a dictionary key — for up to `_FIND_NODE_SCAN` candidates a query.
-        raws = [cert.serialize() for cert in entry.cert_chain]
-        for raw in raws:
-            if raw not in self._index and raw not in added:
-                if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
-                    return False
-                added.append(raw)
-                cost += _CERT_LEN.size + len(raw)
+        prints = [cert.fingerprint() for cert in entry.cert_chain]
+        for cert, digest in zip(entry.cert_chain, prints):
+            if digest in self._index or any(digest == d for d, _ in added):
+                continue
+            if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
+                return False
+            if digest in self._known:
+                # The querier told us it holds this one. Ten bytes instead of
+                # seven thousand, and no `serialize()` at all — which is the
+                # other half of the saving: rebuilding a chain used to cost the
+                # responder a ~7 kB blob per certificate per query.
+                body = _CERT_LEN.pack(_CERT_REF) + digest
+            else:
+                raw = cert.serialize()
+                body = _CERT_LEN.pack(len(raw)) + raw
+            added.append((digest, body))
+            cost += len(body)
         if self._used + cost > self._budget:
             return False
-        for raw in added:
-            self._index[raw] = len(self._pool)
-            self._pool.append(raw)
-        for raw in raws:
-            blob += _POOL_INDEX.pack(self._index[raw])
+        for digest, body in added:
+            self._index[digest] = len(self._pool)
+            self._pool.append(body)
+        for digest in prints:
+            blob += _POOL_INDEX.pack(self._index[digest])
         self._entries.append(blob)
         self._used += cost
         return True
 
     def encode(self) -> bytes:
-        pool = _POOL_COUNT.pack(len(self._pool))
-        for raw in self._pool:
-            pool += _CERT_LEN.pack(len(raw)) + raw
-        return pool + bytes([len(self._entries)]) + b"".join(self._entries)
+        return (_POOL_COUNT.pack(len(self._pool)) + b"".join(self._pool)
+                + bytes([len(self._entries)]) + b"".join(self._entries))
 
 
-def _encode_entries(entries: list[NodeEntry]) -> bytes:
-    packer = _EntryPacker(1 << 30)
+def _encode_cert_hints(prints: list[bytes]) -> bytes:
+    """The tail of a FIND_NODE: fingerprints of certificates we already hold."""
+    return b"".join(prints[:_CERT_HINT_MAX])
+
+
+def _decode_cert_hints(tail: bytes) -> frozenset | None:
+    """Read that tail. ``None`` means the payload is not a FIND_NODE at all.
+
+    An empty tail is the classic question and must stay valid for ever: a node
+    that has never heard of fingerprints asks exactly that, and refusing it
+    would cut every older build out of the lookup."""
+    if not tail:
+        return frozenset()
+    if len(tail) % FINGERPRINT_LEN or len(tail) > _CERT_HINT_MAX * FINGERPRINT_LEN:
+        return None
+    return frozenset(tail[i:i + FINGERPRINT_LEN]
+                     for i in range(0, len(tail), FINGERPRINT_LEN))
+
+
+def _encode_entries(entries: list[NodeEntry], known: frozenset = frozenset()) -> bytes:
+    packer = _EntryPacker(1 << 30, known)
     for entry in entries:
         packer.add(entry)
     return packer.encode()
 
 
-def _decode_entries(data: bytes) -> list[NodeEntry]:
+def _decode_entries(data: bytes, resolve=None) -> tuple[list[NodeEntry], int]:
+    """Parse a FOUND_NODE body. Returns the entries and how many bytes they took.
+
+    ``resolve(fingerprint) -> Certificate | None`` looks up a certificate the
+    sender referred to instead of sending. It can only ever find one this node
+    already holds and verified, so a reference adds no authority: naming one we
+    do not have voids that chain exactly as an unparseable certificate does.
+
+    The consumed length is returned because what follows the entries is how the
+    two ends discover each other (see ``_HINTS_OK``) — and because a build
+    without that marker has always simply stopped reading here."""
     if len(data) < _POOL_COUNT.size:
         raise ValueError("empty payload")
     pool_count = _POOL_COUNT.unpack_from(data, 0)[0]
@@ -1049,6 +1101,13 @@ def _decode_entries(data: bytes) -> list[NodeEntry]:
             raise ValueError("truncated pooled cert length")
         cert_len = _CERT_LEN.unpack_from(data, offset)[0]
         offset += _CERT_LEN.size
+        if cert_len == _CERT_REF:
+            if offset + FINGERPRINT_LEN > len(data):
+                raise ValueError("truncated cert reference")
+            digest = data[offset:offset + FINGERPRINT_LEN]
+            offset += FINGERPRINT_LEN
+            pool.append(resolve(digest) if resolve is not None else None)
+            continue
         if offset + cert_len > len(data):
             raise ValueError("truncated pooled cert")
         try:
@@ -1111,7 +1170,7 @@ def _decode_entries(data: bytes) -> list[NodeEntry]:
         if not valid:
             continue  # drop entry with any malformed URI
         entries.append(NodeEntry(NodeID(raw_id), addresses, b"", chain))
-    return entries
+    return entries, offset
 
 
 # ---------------------------------------------------------------------------
@@ -1134,6 +1193,10 @@ class _Peer:
         # (the signature over our own challenge), and that is the one thing that
         # tells the dialler "wrong address" from "nobody answered".
         self.answered_as: NodeID | None = None
+        # The challenge on this link named our own id. Not proof of anything —
+        # nothing has authenticated yet — so it names the dial outcome for an
+        # operator and never strikes an address off. See `_handle_challenge`.
+        self.claimed_self: bool = False
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
         # Our code came back rejected. Read only by the join that presented it,
@@ -1414,7 +1477,8 @@ class MeshNode:
                  abuse_hostile: float = DEFAULT_HOSTILE,
                  abuse_halflife: float = DEFAULT_HALFLIFE,
                  gossip_abuse: bool = True,
-                 release_quorum: int = 0) -> None:
+                 release_quorum: int = 0,
+                 release_auto_publish: bool = False) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1471,6 +1535,15 @@ class MeshNode:
         # may install itself. 0 — the default — means that route is closed and
         # only a key pinned for automatic install can replace this node's code.
         self._release_quorum = max(0, int(release_quorum))
+        # Publishing our own code unattended. Off unless an operator asked:
+        # this signs a release with the identity the node keeps unlocked, and a
+        # release is the one payload that replaces somebody else's program.
+        self._release_auto_publish = bool(release_auto_publish)
+        # The version we last tried to publish, and when. One attempt per
+        # version per `_AUTO_PUBLISH_RETRY`: reading and hashing the tree is
+        # not free, and a tree that cannot be published will not start being
+        # publishable because we asked again a second later.
+        self._auto_published: tuple[str, float] | None = None
         # The behavioural rules, run on the keepalive sweep. Holds no per-peer
         # state: the counters live on the links, and a second place for a peer's
         # history would be a second answer.
@@ -1528,6 +1601,9 @@ class MeshNode:
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
+        # Nodes whose FOUND_NODE carried `_HINTS_OK`, so we may send them
+        # certificate fingerprints. Bounded, least-recently-answered evicted.
+        self._cert_hint_peers: "OrderedDict[bytes, bool]" = OrderedDict()
         # What this node caches for the network. Filled entirely by what peers
         # STORE, so it is memory given away — the operator decides how much
         # (`dht_max_mb`), and the default is what a small machine can lose.
@@ -2035,6 +2111,15 @@ class MeshNode:
         pkt = Packet.create(PUNCH_REQUEST, self._id.raw,
                             relay_peer.authenticated_id.raw, payload)
         await relay_peer.send(pkt)
+
+    def _is_own_address(self, uri: str) -> bool:
+        """Is this one of the addresses we answer on?
+
+        Comparing the strings is comparing the same thing rather than two
+        spellings of it: a URI travels the mesh verbatim, as some node's own
+        `advertised_uris()` entry relayed onwards, so what we would dial is
+        exactly what we would have published."""
+        return uri in self.advertised_uris()
 
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
@@ -2927,6 +3012,9 @@ class MeshNode:
         An identity already in the book keeps its schedule. Re-arming it on each
         loss would hand a peer that connects and drops a fresh dial per drop,
         and no loop driven by what a peer does may run flat out."""
+        if peer.authenticated_id is not None and peer.session is not None:
+            self._activity.note(
+                "link", "link lost with " + peer.authenticated_id.raw.hex()[:16])
         # Whatever we decide below, a link just went: the addresses behind it
         # can come due again, so the retry loop's schedule is stale. The wake
         # only asks it to recompute — `_retry_pass` still applies its own rules
@@ -3201,24 +3289,47 @@ class MeshNode:
         self._upgrade_last[target] = now
         self._track_route_task(self._ensure_route_to(target))
 
+    def _note_cert_hints(self, node_raw: bytes) -> None:
+        """This node's answer said it will accept fingerprints.
+
+        Learned from the answer rather than from a link negotiation, because a
+        lookup is routed: the node that answers may be several hops away, and
+        the features two *links* agreed on say nothing about it. Bounded and
+        least-recently-answered first, like every other table fed by the
+        network."""
+        self._cert_hint_peers.pop(node_raw, None)
+        while len(self._cert_hint_peers) >= _HINT_PEERS_MAX:
+            self._cert_hint_peers.popitem(last=False)
+        self._cert_hint_peers[node_raw] = True
+
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
-                               timeout: float = 5.0) -> list[NodeEntry]:
+                               timeout: float = 5.0) -> list[NodeEntry] | None:
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_finds[query_id] = future
+        # Only to a node that has told us it understands them. A build that has
+        # not heard of fingerprints checks the payload length exactly and drops
+        # anything longer, so asking one of those with a tail is not a wasted
+        # few hundred bytes — it is a lookup that never happens.
+        tail = b""
+        if node_id.raw in self._cert_hint_peers:
+            tail = _encode_cert_hints(self._cert_store.fingerprints(_CERT_HINT_MAX))
         # Addressed to node_id and routed: a direct peer gets it in one hop, an
         # id reachable only through relays gets it multi-hop. The FOUND_NODE
         # reply routes back to us the same way.
         packet = Packet.create(FIND_NODE, self._id.raw, node_id.raw,
-                               target.raw + query_id)
+                               target.raw + query_id + tail)
         try:
             await self._route_outbound(packet)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except (asyncio.TimeoutError, Exception):
             # Unanswered: whatever first hop we used is not carrying traffic to
             # this id any more. Forget it so the next try re-picks by proximity.
+            # `None`, not an empty list: a node that answers with nothing has
+            # still answered, and telling the two apart is what lets the caller
+            # stop asking after an id that never once replied.
             self._forget_route_hint(node_id)
-            return []
+            return None
         finally:
             self._pending_finds.pop(query_id, None)
             if not future.done():
@@ -3244,6 +3355,14 @@ class MeshNode:
                 *[self._kad_query_node(nid, target) for nid in candidates],
                 return_exceptions=True,
             )
+            # Who answered, and who never does. An empty answer is still an
+            # answer — a node with nothing to say about this target has said so
+            # — which is why `_kad_query_node` distinguishes `[]` from `None`.
+            for node_id, result in zip(candidates, results):
+                if isinstance(result, list):
+                    self._routing.note_answered(node_id)
+                else:
+                    self._routing.note_unanswered(node_id)
             self._note_answer_overlap(candidates, results)
             for r in results:
                 if isinstance(r, list):
@@ -3727,6 +3846,19 @@ class MeshNode:
         if not self._transport_manager.is_supported(scheme):
             self._note_dial(node_hex, uri, "no transport", scheme)
             return None
+        if self._is_own_address(uri):
+            # Answered by the identity guard in `_handle_handshake_ack` — but
+            # only after both halves of this node have built, sent and read a
+            # 21 kB post-quantum handshake, twice, to learn what this comparison
+            # knows for nothing. A real trace showed 42 kB spent on one such
+            # dial. The address belongs to somebody else's entry (a node that
+            # used to answer here, and whose id is still being gossiped), so it
+            # is wrong for them rather than merely slow.
+            self._note_dial(node_hex, uri, "wrong node",
+                            "this address is this node itself")
+            if node_id is not None:
+                self._routing.note_wrong_address(node_id, uri, self._id)
+            return None
         if len(self._peers) >= _MAX_PEERS:
             self._note_dial(node_hex, uri, "peer limit")
             return None
@@ -3757,13 +3889,20 @@ class MeshNode:
                 # it buys a whole post-quantum handshake per pass to learn the
                 # same thing — that is the shape a real trace showed.
                 found = peer.answered_as
-                if found is not None and node_id is not None and found != node_id:
+                if found is None and peer.claimed_self:
+                    self._note_dial(node_hex, uri, "wrong node",
+                                    "answered claiming our own identity",
+                                    time.monotonic() - started)
+                elif found is not None and node_id is not None and found != node_id:
                     self._note_dial(node_hex, uri, "wrong node",
                                     "this address is this node itself"
                                     if found == self._id else
                                     "answered as " + found.raw.hex(),
                                     time.monotonic() - started)
-                    self._routing.drop_address(node_id, uri)
+                    self._activity.note(
+                        "warn", "dropped an address of " + node_hex[:16]
+                        + " — it answers as somebody else")
+                    self._routing.note_wrong_address(node_id, uri, found)
                 else:
                     self._note_dial(node_hex, uri, "no-answer",
                                     "connected but never authenticated",
@@ -4030,6 +4169,11 @@ class MeshNode:
                 "rtt_ms": (round(p.last_rtt * 1000, 1)
                            if p is not None and p.last_rtt is not None else None),
                 "has_key": bool(e.dsa_pub),
+                # Never once answered a lookup of ours. The row stays — the id
+                # is real and somebody else may reach it — but we have stopped
+                # asking after it, and an operator staring at a node that does
+                # nothing deserves to be told that rather than left guessing.
+                "silent": self._routing.is_silent(e, now),
                 "link": self._link_view(p, now) if p is not None else None,
             })
         return {
@@ -4063,6 +4207,7 @@ class MeshNode:
             # anyway — a snapshot costs one pass over at most a dozen jobs, and
             # nothing at all when nobody reads it.
             "activity": self._activity.jobs(),
+            "recent": self._activity.recent(20),
             "detached": len(self._detached),
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
@@ -4428,7 +4573,8 @@ class MeshNode:
         soonest: float | None = None
         for entry in self._routing.all_entries()[:_RETRY_NODES_SCANNED]:
             node_id = entry.node_id
-            if node_id == self._id or node_id in linked:
+            if (node_id == self._id or node_id in linked
+                    or self._routing.is_silent(entry, now)):
                 continue
             book = self._dial_log.get(node_id.raw.hex()) or {}
             for uri in self._known_addresses(node_id):
@@ -4509,7 +4655,8 @@ class MeshNode:
             if budget <= 0:
                 break
             node_id = entry.node_id
-            if node_id == self._id or node_id in linked:
+            if (node_id == self._id or node_id in linked
+                    or self._routing.is_silent(entry, now)):
                 continue
             node_hex = node_id.raw.hex()
             book = self._dial_log.get(node_hex) or {}
@@ -6005,17 +6152,20 @@ class MeshNode:
         return True
 
     async def _handle_find_node(self, peer: _Peer, packet: Packet) -> None:
-        if len(packet.payload) != 20 + _QID_LEN:
-            return
+        if len(packet.payload) < 20 + _QID_LEN:
+            return          # the question itself is not there
+        known = _decode_cert_hints(packet.payload[20 + _QID_LEN:])
+        if known is None:
+            return          # a tail that is not a list of fingerprints
         if not self._query_allowed(peer):
             return
         target = NodeID(packet.payload[:20])
-        query_id = packet.payload[20:]
+        query_id = packet.payload[20:20 + _QID_LEN]
         # Closest-first under a hard byte budget: one PQ chain is ~15 KB, so a
         # full k=20 answer would exceed the packet cap and never be sent at all
         # (see _FOUND_NODE_MAX_BYTES). Chains are built lazily so the budget
         # also caps the work one query can ask of us.
-        packer = _EntryPacker(_FOUND_NODE_MAX_BYTES)
+        packer = _EntryPacker(_FOUND_NODE_MAX_BYTES, known)
         # Kademlia's answer classically excludes the responder — but here a
         # querier can only reach us *through* a relay, so leaving ourselves out
         # means it never learns our entry. A lookup routed to the very id it is
@@ -6038,7 +6188,7 @@ class MeshNode:
             if not packer.add(NodeEntry(node_id, addresses, dsa_pub, chain)):
                 break
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
-                                 query_id + packer.encode())
+                                 query_id + packer.encode() + _HINTS_OK)
         # routes back to the querier — never inline, we are in a receive loop
         await self._route_outbound(response, blocking=False)
 
@@ -6050,9 +6200,12 @@ class MeshNode:
         if future is None:
             return  # unsolicited routing data never mutates local state
         try:
-            entries = _decode_entries(packet.payload[_QID_LEN:])
+            body = packet.payload[_QID_LEN:]
+            entries, used = _decode_entries(body, self._cert_store.by_fingerprint)
         except Exception:
-            entries = []
+            entries, body, used = [], b"", 0
+        if body[used:used + len(_HINTS_OK)] == _HINTS_OK:
+            self._note_cert_hints(packet.src_id)
         if len(entries) > 20:
             return
         valid_entries: list[NodeEntry] = []
@@ -6459,6 +6612,8 @@ class MeshNode:
         # discovery for every other operator. It is flagged, never acted on.
         outcome = self._releases.offer(release_bytes, self._identity.verify,
                                        self._trusts_publisher)
+        self._note_equivocation("publisher", doc["publisher_id"],
+                                self._releases.equivocated(doc["publisher_id"]))
         if outcome:
             held = self._packages.has(
                 bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex())
@@ -6784,6 +6939,8 @@ class MeshNode:
                                  self._publishers.endorsed_among(attesters)),
                              "disputed": self._releases.contradicts(
                                  entry["version"], entry["sha256"]),
+                             "equivocated": self._releases.equivocated(
+                                 entry["publisher"]) is not None,
                              "unattended": allowed,
                              "unattended_why": why})
         from . import updater
@@ -6834,6 +6991,21 @@ class MeshNode:
         of keys a human chose cannot be reached by minting identities, only by
         compromising chosen ones."""
         return self._publishers.set_endorse(publisher_id_hex, endorsed)
+
+    def _note_equivocation(self, what: str, subject: bytes, proof) -> None:
+        """Say once that an identity signed two things that cannot both hold.
+
+        Called on every arrival rather than only on the first, because the feed
+        coalesces a repeat onto one row with a count — so the cheap call here is
+        what keeps a "have we already said this?" set off the node. The proof
+        itself is not shown and does not yet travel: what a reader needs here is
+        the name of the key, and gossiping a 20 kB record on the say-so of one
+        arrival is an amplifier that wants designing before it is built."""
+        if proof is None:
+            return
+        self._activity.note(
+            "warn", f"{what} {bytes(subject).hex()[:16]} signed two "
+                    "contradictory records")
 
     def _note_release(self, version: str, outcome: str, detail: str = "") -> None:
         self._release_log.append({"ts": int(time.time()), "version": version,
@@ -6929,6 +7101,12 @@ class MeshNode:
             delay = _RELEASE_TICK
             self._release_wake.clear()
             try:
+                await self._auto_publish_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
                 await self._release_pass()
             except asyncio.CancelledError:
                 raise
@@ -6968,16 +7146,27 @@ class MeshNode:
 
           - somebody claims this version with different content — a fork, or a
             build of somebody's own wearing a version everyone recognises;
-          - the publisher we would install from contradicts itself.
+          - the publisher we would install from contradicts itself, having
+            signed two different programs under one version number.
 
-        Neither accuses anybody. Two honest publishers can disagree by accident,
-        and the answer to that is the same as to an attack: stop, and let a
-        human look. Refusing an update is recoverable; installing a hostile one
+        The first accuses nobody: two honest publishers can disagree by
+        accident, and the answer to that is the same as to an attack — stop, and
+        let a human look. The second does accuse, and is the one place in this
+        file entitled to: no accident makes one key sign one version twice with
+        different bytes, and the pair is checkable without trusting whoever
+        showed it. Refusing an update is recoverable; installing a hostile one
         is not."""
         publisher = entry.get("publisher")
         version, digest = entry.get("version", ""), entry.get("sha256", "")
         if self._releases.contradicts(version, digest):
             return False, "another publisher signed different content for this version"
+        if publisher is not None and self._releases.equivocated(publisher) is not None:
+            # The one refusal here that rests on nothing but the accused's own
+            # signature: two descriptors signed by this key, one version, two
+            # different programs. Forging the pair needs the key it accuses, so
+            # unlike everything else a node hears about another node, no
+            # messenger's honesty is in it — see `src/equivocation.py`.
+            return False, "this publisher has signed two different programs as one version"
         attesters = self._releases.attesters(version, digest)
         if self._publishers.auto_for(publisher):
             return True, "signed by a publisher pinned for automatic install"
@@ -7025,6 +7214,47 @@ class MeshNode:
         if count <= len(placed) * _FAMILY_SHARE:
             return None, 0
         return family.hex(), count
+
+    def _we_published(self, version: str) -> bool:
+        """Is this exact version already offered by *our* key?"""
+        mine = self._identity.dsa_public_key
+        for listed in self._releases.list():
+            entry = self._releases.get(listed["publisher_id"])
+            if (entry is not None and entry["publisher"] == mine
+                    and entry["version"] == version):
+                return True
+        return False
+
+    async def _auto_publish_pass(self) -> str | None:
+        """Offer the running version to the mesh, once, if asked to.
+
+        What makes this safe to leave on is that it adds nothing: the code is
+        already on this machine, the key already signs handshakes with it, and
+        nobody installs the result who has not separately pinned this key. What
+        it removes is the step where a node updates itself and then sits on the
+        new version because nobody pressed a button.
+
+        Idempotent by construction — it asks whether *our* key already offers
+        this exact version — so a restart, a re-announce or a second pass do
+        nothing. Returns the version published, or None."""
+        if not self._release_auto_publish:
+            return None
+        version = _running_version()
+        if self._we_published(version):
+            return None
+        last = self._auto_published
+        now = time.monotonic()
+        if last is not None and last[0] == version and now - last[1] < _AUTO_PUBLISH_RETRY:
+            return None
+        self._auto_published = (version, now)
+        try:
+            await self.publish_release()
+        except Exception:
+            self._activity.note(
+                "warn", "could not publish this node's code as " + version)
+            return None      # a tree we cannot publish is not a reason to stop
+        self._activity.note("release", "published this node's code as " + version)
+        return version
 
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
@@ -7238,7 +7468,10 @@ class MeshNode:
         if claim is None:
             self._charge_abuse(peer)
             return None
-        if not self._pseudo_book.offer(claim, bytes(raw)):
+        changed = self._pseudo_book.offer(claim, bytes(raw))
+        self._note_equivocation("node", claim["node_id"],
+                                self._pseudo_book.equivocated(claim["node_id"]))
+        if not changed:
             return None
         self._persist_pseudos()   # a name learned once is a name kept
         self._note_change("names")
@@ -7642,6 +7875,21 @@ class MeshNode:
             return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
+        if packet.src_id == self._id.raw:
+            # Either the far end of this link is this node, or it is a peer
+            # claiming to be us. Both end at the same refusal one message later
+            # — so end it here instead, before a 21 kB handshake is built for
+            # it. This is the net that catches a self-dial whose address we did
+            # not recognise as ours; the address is *not* held against the node
+            # we were dialling, because nothing here is proved: an id in a
+            # challenge is a claim on a link that has authenticated nothing, and
+            # a claim must never be what strikes an address off. What does that
+            # is `_is_own_address` (our own list) and `answered_as` (a signature
+            # over our own challenge). A ghost id that keeps landing here stops
+            # being asked about by `note_unanswered`, which needs no claim.
+            peer.claimed_self = True
+            self._refuse_handshake(packet, "the challenge presents our own identity")
+            return
         # Our half of the negotiation, on the round trip that was happening
         # anyway. The server announced with its challenge; this is the answer.
         await self._announce_capabilities(peer)
@@ -7822,6 +8070,7 @@ class MeshNode:
             record = self._handshake_refusals[reason] = {"count": 0}
         record["count"] += 1
         record["at"] = time.time()
+        self._activity.note("refused", "handshake refused: " + reason)
         try:
             record["peer"] = packet.src_id.hex()
         except Exception:
@@ -7919,6 +8168,7 @@ class MeshNode:
         await peer.send(ack)
 
         self._note_punch_link_up(peer)
+        self._activity.note("link", "link up with " + claimed_id.raw.hex()[:16])
         self._routing.add(claimed_id, [], bob_dsa_pub)
         kept = self._collapse_redundant_links(peer)
         self._stop_chasing(peer.authenticated_id)
@@ -8021,6 +8271,7 @@ class MeshNode:
 
         peer.authenticated_id = server_id
         peer.dsa_pub = alice_dsa_pub
+        self._activity.note("link", "link up with " + server_id.raw.hex()[:16])
         self._note_punch_link_up(peer)
         # Record the address we dialled so this peer is reconnectable after a
         # restart (validated before advertising it to anyone else).

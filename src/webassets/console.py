@@ -131,6 +131,11 @@ INDEX_HTML = """<!doctype html>
         </div>
       </article>
       <div id="metrics" class="stats"></div>
+      <article id="feed-card" class="card" hidden>
+        <div class="card-head"><div class="grow"><h2>Happening now</h2>
+          <div class="sub">The last things this node did, or was told</div></div></div>
+        <div class="card-body"><ul id="feed-list" class="feed"></ul></div>
+      </article>
       <div class="split wide-first">
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Throughput</h2>
@@ -1113,6 +1118,7 @@ async function tick(sample){
     if(sample === false) STATE._rates = RATE_NOW;
     else trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); paintFirstRun(STATE);
+    paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
@@ -1226,6 +1232,26 @@ function paintFirstRun(state){
   // Through setHTML: this repaints on the cadence, and assigning innerHTML on a
   // timer replaces the list under the reader's finger and drops any selection.
   setHTML("first-run-steps", steps.map((step) => "<li>" + esc(step) + "</li>").join(""));
+}
+// What just happened, in a few lines. The node keeps a bounded ring of these
+// (`activity.py`) written where it already knows something happened — a link, a
+// refusal, a release — never per packet, and repeats coalesce onto one row so a
+// peer that flaps twice a second cannot push everything else out of view.
+//
+// Hidden while empty, which on a healthy node that has been up a while is most
+// of the time: an empty card is clutter with a heading on it.
+function paintFeed(state){
+  const rows = (state.recent || []).slice(0, 8);
+  const card = $("feed-card");
+  if(card) card.hidden = rows.length === 0;
+  if(!rows.length) return;
+  const now = state.server_time || (Date.now() / 1000);
+  setHTML("feed-list", rows.map((row) =>
+    '<li><i class="k ' + esc(row.kind) + '"></i>' +
+    '<span class="when">' + esc(fmtDuration(Math.max(0, now - row.at))) + '</span>' +
+    '<span class="what">' + esc(row.text) + "</span>" +
+    (row.count > 1 ? '<span class="n">&times;' + esc(String(row.count)) + "</span>" : "") +
+    "</li>").join(""));
 }
 function paintMetrics(state){
   const load = state.load || {};
@@ -1837,9 +1863,14 @@ function rowValues(node, inner, out){
   const key = rowKey(node, inner);
   const quality = (node.link || {}).quality || {};
   const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
-  out[key + ":state"] = {
-    text: node.connected ? "authenticated" : (node.has_key ? "key known" : "no key"),
-    tone: node.connected ? "ok" : (node.has_key ? "" : "warn")};
+  // "silent" is not a worse "no key" — it is a different fact, and the one that
+  // explains a row that never changes: this id has never once answered a lookup
+  // of ours, so we have stopped asking after it and stopped naming it to
+  // others. It says nothing about the node; anyone who can reach it still does.
+  out[key + ":state"] = node.silent
+    ? {text: "never answers", tone: "warn"}
+    : {text: node.connected ? "authenticated" : (node.has_key ? "key known" : "no key"),
+       tone: node.connected ? "ok" : (node.has_key ? "" : "warn")};
   out[key + ":loss"] = {html: loss ? badge(loss + "% loss", "warn") : ""};
   out[key + ":rtt"] = node.rtt_ms == null ? "—" : node.rtt_ms + " ms";
   out[key + ":jitter"] = quality.jitter_ms ? "±" + quality.jitter_ms + " ms" : "";
@@ -2823,6 +2854,18 @@ function releaseRowHTML(entry){
     (entry.mine ? ' <span class="badge">this node</span>' : "") +
     (entry.trusted ? ' <span class="badge ok">pinned</span>'
                    : ' <span class="badge">unpinned</span>') +
+    // Two different claims and only one of them names a culprit. `disputed`
+    // says somebody else signed other bytes for this version — a fork looks
+    // exactly like that, so it warns and blames nobody. `equivocated` says
+    // this key signed both, which no accident produces and which the node can
+    // prove without trusting whoever showed it. Both stop an unattended
+    // install; a human is still allowed to install, and is told first.
+    (entry.equivocated
+      ? ' <span class="badge danger" title="This key signed two different ' +
+        'programs under one version number.">contradicts itself</span>' : "") +
+    (entry.disputed
+      ? ' <span class="badge warn" title="Another publisher signed different ' +
+        'content for this version.">disputed</span>' : "") +
     "</td><td>" + fmtAgo(Date.now() / 1000 - entry.ts) + "</td><td>" + action + "</td></tr>";
 }
 function publisherRowHTML(entry){
