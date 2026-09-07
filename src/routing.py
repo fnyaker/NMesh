@@ -1,8 +1,20 @@
 import heapq
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from .node_id import NodeID
 from .uri import _MAX_ADDRESSES, _validate_uri
+
+# How long an address that answered as somebody else is held against the node it
+# was filed under. Not for ever: an address is a lease, and the node that owns
+# it today may be the one we were looking for tomorrow. Long enough that the
+# gossip which taught it to us has stopped repeating itself, short enough that a
+# machine changing hands heals on its own.
+WRONG_ADDRESS_TTL = 600.0
+# Bounded like everything an outsider can grow: the pairs come from what peers
+# advertise, so a flood of invented (node, address) pairs must not be a way to
+# grow this table.
+MAX_WRONG_ADDRESSES = 256
 
 
 @dataclass
@@ -64,6 +76,9 @@ class RoutingTable:
     def __init__(self, own_id: NodeID) -> None:
         self._own_id = own_id
         self._buckets: list[KBucket] = [KBucket() for _ in range(160)]
+        # (node_id, address) -> (what it answered as, when we stop believing it).
+        # Oldest first, so the bound evicts what we have believed longest.
+        self._wrong: "OrderedDict[tuple[bytes, str], tuple[bytes, float]]" = OrderedDict()
 
     def _bucket_index(self, node_id: NodeID) -> int:
         """Which bucket an id belongs in, or -1 for our own.
@@ -83,11 +98,61 @@ class RoutingTable:
         # Prefer fresh observations and cap address churn from authenticated
         # peers so a single route can never grow without bound.
         merged_addrs = list(dict.fromkeys(
-            addresses + (existing.addresses if existing else [])))[:_MAX_ADDRESSES]
+            addresses + (existing.addresses if existing else [])))
+        # Filtered here, at the one door every address comes through. Dropping a
+        # bad address without remembering it was a treadmill: the next answer
+        # from anybody put it straight back, at the *head* of the list because
+        # fresh observations are preferred, and the next pass paid another
+        # post-quantum handshake to learn the same thing. That loop is what a
+        # real trace showed, once every ten seconds, for as long as the node ran.
+        merged_addrs = [a for a in merged_addrs
+                        if self.wrong_address(node_id, a) is None][:_MAX_ADDRESSES]
         merged_pub = dsa_pub if dsa_pub else (existing.dsa_pub if existing else b"")
         return self._buckets[self._bucket_index(node_id)].add(
             NodeEntry(node_id, merged_addrs, merged_pub)
         )
+
+    # -- addresses that answered as somebody else --------------------------
+
+    def note_wrong_address(self, node_id: NodeID, address: str,
+                           answered_as: NodeID) -> None:
+        """This address is not this node's. Drop it, and remember why.
+
+        Only ever called on something we established ourselves — the identity a
+        handshake proved against our own challenge, or our own list of the
+        addresses we answer on. A *claim* on an unauthenticated link is not
+        enough to strike an address off; if it were, saying "I am somebody else"
+        would be a way to have a third party's address forgotten."""
+        self.drop_address(node_id, address)
+        now = time.monotonic()
+        self._prune_wrong(now)
+        key = (node_id.raw, address)
+        self._wrong.pop(key, None)
+        while len(self._wrong) >= MAX_WRONG_ADDRESSES:
+            self._wrong.popitem(last=False)
+        self._wrong[key] = (answered_as.raw, now + WRONG_ADDRESS_TTL)
+
+    def wrong_address(self, node_id: NodeID, address: str) -> bytes | None:
+        """Who this address answered as, while we still believe it. ``None``
+        once the record has expired — the entry is left to the next prune."""
+        found = self._wrong.get((node_id.raw, address))
+        if found is None:
+            return None
+        answered_as, until = found
+        return answered_as if time.monotonic() < until else None
+
+    def wrong_addresses(self) -> list[dict]:
+        """What we are currently refusing to dial, for a console to show."""
+        now = time.monotonic()
+        return [{"node": node_raw.hex(), "address": address,
+                 "answered_as": answered_as.hex(),
+                 "for_seconds": round(until - now, 1)}
+                for (node_raw, address), (answered_as, until)
+                in self._wrong.items() if now < until]
+
+    def _prune_wrong(self, now: float) -> None:
+        for key in [k for k, (_who, until) in self._wrong.items() if now >= until]:
+            self._wrong.pop(key, None)
 
     def evict_and_add(self, node_id: NodeID, addresses: list[str], dsa_pub: bytes = b"") -> None:
         index = self._bucket_index(node_id)
@@ -104,11 +169,11 @@ class RoutingTable:
         """Forget one address of a node, keeping the node. Returns whether it
         was there.
 
-        For an address that answered as somebody else: that is not a slow
-        address, it is the wrong one, and leaving it in the entry means dialling
-        it again on the next pass and paying a whole post-quantum handshake to
-        learn the same thing. The entry stays — the node is real, its other
-        addresses may be good, and a punch can still reach it.
+        The removal half of :meth:`note_wrong_address`, and on its own not
+        enough: forgetting an address that anybody is still advertising means
+        learning it again on the next answer. Call this directly only where
+        there is nothing to remember. The entry stays either way — the node is
+        real, its other addresses may be good, and a punch can still reach it.
 
         The entry is edited rather than re-added: ``add`` builds a fresh
         ``NodeEntry``, whose ``last_seen`` defaults to now, so re-adding would

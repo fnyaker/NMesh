@@ -1135,6 +1135,10 @@ class _Peer:
         # (the signature over our own challenge), and that is the one thing that
         # tells the dialler "wrong address" from "nobody answered".
         self.answered_as: NodeID | None = None
+        # The challenge on this link named our own id. Not proof of anything —
+        # nothing has authenticated yet — so it names the dial outcome for an
+        # operator and never strikes an address off. See `_handle_challenge`.
+        self.claimed_self: bool = False
         self.invite_accepted: bool = False
         self.invite_sent: bool = False
         # Our code came back rejected. Read only by the join that presented it,
@@ -2046,6 +2050,15 @@ class MeshNode:
         pkt = Packet.create(PUNCH_REQUEST, self._id.raw,
                             relay_peer.authenticated_id.raw, payload)
         await relay_peer.send(pkt)
+
+    def _is_own_address(self, uri: str) -> bool:
+        """Is this one of the addresses we answer on?
+
+        Comparing the strings is comparing the same thing rather than two
+        spellings of it: a URI travels the mesh verbatim, as some node's own
+        `advertised_uris()` entry relayed onwards, so what we would dial is
+        exactly what we would have published."""
+        return uri in self.advertised_uris()
 
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
@@ -3741,6 +3754,19 @@ class MeshNode:
         if not self._transport_manager.is_supported(scheme):
             self._note_dial(node_hex, uri, "no transport", scheme)
             return None
+        if self._is_own_address(uri):
+            # Answered by the identity guard in `_handle_handshake_ack` — but
+            # only after both halves of this node have built, sent and read a
+            # 21 kB post-quantum handshake, twice, to learn what this comparison
+            # knows for nothing. A real trace showed 42 kB spent on one such
+            # dial. The address belongs to somebody else's entry (a node that
+            # used to answer here, and whose id is still being gossiped), so it
+            # is wrong for them rather than merely slow.
+            self._note_dial(node_hex, uri, "wrong node",
+                            "this address is this node itself")
+            if node_id is not None:
+                self._routing.note_wrong_address(node_id, uri, self._id)
+            return None
         if len(self._peers) >= _MAX_PEERS:
             self._note_dial(node_hex, uri, "peer limit")
             return None
@@ -3771,7 +3797,11 @@ class MeshNode:
                 # it buys a whole post-quantum handshake per pass to learn the
                 # same thing — that is the shape a real trace showed.
                 found = peer.answered_as
-                if found is not None and node_id is not None and found != node_id:
+                if found is None and peer.claimed_self:
+                    self._note_dial(node_hex, uri, "wrong node",
+                                    "answered claiming our own identity",
+                                    time.monotonic() - started)
+                elif found is not None and node_id is not None and found != node_id:
                     self._note_dial(node_hex, uri, "wrong node",
                                     "this address is this node itself"
                                     if found == self._id else
@@ -3780,7 +3810,7 @@ class MeshNode:
                     self._activity.note(
                         "warn", "dropped an address of " + node_hex[:16]
                         + " — it answers as somebody else")
-                    self._routing.drop_address(node_id, uri)
+                    self._routing.note_wrong_address(node_id, uri, found)
                 else:
                     self._note_dial(node_hex, uri, "no-answer",
                                     "connected but never authenticated",
@@ -7740,6 +7770,21 @@ class MeshNode:
             return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
             return  # Unsolicited challenge — ignore
+        if packet.src_id == self._id.raw:
+            # Either the far end of this link is this node, or it is a peer
+            # claiming to be us. Both end at the same refusal one message later
+            # — so end it here instead, before a 21 kB handshake is built for
+            # it. This is the net that catches a self-dial whose address we did
+            # not recognise as ours; the address is *not* held against the node
+            # we were dialling, because nothing here is proved: an id in a
+            # challenge is a claim on a link that has authenticated nothing, and
+            # a claim must never be what strikes an address off. What does that
+            # is `_is_own_address` (our own list) and `answered_as` (a signature
+            # over our own challenge). A ghost id that keeps landing here stops
+            # being asked about by `note_unanswered`, which needs no claim.
+            peer.claimed_self = True
+            self._refuse_handshake(packet, "the challenge presents our own identity")
+            return
         # Our half of the negotiation, on the round trip that was happening
         # anyway. The server announced with its challenge; this is the answer.
         await self._announce_capabilities(peer)
