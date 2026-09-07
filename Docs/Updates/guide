@@ -23,6 +23,9 @@ from a key the operator chose to accept.
 
 The GitHub path is still there ([`../Setup/guide`](../Setup/guide)) — it is how
 a node with no peers yet gets its first version. It is no longer the only way.
+What it looks at is one setting: the published releases by default, or
+`src/version.py` at the branch `update_branch` names. Neither is signed for this
+node, which is the whole point of what follows.
 
 ## Publishing costs nothing
 

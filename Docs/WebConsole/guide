@@ -535,8 +535,8 @@ works on a machine with no internet.
 | POST    | `/api/releases/publish` | `{notes}` — signs the installed tree and announces it to the mesh |
 | POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
 | POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
-| GET     | `/api/update/check` | asks GitHub releases → `{current, latest?, newer, notes?, updatable, reason?}` |
-| POST    | `/api/update/apply` | `{version}` — installs that **exact** release; a mismatch with what GitHub offers is refused |
+| GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
+| POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node. **409** with the reason when nothing would start it again |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
 | POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
@@ -694,6 +694,12 @@ opens a confirmation that **names the version**, and the request sent repeats
 that same version — a mismatch with what GitHub offers at click time is refused
 rather than installing something the operator has not seen. No update ever
 happens without that click.
+
+What is checked depends on one setting: with `update_branch` empty (the default)
+it is the published releases, and with a branch named it is the `__version__`
+declared in `src/version.py` at that branch — the card says which, on every
+answer, since "up to date" means a different thing against each. See
+[`../Setup/guide`](../Setup/guide).
 
 A row says three separate things about a release and each says only what it
 knows: **this node** is who signed it, **pinned** is whether that key is one this

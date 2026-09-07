@@ -581,6 +581,11 @@ INDEX_HTML = """<!doctype html>
             <p class="muted small">Nothing is installed without you confirming the exact version.
               Applying an update replaces the node's files, then restarts the node if something
               is there to bring it back — otherwise it says so and waits for you.</p>
+            <p class="muted small">By default this asks for the latest published release. Set
+              <code>update_branch</code> in the configuration to follow a branch instead: the
+              version then comes from <code>src/version.py</code> at that branch, and installing
+              takes its tree — a branch moves, so one that no longer carries the version you
+              confirmed is refused.</p>
             <div class="btn-row">
               <button id="update-check">Check for updates</button>
               <button id="update-apply" class="primary" hidden>Install</button>
@@ -2770,7 +2775,8 @@ $("store-publish-btn").addEventListener("click", (event) => withBusy(event.targe
 }));
 
 // ---- updates ---------------------------------------------------------------
-let UPDATE_OFFER = null;                  // the exact release on screen
+let UPDATE_OFFER = null;                  // the exact version on screen
+let UPDATE_BRANCH = "";                   // the branch it came from, if any
 async function checkForUpdates(event){
   await withBusy(event.target, async () => {
     const status = $("update-status"), notes = $("update-notes");
@@ -2779,17 +2785,23 @@ async function checkForUpdates(event){
     try{
       const {data} = await apiJson("/api/update/check");
       if(data.error){ status.textContent = data.error; return; }
+      // Which of the two answered is worth saying every time: "up to date"
+      // means something different against a branch than against a release.
+      UPDATE_BRANCH = data.source === "branch" ? (data.branch || "") : "";
+      const where = UPDATE_BRANCH ? " on branch " + UPDATE_BRANCH : "";
       if(!data.available){
-        status.textContent = "Up to date — running " + data.current + ", latest is " + data.latest + ".";
+        status.textContent = "Up to date — running " + data.current + ", latest is " +
+          data.latest + where + ".";
         return;
       }
       if(!data.can_apply){
-        status.textContent = data.latest + " is available, but this install cannot update itself: " +
-          data.blocked;
+        status.textContent = data.latest + " is available" + where +
+          ", but this install cannot update itself: " + data.blocked;
         return;
       }
       UPDATE_OFFER = data.latest;
-      status.textContent = data.latest + " is available (you run " + data.current + ").";
+      status.textContent = data.latest + " is available" + where +
+        " (you run " + data.current + ").";
       if(data.notes){ notes.textContent = data.notes; notes.hidden = false; }
       const apply = $("update-apply");
       apply.textContent = "Install " + data.latest;
@@ -2804,7 +2816,10 @@ async function applyUpdate(event){
   const agreed = await confirmAction({
     title:"Install " + UPDATE_OFFER + "?",
     body:'<p class="muted small">The node replaces its own files and restarts. The previous ' +
-      "files are kept, so a bad release can be rolled back on the machine itself.</p>",
+      "files are kept, so a bad release can be rolled back on the machine itself." +
+      (UPDATE_BRANCH ? " This installs the branch you follow as it stands now; if it has moved " +
+        "past " + UPDATE_OFFER + ", the install is refused rather than silently newer." : "") +
+      "</p>",
     confirmLabel:"Install " + UPDATE_OFFER});
   if(!agreed) return;
   await withBusy(event.target, async () => {

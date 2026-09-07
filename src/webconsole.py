@@ -523,6 +523,14 @@ class WebConsole:
             return False, str(exc)[:200]
         return True, None
 
+    def _update_branch(self) -> str:
+        """Which branch *this* node follows for updates, or "" for releases.
+
+        Read from this console's own configuration file rather than from
+        wherever the default would be: a node started with ``--config``
+        elsewhere must not be told what some other file says."""
+        return updater.update_branch(self._config_path)
+
     def _config_snapshot(self) -> dict:
         """The configuration as the settings page needs it: current values,
         which of them may be edited from here, and anything wrong with the file.
@@ -1088,7 +1096,9 @@ def _make_handler(console: WebConsole):
                     self._json(401, {"error": "unauthorized"})
                     return
                 try:
-                    result = console._call(updater.check(), timeout=40.0)
+                    result = console._call(
+                        updater.check(branch=console._update_branch()),
+                        timeout=40.0)
                 except updater.UpdateError as exc:
                     self._json(200, {"error": str(exc)[:256],
                                      "current": updater.__version__})
@@ -1977,7 +1987,9 @@ def _make_handler(console: WebConsole):
 
             The request must name the version. If GitHub has moved on since the
             page was drawn, the mismatch is refused: a tab left open for an hour
-            must not install something nobody looked at."""
+            must not install something nobody looked at. That holds for a branch
+            too — it is checked again here, and once more against the tree that
+            comes down, because a branch moves under its own name."""
             data = data or {}
             wanted = data.get("version")
             if not isinstance(wanted, str) or not wanted:
@@ -1990,8 +2002,10 @@ def _make_handler(console: WebConsole):
             if not ok:
                 self._json(409, {"error": reason})
                 return
+            branch = console._update_branch()
             try:
-                latest = console._call(updater.check(), timeout=40.0)
+                latest = console._call(updater.check(branch=branch),
+                                       timeout=40.0)
             except updater.UpdateError as exc:
                 self._json(502, {"error": str(exc)[:256]})
                 return
@@ -2000,14 +2014,15 @@ def _make_handler(console: WebConsole):
                 return
             if latest.get("latest") != wanted:
                 self._json(409, {
-                    "error": f"the latest release is now {latest.get('latest')}, "
+                    "error": f"the latest version is now {latest.get('latest')}, "
                              f"not {wanted} — check again and re-confirm"})
                 return
             if not latest.get("available"):
                 self._json(409, {"error": "already up to date"})
                 return
             try:
-                result = console._call(updater.apply(wanted), timeout=400.0)
+                result = console._call(updater.apply(wanted, branch=branch),
+                                       timeout=400.0)
             except updater.UpdateError as exc:
                 self._json(502, {"error": str(exc)[:256]})
                 return
