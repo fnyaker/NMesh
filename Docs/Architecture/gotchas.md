@@ -515,6 +515,37 @@ The port is never released, so there is no window at all. The general rule: a
 helper that hands out a *number* for somebody else to bind later is handing out
 a promise the kernel never made.
 
+### 11. A retry that invalidated the answer to the attempt it retried
+The E2E retry re-sends a handshake every 5 s while data is queued, with a fresh
+nonce and a fresh ML-KEM keypair — it has to, an identical packet is dropped by
+the receiver's `msg_id` dedup. It wrote both straight over
+`_e2e_pending_nonce` / `_e2e_pending_kem`, so the attempt it replaced could no
+longer be answered: an ACK carrying the first nonce failed the "is this the
+nonce we sent?" gate and was dropped. Meanwhile the far end had answered that
+first handshake, installed the session, and **flushed everything it had queued
+for us under it** — payloads nothing in the E2E plane ever retransmits. The
+result is one direction of a healthy link losing its first message for good,
+while the other direction heals itself through the responder's re-key candidate
+(§5): the two ends disagree about whether the message arrived, and neither ever
+says so.
+It needs the answer to be slower than the retry cadence, which never happens on
+a developer's machine and does happen on a loaded runner. That is the shape of
+the failure `main` showed twice in a week — CI red on
+`TestSpoolMesh::test_bidirectional_over_directory`, each time on a commit that
+touched nothing near it, each time one direction timing out on a link whose
+other direction had already delivered. Both ends send their first message at the
+same moment there, over the slowest medium in the suite, so it is the test most
+exposed to it; the mechanism itself belongs to no transport, and reproducing it
+takes no timing at all once the retry is made explicit (the test below).
+→ A replaced attempt stays answerable for `_E2E_ATTEMPT_TTL` (bounded by
+`_E2E_ATTEMPT_MAX`, both alongside the re-key candidates it mirrors), and an ACK
+is matched against the attempts still in flight rather than against the newest
+one alone. A replaced attempt only ever **fills a gap**: with a session already
+live it is refused, because installing an older key with no proof the peer holds
+it is the poisoning of §5 seen from the other side. Test:
+`tests/test_nat_relay_fixes.py::TestE2ERetriedAttempts`.
+**A retry must never invalidate the answer to what it is retrying.**
+
 ## Hole punching (see also `transports.md`)
 
 - **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a

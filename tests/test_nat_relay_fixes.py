@@ -9,6 +9,10 @@ Each test pins one bug that was reproduced live before the fix:
   - ``console_ping_node`` falls back to the routed ECHO probe when no PONG
     arrives, instead of claiming reachability from a direct link's mere
     existence (half-dead punched link).
+  - E2E retries: a retry no longer invalidates the attempt it retries, so a
+    slow answer still establishes the session the far end already acted on
+    (the message it had flushed under that key used to be lost, in one
+    direction, on a link both ends considered healthy).
   - E2E re-key: a valid handshake for an already-established peer parks a
     *candidate* session instead of overwriting the live one (a stale/late
     duplicate handshake used to poison the session permanently — every DATA
@@ -244,6 +248,113 @@ class TestE2ERekey:
         for i in range(nodemod._E2E_REKEY_MAX + 10):
             node._e2e_rekey_store(NodeID.generate(), SessionKey(os.urandom(32)))
         assert len(node._e2e_rekey) <= nodemod._E2E_REKEY_MAX
+        await node.stop()
+
+
+class TestE2ERetriedAttempts:
+    """The initiator side of the same problem: a retry used to invalidate the
+    attempt it was retrying, so a slow answer was refused — while the far end
+    had already installed that session and flushed everything it had queued to
+    us under it. One direction of a healthy link then lost its first message
+    permanently, with nothing anywhere to retransmit it."""
+
+    async def test_a_slow_answer_to_a_replaced_attempt_still_lands(self):
+        import src.node as nodemod
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        _cross_trust(node_a, node_b)
+        await _make_authed_pair(node_a, fake_a, node_b, fake_b)
+
+        await node_a.send_data(node_b.id, b"a2b")
+        first = next(p for p in fake_a.sent if p.type == E2E_HANDSHAKE)
+
+        # The answer is slower than the retry cadence, so A starts a second
+        # attempt while the first is still in flight.
+        node_a._e2e_attempt[node_b.id] = (time.monotonic()
+                                          - nodemod._E2E_RETRY_INTERVAL - 1)
+        await node_a._initiate_e2e_handshake(node_b.id)
+
+        # B has its own message queued, and answers the *first* attempt: it
+        # installs that session and flushes the queue under it.
+        node_b._e2e_pending_data[node_a.id] = [b"b2a"]
+        before = len(fake_b.sent)
+        fake_b.inject(first)
+        await _until(lambda: any(p.type == E2E_HANDSHAKE_ACK
+                                 for p in fake_b.sent[before:]))
+        answer = fake_b.sent[before:]
+        fake_a.inject(next(p for p in answer if p.type == E2E_HANDSHAKE_ACK))
+        fake_a.inject(next(p for p in answer if p.type == DATA))
+
+        src, payload = await asyncio.wait_for(node_a.receive_data(), timeout=3.0)
+        assert (src, payload) == (node_b.id, b"b2a")
+        await node_a.stop()
+        await node_b.stop()
+
+    async def test_a_replaced_attempt_never_replaces_a_live_session(self):
+        """It fills a gap, it does not rotate a key: reinstalling a session with
+        no proof the peer holds it is exactly what poisons a link."""
+        import src.node as nodemod
+        node_a, fake_a = await make_node()
+        node_b, fake_b = await make_node()
+        _cross_trust(node_a, node_b)
+        await _make_authed_pair(node_a, fake_a, node_b, fake_b)
+
+        await node_a._initiate_e2e_handshake(node_b.id)
+        first = next(p for p in fake_a.sent if p.type == E2E_HANDSHAKE)
+        await node_a._initiate_e2e_handshake(node_b.id)      # replaces it
+
+        live = SessionKey(os.urandom(32))
+        node_a._e2e_sessions[node_b.id] = live
+
+        before = len(fake_b.sent)
+        fake_b.inject(first)
+        await _until(lambda: any(p.type == E2E_HANDSHAKE_ACK
+                                 for p in fake_b.sent[before:]))
+        fake_a.inject(next(p for p in fake_b.sent[before:]
+                           if p.type == E2E_HANDSHAKE_ACK))
+        await asyncio.sleep(0.1)
+
+        assert node_a._e2e_sessions[node_b.id] is live
+        await node_a.stop()
+        await node_b.stop()
+
+    async def test_an_answer_to_a_nonce_we_never_sent_is_refused(self):
+        node, _ = await make_node()
+        peer_id = NodeID.generate()
+        assert node._e2e_attempt_secret(peer_id, os.urandom(32)) is None
+        await node.stop()
+
+    async def test_a_replaced_attempt_expires(self):
+        node, _ = await make_node()
+        peer_id = NodeID.generate()
+        nonce = os.urandom(32)
+        node._e2e_replaced_kem[(peer_id.raw, nonce)] = (b"secret",
+                                                        time.monotonic() - 0.01)
+        assert node._e2e_attempt_secret(peer_id, nonce) is None
+        assert (peer_id.raw, nonce) not in node._e2e_replaced_kem
+        await node.stop()
+
+    async def test_replaced_attempts_are_bounded(self):
+        import src.node as nodemod
+        node, _ = await make_node()
+        for _ in range(nodemod._E2E_ATTEMPT_MAX + 10):
+            target = NodeID.generate()
+            node._e2e_pending_nonce[target] = os.urandom(32)
+            node._e2e_pending_kem[target] = b"secret"
+            node._e2e_keep_replaced_attempt(target)
+        assert len(node._e2e_replaced_kem) <= nodemod._E2E_ATTEMPT_MAX
+        await node.stop()
+
+    async def test_forgetting_a_peer_forgets_its_attempts(self):
+        node, _ = await make_node()
+        target = NodeID.generate()
+        nonce = os.urandom(32)
+        node._e2e_pending_nonce[target] = nonce
+        node._e2e_pending_kem[target] = b"secret"
+        node._e2e_keep_replaced_attempt(target)
+        node._forget_e2e(target)
+        assert not node._e2e_replaced_kem
+        assert target not in node._e2e_pending_nonce
         await node.stop()
 
 

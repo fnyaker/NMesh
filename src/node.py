@@ -339,6 +339,17 @@ _STATE_WRITE_INTERVAL = 2.0
 # and short-lived so a flood of valid-but-useless handshakes can't grow it.
 _E2E_REKEY_TTL = 30.0        # seconds a candidate session awaits proof
 _E2E_REKEY_MAX = 64          # distinct peers with a pending re-key candidate
+# Initiator side of the same problem. A retry generates a fresh nonce and ML-KEM
+# keypair — it has to, an identical packet would be dropped by the receiver's
+# msg_id dedup — and used to overwrite the attempt it was retrying. The answer to
+# that first attempt then had nothing left to decapsulate with and was refused,
+# while the far end had already installed that session and flushed everything it
+# had queued for us under it. Nothing in the E2E plane retransmits, so those
+# payloads were lost for good, in one direction only, on a link both ends
+# considered healthy. A replaced attempt therefore stays answerable for a while,
+# bounded and short-lived like the candidate table above.
+_E2E_ATTEMPT_TTL = 30.0      # seconds a replaced attempt can still be answered
+_E2E_ATTEMPT_MAX = 64        # replaced attempts kept, across all peers
 # When our advertised address set changes, push it to this many most-recently
 # seen peers (targeted Kademlia-style gossip). Bounded → no storm.
 _ANNOUNCE_FANOUT       = 5
@@ -1570,6 +1581,8 @@ class MeshNode:
         # Never persisted: a candidate is proof-of-completion awaited *now*;
         # across a restart the peer re-handshakes anyway.
         self._e2e_rekey: dict[NodeID, tuple[SessionKey, float]] = {}
+        # (peer, nonce) -> (ML-KEM secret, expiry) for attempts a retry replaced.
+        self._e2e_replaced_kem: OrderedDict = OrderedDict()
         self._e2e_retry_task: asyncio.Task | None = None
         # Persisted state is written by one background task, not by whoever
         # happened to change it — see _persist_state.
@@ -3623,6 +3636,7 @@ class MeshNode:
         self._e2e_pending_data.pop(target, None)
         self._e2e_attempt.pop(target, None)
         self._e2e_rekey.pop(target, None)
+        self._e2e_drop_attempts(target)
 
     def _keep_e2e_session(self, src: NodeID, session: SessionKey) -> None:
         """File a live E2E session, evicting the least recently used if needed.
@@ -3664,6 +3678,7 @@ class MeshNode:
             return
         signature = self._identity.sign(nonce + kem_pub + dsa_pub)
         payload = _encode_e2e_handshake(nonce, kem_pub, dsa_pub, cert_chain, signature)
+        self._e2e_keep_replaced_attempt(target)
         self._e2e_pending_kem[target] = kem_secret
         self._e2e_pending_nonce[target] = nonce
         self._e2e_attempt[target] = time.monotonic()
@@ -8000,6 +8015,55 @@ class MeshNode:
             await self._route_outbound(pkt, blocking=False)
         self._persist_state()
 
+    def _e2e_keep_replaced_attempt(self, target: NodeID) -> None:
+        """Keep the attempt this new one replaces answerable a little longer.
+
+        Called by every retry, before it overwrites the pending state. What it
+        buys is the slow answer: the far end acted on the handshake it received,
+        so its reply is the only thing that can decrypt what it has already sent
+        us."""
+        nonce = self._e2e_pending_nonce.get(target)
+        secret = self._e2e_pending_kem.get(target)
+        if nonce is None or secret is None:
+            return
+        now = time.monotonic()
+        for key in [k for k, (_, exp) in self._e2e_replaced_kem.items()
+                    if exp <= now]:
+            del self._e2e_replaced_kem[key]
+        while len(self._e2e_replaced_kem) >= _E2E_ATTEMPT_MAX:
+            self._e2e_replaced_kem.popitem(last=False)
+        self._e2e_replaced_kem[(target.raw, nonce)] = (secret,
+                                                       now + _E2E_ATTEMPT_TTL)
+
+    def _e2e_attempt_secret(self, src: NodeID, nonce: bytes) -> bytes | None:
+        """The ML-KEM secret waiting for this answer, without consuming it.
+
+        The attempt in flight, or one a retry has since replaced: a peer answers
+        whichever handshake reached it, and a slow answer is still the answer to
+        something we sent.
+
+        A replaced attempt only ever *fills a gap*. With a session already live,
+        taking an older key would be reinstalling a session with no proof the
+        peer holds it — the poisoning this file refuses on the responder side
+        too (gotchas §5)."""
+        if self._e2e_pending_nonce.get(src) == nonce:
+            return self._e2e_pending_kem.get(src)
+        entry = self._e2e_replaced_kem.get((src.raw, nonce))
+        if entry is None or src in self._e2e_sessions:
+            return None
+        secret, expires = entry
+        if expires <= time.monotonic():
+            del self._e2e_replaced_kem[(src.raw, nonce)]
+            return None
+        return secret
+
+    def _e2e_drop_attempts(self, src: NodeID) -> None:
+        """Forget every handshake attempt still waiting on this peer's answer."""
+        self._e2e_pending_nonce.pop(src, None)
+        self._e2e_pending_kem.pop(src, None)
+        for key in [k for k in self._e2e_replaced_kem if k[0] == src.raw]:
+            del self._e2e_replaced_kem[key]
+
     def _e2e_rekey_store(self, src: NodeID, candidate: SessionKey) -> None:
         """Park a responder-side re-key candidate, bounded and TTL'd."""
         now = time.monotonic()
@@ -8030,8 +8094,11 @@ class MeshNode:
         except Exception:
             return
         src = NodeID(packet.src_id)
-        expected_nonce = self._e2e_pending_nonce.get(src)
-        if expected_nonce is None or nonce != expected_nonce:
+        # Cheap gate before the signature work, as before: an answer to a nonce
+        # we are not waiting on is not ours. Looked up, not consumed — a bogus
+        # ACK must not be able to spend the attempt it names.
+        kem_secret = self._e2e_attempt_secret(src, nonce)
+        if kem_secret is None:
             return
         if NodeID.from_public_key(dsa_pub) != src:
             return
@@ -8039,10 +8106,7 @@ class MeshNode:
             return
         if not self._identity.verify(nonce + ciphertext + dsa_pub, signature, dsa_pub):
             return
-        kem_secret = self._e2e_pending_kem.pop(src, None)
-        if kem_secret is None:
-            return
-        self._e2e_pending_nonce.pop(src, None)
+        self._e2e_drop_attempts(src)
         shared_secret = self._identity.kem_decapsulate(ciphertext, kem_secret)
         self._keep_e2e_session(src, SessionKey(shared_secret))
         pending = self._e2e_pending_data.pop(src, [])
