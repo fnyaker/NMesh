@@ -362,6 +362,13 @@ class UDPTransport(BaseTransport):
                "-254 to 254. Weighed against measured latency; the balance "
                "between the two is set once for the node, under Reachability.",
                minimum=-254, maximum=254),
+        option("mlo", "bool", False,
+               "Let this medium carry half of a peer's traffic beside another "
+               "link (multi-link operation). It buys throughput and a much "
+               "faster reaction to a link going bad, and it costs a probe "
+               "every hundred milliseconds on every link it bundles — so it is "
+               "off unless the medium is one where that is cheap.",
+               label="MLO ready"),
         option("retry_interval", "float", 0.0,
                "How often to re-dial a known node this one has no link to, on "
                "each of its UDP addresses. Zero switches it off: nothing "

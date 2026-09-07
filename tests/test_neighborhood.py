@@ -8,6 +8,7 @@ worst slot, it discovers it and maintains it in that slot's place. See
 """
 import asyncio
 import os
+import time
 
 import pytest
 
@@ -308,21 +309,29 @@ async def test_watching_never_wakes_the_loop():
 # ── keepalive ────────────────────────────────────────────────────────────────
 
 async def _run_keepalive_once(node, monkeypatch, expected: int) -> list:
-    """Laisse tourner un cycle de keepalive et renvoie l'ordre des PING."""
+    """Run one keepalive cycle and return the order the PINGs went out in.
+
+    Every link is made due now: the loop probes each one on *its own* due time
+    rather than everybody on one interval, so a test about the order has to say
+    that they are all due at once — otherwise it is measuring the due times it
+    happened to inherit."""
     pinged = []
 
     async def fake_ping(peer):
         pinged.append(peer.authenticated_id)
+        peer.ka_due = time.monotonic() + 3600.0    # probed once, not in a loop
 
     monkeypatch.setattr(node, "ping", fake_ping)
     monkeypatch.setattr(src.node, "_LINK_KEEPALIVE_INTERVAL", 0)
+    for peer in node._peers:
+        peer.ka_due = 0.0
 
     node._running = True
     task = asyncio.create_task(node._link_keepalive_loop())
-    for _ in range(200):
+    for _ in range(400):
         if len(pinged) >= expected:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.005)
     node._running = False
     task.cancel()
     try:

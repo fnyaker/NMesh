@@ -73,6 +73,30 @@ datagram = one packet.
 
 ---
 
+## Declaring what your medium is worth
+
+A transport declares its settings in `OPTIONS` (see
+[`../Architecture/transports.md`](../Architecture/transports.md)); the
+coercion, the bounds and the rendering are written once for everybody. Two of
+them are read by the **core** rather than by the transport, so a medium that
+does not declare them simply does not take part in what they decide:
+
+| option | what the core does with it |
+|---|---|
+| `priority` (−254…254) | how much this node prefers the medium when choosing between a peer's addresses, weighed against measured latency |
+| `retry_interval` (s, 0 = off) | how often a known but unlinked node's addresses on this medium are re-dialled |
+| `mlo` (bool) | may two links over this medium carry one peer's traffic together (**multi-link operation**) |
+
+`mlo` deserves a word, because it is the one that costs something continuously.
+Declaring it does not turn anything on — it offers the operator a checkbox — but
+a bundled link is probed roughly every hundred milliseconds for as long as the
+node is being used. Offer it where that is cheap (Ethernet, Wi-Fi) and leave it
+undeclared where it is not: a medium that never declares the option can never be
+bundled, and for a store-and-forward or radio link that is the right answer
+rather than a gap.
+
+---
+
 ## Example: an in-memory transport (for tests)
 
 See Docs/Transports/template.py

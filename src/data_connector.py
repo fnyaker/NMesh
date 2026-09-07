@@ -162,6 +162,14 @@ class DataConnector:
                 self._handle_client, self._host, self.port, ssl=self._ssl)
             self.port = self._server.sockets[0].getsockname()[1]
         self._pump_task = asyncio.create_task(self._pump())
+        # An attached app is what "this node is being used" means from here,
+        # and it is a *state* rather than an event: a chat page open with
+        # nobody typing is still a page open. So the node is handed something
+        # it can ask, instead of being told once and left to time it out. See
+        # `MeshNode.hold_awake`.
+        hold = getattr(self._node, "hold_awake", None)
+        if hold is not None:
+            hold("app", lambda: bool(self._clients))
 
     async def stop(self) -> None:
         if self._pump_task is not None:
@@ -198,6 +206,9 @@ class DataConnector:
                 os.unlink(self._unix_path)
             except OSError:
                 pass
+        drop = getattr(self._node, "drop_awake", None)
+        if drop is not None:
+            drop("app")     # a connector that has stopped holds nothing awake
 
     async def _pump(self) -> None:
         """Demultiplex inbound mesh messages by app section to matching clients.
