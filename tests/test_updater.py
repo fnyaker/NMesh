@@ -24,6 +24,16 @@ from src.version import __version__, is_newer, parse
 ROOT = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _follow_releases(monkeypatch):
+    """Every test here means "a node that follows the published releases".
+
+    Said out loud rather than assumed: the branch this node follows now comes
+    from its configuration file, and a machine that happens to have one next to
+    the checkout would otherwise send these tests somewhere else entirely."""
+    monkeypatch.setenv(updater.UPDATE_BRANCH_ENV, "")
+
+
 class TestVersionComparison:
     def test_matches_pyproject(self):
         """Two sources of truth drifting apart means a wrong version shown to
@@ -102,6 +112,72 @@ class TestCheckParsing:
         assert result["notes"] == ""
         assert len(result["url"]) <= 512
         assert isinstance(result["published_at"], str)
+
+
+class TestFollowingABranch:
+    """Checking `src/version.py` at a branch instead of the published releases."""
+
+    def _source(self, monkeypatch, text: str):
+        monkeypatch.setattr(updater, "_fetch",
+                            lambda url, **kw: text.encode())
+
+    def test_the_branch_says_what_the_latest_version_is(self, monkeypatch):
+        self._source(monkeypatch, '__version__ = "99.0.0"\n')
+        result = updater.check_sync(branch="main")
+        assert result["source"] == "branch"
+        assert result["branch"] == "main"
+        assert result["latest"] == "99.0.0"
+        assert result["available"] is True
+
+    def test_the_same_version_is_not_an_update(self, monkeypatch):
+        self._source(monkeypatch, f'__version__ = "{__version__}"\n')
+        assert updater.check_sync(branch="main")["available"] is False
+
+    def test_a_file_declaring_nothing_is_an_error(self, monkeypatch):
+        self._source(monkeypatch, "# nothing here\n")
+        with pytest.raises(updater.UpdateError, match="no version"):
+            updater.check_sync(branch="main")
+
+    def test_an_unreadable_version_is_never_newer(self, monkeypatch):
+        for text in ('__version__ = "tomorrow"\n',
+                     '__version__ = "9.9.9 <script>"\n'):
+            self._source(monkeypatch, text)
+            with pytest.raises(updater.UpdateError, match="cannot be read"):
+                updater.check_sync(branch="main")
+
+    def test_a_branch_name_that_would_leave_the_repository_is_refused(
+            self, monkeypatch):
+        """An unusable name falls back to the releases rather than being
+        escaped into a URL that asks somewhere nobody chose."""
+        monkeypatch.setattr(updater, "_latest_release",
+                            lambda: {"tag_name": "v99.0.0"})
+        for bad in ("../../elsewhere", "/etc", "a branch", "x" * 200):
+            assert updater.check_sync(branch=bad)["source"] == "release"
+
+    def test_the_environment_names_the_branch(self, monkeypatch):
+        monkeypatch.setenv(updater.UPDATE_BRANCH_ENV, "main")
+        self._source(monkeypatch, '__version__ = "99.0.0"\n')
+        assert updater.check_sync()["branch"] == "main"
+
+    def test_the_configuration_file_names_the_branch(self, tmp_path,
+                                                     monkeypatch):
+        monkeypatch.delenv(updater.UPDATE_BRANCH_ENV, raising=False)
+        path = tmp_path / "nmesh.conf"
+        path.write_text("update_branch = testing\n")
+        assert updater.update_branch(str(path)) == "testing"
+
+    def test_no_branch_means_the_releases(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(updater.UPDATE_BRANCH_ENV, raising=False)
+        path = tmp_path / "nmesh.conf"
+        path.write_text("update_branch =\n")
+        assert updater.update_branch(str(path)) == ""
+
+    def test_a_branch_the_file_would_refuse_is_not_followed(self, tmp_path,
+                                                            monkeypatch):
+        monkeypatch.delenv(updater.UPDATE_BRANCH_ENV, raising=False)
+        path = tmp_path / "nmesh.conf"
+        path.write_text("update_branch = ../elsewhere\n")
+        assert updater.update_branch(str(path)) == ""
 
 
 def _make_release_tarball(entries: dict, top: str = "NMesh-1.0") -> bytes:
@@ -343,6 +419,59 @@ class TestApplyingVerifiedFiles:
         assert updater.safe_relative("src/node.py") == os.path.join("src", "node.py")
         for bad in ("/abs", "../up", "a/../../b", "a/\x00b", "", None, 42, "."):
             assert updater.safe_relative(bad) is None
+
+
+class TestInstallingFromABranch:
+    """A branch moves under its own name, so the tree that arrives is checked
+    against the version the operator confirmed."""
+
+    def _install(self, tmp_path):
+        root = tmp_path / "install"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "version.py").write_text('__version__ = "1.0.0"\n')
+        (root / "start.sh").write_text("#!/bin/sh\necho old\n")
+        return root
+
+    def _tarball(self, version: str) -> bytes:
+        return _make_release_tarball({
+            "src/version.py": f'__version__ = "{version}"\n',
+            "start.sh": "#!/bin/sh\necho new\n"})
+
+    def test_it_downloads_the_branch_not_a_tag(self, tmp_path, monkeypatch):
+        asked = []
+
+        def codeload(ref, what):
+            asked.append(ref)
+            return self._tarball("99.0.0")
+
+        monkeypatch.setattr(updater, "_codeload", codeload)
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        root = self._install(tmp_path)
+        result = updater.apply_sync("99.0.0", root=str(root), branch="main")
+        assert asked == ["refs/heads/main"]
+        assert result["applied"] == "99.0.0"
+        assert (root / "src" / "version.py").read_text().strip().endswith('"99.0.0"')
+
+    def test_a_branch_that_moved_since_the_check_is_refused(self, tmp_path,
+                                                            monkeypatch):
+        monkeypatch.setattr(updater, "_codeload",
+                            lambda ref, what: self._tarball("99.0.1"))
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        root = self._install(tmp_path)
+        with pytest.raises(updater.UpdateError, match="now carries 99.0.1"):
+            updater.apply_sync("99.0.0", root=str(root), branch="main")
+        # Refused before anything was replaced.
+        assert (root / "src" / "version.py").read_text() == '__version__ = "1.0.0"\n'
+        assert not (root / ".nmesh-update").exists()
+
+    def test_a_tree_declaring_no_version_is_refused(self, tmp_path, monkeypatch):
+        archive = _make_release_tarball({"src/node.py": "code\n",
+                                         "start.sh": "#!/bin/sh\n"})
+        monkeypatch.setattr(updater, "_codeload", lambda ref, what: archive)
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        root = self._install(tmp_path)
+        with pytest.raises(updater.UpdateError, match="no version"):
+            updater.apply_sync("99.0.0", root=str(root), branch="main")
 
 
 class TestGuards:

@@ -39,6 +39,7 @@ MAX_LIST = 32
 _HOST_RE = re.compile(r"\A[A-Za-z0-9._:\[\]-]{1,255}\Z")
 _SCHEME_KEY = re.compile(r"\A[a-z0-9_]{1,32}\Z")
 _ADDR_RE = re.compile(r"\A[A-Za-z0-9._:\[\]-]{1,255}:\d{1,5}\Z")
+_BRANCH_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,99}\Z")
 
 
 class ConfigError(Exception):
@@ -186,6 +187,23 @@ def _as_quorum(raw: str) -> int:
     return value
 
 
+def _as_branch(raw: str) -> str:
+    """A branch to follow instead of the published releases. Empty = releases.
+
+    Validated here because the name goes straight into a URL path: a value that
+    could walk out of the repository's own namespace (``..``, a leading slash, a
+    space) is refused rather than escaped — an update check that quietly asks a
+    different address for its answer is the worst way to learn a name was
+    wrong."""
+    value = raw.strip()
+    if not value:
+        return ""
+    if (not _BRANCH_RE.match(value) or ".." in value
+            or value.endswith(("/", ".lock"))):
+        raise ConfigError("not a usable branch name")
+    return value
+
+
 def _as_path(raw: str):
     value = raw.strip()
     if not value:
@@ -280,6 +298,15 @@ SETTINGS = {
     "release_auto_publish": (_as_bool, False, True,
                         "Publish this node's own code to the mesh whenever its "
                         "version changes (signed with the node identity)"),
+    # Where "is there a newer version?" gets its answer. Empty is the default
+    # and means the published releases: a tag is something somebody decided to
+    # publish. A branch is whatever was pushed to it a minute ago, so following
+    # one is a deliberate choice — a test fleet tracking `main` — and the answer
+    # then comes from `src/version.py` at that branch, not from a release.
+    "update_branch":   (_as_branch, "", True,
+                        "Branch whose src/version.py says what the latest "
+                        "version is, instead of the published GitHub releases "
+                        "(empty = releases)"),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),

@@ -169,6 +169,39 @@ class TestHostileFiles:
             config.validate("listen", "0.0.0.0:9000\nfleet = true")
 
 
+class TestUpdateBranchSetting:
+    """Which branch the update check follows. The value lands in a URL path, so
+    the parser is the gate — not whoever builds the URL."""
+
+    def test_empty_means_the_published_releases(self):
+        assert config.defaults()["update_branch"] == ""
+        values, problems = config.parse("update_branch =\n")
+        assert problems == [] and values["update_branch"] == ""
+
+    def test_a_branch_name_is_kept(self):
+        values, problems = config.parse("update_branch = feature/new-thing\n")
+        assert problems == [] and values["update_branch"] == "feature/new-thing"
+
+    def test_names_that_could_leave_the_repository_are_refused(self):
+        for bad in ("../elsewhere", "/etc/passwd", "a branch", "main/",
+                    "-dash-first", "x" * 200, "a/../../b"):
+            values, problems = config.parse(f"update_branch = {bad}\n")
+            assert problems and "update_branch" not in values
+
+    def test_it_survives_a_round_trip_through_the_file(self, tmp_path):
+        path = str(tmp_path / "nmesh.conf")
+        merged = config.defaults()
+        merged["update_branch"] = "main"
+        config.save(path, merged)
+        values, problems = config.load(path)
+        assert problems == [] and values["update_branch"] == "main"
+
+    def test_the_console_may_set_it(self):
+        merged, rejected = config.apply_edits(config.defaults(),
+                                              {"update_branch": "main"})
+        assert rejected == [] and merged["update_branch"] == "main"
+
+
 class TestConsoleEdits:
     def test_a_valid_edit_is_applied(self):
         merged, rejected = config.apply_edits(config.defaults(),
