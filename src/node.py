@@ -8,7 +8,6 @@ import os
 import random
 import re
 import socket
-import ssl
 import struct
 import threading
 import time
@@ -20,6 +19,7 @@ from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
 from .packet import Packet
 from .seen import SeenSet
+from .activity import Activity
 from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
 from .cert import Certificate
@@ -1507,6 +1507,9 @@ class MeshNode:
         # of on a clock: at rest there is nothing to find, and a tick that
         # exists to find nothing is one the node pays for every two seconds
         # for as long as it runs.
+        # Who is doing what, by name. Declared once per loop when it starts;
+        # a pass is two attribute writes. Never touched by the packet path.
+        self._activity = Activity()
         self._state_wakeup = asyncio.Event()
         # Set when data is queued for a peer we have no session with, and when
         # a route appears that a stalled handshake may now travel.
@@ -1855,11 +1858,16 @@ class MeshNode:
     async def _punch_keepalive_loop(self) -> None:
         """Refresh the listener's NAT mapping on a timer while continuous mode
         is on. Never raises out — a broken probe must not kill the loop."""
+        job = self._activity.register(
+            "punch-keepalive",
+            "refreshes the NAT mapping on the UDP listener so a punched path stays open",
+            "a 20 s timer")
         while self._punch_keepalive and self._running:
             try:
                 await self._send_nat_keepalive()
             except Exception:
                 pass
+            job.ran()
             await asyncio.sleep(_PUNCH_KEEPALIVE_INTERVAL)
 
     async def _send_nat_keepalive(self) -> None:
@@ -1969,7 +1977,12 @@ class MeshNode:
 
         Each service gets a per-socket timeout AND we cap the DNS lookup, so a
         single stuck host can't consume the whole overall budget."""
+        # Imported here, not at module scope: `ssl` costs about five
+        # milliseconds to import and this is the only line in the file that
+        # touches it — a probe that runs at most once a network change, in an
+        # executor. Every node paid that on the way up.
         import http.client
+        import ssl
         services = [
             ("ip.me", "/"),
             ("ifconfig.me", "/"),
@@ -2466,8 +2479,14 @@ class MeshNode:
         links the node commits to, so they must never be the ones starved by a
         slow or dead peer earlier in the list. Dropping below the floor puts
         maintenance back into its searching regime immediately."""
+        job = self._activity.register(
+            "keepalive",
+            "pings every link so an idle one is not torn down, then reaps the silent"
+            " ones and sweeps behaviour",
+            "a 20 s timer")
         while self._running:
             await asyncio.sleep(_LINK_KEEPALIVE_INTERVAL)
+            job.ran()
             slots = self._neighbor_slots()
             peers = sorted(self._peers,
                            key=lambda p: 0 if p.authenticated_id in slots else 1)
@@ -2789,8 +2808,14 @@ class MeshNode:
         turn up nothing new stretch the wait out to `_NEIGHBOR_IDLE_MAX`; a
         real change — a peer gained or lost, an identity we had not seen —
         wakes the loop and resets it."""
+        job = self._activity.register(
+            "neighbours",
+            "keeps a target neighbourhood: looks up, dials, and promotes what is"
+            " closer than the worst slot held",
+            "a link or an identity changed, backing off while nothing does")
         while self._running:
             self._neighbor_wakeup.clear()
+            job.ran()
             before = len(self._live_neighbors())
             known_before = len(self._routing.all_entries())
             try:
@@ -2959,8 +2984,13 @@ class MeshNode:
         Never raises: this loop dying would be a silent loss of recovery. It
         sleeps on the book's own next due time, so an empty book costs one
         wait rather than a tick a second."""
+        job = self._activity.register(
+            "reconnect",
+            "dials back the nodes whose link died, on the book's own schedule",
+            "a link died, or the next entry falls due")
         while self._running:
             self._reconnect_wakeup.clear()
+            job.ran()
             try:
                 await self._reconnect_pass()
             except asyncio.CancelledError:
@@ -3568,8 +3598,13 @@ class MeshNode:
         is healthy — and `send_data` already sends the first handshake itself,
         so the tick was never what got a message moving, only what got it moving
         again."""
+        job = self._activity.register(
+            "e2e-retry",
+            "re-drives end-to-end handshakes for peers with data still queued",
+            "data was queued, or a route appeared")
         while self._running:
             self._e2e_wakeup.clear()
+            job.ran()
             # Prune bookkeeping for targets that are done (session up / no backlog).
             for t in [t for t in self._e2e_attempt
                       if t in self._e2e_sessions or t not in self._e2e_pending_data]:
@@ -3898,6 +3933,11 @@ class MeshNode:
 
         Shutdown needs no special case here: `_stop_state_writer` cancels this
         and then flushes whatever is still dirty."""
+        job = self._activity.register(
+            "state-writer",
+            "writes the session store, the certificates and the names, off the loop"
+            " thread",
+            "something was marked dirty")
         while True:
             if not self._state_is_dirty():
                 if not self._running:
@@ -3907,6 +3947,7 @@ class MeshNode:
                     await self._state_wakeup.wait()
                 continue
             await asyncio.sleep(_STATE_WRITE_INTERVAL)
+            job.ran()
             if self._state_dirty:
                 await asyncio.to_thread(self._write_state_now)
             if self._certs_dirty:
@@ -4018,6 +4059,11 @@ class MeshNode:
             "topology": self._console_topology(now),
             "total": self._metrics.total.as_dict(),
             "load": self._metrics.load(),
+            # What is running, by name. Built here from counters the loops kept
+            # anyway — a snapshot costs one pass over at most a dozen jobs, and
+            # nothing at all when nobody reads it.
+            "activity": self._activity.jobs(),
+            "detached": len(self._detached),
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
             "transport_details": self._transport_details(),
@@ -4417,8 +4463,14 @@ class MeshNode:
         and rediscover, each time, that there was nothing it was allowed to do.
         `_RETRY_TICK` survives as the floor rather than the period: a medium
         that asks for a millisecond does not get one."""
+        job = self._activity.register(
+            "address-retry",
+            "redials the known addresses of unlinked nodes, at the cadence each"
+            " medium asks for",
+            "a link dropped, or a medium's settings changed")
         while self._running:
             self._retry_wakeup.clear()
+            job.ran()
             wait = self._retry_wait()
             if wait is None:
                 # Nothing retryable. A dropped link or a changed setting is what
@@ -4564,7 +4616,13 @@ class MeshNode:
         because an address that looks fast and cannot complete a handshake is
         not a better address. The loser is closed either way, so the node never
         keeps two links to one peer beyond the measurement."""
+        job = self._activity.register(
+            "steering",
+            "moves a link onto a better-scoring address of the same node, when"
+            " asked to",
+            "the dynamic-address switch")
         while self._running:
+            job.ran()
             if not self._dynamic_address:
                 # Off is the default and the normal state. Waiting on the switch
                 # costs nothing; waking every minute to read a boolean costs a
@@ -5387,6 +5445,11 @@ class MeshNode:
             packet, self._route_candidates(target, exclude=from_peer),
             decrement=True)
         if peer is not None:
+            # Carried for somebody else. `peer.send` has already counted these
+            # bytes as ours going out; this is the one place that knows they
+            # were not ours, and it is one integer pair on a path that has just
+            # done a routing decision and a write.
+            self._metrics.total.on_relay(_HEADER_BYTES + len(packet.payload))
             return
         # No live relay. Acquiring one takes seconds and must not happen here:
         # this runs in from_peer's receive loop, so an inline lookup/dial froze
@@ -6845,8 +6908,14 @@ class MeshNode:
 
         Never raises: this loop dying would silently stop the updates an
         operator asked for."""
+        job = self._activity.register(
+            "releases",
+            "settles announced releases and installs one when a pinned publisher is"
+            " allowed to",
+            "a release was announced")
         delay = _RELEASE_FIRST_TICK
         while self._running:
+            job.ran()
             try:
                 await asyncio.wait_for(self._release_wake.wait(), delay)
                 # A peer catching us up sends every release it holds; waiting a
@@ -8071,6 +8140,10 @@ class MeshNode:
 
         Never raises: this loop dying is the outage it exists to prevent, and it
         would be invisible until the day the chain expired."""
+        job = self._activity.register(
+            "cert-renewal",
+            "asks our issuer for a fresh membership well before ours runs out",
+            "a 6 h timer")
         await asyncio.sleep(_CERT_RENEW_FIRST)
         while self._running:
             try:
@@ -8079,6 +8152,7 @@ class MeshNode:
                 raise
             except Exception:
                 pass          # a sweep that fails is retried at the next tick
+            job.ran()
             await asyncio.sleep(_CERT_RENEW_TICK)
 
     async def _renew_own_membership(self) -> bool:
