@@ -22,6 +22,7 @@ import pytest
 from src import revocation
 from src.crypto import CryptoIdentity
 from src.node import (MeshNode, _Peer, _MAX_MALFORMED, _DEAD_LINK_PROBES,
+                      _DEAD_LINK_SILENCE,
                       _RECONNECT_BACKOFF_MAX, _RECONNECT_FIRST_DELAY,
                       _RECONNECT_MAX_IN_FLIGHT, _RECONNECT_MIN_TICK,
                       _RECONNECT_NODES_TRACKED, _RECONNECT_WINDOW)
@@ -47,6 +48,18 @@ def _link(node: MeshNode, target: NodeID, *, uri: str = "fake://a:1") -> _Peer:
     peer.session = object()
     peer.remote_addr = uri
     node._peers.append(peer)
+    return peer
+
+
+def _go_silent(peer: _Peer) -> _Peer:
+    """A link that has answered nothing for long enough to be cut.
+
+    Both halves: the run of unanswered probes *and* the silence it stands for.
+    A run alone stopped being a duration once a link could negotiate its own
+    cadence — see `_reap_silent_links`."""
+    for _ in range(_DEAD_LINK_PROBES):
+        peer.quality.on_ping()
+    peer.quality.answered_at = time.monotonic() - _DEAD_LINK_SILENCE - 1.0
     return peer
 
 
@@ -298,8 +311,7 @@ class TestEveryWayALinkDies:
     async def test_a_link_that_answers_no_probe_enrols_the_node(self):
         node = _node()
         peer = _link(node, TARGET)
-        for _ in range(_DEAD_LINK_PROBES):
-            peer.quality.on_ping()
+        _go_silent(peer)
         node._reap_silent_links()
         assert TARGET in node._reconnect
 
@@ -308,9 +320,7 @@ class TestEveryWayALinkDies:
         other still listed and call the node reached."""
         node = _node()
         for uri in ("fake://a:1", "udp://a:2"):
-            peer = _link(node, TARGET, uri=uri)
-            for _ in range(_DEAD_LINK_PROBES):
-                peer.quality.on_ping()
+            _go_silent(_link(node, TARGET, uri=uri))
         node._reap_silent_links()
         assert TARGET in node._reconnect
 

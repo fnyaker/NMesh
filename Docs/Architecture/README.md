@@ -20,7 +20,7 @@ is therefore safe to accept from strangers.
 
 | File | Role |
 |---|---|
-| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**. |
+| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive (a **due time per link**, not one interval for all), reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**, **spreading one node's traffic over two links**. |
 | `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
 | `activity.py` | Who is doing what: every background loop declares a name, what it does and **what wakes it**, and counts its own passes. Nothing on the packet path. |
 | `seen.py` | The replay window: a bounded, **exact** set of 64-bit ids in a flat table, generational eviction, seeded buckets. Sixteen bytes an id where boxing them cost a hundred. |
@@ -30,8 +30,9 @@ is therefore safe to accept from strangers.
 | `revocation.py` | A signed "I no longer vouch for this node", from its issuer and nobody else. |
 | `reputation.py` | What this node thinks of the nodes it talks to: a bounded, decaying score fed by the core and by the apps, plus `RateGate`. |
 | `app_guard.py` | An app's per-kind allowances per sender, and the one place a breach is reported to the node. |
-| `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. |
+| `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. Silence means yes for every name older than the negotiation, and no for the ones added since (`SINCE_NEGOTIATION`) — the same sentence, "exactly what it received before", read in both directions. |
 | `behaviour.py` | Named rules over counters the links already keep, swept on the keepalive timer. Compares a peer to its transport class, never to a constant; a rule that fires on everyone disarms itself. |
+| `mlo.py` | **Multi-link operation**: two links to one node carrying its traffic together, and the keepalive **accord** that makes measuring them possible. Which links are close enough to bundle, what that costs in reordering, and which one is losing enough to be benched — over opaque keys, so none of it needs a mesh to be tested. |
 | `publisher_key.py` | A release-signing key kept encrypted at rest, unlocked only to sign. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `equivocation.py` | The one report that is **not** an opinion: two records signed by the same key that cannot both have been meant. Forging one needs the key it accuses, so the messenger's honesty is not in it. |
@@ -73,7 +74,8 @@ is therefore safe to accept from strangers.
 3. **[routing.md](routing.md)** — routing table, `last_seen`, on-demand
    routing, Kademlia lookup, DHT, **address propagation**.
 4. **[transports.md](transports.md)** — the transport abstraction, TCP/UDP/spool,
-   NAT hole punching, STUN, reachability/AutoNAT, net monitor, keepalive.
+   NAT hole punching, STUN, reachability/AutoNAT, net monitor, keepalive, the
+   **keepalive accord** and **multi-link operation**.
 5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
    blocking network probes, hole-punch races, parallelising the tests).
    **Start here before debugging a hang or a flaky test.**

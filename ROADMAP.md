@@ -422,6 +422,39 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   missed wake-up, not the schedule.
 - GitHub remains as the first-run route only. Docs: `Docs/Updates/guide`.
 
+### Multi-link operation (`src/mlo.py`) — done
+
+- A node reached over two media at once carries one peer's traffic down
+  **both**, in turn, instead of leaving the loser of `_link_score` idle. One
+  place spreads it (`_route_candidates` → `_stripe`), so app data and relayed
+  traffic follow the same rule and a link excluded by a forward is still
+  excluded when the turn lands on it.
+- Bundled only when the two links **measure alike** (`mlo_skew_ms`, default
+  30 ms), and the reordering that buys — twice the measured skew — is a number
+  the node publishes rather than a hope. A member losing more than
+  `mlo_drop_percent` is benched, keeps its probes, and rejoins at *half* that
+  share: one threshold in both directions is a link that flaps on a single
+  probe.
+- Paid for by a **keepalive accord**. Two nodes declare a window of cadences
+  and both compute the intersection — nothing is exchanged to settle it — and
+  every probe then announces when the next one is due, under a token the answer
+  echoes so a probe can be matched to its own answer at ten a second. Three
+  behavioural findings come out of it (K1–K3), and one property holds the whole
+  plane up: nothing a peer sends raises this node's probe rate above what it
+  had before any of this existed.
+- Off by default and ticked **per medium** (`tcp.mlo`, `udp.mlo`) — a probe ten
+  times a second is cheap on Ethernet and expensive on a battery — and awake
+  only while the node is being used, unless `mlo_always`. A medium that never
+  declares the option can never be bundled, which is the right answer for
+  store-and-forward.
+- Backward compatible through the negotiation, and that needed a second
+  predicate: silence means *yes* for every plane older than the announcement
+  and *no* for the ones added since (`features.SINCE_NEGOTIATION`).
+- Apps must tolerate arriving out of order — which a mesh never guaranteed
+  anyway. Chat's edits, deletions and reactions now wait for the message they
+  name instead of being dropped.
+- Docs: `Docs/Architecture/transports.md`, `Docs/Setup/guide`.
+
 ### Long term
 - **Signing GitHub releases too** (or dropping that route once a node can always
   reach a publisher it trusts on the mesh).

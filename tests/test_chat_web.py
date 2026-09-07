@@ -12,7 +12,8 @@ import os
 
 import pytest
 
-from src.apps.chat import ChatApp, TextMessage
+from src.apps.chat import (ChatApp, Deleted, Edited, Reaction,
+                           TextMessage)
 from src.apps.chat_web import ChatWebServer
 from src.node_id import NodeID
 
@@ -124,3 +125,67 @@ class TestChatWeb:
             assert status == 200 and b"NMesh" in body
         finally:
             server.stop()
+
+
+class TestArrivingOutOfOrder:
+    """An app on a mesh cannot assume order, and chat's answer is to wait.
+
+    A routed reply has never been obliged to arrive after the one before it,
+    and multi-link operation makes the overtaking deliberate and a few
+    milliseconds wide (`src/mlo.py`). An edit that outran its own message used
+    to be dropped in silence — the message then stayed unedited for ever with
+    nothing anywhere saying why."""
+
+    def _bridge(self):
+        return ChatWebServer(ChatApp(StubClient()), host="127.0.0.1", port=0,
+                             token=TOKEN, peer=PEER).bridge
+
+    async def test_an_edit_that_arrives_first_is_applied_when_it_can_be(self):
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        bridge._on_event(Edited(SRC, None, mid, "corrected"))
+        bridge._on_event(TextMessage(SRC, "original", mid))
+        held = [m for m in bridge.snapshot(0)["messages"]]
+        assert [m["text"] for m in held] == ["corrected"]
+        assert held[0]["edited"] is True
+
+    async def test_a_reaction_that_arrives_first_lands_on_the_message(self):
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        bridge._on_event(Reaction(SRC, None, mid, "\N{PARTY POPPER}"))
+        bridge._on_event(TextMessage(SRC, "hello", mid))
+        message = bridge.snapshot(0)["messages"][0]
+        assert list(message["reactions"]) == ["\N{PARTY POPPER}"]
+
+    async def test_a_deletion_that_arrives_first_still_deletes(self):
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        bridge._on_event(Deleted(SRC, None, mid))
+        bridge._on_event(TextMessage(SRC, "oops", mid))
+        message = bridge.snapshot(0)["messages"][0]
+        assert message["deleted"] is True and message["text"] == ""
+
+    async def test_waiting_is_bounded_in_number(self):
+        bridge = self._bridge()
+        for _ in range(500):
+            bridge._on_event(Edited(SRC, None, os.urandom(8), "x"))
+        assert len(bridge._orphans) <= 128
+
+    async def test_waiting_is_bounded_in_time(self):
+        """An operation whose message never comes is a message nobody sent us."""
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        bridge._on_event(Edited(SRC, None, mid, "corrected"))
+        at, operations = bridge._orphans[mid.hex()]
+        bridge._orphans[mid.hex()] = (at - 10_000, operations)
+        bridge._on_event(Edited(SRC, None, os.urandom(8), "y"))   # any later one
+        assert mid.hex() not in bridge._orphans
+
+    async def test_a_replay_does_not_park_itself_again(self):
+        """The record is registered before the replay runs, or the operation
+        would land back on the very message it was waiting for."""
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        bridge._on_event(Edited(SRC, None, mid, "corrected"))
+        bridge._on_event(TextMessage(SRC, "original", mid))
+        assert bridge._orphans == {}

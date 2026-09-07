@@ -244,12 +244,37 @@ Three rules, and they are load-bearing:
    has announced nothing: that is a node from before this existed, not one with
    no features. Read the other way, the negotiation would be an upgrade that
    cuts off everyone who has not taken it.
+
+   The rule is "it must keep working **exactly as it did**", and that sentence
+   points both ways. Every name in the classic set predates the announcement, so
+   a silent peer must go on receiving all of them. A name added *after* the
+   negotiation is the opposite case: silence there is a peer that has never
+   heard of it, and sending it the new thing is not what it received before — it
+   is a message it drops and an answer we then wait for. Those names are listed
+   in `features.SINCE_NEGOTIATION` and asked through **`peer_announces`**, which
+   requires the name to have actually been said. The first plane to need it was
+   the keepalive accord, where the cost of getting it wrong is not a lost
+   feature but a **healthy link measured as losing every probe** (see
+   `gotchas.md`).
 3. **Negotiation may only ever add.** No name switches off a check, weakens a
    cipher, skips a verification or widens an authorisation. The announcement
    happens *before* anybody has proved anything, so a name that could weaken
    something would be the way in. What is negotiated is only which **optional
    messages** are worth sending — the gossip planes, the directory, renewal,
-   revocation, abuse reports. A test asserts no feature name reads like a check.
+   revocation, abuse reports, the keepalive accord and multi-link operation. A
+   test asserts no feature name reads like a check.
+
+   The accord is worth a second look against this rule, because it is the first
+   negotiated thing that changes what a node *does* rather than what it sends.
+   It still only ever adds, and the whole plane is built around one property:
+   **nothing a peer sends raises this node's probe rate above what it had
+   before any of this existed.** A `KA_REQUEST` may only ever ask for less. A
+   proposed *floor* is a `max`, so it can only slow us. A proposed *ceiling* is
+   a `min` — which is a lever anyone can pull, and was the one place a
+   negotiated value could have cost this node something: `mlo.CEILING_MIN_MS`
+   floors it at the classic interval (see `transports.md`). A peer that
+   announces nothing keeps that interval unchanged. That property is what would
+   have to hold for the plane to be safe, so it is the one the tests state.
 
 Mechanics: the announcement rides the round trip that was happening anyway (the
 server sends it with its `CHALLENGE`, the client answers it on receiving one), so

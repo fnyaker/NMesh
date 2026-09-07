@@ -274,6 +274,20 @@ async def main() -> None:
     ap.add_argument("--dynamic-address", action="store_true", default=None,
                     help="move a live link onto a lower-latency address of the "
                          "same node when one measures better")
+    ap.add_argument("--mlo-always", action="store_true", default=None,
+                    help="keep multi-link operation running even when nothing "
+                         "is using this node (it otherwise wakes with the "
+                         "console or an app and sleeps again afterwards)")
+    ap.add_argument("--mlo-skew-ms", type=int, default=None,
+                    help="how far apart two links may measure and still carry "
+                         "one node's traffic together (default 30 ms)")
+    ap.add_argument("--mlo-drop-percent", type=int, default=None,
+                    help="share of probes a bundled link may lose before it is "
+                         "benched (default 10%%; it rejoins at half that)")
+    ap.add_argument("--keepalive-min-ms", type=int, default=None,
+                    help="fastest keepalive this node will agree to on a link")
+    ap.add_argument("--keepalive-max-ms", type=int, default=None,
+                    help="slowest keepalive this node will agree to on a link")
     ap.add_argument("--lan-discovery", action="store_true", default=None,
                     help="answer LAN relay-discovery beacons (be findable as a "
                          "relay by joiners on the same network)")
@@ -360,6 +374,16 @@ async def main() -> None:
             print(f"  transport-balance: {exc} — keeping the default")
     if args.dynamic_address:
         node.set_dynamic_address(True)
+    if args.mlo_always:
+        node.set_mlo_always(True)
+    if args.mlo_skew_ms is not None or args.mlo_drop_percent is not None:
+        node.set_mlo_settings(skew_ms=args.mlo_skew_ms,
+                              drop_percent=args.mlo_drop_percent)
+    if args.keepalive_min_ms is not None or args.keepalive_max_ms is not None:
+        low, high = node.keepalive_window()
+        node.set_keepalive_window(
+            low if args.keepalive_min_ms is None else args.keepalive_min_ms,
+            high if args.keepalive_max_ms is None else args.keepalive_max_ms)
     if args.lan_discovery:
         await node.start_lan_discovery()
         if args.stun:

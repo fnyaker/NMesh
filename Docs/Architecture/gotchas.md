@@ -204,6 +204,103 @@ feature that never turns on, with nothing anywhere saying why.
 `_RETRY_IDLE_MAX` bounds that to a delay instead of a fault. The wake is what
 makes it prompt; the ceiling is what makes it recoverable.
 
+## A probe count is not a timeout
+
+`_reap_silent_links` cut a link after `_DEAD_LINK_PROBES = 4` unanswered
+probes, and the comment next to the number explained it as "over a minute of
+one-way silence on a link whose own transport reaps at sixty seconds". That
+sentence was true, and it was true *because every link was probed on one
+interval*. Nothing in the code said so.
+
+The moment a link could negotiate its own cadence (`mlo.py`), four probes on a
+bundle member became **four hundred milliseconds**, and the sweep that exists to
+cut half-open sockets would have cut a healthy link for a hiccup — undoing the
+whole point of benching a lossy member instead of losing it. The failure would
+have been a link that drops and comes back every few seconds under load, which
+reads as a bad network rather than as a bug.
+
+The run is now joined by the duration it always stood for (`_DEAD_LINK_SILENCE`,
+off `LinkQuality.answered_at`) and a link has to fail **both**. Neither half
+alone is right: the run alone cuts a fast-probed link for a hiccup, and the
+silence alone cuts a link on a slow medium that nobody has got round to probing.
+
+> **Any threshold expressed in "how many times" carries an unwritten "how
+> often".** When the cadence becomes a variable, go and find every count that
+> was silently a duration.
+
+## Adding a message to a plane everybody already speaks
+
+The PING gained a trailer (`next_ms ‖ token`, see `protocol.md`). Two questions
+look like one and are not, and answering only the first is a bug with no error
+message anywhere.
+
+1. **Will a build without this break on it?** No — `_decode_addresses` has
+   always stopped at the last address. That is what makes it a trailer, and it
+   is the same reasoning as `_HINTS_OK` on a `FOUND_NODE`.
+2. **May it therefore be sent to anybody?** *No.* The answer has to echo the
+   token back, and a peer that does not know that sends an empty PONG. Every
+   probe would then be unmatched, and `LinkQuality.expire` would charge every
+   one of them as a **loss on a link answering perfectly** — which would bench
+   a healthy link, or with the old reaper, cut it.
+
+So the trailer only goes to a peer that *announced* `keepalive`. And that
+exposed a second trap in the negotiation itself:
+
+`peer_speaks` reads silence as **yes**, and that is right and stays right: every
+name in the classic set predates the announcement, and a node from before it
+must keep receiving exactly what it received before. For a name added *after*
+the negotiation, the very same sentence gives the opposite answer — silence
+there is a peer that has never heard of it, and sending it the new thing is not
+what it received before. Those names are listed in
+`features.SINCE_NEGOTIATION` and asked through `peer_announces`, which requires
+the name to have been said.
+
+> **"Silence means yes" is a statement about names that are older than the
+> question.** A new name asked through the old predicate is a feature switched
+> on for every peer that has never heard of it.
+
+## A `min` in a negotiated pair is a lever anybody can pull
+
+The keepalive accord takes `max` of the two floors and `min` of the two
+ceilings, which reads as obviously symmetric and is not. The floor is a `max`,
+so nobody can be dragged below what they declared — that half defends itself.
+The ceiling is a `min`, and this node clamps its own cadence into the accord:
+a peer proposing `(100, 150)` pulled the ceiling to 150 ms and bought **six
+probes a second on that link for as long as it existed**. Eight bytes, once,
+per link an adversary opens.
+
+It looks like a fair intersection because both ends compute it identically.
+Symmetry in the *arithmetic* says nothing about symmetry in the *cost*: one
+side spends the packets.
+
+`mlo.CEILING_MIN_MS` floors the ceiling at the cadence every link had before
+any of this existed, so the property becomes statable and testable — nothing a
+peer sends raises this node's probe rate above what it already was. Nothing
+legitimate is lost, because a ceiling exists so a peer can tell a live link
+from a dead one, and a peer's own probes (which we answer whatever our rate is)
+are what its own liveness verdict counts.
+
+> **On any negotiated pair of bounds, ask which side pays for each half.** The
+> half whose extreme costs the *other* party needs a limit that is not
+> negotiable.
+
+## A threshold with no margin is a switch that flaps
+
+A bundle member is benched at `mlo_drop_percent` of its last fifty probes.
+Reading the requirement literally — bench above X, rejoin below X — gives a
+link at the threshold one *probe* of hysteresis: an answer displaces an old
+loss, the share drops by 2%, the link rejoins, loses one, and leaves again.
+About ten times a second, spraying traffic down the one link known to be losing
+it.
+
+The fifty-probe window looks like it damps this and does not: it bounds how far
+the share can move, not how often. `mlo.RECOVER_SHARE` is what does — leaving
+costs the threshold, coming back costs half of it.
+
+> **Whenever a measurement crosses a line in both directions, ask what the
+> smallest observation that can move it is.** If one sample can flip the
+> verdict, the verdict flaps at the sampling rate.
+
 ## Hangs (the job/node "never finishes")
 
 ### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections

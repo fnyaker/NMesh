@@ -150,6 +150,37 @@ it belongs to whoever runs the node, not to an app holding a connector token.
 Renaming goes through the console. Details:
 [`Docs/Pseudos/guide`](../Pseudos/guide).
 
+## What an app is promised about delivery
+
+**Nothing about order.** A message reaches the connector when it reaches the
+node, and that is the only guarantee. Two things break order and one of them
+always could:
+
+- **Routing.** A mesh routes, and a routed reply has never been obliged to
+  arrive after the one before it. This was true on the first day.
+- **Multi-link operation.** When the node holds two links to the same peer over
+  media the operator marked MLO-ready, it spreads packets across both on
+  purpose. That makes the overtaking *deliberate* — and, unlike routing, it
+  gives it a number: roughly twice the measured skew between the two links,
+  a handful of milliseconds on a healthy pair
+  (`MeshNode.reorder_budget_ms`, shown per bundle in the console). See
+  [`../Architecture/transports.md`](../Architecture/transports.md).
+
+So **every app has to tolerate receiving out of order**, and each decides how.
+What the built-ins do is worth copying, because the three shapes cover almost
+everything:
+
+| shape | what it does |
+|---|---|
+| a **sequence number** per stream | `apps/call.py` buffers audio frames by `seq` and writes them out in order |
+| an **index** per piece | chat's file transfer numbers its chunks, so a chunk is placed rather than appended |
+| **wait for what you name** | chat's edits, deletions and reactions name a message id; one that arrives before its message is *held* (bounded in number and in time) and applied when the message lands, instead of being dropped in silence |
+
+The failure to avoid is the fourth shape: an operation that silently does
+nothing when the thing it refers to is not there yet. It works on a fast local
+link, it works in every test, and in the field it loses one edit in a hundred
+with nothing anywhere saying why.
+
 ## Security
 
 - **The token is mandatory** (constant-time comparison) before any action;

@@ -10,13 +10,20 @@ there is, so silence has to be enough to act on.
 
 What is proved here: the run of unanswered probes is what decides, the ratio
 cannot, and a cut heals the link rather than losing the node.
+
+Since a link can negotiate its own probe cadence (see `mlo.py`), a run of
+probes is no longer a duration, and a verdict that means "over a minute of
+silence" at one probe every twenty seconds would mean four hundred
+milliseconds on a bundle member. So the run is joined by the time it always
+stood for, and both have to be true — which is also proved here.
 """
 import asyncio
+import time
 
 import pytest
 
 from src.metrics import LinkQuality
-from src.node import MeshNode, _Peer, _DEAD_LINK_PROBES
+from src.node import (MeshNode, _Peer, _DEAD_LINK_PROBES, _DEAD_LINK_SILENCE)
 from src.node_id import NodeID
 from tests.conftest import FakeTransport, make_manager
 
@@ -28,7 +35,11 @@ def _node() -> MeshNode:
 
 
 def _link(node: MeshNode, target: NodeID, *, uri: str = "fake://a:1",
-          pings: int = 0, pongs: int = 0) -> _Peer:
+          pings: int = 0, pongs: int = 0, silent_for: float | None = None) -> _Peer:
+    """A link with a probe history. ``silent_for`` is how long ago it last
+    answered anything — a run of unanswered probes only cuts a link that has
+    also been quiet for `_DEAD_LINK_SILENCE`, so a test about the run has to
+    say which side of that it is on."""
     peer = _Peer(FakeTransport(), is_client_side=True)
     peer.authenticated_id = target
     peer.session = object()
@@ -39,6 +50,10 @@ def _link(node: MeshNode, target: NodeID, *, uri: str = "fake://a:1",
         quality.on_pong(0.01)
     for _ in range(pings):
         quality.on_ping()
+    if silent_for is None and pings and not pongs:
+        silent_for = _DEAD_LINK_SILENCE + 1.0
+    if silent_for is not None:
+        quality.answered_at = time.monotonic() - silent_for
     peer.quality = quality
     node._peers.append(peer)
     return peer
@@ -102,6 +117,30 @@ class TestReapingSilentLinks:
         """The threshold is a threshold, not a direction of travel."""
         node = _node()
         peer = _link(node, TARGET, pings=_DEAD_LINK_PROBES - 1)
+        node._reap_silent_links()
+        await asyncio.sleep(0)
+        assert peer in node._peers
+
+    async def test_a_fast_probed_link_is_not_cut_for_four_probes(self):
+        """The regression multi-link operation would otherwise have shipped.
+
+        A bundle member is probed ten times a second, so four unanswered
+        probes is four hundred milliseconds — a hiccup, not a dead socket. The
+        answer to that is to bench the member, which the bundle does; cutting
+        the link would throw away the very thing that measures its way back."""
+        node = _node()
+        peer = _link(node, TARGET, pings=_DEAD_LINK_PROBES, silent_for=0.4)
+        node._reap_silent_links()
+        await asyncio.sleep(0)
+        assert peer in node._peers
+        assert peer.quality.since_pong >= _DEAD_LINK_PROBES   # the run is there
+
+    async def test_silence_alone_is_not_enough_either(self):
+        """Both halves, or a link nobody has probed for an hour — a node that
+        was asleep, a medium with a very long cadence — would be cut on the
+        strength of a clock it never agreed to."""
+        node = _node()
+        peer = _link(node, TARGET, pings=1, silent_for=_DEAD_LINK_SILENCE * 10)
         node._reap_silent_links()
         await asyncio.sleep(0)
         assert peer in node._peers

@@ -34,6 +34,16 @@ The three rules
 2. **Silence means the classic set.** A node that says nothing is not a node
    with no features; it is a node from before this existed, and it must keep
    working exactly as it did. Absence is never read as refusal.
+
+   The sting is in "exactly as it did", and it points **both ways**. Every name
+   in the classic set predates the announcement, so a silent peer must go on
+   receiving all of them — that is `MeshNode.peer_speaks`, and silence there
+   means yes. A name added *after* the negotiation is the opposite case:
+   silence about it is a peer that has never heard of it, and sending it the
+   new thing is not what it received before, it is a message it will drop and
+   an answer we will then wait for. Those names are listed in
+   :data:`SINCE_NEGOTIATION` and asked through `MeshNode.peer_announces`, which
+   requires the name to have actually been said.
 3. **Negotiation may only ever add.** No feature name may switch off a check,
    weaken a cipher, skip a verification or widen an authorisation — otherwise
    the negotiation, which happens before anybody has proved anything, becomes
@@ -72,9 +82,18 @@ RELAY = "relay"            # relayed invitation and carry
 RENEW = "certren"          # membership renewal
 REVOKE = "revoke"          # membership revocation gossip
 ABUSE = "abuse"            # signed abuse reports
+KEEPALIVE = "keepalive"    # the negotiated keepalive cadence (KA_PROPOSE/REQUEST)
+MLO = "mlo"                # multi-link operation: two links carrying one flow
 
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
-                    PUNCH, REACH, RELAY, RENEW, REVOKE, ABUSE})
+                    PUNCH, REACH, RELAY, RENEW, REVOKE, ABUSE,
+                    KEEPALIVE, MLO})
+
+# Planes added *after* this negotiation existed. Silence about one of these is
+# not a node from before the name — it is a node that has never heard of it,
+# and sending it the new thing is exactly what rule 2 forbids. See
+# ``MeshNode.peer_announces``, which is the predicate these are asked through.
+SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO})
 
 
 class FeatureError(Exception):

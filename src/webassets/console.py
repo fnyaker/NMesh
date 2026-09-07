@@ -240,6 +240,39 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
         <article class="card">
+          <div class="card-head"><div class="grow"><h2>Multi-link operation</h2>
+            <div class="sub">Two links to one node, carrying its traffic together</div></div></div>
+          <div class="card-body">
+            <div id="mlo-summary" class="stats"></div>
+            <p class="muted small">When this node holds two links to the same peer over media
+              you marked <em>MLO ready</em> below, and the two measure within the skew, packets
+              go down them in turn. It costs a probe every hundred milliseconds on each link,
+              so it runs only while somebody is using this node — the console open, an app
+              attached — unless you say otherwise. A link losing more than the drop share is
+              benched: it keeps its probes, which is how it measures its way back in, and it
+              rejoins at half that share.</p>
+            <p class="muted small">Packets spread over two links arrive out of order by roughly
+              twice the measured skew. Apps have to expect that, with or without this: a mesh
+              routes, and a routed reply was never obliged to arrive after the one before it.</p>
+            <div class="btn-row"><button id="mlo-always"></button></div>
+            <div class="form-grid">
+              <label class="field" for="mlo-skew"><span>Skew two links may differ by</span>
+                <span class="hint">Further apart than this and they are not bundled: striping
+                  across a fast link and a slow one delivers half the packets late.</span>
+                <input id="mlo-skew" type="number" min="1" max="10000" step="1"></label>
+              <label class="field" for="mlo-drop"><span>Drop share that benches a link</span>
+                <span class="hint">Percent of its last 50 probes. It rejoins at half this, so
+                  a link at the threshold does not flap in and out on one probe.</span>
+                <input id="mlo-drop" type="number" min="1" max="100" step="1"></label>
+            </div>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Node</th><th>Link</th><th class="num">Round trip</th>
+                <th class="num">Loss</th><th>State</th><th class="num">Reordering</th></tr></thead>
+              <tbody id="mlo-list"></tbody></table></div>
+            <p id="mlo-status" class="msg"></p>
+          </div>
+        </article>
+        <article class="card">
           <div class="card-head"><div class="grow"><h2>Transports</h2>
             <div class="sub">One block per medium: what is bound, what it carries, what it takes</div></div></div>
           <div class="card-body">
@@ -2047,6 +2080,7 @@ function paintReach(state){
   TRANSPORT_LIVE = byScheme;
   $("dyn-toggle").textContent = "Dynamic addressing: " + (state.dynamic_address ? "on" : "off");
   paintBalance(state);
+  paintMLO(state);
   const address = [
     ["Advertised", (state.advertised || []).join("\n") || "None"],
     ["Local IPs", (state.local_ips || []).join(", ") || "None"],
@@ -2293,6 +2327,54 @@ function paintBalance(state){
         esc(entry.priority) + "</span></span>").join(" ")
     : "");
 }
+// Every number here comes off `state.mlo`, which the node built from the same
+// places the decisions were made. A page that works out a bundle's skew for
+// itself is a page that can disagree with the bundle.
+function paintMLO(state){
+  const mlo = state.mlo || {};
+  const bundles = mlo.bundles || [];
+  const carrying = bundles.filter((row) => row.active).length;
+  const summary = [
+    ["Bundles carrying", carrying],
+    ["State", mlo.active ? (mlo.always ? "On (always)" : "On (in use)") : "Asleep"],
+    ["Woken by", (mlo.awake_sources || []).join(", ") || "nothing"],
+    ["Keepalive window", (mlo.keepalive_window_ms || []).join("–") + " ms"],
+  ];
+  setHTML("mlo-summary", summary.map(([key, value]) =>
+    '<div class="stat sm"><span class="v">' + esc(value) +
+    '</span><span class="k">' + esc(key) + "</span></div>").join(""));
+  $("mlo-always").textContent = "Always on: " + (mlo.always ? "yes" : "no");
+  // Never yank a number out from under somebody typing it.
+  for(const [id, value] of [["mlo-skew", mlo.skew_ms], ["mlo-drop", mlo.drop_percent]])
+    if(document.activeElement !== $(id) && value != null) $(id).value = value;
+  const rows = [];
+  for(const bundle of bundles){
+    const name = bundle.pseudo || bundle.node.slice(0, 16);
+    const members = bundle.members || [];
+    members.forEach((member, index) => {
+      rows.push("<tr><td>" + (index ? "" : esc(name)) + "</td>" +
+        "<td>" + esc(member.remote || member.scheme || "?") + "</td>" +
+        '<td class="num">' + (member.mean_ms == null ? "—" : esc(member.mean_ms) + " ms") + "</td>" +
+        '<td class="num">' + (member.loss == null ? "—" : esc(Math.round(member.loss * 100)) + "%") + "</td>" +
+        "<td>" + (member.carrying ? "carrying" : "benched") + "</td>" +
+        '<td class="num">' + (index ? "" : esc(bundle.reorder_ms) + " ms") + "</td></tr>");
+    });
+  }
+  setHTML("mlo-list", rows.join("") || spanRow(6,
+    '<span class="muted">No node is reached over two MLO-ready links right now.</span>'));
+}
+$("mlo-always").addEventListener("click", () => STATE &&
+  post("/api/mlo", {always: !((STATE.mlo || {}).always)}, "Multi-link operation updated"));
+for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"]])
+  $(id).addEventListener("change", async (event) => {
+    const value = Number(event.target.value);
+    try{
+      const {ok, data} = await apiJson("/api/mlo", "POST", {[field]: value});
+      $("mlo-status").textContent = ok ? "" : (data.error || "Refused");
+      if(ok) toast("Multi-link operation updated", "ok");
+    }catch(_){ toast("Could not save that", "danger"); }
+    finally{ tick(); }
+  });
 function showBalance(value){
   $("balance-value").textContent = value === 0 ? "Latency only"
     : value === 100 ? "Priority only"
