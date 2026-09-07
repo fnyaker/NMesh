@@ -57,6 +57,7 @@ MAX_CLAIM = _HDR.size + _MAX_PUBKEY + _MAX_PSEUDO_BYTES + _MAX_SIG
 
 _MAX_NODES = 1024              # distinct nodes we remember a pseudo for
 _MAX_BOOK_BYTES = 4 * 1024 * 1024
+_MAX_EQUIVOCATIONS = 8         # nodes we keep a self-contradiction proof about
 # Claims are large, so few per pseudo — a DIR_FOUND reply must fit one packet.
 _MAX_PER_KEY = 8
 
@@ -187,6 +188,9 @@ class PseudoBook:
         self._by_node: "OrderedDict[bytes, dict]" = OrderedDict()
         self._by_key: dict[bytes, list[bytes]] = {}
         self._bytes = 0
+        # Nodes caught signing two different names for one instant. One proof
+        # per node, bounded like everything else an outsider can grow.
+        self._equivocations: dict[bytes, bytes] = {}
 
     # -- mutation ---------------------------------------------------------
 
@@ -201,6 +205,13 @@ class PseudoBook:
             return False
         current = self._by_node.get(node_id)
         if current is not None:
+            # Before the rollback check, deliberately. Two names carrying the
+            # same instant is not a stale claim to drop, it is one node telling
+            # two halves of the network different things — and an attacker
+            # replaying the older half is exactly how it would slip past a
+            # check that ran after. See :mod:`src.equivocation`.
+            if ts == current["ts"] and claim["pseudo"] != current["pseudo"]:
+                self._note_equivocation(node_id, current["raw"], raw)
             if ts <= current["ts"]:
                 return False          # older or replayed — the name stands
             self._unindex(node_id, current)
@@ -231,7 +242,37 @@ class PseudoBook:
         # an epidemic that never terminates, exactly under memory pressure.
         return node_id in self._by_node
 
+    def _note_equivocation(self, node_id: bytes, held: bytes, incoming: bytes) -> None:
+        """Keep the pair when one node signs two names for one instant.
+
+        The first one seen, and no more: a second pair is the same fact about
+        the same key. Nothing is evicted to make room — a proof already held is
+        about a node somebody may still be looking at, and a table an outsider
+        could churn is a table that says whatever arrived last."""
+        if node_id in self._equivocations or len(self._equivocations) >= _MAX_EQUIVOCATIONS:
+            return
+        from . import equivocation
+        try:
+            self._equivocations[node_id] = equivocation.build(
+                equivocation.KIND_PSEUDO, held, incoming)
+        except Exception:
+            pass          # a proof we cannot frame is not a reason to fail the offer
+
+    def equivocations(self) -> dict[bytes, bytes]:
+        """``node_id -> proof``. A copy: nothing outside edits the book by
+        iterating it."""
+        return dict(self._equivocations)
+
+    def equivocated(self, node_id) -> bytes | None:
+        if not isinstance(node_id, (bytes, bytearray)):
+            return None
+        return self._equivocations.get(bytes(node_id))
+
     def forget(self, node_id: bytes) -> None:
+        """Drop what this node is called. The proof that it contradicted itself
+        stays: it is about the key, not about the name we happened to hold, and
+        a node able to make us forget it by renaming twice more could clear its
+        own record."""
         entry = self._by_node.pop(node_id, None)
         if entry is not None:
             self._unindex(node_id, entry)

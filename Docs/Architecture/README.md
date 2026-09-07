@@ -34,12 +34,13 @@ is therefore safe to accept from strangers.
 | `behaviour.py` | Named rules over counters the links already keep, swept on the keepalive timer. Compares a peer to its transport class, never to a constant; a rule that fires on everyone disarms itself. |
 | `publisher_key.py` | A release-signing key kept encrypted at rest, unlocked only to sign. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
+| `equivocation.py` | The one report that is **not** an opinion: two records signed by the same key that cannot both have been meant. Forging one needs the key it accuses, so the messenger's honesty is not in it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
 | `routing.py` | Kademlia routing table (k-buckets, `last_seen`). |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
 | `app_dht.py` | Per-app DHT (overlay): a namespace per `app_id`, entries public (in the clear) or private (AES-256-GCM under a key the app supplies). |
 | `pseudo.py` | The one canonical form of a pseudo (NFC, no invisible or directional characters, at most 50). Deterministic, so a receiver can re-derive it and call a mismatch a lie. |
-| `pseudo_dir.py` | Signed name claims (bound to the public key, so a claim can only name its own author) and the bounded book that holds them — indexed by node id *and* by directory key, so it answers both "what is this called?" and "who is called this?". |
+| `pseudo_dir.py` | Signed name claims (bound to the public key, so a claim can only name its own author) and the bounded book that holds them — indexed by node id *and* by directory key, so it answers both "what is this called?" and "who is called this?". Keeps the proof when one node signs two names for one instant. |
 | `transport.py` / `transport_manager.py` | The `BaseTransport`/`BaseServer` interfaces + a registry by URL scheme. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Concrete transports. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Address tracking, STUN, local IPs, **enumerating the attached networks** (interface + real mask, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, then a fallback), a bounded DNS resolver outside the executor. |
@@ -61,7 +62,7 @@ is therefore safe to accept from strangers.
 | `trace.py` | **Protocol trace**: a bounded ring of packet events (type, size, TTL, ids) + totals per message type. Never a payload. Off by default, bounded in memory *and* in time, stops on its own. See [`../WebConsole/guide`](../WebConsole/guide). |
 | `config.py` | The node's configuration file (`nmesh.conf`): bounded, defensive parsing, per-setting validation, commented rendering, atomic 0600 write. Precedence command line > file > default. See [`../Setup/guide`](../Setup/guide). |
 | `version.py` / `updater.py` | The current version and tag comparison; obtaining a release (from GitHub, or from the mesh) and replacing the installed tree — the node's state is untouched, the previous tree is kept and restored on failure. See [`../Setup/guide`](../Setup/guide). |
-| `core_release.py` | **Mesh-native releases**: a node packs its own code into one deterministic archive and signs a descriptor naming its hash. Publishing touches no network; the package moves when someone asks, and whoever received it serves the next node. An operator pins the publisher keys they accept; nothing arriving from the network can add one. Also the journal that keeps an automatic install — which ends in a restart — from becoming a restart loop. See [`../Updates/guide`](../Updates/guide). |
+| `core_release.py` | **Mesh-native releases**: a node packs its own code into one deterministic archive and signs a descriptor naming its hash. Publishing touches no network; the package moves when someone asks, and whoever received it serves the next node. An operator pins the publisher keys they accept; nothing arriving from the network can add one. Also the journal that keeps an automatic install — which ends in a restart — from becoming a restart loop, and the proof kept when one publisher signs two different programs under one version. See [`../Updates/guide`](../Updates/guide). |
 
 ## The documents
 

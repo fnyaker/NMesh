@@ -6477,6 +6477,8 @@ class MeshNode:
         # discovery for every other operator. It is flagged, never acted on.
         outcome = self._releases.offer(release_bytes, self._identity.verify,
                                        self._trusts_publisher)
+        self._note_equivocation("publisher", doc["publisher_id"],
+                                self._releases.equivocated(doc["publisher_id"]))
         if outcome:
             held = self._packages.has(
                 bytes.fromhex(doc["sha256"])[:_RELEASE_ID_LEN].hex())
@@ -6802,6 +6804,8 @@ class MeshNode:
                                  self._publishers.endorsed_among(attesters)),
                              "disputed": self._releases.contradicts(
                                  entry["version"], entry["sha256"]),
+                             "equivocated": self._releases.equivocated(
+                                 entry["publisher"]) is not None,
                              "unattended": allowed,
                              "unattended_why": why})
         from . import updater
@@ -6852,6 +6856,21 @@ class MeshNode:
         of keys a human chose cannot be reached by minting identities, only by
         compromising chosen ones."""
         return self._publishers.set_endorse(publisher_id_hex, endorsed)
+
+    def _note_equivocation(self, what: str, subject: bytes, proof) -> None:
+        """Say once that an identity signed two things that cannot both hold.
+
+        Called on every arrival rather than only on the first, because the feed
+        coalesces a repeat onto one row with a count — so the cheap call here is
+        what keeps a "have we already said this?" set off the node. The proof
+        itself is not shown and does not yet travel: what a reader needs here is
+        the name of the key, and gossiping a 20 kB record on the say-so of one
+        arrival is an amplifier that wants designing before it is built."""
+        if proof is None:
+            return
+        self._activity.note(
+            "warn", f"{what} {bytes(subject).hex()[:16]} signed two "
+                    "contradictory records")
 
     def _note_release(self, version: str, outcome: str, detail: str = "") -> None:
         self._release_log.append({"ts": int(time.time()), "version": version,
@@ -6992,16 +7011,27 @@ class MeshNode:
 
           - somebody claims this version with different content — a fork, or a
             build of somebody's own wearing a version everyone recognises;
-          - the publisher we would install from contradicts itself.
+          - the publisher we would install from contradicts itself, having
+            signed two different programs under one version number.
 
-        Neither accuses anybody. Two honest publishers can disagree by accident,
-        and the answer to that is the same as to an attack: stop, and let a
-        human look. Refusing an update is recoverable; installing a hostile one
+        The first accuses nobody: two honest publishers can disagree by
+        accident, and the answer to that is the same as to an attack — stop, and
+        let a human look. The second does accuse, and is the one place in this
+        file entitled to: no accident makes one key sign one version twice with
+        different bytes, and the pair is checkable without trusting whoever
+        showed it. Refusing an update is recoverable; installing a hostile one
         is not."""
         publisher = entry.get("publisher")
         version, digest = entry.get("version", ""), entry.get("sha256", "")
         if self._releases.contradicts(version, digest):
             return False, "another publisher signed different content for this version"
+        if publisher is not None and self._releases.equivocated(publisher) is not None:
+            # The one refusal here that rests on nothing but the accused's own
+            # signature: two descriptors signed by this key, one version, two
+            # different programs. Forging the pair needs the key it accuses, so
+            # unlike everything else a node hears about another node, no
+            # messenger's honesty is in it — see `src/equivocation.py`.
+            return False, "this publisher has signed two different programs as one version"
         attesters = self._releases.attesters(version, digest)
         if self._publishers.auto_for(publisher):
             return True, "signed by a publisher pinned for automatic install"
@@ -7303,7 +7333,10 @@ class MeshNode:
         if claim is None:
             self._charge_abuse(peer)
             return None
-        if not self._pseudo_book.offer(claim, bytes(raw)):
+        changed = self._pseudo_book.offer(claim, bytes(raw))
+        self._note_equivocation("node", claim["node_id"],
+                                self._pseudo_book.equivocated(claim["node_id"]))
+        if not changed:
             return None
         self._persist_pseudos()   # a name learned once is a name kept
         self._note_change("names")

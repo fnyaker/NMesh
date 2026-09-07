@@ -209,15 +209,39 @@ question rather than the messenger:
 
 - somebody claims this version with **different content** — a fork, or somebody's
   own build wearing a version everyone recognises;
-- the publisher we would install from **contradicts itself**.
+- the publisher we would install from **contradicts itself**, having signed two
+  different programs under one version number.
 
-Neither accuses anybody: two honest publishers can disagree by accident, and the
-answer to that is the same as to an attack — stop, and let a human look.
-Refusing an update is recoverable; installing a hostile one is not.
+The first accuses nobody: two honest publishers can disagree by accident, and
+the answer to that is the same as to an attack — stop, and let a human look. The
+second does accuse, and is the one refusal here entitled to. Refusing an update
+is recoverable; installing a hostile one is not.
+
+### A publisher that contradicts itself
+
+No accident makes one key sign one version twice with different bytes. The
+catalogue keeps the two descriptors as a pair (`src/equivocation.py`), and the
+pair is **checkable by anyone**: forging either half needs the publisher's own
+private key, so whoever shows it contributes nothing but transport. It is the
+only report on this mesh that stands up without the messenger's honesty in it —
+see [`../Architecture/security.md`](../Architecture/security.md#equivocation-the-one-report-that-needs-no-trusted-messenger).
+The pair is kept locally and is not gossiped yet — that is the next step, and it
+needs the bounding a 20 kB broadcast deserves before it is built.
+
+The detection runs **before** the anti-rollback drop, deliberately: a catalogue
+that dropped the older descriptor first would never see the pair, and showing
+the older half second is precisely how a publisher would arrange that.
+
+What it costs them here is narrow. Nothing installs itself from that key any
+more, the row on the Updates page carries a **contradicts itself** badge, and
+the node's activity feed says so. A human may still install by hand — they are
+told first. No standing moves and nothing is cut off: this is about one key
+having lied once, not about how that node behaves on the wire.
 
 The console shows, per release, how many keys signed that exact content, how
-many of them are endorsed, whether anyone disputes the version, and in one
-sentence why it would or would not install itself.
+many of them are endorsed, whether anyone disputes the version, whether the
+publisher contradicted itself, and in one sentence why it would or would not
+install itself.
 
 ## Signing with a key that is not in memory
 
@@ -433,6 +457,7 @@ rule that lives in Python.
 | `MAX_NOTES_LEN` | 4000 | notes are shown in a page |
 | `MAX_PUBLISHERS` | 32 | pinned keys an operator may hold |
 | `MAX_CATALOG` | 64 | publishers tracked, trusted-first |
+| `MAX_EQUIVOCATIONS` | 8 | publishers we keep a self-contradiction proof about, pinned-first |
 | `_RELEASE_RATE_MAX` | 32 / 10 s | signature verifications one link may ask for |
 | `_RELEASE_TRIED_MAX` | 32 | release ids remembered as already attempted |
 | `_RELEASE_FIRST_TICK` | 20 s | before the first automatic pass after start |
@@ -476,4 +501,8 @@ rule that lives in Python.
 - [`tests/test_updater.py`](../../tests/test_updater.py) — the swap itself:
   paths that reach outside, a failed swap restoring the previous tree, state and
   virtualenv untouched.
+- [`tests/test_equivocation.py`](../../tests/test_equivocation.py) — the proof
+  that a publisher signed two programs as one version: what verifies, and the
+  much longer list of near-misses that must not (a rebuild, a fork, one record
+  shown twice, a half signed by somebody else, a forged descriptor).
 - [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes.
