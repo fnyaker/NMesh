@@ -323,6 +323,28 @@ click, the mismatch is refused rather than installing something nobody has seen.
 The matching API: `GET /api/update/check`, `POST /api/update/apply` (see
 [`../WebConsole/guide`](../WebConsole/guide)).
 
+### Following a branch instead of the releases
+
+`update_branch` in `nmesh.conf` (empty by default; `NMESH_UPDATE_BRANCH`
+overrides it, as a flag would) changes **where the answer comes from**, not what
+happens next. With a branch set, "is there a newer version?" is answered by the
+`__version__` declared in `src/version.py` at that branch —
+`raw.githubusercontent.com/<repo>/<branch>/src/version.py`, read with a regular
+expression and never executed — and *Install* takes that branch's tree rather
+than a tag's. It is for a fleet that tracks development instead of waiting for a
+release to be published.
+
+A branch **moves under its own name**, which a tag does not, so the version is
+checked twice more: when the install request arrives, and again against the
+`src/version.py` inside the downloaded tree. A branch that has moved past the
+version the operator confirmed is refused, not installed under the name that was
+on screen.
+
+The name is validated where it is stored (`src/config.py`), because it lands in
+a URL path: anything that could walk out of the repository's own namespace — a
+`..`, a leading slash, a space — is refused rather than escaped, and a value the
+file would refuse means "follow the releases" rather than a guess.
+
 What is replaced: **only** the code and documentation directories of the
 installed tree. The node's state, the venv and everything else are left intact.
 The previous tree is moved to `.nmesh-previous` and restored if the replacement
@@ -438,6 +460,12 @@ installed themselves want different numbers.
 | `abuse_hostile` | 20 | Score at which it is also refused a fresh connection |
 | `abuse_halflife` | 3600 | Seconds for a complaint to lose half its weight, so a node that misbehaved once and then behaved comes back on its own |
 | `no_abuse_gossip` | off | Neither send nor act on other nodes' reports — judge only what this node saw itself |
+
+### `update_branch` — where the update check looks
+
+Empty by default: the published GitHub releases. Set to a branch name, the check
+reads `src/version.py` at that branch instead and *Install* takes its tree. See
+[Following a branch instead of the releases](#following-a-branch-instead-of-the-releases).
 
 One report is worth at most 4, so it always takes several to reach either
 threshold. What the numbers mean, and why an accusation from a stranger counts
