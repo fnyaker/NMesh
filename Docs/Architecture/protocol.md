@@ -177,8 +177,10 @@ top of `msg_id` deduplication).
 ## The body of a `FOUND_NODE` (certificate pool)
 
 ```
-query_id(8) ‖ pool_count(H) ‖ [cert_len(H) ‖ cert]*pool_count
-            ‖ entry_count(B) ‖ entry*entry_count
+query_id(8) ‖ pool_count(H) ‖ pool_item*pool_count
+            ‖ entry_count(B) ‖ entry*entry_count ‖ [hints_ok(B)]
+pool_item = cert_len(H) ‖ cert          — the certificate itself
+          | 0(H) ‖ fingerprint(16)      — one the querier said it holds
 entry = node_id(20) ‖ addr_count(B) ‖ chain_len(B)
         ‖ [addr_len(H) ‖ addr]*addr_count ‖ index(H)*chain_len
 ```
@@ -193,6 +195,35 @@ without the budget the reply exceeded the packet ceiling and was never sent. The
 sender **includes itself** among the candidates (ranked by distance): a routed
 `FIND_NODE` may come from a seeker who only reaches it through a relay and who
 would otherwise never learn its entry (see `routing.md`).
+
+### Naming a certificate instead of sending it
+
+A `FIND_NODE` may carry a tail of **certificate fingerprints** — 16 bytes each,
+at most `_CERT_HINT_MAX`, `sha256` of the certificate's signature (the thing the
+store already treats as a certificate's identity):
+
+```
+FIND_NODE = target(20) ‖ query_id(8) ‖ fingerprint(16)*n     (n ≤ 32, may be 0)
+```
+
+Any certificate the responder would have sent whose fingerprint is in that list
+travels as `0(H) ‖ fingerprint` — 18 bytes instead of ~7 300. The receiver
+resolves it through `CertStore.by_fingerprint`, which can only ever find one it
+already verified and stored, so **a reference adds no authority**: naming one we
+do not hold voids that chain exactly as an unparseable certificate does, and
+`verify_chain` still runs over whatever comes out.
+
+`n = 0` (no tail at all) is the classic question and stays valid for ever.
+
+**How the two ends find out about each other.** A lookup is *routed* — the node
+that answers may be several hops away — so the features two links negotiated say
+nothing about it. Instead the answer carries a one-byte `_HINTS_OK` trailer:
+trailing bytes are exactly what a build without this reads it as, since
+`_decode_entries` has always stopped at the last entry. A querier sends
+fingerprints only to a node whose answer carried that byte, because a build
+without it checks the `FIND_NODE` payload length **exactly** and drops anything
+longer — a tail sent there is not a few wasted bytes, it is a lookup that never
+happens.
 
 ### The replay window (`seen.py`)
 

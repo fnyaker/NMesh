@@ -824,3 +824,70 @@ class TestAutomaticInstall:
             except asyncio.CancelledError:
                 pass
             await node.stop()
+
+
+class TestPublishingItselfWhenAsked:
+    """Off unless somebody asked. A release is the one payload that replaces
+    another node's program, and this signs one with the identity the node keeps
+    unlocked for as long as it runs — so the default is the only safe one, and
+    what the setting buys is a node that updates itself and then stops sitting
+    on the new version because nobody pressed a button."""
+
+    def _tree_at_running_version(self, tmp_path):
+        from src.version import __version__ as running
+        return _tree(str(tmp_path), running), running
+
+    async def test_it_publishes_nothing_by_default(self, tmp_path):
+        node = _node()
+        try:
+            assert await node._auto_publish_pass() is None
+            assert node.release_overview()["releases"] == []
+        finally:
+            await node.stop()
+
+    async def test_it_offers_the_running_version_when_switched_on(self, tmp_path, monkeypatch):
+        _root, running = self._tree_at_running_version(tmp_path)
+        node = _node()
+        node._release_auto_publish = True
+        monkeypatch.setattr("src.updater.install_root", lambda: str(tmp_path))
+        try:
+            assert await node._auto_publish_pass() == running
+            listed = node.release_overview()["releases"]
+            assert [entry["version"] for entry in listed] == [running]
+            assert listed[0]["mine"] is True
+        finally:
+            await node.stop()
+
+    async def test_a_second_pass_publishes_nothing_new(self, tmp_path, monkeypatch):
+        """Idempotent by asking whether *our* key already offers this exact
+        version, so a restart or a re-announce costs nothing."""
+        self._tree_at_running_version(tmp_path)
+        node = _node()
+        node._release_auto_publish = True
+        monkeypatch.setattr("src.updater.install_root", lambda: str(tmp_path))
+        try:
+            assert await node._auto_publish_pass() is not None
+            assert await node._auto_publish_pass() is None
+            assert len(node.release_overview()["releases"]) == 1
+        finally:
+            await node.stop()
+
+    async def test_a_tree_it_cannot_publish_is_not_retried_at_once(self, tmp_path, monkeypatch):
+        """Reading and hashing a tree is not free, and a tree that will not
+        publish does not become publishable because we asked again a second
+        later."""
+        node = _node()
+        node._release_auto_publish = True
+        tries = []
+
+        async def _refuses(*a, **k):
+            tries.append(1)
+            raise cr.ReleaseError("no")
+
+        node.publish_release = _refuses
+        try:
+            assert await node._auto_publish_pass() is None
+            assert await node._auto_publish_pass() is None
+            assert len(tries) == 1
+        finally:
+            await node.stop()

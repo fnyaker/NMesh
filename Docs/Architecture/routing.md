@@ -16,13 +16,36 @@ Kademlia with 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
   (`dict.fromkeys(existing + new)`) and the DSA key; creates a fresh `NodeEntry`
   → `last_seen` refreshed. Ignores adding ourselves.
 - `RoutingTable.drop_address(id, address)`: forgets **one** address, keeping the
-  node. For an address that answered as somebody else — that is the wrong
-  address, not a slow one, and left in the entry it buys a whole post-quantum
-  handshake per pass to learn the same thing (`gotchas.md`, "The address that
-  answers as somebody else"). Edits the entry in place rather than re-adding it,
-  precisely because `add` refreshes `last_seen`: re-adding would report a node
-  we have just failed to reach as the most recently seen one.
-- `all_entries()`, `get_closest(target, k)` (sorted by XOR distance),
+  node. Edits the entry in place rather than re-adding it, precisely because
+  `add` refreshes `last_seen`: re-adding would report a node we have just failed
+  to reach as the most recently seen one.
+- `RoutingTable.note_wrong_address(id, address, answered_as)`: drops it **and
+  remembers**. Dropping alone was a treadmill — `add` merges `new + existing`,
+  so the next answer from anybody put it back at the head of the list and the
+  next pass paid another post-quantum handshake to learn the same thing
+  (`gotchas.md`, "…and neither of those was the fix"). `add` filters merged
+  addresses through `wrong_address(id, address)`; records expire after
+  `WRONG_ADDRESS_TTL` (an address is a lease) and the table is bounded by
+  `MAX_WRONG_ADDRESSES`. Keyed on the **pair**: the address usually belongs to
+  somebody, just not to the node it was filed under. Only ever called on
+  something we established ourselves — our own address list, or an identity
+  proved by a signature over our own challenge.
+- `RoutingTable.note_answered(id)` / `note_unanswered(id)`: whether an id
+  answered a **lookup of ours**. Being mentioned by a peer is not an answer —
+  that is what put it in the table. `is_silent(entry)` is true for an entry that
+  has **never once** answered and has failed `SILENT_AFTER` times; such an entry
+  is left out of `get_closest` — so out of what we ask, what we dial and what we
+  tell others — and tried again every `SILENT_RETRY`.
+  Never *once*, not lately: an id that has answered before is a node having a
+  bad minute, and the answer to that is patience. The counters live on the entry
+  and are **carried across `add`**, which is the whole point — everyone on the
+  mesh re-teaches a dead id, and an entry rebuilt with a clean sheet on every
+  answer never reaches any threshold. Nothing is held against the node and no
+  standing moves; we stop *naming* an id that answers nobody, which is how a
+  dead one leaves the network instead of being handed round it for ever, and
+  anyone who can still reach it goes on naming it.
+- `all_entries()`, `get_closest(target, k)` (sorted by XOR distance, silent
+  entries omitted),
   `export_entries`/`import_entries` (persistence; only entries with a DSA key
   are exportable — without a key we cannot re-authenticate).
 - `last_seen` feeds the console ("Known nodes", the N most recent) and **must**
@@ -358,11 +381,20 @@ onwards, every lookup on the network timed out silently.
 
 The reply is therefore **budgeted**:
 
-- `_EntryPacker(budget)` stacks the nearest entries while they fit inside
+- `_EntryPacker(budget, known)` stacks the nearest entries while they fit inside
   `_FOUND_NODE_MAX_BYTES = 32 000`, and **shares certificates** through an
   indexed pool (every chain ends on the same network root: sending it once per
   entry doubled the packet). In practice ≈ 3 entries per reply instead of
   nothing at all.
+- The pool stopped *one* answer repeating a certificate. Nothing stopped the
+  **next** answer repeating all of them, and that was the largest single thing
+  on an idle node's wire: 29% of every byte, the same 22 kB from the same peer
+  at 8 s, 19 s and 105 s. A `FIND_NODE` now carries the fingerprints of the
+  certificates the querier already holds, and the pool sends 18 bytes instead of
+  ~7 300 for each of them (see `protocol.md`, "Naming a certificate instead of
+  sending it"). Measured on a table of 8 certified nodes: **29 238 → 592 bytes**,
+  and 9 entries where the budget used to fit 3 — so the lookup converges in
+  fewer rounds as well.
 - Entries **with no chain** are skipped: the receiver drops them anyway
   (`_handle_found_node` requires a verifiable chain), so there is no point
   spending the budget. Chains are built as we go, so the budget also caps the

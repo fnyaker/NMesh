@@ -141,12 +141,32 @@ goes through the console (`POST /api/pseudo`), which is authenticated.
 the alternative is each app keeping its own idea of what a node is called, which
 is the thing pseudos exist to stop. Chat and Fleet both use it.
 
+## Two names for one instant
+
+A node is entitled to change its name as often as it likes — the book keeps the
+newest claim per node precisely so it can, and a claim that is not newer is
+dropped. What no honest sequence produces is **two different names carrying the
+same signed instant**: that is one node telling two halves of the network
+different things and leaving whichever arrived first to decide.
+
+The book keeps that pair when it sees it (`src/equivocation.py`). It is a proof
+rather than an opinion — forging either half needs the private key it accuses —
+and the check runs before the not-newer drop, because replaying the older half
+second is exactly how it would slip past one that ran after. The name we already
+hold does not change: catching the contradiction must not hand the attacker the
+rename it was trying for. Nothing is cut off; the node's activity feed says what
+it saw.
+
+Forgetting a node's name does **not** forget the pair. A node able to clear its
+own record by renaming twice more would have a way to launder it.
+
 ## What it costs
 
 A claim is about 5.3 kB — an ML-DSA-65 public key and signature, which is what
 makes it verifiable by a node that has never met you. Each node keeps a bounded
 book of them (`_MAX_NODES` entries, `_MAX_BOOK_BYTES` bytes, whichever binds
-first), evicting the least recently touched. A freshly connected peer is sent at
+first), evicting the least recently touched, plus at most `_MAX_EQUIVOCATIONS`
+proofs of the kind above. A freshly connected peer is sent at
 most `_PSEUDO_SYNC_MAX` claims, ours first; the rest arrives by gossip.
 
 Gossip stops on its own: a node passes a claim on **only when it changed what it

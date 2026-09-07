@@ -550,6 +550,16 @@ advertised to reach the node (wildcard listens expanded over each local IP), the
 listening URIs, the local IPs, and the registered transports (● = active). The
 snapshot exposes `advertised`, `listen`, `local_ips`, `transports`, `listening`.
 
+A row in **Known nodes** reads `authenticated`, `key known`, `no key` — or
+**never answers**, which is a different fact rather than a worse one and is the
+one that explains a row that never changes: that id has never once answered a
+lookup of ours, so the node has stopped asking after it, stopped dialling it and
+stopped naming it to others. It says nothing about the node itself; anybody who
+can reach it still names it, and we try again every few minutes. The usual cause
+is a machine that changed identity — the old id is still being gossiped, and
+answers nowhere. The snapshot carries it as `silent` on the routing row; see
+`Docs/Architecture/routing.md`.
+
 In a node's card (**Network → Peers**, the **Details** button), **Forget node**
 removes that node from the local routing table and cuts its session if it is
 live. It is **not a ban**: automatic merging into the routing table on receiving
@@ -656,6 +666,15 @@ at about a hundred nanoseconds, and nothing on the path a packet takes. *Wakes
 on* matters more than it looks: since these loops stopped polling, what each one
 waits for is a real question, and the answer is read off the loop rather than
 kept in a second list somebody has to remember to update.
+
+Overview also carries **Happening now**: the last handful of things this node
+did or was told — a link up or lost, a handshake refused and why, an address
+dropped for answering as somebody else, its own code published. It is written
+where the node already knows something happened, never per packet, and the text
+is always the node's own words: nothing a peer wrote reaches it, which is what
+keeps a log an adversary can write into from existing. Repeats coalesce onto one
+row with a count, so a peer flapping twice a second cannot push everything else
+out of view, and the card is hidden entirely while nothing has happened.
 
 Overview's tiles say **Relayed** — of what left this node, how much was carried
 for somebody else. Relaying is the one thing a node spends bandwidth on with
