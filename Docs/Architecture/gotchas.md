@@ -80,6 +80,37 @@ whole post-quantum handshake per pass to learn the same thing. `answered_as` on
 the peer is what carries the proven identity past a refusal — `authenticated_id`
 is only set for a link we keep.
 
+### …and neither of those was the fix
+A later trace showed the same loop still running, every ten seconds, for as long
+as the node ran. Two reasons, and both are the same mistake: **refusing late, and
+forgetting rather than remembering.**
+
+*Refusing at the handshake refuses after the handshake.* A self-connection was
+caught by the identity guard — after both halves of this node had built, sent
+and read a 21 kB post-quantum handshake. 42 kB to learn what a list lookup knows.
+`_dial_uri` now checks `_is_own_address(uri)` before opening a socket, and
+`_handle_challenge` ends a link whose challenge names our own id one message
+before the handshake is built.
+
+*Dropping an address forgets it until the next answer.* `RoutingTable.add`
+merges `new + existing`, so the very next `FOUND_NODE` from anybody put the bad
+address straight back — at the **head** of the list, because fresh observations
+are preferred — and the next pass paid another handshake. `note_wrong_address`
+now records the `(node, address)` pair with what it answered as, `add` filters
+merged addresses through it, and the record expires (`WRONG_ADDRESS_TTL`)
+because an address is a lease and the machine may change hands.
+
+The pair, never the address alone: in the trace the address was perfectly good —
+for the node that actually answers there. Holding it against everyone would have
+cut us off from the machine we could reach.
+
+**Only what we established ourselves may strike an address off.** Our own
+address list, and an identity proved by a signature over our own challenge. A
+`CHALLENGE` naming an id is a claim on a link that has authenticated nothing, so
+it ends the link and names the dial outcome — and does *not* touch the entry. If
+a claim could have an address forgotten, "I am somebody else" would be how you
+get a third party's address dropped.
+
 ### A trusted root can be evicted out from under you
 `CertStore._pinned` protected the roots and our own certificates, and its
 comment claimed it protected "our own chain". It did not protect the

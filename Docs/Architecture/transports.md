@@ -117,8 +117,24 @@ address never tried is `untried`, not broken. Bounded twice over: 128 nodes,
 `wrong node` is the one that used to hide: an address that connects, completes
 the handshake and turns out to belong to somebody else — or to this node itself
 — failed in a way `no-answer` describes as its opposite. The reason names the
-identity actually reached, and the address is dropped from the entry, because
-that entry is wrong rather than slow (see `gotchas.md` and `routing.md`).
+identity actually reached, and the address is dropped from the entry **and
+remembered** (`note_wrong_address`), because that entry is wrong rather than
+slow and forgetting it only lasts until the next answer re-advertises it (see
+`gotchas.md` and `routing.md`).
+
+Three of its reasons say three different things, and the difference is what may
+be held against the address:
+
+| Reason | What proved it | Address struck off |
+|---|---|---|
+| `answered as <id>` | a signature over our own challenge | yes |
+| `this address is this node itself` | our own advertised address list | yes |
+| `answered claiming our own identity` | nothing — a `CHALLENGE` on a link that has authenticated nothing | **no** |
+
+The third is the net for a self-dial at an address we did not recognise as ours:
+it ends the link before a 21 kB handshake is built for it, but a *claim* must
+never be what strikes an address off — otherwise saying "I am somebody else"
+would be how you get a third party's address forgotten.
 
 Three further outcomes never reach the medium and are recorded anyway, because
 a blank line next to an address that does not work teaches nothing: `invalid`
