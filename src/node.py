@@ -22,7 +22,7 @@ from .seen import SeenSet
 from .activity import Activity
 from .crypto import CryptoIdentity, SessionKey
 from .invite import InviteManager, compute_response
-from .cert import Certificate
+from .cert import Certificate, FINGERPRINT_LEN
 from .cert_store import CertStore
 from . import revocation
 from .revocation import MAX_RECORD as _REVOCATION_MAX
@@ -144,6 +144,19 @@ _ENTRY_HEADER = struct.Struct('!20sBB')
 _POOL_COUNT   = struct.Struct('!H')
 _POOL_INDEX   = struct.Struct('!H')
 _ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
+# A pooled certificate may travel as a fingerprint instead of as ~7 kB, when the
+# querier said it already holds it. `cert_len == 0` is free as the marker: a
+# certificate shorter than its own header cannot be parsed, so no real one is
+# ever zero-length.
+_CERT_REF        = 0
+_CERT_HINT_MAX   = 32   # fingerprints a FIND_NODE may carry
+# One byte on the end of a FOUND_NODE saying "you may send me fingerprints".
+# Trailing bytes are what a build without this reads it as, and `_decode_entries`
+# has always stopped at the last entry — so this is how the two ends find out
+# about each other without a link-level negotiation they cannot have: a lookup
+# is routed, and the node that answers it may be several hops away.
+_HINTS_OK        = b"\x01"
+_HINT_PEERS_MAX  = 256  # nodes we remember as understanding fingerprints
 _ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
 # Certificate renewal. A membership certificate lasts a year
@@ -981,8 +994,12 @@ class _EntryPacker:
     hostile FOUND_NODE can make a receiver verify.
     """
 
-    def __init__(self, budget: int) -> None:
+    def __init__(self, budget: int, known: frozenset = frozenset()) -> None:
         self._budget = budget
+        self._known = known
+        # Keyed on the fingerprint rather than on the serialised bytes: it is
+        # what the store already treats as a certificate's identity, it is
+        # computed once per certificate, and it is what a reference names.
         self._pool: list[bytes] = []
         self._index: dict[bytes, int] = {}
         self._entries: list[bytes] = []
@@ -1000,44 +1017,78 @@ class _EntryPacker:
         for addr in addrs:
             b = addr.encode('utf-8')
             blob += _ADDR_LEN.pack(len(b)) + b
-        added: list[bytes] = []
+        added: list[tuple[bytes, bytes]] = []
         cost = len(blob) + _POOL_INDEX.size * len(entry.cert_chain)
-        # Serialised once each. `serialize()` rebuilds a ~7 kB blob every call,
-        # and this ran it twice per certificate — the second time only to use it
-        # as a dictionary key — for up to `_FIND_NODE_SCAN` candidates a query.
-        raws = [cert.serialize() for cert in entry.cert_chain]
-        for raw in raws:
-            if raw not in self._index and raw not in added:
-                if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
-                    return False
-                added.append(raw)
-                cost += _CERT_LEN.size + len(raw)
+        prints = [cert.fingerprint() for cert in entry.cert_chain]
+        for cert, digest in zip(entry.cert_chain, prints):
+            if digest in self._index or any(digest == d for d, _ in added):
+                continue
+            if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
+                return False
+            if digest in self._known:
+                # The querier told us it holds this one. Ten bytes instead of
+                # seven thousand, and no `serialize()` at all — which is the
+                # other half of the saving: rebuilding a chain used to cost the
+                # responder a ~7 kB blob per certificate per query.
+                body = _CERT_LEN.pack(_CERT_REF) + digest
+            else:
+                raw = cert.serialize()
+                body = _CERT_LEN.pack(len(raw)) + raw
+            added.append((digest, body))
+            cost += len(body)
         if self._used + cost > self._budget:
             return False
-        for raw in added:
-            self._index[raw] = len(self._pool)
-            self._pool.append(raw)
-        for raw in raws:
-            blob += _POOL_INDEX.pack(self._index[raw])
+        for digest, body in added:
+            self._index[digest] = len(self._pool)
+            self._pool.append(body)
+        for digest in prints:
+            blob += _POOL_INDEX.pack(self._index[digest])
         self._entries.append(blob)
         self._used += cost
         return True
 
     def encode(self) -> bytes:
-        pool = _POOL_COUNT.pack(len(self._pool))
-        for raw in self._pool:
-            pool += _CERT_LEN.pack(len(raw)) + raw
-        return pool + bytes([len(self._entries)]) + b"".join(self._entries)
+        return (_POOL_COUNT.pack(len(self._pool)) + b"".join(self._pool)
+                + bytes([len(self._entries)]) + b"".join(self._entries))
 
 
-def _encode_entries(entries: list[NodeEntry]) -> bytes:
-    packer = _EntryPacker(1 << 30)
+def _encode_cert_hints(prints: list[bytes]) -> bytes:
+    """The tail of a FIND_NODE: fingerprints of certificates we already hold."""
+    return b"".join(prints[:_CERT_HINT_MAX])
+
+
+def _decode_cert_hints(tail: bytes) -> frozenset | None:
+    """Read that tail. ``None`` means the payload is not a FIND_NODE at all.
+
+    An empty tail is the classic question and must stay valid for ever: a node
+    that has never heard of fingerprints asks exactly that, and refusing it
+    would cut every older build out of the lookup."""
+    if not tail:
+        return frozenset()
+    if len(tail) % FINGERPRINT_LEN or len(tail) > _CERT_HINT_MAX * FINGERPRINT_LEN:
+        return None
+    return frozenset(tail[i:i + FINGERPRINT_LEN]
+                     for i in range(0, len(tail), FINGERPRINT_LEN))
+
+
+def _encode_entries(entries: list[NodeEntry], known: frozenset = frozenset()) -> bytes:
+    packer = _EntryPacker(1 << 30, known)
     for entry in entries:
         packer.add(entry)
     return packer.encode()
 
 
-def _decode_entries(data: bytes) -> list[NodeEntry]:
+def _decode_entries(data: bytes, resolve=None) -> tuple[list[NodeEntry], int]:
+    """Parse a FOUND_NODE body. Returns the entries and how many bytes they took.
+
+    ``resolve(fingerprint) -> Certificate | None`` looks up a certificate the
+    sender referred to instead of sending. It can only ever find one this node
+    already holds and verified, so a reference adds no authority: naming one we
+    do not have voids that chain exactly as an unparseable certificate does.
+
+    The consumed length is returned because what follows the entries is how the
+    two ends discover each other (see ``_HINTS_OK``) — and because a build
+    without that marker has always simply stopped reading here."""
     if len(data) < _POOL_COUNT.size:
         raise ValueError("empty payload")
     pool_count = _POOL_COUNT.unpack_from(data, 0)[0]
@@ -1050,6 +1101,13 @@ def _decode_entries(data: bytes) -> list[NodeEntry]:
             raise ValueError("truncated pooled cert length")
         cert_len = _CERT_LEN.unpack_from(data, offset)[0]
         offset += _CERT_LEN.size
+        if cert_len == _CERT_REF:
+            if offset + FINGERPRINT_LEN > len(data):
+                raise ValueError("truncated cert reference")
+            digest = data[offset:offset + FINGERPRINT_LEN]
+            offset += FINGERPRINT_LEN
+            pool.append(resolve(digest) if resolve is not None else None)
+            continue
         if offset + cert_len > len(data):
             raise ValueError("truncated pooled cert")
         try:
@@ -1112,7 +1170,7 @@ def _decode_entries(data: bytes) -> list[NodeEntry]:
         if not valid:
             continue  # drop entry with any malformed URI
         entries.append(NodeEntry(NodeID(raw_id), addresses, b"", chain))
-    return entries
+    return entries, offset
 
 
 # ---------------------------------------------------------------------------
@@ -1543,6 +1601,9 @@ class MeshNode:
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
+        # Nodes whose FOUND_NODE carried `_HINTS_OK`, so we may send them
+        # certificate fingerprints. Bounded, least-recently-answered evicted.
+        self._cert_hint_peers: "OrderedDict[bytes, bool]" = OrderedDict()
         # What this node caches for the network. Filled entirely by what peers
         # STORE, so it is memory given away — the operator decides how much
         # (`dht_max_mb`), and the default is what a small machine can lose.
@@ -3228,24 +3289,47 @@ class MeshNode:
         self._upgrade_last[target] = now
         self._track_route_task(self._ensure_route_to(target))
 
+    def _note_cert_hints(self, node_raw: bytes) -> None:
+        """This node's answer said it will accept fingerprints.
+
+        Learned from the answer rather than from a link negotiation, because a
+        lookup is routed: the node that answers may be several hops away, and
+        the features two *links* agreed on say nothing about it. Bounded and
+        least-recently-answered first, like every other table fed by the
+        network."""
+        self._cert_hint_peers.pop(node_raw, None)
+        while len(self._cert_hint_peers) >= _HINT_PEERS_MAX:
+            self._cert_hint_peers.popitem(last=False)
+        self._cert_hint_peers[node_raw] = True
+
     async def _kad_query_node(self, node_id: NodeID, target: NodeID,
-                               timeout: float = 5.0) -> list[NodeEntry]:
+                               timeout: float = 5.0) -> list[NodeEntry] | None:
         query_id = os.urandom(_QID_LEN)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_finds[query_id] = future
+        # Only to a node that has told us it understands them. A build that has
+        # not heard of fingerprints checks the payload length exactly and drops
+        # anything longer, so asking one of those with a tail is not a wasted
+        # few hundred bytes — it is a lookup that never happens.
+        tail = b""
+        if node_id.raw in self._cert_hint_peers:
+            tail = _encode_cert_hints(self._cert_store.fingerprints(_CERT_HINT_MAX))
         # Addressed to node_id and routed: a direct peer gets it in one hop, an
         # id reachable only through relays gets it multi-hop. The FOUND_NODE
         # reply routes back to us the same way.
         packet = Packet.create(FIND_NODE, self._id.raw, node_id.raw,
-                               target.raw + query_id)
+                               target.raw + query_id + tail)
         try:
             await self._route_outbound(packet)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except (asyncio.TimeoutError, Exception):
             # Unanswered: whatever first hop we used is not carrying traffic to
             # this id any more. Forget it so the next try re-picks by proximity.
+            # `None`, not an empty list: a node that answers with nothing has
+            # still answered, and telling the two apart is what lets the caller
+            # stop asking after an id that never once replied.
             self._forget_route_hint(node_id)
-            return []
+            return None
         finally:
             self._pending_finds.pop(query_id, None)
             if not future.done():
@@ -6053,17 +6137,20 @@ class MeshNode:
         return True
 
     async def _handle_find_node(self, peer: _Peer, packet: Packet) -> None:
-        if len(packet.payload) != 20 + _QID_LEN:
-            return
+        if len(packet.payload) < 20 + _QID_LEN:
+            return          # the question itself is not there
+        known = _decode_cert_hints(packet.payload[20 + _QID_LEN:])
+        if known is None:
+            return          # a tail that is not a list of fingerprints
         if not self._query_allowed(peer):
             return
         target = NodeID(packet.payload[:20])
-        query_id = packet.payload[20:]
+        query_id = packet.payload[20:20 + _QID_LEN]
         # Closest-first under a hard byte budget: one PQ chain is ~15 KB, so a
         # full k=20 answer would exceed the packet cap and never be sent at all
         # (see _FOUND_NODE_MAX_BYTES). Chains are built lazily so the budget
         # also caps the work one query can ask of us.
-        packer = _EntryPacker(_FOUND_NODE_MAX_BYTES)
+        packer = _EntryPacker(_FOUND_NODE_MAX_BYTES, known)
         # Kademlia's answer classically excludes the responder — but here a
         # querier can only reach us *through* a relay, so leaving ourselves out
         # means it never learns our entry. A lookup routed to the very id it is
@@ -6086,7 +6173,7 @@ class MeshNode:
             if not packer.add(NodeEntry(node_id, addresses, dsa_pub, chain)):
                 break
         response = Packet.create(FOUND_NODE, self._id.raw, packet.src_id,
-                                 query_id + packer.encode())
+                                 query_id + packer.encode() + _HINTS_OK)
         # routes back to the querier — never inline, we are in a receive loop
         await self._route_outbound(response, blocking=False)
 
@@ -6098,9 +6185,12 @@ class MeshNode:
         if future is None:
             return  # unsolicited routing data never mutates local state
         try:
-            entries = _decode_entries(packet.payload[_QID_LEN:])
+            body = packet.payload[_QID_LEN:]
+            entries, used = _decode_entries(body, self._cert_store.by_fingerprint)
         except Exception:
-            entries = []
+            entries, body, used = [], b"", 0
+        if body[used:used + len(_HINTS_OK)] == _HINTS_OK:
+            self._note_cert_hints(packet.src_id)
         if len(entries) > 20:
             return
         valid_entries: list[NodeEntry] = []
