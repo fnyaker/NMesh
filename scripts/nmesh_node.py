@@ -336,6 +336,7 @@ async def main() -> None:
         abuse_halflife=getattr(args, "abuse_halflife", None) or DEFAULT_HALFLIFE,
         gossip_abuse=not getattr(args, "no_abuse_gossip", False),
         release_quorum=getattr(args, "release_quorum", 0) or 0,
+        release_auto_publish=bool(getattr(args, "release_auto_publish", False)),
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

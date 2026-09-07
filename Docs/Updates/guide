@@ -136,6 +136,35 @@ other:
 
 ## Installing from people you do not individually trust
 
+## Publishing without being asked
+
+`release_auto_publish` in `nmesh.conf` (off, and off is the default) makes a
+node offer **its own running version** to the mesh whenever that version
+changes — which is what turns a node that updated itself into one that also
+carries the update onward, instead of sitting on it until somebody presses a
+button.
+
+Three things bound it, and the third is why the default is what it is:
+
+- **Once per version.** The pass asks whether *our* key already offers this
+  exact version, so a restart, a re-announce or a second sweep publish nothing.
+  A tree that fails to publish is not retried for an hour: reading and hashing
+  it is not free, and it will not become publishable because we asked again a
+  second later.
+- **It announces, it does not push.** Publishing signs a descriptor and says so;
+  the package moves only when somebody asks. Nobody installs it who has not
+  separately pinned this node's key, and pinning is always a human act.
+- **It signs with the node identity.** That key is unlocked for as long as the
+  node runs, because handshakes need it — which is exactly why
+  `publish_release` prefers a separate publisher key when a person is there to
+  unlock one. Unattended, there is nobody to type a passphrase, so this uses the
+  identity. Turning it on says "whoever holds this machine may offer its code to
+  everyone who pinned it". That is already true of anyone who can press the
+  button; the difference is that this is a standing permission rather than a
+  decision, and standing permissions deserve to be opted into.
+
+## Installing without being asked
+
 `release_quorum` in `nmesh.conf` (0 = off, and off is the default) says how many
 **endorsed publishers must independently sign the same `(version, sha256)`**
 before a release may install itself unattended.

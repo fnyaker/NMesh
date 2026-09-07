@@ -201,6 +201,7 @@ _RELEASE_TICK        = 300.0    # seconds between auto-install sweeps
 # what keeps a burst of announces (a peer catching us up) to one pass.
 _RELEASE_FIRST_TICK  = 20.0     # seconds before the first pass after start
 _RELEASE_SETTLE      = 3.0      # seconds an announce waits for its neighbours
+_AUTO_PUBLISH_RETRY  = 3600.0   # before re-attempting a version that failed
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
 _RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
 _RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
@@ -1414,7 +1415,8 @@ class MeshNode:
                  abuse_hostile: float = DEFAULT_HOSTILE,
                  abuse_halflife: float = DEFAULT_HALFLIFE,
                  gossip_abuse: bool = True,
-                 release_quorum: int = 0) -> None:
+                 release_quorum: int = 0,
+                 release_auto_publish: bool = False) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1471,6 +1473,15 @@ class MeshNode:
         # may install itself. 0 — the default — means that route is closed and
         # only a key pinned for automatic install can replace this node's code.
         self._release_quorum = max(0, int(release_quorum))
+        # Publishing our own code unattended. Off unless an operator asked:
+        # this signs a release with the identity the node keeps unlocked, and a
+        # release is the one payload that replaces somebody else's program.
+        self._release_auto_publish = bool(release_auto_publish)
+        # The version we last tried to publish, and when. One attempt per
+        # version per `_AUTO_PUBLISH_RETRY`: reading and hashing the tree is
+        # not free, and a tree that cannot be published will not start being
+        # publishable because we asked again a second later.
+        self._auto_published: tuple[str, float] | None = None
         # The behavioural rules, run on the keepalive sweep. Holds no per-peer
         # state: the counters live on the links, and a second place for a peer's
         # history would be a second answer.
@@ -2927,6 +2938,9 @@ class MeshNode:
         An identity already in the book keeps its schedule. Re-arming it on each
         loss would hand a peer that connects and drops a fresh dial per drop,
         and no loop driven by what a peer does may run flat out."""
+        if peer.authenticated_id is not None and peer.session is not None:
+            self._activity.note(
+                "link", "link lost with " + peer.authenticated_id.raw.hex()[:16])
         # Whatever we decide below, a link just went: the addresses behind it
         # can come due again, so the retry loop's schedule is stale. The wake
         # only asks it to recompute — `_retry_pass` still applies its own rules
@@ -3763,6 +3777,9 @@ class MeshNode:
                                     if found == self._id else
                                     "answered as " + found.raw.hex(),
                                     time.monotonic() - started)
+                    self._activity.note(
+                        "warn", "dropped an address of " + node_hex[:16]
+                        + " — it answers as somebody else")
                     self._routing.drop_address(node_id, uri)
                 else:
                     self._note_dial(node_hex, uri, "no-answer",
@@ -4063,6 +4080,7 @@ class MeshNode:
             # anyway — a snapshot costs one pass over at most a dozen jobs, and
             # nothing at all when nobody reads it.
             "activity": self._activity.jobs(),
+            "recent": self._activity.recent(20),
             "detached": len(self._detached),
             "network": (self._net_monitor.status()
                         if self._net_monitor is not None else None),
@@ -6929,6 +6947,12 @@ class MeshNode:
             delay = _RELEASE_TICK
             self._release_wake.clear()
             try:
+                await self._auto_publish_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
                 await self._release_pass()
             except asyncio.CancelledError:
                 raise
@@ -7025,6 +7049,47 @@ class MeshNode:
         if count <= len(placed) * _FAMILY_SHARE:
             return None, 0
         return family.hex(), count
+
+    def _we_published(self, version: str) -> bool:
+        """Is this exact version already offered by *our* key?"""
+        mine = self._identity.dsa_public_key
+        for listed in self._releases.list():
+            entry = self._releases.get(listed["publisher_id"])
+            if (entry is not None and entry["publisher"] == mine
+                    and entry["version"] == version):
+                return True
+        return False
+
+    async def _auto_publish_pass(self) -> str | None:
+        """Offer the running version to the mesh, once, if asked to.
+
+        What makes this safe to leave on is that it adds nothing: the code is
+        already on this machine, the key already signs handshakes with it, and
+        nobody installs the result who has not separately pinned this key. What
+        it removes is the step where a node updates itself and then sits on the
+        new version because nobody pressed a button.
+
+        Idempotent by construction — it asks whether *our* key already offers
+        this exact version — so a restart, a re-announce or a second pass do
+        nothing. Returns the version published, or None."""
+        if not self._release_auto_publish:
+            return None
+        version = _running_version()
+        if self._we_published(version):
+            return None
+        last = self._auto_published
+        now = time.monotonic()
+        if last is not None and last[0] == version and now - last[1] < _AUTO_PUBLISH_RETRY:
+            return None
+        self._auto_published = (version, now)
+        try:
+            await self.publish_release()
+        except Exception:
+            self._activity.note(
+                "warn", "could not publish this node's code as " + version)
+            return None      # a tree we cannot publish is not a reason to stop
+        self._activity.note("release", "published this node's code as " + version)
+        return version
 
     async def _release_pass(self) -> str | None:
         """One pass: install at most one release, and never the same failing
@@ -7822,6 +7887,7 @@ class MeshNode:
             record = self._handshake_refusals[reason] = {"count": 0}
         record["count"] += 1
         record["at"] = time.time()
+        self._activity.note("refused", "handshake refused: " + reason)
         try:
             record["peer"] = packet.src_id.hex()
         except Exception:
@@ -7919,6 +7985,7 @@ class MeshNode:
         await peer.send(ack)
 
         self._note_punch_link_up(peer)
+        self._activity.note("link", "link up with " + claimed_id.raw.hex()[:16])
         self._routing.add(claimed_id, [], bob_dsa_pub)
         kept = self._collapse_redundant_links(peer)
         self._stop_chasing(peer.authenticated_id)
@@ -8021,6 +8088,7 @@ class MeshNode:
 
         peer.authenticated_id = server_id
         peer.dsa_pub = alice_dsa_pub
+        self._activity.note("link", "link up with " + server_id.raw.hex()[:16])
         self._note_punch_link_up(peer)
         # Record the address we dialled so this peer is reconnectable after a
         # restart (validated before advertising it to anyone else).

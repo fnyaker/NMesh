@@ -657,6 +657,15 @@ on* matters more than it looks: since these loops stopped polling, what each one
 waits for is a real question, and the answer is read off the loop rather than
 kept in a second list somebody has to remember to update.
 
+Overview also carries **Happening now**: the last handful of things this node
+did or was told — a link up or lost, a handshake refused and why, an address
+dropped for answering as somebody else, its own code published. It is written
+where the node already knows something happened, never per packet, and the text
+is always the node's own words: nothing a peer wrote reaches it, which is what
+keeps a log an adversary can write into from existing. Repeats coalesce onto one
+row with a count, so a peer flapping twice a second cannot push everything else
+out of view, and the card is hidden entirely while nothing has happened.
+
 Overview's tiles say **Relayed** — of what left this node, how much was carried
 for somebody else. Relaying is the one thing a node spends bandwidth on with
 nothing of its own to show for it, and it used to be indistinguishable from its

@@ -414,6 +414,21 @@ tbody tr[data-clickable]{cursor:pointer}
   gap:var(--s-2);color:var(--text-muted);font-size:var(--fs-sm);max-width:76ch}
 .steps li{padding-left:var(--s-1)}
 .steps li::marker{color:var(--text);font-weight:620}
+/* A few lines of what just happened. Compact on purpose: it is context for the
+   numbers above it, not a log to sit and read. Hidden entirely while empty,
+   which on a healthy node is most of the time. */
+.feed{display:flex;flex-direction:column;gap:var(--s-2);margin:0;padding:0;list-style:none}
+.feed li{display:flex;gap:var(--s-3);align-items:baseline;font-size:var(--fs-sm);min-width:0}
+.feed .k{flex:none;width:.5em;height:.5em;border-radius:50%;
+  background:var(--text-muted);align-self:center}
+.feed .k.link{background:var(--ok)}
+.feed .k.warn,.feed .k.refused{background:var(--warn)}
+.feed .k.release{background:var(--accent)}
+.feed .when{color:var(--text-muted);font-variant-numeric:tabular-nums;
+  flex:none;min-width:5.5em;text-align:right}
+.feed .what{color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.feed .n{color:var(--text-muted);flex:none}
 .skel{background:linear-gradient(90deg,var(--surface-2),var(--surface-3),var(--surface-2));
   background-size:200% 100%;animation:nm-skel 1.3s linear infinite;border-radius:var(--r-sm);
   height:12px}
