@@ -424,6 +424,68 @@ under attack must not answer by becoming the flood — and never to the node it
 names: it will find out when its traffic stops being answered, but not from us,
 and not with a timestamp telling it which of the things it tried was noticed.
 
+### Equivocation: the one report that needs no trusted messenger
+(`equivocation.py`)
+
+Everything above is about weighing an opinion, and it has to be: an accusation
+is one node's word, and the accuser may simply be lying. That is why rumour is
+capped strictly below the threshold that cuts anybody off.
+
+There is exactly one shape of report that escapes this, and it is worth naming
+because it is the only one. An **equivocation proof** is two records *signed by
+the same key* that cannot both have been meant:
+
+| Kind | The contradiction | Where it is caught |
+|---|---|---|
+| `KIND_RELEASE` | one publisher, one version number, two different programs | `ReleaseCatalog.offer` |
+| `KIND_PSEUDO` | one node, one instant, two different names | `PseudoBook.offer` |
+
+Forging either half needs the private key of the node it accuses. So the
+messenger contributes nothing but transport, and there is nothing to trust them
+about — a receiver checks the pair itself, exactly as it checks any other
+signature, and reaches the same verdict whoever handed it over. This is what
+lets a proof travel: it is *self-authenticating* in the same sense a name claim
+is, which is why both are safe to accept from strangers and re-serve.
+
+Three properties keep it that way:
+
+- **Nothing here signs anything.** The proof carries two records that were
+  already signed, on paths that already existed, for their own reasons. No new
+  signing domain, no new key material, nothing on any hot path.
+- **The subject is derived from the records**, never carried beside them. A
+  proof cannot name a victim: whoever it accuses is whoever signed both halves.
+- **Order is not meaningful.** Which half arrived first is a fact about the
+  network, never about the signer, and a proof that depended on it would be a
+  proof somebody could argue with.
+
+Both detections run **before** their anti-rollback check, deliberately. A
+catalogue that dropped the older descriptor first would never see the pair, and
+showing the older half second is precisely how an attacker would arrange that.
+
+What it costs the accused, today, is narrow and deliberate: a publisher caught
+contradicting itself can no longer install anything on this node **unattended**
+(`may_auto_install`), the row on the Updates page says so, and the node's
+activity feed notes it. A human may still install by hand — they are told
+first. Nothing is cut off and no standing moves: the proof is about one key
+having lied once, not about how the node behaves on the wire, and those are
+different questions. Both tables are bounded like everything else an outsider
+can grow (`MAX_EQUIVOCATIONS`); when the release table is full, a proof about a
+publisher this operator never pinned makes way for one about a publisher they
+did, since refusing an unattended install is the whole use of it.
+
+**It does not travel yet.** Both proofs are built and kept locally, and the
+consequence is local. Passing one to a neighbour is the obvious next step and is
+deliberately not taken here: a 20 kB record re-broadcast on the say-so of one
+arrival is an amplifier, and the gossip needs the same bounding, deduplication
+and rate limiting every other flood on this mesh has before it is worth having.
+The format is the part that had to exist first, because it is what makes the
+report checkable at all.
+
+What this is **not** is two publishers disagreeing. `ReleaseCatalog.contradicts`
+answers that one, and it is right to treat it as a reason to stop rather than to
+blame: honest publishers fork by accident. Equivocation is one key contradicting
+*itself*, which no accident produces.
+
 ### Behavioural rules (`behaviour.py`)
 
 The core reports what it *sees*; this is what it *notices*. Named rules run over

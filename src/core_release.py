@@ -86,6 +86,7 @@ MAX_NOTES_LEN = 4000
 MAX_NAME_LEN = 64
 MAX_PUBLISHERS = 32          # pinned keys an operator may hold
 MAX_CATALOG = 64             # publishers tracked in the gossiped catalogue
+MAX_EQUIVOCATIONS = 8        # publishers we keep a self-contradiction proof about
 MAX_HELD_PACKAGES = 4        # packages this node keeps to serve others
 PUBLISHER_ID_LEN = 20
 # An automatic install ends in a restart, so it must be able to give up: a
@@ -825,6 +826,9 @@ class ReleaseCatalog:
     def __init__(self, max_entries: int = MAX_CATALOG) -> None:
         self._max = max_entries
         self._entries: dict[bytes, dict] = {}
+        # Publishers caught signing one version twice, with different bytes each
+        # time. One proof per publisher, bounded beside the table it describes.
+        self._equivocations: dict[bytes, bytes] = {}
 
     def offer(self, release_bytes: bytes, verify, trusted=None) -> str | None:
         """Consider a signed release.
@@ -840,6 +844,13 @@ class ReleaseCatalog:
         is_trusted = bool(trusted(doc["publisher"])) if trusted else False
         existing = self._entries.get(key)
         if existing is not None:
+            # Before the rollback check, deliberately. One publisher signing two
+            # different programs under one version is not a stale descriptor to
+            # drop, it is a proof to keep — and an attacker showing the older
+            # half second is exactly how it would slip past a check that ran
+            # after. See `equivocation.py`: unlike everything else a node hears
+            # about another node, this needs nobody's honesty to stand up.
+            self._note_equivocation(key, existing, doc, release_bytes, is_trusted)
             if doc["ts"] <= existing["ts"]:
                 return None                      # anti-rollback
             outcome = "updated"
@@ -863,6 +874,59 @@ class ReleaseCatalog:
             "trusted": is_trusted,
         }
         return outcome
+
+    def _note_equivocation(self, key: bytes, existing: dict, doc: dict,
+                           incoming: bytes, is_trusted: bool) -> None:
+        """Keep the pair when one publisher signs one version twice, differently.
+
+        One proof per publisher, the first one seen: a second is the same fact
+        about the same key, and the table is bounded like every other thing here
+        that an outsider can grow. When it is full a proof about a publisher
+        this operator never pinned makes way for one about a publisher they did
+        — the table's whole use is refusing an unattended install, so the keys
+        that could actually cause one are the keys worth the room."""
+        if key in self._equivocations:
+            return
+        if existing["version"] != doc["version"]:
+            return
+        if existing["sha256"] == doc["sha256"]:
+            return
+        from . import equivocation
+        try:
+            proof = equivocation.build(
+                equivocation.KIND_RELEASE, existing["release"], bytes(incoming))
+        except Exception:
+            return        # a proof we cannot frame is not a reason to drop the release
+        if len(self._equivocations) >= MAX_EQUIVOCATIONS:
+            if not is_trusted or not self._evict_equivocation():
+                return
+        self._equivocations[key] = proof
+
+    def _evict_equivocation(self) -> bool:
+        for key in self._equivocations:
+            entry = self._entries.get(key)
+            if entry is None or not entry["trusted"]:
+                del self._equivocations[key]
+                return True
+        return False
+
+    def equivocations(self) -> dict[bytes, bytes]:
+        """``publisher_id -> proof``, for whoever wants to act on it or pass it
+        on. A copy: nothing outside may edit the catalogue by iterating it."""
+        return dict(self._equivocations)
+
+    def equivocated(self, key) -> bytes | None:
+        """The proof that this publisher contradicted itself, if we hold one.
+
+        Takes the publisher id or the key it is derived from: both are what a
+        caller has to hand, and deriving one from the other is not a decision
+        worth making at four call sites."""
+        if not isinstance(key, (bytes, bytearray)):
+            return None
+        key = bytes(key)
+        if len(key) != PUBLISHER_ID_LEN:
+            key = publisher_id(key)
+        return self._equivocations.get(key)
 
     def _make_room(self, for_trusted: bool) -> bool:
         if not for_trusted:

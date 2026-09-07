@@ -2849,6 +2849,18 @@ function releaseRowHTML(entry){
     (entry.mine ? ' <span class="badge">this node</span>' : "") +
     (entry.trusted ? ' <span class="badge ok">pinned</span>'
                    : ' <span class="badge">unpinned</span>') +
+    // Two different claims and only one of them names a culprit. `disputed`
+    // says somebody else signed other bytes for this version — a fork looks
+    // exactly like that, so it warns and blames nobody. `equivocated` says
+    // this key signed both, which no accident produces and which the node can
+    // prove without trusting whoever showed it. Both stop an unattended
+    // install; a human is still allowed to install, and is told first.
+    (entry.equivocated
+      ? ' <span class="badge danger" title="This key signed two different ' +
+        'programs under one version number.">contradicts itself</span>' : "") +
+    (entry.disputed
+      ? ' <span class="badge warn" title="Another publisher signed different ' +
+        'content for this version.">disputed</span>' : "") +
     "</td><td>" + fmtAgo(Date.now() / 1000 - entry.ts) + "</td><td>" + action + "</td></tr>";
 }
 function publisherRowHTML(entry){
