@@ -242,6 +242,37 @@ class TestTouchingAnEntry:
         table.touch(live)
         assert bucket.oldest.node_id != live        # …and a probe saves it
 
+    def test_neither_touch_nor_add_compares_two_entries(self):
+        """The shape of the cost, asserted structurally rather than by a clock.
+
+        A bucket held its entries in a list, so refreshing one scanned it under
+        `NodeEntry.__eq__` — a dataclass comparison over eight fields including
+        two lists. On a full bucket that was 8 µs for a `move_to_end`, paid on
+        every probe, every `FOUND_NODE` and every address gossip. Keyed by id,
+        nothing compares two entries at all; a timing test would only say it is
+        fast today, this says *why*."""
+        calls = []
+        original = NodeEntry.__eq__
+        NodeEntry.__eq__ = lambda self, other: (calls.append(1),
+                                                original(self, other))[1]
+        try:
+            table = RoutingTable(NodeID(b"\x00" * 20))
+            live = NodeID(bytes([0x80]) + b"\x00" * 19)
+            table.add(live, ["tcp://live:1"], b"\x01" * 32)
+            index = 1
+            while len(table._buckets[table._bucket_index(live)]) < KBucket.K:
+                other = NodeID(bytes([0x80]) + bytes([index]) + b"\x00" * 18)
+                index += 1
+                if table._bucket_index(other) == table._bucket_index(live):
+                    table.add(other, ["tcp://x:1"], b"\x02" * 32)
+            calls.clear()
+            for _ in range(50):
+                table.touch(live)
+                table.add(live, ["tcp://live:1"], b"\x01" * 32)
+            assert calls == [], f"{len(calls)} entry comparisons on the hot path"
+        finally:
+            NodeEntry.__eq__ = original
+
     def test_it_leaves_the_lookup_counters_alone(self):
         """Being probed is not answering a lookup — the two are what tell a
         live node from an id somebody keeps re-advertising."""

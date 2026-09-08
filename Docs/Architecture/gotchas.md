@@ -333,6 +333,23 @@ found: the visible behaviour was identical.
 > not what it returned.** A function that also reorders, also filters, also
 > marks something is three contracts wearing one name.
 
+And then the fix was measured, because a correctness fix on a path that runs
+ten times a second is a performance decision whether or not anybody treats it
+as one. Putting the re-append back cost **11.7 µs** on a full bucket — it had
+undone the entire probe optimisation, quietly, in the name of security.
+
+The cause was not the fix: a bucket held its twenty entries in a *list*, so
+both `add` and the restored re-append scanned it under `NodeEntry.__eq__` — a
+dataclass comparison over eight fields including two lists. Keyed by the raw id
+in an insertion-ordered map instead, nothing compares two entries at all:
+`touch` went to **0.72 µs** and `add` — which was never part of any of this,
+and is paid on every `FOUND_NODE`, every address gossip and every probe that
+carries one — went from **13.3 µs to 2.95 µs**.
+
+> **A security fix that costs a hot path is not finished.** The choice is
+> almost never "safe or fast": it is usually a data structure that was wrong
+> for both, and the fix is what makes you finally look at it.
+
 ## An exact length check reads like rigour and is a compatibility bug
 
 Three new messages checked `len(payload) != SIZE` and charged abuse otherwise.

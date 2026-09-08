@@ -38,8 +38,15 @@ class PacketError(Exception):
 # silently and unreproducibly. "Nothing calls this off the loop" is exactly the
 # kind of invariant nobody re-checks when they add a thread, and this project
 # has a file full of what that costs. The lock is still cheaper than the
-# `getrandom` syscall it replaced (0.51 us against 0.65), so correctness here
+# `getrandom` syscall it replaced (0.51 us against 0.62), so correctness here
 # is not even a trade.
+#
+# A lock-free version measured twice as fast again — an `itertools.count` per
+# pool, whose `__next__` is a single C call — and is **not** taken. Its safety
+# rests on that call being atomic, which CPython does not promise and a
+# free-threaded build need not provide; that is the same unstated assumption
+# the lock exists to remove, wearing a faster suit. A quarter of a microsecond
+# on a 2.5 us path is not worth buying it back.
 _NONCE_BLOCK = 4096
 _NONCE_SIZE = 12
 _EMPTY_TAG = bytes(16)
