@@ -310,6 +310,43 @@ afford, never to push a cadence below what the pair agreed.
 > negotiated, clamp it where that thing is known** — and make the clamp
 > one-directional, or it becomes a second way to impose a cost.
 
+## A cheaper path has to keep the side effects, not just the answer
+
+`RoutingTable.add` was how a peer's recency got refreshed, and most probes now
+carry no addresses at all — so `touch` was written to refresh `last_seen` and
+skip the merge. It returned the same answer for a fraction of the cost, and it
+quietly dropped something `add` was also doing: **re-appending the entry to its
+k-bucket.**
+
+Bucket position *is* the eviction order (`oldest` is `_entries[0]`, and that is
+what `evict_oldest` takes). So being heard from is what has always kept a node
+out of the firing line. After the change, the peer we probe ten times a
+second — the one we have the most evidence is alive — sat first in the queue
+while an id a stranger merely *mentioned* was promoted past it. In a table
+where identities are free to mint, that is proof being outranked by hearsay,
+and it is the exact inversion the charter names.
+
+Reproduced in four lines against a full bucket, which is the only reason it was
+found: the visible behaviour was identical.
+
+> **When you replace a call with a cheaper one, diff what the old one *did*,
+> not what it returned.** A function that also reorders, also filters, also
+> marks something is three contracts wearing one name.
+
+## An exact length check reads like rigour and is a compatibility bug
+
+Three new messages checked `len(payload) != SIZE` and charged abuse otherwise.
+That is right for a body too *short* to hold the message — it is not there. It
+is wrong for a body that is longer, which is what a build newer than this one
+looks like, and charging it means every node running tomorrow's code is
+reported by every node running today's. Exactly what the capability negotiation
+exists to prevent, written by hand three times, in the same commit as a PING
+trailer that got it right.
+
+> **Too short is malformed; longer than you understand is a newer build.**
+> Apply it to every message with a fixed-size body, not only the ones designed
+> to grow.
+
 ## What rides along becomes the cost when the cadence changes
 
 The PING carried `advertised_uris` because liveness and address gossip happened

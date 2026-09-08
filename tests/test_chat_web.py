@@ -189,3 +189,26 @@ class TestArrivingOutOfOrder:
         bridge._on_event(Edited(SRC, None, mid, "corrected"))
         bridge._on_event(TextMessage(SRC, "original", mid))
         assert bridge._orphans == {}
+
+    async def test_parking_does_not_launder_an_edit_past_its_author_check(self):
+        """The property the hold-back must not cost. An edit only applies to a
+        message its own sender wrote, and a parked one is checked against the
+        real author at the moment the message lands — not against whoever
+        happened to park it first."""
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        stranger = NodeID(os.urandom(20))
+        bridge._on_event(Edited(stranger, None, mid, "not theirs to edit"))
+        bridge._on_event(TextMessage(SRC, "mine", mid))
+        message = bridge.snapshot(0)["messages"][0]
+        assert message["text"] == "mine"
+        assert not message.get("edited")
+
+    async def test_parking_does_not_launder_a_deletion_either(self):
+        bridge = self._bridge()
+        mid = os.urandom(8)
+        stranger = NodeID(os.urandom(20))
+        bridge._on_event(Deleted(stranger, None, mid))
+        bridge._on_event(TextMessage(SRC, "mine", mid))
+        message = bridge.snapshot(0)["messages"][0]
+        assert not message.get("deleted") and message["text"] == "mine"

@@ -221,6 +221,27 @@ class TestTouchingAnEntry:
         assert table.touch(NodeID(b"\x11" * 20)) is False
         assert table.get(NodeID(b"\x11" * 20)) is None
 
+    def test_it_keeps_a_live_node_out_of_the_firing_line(self):
+        """The regression this method shipped with. Bucket position *is* the
+        eviction order, and `add` has always re-appended what it refreshed —
+        so being heard from is what protects a node. Refreshing `last_seen`
+        alone left the peer we probe ten times a second first in the queue
+        while an id a stranger merely mentioned was promoted past it: proof
+        outranked by hearsay, in a table where identities are free to mint."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        live = NodeID(bytes([0x80]) + b"\x00" * 19)
+        table.add(live, ["tcp://live:1"], b"\x01" * 32)
+        bucket = table._buckets[table._bucket_index(live)]
+        index = 1
+        while len(bucket) < KBucket.K:
+            other = NodeID(bytes([0x80]) + bytes([index]) + b"\x00" * 18)
+            index += 1
+            if table._bucket_index(other) == table._bucket_index(live):
+                table.add(other, ["tcp://x:1"], b"\x02" * 32)
+        assert bucket.oldest.node_id == live        # first in line to go
+        table.touch(live)
+        assert bucket.oldest.node_id != live        # …and a probe saves it
+
     def test_it_leaves_the_lookup_counters_alone(self):
         """Being probed is not answering a lookup — the two are what tell a
         live node from an id somebody keeps re-advertising."""

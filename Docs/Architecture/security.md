@@ -292,6 +292,12 @@ away an optional plane, which is exactly why rule 3 is not optional.
 `node.negotiation_status()` shows, per link, what is shared, what they have that
 we do not, and what we have that they do not.
 
+**A fixed-size body is not an exemption.** Every message on a negotiated plane
+reads *too short* as malformed and *longer than we understand* as a newer build
+— including the ones whose body is a fixed struct today. An exact length check
+reads like rigour and is the same bug as reading silence as refusal: it reports
+every node running tomorrow's code. See `gotchas.md`.
+
 ## Zero trust: being in the network is not being trusted
 
 Source: `reputation.py`, `accusation.py`, and `MeshNode.report_abuse`.

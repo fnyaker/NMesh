@@ -3256,11 +3256,13 @@ class MeshNode:
         Both ends run `mlo.accord` over the same two windows and get the same
         answer, so there is no acceptance message and no state where one end
         thinks something was agreed and the other does not."""
-        if len(packet.payload) != _KA_BOUNDS.size:
+        # Too short is malformed; longer is a newer build saying more than this
+        # one knows how to read. See `_handle_pong`.
+        if len(packet.payload) < _KA_BOUNDS.size:
             return self._charge_abuse(peer)
         if not self._ka_negotiation_allowed(peer):
             return
-        declared = _KA_BOUNDS.unpack(packet.payload)
+        declared = _KA_BOUNDS.unpack_from(packet.payload, 0)
         if not mlo.well_formed(*declared):
             # A mode whose floor is not below its ceiling, or a "fast" mode
             # slower than the "slow" one: claims that cannot be true. Counted
@@ -3292,12 +3294,13 @@ class MeshNode:
         battery and bandwidth, on a plane that exists precisely to stop that —
         so a request at or below what we are already doing is dropped, and the
         peer is told nothing it did not already know."""
-        if len(packet.payload) != _KA_WANTED.size:
-            return self._charge_abuse(peer)
+        if len(packet.payload) < _KA_WANTED.size:
+            return self._charge_abuse(peer)     # see `_handle_pong`
         if not self._ka_negotiation_allowed(peer):
             return
         low, high = self._accord_with(peer).window
-        wanted = min(max(int(_KA_WANTED.unpack(packet.payload)[0]), low), high)
+        wanted = min(max(int(_KA_WANTED.unpack_from(packet.payload, 0)[0]),
+                         low), high)
         if wanted <= self._keepalive_interval(peer) * 1000.0:
             return
         peer.ka_told_ms = wanted
@@ -7074,14 +7077,21 @@ class MeshNode:
         # to happen — makes a link slower than the keepalive interval look
         # exactly like a dead one.
         now = time.monotonic()
-        if len(packet.payload) == _KA_TOKEN.size:
-            rtt = peer.quality.answered(_KA_TOKEN.unpack(packet.payload)[0], now)
+        if len(packet.payload) >= _KA_TOKEN.size:
+            # At least a token: read one and ignore whatever follows. **Too
+            # short is malformed; longer than we understand is a newer build.**
+            # Charging the second is precisely what the capability negotiation
+            # exists to stop — it would report every node running tomorrow's
+            # code — and it is the same rule the PING trailer already follows.
+            rtt = peer.quality.answered(
+                _KA_TOKEN.unpack_from(packet.payload, 0)[0], now)
             if rtt is not None:
                 peer.last_rtt = rtt
                 peer.ping_sent_at = None
             return
         if packet.payload:
-            return self._charge_abuse(peer)   # a PONG body is a token or nothing
+            # Something, but not enough to be a token. The message is not there.
+            return self._charge_abuse(peer)
         if peer.ping_sent_at is not None:
             peer.last_rtt = max(0.0, now - peer.ping_sent_at)
             peer.quality.on_pong(peer.last_rtt)

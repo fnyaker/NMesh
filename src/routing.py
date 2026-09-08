@@ -63,6 +63,20 @@ class KBucket:
             return None
         return self._entries[0]
 
+    def touch(self, node_id: NodeID) -> bool:
+        """Move an entry to the back of the queue, the way `add` does.
+
+        Position in this list **is** the eviction order — `oldest` is
+        `_entries[0]` and that is what `evict_oldest` takes. `add` has always
+        re-appended a refreshed entry, so being heard from was what kept a node
+        out of the firing line."""
+        existing = self.get(node_id)
+        if existing is None:
+            return False
+        self._entries.remove(existing)
+        self._entries.append(existing)
+        return True
+
     def evict_oldest(self, replacement: NodeEntry) -> None:
         self._entries.pop(0)
         self._entries.append(replacement)
@@ -145,11 +159,20 @@ class RoutingTable:
         Returns whether the id was known. An unknown one is *not* created here:
         recency about a node we have never heard of is not an entry, and
         inventing one from a bare liveness signal is how a table fills with ids
-        nobody can reach."""
+        nobody can reach.
+
+        **It moves the entry in its bucket too, and that is not bookkeeping.**
+        Bucket position is the eviction order, and `add` has always re-appended
+        what it refreshed — so being heard from is what has always kept a node
+        out of the firing line. Refreshing `last_seen` alone left the peer we
+        probe ten times a second sitting first in the queue while an id a
+        stranger merely *mentioned* was promoted past it: proof outranked by
+        hearsay, in a table where identities are free to mint."""
         entry = self.get(node_id)
         if entry is None:
             return False
         entry.last_seen = time.monotonic()
+        self._buckets[self._bucket_index(node_id)].touch(node_id)
         return True
 
     # -- ids that never answer ---------------------------------------------
