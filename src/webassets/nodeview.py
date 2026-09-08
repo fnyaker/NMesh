@@ -270,7 +270,12 @@ const NODEVIEW = {
   },
 
   async extras(id, self){
-    const out = {chat:null, fleet:null};
+    const out = {chat:null, fleet:null, packages:[]};
+    // What this machine publishes is asked of every node, its own included: a
+    // node that published its own code is exactly the one an operator wants to
+    // see it on. Answered from what this node already holds — the button below
+    // is what spends a round of queries on the network.
+    try{ out.packages = await PACKAGES.forNode(id, false); }catch(_){}
     if(self) return out;
     const jobs = [];
     if(this.has("chat", "peer"))
@@ -297,6 +302,7 @@ const NODEVIEW = {
       this.relationHTML(view, extras, options) +
       this.actionsHTML(view, extras, options) +
       this.linksHTML(view) +
+      this.packagesHTML(view, extras) +
       this.foldHTML("Addresses", this.addressHTML(view), this.addressCount(view)) +
       this.foldHTML("Identity and session", this.identityHTML(view), "") +
       '<p class="msg" data-nv-status role="status"></p>' +
@@ -311,6 +317,7 @@ const NODEVIEW = {
       view.id, view.self, view.direct, view.knownHere, view.has_key,
       view.links.map((link) => this.linkKey(link)),
       view.addresses.map((row) => row.uri),
+      (extras.packages || []).map((row) => row.id + ":" + row.version),
       (options.hide || []), !!extras.chat, !!chat.contact, !!chat.seen,
       !!chat.unread, !!extras.fleet, !!fleet.managed, !!fleet.operator,
       (fleet.caps || []), (fleet.operator_caps || []),
@@ -690,6 +697,22 @@ const NODEVIEW = {
         "</tr>").join("") + "</tbody></table></div>";
   },
 
+  // What this node offers. Two different sentences, and the difference is the
+  // whole reason this section exists: a *publication* is code signed by this
+  // key, a *recommendation* is this node saying which release it runs. One can
+  // be installed; the other is somebody agreeing, and agreeing is not authority.
+  packagesHTML(view, extras){
+    const rows = extras.packages || [];
+    const body = rows.length
+      ? PACKAGES.hitsHTML(rows)
+      : '<p class="small muted">This node offers nothing — it has published no ' +
+        "version, and does not say which one it runs.</p>";
+    return this.foldHTML("What it publishes",
+      body + '<div class="btn-row"><button data-nv-act="packages">' +
+      "Ask the network</button></div>",
+      rows.length ? String(rows.length) : "none");
+  },
+
   identityHTML(view){
     const rows = [
       ["Relationship", view.self ? "This console's node"
@@ -809,6 +832,10 @@ const NODEVIEW = {
   async act(event, element, options){
     const retry = event.target.closest("[data-nv-retry]");
     if(retry){ await this.retry(element, retry, retry.dataset.nvRetry); return; }
+    // A package this node offers opens on its own, where it can be read,
+    // downloaded, installed or watched. The card here only names it.
+    const pkg = event.target.closest("[data-pkg-open]");
+    if(pkg){ openLinked("/package#" + pkg.dataset.pkgOpen, "nmesh-package"); return; }
     const button = event.target.closest("[data-nv-act]");
     if(!button) return;
     const id = element.dataset.nvId;
@@ -820,10 +847,27 @@ const NODEVIEW = {
     if(what === "message"){ openLinked("/chat#c/" + id); return; }
     if(what === "fleet"){ openLinked("/fleet#nodes"); return; }
     if(what === "ping"){ await this.ping(element, button, id); return; }
+    if(what === "packages"){ await this.askPackages(element, button, id, options); return; }
     if(what === "contact"){ await this.contact(element, button, id, options); return; }
     if(what === "invite"){ await this.invite(element, button, id); return; }
     if(what === "enrol"){ await this.enrol(element, button, id, options); return; }
     if(what === "forget"){ await this.forget(element, id, options); return; }
+  },
+
+  // The fold answers from what this node already holds; this spends a round of
+  // queries on the network, which is why it is a button.
+  async askPackages(element, button, id, options){
+    await withBusy(button, async () => {
+      this.say(element, "Asking the network what this node offers…");
+      try{
+        const rows = await PACKAGES.forNode(id, true);
+        this.say(element, rows.length
+          ? "" : "This node offers nothing the network knows about.");
+        await this.mount(element, id, options);
+      }catch(error){
+        if(!isStale(error)) this.say(element, "Could not ask", true);
+      }
+    });
   },
 
   async ping(element, button, id){

@@ -287,9 +287,11 @@ is restarted. That is the normal path for a manual update.
 
 ### Service managers handled
 
-systemd (system and user), OpenRC, launchd. None of the three → the script says
-so and prints the command to run by hand; it does not fail for it, and the
-installation stays valid.
+systemd (system and user), OpenRC, launchd, and **runit** on Android — the
+installer offers to add `termux-services` when a phone has no supervisor at all,
+because a node that only runs while a terminal is open is the thing `install.sh`
+exists to avoid. None of them → the script says so and prints the command to run
+by hand; it does not fail for it, and the installation stays valid.
 
 A trap that is handled: `systemctl` present **without** systemd behind it (the
 case for many container images) would make every call fail with *"Failed to
@@ -298,12 +300,23 @@ real test of a running systemd. Likewise, a service manager that refuses the
 service does not fail the installation: it is a warning, and the installed tree
 stays runnable by hand.
 
-Every unit written exports `NMESH_SERVICE_MANAGED=1`, next to `Restart=always`
-(systemd) or `KeepAlive` (launchd): that pair is what lets a node install an
-update and then **exit to come back on the new code**. Replacing the tree does
-nothing to a process that already has the old code loaded, so leaving is the
-update. Without that variable the node stays up and says to restart it by hand —
-exiting with nothing to catch it would be worse than running the old version.
+**Every** unit written exports `NMESH_SERVICE_MANAGED=1`, next to
+`Restart=always` (systemd), `KeepAlive` (launchd) or `runsv`'s own restarting
+(runit): that pair is what lets a node install an update and then **exit to come
+back on the new code**. Replacing the tree does nothing to a process that already
+has the old code loaded, so leaving is the update.
+
+The runit service under Termux was the one that did not export it, and the
+consequence was invisible in the worst way: `runsv` would have restarted the
+node perfectly well, but the node could not tell, so it installed the update and
+refused to leave. A phone kept running yesterday's code until somebody reopened
+Termux by hand.
+
+Without a supervisor the node no longer gives up either: it **re-execs itself**
+(`os.execv`, a fresh interpreter on the same command line, keeping the pid and
+the terminal) rather than exiting into nothing. Only when even that is
+impossible does it stay up and say to restart it by hand. See
+[`../Updates/guide`](../Updates/guide).
 
 The tests source `install.sh` with `NMESH_INSTALL_LIB=1` and exercise init
 detection, privileges, paths, account creation, the generated units and the tree
@@ -506,6 +519,36 @@ anyway — but a third-party app that does will notice.
 Empty by default: the published GitHub releases. Set to a branch name, the check
 reads `src/version.py` at that branch instead and *Install* takes its tree. See
 [Following a branch instead of the releases](#following-a-branch-instead-of-the-releases).
+
+### `update_check_minutes` / `update_when_active` — when the node goes looking
+
+`update_check_minutes` (5) is how often the node sweeps for an installable
+update; **0 means it never goes looking**. `update_when_active` (off) holds that
+sweep back while nobody is using the node — no console open, no app attached, no
+call.
+
+Neither touches what *arrives*: an announcement from the mesh still wakes the
+node, so an operator who publishes an update and is watching for it to land does
+not have to wait for anything. What these control is the node going to look on
+its own, which on a phone is where the battery goes. An hourly sweep that skips
+while the screen is off is a different machine from one checking every five
+minutes in a pocket:
+
+```
+update_check_minutes = 60
+update_when_active = true
+```
+
+### `recommend_version` — saying which version this node runs
+
+Off by default. On, the node publishes a signed record pointing at the release
+id it runs, carrying the **source digest of the tree actually running here**.
+
+It publishes no code and authorises nothing. What it is worth is corroboration:
+a second party saying "this code is what I am executing" is the one thing in a
+supply chain an attacker cannot obtain by minting identities. Whoever reads it
+decides what their own subscriptions make of it — see
+[`../Updates/guide`](../Updates/guide).
 
 One report is worth at most 4, so it always takes several to reach either
 threshold. What the numbers mean, and why an accusation from a stranger counts

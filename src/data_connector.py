@@ -52,6 +52,14 @@ _MAX_CLIENTS = 64
 # sharing it is an explicitly supported deployment.
 _MAX_PENDING_CLIENTS = 16
 _AUTH_DEADLINE = 10.0      # seconds a connection has to send its AUTH frame
+# How long a client waits for the node to answer one question. One question is
+# in flight at a time (replies carry no id, so they are matched by order), which
+# is why this exists at all: without a bound, one slow answer holds every other
+# question the app will ever ask.
+_ASK_TIMEOUT = 15.0
+# …except the one that deliberately asks the network. The node bounds that
+# round itself; this outlasts it rather than racing it.
+_LOOKUP_TIMEOUT = 30.0
 # Frames queued for one client. A client that stops reading must not be able to
 # hold the pump — and with it every other app's inbound delivery.
 _MAX_CLIENT_QUEUE = 64
@@ -729,12 +737,18 @@ class ConnectorClient:
     # supplies it, so these calls never name another app's section.
 
     async def _roundtrip(self, req_type: int, req_body: bytes,
-                         resp_type: int) -> bytes:
+                         resp_type: int, timeout: float = _ASK_TIMEOUT) -> bytes:
         """Ask the connector one question and wait for its answer.
 
         Replies carry no request id, so they can only be matched by order: the
         lock keeps one question in flight at a time, and the pump hands the
-        answer to the future registered here."""
+        answer to the future registered here.
+
+        Bounded, because of what that lock means: one question that never comes
+        back holds every other question this app will ever ask. There was no
+        timeout at all, and a directory lookup on a mesh with a slow peer is
+        exactly the question that takes its time — so an app searching for a
+        name could stop being able to send a message."""
         if self._dead is not None:
             raise self._dead
         if self._asking is None:
@@ -746,11 +760,13 @@ class ConnectorClient:
             self._waiting.setdefault(resp_type, []).append(future)
             try:
                 await _write_frame(self._writer, req_type, req_body)
-                return await future
+                return await asyncio.wait_for(asyncio.shield(future), timeout)
             finally:
                 waiters = self._waiting.get(resp_type)
                 if waiters and future in waiters:
                     waiters.remove(future)
+                if not future.done():
+                    future.cancel()
 
     async def store_put(self, key: str, value: bytes) -> bool:
         kb = key.encode("utf-8")
@@ -886,7 +902,11 @@ class ConnectorClient:
         ``wide`` also asks the network for an exact match, which costs a round
         of queries: leave it off for search-as-you-type."""
         body = bytes([1 if wide else 0]) + query.encode("utf-8")
-        resp = await self._roundtrip(_PSEUDO_LOOKUP, body, _PSEUDO_RESULTS)
+        # A wide lookup asks the network and the node bounds that round itself;
+        # this only has to outlast it, or the app would give up on an answer
+        # that was about to arrive.
+        resp = await self._roundtrip(_PSEUDO_LOOKUP, body, _PSEUDO_RESULTS,
+                                     _LOOKUP_TIMEOUT if wide else _ASK_TIMEOUT)
         try:
             out = json.loads(resp.decode("utf-8"))
         except Exception:
