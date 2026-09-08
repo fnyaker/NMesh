@@ -63,6 +63,25 @@ async def _two_linked_nodes(tcp_addr: str, udp_addr: str):
     return host, guest
 
 
+async def _one_linked_pair(tcp_addr: str, udp_addr: str):
+    """A pair holding exactly **one** link — the state every pair starts in.
+
+    The same two boxes ticked, and nothing dialled by hand: what happens next
+    is the node's to decide."""
+    for transport in (TCPTransport, UDPTransport):
+        transport.SETTINGS = dict(transport.SETTINGS, mlo=True)
+    host, guest = make_node(), make_node()
+    code = host.generate_invite()
+    await host.start([f"tcp://{tcp_addr}", f"udp://{udp_addr}"])
+    await guest.start([])
+    await guest.join(f"tcp://{tcp_addr}", code)
+    await guest.wait_for_session(timeout=20.0)
+    await host.wait_for_session(timeout=20.0)
+    for node in (host, guest):
+        node.set_mlo_always(True)
+    return host, guest
+
+
 def _links_to(node: MeshNode, target) -> list:
     return [peer for peer in node._peers
             if peer.authenticated_id == target and peer.session is not None]
@@ -160,6 +179,68 @@ class TestNotSpendingSomebodyElsesBattery:
                 assert not agreed.fast_ok
                 assert agreed.slow_ms == 60000       # the frugal floor wins
                 assert peer.ka_wanted_ms is None
+        finally:
+            await guest.stop()
+            await host.stop()
+
+
+@pytest.mark.asyncio
+class TestTheSecondLinkOpensItself:
+    """The half that used to be an accident.
+
+    Everything above starts from a pair that already holds two links, and every
+    one of those pairs got its second link because this test file dialled it —
+    which is what an operator pressing "retry every address" was doing. A node
+    holds one link to a peer and nothing in it ever opened another: the routing
+    walk stops at the first address that answers and the retry loop skips a node
+    it is already linked to. So MLO asks."""
+
+    async def test_a_pair_that_starts_with_one_link_ends_up_bundled(self):
+        host, guest = await _one_linked_pair("127.0.0.1:19467", "127.0.0.1:19468")
+        try:
+            assert len(_links_to(guest, host.id)) == 1
+            # The address the second link will be made of is one the host
+            # announced; nothing here tells the guest about it.
+            assert await _wait(lambda: any(
+                uri.startswith("udp://")
+                for uri in guest._known_addresses(host.id))), \
+                "the guest never learned the host's other address"
+
+            # The keepalive sweep is what notices and it runs every twenty
+            # seconds; everything after this line is the node's own doing.
+            guest._update_bundles()
+            assert list(guest._mlo_short) == [host.id]
+            guest._mlo_dial_wakeup.set()
+
+            assert await _wait(lambda: len(_links_to(guest, host.id)) >= 2), \
+                "the node never opened the second link itself"
+            assert {peer.remote_addr.split("://")[0]
+                    for peer in _links_to(guest, host.id)} == {"tcp", "udp"}
+
+            assert await _wait(
+                lambda: all(peer.quality.recent_probes() >= mlo.MIN_PROBES
+                            for peer in _links_to(guest, host.id)),
+                timeout=30.0)
+            guest._update_bundles()
+            bundle = guest._bundles.get(host.id)
+            assert bundle is not None and bundle.active, guest.mlo_status()
+        finally:
+            await guest.stop()
+            await host.stop()
+
+    async def test_a_sleeping_node_opens_nothing(self):
+        """The trade, in the direction that costs: the second link exists to be
+        probed ten times a second, so a node nobody is using does not open it."""
+        host, guest = await _one_linked_pair("127.0.0.1:19469", "127.0.0.1:19470")
+        try:
+            guest.set_mlo_always(False)
+            guest._awake_since.clear()
+            guest._awake_holds.clear()
+            guest._update_bundles()
+            assert not guest._mlo_short
+            assert await guest._mlo_second_link_pass() == 0
+            await asyncio.sleep(0.5)
+            assert len(_links_to(guest, host.id)) == 1
         finally:
             await guest.stop()
             await host.stop()

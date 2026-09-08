@@ -383,6 +383,18 @@ _ADDR_GOSSIP_INTERVAL = _LINK_KEEPALIVE_INTERVAL
 # seconds by ten past.
 _MLO_AWAKE_TTL = 120.0
 _MLO_SOURCES_MAX = 16       # distinct things that can say "somebody is here"
+# Asking for the second link a bundle is made of. Nothing else in this node
+# ever opens it: `_ensure_route_to` stops at the first address that answers and
+# the retry loop skips a node it is already linked to — neither is wrong, one
+# link is all routing needs. So a bundle only ever formed when the pair
+# happened to dial each other over two media, or when an operator pressed
+# "retry every address" by hand.
+_MLO_DIAL_MIN = 60.0        # backoff after an address that did not answer…
+_MLO_DIAL_MAX = 900.0       # …doubling to here, so a dead address costs little
+_MLO_DIAL_TRACKED = 64      # identities remembered, in either book
+_MLO_DIAL_PER_PASS = 1      # dials one pass may make…
+_MLO_DIAL_FLOOR = 5.0       # …and the shortest gap between two passes
+_MLO_DIAL_IDLE_MAX = 300.0  # ceiling on a wait nothing is expected to end
 # Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
 # session with, re-initiate on this cadence. Without it, a single lost handshake
 # (peer offline at send time, an ACK dropped in transit) stranded the queued data
@@ -1935,6 +1947,13 @@ class MeshNode:
         # identity -> Bundle. One per node we hold links to, bounded by the
         # link ceiling and dropped with the last link to that identity.
         self._bundles: OrderedDict[NodeID, mlo.Bundle] = OrderedDict()
+        # Identities one link short of a bundle, and how the last ask for that
+        # second link went. Filled by `_update_bundles` (which is the one place
+        # that decides who could be bundled), spent by `_mlo_dial_loop`.
+        self._mlo_short: OrderedDict[NodeID, None] = OrderedDict()
+        self._mlo_dial_log: OrderedDict[NodeID, tuple] = OrderedDict()
+        self._mlo_dial_task: asyncio.Task | None = None
+        self._mlo_dial_wakeup = asyncio.Event()
         # source -> when it last said somebody was here, and source -> a probe
         # that answers whether it is open right now. MLO is a trade — a probe
         # ten times a second against latency and throughput — and it is only
@@ -2028,6 +2047,7 @@ class MeshNode:
         self._ensure_reconnect()
         self._ensure_address_retry()
         self._ensure_address_steering()
+        self._ensure_mlo_dial()
         self._ensure_release_watch()
         self._ensure_cert_renewal()
         self._announce_own_pseudo()   # peers that were already up learn our name
@@ -2540,6 +2560,7 @@ class MeshNode:
         await self._stop_reconnect()
         await self._stop_address_retry()
         await self._stop_address_steering()
+        await self._stop_mlo_dial()
         await self._stop_release_watch()
         await self._stop_cert_renewal()
         await self._stop_deferred_routes()
@@ -2886,6 +2907,11 @@ class MeshNode:
                 self._reap_silent_links()
                 self._reap_expired_tarpits()
                 self._update_bundles()
+                if self._mlo_short:
+                    # Here rather than inside `_update_bundles`: that also runs
+                    # from the console's thread, and an asyncio event is the
+                    # loop's. This sweep is what filled the book.
+                    self._mlo_dial_wakeup.set()
                 self._behaviour_sweep()
                 # Only nudge maintenance while it is still finding things. A
                 # mesh smaller than the floor is below it permanently, and
@@ -3414,13 +3440,19 @@ class MeshNode:
                 del self._bundles[target]
             if not self.mlo_active():
                 self._bundles.clear()
+                self._mlo_short.clear()   # nobody is here; ask nobody for one
                 return
             now = time.monotonic()
             for target, links in live.items():
                 if len(links) < 2:
-                    # One link is not a bundle, and must not pay for one.
+                    # One link is not a bundle, and must not pay for one — but
+                    # it is what every bundle is made from, and nothing else in
+                    # this node will ever open the second one. Say so; asking
+                    # is `_mlo_dial_loop`'s, because it dials and this cannot.
                     self._bundles.pop(target, None)
+                    self._want_second_link(target)
                     continue
+                self._mlo_short.pop(target, None)
                 bundle = self._bundles.get(target)
                 if bundle is None:
                     bundle = self._bundles[target] = mlo.Bundle(self._mlo_settings)
@@ -3445,6 +3477,163 @@ class MeshNode:
                         peer.ka_due = due
         except Exception:
             pass
+
+    # -- opening the second link a bundle is made of ------------------------
+    #
+    # MLO worked and *started* by accident. A bundle needs two links to one
+    # identity, and a node holds one: `_ensure_route_to` stops at the first
+    # address that answers, and the address-retry loop skips a node it is
+    # already linked to. Neither is wrong — one link is all routing needs — so
+    # the second one existed only when the pair happened to dial each other
+    # over two media, or when an operator pressed "retry every address".
+    #
+    # So MLO asks for it. Every bound here is one the rest of the node already
+    # dials under: one dial per pass, a floor between passes, a backoff per
+    # identity, a book that cannot grow. And it only ever asks while somebody
+    # is using this node (`mlo_active`), because the link it opens exists to be
+    # probed ten times a second.
+
+    def _want_second_link(self, target: NodeID) -> None:
+        """Note that one identity is one link short of a bundle.
+
+        Records only. `_update_bundles` also runs from the console's thread
+        (`set_mlo_always`), and an asyncio event is the loop's — so the wake is
+        set by the keepalive sweep, which is on the loop and is what filled
+        this book in the first place."""
+        if target in self._mlo_short:
+            return
+        self._mlo_short[target] = None
+        while len(self._mlo_short) > _MLO_DIAL_TRACKED:
+            self._mlo_short.popitem(last=False)
+
+    def _mlo_second_address(self, target: NodeID) -> str | None:
+        """An address of ``target`` that could carry the other half of a
+        bundle, or ``None``.
+
+        Two rules, and neither is a preference.
+
+        **Another scheme.** Two links to one identity over one medium are
+        collapsed as redundant the moment the second authenticates
+        (`_redundant_links`), so dialling one is asking for the link we already
+        have to be closed. This is also why a bundle is a LAN address *and* a
+        punched UDP path rather than two addresses of one transport.
+
+        **A medium that declares `mlo`.** Exactly what the link we hold had to
+        prove: the second link is probed ten times a second too, and only the
+        operator knows whether that is cheap on it."""
+        held = {self._peer_scheme(peer)
+                for peer in self._direct_links_to(target)}
+        for uri in self._known_addresses(target):
+            result = _validate_uri(uri)
+            if result is None:
+                continue
+            scheme = result[0]
+            if scheme in held:
+                continue
+            if not self._transport_manager.is_supported(scheme):
+                continue
+            try:
+                if not self._transport_manager.setting(scheme, "mlo"):
+                    continue
+            except Exception:
+                continue
+            return uri
+        return None
+
+    def _note_mlo_dial(self, target: NodeID, linked: bool) -> None:
+        """How the last ask went, so a second address that never answers is not
+        dialled every sweep for the life of the node."""
+        if linked:
+            self._mlo_dial_log.pop(target, None)
+            return
+        failures = self._mlo_dial_log.get(target, (0, 0.0))[0] + 1
+        delay = min(_MLO_DIAL_MAX, _MLO_DIAL_MIN * (2 ** min(failures - 1, 5)))
+        self._mlo_dial_log[target] = (failures, time.monotonic() + delay)
+        self._mlo_dial_log.move_to_end(target)
+        while len(self._mlo_dial_log) > _MLO_DIAL_TRACKED:
+            self._mlo_dial_log.popitem(last=False)
+
+    async def _mlo_second_link_pass(self) -> int:
+        """One bounded round of asking. Returns how many dials it made.
+
+        Every condition is re-read here rather than trusted from the sweep that
+        filled the book: a link may have gone, a second one may have arrived on
+        its own, and the node may have gone back to sleep between the two."""
+        made = 0
+        while self._mlo_short and made < _MLO_DIAL_PER_PASS:
+            target, _ = self._mlo_short.popitem(last=False)
+            if not self.mlo_active():
+                self._mlo_short.clear()
+                return made
+            links = [peer for peer in self._direct_links_to(target)
+                     if self._mlo_ready_link(peer)]
+            if len(links) != 1:
+                continue        # gone, or a second one arrived by itself
+            if time.monotonic() < self._mlo_dial_log.get(target, (0, 0.0))[1]:
+                continue        # this one is serving a backoff
+            uri = self._mlo_second_address(target)
+            if uri is None:
+                continue        # no address a bundle could be made of
+            made += 1
+            peer = await self._dial_uri(target, uri, _RETRY_DIAL_TIMEOUT)
+            self._note_mlo_dial(target, peer is not None)
+            if peer is not None:
+                # Candidacy is what buys the fast probe, and a bundle is formed
+                # from measurements: start both now rather than at the next
+                # sweep, or the pair spends twenty seconds unmeasured.
+                self._update_bundles()
+                self._wake_keepalive()
+        return made
+
+    def _ensure_mlo_dial(self) -> None:
+        if self._mlo_dial_task is None or self._mlo_dial_task.done():
+            self._mlo_dial_task = asyncio.create_task(self._mlo_dial_loop())
+
+    async def _stop_mlo_dial(self) -> None:
+        task = self._mlo_dial_task
+        self._mlo_dial_task = None
+        self._mlo_dial_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _mlo_dial_loop(self) -> None:
+        """Ask for the second link of every identity that is one short.
+
+        Waits on the book being filled and on nothing else: a node with no
+        bundleable pair — every node with one medium, and every node nobody is
+        using — never wakes here at all. The ceiling is only so that a wake
+        somehow missed costs a delay rather than the feature.
+
+        Never raises: this loop dying would mean MLO silently stopped starting,
+        which is the bug it exists to fix."""
+        job = self._activity.register(
+            "mlo-second-link",
+            "opens the second link a bundle needs, one dial at a time",
+            "a keepalive sweep found a node one link short of a bundle")
+        while self._running:
+            self._mlo_dial_wakeup.clear()
+            job.ran()
+            if not self._mlo_short:
+                try:
+                    async with asyncio.timeout(_MLO_DIAL_IDLE_MAX):
+                        await self._mlo_dial_wakeup.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                await self._mlo_second_link_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            # A dial is a handshake and a peer took part in asking for it: the
+            # floor is what stops a node whose second address flaps from
+            # buying one per sweep of this loop.
+            await asyncio.sleep(_MLO_DIAL_FLOOR)
 
     def _stripe(self, peers: list['_Peer'],
                 exclude: '_Peer | None' = None) -> list['_Peer']:
@@ -3519,6 +3708,14 @@ class MeshNode:
             "awake_sources": self.awake_sources(),
             "skew_ms": self._mlo_settings.skew_ms,
             "drop_percent": self._mlo_settings.drop_percent,
+            # What is one link short of a bundle, and the address MLO would
+            # open it on. "Why is nothing bundled?" had no answer on the page
+            # at all, and the honest one is usually "there is only one link to
+            # that node, and I am working on it".
+            "waiting": [{"node": target.raw.hex(),
+                         "pseudo": self.pseudo_of(target),
+                         "address": self._mlo_second_address(target)}
+                        for target in list(self._mlo_short)],
             # What this node offers, and what each link actually settled on.
             # Both, because "why is this link probed every twenty seconds when
             # I asked for a hundred milliseconds" is answered by the difference
@@ -3660,15 +3857,25 @@ class MeshNode:
     # canonical rule there answered a live link by closing it, and left the
     # pair with nothing.
 
+    def _direct_links_to(self, target: NodeID) -> list['_Peer']:
+        """Every live link this node holds *to* one identity, of its own.
+
+        The list `_authenticated_peers` reduces to one and a bundle widens back
+        out, and the set `_redundant_links` collapses within. Written once
+        because those are one claim — which links are this node's own way to
+        that node — and two expressions for it are two chances to disagree."""
+        return [peer for peer in self._peers
+                if peer.authenticated_id == target and peer.session is not None
+                and not peer.relay_only]
+
     def _redundant_links(self, peer: '_Peer') -> list['_Peer']:
         """The links that ``peer``'s arrival makes redundant, if any."""
         target = peer.authenticated_id
         scheme = self._peer_scheme(peer)
         if target is None or scheme is None or peer.probation:
             return []
-        same = [p for p in self._peers
-                if p.authenticated_id == target and p.session is not None
-                and not p.relay_only and self._peer_scheme(p) == scheme]
+        same = [p for p in self._direct_links_to(target)
+                if self._peer_scheme(p) == scheme]
         if len(same) < 2:
             return []
         # A link being measured against another (address steering) is a second
