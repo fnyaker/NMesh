@@ -82,11 +82,46 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | ←    | `AUTH_ASSERTION`(0x8C)| the assertion, or empty if refused | the `AUTH_ASSERT` answer |
 | ←    | `AUTH_PRINCIPAL`(0x8D)| the principal as JSON, or `null` | the `AUTH_VERIFY` answer |
 | →    | `ABUSE` (0x0F)       | `node_id(20) + weight(1) + kind(1) + reason(utf-8)` | reports a node abusing **this app**. No answer, by design |
+| →    | `ATTENDED` (0x10)    | `flag(1)`                   | is somebody **at** this app right now? No answer, by design |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
 `SEND` frames and receives `RECV` frames from its section as they come. On the
 client side, `ConnectorClient(host, port, token, app_id)` fixes the section;
 `from_env` reads `NMESH_APP_ID` (hex) or falls back to the generic section.
+
+## Is somebody at this app? (`ATTENDED`)
+
+The node decides some of what it spends on itself by whether anybody is using
+it — multi-link operation is a probe ten times a second per bundled link, and it
+is not worth paying for in an empty room
+([`Docs/Architecture/transports.md`](../Architecture/transports.md)). An
+attached app is one of the things that says a person is there, so an app that
+runs **whether or not anybody is there** has to be able to say it is not one:
+
+```python
+client = ConnectorClient(host, port, token, app_id, attended=False)
+await client.connect()          # declared before anything can read the answer
+await client.set_attended(True) # …and taken back when its window opens
+```
+
+`from_env` reads `NMESH_ATTENDED` for the same thing (`0`/`false`/`no`/`off`),
+which is how an app the node launched as a child process declares it without a
+code change.
+
+Three properties, and each one is deliberate:
+
+- **Saying nothing means attended.** Every client written before this frame
+  existed, and every app a person started, is somebody there. Silence has to
+  keep meaning what it meant.
+- **It only ever claims less.** There is nothing here a local process can say to
+  be counted as a person it is not, so the frame is not worth lying on.
+- **It is not answered.** Like `ABUSE`: a reply would let an app read the node's
+  state back, and this one is nobody's business but the node's.
+
+The node's own built-in apps (chat, fleet) declare `attended=False`, because
+they are attached at boot by the node itself — the node wiring an enabled app to
+the mesh, not somebody sitting in front of it. What says a person is at chat is
+the chat *page*, and the console is what sees that.
 
 The `STORE_*` frames drive the **per-app local store** (the "drawer"): an
 encrypted key→value store, isolated per section. The `app_id` **does not appear**

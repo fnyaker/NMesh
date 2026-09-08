@@ -24,6 +24,7 @@ from src.node import MeshNode
 from src.node_id import NodeID
 from src.webconsole import (WebConsole, _Changes, _LOGIN_MAX_FAILURES,
                             _MAX_STREAMS)
+from src.apps.fleet_console import REPLAY_HEADER
 from tests.conftest import make_manager
 
 PW = "correct-horse-battery-staple"
@@ -2322,3 +2323,94 @@ class TestTheNodePage:
                 assert status == 401, path
         finally:
             console.stop(); await node.stop()
+
+
+class TestSayingSomebodyIsHere:
+    """The console is what knows a page is open, and the node needs to know:
+    it is what decides whether multi-link operation — a probe ten times a
+    second per bundled link — is worth paying for (`MeshNode.awake`).
+
+    Every page counts, not just the dashboard: chat and fleet never ask for
+    `/api/state`, so waking on that one route read a console open on chat as an
+    empty room. And a page on somebody *else's* machine does not count at all:
+    what this node spends on itself must not be something the network turns
+    on."""
+
+    async def _awake(self, node, timeout=2.0):
+        """The awake book is the node's and is written on its loop, so the
+        answer arrives a turn after the request was served."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not node.awake():
+            await asyncio.sleep(0.01)
+        return node.awake()
+
+    async def test_a_page_asking_for_anything_says_somebody_is_here(self):
+        node, console = await _make_console()
+        try:
+            assert not node.awake()
+            _status, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert status == 200
+            assert await self._awake(node)
+            assert node.awake_sources() == ["console"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_stranger_is_nobody(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state")
+            assert status == 401
+            await asyncio.sleep(0.1)
+            assert not node.awake()
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_peer_driving_us_does_not_wake_us(self):
+        """A call the fleet app replays on a peer's behalf is a page on their
+        machine. It is authorised — and it is still not somebody here."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token, None, None,
+                False, None, {REPLAY_HEADER: "1"})
+            assert status == 200
+            await asyncio.sleep(0.1)
+            assert not node.awake()
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_page_holding_the_stream_holds_it_awake(self):
+        """A page with its interval turned off asks for nothing until something
+        moves. The connection it holds is what says it is still there."""
+        node, console = await _make_console()
+        connection = None
+        try:
+            _status, token = await _login(console)
+            connection = http.client.HTTPConnection(console.host, console.port,
+                                                    timeout=8)
+            connection.request("GET", "/api/events",
+                               headers={"Authorization": "Bearer " + token})
+            response = connection.getresponse()
+            assert response.status == 200
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and console.open_streams < 1:
+                await asyncio.sleep(0.01)
+            # Forget every moment: what is left is the state.
+            node._awake_since.clear()
+            assert node.awake_sources() == ["console stream"]
+        finally:
+            if connection is not None:
+                connection.close()
+            console.stop(); await node.stop()
+
+    async def test_a_console_that_has_stopped_holds_nothing(self):
+        node, console = await _make_console()
+        try:
+            assert "console stream" in node._awake_holds
+        finally:
+            console.stop(); await node.stop()
+        assert "console stream" not in node._awake_holds

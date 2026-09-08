@@ -820,7 +820,7 @@ Six tests, and each one is a way this could otherwise break a mesh.
 | the **peer announced** `mlo` **and** `keepalive` | one end missing is no MLO — which is the backward-compatibility story, and it is the negotiation's, not a special case |
 | the accord has a **fast mode** (`fast_ok`) | a cadence *both* call fast. Without one the pair would be measured at whatever the slower tolerates and called multi-link operation: fifty probes at twenty seconds is seventeen minutes of history. Either end declaring a fast range that does not reach the other's is how a node opts out, and that opt-out has to work |
 | the link is **direct** | not relayed, not `probation`, not tarpitted: a tunnelled link has no medium of its own to be a second one |
-| there are **two of them** to one identity | one link is not a bundle and must not pay for one |
+| there are **two of them** to one identity | one link is not a bundle and must not pay for one — and the node opens the second one itself, see [below](#where-the-second-link-comes-from) |
 
 A link that passes is a **candidate**, and candidacy is what buys the fast
 probe — not membership. A link only earns its place by being *measured* at that
@@ -859,6 +859,53 @@ An **unmeasured** link (fewer than `mlo.MIN_PROBES` outcomes) is never eligible:
 unproven is not good, and handing half the traffic to a link nothing has come
 back from yet is the failure the whole mechanism exists to avoid.
 
+### Where the second link comes from
+
+MLO worked, and *started* by accident.
+
+A bundle is two links to one identity, and a node holds one. `_ensure_route_to`
+stops at the first address that answers; the address-retry loop skips a node it
+is already linked to. Neither is wrong — one link is all routing needs — so the
+second one existed only when the pair happened to dial each other over two
+media, or when an operator pressed **Retry every address** by hand. A node could
+sit next to a perfectly bundleable peer for a week and never bundle.
+
+So MLO asks for it (`_mlo_dial_loop`). `_update_bundles` is already the one
+place that decides who could be bundled, so it is the one place that notices an
+identity **one link short** and writes it down (`_mlo_short`); the loop spends
+that book, one dial at a time.
+
+Two rules pick the address (`_mlo_second_address`), and neither is a preference:
+
+- **Another scheme.** Two links to one identity over one medium are collapsed as
+  redundant the moment the second authenticates (`_redundant_links`), so dialling
+  one is asking for the link we already hold to be closed. This is why a bundle
+  is a LAN address *and* a punched UDP path, never two addresses of one
+  transport.
+- **A medium that declares `mlo`.** Exactly what the link we hold had to prove:
+  the second link is probed ten times a second too.
+
+And the bounds are the ones every other dial in the node obeys: it dials only
+addresses **already known for that identity** (like the retry loop and the
+console's button — "type a host and the node connects to it" is a different
+feature with a different threat model), the far end must still prove it is that
+identity, one dial per pass, `_MLO_DIAL_FLOOR` between passes, an exponential
+backoff per identity from `_MLO_DIAL_MIN` to `_MLO_DIAL_MAX`, and both books
+bounded at `_MLO_DIAL_TRACKED`. It asks for nothing at all while the node is
+asleep: the link it would open exists to be probed ten times a second.
+
+What it does not do is close one. A link opened is a link the node has, and MLO
+never takes one away — a node that goes back to sleep keeps both, at one probe
+per link every twenty seconds.
+
+> A peer only reachable through a hole punch is the one case this cannot serve:
+> a punch is coordinated when there is **no** route, and by then there is one.
+> Such a pair bundles when the punched path arrives on its own.
+
+`mlo_status()["waiting"]` is the same book, for an operator: what is one link
+short, and the address MLO would open it on — which is what the console's
+multi-link table says when it is empty.
+
 ### Where the traffic is actually spread
 
 One place: `_route_candidates`, through `_stripe`, which swaps the **head** of
@@ -887,15 +934,42 @@ which cannot be read off traffic, since a relay carries plenty and wants none of
 this. Two shapes say so, because "somebody is here" arrives as two different
 facts:
 
-- `note_awake(source)` — a **moment**. `console_snapshot` calls it: a page open
-  polls, and that is what a console being open *is*. It wears off after
+- `note_awake(source)` — a **moment**. The console calls it for **every**
+  authenticated request it serves (`WebConsole._authed`), because a page asking
+  for anything is what a page being open *is*. Not `/api/state` alone, which is
+  where it used to be: the chat and fleet pages never read the node's state, so
+  a console open on chat looked like an empty room. It wears off after
   `_MLO_AWAKE_TTL`.
-- `hold_awake(source, probe)` — a **state**. The data connector registers one
-  over its client table: an app attached with nobody typing is still an app
-  open, and a timestamp would have been the wrong shape for it.
+- `hold_awake(source, probe)` — a **state**. Two are registered. The console
+  holds one over the change streams it is serving (`open_streams`): a page with
+  its refresh interval turned off asks for nothing until something moves, and
+  the connection it is holding open is what says it is still there. The data
+  connector holds one over its **attended** clients: an app somebody is at,
+  with nobody typing, is still a window open, and a timestamp would have been
+  the wrong shape for it.
 
-Nothing a peer sends reaches either. Waking this node up must not be something
-the network can do to it.
+### …and what is not somebody
+
+Two things look exactly like a person and are not. Both were counted once, and
+each one on its own is enough to keep a node bundling for ever.
+
+- **A socket this node opened for itself.** The node attaches its own built-in
+  apps to the connector at boot — chat is enabled by default — so "a client is
+  attached" is true on a machine nobody has touched in a week. Those clients
+  declare themselves unattended (`ConnectorClient(attended=False)`, the
+  `ATTENDED` frame in [`Docs/DataConnector/guide`](../DataConnector/guide)) and
+  `DataConnector.attended_clients` counts what is left. What says a person is
+  at chat is the chat *page*, and the console sees that.
+- **A page on somebody else's machine.** A peer holding the fleet's `manage`
+  right drives this console by replaying HTTP calls against it
+  (`fleet_console.LocalConsole`), which is authorised and is still not somebody
+  *here*: waking this node must not be something the network can do to it. Each
+  replayed call carries `fleet_console.REPLAY_HEADER` and the console does not
+  count it. The marker can only ever ask for less, so nothing that can set it
+  gains anything by lying.
+
+An operator who wants a node bundling regardless of any of this says so:
+`mlo_always`.
 
 ### The contract this puts on apps
 

@@ -17,6 +17,7 @@ from src.apps.chat_web import ChatBridge
 from src.node_id import NodeID
 from tests.conftest import make_manager
 from tests.test_webconsole import _request, _login, PW
+import time
 
 PEER = NodeID(bytes(range(20)))
 
@@ -239,5 +240,38 @@ class TestNoChatBridge:
             status2, _, _, j = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)
             assert status2 == 200 and j.get("apps") == []
+        finally:
+            console.stop(); await node.stop()
+
+
+class TestAPageOnChatIsSomebodyHere:
+    """A console open on chat polls its messages and never asks for the node's
+    state — so the node, which decides on multi-link operation by whether
+    anybody is using it, has to hear it from this route too
+    (`MeshNode.awake`, `Docs/Architecture/transports.md`)."""
+
+    async def test_reading_messages_says_somebody_is_here(self):
+        node, console, _ = await _make_console_with_chat()
+        try:
+            assert not node.awake()
+            _status, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/chat/messages?since=0", token)
+            assert status == 200
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not node.awake():
+                await asyncio.sleep(0.01)
+            assert node.awake() and "console" in node.awake_sources()
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_stranger_reading_them_is_nobody(self):
+        node, console, _ = await _make_console_with_chat()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/chat/messages?since=0")
+            assert status == 401
+            await asyncio.sleep(0.1)
+            assert not node.awake()
         finally:
             console.stop(); await node.stop()

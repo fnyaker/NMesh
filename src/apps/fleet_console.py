@@ -40,6 +40,13 @@ import threading
 # A proxied call is a local HTTP request; it should take milliseconds. The
 # ceiling exists so a wedged console cannot pin a mesh handler for ever.
 CALL_TIMEOUT = 20.0
+# Set on every call replayed here, so the console can tell a page on this
+# machine from a peer driving us. The two differ in exactly one way that
+# matters and it is not authorisation: an operator at a remote console is not
+# somebody *at this node*, and what this node spends on itself — a probe ten
+# times a second per bundled link — must not be something the network turns on
+# (`webconsole._authed`, `Docs/Architecture/transports.md`).
+REPLAY_HEADER = "X-NMesh-Replayed"
 READ_MAX = 512 * 1024
 
 
@@ -164,7 +171,7 @@ class LocalConsole:
             connection.connect()
             if getattr(self._console, "_use_tls", False):
                 self._verify(connection)
-            headers = {"Accept": "application/json"}
+            headers = {"Accept": "application/json", REPLAY_HEADER: "1"}
             if token:
                 headers["Authorization"] = "Bearer " + token
             if body is not None:
