@@ -2355,6 +2355,23 @@ function msRange(value){
   if(value == null) return "—";
   return value >= 1000 ? (value / 1000) + " s" : value + " ms";
 }
+// Why nothing is bundled — which is the question this table raises whenever it
+// is empty, and used to answer with a restatement of itself. A bundle is two
+// links to one node and a node holds one until MLO opens the other, so what
+// the operator wants to know is whether that is in hand.
+function mloWaiting(mlo){
+  if(!mlo.active)
+    return '<span class="muted">Asleep: nothing is using this node, so no link is'
+      + " bundled and no second one is opened.</span>";
+  const waiting = mlo.waiting || [];
+  if(!waiting.length)
+    return '<span class="muted">No node is reached over two MLO-ready links right now.</span>';
+  const rows = waiting.map((row) => esc(row.pseudo || row.node.slice(0, 16)) + " "
+    + (row.address
+        ? '<span class="muted">via ' + esc(row.address) + "</span>"
+        : '<span class="muted">— no other address on an MLO-ready medium</span>'));
+  return '<span class="muted">One link short of a bundle: </span>' + rows.join(", ");
+}
 function paintMLO(state){
   const ms = msRange;
   const mlo = state.mlo || {};
@@ -2392,8 +2409,7 @@ function paintMLO(state){
         '<td class="num">' + (index ? "" : esc(bundle.reorder_ms) + " ms") + "</td></tr>");
     });
   }
-  setHTML("mlo-list", rows.join("") || spanRow(6,
-    '<span class="muted">No node is reached over two MLO-ready links right now.</span>'));
+  setHTML("mlo-list", rows.join("") || spanRow(6, mloWaiting(mlo)));
 }
 $("mlo-always").addEventListener("click", () => STATE &&
   post("/api/mlo", {always: !((STATE.mlo || {}).always)}, "Multi-link operation updated"));

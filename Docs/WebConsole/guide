@@ -459,6 +459,20 @@ new medium appears here with no change to the console. See
   with the node onto the asyncio loop: the node's state is never touched outside
   the loop's thread.
 
+## Somebody is here
+
+Every authenticated request tells the node a page is open, and a change stream
+held open says so for as long as it is held. The node uses it to decide what it
+spends on itself — multi-link operation is a probe ten times a second per
+bundled link and is not worth paying for in an empty room
+([`Docs/Architecture/transports.md`](../Architecture/transports.md)).
+
+Every route counts, not just `/api/state`: the chat and fleet pages never read
+the node's state, so waking on that one route read a console open on chat as an
+empty room. A call a peer **replays** against this console through the fleet's
+`manage` right does not count — it is a page on their machine, and waking this
+node must not be something the network can do to it.
+
 ## Files served
 
 | Route | Role |
@@ -486,7 +500,7 @@ works on a machine with no internet.
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
 | POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
 | POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
-| POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block |
+| POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
 | POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
 | POST    | `/api/invite`    | generates an invitation code                   |

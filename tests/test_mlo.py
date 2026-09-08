@@ -32,9 +32,10 @@ from src.node import (MeshNode, _Peer, KA_PROPOSE, KA_REQUEST, PING, PONG,
                       _KA_TICK_FLOOR, _KA_TOKEN, _KA_WANTED,
                       _LINK_KEEPALIVE_INTERVAL,
                       _decode_addresses_at, _decode_ping_tail)
+from src.node import _MLO_DIAL_TRACKED
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import FakeTransport, make_manager
+from tests.conftest import FakeServer, FakeTransport, make_manager
 
 TARGET = NodeID(b"\x11" * 20)
 OTHER = NodeID(b"\x22" * 20)
@@ -85,6 +86,25 @@ def _ready(node: MeshNode, *schemes: str) -> None:
     """Declare those media MLO-ready, the way an operator's setting does."""
     node._transport_manager.setting = (
         lambda scheme, name: True if name == "mlo" and scheme in schemes else None)
+
+
+def _second_medium(node: MeshNode, scheme: str = "fake2") -> None:
+    """A second transport this node knows how to dial. A bundle is two media,
+    never two addresses of one — see `_mlo_second_address`."""
+    node._transport_manager.register(scheme, FakeTransport, FakeServer)
+
+
+def _dials(node: MeshNode, *, answers: bool = False) -> list:
+    """Record what the node dials instead of opening anything."""
+    tried: list = []
+
+    async def _spy(node_id, uri, timeout, **kwargs):
+        tried.append(uri)
+        if not answers:
+            return None
+        return _link(node, node_id, uri=uri, mean_ms=10.0, probes=50)
+    node._dial_uri = _spy
+    return tried
 
 
 # ---------------------------------------------------------------------------
@@ -1225,3 +1245,205 @@ class TestANewerBuildIsNotAnOffender:
             _KA_WANTED.pack(20000) + b"\x00" * 8))
         assert peer._malformed == 0 and peer.ka_told_ms == 20000
         await node.stop()
+
+
+# ---------------------------------------------------------------------------
+# Where the second link comes from
+# ---------------------------------------------------------------------------
+
+class TestOpeningTheSecondLink:
+    """MLO used to work and *start* by accident.
+
+    A bundle is two links to one identity, and a node holds one: the routing
+    walk stops at the first address that answers, and the retry loop skips a
+    node it is already linked to. Neither is wrong — one link is all routing
+    needs — so the second one existed only when the pair happened to dial each
+    other over two media, or when an operator pressed "retry every address" by
+    hand. So MLO asks for it, under the bounds every other dial in this node
+    obeys."""
+
+    def _lonely(self, node: MeshNode, *, addresses=("fake://a:1", "fake2://b:2"),
+                media=("fake", "fake2")) -> NodeID:
+        """One ready link to a node we know a second address for."""
+        _second_medium(node)
+        _ready(node, *media)
+        node.note_awake("test")
+        _link(node, uri=addresses[0], mean_ms=10.0, probes=50)
+        node._routing.add(TARGET, list(addresses))
+        return TARGET
+
+    def test_one_link_short_of_a_bundle_is_noticed(self):
+        node = _node()
+        self._lonely(node)
+        node._update_bundles()
+        assert list(node._mlo_short) == [TARGET]
+
+    async def test_and_the_second_address_is_dialled(self):
+        node = _node()
+        self._lonely(node)
+        tried = _dials(node)
+        node._update_bundles()
+        assert await node._mlo_second_link_pass() == 1
+        assert tried == ["fake2://b:2"]
+
+    async def test_a_second_medium_is_what_it_asks_for(self):
+        """Two links to one identity over one medium are collapsed as
+        redundant the moment the second authenticates (`_redundant_links`), so
+        dialling one asks for the link we already hold to be closed."""
+        node = _node()
+        self._lonely(node, addresses=("fake://a:1", "fake://b:2"))
+        tried = _dials(node)
+        node._update_bundles()
+        assert await node._mlo_second_link_pass() == 0
+        assert tried == []
+
+    async def test_the_second_medium_must_declare_mlo_too(self):
+        """The link it opens is probed ten times a second as well, and only the
+        operator knows whether that is cheap on it."""
+        node = _node()
+        self._lonely(node, media=("fake",))
+        tried = _dials(node)
+        node._update_bundles()
+        assert node._mlo_second_address(TARGET) is None
+        assert await node._mlo_second_link_pass() == 0
+        assert tried == []
+
+    async def test_a_node_nobody_is_using_asks_for_nothing(self):
+        """The link exists to be probed ten times a second. Opening one on a
+        node nobody is using is the trade made backwards."""
+        node = _node()
+        self._lonely(node)
+        node._awake_since.clear()
+        tried = _dials(node)
+        node._update_bundles()
+        assert not node._mlo_short
+        node._want_second_link(TARGET)          # even asked directly
+        assert await node._mlo_second_link_pass() == 0
+        assert tried == []
+
+    async def test_a_pair_that_is_already_two_asks_for_nothing(self):
+        node = _node()
+        self._lonely(node)
+        _link(node, uri="fake2://b:2", mean_ms=12.0, probes=50)
+        tried = _dials(node)
+        node._update_bundles()
+        assert not node._mlo_short and node._bundles[TARGET].active
+        assert await node._mlo_second_link_pass() == 0
+        assert tried == []
+
+    async def test_a_peer_that_never_said_it_speaks_mlo_is_left_alone(self):
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        _link(node, uri="fake://a:1", mean_ms=10.0, probes=50,
+              speaks={features.CORE, features.KEEPALIVE})
+        node._routing.add(TARGET, ["fake://a:1", "fake2://b:2"])
+        node._update_bundles()
+        assert not node._mlo_short
+
+    async def test_an_address_that_does_not_answer_backs_off(self):
+        """Otherwise a peer whose second address is a stale entry buys a dial
+        every keepalive sweep, for the life of the node."""
+        node = _node()
+        self._lonely(node)
+        tried = _dials(node)
+        node._update_bundles()
+        await node._mlo_second_link_pass()
+        node._update_bundles()               # the sweep says it again
+        assert await node._mlo_second_link_pass() == 0
+        assert tried == ["fake2://b:2"]
+        assert node._mlo_dial_log[TARGET][0] == 1
+
+    async def test_a_link_that_answers_is_forgiven_and_measured_at_once(self):
+        """A bundle is formed from measurements, and candidacy is what buys the
+        fast probe: waiting for the next sweep is twenty seconds unmeasured."""
+        node = _node()
+        self._lonely(node)
+        _dials(node, answers=True)
+        node._update_bundles()
+        assert await node._mlo_second_link_pass() == 1
+        assert TARGET not in node._mlo_dial_log
+        assert node._bundles[TARGET].active
+
+    async def test_one_pass_makes_one_dial(self):
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        for index in range(4):
+            target = NodeID(bytes([0x40 + index]) * 20)
+            _link(node, target, uri=f"fake://a:{index}", mean_ms=10.0, probes=50)
+            node._routing.add(target, [f"fake://a:{index}", f"fake2://b:{index}"])
+        tried = _dials(node)
+        node._update_bundles()
+        assert len(node._mlo_short) == 4
+        assert await node._mlo_second_link_pass() == 1
+        assert len(tried) == 1
+
+    def test_the_page_can_say_what_it_is_waiting_for(self):
+        """"Why is nothing bundled?" used to have no answer on the page."""
+        node = _node()
+        self._lonely(node)
+        node._update_bundles()
+        waiting = node.mlo_status()["waiting"]
+        assert [row["node"] for row in waiting] == [TARGET.raw.hex()]
+        assert waiting[0]["address"] == "fake2://b:2"
+
+    def test_and_says_so_plainly_when_there_is_no_second_address(self):
+        node = _node()
+        self._lonely(node, addresses=("fake://a:1",))
+        node._update_bundles()
+        assert node.mlo_status()["waiting"][0]["address"] is None
+
+    def test_both_books_are_bounded(self):
+        """Nothing a peer can do grows either of them without end."""
+        node = _node()
+        for index in range(_MLO_DIAL_TRACKED * 3):
+            target = NodeID(index.to_bytes(20, "big"))
+            node._want_second_link(target)
+            node._note_mlo_dial(target, False)
+        assert len(node._mlo_short) <= _MLO_DIAL_TRACKED
+        assert len(node._mlo_dial_log) <= _MLO_DIAL_TRACKED
+
+    async def test_the_loop_is_quiet_when_nothing_is_short(self):
+        """A node with one medium, and every node nobody is using, must never
+        wake here at all."""
+        node = _node()
+        task = asyncio.create_task(node._mlo_dial_loop())
+        try:
+            await asyncio.sleep(0.2)
+            job = next(row for row in node._activity.jobs()
+                       if row["name"] == "mlo-second-link")
+            assert job["runs"] == 1
+        finally:
+            node._running = False
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def test_the_loop_cannot_spin_on_something_it_cannot_fix(self):
+        """The failure a book-driven loop invites: an identity that stays short
+        however often it is dialled. The floor is what makes that a slow retry
+        rather than a core at a hundred percent."""
+        node = _node()
+        self._lonely(node)
+        tried = _dials(node)
+        node._mlo_dial_log[TARGET] = (0, 0.0)
+        original = node._note_mlo_dial
+        node._note_mlo_dial = lambda target, linked: None   # never backs off
+        node._want_second_link(TARGET)
+        task = asyncio.create_task(node._mlo_dial_loop())
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            node._running = False
+            node._note_mlo_dial = original
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        assert len(tried) <= 2, len(tried)

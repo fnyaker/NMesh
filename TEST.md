@@ -49,6 +49,11 @@ Among other things they check:
   quietly never forms while everything goes on working at half the throughput.
   And the other direction: a node that declares a phone's cadences is left alone
   over real sockets — no striping at it, and an idle probe once a minute.
+  The same file also starts a pair on **one** link and lets it get the second
+  one itself: nothing in the test dials it, which is what makes the case worth
+  running — every other pair in that file was bundled because the test opened
+  the second link by hand, exactly as an operator pressing "retry every
+  address" used to have to.
 - The **management app on a real mesh** (`tests/integration/test_fleet.py`):
   a full enrolment with a human decision followed by an authorised command, an
   un-enrolled operator who gets nothing, an ungranted capability refused,

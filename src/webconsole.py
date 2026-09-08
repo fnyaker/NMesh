@@ -55,6 +55,7 @@ from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
+from .apps.fleet_console import REPLAY_HEADER
 from . import transport as transport_option
 
 # The page names the node it is driving with this header. Absent (or naming us)
@@ -463,6 +464,31 @@ class WebConsole:
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout=timeout)
 
+    def _note_awake(self, source: str) -> None:
+        """Tell the node somebody is here, from the server thread.
+
+        Handed over rather than written here: the awake book is the node's and
+        is only ever touched on its loop. Fire-and-forget and never raises — a
+        page must not fail because the node is on its way down."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._node.note_awake, source)
+        except RuntimeError:
+            pass
+
+    @property
+    def open_streams(self) -> int:
+        """Change streams held open right now — one per page listening.
+
+        A page with its interval turned off asks for nothing until something
+        moves, so the requests alone would have it stop counting as somebody
+        after `_MLO_AWAKE_TTL`. The connection it is holding is the state that
+        says otherwise."""
+        with self._streams_lock:
+            return self._streams
+
     # -- lifecycle --------------------------------------------------------
 
     @property
@@ -616,6 +642,12 @@ class WebConsole:
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
+        # A page holding the change stream open is somebody here for as long as
+        # it holds it — the *state* half of what the node's awake book takes,
+        # the requests below being the moments. See `MeshNode.hold_awake`.
+        hold = getattr(self._node, "hold_awake", None)
+        if hold is not None:
+            hold("console stream", lambda: self.open_streams > 0)
         if self._app_host is not None:
             self._app_host.bind_console(self._loop)
         elif self._chat_bridge is not None:
@@ -683,6 +715,9 @@ class WebConsole:
         except Exception:
             pass
         self._changes.close()
+        drop = getattr(self._node, "drop_awake", None)
+        if drop is not None:
+            drop("console stream")   # a console that has stopped holds nothing
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -947,7 +982,22 @@ def _make_handler(console: WebConsole):
             return self._cookie_token()
 
         def _authed(self) -> bool:
-            return console._valid_token(self._session_token())
+            if not console._valid_token(self._session_token()):
+                return False
+            # A request carrying this console's session is a page open, and
+            # that — not `/api/state` alone — is what "somebody is using this
+            # node" means: the chat and fleet pages never ask for the node's
+            # state, so waking on that one route left a console open on chat
+            # looking like an empty room.
+            #
+            # Except a call a peer is replaying through the fleet's `manage`
+            # right: that is a page on *their* machine, and waking this node
+            # must not be something the network can do to it. The marker can
+            # only ever ask for less, so nothing that can set it gains
+            # anything by lying (`fleet_console.REPLAY_HEADER`).
+            if not self.headers.get(REPLAY_HEADER):
+                console._note_awake("console")
+            return True
 
         # -- remote context ----------------------------------------------
         # The page sends `X-NMesh-Node: <id>` when the operator has switched
