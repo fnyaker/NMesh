@@ -5,12 +5,14 @@ Focus on the auth boundary (token required before anything), the send/receive
 round-trip against a live node, and framing hardening.
 """
 import asyncio
+import time
 
 import pytest
 
 from src.data_connector import (
     DataConnector, ConnectorClient, _read_frame, _write_frame, _LEN,
     _AUTH, _SEND, _WHOAMI, _AUTH_OK, _AUTH_FAIL, _RECV, _WHOAMI_RESP,
+    _ATTENDED,
 )
 from src.app_channel import APP_ID_LEN, GENERIC_APP_ID, builtin_id, frame
 from src.node_id import NodeID
@@ -38,6 +40,18 @@ async def _auth(reader, writer, token=TOKEN, app_id=APP):
     await _write_frame(writer, _AUTH, app_id + token.encode())
     ftype, _ = await _read_frame(reader)
     return ftype
+
+
+async def _until(predicate, timeout=2.0):
+    """AUTH_OK is written before the client is booked in, and a declaration
+    sent after it is read a turn later. Wait for the server to have caught up
+    rather than sleeping a guessed amount."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return bool(predicate())
 
 
 class TestAuth:
@@ -609,3 +623,134 @@ class TestConnectorAppAuth:
             await client.close()
             await conn.stop()
             await node.stop()
+
+
+class TestWhoCountsAsSomebodyBeingHere:
+    """What the node asks this connector (`hold_awake`) is whether anybody is
+    using it — the answer drives MLO, which is a probe ten times a second per
+    bundled link and is not worth paying for in an empty room.
+
+    The answer is **not** "is a socket attached". The node attaches its own
+    built-in apps at boot (chat is enabled by default), so that answer was yes
+    on a machine nobody had touched in a week, and such a node never went back
+    to sleep."""
+
+    async def test_an_app_that_says_nothing_is_somebody(self):
+        """Every client written before the declaration existed, and every app a
+        person started: saying nothing has to keep meaning what it meant."""
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            assert await _until(lambda: conn.attended_clients() == 1)
+            assert node.awake() and "app" in node.awake_sources()
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_an_app_the_node_started_for_itself_is_not(self):
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            await _write_frame(writer, _ATTENDED, b"\x00")
+            assert await _until(lambda: conn.attended_clients() == 0)
+            assert not node.awake()
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_one_person_among_services_is_enough(self):
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            await _write_frame(writer, _ATTENDED, b"\x00")
+            other_reader, other_writer = await _open(conn)
+            assert await _auth(other_reader, other_writer) == _AUTH_OK
+            assert await _until(lambda: conn.attended_clients() == 1)
+            assert node.awake()
+            writer.close(); other_writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_a_window_that_opens_says_so(self):
+        """An app is not one or the other for ever: the declaration is a frame,
+        so an app whose window opens takes it back."""
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            await _write_frame(writer, _ATTENDED, b"\x00")
+            assert await _until(lambda: not node.awake())
+            await _write_frame(writer, _ATTENDED, b"\x01")
+            assert await _until(lambda: node.awake())
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_an_empty_declaration_changes_nothing(self):
+        """Reject by default: a malformed frame has no side effect, and the
+        client that sent it is served exactly as before."""
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            await _write_frame(writer, _ATTENDED, b"")
+            await _write_frame(writer, _WHOAMI, b"")
+            ftype, body = await _read_frame(reader)
+            assert ftype == _WHOAMI_RESP and body == node.id.raw
+            assert conn.attended_clients() == 1
+            writer.close()
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_a_client_that_goes_is_forgotten(self):
+        """The book of who is not a person is bounded by the clients there
+        are: a socket that closed leaves nothing behind in it."""
+        node, _, conn = await _make()
+        try:
+            reader, writer = await _open(conn)
+            assert await _auth(reader, writer) == _AUTH_OK
+            await _write_frame(writer, _ATTENDED, b"\x00")
+            assert await _until(lambda: conn.attended_clients() == 0)
+            writer.close()
+            assert await _until(lambda: not conn._clients and not conn._unattended)
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_the_client_library_says_it_at_connect(self):
+        """What the node's own built-in apps do: `attended=False`, declared
+        once, before anything else can read the answer."""
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, conn.token, APP,
+                                 attended=False)
+        await client.connect()
+        try:
+            assert await _until(lambda: conn._clients and
+                                conn.attended_clients() == 0)
+            assert not node.awake()
+            await client.set_attended(True)
+            assert await _until(lambda: node.awake())
+        finally:
+            await client.close()
+            await conn.stop(); await node.stop()
+
+    async def test_an_app_launched_to_run_alone_can_say_so(self):
+        """`NMESH_ATTENDED=0` — the same lever for an app the node launched as
+        a child process, which reads its coordinates from the environment."""
+        node, _, conn = await _make()
+        client = ConnectorClient.from_env({
+            "NMESH_CONNECTOR_HOST": conn.host,
+            "NMESH_CONNECTOR_PORT": str(conn.port),
+            "NMESH_CONNECTOR_TOKEN": conn.token,
+            "NMESH_ATTENDED": "0",
+        }, app_id=APP)
+        await client.connect()
+        try:
+            assert await _until(lambda: conn._clients and
+                                conn.attended_clients() == 0)
+            assert not node.awake()
+        finally:
+            await client.close()
+            await conn.stop(); await node.stop()

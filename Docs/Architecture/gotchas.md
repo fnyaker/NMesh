@@ -402,6 +402,28 @@ costs the threshold, coming back costs half of it.
 > smallest observation that can move it is.** If one sample can flip the
 > verdict, the verdict flaps at the sampling rate.
 
+## A socket the process opened for itself is not a user
+
+MLO only runs while somebody is using the node, and the data connector answered
+that question with `bool(self._clients)` — is an app attached? It reads right
+until you notice **who attaches**: the node opens a connector client for each of
+its own built-in apps at boot, and chat is enabled by default. So the answer was
+yes on a machine with no page open, nobody typing, and nothing to carry — every
+node, for ever, probing ten times a second on every bundled link and never going
+back to sleep. The count was never wrong; the question it was answering was.
+
+The other half of the same bug was the console: only `/api/state` said "somebody
+is here", and the chat and fleet pages never ask for it. A console open on chat
+was an empty room. It is now every authenticated request, in one place
+(`WebConsole._authed`), plus a hold over the change streams — a page with its
+refresh interval off asks for nothing until something moves.
+
+> **A signal that means "a person is here" must be one only a person can
+> produce.** Before trusting one, name everything that produces it: your own
+> process wiring itself up, a health check, a peer's request replayed against
+> your own front door (`fleet_console.REPLAY_HEADER` — waking this node must not
+> be something the network can do to it). Anything left is the signal.
+
 ## Hangs (the job/node "never finishes")
 
 ### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections

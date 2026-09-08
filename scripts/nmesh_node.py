@@ -47,8 +47,14 @@ def _chat_factory(node, connector):
     (``CHAT_APP_ID``) — contacts and pseudos never sit in the clear, and the feed
     survives restarts. With no ``--data`` the drawer is RAM-only."""
     async def build():
+        # `attended=False`: this client is the node wiring chat to the mesh
+        # because chat is enabled, not somebody sitting in front of it. What
+        # says a person is there is the chat page, and the console sees that.
+        # Counted as a person, an app enabled by default would mean no node
+        # ever sleeps (`DataConnector.attended_clients`).
         client = ConnectorClient(connector.host, connector.port,
-                                 connector.token, CHAT_APP_ID)
+                                 connector.token, CHAT_APP_ID,
+                                 attended=False)
         await client.connect()
         store = DrawerStore(node.app_storage, CHAT_APP_ID)
         state = ChatState(store=store)
@@ -66,7 +72,8 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
     unavailable instead of half working."""
     async def build():
         client = ConnectorClient(connector.host, connector.port,
-                                 connector.token, FLEET_APP_ID)
+                                 connector.token, FLEET_APP_ID,
+                                 attended=False)      # see `_chat_factory`
         await client.connect()
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),

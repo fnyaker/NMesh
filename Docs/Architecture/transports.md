@@ -887,15 +887,42 @@ which cannot be read off traffic, since a relay carries plenty and wants none of
 this. Two shapes say so, because "somebody is here" arrives as two different
 facts:
 
-- `note_awake(source)` — a **moment**. `console_snapshot` calls it: a page open
-  polls, and that is what a console being open *is*. It wears off after
+- `note_awake(source)` — a **moment**. The console calls it for **every**
+  authenticated request it serves (`WebConsole._authed`), because a page asking
+  for anything is what a page being open *is*. Not `/api/state` alone, which is
+  where it used to be: the chat and fleet pages never read the node's state, so
+  a console open on chat looked like an empty room. It wears off after
   `_MLO_AWAKE_TTL`.
-- `hold_awake(source, probe)` — a **state**. The data connector registers one
-  over its client table: an app attached with nobody typing is still an app
-  open, and a timestamp would have been the wrong shape for it.
+- `hold_awake(source, probe)` — a **state**. Two are registered. The console
+  holds one over the change streams it is serving (`open_streams`): a page with
+  its refresh interval turned off asks for nothing until something moves, and
+  the connection it is holding open is what says it is still there. The data
+  connector holds one over its **attended** clients: an app somebody is at,
+  with nobody typing, is still a window open, and a timestamp would have been
+  the wrong shape for it.
 
-Nothing a peer sends reaches either. Waking this node up must not be something
-the network can do to it.
+### …and what is not somebody
+
+Two things look exactly like a person and are not. Both were counted once, and
+each one on its own is enough to keep a node bundling for ever.
+
+- **A socket this node opened for itself.** The node attaches its own built-in
+  apps to the connector at boot — chat is enabled by default — so "a client is
+  attached" is true on a machine nobody has touched in a week. Those clients
+  declare themselves unattended (`ConnectorClient(attended=False)`, the
+  `ATTENDED` frame in [`Docs/DataConnector/guide`](../DataConnector/guide)) and
+  `DataConnector.attended_clients` counts what is left. What says a person is
+  at chat is the chat *page*, and the console sees that.
+- **A page on somebody else's machine.** A peer holding the fleet's `manage`
+  right drives this console by replaying HTTP calls against it
+  (`fleet_console.LocalConsole`), which is authorised and is still not somebody
+  *here*: waking this node must not be something the network can do to it. Each
+  replayed call carries `fleet_console.REPLAY_HEADER` and the console does not
+  count it. The marker can only ever ask for less, so nothing that can set it
+  gains anything by lying.
+
+An operator who wants a node bundling regardless of any of this says so:
+`mlo_always`.
 
 ### The contract this puts on apps
 

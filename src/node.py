@@ -3011,11 +3011,17 @@ class MeshNode:
     # "somebody is here" arrives as two different facts and collapsing them
     # loses one of them.
     #
-    #   - a **moment**: the console polls, and that is what a page being open
-    #     *is*. It happened, and it stops being evidence once it is old enough.
-    #   - a **state**: an app holds a connector socket open, and that says so
-    #     however long it has been sitting there with nothing to send. A node
-    #     with a chat page open and nobody typing is being used.
+    #   - a **moment**: a page asks the console for something, and that is what
+    #     a page being open *is*. It happened, and it stops being evidence once
+    #     it is old enough.
+    #   - a **state**: an app somebody is at holds a connector socket open, and
+    #     that says so however long it has been sitting there with nothing to
+    #     send. A node with a chat window open and nobody typing is being used.
+    #
+    # What neither of them is: a socket this node opened for itself. The node
+    # attaches its own built-in apps at boot, so "a client is attached" is true
+    # on a machine nobody has touched in a week — see
+    # `DataConnector.attended_clients`, which is where that was counted wrong.
     #
     # Nothing here is on the packet path, and nothing a peer sends can reach
     # it — which is the point: waking this node up must not be something the
@@ -5055,11 +5061,13 @@ class MeshNode:
     async def console_snapshot(self) -> dict:
         """A JSON-serialisable view of the node. Built on the event loop, so it
         reads live state atomically (no awaits mid-iteration)."""
-        # Somebody has a page open — which is the whole of what "this node is
-        # being used" means for a console, and the reason this is here rather
-        # than in the console's thread-side marshalling: that runs off the loop,
-        # and the awake book is the node's.
-        self.note_awake("console")
+        # Deliberately does *not* note the node awake. It used to, and it was
+        # the wrong place twice over: the chat and fleet pages never ask for
+        # this document, so a console open on one of them looked like nobody
+        # there, and a peer holding `manage` replays console calls through this
+        # very route — which made waking this node something the network could
+        # do to it. The console says who is there, once, for every page and
+        # only for the ones on this machine (`WebConsole._authed`).
         peers = []
         link_now = time.monotonic()
         for p in self._peers:
