@@ -232,6 +232,14 @@ reading that as misbehaviour is precisely what the negotiation exists to
 prevent. A PONG body that is neither empty nor a token is charged, because
 there is no third thing it could be.
 
+The **addresses in front of it are usually absent**, and that is not a second
+format either: a node with nothing announceable has always sent a PING whose
+address count is zero, so `addresses` is a list that is often empty rather than
+a field that comes and goes. A probe carries them when the peer might not have
+them and is otherwise 92 bytes instead of 312 — see
+[`transports.md`](transports.md#what-a-probe-weighs) for what that is worth and
+why the recency it used to prove is proved anyway.
+
 ### Naming a certificate instead of sending it
 
 A `FIND_NODE` may carry a tail of **certificate fingerprints** — 16 bytes each,

@@ -310,6 +310,27 @@ afford, never to push a cadence below what the pair agreed.
 > negotiated, clamp it where that thing is known** — and make the clamp
 > one-directional, or it becomes a second way to impose a cost.
 
+## What rides along becomes the cost when the cadence changes
+
+The PING carried `advertised_uris` because liveness and address gossip happened
+to want the same packet, and at one probe per link per twenty seconds nobody
+could tell. At ten a second the unchanged address list was **71% of the packet
+and half of what answering one costs** — 312 bytes and 30 µs, to re-learn five
+strings the peer already had, ten times a second, per link, for ever.
+
+Nothing was wrong with the old code. What changed was a *rate*, and a rate
+turns "free, and tidy to send together" into the whole bill.
+
+> **When you make something run two hundred times more often, go and look at
+> what it was carrying for somebody else.** The passenger is what gets
+> expensive, not the thing you sped up.
+
+The same pass found two more of these, both hiding behind their own tidiness:
+`advertised_uris()` recomputing 15 µs of regex per call to return the same five
+strings, and `Packet.create` building the packet twice — once to ask it for its
+own id, once to keep — and making a `getrandom` syscall per packet. Neither was
+visible at the old rate. Neither was a property, so both are gone.
+
 ## A threshold with no margin is a switch that flaps
 
 A bundle member is benched at `mlo_drop_percent` of its last fifty probes.

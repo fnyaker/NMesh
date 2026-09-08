@@ -365,6 +365,18 @@ _KA_REQUEST_MAX = 8
 # repeating it costs nothing against the meter above, short enough that a peer
 # that went away does not leave a link sleeping for ever.
 _KA_TOLD_TTL = 300.0
+# How often a probe re-carries this node's advertised addresses to one peer,
+# whether or not they changed. The address gossip rides the probe; it is not
+# what a probe is *for*, and at ten probes a second re-sending an unchanged
+# list is 71% of the packet and half of what answering it costs.
+#
+# A duration and not a probe count, for the reason `_DEAD_LINK_SILENCE` exists:
+# "every Nth probe" means one cadence at rest and another while striping. At
+# the classic interval this is every probe, which is exactly what the node did
+# before — so nothing changes for a link nobody is bundling. It is also the net
+# under a lost PING: a peer that missed the update is told again within it,
+# rather than never.
+_ADDR_GOSSIP_INTERVAL = _LINK_KEEPALIVE_INTERVAL
 # How long a sign of somebody actually using this node keeps it awake for MLO.
 # Long enough that a console left open on a dashboard does not flap, short
 # enough that a laptop shut at six is back to one probe per link per twenty
@@ -919,6 +931,13 @@ _KA_BOUNDS = struct.Struct("!IIII")
 _KA_WANTED = struct.Struct("!I")         # a KA_REQUEST body
 
 
+#: A probe carrying no addresses — the one byte `_encode_addresses([])` builds,
+#: hoisted because it is now the common case and a probe should not allocate to
+#: say "nothing new". Exactly what a node with no announceable address has
+#: always sent, so no build anywhere reads it as anything unusual.
+_NO_ADDRESSES = _encode_addresses([])
+
+
 def _encode_ping_tail(next_ms: int, token: int) -> bytes:
     return _KA_TAIL.pack(max(0, min(0xFFFFFFFF, int(next_ms))), token)
 
@@ -1395,6 +1414,11 @@ class _Peer:
         # still wants it says so again.
         self.ka_told_ms: int | None = None
         self.ka_told_at: float = 0.0
+        # What this link was last told about where we are, and when. `None` is
+        # "nothing yet", which no advertised set can equal — so the first probe
+        # on a link always carries the addresses.
+        self.addrs_sent: tuple | None = None
+        self.addrs_sent_at: float = 0.0
         # When this link is next probed. A fresh one is due at the classic
         # interval, exactly as it was when one interval served every link; what
         # moves it in is the sweep deciding this link has a twin worth
@@ -1936,6 +1960,10 @@ class MeshNode:
         # link, no session and no handshake, so there is no peer to key on.
         self._punch_dgram_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._last_announced: tuple[str, ...] | None = None
+        # `advertised_uris` memoised on the three lists it derives from. See
+        # there for why the key is the whole of the input and not a flag.
+        self._advertised_key: tuple | None = None
+        self._advertised: list[str] = []
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         # STUN transaction id -> (server ip, expiry). Requests we sent and are
@@ -2303,15 +2331,33 @@ class MeshNode:
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
         listen URI expanded over the host's addresses (and any discovered
-        external address). Wildcards like 0.0.0.0 become one URI per address."""
-        out: list[str] = []
-        seen: set[str] = set()
-        for uri in self._addresses:
-            for u in expand_listen_uri(uri, self._local_ips, self._extra_addrs):
-                if u not in seen:
-                    seen.add(u)
-                    out.append(u)
-        return out
+        external address). Wildcards like 0.0.0.0 become one URI per address.
+
+        Cached on exactly what it is derived from, and on nothing else. This is
+        a pure function of three lists, and it was being recomputed on every
+        probe, every `FIND_NODE` answer and every announce — 15 µs of regex and
+        per-character work to produce the same five strings, ten times a second
+        per bundled link. Comparing the three inputs costs a fraction of that
+        and cannot go stale: there is no fourth thing to forget to invalidate,
+        which is the failure mode a cache normally buys.
+
+        The copy on the way out is not an oversight. Callers have always been
+        handed a list of their own, and handing back the cached one would make
+        this a shared mutable — a bug that would surface as addresses appearing
+        or vanishing somewhere entirely unrelated."""
+        key = (tuple(self._addresses), tuple(self._local_ips),
+               tuple(self._extra_addrs))
+        if key != self._advertised_key:
+            out: list[str] = []
+            seen: set[str] = set()
+            for uri in self._addresses:
+                for u in expand_listen_uri(uri, self._local_ips,
+                                           self._extra_addrs):
+                    if u not in seen:
+                        seen.add(u)
+                        out.append(u)
+            self._advertised_key, self._advertised = key, out
+        return list(self._advertised)
 
     async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._connect_for_join(address)
@@ -2555,9 +2601,28 @@ class MeshNode:
         always ignored whatever followed the addresses — but because the answer
         has to echo the token back: a peer that cannot would leave every probe
         unmatched, and `LinkQuality.expire` would then charge every one of them
-        as a loss on a link that is answering perfectly."""
-        payload = _encode_addresses(self.advertised_uris())
+        as a loss on a link that is answering perfectly.
+
+        **The addresses ride a probe, they are not what a probe is for.** That
+        distinction cost nothing while every link was probed every twenty
+        seconds and it is most of the packet at ten a second: measured, five
+        advertised addresses are 221 of a PING's 312 bytes and half of what
+        answering one costs. So they go out when the peer might not have them —
+        our set changed, or `_ADDR_GOSSIP_INTERVAL` has passed — and the rest of
+        the time the probe is a probe.
+
+        Sending none is not a new kind of packet: a node with nothing
+        announceable has always sent exactly this, and every build reads it the
+        same way (`_handle_ping` merges an empty list and keeps the recency).
+        So there is nothing here to negotiate and nothing to be older than."""
         now = time.monotonic()
+        current = tuple(self.advertised_uris())
+        if (current != peer.addrs_sent
+                or now - peer.addrs_sent_at >= _ADDR_GOSSIP_INTERVAL):
+            payload = _encode_addresses(list(current))
+            peer.addrs_sent, peer.addrs_sent_at = current, now
+        else:
+            payload = _NO_ADDRESSES
         token = None
         if self.peer_announces(peer, features.KEEPALIVE):
             interval = self._keepalive_interval(peer)
@@ -6967,10 +7032,20 @@ class MeshNode:
             raw_addrs, end = _decode_addresses_at(packet.payload)
         except (ValueError, UnicodeDecodeError):
             return
-        valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
         # An authenticated PING proves recency even when the peer currently has
         # no announceable address. Existing addresses remain as reconnect hints.
-        self._routing.add(src, valid_uris, peer.dsa_pub)
+        #
+        # Most probes now carry no addresses at all (see `ping`), and `add` is
+        # the wrong tool for those: it merges and re-filters everything already
+        # held, which is 4 µs of work to learn nothing. `touch` refreshes the
+        # recency and stops — and falls back to `add` for an id we have never
+        # heard of, because recency about an unknown node is not an entry and
+        # this is the one path that may create one.
+        if raw_addrs:
+            valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
+            self._routing.add(src, valid_uris, peer.dsa_pub)
+        elif not self._routing.touch(src):
+            self._routing.add(src, [], peer.dsa_pub)
         tail = _decode_ping_tail(packet.payload, end)
         token = None
         if tail is not None:

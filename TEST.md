@@ -140,7 +140,10 @@ tests/
 │     and lapses rather than sticking, and *no declaration at all* lowers either
 │     of this node's cadences (swept over every corner of the hard range, not
 │     argued: it is why a cadence is negotiated as a range per mode rather than
-│     as one window whose ceiling anybody could pull down)
+│     as one window whose ceiling anybody could pull down). Plus what a probe
+│     weighs: the addresses ride it only when the peer might not have them, and
+│     a probe that carries none still proves recency — the invariant the old
+│     unconditional merge protected
 ├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
 │     the rate gate, the signed accusation, and above all what hearsay may NOT
 │     do — hearsay alone sanctions nobody (it stops below the *first* threshold,

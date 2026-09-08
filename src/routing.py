@@ -132,6 +132,26 @@ class RoutingTable:
             entry.asked_at = existing.asked_at
         return self._buckets[self._bucket_index(node_id)].add(entry)
 
+    def touch(self, node_id: NodeID) -> bool:
+        """This node is alive; it told us nothing new about where it is.
+
+        `add` is how recency has always been refreshed, and it does far more
+        than that: it merges the addresses it was handed with the ones already
+        held, filters every one of them through `wrong_address`, builds a fresh
+        entry and re-inserts it. That is right when addresses arrive and pure
+        waste when none did — and since a link can be probed ten times a
+        second, "none did" is now the overwhelming majority of the calls.
+
+        Returns whether the id was known. An unknown one is *not* created here:
+        recency about a node we have never heard of is not an entry, and
+        inventing one from a bare liveness signal is how a table fills with ids
+        nobody can reach."""
+        entry = self.get(node_id)
+        if entry is None:
+            return False
+        entry.last_seen = time.monotonic()
+        return True
+
     # -- ids that never answer ---------------------------------------------
 
     def note_answered(self, node_id: NodeID) -> None:
