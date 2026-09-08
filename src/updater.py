@@ -62,6 +62,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 import threading
 import time
@@ -145,6 +146,79 @@ def service_managed() -> bool:
     a worse outcome than running the previous version — so it stays up and says
     so instead."""
     return os.environ.get("NMESH_SERVICE_MANAGED") == "1"
+
+
+# How this process came into the world, captured **before** anything can chdir
+# or rewrite ``sys.argv``. A restart re-runs exactly this, so it has to be the
+# launch as it happened, not as the process looks by the time somebody asks.
+_LAUNCH = (sys.executable, list(sys.argv), os.getcwd())
+
+# Restart routes, most preferred first. ``service`` is exiting and letting the
+# supervisor bring us back; ``reexec`` is replacing this process image with a
+# fresh interpreter on the same command line.
+RESTART_SERVICE = "service"
+RESTART_REEXEC = "reexec"
+
+
+def restart_plan() -> tuple[str, tuple, str]:
+    """How this node can come back on freshly installed code.
+
+    ``(mode, launch, reason)`` — ``mode`` is one of the two constants above, or
+    ``""`` when there is no way back and the reason says why.
+
+    **A supervisor is preferred whenever there is one.** Exiting is the clean
+    route: the whole process image goes, along with any file descriptor, thread
+    or C library state an update may have invalidated, and something whose job
+    is to start us does the starting.
+
+    **Re-exec is the fallback, and it is what Android needed.** Termux has no
+    init a package can reach; without ``termux-services`` a node installs an
+    update and then sits on it until somebody reopens the app and types the
+    command again. ``os.execv`` is not an exit — it replaces this process with a
+    fresh interpreter reading the tree that was just written, keeping the pid,
+    the session and the terminal. Nothing outside has to cooperate.
+
+    Every descriptor Python opens is close-on-exec (PEP 446), so the listening
+    sockets are gone by the time the new image binds them; the caller still
+    stops the node first, because a peer deserves a closed link rather than a
+    reset one."""
+    executable, argv, cwd = _LAUNCH
+    if service_managed():
+        return RESTART_SERVICE, (executable, argv, cwd), ""
+    if not executable or not os.path.isfile(executable):
+        return "", (), "this process has no interpreter to start again"
+    if not argv or not argv[0]:
+        return "", (), "this process does not know how it was started"
+    # ``python -m package`` leaves ``argv[0]`` as the module's ``__main__``
+    # path, which exists; a zipapp or a frozen build may leave something that
+    # is not a file at all, and re-running it would land nowhere.
+    entry = argv[0]
+    if not os.path.isabs(entry):
+        entry = os.path.join(cwd, entry)
+    if not os.path.exists(entry):
+        return "", (), f"the script this node was started from is gone ({argv[0]})"
+    if not os.path.isdir(cwd):
+        return "", (), "the directory this node was started in is gone"
+    return RESTART_REEXEC, (executable, argv, cwd), ""
+
+
+def restart_possible() -> tuple[bool, str]:
+    """Can this node come back if it leaves? ``(ok, reason_if_not)``."""
+    mode, _launch, reason = restart_plan()
+    return bool(mode), reason
+
+
+def reexec() -> None:
+    """Replace this process with a fresh one on the same command line.
+
+    Never returns when it works. The caller has already stopped the node: this
+    is the last thing the old image does."""
+    _mode, launch, _reason = restart_plan()
+    if not launch:
+        raise OSError("nothing to re-exec")
+    executable, argv, cwd = launch
+    os.chdir(cwd)
+    os.execv(executable, [executable] + list(argv))
 
 
 def updatable() -> tuple[bool, str]:
@@ -514,7 +588,7 @@ def apply_sync(tag: str, *, root: str | None = None, branch=None) -> dict:
         "root": root,
         "backup": backup,
         "restart_required": True,
-        "service_managed": service_managed(),
+        "can_restart": restart_possible()[0],
     }
 
 
@@ -560,7 +634,7 @@ def apply_files_sync(files: dict, version: str, *,
         "root": root,
         "backup": backup,
         "restart_required": True,
-        "service_managed": service_managed(),
+        "can_restart": restart_possible()[0],
     }
 
 

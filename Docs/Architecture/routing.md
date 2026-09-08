@@ -199,7 +199,7 @@ hostile rather than tidied up (see `security.md`).
 ```
 claim = version ‖ ts ‖ pubkey ‖ pseudo ‖ ML-DSA signature
 signed over  "nmesh-pseudo-v2" ‖ node_id ‖ ts ‖ pseudo
-key   = sha256("nmesh-pseudo-v2" : fold(pseudo))[:20]
+key   = sha256("nmesh-pseudo-v2" : term)[:20]   for each term the name is filed under
 ```
 
 - The **node id is derived from the claim's own `pubkey`**
@@ -207,8 +207,14 @@ key   = sha256("nmesh-pseudo-v2" : fold(pseudo))[:20]
   claim can therefore only bind a pseudo to **its author's own** id — mapping
   "alice" onto a victim's id is impossible, the same closure of
   poisoning/impersonation as the content-addressed store.
-- The receiver **recomputes the key** from the claim's pseudo → filing it under
-  an unrelated key is impossible.
+- The receiver **recomputes the keys** from the claim's pseudo → filing it under
+  an unrelated key is impossible. There are several of them, because a hash of a
+  whole name cannot answer half of one: a claim is filed under the whole folded
+  pseudo **and under each word's prefixes** (`pseudo.key_terms`, `dir_keys`), so
+  a lookup for `ali` lands on a key `Alice Ada` was stored under. Those are
+  exactly the matches `rank_folded` calls EXACT, PREFIX and WORD; CONTAINS has
+  no key, because you cannot hash the middle of a word, and the local book still
+  finds it.
 - `ts` only moves **forward** per node id, so a relay replaying an old claim
   cannot roll a name back to one its owner abandoned. A rename inside the same
   second still advances it (`set_pseudo` uses `max(now, previous + 1)`).
@@ -223,23 +229,78 @@ memory-exhaustion vector.
 - **Gossip** (`PSEUDO_ANNOUNCE`, a direct type re-stamped at each hop) spreads a
   claim to everyone reachable, and a freshly authenticated peer is caught up
   with `_PSEUDO_SYNC_MAX` claims, ours first. Re-gossiped **only when the view
-  changed**, so the epidemic terminates on its own. This is what makes a
-  *partial* search possible at all: you cannot hash half a name into a DHT key,
-  but you can rank the names you already hold.
+  changed**, so the epidemic terminates on its own. It is what makes a search
+  instant: ranking names you already hold costs nothing and answers as somebody
+  types.
 - **The keyed directory** (`DIR_STORE` / `DIR_FIND` / `DIR_FOUND`, replicated to
-  and queried from the `_DIR_K` nodes nearest the key plus our direct peers)
-  covers the rest: an **exact** name whose owner sits beyond the gossip horizon.
+  and queried from the `_DIR_K` nodes nearest each key plus our direct peers)
+  covers the rest: a name — whole **or partial** — whose owner sits beyond the
+  gossip horizon.
 
 Both planes are bounded and rate-limited per ingress link, and both charge a bad
 claim to the peer that sent it (`security.md`).
 
+**Filing happens on its own.** `_directory_loop` publishes this node's claim
+`_DIR_FIRST_PUBLISH` after start, again whenever the name changes or a peer
+comes up, and then on a slow `_DIR_REPUBLISH` sweep. The sweep is not
+belt-and-braces: the `_DIR_K` nodes closest to a key move as the mesh does, a
+holder restarts, and a node that published before it had a single peer published
+to nobody. One publish reaches at most `_DIR_PUBLISH_MAX` nodes across every key
+the name has — a node that receives the claim re-derives all of them, so
+reaching a node once is reaching it for every term.
+
+**A lookup is bounded** (`_DIR_LOOKUP_BUDGET`, and `_DIR_LOOKUP_ROUNDS` of
+Kademlia rather than the full ten): it is asked while somebody watches a search
+field, and it returns what it has rather than timing out. A partial answer is an
+answer; a timeout reaches the caller as "the node is unavailable", which is how
+a slow directory used to read as a broken one.
+
 Node API: `set_pseudo` / `pseudo` / `pseudo_of(id)`, `find_pseudo(query)` (local,
-ranked, instant), `search_pseudo(query)` (the same, widened by one exact
-directory lookup), `publish_pseudo()` (replicate our claim into the directory),
-`lookup_pseudo(pseudo)` (exact, network-wide). From an app:
+ranked, instant), `search_pseudo(query)` (the same, widened by one directory
+lookup), `publish_pseudo()` (file our claim under every one of its keys),
+`lookup_pseudo(pseudo)` (network-wide, whole or partial). From an app:
 `ConnectorClient.my_pseudo` / `lookup_pseudo` / `pseudos_of` / `refresh_names` —
 all **read-only**, because the node's name belongs to whoever runs the node, not
 to an app holding a connector token.
+
+## The package directory (who publishes what)
+
+Same shape again, different subject, and deliberately so: a **signed record**
+naming what one key publishes, filed under keys derived from what it signed.
+`src/pkg_dir.py`, `PKG_STORE` / `PKG_FIND` / `PKG_FOUND` / `PKG_ANNOUNCE`,
+feature name `pkgdir`.
+
+```
+record = version ‖ kind ‖ flags ‖ ts ‖ pubkey ‖ name ‖ pkg_version
+         ‖ notes ‖ ref ‖ src ‖ ML-DSA signature
+signed over  "nmesh-package-dir-v1" ‖ publisher_id ‖ kind ‖ flags ‖ ts
+             ‖ name ‖ pkg_version ‖ notes ‖ ref ‖ src
+keys   = sha256(domain : "pub:" ‖ publisher_id)[:20]        — what this key offers
+         sha256(domain : "name:" ‖ term)[:20]  per term     — who offers this name
+```
+
+- `ref` is a **DHT content key**: the signed descriptor the record points at (a
+  core release descriptor, or an app release descriptor). The record is small
+  enough to travel in a directory reply; the descriptor and the package itself
+  move on the paths that already existed.
+- `src` is a digest over the package's **code with its documentation left out**
+  (`pkg_dir.source_digest`), so "do these publishers agree on the code?" is
+  answerable before anything is downloaded. It never replaces the content hash:
+  an install still verifies every byte against the descriptor the operator chose.
+- `kind` is `core` (the node's own code) or `app`; `FLAG_RECOMMEND` says the
+  signer is not the author — "this is the release id I run". Corroboration,
+  never authority.
+- A publisher id is `sha256(pubkey)[:20]`, built exactly like a node id, so a
+  node signing with its own identity publishes **under its own id**. That is
+  what lets a node's details page ask "what does this machine offer?" with
+  nothing but the id already on the screen.
+
+The book (`PackageBook`) keeps the highest `ts` per (publisher, kind, folded
+name), bounded in entries and in bytes, and keeps the equivocation proof when
+one key signs two different packages as one version at one instant. Filed and
+re-filed by the same `_directory_loop` as the pseudo claim.
+
+See [`../Updates/guide`](../Updates/guide) for what an operator does with it.
 
 ## Target-neighbourhood maintenance and recovery at startup
 

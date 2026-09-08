@@ -632,7 +632,8 @@ def test_the_page_listens_rather_than_asking_whether_anything_moved():
     """A console on a timer is either late or wasteful. The interval that
     remains is for the numbers that never stop moving."""
     assert "new EventSource(\"/api/events\")" in webassets.ui.JS
-    assert 'EVENTS.on(["links", "nodes", "names", "reach"]' in webassets.APP_JS
+    assert ('EVENTS.on(["links", "nodes", "names", "reach", "packages"]'
+            in webassets.APP_JS)
 
 
 def test_a_burst_of_changes_is_one_repaint():
@@ -1014,34 +1015,44 @@ def test_a_node_on_the_map_has_a_target_a_finger_can_hit():
 # The page must not re-derive who may install what: the node hands each row its
 # own state and the verb to POST.
 
-def test_the_release_rows_render_what_the_node_decided():
+def test_a_package_card_renders_what_the_node_decided():
     source = webassets.APP_JS
-    assert "function releaseRowHTML(" in source
-    assert 'entry.action === "install"' in source
+    assert "cardHTML(row, options)" in source
     # No version comparison in JavaScript — that rule lives in Python.
     assert "is_newer" not in source and "compareVersions" not in source
 
 
-def test_an_unpinned_publisher_is_shown_without_an_install_button():
+def test_an_unpinned_publisher_gets_a_pin_button_not_an_install_one():
     source = webassets.APP_JS
-    assert 'untrusted:"publisher not pinned"' in source
-    assert 'entry.trusted ?' in source
+    assert 'row.kind === "core" && !row.trusted' in source
+    assert 'data-pkg-act="trust"' in source and 'data-pkg-act="install"' in source
 
 
-def test_installing_a_release_asks_first():
+def test_installing_a_package_asks_first():
     """Replacing the node's own code is not a button you press by accident."""
     source = webassets.APP_JS
-    block = source.split('data-install', 1)[1]
+    block = source.split("async install(row, element)", 1)[1]
     assert "confirmAction(" in block
-    assert '"/api/releases/install"' in source and "confirm:true" in source
+    assert '"/api/packages/install"' in source and "confirm:true" in source
 
 
-def test_pinning_a_publisher_is_the_only_way_a_key_gets_in():
+def test_a_key_is_pinned_from_the_record_that_carries_it():
+    """The list of publishers with a paste-a-hex-key form is gone: a key
+    arrives inside the record whose signature it made, and pinning it is a
+    confirmation of that record."""
     html, source = webassets.INDEX_HTML, webassets.APP_JS
-    assert 'id="pin-key"' in html and 'id="pin-add"' in html
-    assert '"/api/releases/trust"' in source
-    # Trusting and auto-installing are two controls, not one.
-    assert 'id="pin-auto"' in html and '"/api/releases/auto"' in source
+    assert 'id="pin-key"' not in html and 'id="pin-add"' not in html
+    assert '"/api/packages/trust"' in source
+    # Trusting and auto-installing stay two decisions, not one.
+    assert 'id="pkg-pin-auto"' in source and '"/api/releases/auto"' in source
+
+
+def test_a_package_can_be_read_before_it_is_run():
+    """Download comes before install on the card, because reading before
+    running is the whole argument for offering the bytes at all."""
+    source = webassets.APP_JS
+    actions = source.split("actionsHTML(row, opts){", 1)[1].split("\n  },", 1)[0]
+    assert actions.index("/download") < actions.index('data-pkg-act="install"')
 
 
 def test_the_node_offers_its_own_publisher_key_to_copy():
@@ -1055,11 +1066,11 @@ def test_no_release_action_can_end_mid_sentence():
     the call itself fails — a restart cuts the connection mid-answer, so this is
     a path that really happens."""
     source = webassets.APP_JS
-    for route in ('"/api/releases/publish"', '"/api/releases/install"',
-                  '"/api/releases/trust"'):
+    for route in ('"/api/releases/publish"', '"/api/packages/install"',
+                  '"/api/packages/trust"'):
         call = source.index(route)
         window = source[call - 400:call + 700]
-        assert "catch(" in window, route
+        assert "catch(" in window or "setMessage(" in window, route
 
 
 # ── what belongs to a transport lives in that transport ─────────────────────

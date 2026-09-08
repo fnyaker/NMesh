@@ -49,6 +49,7 @@ from . import qr
 from .node import MESSAGE_NAMES
 from .pseudo import MAX_PSEUDO, PseudoError
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
+                        PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS,
                         TERM_HTML, TERM_JS, TERM_CSS)
@@ -103,6 +104,10 @@ _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
 # costs whoever sent them.
 _LOGIN_MAX_INFLIGHT = 4
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
+# Asking the directory is a Kademlia lookup plus a query to every target, and
+# the node bounds the whole round itself — this only has to be the larger of the
+# two, or the console would give up on an answer the node was about to hand it.
+_PKG_LOOKUP_TIMEOUT = 30.0
 _LIST_DEFAULT_LIMIT = 20
 _LIST_MAX_LIMIT = 100
 _LIST_MAX_QUERY = 128
@@ -575,7 +580,7 @@ class WebConsole:
                 "settings": node_config.public(merged),
                 "problems": problems[:16],
                 "restart_required": False,
-                "service_managed": updater.service_managed()}
+                "can_restart": updater.restart_possible()[0]}
 
     @property
     def _api(self) -> "app_api.AppAPI":
@@ -668,19 +673,24 @@ class WebConsole:
 
     # -- restarting --------------------------------------------------------
     #
-    # There is no way for a process to restart itself; the service manager is
-    # what starts it, so "restart" here means "exit, and let it bring us back"
-    # — the same path a crash would take, which is why it is only ever done
-    # when something is actually watching (`NMESH_SERVICE_MANAGED`).
-    #
     # Two callers, one mechanism: an update, which only takes effect when the
     # node starts again on the tree that was just written, and an operator who
     # asked for a restart outright.
+    #
+    # Two ways back, and `updater.restart_plan` picks between them. With a
+    # supervisor (`NMESH_SERVICE_MANAGED`) the node exits and is started again —
+    # the whole process image goes, which is the cleanest thing an update can
+    # ask for. Without one it **re-execs itself**: `os.execv` is not an exit, it
+    # replaces this process with a fresh interpreter on the same command line,
+    # keeping the pid and the terminal. That is what a phone needs — Android has
+    # no init a package can reach, so a node under Termux with no
+    # `termux-services` used to install an update and then sit on it until
+    # somebody reopened the app and typed the command again.
 
     _RESTART_DELAY = 1.0        # let the operator's response reach them first
 
-    def _restart_worker(self) -> None:
-        """Stop the node properly, then leave. Never returns."""
+    def _restart_worker(self, mode: str) -> None:
+        """Stop the node properly, then come back. Never returns on success."""
         time.sleep(self._RESTART_DELAY)
         try:
             if self._loop is not None and not self._loop.is_closed():
@@ -690,19 +700,27 @@ class WebConsole:
                     self._node.stop(), self._loop).result(timeout=20.0)
         except Exception:
             pass                # going down regardless; state writes are bounded
+        if mode == updater.RESTART_REEXEC:
+            try:
+                updater.reexec()
+            except Exception:
+                # The exec failed and this image is still here — with a node
+                # that has been stopped. Leaving is then the honest outcome:
+                # staying up would serve a console attached to nothing.
+                pass
         os._exit(0)
 
     def restart(self) -> bool:
-        """Exit so the service manager starts us again.
+        """Come back running the code that is on disk now.
 
-        Returns whether a restart was scheduled. Without a service manager
-        (``NMESH_SERVICE_MANAGED``), exiting would simply stop the node — a
-        worse outcome than either running yesterday's code or not restarting at
-        all — so we stay up and the console says so instead of leaving an
-        operator with a node that never came back."""
-        if not updater.service_managed():
+        Returns whether a restart was scheduled. When neither route is
+        available — no supervisor, and nothing this process can re-exec — the
+        node stays up and the console says so, rather than leaving an operator
+        with a node that never came back."""
+        mode, _launch, _reason = updater.restart_plan()
+        if not mode:
             return False
-        threading.Thread(target=self._restart_worker, daemon=True,
+        threading.Thread(target=self._restart_worker, args=(mode,), daemon=True,
                          name="nmesh-restart").start()
         return True
 
@@ -798,6 +816,10 @@ _STATIC = {
     "/node": ("text/html; charset=utf-8", NODE_HTML),
     "/node.js": ("application/javascript; charset=utf-8", NODE_JS),
     "/node.css": ("text/css; charset=utf-8", NODE_CSS),
+    # One package, described — the same rule: a view before it is a page.
+    "/package": ("text/html; charset=utf-8", PKG_HTML),
+    "/package.js": ("application/javascript; charset=utf-8", PKG_JS),
+    "/package.css": ("text/css; charset=utf-8", PKG_CSS),
     "/app.js": ("application/javascript; charset=utf-8", APP_JS),
     "/style.css": ("text/css; charset=utf-8", STYLE_CSS),
     # Loaded blocking in <head> on every page: a stored theme choice has to be
@@ -1084,8 +1106,12 @@ def _make_handler(console: WebConsole):
                     snap["apps"] = console._apps()
                     snap["version"] = updater.__version__
                     # Whether a restart would come back. The page needs it to
-                    # decide between offering the action and saying why not.
-                    snap["service_managed"] = updater.service_managed()
+                    # decide between offering the action and saying why not —
+                    # so it is that question, asked of `restart_plan`, not the
+                    # narrower "is a service manager watching?" it used to be.
+                    can, why = updater.restart_possible()
+                    snap["can_restart"] = can
+                    snap["restart_blocked"] = why
                     self._json(200, snap)
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
@@ -1184,11 +1210,15 @@ def _make_handler(console: WebConsole):
                         self._json(200, console._call(_wrap(console._pseudo_state)))
                     else:
                         # `wide` also asks the network, which costs a round of
-                        # queries — so it is opt-in, not what typing triggers.
+                        # queries — so it is opt-in, not what typing triggers,
+                        # and it is given longer than a local call: the node
+                        # bounds that round itself, and giving up here at ten
+                        # seconds turned a slow answer into "node unavailable".
+                        wide = self._query("wide") == "1"
                         self._json(200, {"results": console._call(
-                            console._node.search_pseudo(query)
-                            if self._query("wide") == "1"
-                            else _wrap(console._node.find_pseudo, query))})
+                            console._node.search_pseudo(query) if wide
+                            else _wrap(console._node.find_pseudo, query),
+                            timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)})
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
@@ -1247,7 +1277,92 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/packages":
+                self._handle_packages_get()
+                return
+            if path.startswith("/api/packages/"):
+                self._handle_package_get(path[len("/api/packages/"):])
+                return
             self._json(404, {"error": "not found"})
+
+        # -- the package directory ----------------------------------------
+        #
+        # There is no catalogue to list, which is the point: an unlisted
+        # directory is one nobody can flood with entries nobody asked for. You
+        # ask it a question — this name, or this node — and it answers.
+
+        def _handle_packages_get(self) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            node = self._query("node")
+            query = self._query("q")
+            wide = self._query("wide") == "1"
+            try:
+                if node is not None:
+                    results = console._call(
+                        console._node.packages_of(node, wide=wide),
+                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
+                elif query:
+                    # Asking the network costs a round of queries, so it is a
+                    # button rather than something a keystroke triggers — the
+                    # same bargain the name search makes.
+                    results = console._call(
+                        console._node.search_packages(query)
+                        if wide else _wrap(console._node.find_packages, query),
+                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
+                else:
+                    self._json(400, {"error": "q or node required"})
+                    return
+            except Exception:
+                self._json(503, {"error": "node unavailable"})
+                return
+            self._json(200, {"results": results})
+
+        def _handle_package_get(self, rest: str) -> None:
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            record_id, _, action = rest.partition("/")
+            if action not in ("", "download"):
+                self._json(404, {"error": "not found"})
+                return
+            if action == "download":
+                # The bytes an operator wants to open by hand before trusting
+                # anything: every one of them checked against a hash the author
+                # signed, and served as an opaque download (nosniff) rather than
+                # anything a browser might decide to render.
+                try:
+                    fetched = console._call(
+                        console._node.fetch_package(record_id),
+                        timeout=_APP_CALL_TIMEOUT)
+                except Exception:
+                    self._json(503, {"error": "the package could not be fetched"})
+                    return
+                if fetched is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                _entry, blob, name = fetched
+                self._send_binary(blob, name)
+                return
+            try:
+                entry = console._call(
+                    _wrap(console._node.package_entry, record_id))
+            except Exception:
+                self._json(503, {"error": "node unavailable"})
+                return
+            if entry is None:
+                self._json(404, {"error": "not found"})
+                return
+            described = None
+            if self._query("fetch") == "1":
+                try:
+                    described = console._call(
+                        console._node.package_descriptor(record_id),
+                        timeout=_APP_CALL_TIMEOUT)
+                except Exception:
+                    described = None
+            self._json(200, {**entry, "descriptor": described})
 
         def _handle_list_get(self, path: str) -> None:
             if not self._authed():
@@ -1739,6 +1854,9 @@ def _make_handler(console: WebConsole):
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
+            if path.startswith("/api/packages/"):
+                self._handle_package_post(path, _parse_json(body))
+                return
             if path == "/api/pseudo":
                 self._handle_pseudo_save(_parse_json(body))
                 return
@@ -1889,6 +2007,64 @@ def _make_handler(console: WebConsole):
             saved, problem = console._persist_pseudo(adopted)
             self._json(200, {"ok": True, "pseudo": adopted,
                              "saved": saved, "error": problem})
+
+        def _handle_package_post(self, path: str, data) -> None:
+            """Installing, pinning and subscribing from a package record.
+
+            The console decides nothing here either. What is new is where the
+            publisher key comes from: it arrived *inside the record*, checked
+            against the signature it made, so pinning is a confirmation rather
+            than a hex string copied from a channel nobody could vouch for."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            node = console._node
+            record_id = data.get("id")
+            if not isinstance(record_id, str):
+                self._json(400, {"error": "id required"})
+                return
+            try:
+                if path == "/api/packages/install":
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    result = console._call(node.install_package(record_id),
+                                           timeout=400.0)
+                    # A core release only takes effect when the node comes back
+                    # on the tree just written; an app is live where it stands.
+                    restarting = (console.restart()
+                                  if result.get("restart_required") else False)
+                    self._json(200, {"ok": True, **result,
+                                     "restarting": restarting})
+                    return
+                if path == "/api/packages/trust":
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    entry = console._call(_wrap(
+                        node.trust_package_publisher, record_id,
+                        auto=data.get("auto") is True,
+                        endorsed=data.get("endorsed") is True))
+                    self._json(200, {"ok": True, "publisher": entry})
+                    return
+                if path == "/api/packages/subscribe":
+                    if data.get("on") is False:
+                        self._json(200, {"ok": console._call(
+                            _wrap(node.unsubscribe_package, record_id))})
+                        return
+                    quorum = data.get("quorum")
+                    entry = console._call(_wrap(
+                        node.subscribe_package, record_id,
+                        auto=data.get("auto") is True,
+                        quorum=quorum if isinstance(quorum, int)
+                        and not isinstance(quorum, bool) else 1))
+                    self._json(200, {"ok": True, "subscription": entry})
+                    return
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            self._json(404, {"error": "not found"})
 
         def _handle_release_post(self, path: str, data) -> None:
             """Publishing, pinning and installing mesh-native releases.
@@ -2044,7 +2220,7 @@ def _make_handler(console: WebConsole):
             self._json(200, {"saved": True,
                              "path": console._config_path,
                              "restart_required": True,
-                             "service_managed": updater.service_managed()})
+                             "can_restart": updater.restart_possible()[0]})
 
         def _handle_restart(self, data) -> None:
             """Restart this node, if something will bring it back.
@@ -2052,8 +2228,7 @@ def _make_handler(console: WebConsole):
             The gate is not the point of interest — the answer is. A console
             that says "restarting" and leaves the operator with a stopped node
             is worse than one that refuses, so the refusal is explicit and names
-            the reason: this process cannot restart itself, only exit and be
-            started again.
+            the reason it came back with.
 
             Under a remote context this arrives at the *managed* node's console,
             which is exactly right: the operator asked to restart that machine,
@@ -2065,12 +2240,11 @@ def _make_handler(console: WebConsole):
             if data.get("confirm") is not True:
                 self._json(400, {"error": "confirmation required"})
                 return
-            if not updater.service_managed():
+            can, why = updater.restart_possible()
+            if not can:
                 self._json(409, {
                     "ok": False, "restarting": False,
-                    "error": "nothing would start this node again — it runs "
-                             "outside a service manager, so it would stop "
-                             "rather than restart"})
+                    "error": "nothing would start this node again — " + why})
                 return
             self._json(200, {"ok": True, "restarting": console.restart()})
 
@@ -2664,8 +2838,11 @@ def _make_handler(console: WebConsole):
                     if total > _MAX_APP_BODY:
                         raise ValueError("app too large")
                     files[p] = raw
+                notes = data.get("notes")
                 info = console._call(
-                    console._node.publish_store_app(data["name"], data["version"], files),
+                    console._node.publish_store_app(
+                        data["name"], data["version"], files,
+                        notes=notes if isinstance(notes, str) else ""),
                     timeout=_APP_CALL_TIMEOUT)
                 self._json(200, {"ok": True, **info})
             except Exception as exc:
@@ -2763,6 +2940,6 @@ def _parse_json(body: bytes):
         return None
 
 
-async def _wrap(fn, *args):
+async def _wrap(fn, *args, **kwargs):
     """Adapt a sync node method into an awaitable run on the loop thread."""
-    return fn(*args)
+    return fn(*args, **kwargs)

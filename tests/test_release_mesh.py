@@ -797,10 +797,10 @@ class TestAutomaticInstall:
         """Zero crash: this loop dying would silently stop the updates an
         operator asked for."""
         import asyncio
-        monkeypatch.setattr("src.node._RELEASE_TICK", 0.01)
         monkeypatch.setattr("src.node._RELEASE_FIRST_TICK", 0.01)
         monkeypatch.setattr("src.node._RELEASE_SETTLE", 0.0)
         node = _node()
+        node._release_sweep_delay = lambda: 0.01
         node._running = True
         calls = []
 

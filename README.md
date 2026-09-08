@@ -147,7 +147,15 @@ package and announces it — publishing touches no network at all. Whoever pinne
 that publisher's key asks for the package, from the publisher or from any node
 that already kept a copy, checks every byte against the signature, and installs
 it — automatically if asked. One publisher becomes a swarm, and no web host is
-in the trusted set. Same page in the console; the mechanism is in
+in the trusted set.
+
+Finding one is a question rather than a list: type part of a name, or open a
+node's details and see whether that machine publishes a version or simply says
+which one it runs. The record carries its publisher's key, so pinning is one
+press and a confirmation instead of a hex string copied from somewhere. A
+package's page shows what it says about itself, how many publishers signed the
+same code, and lets you download the archive to read it before installing it.
+Same page in the console; the mechanism is in
 [`Docs/Updates/guide`](Docs/Updates/guide).
 
 Docker is still possible (`docker/`), but it is no longer the recommended route
@@ -165,7 +173,9 @@ nothing, so the id is always shown with them. What is guaranteed is that nobody
 can put a name on *your* node: a name travels as a claim signed by the identity
 it names. Names are searched **whole or partially** (`ali` finds `Alice Ada`,
 `jose` finds `José`), instantly, from what the node has already learned by
-gossip.
+gossip — and *Ask the network* finds somebody this node has never met, partial
+name included, because a claim is filed in the directory under its name and each
+of its prefixes.
 
 → [`Docs/Pseudos/guide`](Docs/Pseudos/guide)
 
@@ -179,8 +189,9 @@ Settings):
   can pan and zoom), the table of active peers (direction, session, RTT, bytes).
 - Network: peers and known nodes, reachability, one block per transport (what
   is bound, what it carries, what it takes), and how to add a node.
-- Apps: installed apps + a **scalable store** (server-paginated catalogue,
-  search, install/uninstall actions).
+- Apps: installed apps, and **finding one by name**. There is no store: a store
+  is a list, and a list is a thing to flood. You ask for a name and signed
+  records come back.
 - Settings: this node's name and a search for other nodes' names, updates,
   console password, this browser's preferences, the startup configuration file,
   diagnostics.

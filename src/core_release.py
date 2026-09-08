@@ -76,6 +76,11 @@ import time
 
 _DOMAIN = b"nmesh-core-release-v1"
 
+# What a core release is called in the package directory. A name, not an
+# identity: several publishers offer "NMesh" and the key is what tells them
+# apart — which is exactly the shape a search by name needs.
+PROJECT_NAME = "NMesh"
+
 # Bounds. A release is source code, not a disk image: a package that does not
 # fit these is not a release, whatever it claims to be.
 MAX_TREE_BYTES = 64 * 1024 * 1024      # the tree, unpacked

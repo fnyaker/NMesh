@@ -84,16 +84,17 @@ REVOKE = "revoke"          # membership revocation gossip
 ABUSE = "abuse"            # signed abuse reports
 KEEPALIVE = "keepalive"    # the negotiated keepalive cadence (KA_PROPOSE/REQUEST)
 MLO = "mlo"                # multi-link operation: two links carrying one flow
+PACKAGES = "pkgdir"        # the package directory (PKG_STORE / FIND / FOUND / ANNOUNCE)
 
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENEW, REVOKE, ABUSE,
-                    KEEPALIVE, MLO})
+                    KEEPALIVE, MLO, PACKAGES})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
-SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO})
+SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES})
 
 
 class FeatureError(Exception):

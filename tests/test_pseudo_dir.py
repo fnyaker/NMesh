@@ -10,7 +10,7 @@ import os
 import pytest
 
 from src.pseudo_dir import (
-    dir_key, build_claim, parse_claim, PseudoBook, PseudoDirError,
+    dir_key, dir_keys, build_claim, parse_claim, PseudoBook, PseudoDirError,
     encode_claims, decode_claims, MAX_CLAIM, _MAX_PER_KEY,
 )
 from src.crypto import CryptoIdentity
@@ -38,6 +38,52 @@ class TestKey:
 
     def test_distinct_pseudos_differ(self):
         assert dir_key("alice") != dir_key("bob")
+
+
+class TestFilingKeys:
+    """A claim is filed under its name *and* its prefixes, which is what lets a
+    directory answer a partial name. The keys are derived from the pseudo inside
+    the signed claim, so nobody can file themselves under a name they did not
+    claim."""
+
+    def test_a_prefix_lands_on_a_key_the_claim_was_filed_under(self):
+        keys = dir_keys("Alice Ada")
+        for query in ("alice ada", "ali", "ada"):
+            assert dir_key(query) in keys, query
+
+    def test_a_name_that_does_not_match_lands_elsewhere(self):
+        assert dir_key("bob") not in dir_keys("Alice Ada")
+
+    def test_a_parsed_claim_carries_its_keys(self):
+        ident = CryptoIdentity()
+        raw = build_claim("Alice Ada", ident.dsa_public_key, ident.sign)
+        claim = parse_claim(raw, ident.verify)
+        assert claim["key"] == dir_key("alice ada")
+        assert claim["keys"] == dir_keys("Alice Ada")
+
+    def test_a_partial_lookup_finds_a_claim_in_the_book(self):
+        ident = CryptoIdentity()
+        raw = build_claim("Alice Ada", ident.dsa_public_key, ident.sign)
+        claim = parse_claim(raw, ident.verify)
+        book = PseudoBook()
+        book.offer(claim, raw)
+        assert book.get(dir_key("ali")) == [raw]
+        assert book.get(dir_key("ada")) == [raw]
+        assert book.get(dir_key("bob")) == []
+
+    def test_a_hot_prefix_bucket_never_evicts_a_claim(self):
+        """A short prefix is shared by every second name. Dropping the claim —
+        which is what this used to do — let a busy bucket evict somebody who was
+        still the only answer to their own exact name."""
+        book = PseudoBook(max_per_key=2)
+        names = [f"Alicia {index}" for index in range(5)]
+        for name in names:
+            ident = CryptoIdentity()
+            raw = build_claim(name, ident.dsa_public_key, ident.sign)
+            book.offer(parse_claim(raw, ident.verify), raw)
+        assert len(book) == len(names)
+        for name in names:
+            assert book.get(dir_key(name)), name
 
 
 class TestClaim:
@@ -251,6 +297,44 @@ class TestNodeDirectory:
             res = await node.lookup_pseudo("alice")   # case-insensitive
             assert [r["id"] for r in res] == [node.id.raw.hex()]
             assert res[0]["pseudo"] == "Alice"
+        finally:
+            await node.stop()
+
+    async def test_a_partial_lookup_answers_from_the_directory(self):
+        """The complaint this exists for: "ask the network" only ever matched
+        an exact name, so typing three letters found nothing that had not
+        already reached us by gossip."""
+        node = await self._node("Alice Ada")
+        try:
+            await node.publish_pseudo()
+            for query in ("ali", "ada", "alice ada"):
+                res = await node.lookup_pseudo(query)
+                assert [r["id"] for r in res] == [node.id.raw.hex()], query
+        finally:
+            await node.stop()
+
+    async def test_naming_this_node_asks_the_directory_loop_to_file_it(self):
+        """`publish_pseudo` existed and nothing but the test suite ever called
+        it, so no real node was ever in the directory."""
+        node = await self._node()
+        try:
+            node._running = True
+            node._directory_wake.clear()
+            node.set_pseudo("Bella")
+            assert node._directory_wake.is_set()
+        finally:
+            node._running = False
+            await node.stop()
+
+    async def test_a_peer_coming_up_asks_for_the_same_thing(self):
+        """A node that started before its first link had nobody to file with."""
+        node = await self._node("Bella")
+        peer = _FakePeer()
+        peer.agreed = frozenset()
+        try:
+            node._directory_wake.clear()
+            node._schedule_pseudo_sync(peer)
+            assert node._directory_wake.is_set()
         finally:
             await node.stop()
 

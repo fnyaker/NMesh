@@ -177,7 +177,14 @@ ones. Chat and fleet both go through it. The numbers stay the app's.
 The `PSEUDO_*` frames read **names** — `my_pseudo()`, `lookup_pseudo(query,
 wide=…)` (ranked, partial, case- and accent-insensitive), `pseudos_of(ids)`, and
 `refresh_names(ids)` / `name_of(id)` over a cache shared by every app on this
-client.
+client. `wide=True` also asks the network, partial names included, and costs a
+bounded round of directory queries — leave it off for search-as-you-type.
+
+**Every question is bounded** (`_ASK_TIMEOUT`, and `_LOOKUP_TIMEOUT` for the one
+that deliberately asks the network). One question is in flight at a time —
+replies carry no request id, so they are matched by order — which is why: without
+a ceiling, one answer that never comes back holds every question the app will
+ever ask.
 
 They are **read-only, deliberately**: there is no frame that renames the node. A
 pseudo is shown in the node's console and used by every app on it, so choosing

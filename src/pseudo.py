@@ -121,6 +121,45 @@ def rank(query: str, pseudo: str):
     return rank_folded(fold(query), fold(pseudo))
 
 
+# How a name is filed so a *partial* query can find it network-wide.
+#
+# A directory key is a hash, and half a name does not hash to the same thing as
+# the whole one — which is why "ask the network" only ever found an exact match,
+# and why the local book (which ranks every entry it holds) was the only thing
+# that answered a prefix. The fix is on the *publishing* side: a name is filed
+# under several keys, one per term below, and a query hashes what was typed. So
+# `ali` lands on a key `alice ada` was already stored under.
+#
+# The terms are derived from the name, never declared: the receiver re-derives
+# them from the pseudo inside the signed claim, so a node cannot file itself
+# under a term for a name it did not claim. That is the whole security argument,
+# and it is the same one that makes the exact key safe.
+MAX_INDEX_TERMS = 24        # keys one name may be filed under
+MAX_TERM = 12               # longest prefix indexed
+MIN_TERM = 2                # shortest — a single letter is not a search, and it
+                            # would put every name in the mesh on one key
+
+
+def key_terms(text) -> list[str]:
+    """The folded terms a name is filed under, best first.
+
+    The whole folded name, then every word's prefixes — which is exactly what
+    :func:`rank_folded` calls EXACT, PREFIX and WORD. ``CONTAINS`` has no term:
+    you cannot hash the middle of a word, and the local book still finds it."""
+    folded = fold(text)
+    if not folded:
+        return []
+    terms = [folded]
+    for word in folded.split(" "):
+        for length in range(min(MIN_TERM, len(word)), min(len(word), MAX_TERM) + 1):
+            terms.append(word[:length])
+    seen: dict[str, None] = {}
+    for term in terms:
+        if term:
+            seen.setdefault(term, None)
+    return list(seen)[:MAX_INDEX_TERMS]
+
+
 def rank_folded(q: str, p: str):
     """:func:`rank` on two already-folded strings.
 

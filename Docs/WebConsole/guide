@@ -34,7 +34,7 @@ button works.
 |---|---|---|
 | **Overview** | — | `#overview` |
 | **Network** | Peers · Reachability · Add a node | `#network/peers`, `#network/reach`, `#network/join` |
-| **Apps** | Installed · App store | `#apps/installed`, `#apps/store` |
+| **Apps** | Installed · Find an app | `#apps/installed`, `#apps/store` |
 | **Settings** | Identity · Updates · Security · This browser · Configuration · Diagnostics · Advanced | `#settings/identity`, `#settings/updates`, `#settings/security`, `#settings/appearance`, `#settings/config`, `#settings/diagnostics`, `#settings/advanced` |
 
 Joining a network is a **network** action, not a setting: tickets, QR codes,
@@ -481,6 +481,7 @@ node must not be something the network can do to it.
 | `/chat`, `/chat.css`, `/chat.js` | the chat app, if enabled |
 | `/fleet`, `/fleet.css`, `/fleet.js` | the fleet app, if enabled |
 | `/node`, `/node.css`, `/node.js` | the node card as a page (`/node#<id>`) |
+| `/package`, `/package.css`, `/package.js` | one signed package, described (`/package#<record id>`) — mounted by Settings → Updates, Apps → Find an app and the node card, and served on its own for the window or tab an operator prefers |
 | `/theme.js` | sets the chosen theme **before the first paint** (blocking in `<head>`) |
 | `/favicon.svg` | the icon; without it every load takes a 404 on `/favicon.ico` |
 
@@ -515,8 +516,8 @@ works on a machine with no internet.
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
-| GET     | `/api/store`       | app store view: `{catalog:[…state,action], installed:[…]}` |
-| POST    | `/api/store/publish` | `{name, version, files:{path:b64}}` — publishes + announces to the network |
+| GET     | `/api/store`       | the local view: `{catalog, installed}` |
+| POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name |
 | POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
 | GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing |
 | GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
@@ -546,13 +547,19 @@ works on a machine with no internet.
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
-| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, this node's own publisher key |
-| POST    | `/api/releases/publish` | `{notes}` — signs the installed tree and announces it to the mesh |
+| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
+| POST    | `/api/releases/publish` | `{notes}` — signs the installed tree, announces it, and files it in the package directory |
 | POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
 | POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
+| GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node publishes, `&wide=1` also asks the network. Nothing is listed: it answers questions |
+| GET     | `/api/packages/<id>` | one signed record, as a page reads it; `?fetch=1` also pulls the descriptor it points at |
+| GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
+| POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
+| POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the publisher key **carried inside** that record. **400** for a recommendation: it names somebody else's bytes |
+| POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it for new versions, and say how many watched publishers must agree on the code first |
 | GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
-| POST    | `/api/restart`   | `{confirm:true}` — restarts the node. **409** with the reason when nothing would start it again |
+| POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
 | POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) |
@@ -585,11 +592,15 @@ The interface's **Apps (DHT)** section publishes an application (pick files → 
 identifier shared over the mesh) and fetches one by its identifier (files
 verified, then downloadable). See `Docs/AppSharing/guide`.
 
-The **App Store** section lists the apps **published on the network** (a shared
-catalogue, re-announced automatically) with an Install/Update button according
-to state, the locally installed apps (Uninstall), and a publishing form. The
-state decision is computed **on the node** (`store_overview`); the front end only
-displays it. See `Docs/AppStore/guide`.
+**Find an app** does not list anything. A store is a list, and a list is a thing
+to flood — keeping one clean needs an authority nobody on a decentralised mesh
+can be. So it asks: you type part of a name and signed records filed under it
+come back from the package directory, each carrying its author's key. Opening one
+gives the same page a node release opens (`/package#<id>`): what it is, what it
+says about itself, who else signed the same code, and download / install / watch.
+The **Installed** tab is still a list, because what is on this disk is a finite
+set this operator put there. See `Docs/AppStore/guide` and
+`Docs/Updates/guide`.
 
 ## The built-in chat app (`/chat`)
 
@@ -747,14 +758,18 @@ retried once and then abandoned, and the log on the page says so.
 ### Restarting on demand (⋯ → *Restart this node*)
 
 The same mechanism, asked for outright rather than by an update: the node stops
-its links properly and exits, and the service manager starts it again. It is in
-the **⋯** menu because it is a node action rather than a section of one, and
-because from there it is one click away wherever the operator is.
+its links properly and then comes back — by exiting so a supervisor starts it
+again, or, when there is no supervisor, by **re-execing itself** (`os.execv`
+replaces the process image with a fresh interpreter on the same command line).
+It is in the **⋯** menu because it is a node action rather than a section of
+one, and because from there it is one click away wherever the operator is.
 
-The same gate applies, for the same reason — a process cannot restart itself,
-only exit and be started again. With nothing watching, the item is disabled and
-says why underneath; `POST /api/restart` answers **409** with the reason rather
-than "restarting" for a node that would simply stop.
+Only when *neither* route is available — no interpreter to run, or the script the
+node was started from is gone — is the item disabled and the reason said
+underneath; `POST /api/restart` then answers **409** with that reason rather
+than "restarting" for a node that would simply stop. The page reads
+`can_restart` and `restart_blocked` from `/api/state`, which is that question
+asked rather than the narrower "is a service manager watching?" it used to be.
 
 Under a remote context it reaches the *managed* node's console, which is the
 point: it is that machine's service manager that answers for it. The console
