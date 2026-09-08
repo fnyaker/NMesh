@@ -47,6 +47,8 @@ Among other things they check:
   measure both, forms a bundle and actually sends down both of them — the one
   thing no unit test can show, because every way this breaks is a bundle that
   quietly never forms while everything goes on working at half the throughput.
+  And the other direction: a node that declares a phone's cadences is left alone
+  over real sockets — no striping at it, and an idle probe once a minute.
 - The **management app on a real mesh** (`tests/integration/test_fleet.py`):
   a full enrolment with a human decision followed by an authorised command, an
   un-enrolled operator who gets nothing, an ungranted capability refused,
@@ -134,8 +136,11 @@ tests/
 │     link that flaps on a single probe); probes matched to their own answer, and
 │     a probe nobody answers charged as lost rather than left pending; and the
 │     three properties an adversary would go for — a peer that never heard of
-│     this is untouched, a request can only ever ask this node to do **less**,
-│     and no proposed window raises its probe rate above what it already had
+│     this is untouched, a request can only ever ask this node to do **less**
+│     and lapses rather than sticking, and *no declaration at all* lowers either
+│     of this node's cadences (swept over every corner of the hard range, not
+│     argued: it is why a cadence is negotiated as a range per mode rather than
+│     as one window whose ceiling anybody could pull down)
 ├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
 │     the rate gate, the signed accusation, and above all what hearsay may NOT
 │     do — hearsay alone sanctions nobody (it stops below the *first* threshold,

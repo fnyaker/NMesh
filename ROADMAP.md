@@ -435,13 +435,23 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   `mlo_drop_percent` is benched, keeps its probes, and rejoins at *half* that
   share: one threshold in both directions is a link that flaps on a single
   probe.
-- Paid for by a **keepalive accord**. Two nodes declare a window of cadences
-  and both compute the intersection — nothing is exchanged to settle it — and
-  every probe then announces when the next one is due, under a token the answer
+- Paid for by a **keepalive accord**. Each node declares four numbers — a range
+  for the striping cadence and one for the idle cadence — and both ends compute
+  the same agreement from the two declarations, with nothing exchanged to settle
+  it. Every probe then announces when the next is due, under a token the answer
   echoes so a probe can be matched to its own answer at ten a second. Three
-  behavioural findings come out of it (K1–K3), and one property holds the whole
-  plane up: nothing a peer sends raises this node's probe rate above what it
-  had before any of this existed.
+  behavioural findings come out of it (K1–K3), and one property holds the plane
+  up: **nothing a peer sends lowers this node's own probe interval**, because
+  both agreed cadences are a `max` over something each node declared. Four
+  numbers rather than two precisely for that — with one range the ceiling is a
+  `min`, and a `min` is a lever anybody can pull.
+- A peer whose fast range does not reach ours gets **no striping** rather than
+  one of the two paying for the other's idea of fast, which is a node's
+  strongest way to say "do not spend my battery". A cadence *request* is the
+  weak, temporary counterpart: only ever slower, and it lapses.
+- The medium has the last word on going quiet (`BaseTransport.idle_timeout`):
+  two nodes can agree to idle slower than the wire under them survives, and
+  neither can see that from the negotiation.
 - Off by default and ticked **per medium** (`tcp.mlo`, `udp.mlo`) — a probe ten
   times a second is cheap on Ethernet and expensive on a battery — and awake
   only while the node is being used, unless `mlo_always`. A medium that never

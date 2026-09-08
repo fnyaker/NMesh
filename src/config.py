@@ -95,10 +95,10 @@ def _as_skew(raw: str) -> int:
     return value
 
 
-# The same bounds `mlo.clamp_window` applies to anything a peer proposes. They
-# are repeated as literals rather than imported because this module is loaded
-# from its file by `scripts/nmesh_config.py` and must keep importing nothing of
-# its own — `tests/test_config.py` holds the two in step.
+# The same hard limits `mlo.clamp_bounds` applies to anything a peer proposes.
+# They are repeated as literals rather than imported because this module is
+# loaded from its file by `scripts/nmesh_config.py` and must keep importing
+# nothing of its own — `tests/test_config.py` holds the two in step.
 def _as_keepalive_ms(raw: str) -> int:
     try:
         value = int(str(raw).strip())
@@ -292,14 +292,23 @@ SETTINGS = {
                         "Share of probes a bundled link may lose before it is "
                         "benched; it keeps its keepalive and rejoins at half "
                         "this"),
-    # The window this node offers when two of them negotiate a keepalive
-    # cadence. The floor is what it is *willing* to be asked for, not what it
-    # will do unprompted: a node that does not want fast probes raises it and
-    # no peer can talk it back down.
-    "keepalive_min_ms": (_as_keepalive_ms, 100, True,
-                        "Fastest keepalive this node will agree to on a link"),
-    "keepalive_max_ms": (_as_keepalive_ms, 20000, True,
-                        "Slowest keepalive this node will agree to on a link"),
+    # What this node offers when two of them negotiate their keepalive
+    # cadences: a range per mode, four numbers. One range would leave the
+    # ceiling as a lever a peer can pull — see `src/mlo.py`. All four are what
+    # this node is *willing to be asked for*, never what it does unprompted:
+    # every agreed cadence is a `max` over something both nodes declared, so
+    # raising a floor here is an opt-out no peer can talk back down.
+    "keepalive_fast_min_ms": (_as_keepalive_ms, 100, True,
+                        "Fastest this node will ever be probed, striping or not"),
+    "keepalive_fast_max_ms": (_as_keepalive_ms, 1000, True,
+                        "Slowest cadence this node still calls fast; a peer "
+                        "whose fast range does not reach it gets no bundling"),
+    "keepalive_slow_min_ms": (_as_keepalive_ms, 15000, True,
+                        "Fastest this node wants to be probed when idle"),
+    "keepalive_slow_max_ms": (_as_keepalive_ms, 20000, True,
+                        "Slowest this node can be probed before it stops "
+                        "believing the link (kept under the medium's own "
+                        "timeout whatever is agreed)"),
     "spool":           (_as_path, None, True,
                         "Directory used as a store-and-forward link"),
     "console_host":    (_as_host, "127.0.0.1", True,

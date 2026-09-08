@@ -261,28 +261,54 @@ the name to have been said.
 
 ## A `min` in a negotiated pair is a lever anybody can pull
 
-The keepalive accord takes `max` of the two floors and `min` of the two
-ceilings, which reads as obviously symmetric and is not. The floor is a `max`,
-so nobody can be dragged below what they declared — that half defends itself.
-The ceiling is a `min`, and this node clamps its own cadence into the accord:
-a peer proposing `(100, 150)` pulled the ceiling to 150 ms and bought **six
-probes a second on that link for as long as it existed**. Eight bytes, once,
-per link an adversary opens.
+The keepalive accord first took `max` of two floors and `min` of two ceilings,
+which reads as obviously symmetric and is not. The floor is a `max`, so nobody
+can be dragged below what they declared — that half defends itself. The ceiling
+is a `min`, and this node clamped its own cadence into the accord: a peer
+proposing `(100, 150)` pulled the ceiling to 150 ms and bought **six probes a
+second on that link for as long as it existed**. Eight bytes, once, per link an
+adversary opens.
 
 It looks like a fair intersection because both ends compute it identically.
 Symmetry in the *arithmetic* says nothing about symmetry in the *cost*: one
 side spends the packets.
 
-`mlo.CEILING_MIN_MS` floors the ceiling at the cadence every link had before
-any of this existed, so the property becomes statable and testable — nothing a
-peer sends raises this node's probe rate above what it already was. Nothing
-legitimate is lost, because a ceiling exists so a peer can tell a live link
-from a dead one, and a peer's own probes (which we answer whatever our rate is)
-are what its own liveness verdict counts.
+The first fix was a constant floor under the ceiling, and it worked — but it was
+a patch on a shape that should not have existed. What removed the lever was
+changing the shape: a range **per mode** (`mlo.Bounds`, four numbers) instead of
+one range across both. Then every agreed cadence is a `max` over something each
+node declared, and the property stops needing a constant to hold:
 
-> **On any negotiated pair of bounds, ask which side pays for each half.** The
-> half whose extreme costs the *other* party needs a limit that is not
-> negotiable.
+> There is no expression in `accord` a peer's number enters where being smaller
+> helps it.
+
+The two ceilings still do work, and it is the honest kind — `fast_max` decides
+whether striping is worth it *to each node*, so a peer whose fast range does not
+reach ours simply is not bundled. A bound that answers "is this worth doing"
+cannot be turned into one that answers "how hard will you work".
+
+> **On any negotiated pair of bounds, ask which side pays for each half.** If
+> the extreme of one half costs the *other* party, no constant will fix it
+> honestly — the model needs a bound that side declared for itself.
+
+## The number that binds is not always in the negotiation
+
+Two nodes can agree, correctly and symmetrically, to idle at five minutes over a
+transport that reaps a silent link at sixty seconds. Both computed the same
+accord, both are honouring it, and the link dies anyway. Nothing in the
+negotiation is wrong: the binding constraint is a fact about the wire under it,
+and neither node put it there.
+
+So the medium declares it (`BaseTransport.idle_timeout`) and the core keeps the
+cadence to a third of it — the same margin the UDP keepalive already holds
+itself to, read backwards. Applied **locally** rather than folded into the
+accord, because the two ends may run different transport settings and each is
+right about its own; and only ever able to take back what the medium cannot
+afford, never to push a cadence below what the pair agreed.
+
+> **When a negotiated value has to survive contact with something neither party
+> negotiated, clamp it where that thing is known** — and make the clamp
+> one-directional, or it becomes a second way to impose a cost.
 
 ## A threshold with no margin is a switch that flaps
 
@@ -655,6 +681,22 @@ it is the poisoning of §5 seen from the other side. Test:
 - **Kick in a burst**: opening the punched link with ONE keepalive was fragile
   (one lost UDP datagram = a lost punch). `_kick_punched_link` sends a bounded
   burst.
+
+## A test that corrupts something must corrupt it whatever was there
+
+`test_file_roundtrip` wrote `\x00` over a bundle's last byte and asserted the
+read was then refused. The last byte is part of a digest over random packet
+ids, so about once in a hundred and seventy runs it was **already** `\x00`: the
+file was untouched, the read succeeded, and pytest reported `DID NOT RAISE
+BundleError` — which reads as "the checksum is broken" rather than as "the
+corruption never happened". A red suite pointing at the innocent, on a commit
+that touched nothing near it.
+
+Flip the byte (`^ 0xFF`) instead of assigning a constant.
+
+> **Any test that damages data has to damage it unconditionally.** Writing a
+> fixed value is a no-op exactly as often as that value comes up, and the
+> failure it produces accuses the code under test.
 
 ## Tests: parallelism & not blocking
 

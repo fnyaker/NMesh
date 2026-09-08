@@ -90,8 +90,8 @@ receipt for routable types (see the gates).
 | CERT_REVOKE | 0x24 | gossip of a **signed revocation**: an issuer taking back a membership it granted (see [`security.md`](security.md)) |
 | ABUSE_REPORT | 0x25 | gossip of a **signed accusation**: one node's opinion that another is misbehaving. Carries no authority — the receiver weighs it (see [`security.md`](security.md)) |
 | CAPABILITIES | 0x26 | "here is what I can speak": a **set of feature names**, not a version. Sent pre-auth alongside the challenge and again once authenticated; silence means the classic set (see [`security.md`](security.md)) |
-| KA_PROPOSE | 0x27 | "the keepalive cadences I can work with": `min_ms(I) ‖ max_ms(I)`. Both ends compute the same accord from the two windows; nothing is exchanged to settle it (see [`transports.md`](transports.md)) |
-| KA_REQUEST | 0x28 | "slow your probes on this link to `wanted_ms(I)`". Only ever *less* — a request that asks for more is dropped, or four bytes would buy somebody else's battery |
+| KA_PROPOSE | 0x27 | "the cadences I can work with", a range per mode: `fast_min(I) ‖ fast_max(I) ‖ slow_min(I) ‖ slow_max(I)`. Both ends compute the same accord from the two declarations; nothing is exchanged to settle it. Four and not two because with one range the ceiling is a `min`, and a `min` is a lever anybody can pull (see [`transports.md`](transports.md)) |
+| KA_REQUEST | 0x28 | "slow your probes on this link to `wanted_ms(I)`, for now". Only ever *less* — a request that asks for more is dropped, or four bytes would buy somebody else's battery — and it lapses rather than sticking: the durable mechanism is the declaration above |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated

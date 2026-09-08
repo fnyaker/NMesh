@@ -628,6 +628,12 @@ class UDPTransport(BaseTransport):
             except asyncio.TimeoutError:
                 pass              # re-check _closed, which nothing signals
 
+    def idle_timeout(self) -> float | None:
+        """A UDP link with nothing arriving for this long is declared dead by
+        the reliability layer's own keepalive. Read off the setting, so a value
+        an operator changed is the value the cadence is held to."""
+        return float(self.setting("keepalive_timeout") or 0.0) or None
+
     def remote_ip(self) -> str | None:
         """The peer's source IP as observed locally."""
         if self._remote is None:

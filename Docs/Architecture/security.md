@@ -267,14 +267,18 @@ Three rules, and they are load-bearing:
    The accord is worth a second look against this rule, because it is the first
    negotiated thing that changes what a node *does* rather than what it sends.
    It still only ever adds, and the whole plane is built around one property:
-   **nothing a peer sends raises this node's probe rate above what it had
-   before any of this existed.** A `KA_REQUEST` may only ever ask for less. A
-   proposed *floor* is a `max`, so it can only slow us. A proposed *ceiling* is
-   a `min` — which is a lever anyone can pull, and was the one place a
-   negotiated value could have cost this node something: `mlo.CEILING_MIN_MS`
-   floors it at the classic interval (see `transports.md`). A peer that
-   announces nothing keeps that interval unchanged. That property is what would
-   have to hold for the plane to be safe, so it is the one the tests state.
+   **nothing a peer sends lowers this node's own probe interval.** Each node
+   declares a range per mode — four numbers, not two — and both agreed cadences
+   come out as a `max` over something each of them declared, so there is no
+   expression a peer's number enters where being smaller helps it. Not a
+   constant bolted on afterwards: the shape of the arithmetic (see
+   `transports.md`, and `gotchas.md` for the two-number model it replaced, where
+   the ceiling was a `min` and therefore a lever). A `KA_REQUEST` may only ever
+   ask for *less*, and lapses rather than sticking. A peer that announces
+   nothing keeps the twenty-second interval it always had. That property is what
+   would have to hold for the plane to be safe, so it is the one the tests
+   state — `test_no_declaration_at_all_can_lower_either_cadence` sweeps every
+   corner of the hard range rather than arguing it.
 
 Mechanics: the announcement rides the round trip that was happening anyway (the
 server sends it with its `CHALLENGE`, the client answers it on receiving one), so

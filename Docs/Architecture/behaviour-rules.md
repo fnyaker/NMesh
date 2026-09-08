@@ -382,10 +382,14 @@ grace period covers it. Note the asymmetry that keeps this honest: the floor
 announcement is a *legitimate refusal*, not a violation, so this rule can never
 punish a peer for wanting the fast lane back.
 
-### K3 — Proposed a window whose floor is above its ceiling
-**Signal** `KA_PROPOSE` with `min_ms >= max_ms`.
-**Why** Nothing honest produces it: a correct node cannot mean it, and the two
-readings it could have — "probe me never" and "probe me always" — are opposite.
+### K3 — Declared cadences a correct node could not have meant
+**Signal** `KA_PROPOSE` with a mode whose floor is not below its ceiling, or
+with the fast range slower than the slow one at either end.
+**Why** Nothing honest produces either. A range with no width is not a range,
+and the two readings it could have — "probe me never" and "probe me always" —
+are opposite. The two modes swapped is the same mistake costing a
+hundredfold, which is exactly why it is worth naming rather than quietly
+sorting the four numbers and carrying on.
 **Cost** O(1) · **Confidence** strong · **Weight** 2.0 (like C1)
 **Wrong when** Nothing. Which is why the proposal is also **dropped** rather
 than clamped and adopted: believing a window we have just called impossible
