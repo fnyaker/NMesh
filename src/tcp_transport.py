@@ -48,6 +48,13 @@ class TCPTransport(BaseTransport):
                "-254 to 254. Weighed against measured latency; the balance "
                "between the two is set once for the node, under Reachability.",
                minimum=-254, maximum=254),
+        option("mlo", "bool", False,
+               "Let this medium carry half of a peer's traffic beside another "
+               "link (multi-link operation). It buys throughput and a much "
+               "faster reaction to a link going bad, and it costs a probe "
+               "every hundred milliseconds on every link it bundles — so it is "
+               "off unless the medium is one where that is cheap.",
+               label="MLO ready"),
         option("retry_interval", "float", 0.0,
                "How often to re-dial a known node this one has no link to, on "
                "each of its TCP addresses. Zero switches it off: nothing "
@@ -150,6 +157,12 @@ class TCPTransport(BaseTransport):
         except asyncio.TimeoutError:
             raise ConnectionError("read timeout")
         return Packet.unpack(data)
+
+    def idle_timeout(self) -> float | None:
+        """A TCP read with nothing on it for this long raises, and the link is
+        reaped. It is the same number `receive()` waits on, read off the
+        setting rather than copied — one value, one place."""
+        return float(self.setting("read_timeout") or 0.0) or None
 
     def remote_ip(self) -> str | None:
         if self._writer is None:

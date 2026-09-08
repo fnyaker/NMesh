@@ -204,6 +204,204 @@ feature that never turns on, with nothing anywhere saying why.
 `_RETRY_IDLE_MAX` bounds that to a delay instead of a fault. The wake is what
 makes it prompt; the ceiling is what makes it recoverable.
 
+## A probe count is not a timeout
+
+`_reap_silent_links` cut a link after `_DEAD_LINK_PROBES = 4` unanswered
+probes, and the comment next to the number explained it as "over a minute of
+one-way silence on a link whose own transport reaps at sixty seconds". That
+sentence was true, and it was true *because every link was probed on one
+interval*. Nothing in the code said so.
+
+The moment a link could negotiate its own cadence (`mlo.py`), four probes on a
+bundle member became **four hundred milliseconds**, and the sweep that exists to
+cut half-open sockets would have cut a healthy link for a hiccup — undoing the
+whole point of benching a lossy member instead of losing it. The failure would
+have been a link that drops and comes back every few seconds under load, which
+reads as a bad network rather than as a bug.
+
+The run is now joined by the duration it always stood for (`_DEAD_LINK_SILENCE`,
+off `LinkQuality.answered_at`) and a link has to fail **both**. Neither half
+alone is right: the run alone cuts a fast-probed link for a hiccup, and the
+silence alone cuts a link on a slow medium that nobody has got round to probing.
+
+> **Any threshold expressed in "how many times" carries an unwritten "how
+> often".** When the cadence becomes a variable, go and find every count that
+> was silently a duration.
+
+## Adding a message to a plane everybody already speaks
+
+The PING gained a trailer (`next_ms ‖ token`, see `protocol.md`). Two questions
+look like one and are not, and answering only the first is a bug with no error
+message anywhere.
+
+1. **Will a build without this break on it?** No — `_decode_addresses` has
+   always stopped at the last address. That is what makes it a trailer, and it
+   is the same reasoning as `_HINTS_OK` on a `FOUND_NODE`.
+2. **May it therefore be sent to anybody?** *No.* The answer has to echo the
+   token back, and a peer that does not know that sends an empty PONG. Every
+   probe would then be unmatched, and `LinkQuality.expire` would charge every
+   one of them as a **loss on a link answering perfectly** — which would bench
+   a healthy link, or with the old reaper, cut it.
+
+So the trailer only goes to a peer that *announced* `keepalive`. And that
+exposed a second trap in the negotiation itself:
+
+`peer_speaks` reads silence as **yes**, and that is right and stays right: every
+name in the classic set predates the announcement, and a node from before it
+must keep receiving exactly what it received before. For a name added *after*
+the negotiation, the very same sentence gives the opposite answer — silence
+there is a peer that has never heard of it, and sending it the new thing is not
+what it received before. Those names are listed in
+`features.SINCE_NEGOTIATION` and asked through `peer_announces`, which requires
+the name to have been said.
+
+> **"Silence means yes" is a statement about names that are older than the
+> question.** A new name asked through the old predicate is a feature switched
+> on for every peer that has never heard of it.
+
+## A `min` in a negotiated pair is a lever anybody can pull
+
+The keepalive accord first took `max` of two floors and `min` of two ceilings,
+which reads as obviously symmetric and is not. The floor is a `max`, so nobody
+can be dragged below what they declared — that half defends itself. The ceiling
+is a `min`, and this node clamped its own cadence into the accord: a peer
+proposing `(100, 150)` pulled the ceiling to 150 ms and bought **six probes a
+second on that link for as long as it existed**. Eight bytes, once, per link an
+adversary opens.
+
+It looks like a fair intersection because both ends compute it identically.
+Symmetry in the *arithmetic* says nothing about symmetry in the *cost*: one
+side spends the packets.
+
+The first fix was a constant floor under the ceiling, and it worked — but it was
+a patch on a shape that should not have existed. What removed the lever was
+changing the shape: a range **per mode** (`mlo.Bounds`, four numbers) instead of
+one range across both. Then every agreed cadence is a `max` over something each
+node declared, and the property stops needing a constant to hold:
+
+> There is no expression in `accord` a peer's number enters where being smaller
+> helps it.
+
+The two ceilings still do work, and it is the honest kind — `fast_max` decides
+whether striping is worth it *to each node*, so a peer whose fast range does not
+reach ours simply is not bundled. A bound that answers "is this worth doing"
+cannot be turned into one that answers "how hard will you work".
+
+> **On any negotiated pair of bounds, ask which side pays for each half.** If
+> the extreme of one half costs the *other* party, no constant will fix it
+> honestly — the model needs a bound that side declared for itself.
+
+## The number that binds is not always in the negotiation
+
+Two nodes can agree, correctly and symmetrically, to idle at five minutes over a
+transport that reaps a silent link at sixty seconds. Both computed the same
+accord, both are honouring it, and the link dies anyway. Nothing in the
+negotiation is wrong: the binding constraint is a fact about the wire under it,
+and neither node put it there.
+
+So the medium declares it (`BaseTransport.idle_timeout`) and the core keeps the
+cadence to a third of it — the same margin the UDP keepalive already holds
+itself to, read backwards. Applied **locally** rather than folded into the
+accord, because the two ends may run different transport settings and each is
+right about its own; and only ever able to take back what the medium cannot
+afford, never to push a cadence below what the pair agreed.
+
+> **When a negotiated value has to survive contact with something neither party
+> negotiated, clamp it where that thing is known** — and make the clamp
+> one-directional, or it becomes a second way to impose a cost.
+
+## A cheaper path has to keep the side effects, not just the answer
+
+`RoutingTable.add` was how a peer's recency got refreshed, and most probes now
+carry no addresses at all — so `touch` was written to refresh `last_seen` and
+skip the merge. It returned the same answer for a fraction of the cost, and it
+quietly dropped something `add` was also doing: **re-appending the entry to its
+k-bucket.**
+
+Bucket position *is* the eviction order (`oldest` is `_entries[0]`, and that is
+what `evict_oldest` takes). So being heard from is what has always kept a node
+out of the firing line. After the change, the peer we probe ten times a
+second — the one we have the most evidence is alive — sat first in the queue
+while an id a stranger merely *mentioned* was promoted past it. In a table
+where identities are free to mint, that is proof being outranked by hearsay,
+and it is the exact inversion the charter names.
+
+Reproduced in four lines against a full bucket, which is the only reason it was
+found: the visible behaviour was identical.
+
+> **When you replace a call with a cheaper one, diff what the old one *did*,
+> not what it returned.** A function that also reorders, also filters, also
+> marks something is three contracts wearing one name.
+
+And then the fix was measured, because a correctness fix on a path that runs
+ten times a second is a performance decision whether or not anybody treats it
+as one. Putting the re-append back cost **11.7 µs** on a full bucket — it had
+undone the entire probe optimisation, quietly, in the name of security.
+
+The cause was not the fix: a bucket held its twenty entries in a *list*, so
+both `add` and the restored re-append scanned it under `NodeEntry.__eq__` — a
+dataclass comparison over eight fields including two lists. Keyed by the raw id
+in an insertion-ordered map instead, nothing compares two entries at all:
+`touch` went to **0.72 µs** and `add` — which was never part of any of this,
+and is paid on every `FOUND_NODE`, every address gossip and every probe that
+carries one — went from **13.3 µs to 2.95 µs**.
+
+> **A security fix that costs a hot path is not finished.** The choice is
+> almost never "safe or fast": it is usually a data structure that was wrong
+> for both, and the fix is what makes you finally look at it.
+
+## An exact length check reads like rigour and is a compatibility bug
+
+Three new messages checked `len(payload) != SIZE` and charged abuse otherwise.
+That is right for a body too *short* to hold the message — it is not there. It
+is wrong for a body that is longer, which is what a build newer than this one
+looks like, and charging it means every node running tomorrow's code is
+reported by every node running today's. Exactly what the capability negotiation
+exists to prevent, written by hand three times, in the same commit as a PING
+trailer that got it right.
+
+> **Too short is malformed; longer than you understand is a newer build.**
+> Apply it to every message with a fixed-size body, not only the ones designed
+> to grow.
+
+## What rides along becomes the cost when the cadence changes
+
+The PING carried `advertised_uris` because liveness and address gossip happened
+to want the same packet, and at one probe per link per twenty seconds nobody
+could tell. At ten a second the unchanged address list was **71% of the packet
+and half of what answering one costs** — 312 bytes and 30 µs, to re-learn five
+strings the peer already had, ten times a second, per link, for ever.
+
+Nothing was wrong with the old code. What changed was a *rate*, and a rate
+turns "free, and tidy to send together" into the whole bill.
+
+> **When you make something run two hundred times more often, go and look at
+> what it was carrying for somebody else.** The passenger is what gets
+> expensive, not the thing you sped up.
+
+The same pass found two more of these, both hiding behind their own tidiness:
+`advertised_uris()` recomputing 15 µs of regex per call to return the same five
+strings, and `Packet.create` building the packet twice — once to ask it for its
+own id, once to keep — and making a `getrandom` syscall per packet. Neither was
+visible at the old rate. Neither was a property, so both are gone.
+
+## A threshold with no margin is a switch that flaps
+
+A bundle member is benched at `mlo_drop_percent` of its last fifty probes.
+Reading the requirement literally — bench above X, rejoin below X — gives a
+link at the threshold one *probe* of hysteresis: an answer displaces an old
+loss, the share drops by 2%, the link rejoins, loses one, and leaves again.
+About ten times a second, spraying traffic down the one link known to be losing
+it.
+
+The fifty-probe window looks like it damps this and does not: it bounds how far
+the share can move, not how often. `mlo.RECOVER_SHARE` is what does — leaving
+costs the threshold, coming back costs half of it.
+
+> **Whenever a measurement crosses a line in both directions, ask what the
+> smallest observation that can move it is.** If one sample can flip the
+> verdict, the verdict flaps at the sampling rate.
+
 ## Hangs (the job/node "never finishes")
 
 ### 1. asyncio 3.12: `Server.wait_closed()` waits for client connections
@@ -558,6 +756,22 @@ it is the poisoning of §5 seen from the other side. Test:
 - **Kick in a burst**: opening the punched link with ONE keepalive was fragile
   (one lost UDP datagram = a lost punch). `_kick_punched_link` sends a bounded
   burst.
+
+## A test that corrupts something must corrupt it whatever was there
+
+`test_file_roundtrip` wrote `\x00` over a bundle's last byte and asserted the
+read was then refused. The last byte is part of a digest over random packet
+ids, so about once in a hundred and seventy runs it was **already** `\x00`: the
+file was untouched, the read succeeded, and pytest reported `DID NOT RAISE
+BundleError` — which reads as "the checksum is broken" rather than as "the
+corruption never happened". A red suite pointing at the innocent, on a commit
+that touched nothing near it.
+
+Flip the byte (`^ 0xFF`) instead of assigning a constant.
+
+> **Any test that damages data has to damage it unconditionally.** Writing a
+> fixed value is a no-op exactly as often as that value comes up, and the
+> failure it produces accuses the code under test.
 
 ## Tests: parallelism & not blocking
 

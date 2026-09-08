@@ -2187,6 +2187,61 @@ class TestAddressRetryEndpoints:
         finally:
             console.stop(); await node.stop()
 
+    async def test_multi_link_operation_is_settable_and_shows_in_the_snapshot(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            _, _, _, state = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert state["mlo"]["always"] is False
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/mlo", token,
+                {"always": True, "skew_ms": 45, "drop_percent": 25})
+            assert status == 200
+            assert body["mlo"]["always"] is True
+            assert body["mlo"]["skew_ms"] == 45
+            assert body["mlo"]["drop_percent"] == 25
+            _, _, _, state = await asyncio.to_thread(
+                _request, console, "GET", "/api/state", token)
+            assert state["mlo"]["active"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_multi_link_operation_refuses_what_is_not_a_number(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            for payload in ({"skew_ms": "fast"}, {"drop_percent": None}):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/mlo", token, payload)
+                assert status == 400, payload
+            # …and an out-of-range number is bounded rather than refused: the
+            # node owns the bounds, and a slider that can only be wrong is
+            # worse than one that saturates.
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/mlo", token, {"drop_percent": 5000})
+            assert status == 200 and body["mlo"]["drop_percent"] == 100
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_four_cadence_bounds_are_settable(self):
+        """A range per mode, not one window: two numbers leave the ceiling as
+        a lever a peer can pull (see `src/mlo.py`)."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/mlo", token,
+                {"keepalive_fast_min": 250, "keepalive_slow_max": 45000})
+            assert status == 200
+            bounds = body["mlo"]["bounds_ms"]
+            assert bounds["fast_min"] == 250 and bounds["slow_max"] == 45000
+            # The two nobody touched are still what they were.
+            assert bounds["fast_max"] == 1000 and bounds["slow_min"] == 15000
+            assert node.keepalive_bounds().fast_min == 250
+        finally:
+            console.stop(); await node.stop()
+
     async def test_the_balance_is_settable_and_shows_the_resulting_order(self):
         node, console = await _make_console()
         try:

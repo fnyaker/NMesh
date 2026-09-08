@@ -244,12 +244,41 @@ Three rules, and they are load-bearing:
    has announced nothing: that is a node from before this existed, not one with
    no features. Read the other way, the negotiation would be an upgrade that
    cuts off everyone who has not taken it.
+
+   The rule is "it must keep working **exactly as it did**", and that sentence
+   points both ways. Every name in the classic set predates the announcement, so
+   a silent peer must go on receiving all of them. A name added *after* the
+   negotiation is the opposite case: silence there is a peer that has never
+   heard of it, and sending it the new thing is not what it received before — it
+   is a message it drops and an answer we then wait for. Those names are listed
+   in `features.SINCE_NEGOTIATION` and asked through **`peer_announces`**, which
+   requires the name to have actually been said. The first plane to need it was
+   the keepalive accord, where the cost of getting it wrong is not a lost
+   feature but a **healthy link measured as losing every probe** (see
+   `gotchas.md`).
 3. **Negotiation may only ever add.** No name switches off a check, weakens a
    cipher, skips a verification or widens an authorisation. The announcement
    happens *before* anybody has proved anything, so a name that could weaken
    something would be the way in. What is negotiated is only which **optional
    messages** are worth sending — the gossip planes, the directory, renewal,
-   revocation, abuse reports. A test asserts no feature name reads like a check.
+   revocation, abuse reports, the keepalive accord and multi-link operation. A
+   test asserts no feature name reads like a check.
+
+   The accord is worth a second look against this rule, because it is the first
+   negotiated thing that changes what a node *does* rather than what it sends.
+   It still only ever adds, and the whole plane is built around one property:
+   **nothing a peer sends lowers this node's own probe interval.** Each node
+   declares a range per mode — four numbers, not two — and both agreed cadences
+   come out as a `max` over something each of them declared, so there is no
+   expression a peer's number enters where being smaller helps it. Not a
+   constant bolted on afterwards: the shape of the arithmetic (see
+   `transports.md`, and `gotchas.md` for the two-number model it replaced, where
+   the ceiling was a `min` and therefore a lever). A `KA_REQUEST` may only ever
+   ask for *less*, and lapses rather than sticking. A peer that announces
+   nothing keeps the twenty-second interval it always had. That property is what
+   would have to hold for the plane to be safe, so it is the one the tests
+   state — `test_no_declaration_at_all_can_lower_either_cadence` sweeps every
+   corner of the hard range rather than arguing it.
 
 Mechanics: the announcement rides the round trip that was happening anyway (the
 server sends it with its `CHALLENGE`, the client answers it on receiving one), so
@@ -262,6 +291,12 @@ away an optional plane, which is exactly why rule 3 is not optional.
 
 `node.negotiation_status()` shows, per link, what is shared, what they have that
 we do not, and what we have that they do not.
+
+**A fixed-size body is not an exemption.** Every message on a negotiated plane
+reads *too short* as malformed and *longer than we understand* as a newer build
+— including the ones whose body is a fixed struct today. An exact length check
+reads like rigour and is the same bug as reading silence as refusal: it reports
+every node running tomorrow's code. See `gotchas.md`.
 
 ## Zero trust: being in the network is not being trusted
 

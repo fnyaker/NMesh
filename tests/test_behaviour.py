@@ -289,6 +289,7 @@ class TestOnANode:
             node._behaviour_sweep()
             rules = node.behaviour_status()["rules"]
             assert {rule["id"] for rule in rules} == {"C1", "D2", "E1", "E2",
+                                                      "K1", "K2", "K3",
                                                       "D5", "A1"}
             assert all(rule["wrong_when"] for rule in rules)
         finally:

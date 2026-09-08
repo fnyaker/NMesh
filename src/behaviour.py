@@ -159,6 +159,13 @@ class Observation:
     # them. Only ever counted when several peers were asked at once.
     answers_judged: int = 0
     answers_disjoint: int = 0
+    # The keepalive accord (see `mlo.py`), counted in the PING and KA handlers.
+    # A cadence outside the window both ends computed, a cadence request
+    # ignored without the one announcement that cancels it, and a proposed
+    # window whose floor sits above its own ceiling.
+    ka_outside: int = 0
+    ka_ignored: int = 0
+    ka_impossible: int = 0
     # Set by the watch, from the books it keeps — neither can be read off a
     # single moment, which is the whole reason those books exist.
     profile_break: bool = False
@@ -464,6 +471,18 @@ def _disjoint_answers(observation: Observation, group: Group) -> bool:
     return observation.disjoint_share > floor
 
 
+def _keepalive_outside(observation: Observation, _group: Group) -> bool:
+    return observation.ka_outside > 0
+
+
+def _keepalive_ignored(observation: Observation, _group: Group) -> bool:
+    return observation.ka_ignored > 0
+
+
+def _keepalive_impossible(observation: Observation, _group: Group) -> bool:
+    return observation.ka_impossible > 0
+
+
 def _profile_break(observation: Observation, _group: Group) -> bool:
     return observation.profile_break
 
@@ -508,6 +527,37 @@ RULES = (
                    "rest of its family and can never sanction on its own: the "
                    "same signal is the best way to *notice* a partition",
         test=_disjoint_answers,
+    ),
+    Rule(
+        id="K1",
+        summary="announced a keepalive cadence outside the window we agreed",
+        weight=1.0,
+        wrong_when="the two ends were changing windows at that moment — which "
+                   "is why a proposal opens a grace period and nothing is "
+                   "counted inside it, and why a re-proposal is sent before "
+                   "the first probe at the new cadence, never after",
+        test=_keepalive_outside,
+    ),
+    Rule(
+        id="K2",
+        summary="ignored a cadence it was asked for, without announcing the "
+                "floor that cancels the request",
+        weight=1.0,
+        wrong_when="a request and a change of mind crossing in flight — hence "
+                   "the same grace period, and hence the floor announcement "
+                   "being a *legitimate* refusal rather than a violation: a "
+                   "peer is entitled to want the fast lane back, it is only "
+                   "not entitled to say nothing",
+        test=_keepalive_ignored,
+    ),
+    Rule(
+        id="K3",
+        summary="proposed a keepalive window whose floor is above its ceiling",
+        weight=2.0,
+        wrong_when="nothing honest — a correct node cannot mean it. It is "
+                   "weighted like C1 for that reason, and still cannot "
+                   "sanction on its own",
+        test=_keepalive_impossible,
     ),
     Rule(
         id="D5",

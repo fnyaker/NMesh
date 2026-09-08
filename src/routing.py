@@ -47,42 +47,66 @@ class NodeEntry:
 
 
 class KBucket:
+    """One Kademlia bucket: at most `K` entries, oldest-contact first.
+
+    **Order is the eviction policy**, not presentation. `oldest` is what
+    `evict_oldest` takes, and being heard from moves an entry to the back — so
+    a node we are in touch with is the last thing to be dropped for a stranger.
+
+    Kept as an insertion-ordered map keyed by the raw id rather than as a list.
+    A list looks like the obvious shape for twenty things and made every
+    operation a scan under `NodeEntry.__eq__`, which is a dataclass comparison
+    over eight fields including two lists: refreshing an entry that had drifted
+    to the back cost **8 µs**, and `add` pays it on every `FOUND_NODE`, every
+    address gossip and every probe that carries one. Keyed, all of it is a dict
+    lookup and a `move_to_end`, and nothing compares two entries at all."""
+
     K = 20
 
     def __init__(self) -> None:
-        self._entries: list[NodeEntry] = []
+        self._entries: "OrderedDict[bytes, NodeEntry]" = OrderedDict()
 
     def add(self, entry: NodeEntry) -> NodeEntry | None:
-        existing = self.get(entry.node_id)
-        if existing is not None:
-            self._entries.remove(existing)
-            self._entries.append(entry)
+        """Insert or refresh. Returns the entry that would have to go if the
+        bucket is full and this one is new — the caller decides, not us."""
+        key = entry.node_id.raw
+        if key in self._entries:
+            # Assigning to a key that exists keeps its place, so the move is
+            # explicit: refreshing an entry is what earns it the back.
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
             return None
         if len(self._entries) < self.K:
-            self._entries.append(entry)
+            self._entries[key] = entry
             return None
-        return self._entries[0]
+        return next(iter(self._entries.values()))
+
+    def touch(self, node_id: NodeID) -> bool:
+        """Move an entry to the back without replacing it — what a bare
+        liveness signal earns. See `RoutingTable.touch`."""
+        key = node_id.raw
+        if key not in self._entries:
+            return False
+        self._entries.move_to_end(key)
+        return True
 
     def evict_oldest(self, replacement: NodeEntry) -> None:
-        self._entries.pop(0)
-        self._entries.append(replacement)
+        self._entries.popitem(last=False)
+        self._entries[replacement.node_id.raw] = replacement
 
     def remove(self, node_id: NodeID) -> None:
-        self._entries = [e for e in self._entries if e.node_id != node_id]
+        self._entries.pop(node_id.raw, None)
 
     def get(self, node_id: NodeID) -> NodeEntry | None:
-        for e in self._entries:
-            if e.node_id == node_id:
-                return e
-        return None
+        return self._entries.get(node_id.raw)
 
     @property
     def oldest(self) -> NodeEntry | None:
-        return self._entries[0] if self._entries else None
+        return next(iter(self._entries.values()), None)
 
     @property
     def entries(self) -> list[NodeEntry]:
-        return list(self._entries)
+        return list(self._entries.values())
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -131,6 +155,39 @@ class RoutingTable:
             entry.unanswered = existing.unanswered
             entry.asked_at = existing.asked_at
         return self._buckets[self._bucket_index(node_id)].add(entry)
+
+    def touch(self, node_id: NodeID) -> bool:
+        """This node is alive; it told us nothing new about where it is.
+
+        `add` is how recency has always been refreshed, and it does far more
+        than that: it merges the addresses it was handed with the ones already
+        held, filters every one of them through `wrong_address`, builds a fresh
+        entry and re-inserts it. That is right when addresses arrive and pure
+        waste when none did — and since a link can be probed ten times a
+        second, "none did" is now the overwhelming majority of the calls.
+
+        Returns whether the id was known. An unknown one is *not* created here:
+        recency about a node we have never heard of is not an entry, and
+        inventing one from a bare liveness signal is how a table fills with ids
+        nobody can reach.
+
+        **It moves the entry in its bucket too, and that is not bookkeeping.**
+        Bucket position is the eviction order, and `add` has always re-appended
+        what it refreshed — so being heard from is what has always kept a node
+        out of the firing line. Refreshing `last_seen` alone left the peer we
+        probe ten times a second sitting first in the queue while an id a
+        stranger merely *mentioned* was promoted past it: proof outranked by
+        hearsay, in a table where identities are free to mint."""
+        index = self._bucket_index(node_id)
+        if index < 0:
+            return False                     # our own id is never stored
+        bucket = self._buckets[index]
+        entry = bucket.get(node_id)
+        if entry is None:
+            return False
+        entry.last_seen = time.monotonic()
+        bucket.touch(node_id)
+        return True
 
     # -- ids that never answer ---------------------------------------------
 

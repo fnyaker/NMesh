@@ -66,7 +66,7 @@ receipt for routable types (see the gates).
 | Type | Val | Role |
 |---|---|---|
 | DATA | 0x00 | application data (E2E encrypted) |
-| PING / PONG | 0x01 / 0x02 | liveness + **address gossip** (the PING carries `advertised_uris`; the PONG is **unconditional** — a node with no announceable address is entitled to one) |
+| PING / PONG | 0x01 / 0x02 | liveness + **address gossip** (the PING carries `advertised_uris`; the PONG is **unconditional** — a node with no announceable address is entitled to one). The PING may carry a trailer, and the PONG then echoes its token — see below |
 | FIND_NODE / FOUND_NODE | 0x03 / 0x04 | Kademlia lookup (nearby nodes) |
 | FIND_VALUE / FOUND_VALUE | 0x05 / 0x06 | DHT lookup by key |
 | STORE | 0x07 | store a DHT value (content-addressed) |
@@ -90,14 +90,18 @@ receipt for routable types (see the gates).
 | CERT_REVOKE | 0x24 | gossip of a **signed revocation**: an issuer taking back a membership it granted (see [`security.md`](security.md)) |
 | ABUSE_REPORT | 0x25 | gossip of a **signed accusation**: one node's opinion that another is misbehaving. Carries no authority — the receiver weighs it (see [`security.md`](security.md)) |
 | CAPABILITIES | 0x26 | "here is what I can speak": a **set of feature names**, not a version. Sent pre-auth alongside the challenge and again once authenticated; silence means the classic set (see [`security.md`](security.md)) |
+| KA_PROPOSE | 0x27 | "the cadences I can work with", a range per mode: `fast_min(I) ‖ fast_max(I) ‖ slow_min(I) ‖ slow_max(I)`. Both ends compute the same accord from the two declarations; nothing is exchanged to settle it. Four and not two because with one range the ceiling is a `min`, and a `min` is a lever anybody can pull (see [`transports.md`](transports.md)) |
+| KA_REQUEST | 0x28 | "slow your probes on this link to `wanted_ms(I)`, for now". Only ever *less* — a request that asks for more is dropped, or four bytes would buy somebody else's battery — and it lapses rather than sticking: the durable mechanism is the declaration above |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
   peer and `src_id == the authenticated peer`**. Only what is intrinsically
   per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
-  (`PUNCH_*`, `REACH_PROBE*`), and the five gossip planes `CATALOG_ANNOUNCE` /
-  `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` / `CERT_REVOKE` / `ABUSE_REPORT`
-  (re-stamped at every hop during epidemic gossip).
+  (`PUNCH_*`, `REACH_PROBE*`), the keepalive accord (`KA_PROPOSE`,
+  `KA_REQUEST` — a cadence is a property of the pair, so it can only ever be
+  stated by the peer at the other end of it), and the five gossip planes
+  `CATALOG_ANNOUNCE` / `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` / `CERT_REVOKE` /
+  `ABUSE_REPORT` (re-stamped at every hop during epidemic gossip).
 - `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
   towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/
@@ -195,6 +199,46 @@ without the budget the reply exceeded the packet ceiling and was never sent. The
 sender **includes itself** among the candidates (ranked by distance): a routed
 `FIND_NODE` may come from a seeker who only reaches it through a relay and who
 would otherwise never learn its entry (see `routing.md`).
+
+## The PING trailer (the keepalive accord)
+
+```
+PING = addresses ‖ [ next_ms(I) ‖ token(Q) ]
+PONG = "" | token(Q)
+```
+
+`next_ms` is when this link's next probe is due; `token` is echoed by the PONG
+so a probe can be matched to **its own** answer — indispensable once a cadence
+can be faster than a round trip, and meaningless before that. Full rules and
+the two behaviour findings this feeds in
+[`transports.md`](transports.md#the-keepalive-accord-mloaccord-ka_propose--ka_request).
+
+Two things make it safe to add to a message every node has always sent:
+
+- **It is a trailer, and `_decode_addresses` has always stopped at the last
+  address.** A build without this reads a tailed PING as the PING it always
+  read. Same trick as the `_HINTS_OK` byte below, for the same reason: there is
+  no version to bump and nothing to negotiate for the *reader*.
+- **It is only ever sent to a peer that announced `keepalive`.** That is the
+  other side of the question, and it is not symmetric with the first: a peer
+  that cannot echo the token would leave every probe unmatched, and
+  `LinkQuality.expire` would then charge every one of them as a loss on a link
+  that is answering perfectly. A trailer nobody breaks on is not the same as a
+  trailer anybody can be *sent*.
+
+A trailer that is neither absent nor exactly this one is **ignored, never
+charged**: a longer tail is what a build newer than this one looks like, and
+reading that as misbehaviour is precisely what the negotiation exists to
+prevent. A PONG body that is neither empty nor a token is charged, because
+there is no third thing it could be.
+
+The **addresses in front of it are usually absent**, and that is not a second
+format either: a node with nothing announceable has always sent a PING whose
+address count is zero, so `addresses` is a list that is often empty rather than
+a field that comes and goes. A probe carries them when the peer might not have
+them and is otherwise 92 bytes instead of 312 — see
+[`transports.md`](transports.md#what-a-probe-weighs) for what that is worth and
+why the recency it used to prove is proved anyway.
 
 ### Naming a certificate instead of sending it
 

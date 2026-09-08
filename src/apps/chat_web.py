@@ -38,6 +38,15 @@ _MESSAGES_BUDGET = 220 * 1024     # serialised feed ceiling (under the drawer ca
 _TYPING_TTL = 6.0                 # seconds a typing indicator stays live
 _FILES_MAX = 64                   # received/sent blobs cached for serving
 _FILES_BYTES = 96 * 1024 * 1024   # total bytes of cached file blobs
+# Edits, deletions and reactions that named a message this node has not seen
+# yet. An app on a mesh cannot assume order — a routed reply has never been
+# obliged to arrive after the one before it, and multi-link operation makes the
+# overtaking deliberate and a few milliseconds wide — so an operation that
+# arrives first is held rather than dropped. Bounded twice: how many messages
+# can be waited on, and how long any of them may be waited on for. An operation
+# whose message never comes is a message that was never sent to us.
+_ORPHANS_MAX = 128
+_ORPHAN_TTL = 60.0
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
 
@@ -94,6 +103,8 @@ class ChatBridge:
         self._files_bytes = 0
         self._unread: dict[str, int] = {}        # conv -> unread count
         self._typing: dict[str, tuple] = {}      # conv -> (sender_hex, expiry)
+        # mid -> (parked_at, [operations]). See `_ORPHANS_MAX`.
+        self._orphans: "OrderedDict[str, tuple]" = OrderedDict()
         self._msg_id = 0                          # stable per-message local id
         self._version = 0                         # change counter (drives polling)
         self._lock = threading.Lock()
@@ -169,6 +180,11 @@ class ChatBridge:
         if src != "me":
             self._unread[conv] = self._unread.get(conv, 0) + 1
         self._persist_locked()
+        # Anything that named this message before it arrived can be applied
+        # now. After the record is registered, or the replay would park itself
+        # again on the very message it was waiting for.
+        if record.get("mid"):
+            self._release(record["mid"])
         return record
 
     def _touch(self, record: dict) -> None:
@@ -238,9 +254,43 @@ class ChatBridge:
         asyncio.ensure_future(self._safe(self._chat.send_receipt(src, _DELIVERED, [mid])),
                               loop=self._loop)
 
+    # -- operations that outran the message they name ---------------------
+    #
+    # Chat's answer to arriving out of order, and the answer each app owes for
+    # itself. An edit sent a moment after its message can reach us first — over
+    # two bundled links that is a few milliseconds wide and deliberate, over a
+    # routed path it always could be — and dropping it silently is a message
+    # that stays unedited for ever with nothing anywhere saying why.
+
+    def _park(self, mid_hex: str, operation) -> None:
+        """Hold one operation until its message arrives (caller holds the lock)."""
+        now = time.time()
+        for stale in [mid for mid, (at, _) in self._orphans.items()
+                      if now - at > _ORPHAN_TTL]:
+            del self._orphans[stale]
+        held = self._orphans.get(mid_hex)
+        if held is None:
+            held = self._orphans[mid_hex] = (now, [])
+            while len(self._orphans) > _ORPHANS_MAX:
+                self._orphans.popitem(last=False)
+        self._orphans.move_to_end(mid_hex)
+        held[1].append(operation)
+        del held[1][:-8]        # one message, a handful of operations
+
+    def _release(self, mid_hex: str) -> None:
+        """Its message just landed: replay what was waiting for it."""
+        held = self._orphans.pop(mid_hex, None)
+        if held is None:
+            return
+        for operation in held[1]:
+            operation()
+
     def _apply_edit(self, src_hex: str, mid_hex: str, text: str) -> None:
         rec = self._by_mid.get(mid_hex)
-        if rec is not None and rec["src"] == src_hex and rec.get("kind") == "text":
+        if rec is None:
+            return self._park(mid_hex,
+                              lambda: self._apply_edit(src_hex, mid_hex, text))
+        if rec["src"] == src_hex and rec.get("kind") == "text":
             rec["text"] = text
             rec["edited"] = True
             self._touch(rec)
@@ -248,7 +298,10 @@ class ChatBridge:
 
     def _apply_delete(self, src_hex: str, mid_hex: str) -> None:
         rec = self._by_mid.get(mid_hex)
-        if rec is not None and rec["src"] == src_hex:
+        if rec is None:
+            return self._park(mid_hex,
+                              lambda: self._apply_delete(src_hex, mid_hex))
+        if rec["src"] == src_hex:
             rec["deleted"] = True
             rec["text"] = ""
             rec["reactions"] = {}
@@ -258,7 +311,8 @@ class ChatBridge:
     def _apply_reaction(self, reactor_hex: str, mid_hex: str, emoji: str) -> None:
         rec = self._by_mid.get(mid_hex)
         if rec is None:
-            return
+            return self._park(
+                mid_hex, lambda: self._apply_reaction(reactor_hex, mid_hex, emoji))
         reactions = rec.setdefault("reactions", {})
         for e in list(reactions):                        # one reaction per person
             reactions[e] = [r for r in reactions[e] if r != reactor_hex]

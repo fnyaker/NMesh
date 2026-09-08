@@ -486,6 +486,7 @@ works on a machine with no internet.
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
 | POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
 | POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
+| POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block |
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
 | POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
 | POST    | `/api/invite`    | generates an invitation code                   |

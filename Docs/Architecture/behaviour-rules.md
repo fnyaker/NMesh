@@ -7,7 +7,8 @@ worth believing, because both decide whether it deserves to exist at all.
 
 **Implemented so far** (`src/behaviour.py`, swept from the keepalive loop):
 **M1** — the self-disarm, first, because it is what makes the rest safe to
-switch on — plus **M5**, **A1**, **C1**, **D2**, **E1**, **E2** and **D5**.
+switch on — plus **M5**, **A1**, **C1**, **D2**, **E1**, **E2**, **D5** and the
+keepalive-accord family **K1**, **K2**, **K3**.
 **F3** (volume and retaliation) and **F4** live in the ledger
 (`reputation.py`), where the genealogy decides how many voices a crowd is.
 **G2**, **G3** and **G4** live in the release path
@@ -336,6 +337,63 @@ match what that version is known to do.
 **Why** Claiming to be a build in order to be excused for what that build does.
 **Cost** sweep · **Confidence** moderate — and it requires the network to have a
 notion of "what that version does", which is itself worth building.
+
+### C7 / K — the keepalive accord
+See **K1–K3** below. They belong to this family — a cadence is a declaration
+like any other — but they are grouped under their own letter because they are
+the first rules that read something the two nodes *negotiated* rather than
+something one of them announced, and that is a different kind of evidence.
+
+---
+
+## K. The keepalive accord
+
+Implemented (`src/behaviour.py`, `src/mlo.py`). What makes this family possible
+is the same thing that makes C possible: before two nodes agreed a window,
+"probing faster than it should" was not a statement anybody could make. The
+accord is what turns a cadence into something a peer can be *wrong about*.
+
+All three read a counter the PING and KA handlers bump — an integer, in the
+receive loop, and nothing else. Judgement happens on the sweep like everything
+here.
+
+### K1 — Announced a cadence outside the agreed window
+**Signal** A PING's `next_ms` outside the accord both ends computed.
+**Why** The window is a cost agreed between two nodes. A peer announcing
+something outside it is either running a cadence nobody agreed to, or telling us
+a number that has nothing to do with what it does — and the second is worse,
+because every other rule that reads the accord reads that number.
+**Cost** O(1) · **Confidence** moderate · **Weight** 1.0
+**Wrong when** The two ends were changing windows at that moment. Which is why
+the accord opens a grace period (`_KA_GRACE`) and why a re-proposal is sent
+*before* the first probe at a new cadence, never after: the honest lookalike is
+designed out rather than tolerated.
+
+### K2 — Ignored a cadence request without refusing it out loud
+**Signal** After a `KA_REQUEST`, the peer announces neither a cadence at least
+as slow as the one asked for, nor the accord's floor.
+**Why** A request is how a node says "I am going to sleep, stop probing me so
+hard". A peer is entitled to refuse — that is what announcing the floor means,
+and it costs it nothing. What it is not entitled to do is keep a third cadence
+and say nothing, which is indistinguishable from ignoring us.
+**Cost** O(1) · **Confidence** moderate · **Weight** 1.0
+**Wrong when** A request and a change of mind crossing in flight — the same
+grace period covers it. Note the asymmetry that keeps this honest: the floor
+announcement is a *legitimate refusal*, not a violation, so this rule can never
+punish a peer for wanting the fast lane back.
+
+### K3 — Declared cadences a correct node could not have meant
+**Signal** `KA_PROPOSE` with a mode whose floor is not below its ceiling, or
+with the fast range slower than the slow one at either end.
+**Why** Nothing honest produces either. A range with no width is not a range,
+and the two readings it could have — "probe me never" and "probe me always" —
+are opposite. The two modes swapped is the same mistake costing a
+hundredfold, which is exactly why it is worth naming rather than quietly
+sorting the four numbers and carrying on.
+**Cost** O(1) · **Confidence** strong · **Weight** 2.0 (like C1)
+**Wrong when** Nothing. Which is why the proposal is also **dropped** rather
+than clamped and adopted: believing a window we have just called impossible
+would be the accusation and the compliance in one breath.
 
 ---
 

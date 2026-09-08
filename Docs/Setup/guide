@@ -461,6 +461,46 @@ installed themselves want different numbers.
 | `abuse_halflife` | 3600 | Seconds for a complaint to lose half its weight, so a node that misbehaved once and then behaved comes back on its own |
 | `no_abuse_gossip` | off | Neither send nor act on other nodes' reports — judge only what this node saw itself |
 
+### `mlo_*` and `keepalive_*` — spending two links instead of one
+
+A node often holds two links to the same peer (a LAN address and a punched UDP
+path, IPv4 and IPv6) and until now exactly one of them carried anything.
+Multi-link operation spends both, and its whole cost is a probe every hundred
+milliseconds on each bundled link — which is cheap on Ethernet and expensive on
+a battery, so nothing here is on by default.
+
+Which **media** may be bundled is *not* set here: it is a checkbox per transport
+(`tcp.mlo`, `udp.mlo`, under Network → Reachability, or `tcp.mlo = true` in this
+file), because only the operator knows what a probe ten times a second costs on
+that medium. A transport that does not offer the option at all — the spool, a
+USB stick carried on foot — can never be bundled.
+
+What is set here is everything that is not the medium's business:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `mlo_always` | off | Keep bundling even when nothing is using this node. Off, it wakes with the console or an attached app and sleeps again a couple of minutes after the last of them goes |
+| `mlo_skew_ms` | 30 | How far apart two links may measure and still be bundled. Further apart, striping delivers half the packets late, which every consumer reads as loss |
+| `mlo_drop_percent` | 10 | Share of its last 50 probes a bundled link may lose before it is benched. It keeps its probes — that is how it measures its way back — and rejoins at *half* this, because one number in both directions is a link that flaps in and out on a single probe |
+| `keepalive_fast_min_ms` | 100 | The fastest this node will ever be probed, striping or not |
+| `keepalive_fast_max_ms` | 1000 | The slowest cadence this node still calls *fast*. A peer whose fast range does not reach it gets **no striping** — which is the strongest opt-out here, and the one a battery node wants |
+| `keepalive_slow_min_ms` | 15000 | The fastest this node wants to be probed when nothing is happening |
+| `keepalive_slow_max_ms` | 20000 | The slowest before this node stops believing the link. Kept under the medium's own timeout whatever is agreed, so a deep sleep means raising `tcp.read_timeout` too |
+
+These four are a range **per mode**, and two nodes take the fastest floor both
+offered — in each mode. Raising a floor here is therefore an opt-out no peer can
+talk back down, and nothing a peer sends lowers either of this node's cadences:
+that is the shape of the arithmetic rather than a limit bolted onto it, which is
+why there are four numbers and not two. The mechanics, the reason the
+two-number version was unsafe, and the three behavioural findings that come out
+of it are in
+[`../Architecture/transports.md`](../Architecture/transports.md).
+
+**One thing to know before switching it on:** packets spread over two links
+arrive **out of order**, by roughly twice the measured skew. Every built-in app
+already copes, and an app on a mesh has never been entitled to assume order
+anyway — but a third-party app that does will notice.
+
 ### `update_branch` — where the update check looks
 
 Empty by default: the published GitHub releases. Set to a branch name, the check

@@ -176,6 +176,23 @@ class BaseTransport(ABC):
         tells an operator which of a peer's addresses is carrying traffic."""
         return {"local": None, "remote": None}
 
+    def idle_timeout(self) -> float | None:
+        """Seconds of silence after which *this medium* gives up on the link,
+        or ``None`` where it never does.
+
+        The core needs it for one question and interprets it for nothing else:
+        two nodes can negotiate a keepalive cadence (see `mlo.py`) slower than
+        the wire under them will tolerate, and neither can see that from the
+        negotiation — it is a fact about the medium, not about the pair. So the
+        medium says how long it waits and the core keeps the cadence to a
+        fraction of it (`mlo.IDLE_TIMEOUT_SHARE`), the same three-to-one margin
+        the UDP keepalive already holds itself to.
+
+        A medium with no such timeout — a spool directory, a link that only
+        ever fails on a write — says so by returning ``None``, and its cadence
+        is then bounded by the accord alone."""
+        return None
+
     # -- settings ---------------------------------------------------------
 
     #: Declared with :func:`option`. Empty means "nothing to configure", which

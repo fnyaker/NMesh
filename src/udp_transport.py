@@ -362,6 +362,13 @@ class UDPTransport(BaseTransport):
                "-254 to 254. Weighed against measured latency; the balance "
                "between the two is set once for the node, under Reachability.",
                minimum=-254, maximum=254),
+        option("mlo", "bool", False,
+               "Let this medium carry half of a peer's traffic beside another "
+               "link (multi-link operation). It buys throughput and a much "
+               "faster reaction to a link going bad, and it costs a probe "
+               "every hundred milliseconds on every link it bundles — so it is "
+               "off unless the medium is one where that is cheap.",
+               label="MLO ready"),
         option("retry_interval", "float", 0.0,
                "How often to re-dial a known node this one has no link to, on "
                "each of its UDP addresses. Zero switches it off: nothing "
@@ -620,6 +627,12 @@ class UDPTransport(BaseTransport):
                     await self._arrived.wait()
             except asyncio.TimeoutError:
                 pass              # re-check _closed, which nothing signals
+
+    def idle_timeout(self) -> float | None:
+        """A UDP link with nothing arriving for this long is declared dead by
+        the reliability layer's own keepalive. Read off the setting, so a value
+        an operator changed is the value the cadence is held to."""
+        return float(self.setting("keepalive_timeout") or 0.0) or None
 
     def remote_ip(self) -> str | None:
         """The peer's source IP as observed locally."""

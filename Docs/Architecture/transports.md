@@ -547,3 +547,363 @@ maintenance is woken immediately. Both ends do this → traffic in both
 directions; any incoming frame rearms the timeout. Started in `start()`/`join()`,
 stopped in `stop()`. Never raises. (That PING also carries `advertised_uris` →
 address gossip, see `routing.md`.)
+
+**Two clocks, not one.** Since multi-link operation (below) a link may need a
+probe every hundred millisecond, and every other link must go on costing one
+wake-up every twenty seconds. So the loop is a **due-time** loop: each link
+carries its own `ka_due`, the loop sleeps until the soonest of them (never less
+than `_KA_TICK_FLOOR`, and woken early by `_keepalive_wakeup`), and the *sweep*
+— reaping the silent, expiring tarpits, re-forming the bundles, judging
+behaviour — stays on `_LINK_KEEPALIVE_INTERVAL`, because none of that is
+per-link work.
+
+At rest nothing changed: every link is due in twenty seconds, so the loop
+sleeps twenty seconds. The gotchas' "timers that exist to find nothing" budget
+is unaffected.
+
+### A probe count stopped being a duration
+
+`_reap_silent_links` cut a link after `_DEAD_LINK_PROBES = 4` unanswered
+probes, and the comment explaining the number said "over a minute of one-way
+silence" — true only while every link was probed on one interval. On a bundle
+member probed ten times a second, four probes is **four hundred milliseconds**,
+and cutting a link for a hiccup is exactly the thing benching exists to avoid.
+
+So the run is joined by the time it always stood for
+(`_DEAD_LINK_SILENCE = _DEAD_LINK_PROBES × _LINK_KEEPALIVE_INTERVAL`, read off
+`LinkQuality.answered_at`) and a link has to fail **both** tests. The verdict
+then means the same thing at any cadence — which is the point, and neither half
+alone gets there: the run alone cuts a fast-probed link for a hiccup, and the
+silence alone cuts a link on a very slow medium that nobody has probed yet.
+
+## The keepalive accord (`mlo.accord`, `KA_PROPOSE` / `KA_REQUEST`)
+
+A cadence is a cost, and it is paid by **both** ends: the prober spends the
+packet, the answerer spends the answer. So neither may simply choose it, and
+neither may be made to spend more than it offered to.
+
+Each node declares **four** numbers — a range per mode — in a `KA_PROPOSE` sent
+once the link authenticates, beside the capability record:
+
+| | what it says | default |
+|---|---|---|
+| `keepalive_fast_min_ms` | the fastest I will ever be probed, striping or not | 100 ms |
+| `keepalive_fast_max_ms` | the slowest that is still worth calling *fast* to me | 1 s |
+| `keepalive_slow_min_ms` | the fastest I want to be probed when nothing is happening | 15 s |
+| `keepalive_slow_max_ms` | the slowest I can be probed before I stop believing the link | 20 s |
+
+Both ends then apply `mlo.accord` to the two declarations and get the same
+answer, so **nothing is exchanged to settle it** and there is no state where one
+end thinks something was agreed and the other does not (the same trick as the
+canonical link and the punch initiator).
+
+```
+fast = max(the two fast floors)          … and a fast mode exists only if
+                                           fast ≤ min(the two fast ceilings)
+slow = max(the two slow floors, min(the two slow ceilings))
+```
+
+### Why four and not two
+
+One range was the obvious shape and it is short by half. With a single
+`[min, max]` only the **floor** protects anybody: it is a `max` across the two
+nodes, so nobody can be dragged below what they declared. The ceiling is a
+`min` — and a `min` is a lever anybody can pull. A peer proposing `(100, 150)`
+pulled the shared ceiling to 150 ms, and this node, which clamps its cadence
+into the accord, would have probed that link six times a second for as long as
+it stayed open. Eight bytes, once, per link an adversary opens.
+
+There is no way to write the two-number model where the ceiling is not either a
+lever or ignored. Four numbers give each *mode* its own floor and ceiling, and
+then **both agreed cadences are a `max` over something each node declared**:
+
+> There is no expression in `accord` a peer's number enters where being smaller
+> helps it. **Nothing a peer sends lowers this node's own probe interval** — not
+> bounded by a constant, not clamped afterwards; it is the shape of the
+> arithmetic. `test_no_declaration_at_all_can_lower_either_cadence` sweeps every
+> corner of the hard range against a node on defaults and says so.
+
+The two ceilings still do real work, and it is the honest kind:
+
+- **`fast_max` decides whether striping happens at all.** A phone offering
+  `fast = [2 s, 5 s]` and a server offering `[100 ms, 500 ms]` have no cadence
+  both would call fast, so `fast_ok` is false and the pair is **not bundled** —
+  rather than one of them paying for the other's idea of it. That is the whole
+  of "do not drain the other's battery for something neither of us gets
+  anything from", and it is a node's strongest opt-out: raising `fast_min` past
+  a peer's `fast_max` ends the question, and no request can override it.
+- **`slow_max` is how a node says a link has gone too quiet to believe.** It
+  loses to a peer's `slow_min` when the two disagree, because at rest the
+  cheaper answer is the right one — but see the medium's own timeout below,
+  which is the constraint that actually binds.
+
+### The medium has the last word on going quiet
+
+Two nodes can agree to idle at five minutes over a transport that reaps a
+silent link at sixty seconds, and neither can see that from the accord: it is a
+fact about the wire, not about the pair. So the medium declares
+(`BaseTransport.idle_timeout` — TCP reports its `read_timeout`, UDP its
+`keepalive_timeout`, a spool directory reports nothing) and the core keeps the
+idle cadence to `mlo.IDLE_TIMEOUT_SHARE` of it: the same three-to-one margin the
+UDP keepalive already holds itself to, read backwards.
+
+Applied **locally**, not folded into the accord, because the two ends may run
+different transport settings and each is right about its own — and it may only
+ever take back what the medium cannot afford, never push the cadence below what
+the pair agreed. Which is why a node wanting a genuinely deep sleep raises
+`tcp.read_timeout` as well as its own `slow_max`.
+
+Everything the pair does afterwards sits inside that accord, and three things
+follow from it.
+
+- **Every PING says when the next one is due.** The tail is
+  `next_ms(4) ‖ token(8)`, appended after the address list — a trailer, which is
+  the whole compatibility story: `_decode_addresses` has always stopped at the
+  last address, so a build without this reads a tailed PING as the PING it
+  always read. The tail is only *sent* to a peer that announced the `keepalive`
+  feature, which is a different question — see **What silence means** below.
+- **…and carries the addresses only when the peer might not have them.** See
+  *What a probe weighs* below: at ten a second, an unchanged address list is
+  most of the packet and most of the work.
+- **The answer echoes the token.** `on_ping`/`on_pong` keep only the latest
+  probe, which is right at twenty seconds and useless at a hundred
+  milliseconds: with several probes in flight, every answer but one arrives
+  unmatched. `LinkQuality.sent`/`answered`/`expire` resolve each probe
+  individually, which is what makes the recent window honest.
+- **A `next_ms` outside the accord is a finding** (rule K1), not an error. The
+  two agreed cadences *are* the two ends of the window it is judged against —
+  nothing between striping and idling is out of bounds, nothing outside them is
+  in — and that window is what makes "faster than we agreed" a thing that can be
+  *said* about a peer at all. Nothing is counted for `_KA_GRACE` after an accord
+  moves: a proposal crosses the link at the speed of the link.
+
+### Asking a peer to slow down (`KA_REQUEST`)
+
+`request_keepalive(target, wanted_ms)` asks the far end to probe this link less
+often — "I am going to sleep". It is **deliberate, never automatic**, and that
+is a decision rather than an omission: a node that asked automatically would
+meet a node that automatically takes the fast lane back, and the pair would
+spend the link arguing about how often to probe it.
+
+> **A request can only ever ask for less.** One that asks for more is dropped.
+> Granting it would make a four-byte packet a way to spend somebody else's
+> battery and bandwidth, on the one plane that exists to stop exactly that.
+
+It is clamped into the accord in both directions, so a peer can neither speed
+this node up nor slow it past the idle cadence the two of them already agreed.
+
+> **A request is a "go quiet for now", never a setting.** It is honoured in
+> *both* modes — "stop probing me so hard" is worth nothing if striping ignores
+> it — and it lapses at `_KA_TOLD_TTL`; a peer that still wants the quiet says
+> so again. The **durable** way not to be probed hard is the declared fast
+> range, which no request can override and which a peer cannot ask us to widen.
+> Keeping those two apart is what stops a four-byte packet becoming a
+> configuration change somebody else made.
+
+Once the request has lapsed, the next probe carries the fast cadence again —
+which is the announcement that legitimately refuses it.
+
+The peer has two correct answers, and only two:
+
+| what it announces | what it means | finding |
+|---|---|---|
+| `next_ms ≥ what was asked` | honoured | none; the request is cleared |
+| `next_ms = the accord's floor` | "I want the fast lane back" | none; the request is cancelled |
+| anything else, after the grace | a third cadence | **K2** |
+
+The floor announcement is what keeps a refusal from looking like silence: the
+peer is entitled to want the fast lane, it is only not entitled to say nothing.
+
+A proposed window whose floor sits above its own ceiling is **K3** — a claim
+that cannot be true — and the proposal is dropped rather than adopted: believing
+a window we have just called impossible would be the accusation and the
+compliance in one breath. See `behaviour-rules.md`.
+
+### What silence means, in both directions
+
+`peer_speaks` answers "may we use this plane with a peer that has said
+nothing?", and the answer is **yes**: every name in the classic set predates the
+negotiation, and a node from before it must keep receiving exactly what it
+received before (`features.py`, rule 2).
+
+A name added *after* the negotiation is the opposite case, and reading it the
+same way is a bug with no error message. Silence about `keepalive` is a peer
+that will not echo the token — so every probe would be unmatched and `expire`
+would charge every one of them as a **loss on a link answering perfectly**.
+Those names are listed in `features.SINCE_NEGOTIATION` and asked through
+`peer_announces`, which requires the name to have been said.
+
+## What a probe weighs
+
+The PING carries `advertised_uris` because liveness and address gossip happened
+to want the same packet. That was free at one probe per link per twenty seconds.
+At ten a second it is the packet — measured on a node advertising five
+addresses:
+
+| | before | after |
+|---|---|---|
+| PING on the wire | 312 B | **92 B** |
+| PONG on the wire | 87 B | 87 B |
+| `_handle_ping`, receiving one | 30.2 µs | **6.4 µs** |
+| `ping()`, sending one | 22.1 µs | **6.3 µs** |
+
+Three changes, and none of them touches the wire format.
+
+**The addresses go out when the peer might not have them** — our set changed,
+or `_ADDR_GOSSIP_INTERVAL` has passed for that link — and the rest of the time
+the probe is a probe. The interval is a *duration*, not "every Nth probe", for
+the same reason `_DEAD_LINK_SILENCE` is: a probe count means one thing at rest
+and another while striping. It equals `_LINK_KEEPALIVE_INTERVAL`, so a link
+nobody is bundling carries them on every probe exactly as before, and it is
+also the net under a lost PING — a peer that missed an update is told again
+within it rather than never.
+
+Sending none is **not a new kind of packet**: a node with nothing announceable
+has always sent exactly this, so there is nothing to negotiate and no build
+anywhere that reads it as unusual. On the receiving side an empty list takes
+`RoutingTable.touch` instead of `add` — `add` merges and re-filters everything
+already held, which is four microseconds of work to learn nothing — and falls
+back to `add` for an id we have never heard of, because `touch` will not invent
+an entry and this is the one path that may create one.
+
+Both are cheap because the bucket is keyed by id rather than held as a list:
+refreshing an entry is a `move_to_end`, not a scan under dataclass equality.
+Restoring the second of the two below cost 11.7 µs a probe until that changed —
+a security fix that ate the whole optimisation, which is its own lesson
+(`gotchas.md`).
+
+Two things `add` did are kept, and both are load-bearing rather than
+bookkeeping. **An authenticated PING still proves recency**, which is what
+keeps a live NATted peer with nothing to announce from being purged for having
+nothing to say. And **`touch` re-appends the entry to its k-bucket**: bucket
+position is the eviction order, so being heard from is what keeps a node out of
+the firing line. Refreshing `last_seen` alone — which is what the first version
+of this did — left the peer we probe ten times a second first in line to be
+evicted while an id a stranger merely mentioned was promoted past it. See
+`gotchas.md`.
+
+**`advertised_uris()` is memoised on the three lists it derives from.** It was
+15 µs of regex and per-character work per call, recomputed on every probe,
+every `FIND_NODE` answer and every announce, to produce the same five strings.
+The key is the whole of the input, so there is no fourth thing to forget to
+invalidate — the failure a cache normally buys.
+
+**`Packet.create` builds the packet once and draws its nonce in blocks.** It
+used to construct one `Packet` purely to ask it for its own id and then a
+second one to keep, and to make a `getrandom` syscall for every packet. Neither
+is a property, both were on the send path of *every* packet this node emits:
+3.34 µs → 2.40 µs each. A slice of a CSPRNG draw is CSPRNG output, so the block
+buys a syscall and never a shortcut — and the nonce has to stay unpredictable,
+because it feeds `msg_id` and a guessable `msg_id` is a way to seed a relay's
+dedup window so a *later* legitimate packet is dropped as a replay. The pool is
+dropped in a forked child, or both sides would hand out the same bytes.
+
+## Multi-link operation (`mlo.py`, off by default)
+
+A node holds several links to one peer as a matter of course — a LAN address
+and a punched UDP path, IPv4 and IPv6. Exactly one of them carried anything:
+`_link_to` picked the best by score, `_authenticated_peers` reduced each
+identity to that one, and the other sat there being kept alive at our expense.
+
+MLO spends both. Packets go down the members in turn, so the pair carries what
+neither carries alone, and a link that starts losing is left behind in seconds
+instead of at the next reap.
+
+### Who may be bundled
+
+Six tests, and each one is a way this could otherwise break a mesh.
+
+| test | why |
+|---|---|
+| the **medium** declares `mlo` | `tcp.mlo` / `udp.mlo`, off by default. Only the operator knows whether a probe ten times a second is cheap on that medium — a transport that does not declare the option at all (spool) can never be bundled, and that absence is the right answer rather than a gap |
+| the **node** is awake | `mlo_active()`: somebody is using it, or `mlo_always` |
+| the **peer announced** `mlo` **and** `keepalive` | one end missing is no MLO — which is the backward-compatibility story, and it is the negotiation's, not a special case |
+| the accord has a **fast mode** (`fast_ok`) | a cadence *both* call fast. Without one the pair would be measured at whatever the slower tolerates and called multi-link operation: fifty probes at twenty seconds is seventeen minutes of history. Either end declaring a fast range that does not reach the other's is how a node opts out, and that opt-out has to work |
+| the link is **direct** | not relayed, not `probation`, not tarpitted: a tunnelled link has no medium of its own to be a second one |
+| there are **two of them** to one identity | one link is not a bundle and must not pay for one |
+
+A link that passes is a **candidate**, and candidacy is what buys the fast
+probe — not membership. A link only earns its place by being *measured* at that
+cadence, so waiting for membership first waits for something that can never
+happen. `_update_bundles` decides this once per sweep and writes the answer onto
+the link (`ka_wanted_ms`), because `_keepalive_interval` runs per probe and must
+stay O(1).
+
+### What a bundle decides
+
+Every number comes from the last `LinkQuality.WINDOW` (50) probes of *that*
+link — the window the request named, stated once so the console and the bundle
+cannot read two different ones.
+
+- **Skew.** Members must measure within `mlo_skew_ms` (default 30 ms) of the
+  fastest. Striping across 5 ms and 300 ms does not double anything: it delivers
+  half the packets a third of a second late, which every consumer above reads as
+  loss.
+- **Reordering budget** = `2 × skew`. Deliberately generous: the skew is a
+  difference of *round trips*, so the one-way spread it stands for is about half
+  of it, and doubling again leaves the budget at roughly four times what a
+  healthy pair produces. A budget that is too small is a consumer dropping
+  packets that did arrive. Readable per node as `reorder_budget_ms(target)`.
+- **Benching.** A member losing `mlo_drop_percent` (default 10%) of its window
+  carries nothing — and **keeps its keepalive**, which is how it measures its
+  way back in.
+- **…and coming back needs half that.** One number in both directions is a link
+  that flaps: with a fifty-probe window, one answer moves the share by 2%, so a
+  link at the threshold would rejoin, drop, leave and rejoin about ten times a
+  second — spraying traffic down the one link known to be losing it. The window
+  damps nothing on its own; the margin (`mlo.RECOVER_SHARE`) is what does.
+- **Two members**, `mlo.MAX_MEMBERS`. A third adds a second skew that nothing
+  measures against the first.
+
+An **unmeasured** link (fewer than `mlo.MIN_PROBES` outcomes) is never eligible:
+unproven is not good, and handing half the traffic to a link nothing has come
+back from yet is the failure the whole mechanism exists to avoid.
+
+### Where the traffic is actually spread
+
+One place: `_route_candidates`, through `_stripe`, which swaps the **head** of
+the candidate list for whichever member's turn it is. That puts app data,
+routed traffic and everything else on one rule, and `_authenticated_peers` has
+already reduced each identity to its best link — which is exactly the list a
+bundle exists to widen again. The loser of a turn stays in the list as a
+fallback, so a send that fails still has somewhere to go. When nothing is
+bundled the cost is one truthiness test on an empty dict.
+
+Round robin rather than weighted: the members are inside one skew of each other
+by construction, so there is nothing left to weigh, and a rule recomputed per
+packet is a rule on the hot path.
+
+**The turn is filtered by `exclude` too**, and that is not tidiness. A forward
+excludes the link the packet arrived on; a bundle knows which links reach an
+identity and knows nothing about where a packet came from. Without the filter
+the turn could land on exactly that link and send the packet straight back the
+way it came — a loop, added by the one thing in the path that *adds* a
+candidate rather than removing one.
+
+### Being awake
+
+MLO is a trade, and it is only worth making while somebody is using the node —
+which cannot be read off traffic, since a relay carries plenty and wants none of
+this. Two shapes say so, because "somebody is here" arrives as two different
+facts:
+
+- `note_awake(source)` — a **moment**. `console_snapshot` calls it: a page open
+  polls, and that is what a console being open *is*. It wears off after
+  `_MLO_AWAKE_TTL`.
+- `hold_awake(source, probe)` — a **state**. The data connector registers one
+  over its client table: an app attached with nobody typing is still an app
+  open, and a timestamp would have been the wrong shape for it.
+
+Nothing a peer sends reaches either. Waking this node up must not be something
+the network can do to it.
+
+### The contract this puts on apps
+
+> **An app must tolerate receiving out of order**, and this is not new — a mesh
+> routes, and a routed reply has never been obliged to arrive after the one
+> before it. MLO makes the overtaking *deliberate* and gives it a number.
+
+Each app decides how. The built-ins: `call` orders audio frames by `seq`, chat's
+file transfer is indexed by chunk, and chat's edits, deletions and reactions
+now **wait** for the message they name rather than being dropped when it has not
+arrived yet (`chat_web._park` / `_release`, bounded in number and in time).

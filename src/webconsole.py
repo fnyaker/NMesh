@@ -1468,6 +1468,48 @@ def _make_handler(console: WebConsole):
                 except Exception as exc:
                     self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return
+            if path == "/api/mlo":
+                # Two settings and two shapes on purpose: "always on" is a
+                # yes/no an operator flips, the other two are numbers a bundle
+                # is judged on. Which *media* may be bundled is not here at all
+                # — that is the transport's own `mlo` option, because only the
+                # medium knows what a probe ten times a second costs on it.
+                data = _parse_json(body)
+                if not isinstance(data, dict):
+                    self._json(400, {"error": "object required"})
+                    return
+                try:
+                    if isinstance(data.get("always"), bool):
+                        console._node.set_mlo_always(data["always"])
+                        console._persist_setting("mlo_always", data["always"])
+                    changed = {}
+                    if "skew_ms" in data:
+                        changed["skew_ms"] = int(data["skew_ms"])
+                    if "drop_percent" in data:
+                        changed["drop_percent"] = int(data["drop_percent"])
+                    if changed:
+                        applied = console._node.set_mlo_settings(**changed)
+                        for name, value in applied.items():
+                            console._persist_setting(f"mlo_{name}", value)
+                    # The four cadence bounds. Partial on purpose, like the
+                    # transports' own settings: one field typed wrong must not
+                    # throw away the three typed with it.
+                    bounds = {name: int(data[f"keepalive_{name}"])
+                              for name in ("fast_min", "fast_max",
+                                           "slow_min", "slow_max")
+                              if f"keepalive_{name}" in data}
+                    if bounds:
+                        applied = console._node.set_keepalive_bounds(
+                            **{f"{name}_ms": value
+                               for name, value in bounds.items()})
+                        for name, value in zip(("fast_min", "fast_max",
+                                                "slow_min", "slow_max"),
+                                               applied.as_tuple()):
+                            console._persist_setting(f"keepalive_{name}_ms", value)
+                    self._json(200, {"ok": True, "mlo": console._node.mlo_status()})
+                except (TypeError, ValueError) as exc:
+                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
             if path == "/api/lan/discovery":
                 data = _parse_json(body)
                 if not data or not isinstance(data.get("enabled"), bool):

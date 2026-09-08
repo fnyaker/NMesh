@@ -83,10 +83,20 @@ class TestBundle:
             pkts = [_pkt(b"x"), _pkt(b"y")]
             write_bundle(path, pkts)
             assert read_bundle(path) == pkts
-            # corrupt the file on disk → rejected on read
+            # corrupt the file on disk → rejected on read.
+            #
+            # Flipped, not overwritten with a constant. The last byte is part
+            # of a digest over random packet ids, so writing `\x00` over it
+            # left the file untouched about once in every one hundred and
+            # seventy runs — and the test then failed with "DID NOT RAISE",
+            # which reads as the checksum being broken rather than as the
+            # corruption never having happened. A test that corrupts something
+            # has to corrupt it whatever was there.
             with open(path, "r+b") as f:
                 f.seek(-1, os.SEEK_END)
-                f.write(b"\x00")
+                last = f.read(1)
+                f.seek(-1, os.SEEK_END)
+                f.write(bytes([last[0] ^ 0xFF]))
             with pytest.raises(BundleError):
                 read_bundle(path)
 

@@ -75,6 +75,40 @@ def _as_balance(raw: str) -> int:
     return value
 
 
+def _as_percent(raw: str) -> int:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ConfigError("expected a whole number between 1 and 100") from None
+    if not 1 <= value <= 100:
+        raise ConfigError("must be between 1 and 100")
+    return value
+
+
+def _as_skew(raw: str) -> int:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ConfigError("expected a number of milliseconds") from None
+    if not 1 <= value <= 10000:
+        raise ConfigError("must be between 1 and 10000 milliseconds")
+    return value
+
+
+# The same hard limits `mlo.clamp_bounds` applies to anything a peer proposes.
+# They are repeated as literals rather than imported because this module is
+# loaded from its file by `scripts/nmesh_config.py` and must keep importing
+# nothing of its own — `tests/test_config.py` holds the two in step.
+def _as_keepalive_ms(raw: str) -> int:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ConfigError("expected a number of milliseconds") from None
+    if not 50 <= value <= 600000:
+        raise ConfigError("must be between 50 and 600000 milliseconds")
+    return value
+
+
 def _as_optional_port(raw: str):
     if not raw.strip():
         return None
@@ -241,6 +275,40 @@ SETTINGS = {
     "dynamic_address": (_as_bool, False, True,
                         "Move a live link onto a lower-latency address of the "
                         "same node when one measures better"),
+    # Multi-link operation. Which *media* may be bundled is a per-transport
+    # setting (`tcp.mlo`, `udp.mlo`) because only the operator knows whether a
+    # probe ten times a second is cheap on that medium. What is decided here is
+    # everything that is not the medium's business: when the node is awake
+    # enough to bundle at all, and the two numbers a bundle is judged on.
+    "mlo_always":      (_as_bool, False, True,
+                        "Keep multi-link operation running even when nothing "
+                        "is using this node (otherwise it wakes with the "
+                        "console or an app and sleeps again afterwards)"),
+    "mlo_skew_ms":     (_as_skew, 30, True,
+                        "How far apart two links may measure, in "
+                        "milliseconds, and still carry one node's traffic "
+                        "together"),
+    "mlo_drop_percent": (_as_percent, 10, True,
+                        "Share of probes a bundled link may lose before it is "
+                        "benched; it keeps its keepalive and rejoins at half "
+                        "this"),
+    # What this node offers when two of them negotiate their keepalive
+    # cadences: a range per mode, four numbers. One range would leave the
+    # ceiling as a lever a peer can pull — see `src/mlo.py`. All four are what
+    # this node is *willing to be asked for*, never what it does unprompted:
+    # every agreed cadence is a `max` over something both nodes declared, so
+    # raising a floor here is an opt-out no peer can talk back down.
+    "keepalive_fast_min_ms": (_as_keepalive_ms, 100, True,
+                        "Fastest this node will ever be probed, striping or not"),
+    "keepalive_fast_max_ms": (_as_keepalive_ms, 1000, True,
+                        "Slowest cadence this node still calls fast; a peer "
+                        "whose fast range does not reach it gets no bundling"),
+    "keepalive_slow_min_ms": (_as_keepalive_ms, 15000, True,
+                        "Fastest this node wants to be probed when idle"),
+    "keepalive_slow_max_ms": (_as_keepalive_ms, 20000, True,
+                        "Slowest this node can be probed before it stops "
+                        "believing the link (kept under the medium's own "
+                        "timeout whatever is agreed)"),
     "spool":           (_as_path, None, True,
                         "Directory used as a store-and-forward link"),
     "console_host":    (_as_host, "127.0.0.1", True,

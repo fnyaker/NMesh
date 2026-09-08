@@ -184,3 +184,102 @@ class TestExportImport:
         rt.import_entries("not a list")
         rt.import_entries([{"id": "zz"}, {"bad": 1}, 42, {"id": "00", "dsa_pub": "gg"}])
         assert rt.all_entries() == []
+
+
+class TestTouchingAnEntry:
+    """`add` was how recency got refreshed, and it does far more than that:
+    it merges the addresses handed to it with the ones held, re-filters every
+    one through `wrong_address`, builds a fresh entry and re-inserts it. Right
+    when addresses arrive, four microseconds of nothing when none did — and
+    since a link can be probed ten times a second, "none did" is now almost
+    every call."""
+
+    def test_it_refreshes_recency(self):
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1"], b"\x01" * 32)
+        entry = table.get(target)
+        entry.last_seen -= 3600.0
+        stale = entry.last_seen
+        assert table.touch(target) is True
+        assert table.get(target).last_seen > stale
+
+    def test_it_keeps_everything_add_would_have_kept(self):
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1", "udp://a:2"], b"\x01" * 32)
+        table.touch(target)
+        entry = table.get(target)
+        assert entry.addresses == ["tcp://a:1", "udp://a:2"]
+        assert entry.dsa_pub == b"\x01" * 32
+
+    def test_it_never_invents_an_entry(self):
+        """Recency about a node we have never heard of is not an entry, and a
+        table filled from bare liveness signals is a table of ids nobody can
+        reach. The caller falls back to `add`, which is the one door in."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        assert table.touch(NodeID(b"\x11" * 20)) is False
+        assert table.get(NodeID(b"\x11" * 20)) is None
+
+    def test_it_keeps_a_live_node_out_of_the_firing_line(self):
+        """The regression this method shipped with. Bucket position *is* the
+        eviction order, and `add` has always re-appended what it refreshed —
+        so being heard from is what protects a node. Refreshing `last_seen`
+        alone left the peer we probe ten times a second first in the queue
+        while an id a stranger merely mentioned was promoted past it: proof
+        outranked by hearsay, in a table where identities are free to mint."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        live = NodeID(bytes([0x80]) + b"\x00" * 19)
+        table.add(live, ["tcp://live:1"], b"\x01" * 32)
+        bucket = table._buckets[table._bucket_index(live)]
+        index = 1
+        while len(bucket) < KBucket.K:
+            other = NodeID(bytes([0x80]) + bytes([index]) + b"\x00" * 18)
+            index += 1
+            if table._bucket_index(other) == table._bucket_index(live):
+                table.add(other, ["tcp://x:1"], b"\x02" * 32)
+        assert bucket.oldest.node_id == live        # first in line to go
+        table.touch(live)
+        assert bucket.oldest.node_id != live        # …and a probe saves it
+
+    def test_neither_touch_nor_add_compares_two_entries(self):
+        """The shape of the cost, asserted structurally rather than by a clock.
+
+        A bucket held its entries in a list, so refreshing one scanned it under
+        `NodeEntry.__eq__` — a dataclass comparison over eight fields including
+        two lists. On a full bucket that was 8 µs for a `move_to_end`, paid on
+        every probe, every `FOUND_NODE` and every address gossip. Keyed by id,
+        nothing compares two entries at all; a timing test would only say it is
+        fast today, this says *why*."""
+        calls = []
+        original = NodeEntry.__eq__
+        NodeEntry.__eq__ = lambda self, other: (calls.append(1),
+                                                original(self, other))[1]
+        try:
+            table = RoutingTable(NodeID(b"\x00" * 20))
+            live = NodeID(bytes([0x80]) + b"\x00" * 19)
+            table.add(live, ["tcp://live:1"], b"\x01" * 32)
+            index = 1
+            while len(table._buckets[table._bucket_index(live)]) < KBucket.K:
+                other = NodeID(bytes([0x80]) + bytes([index]) + b"\x00" * 18)
+                index += 1
+                if table._bucket_index(other) == table._bucket_index(live):
+                    table.add(other, ["tcp://x:1"], b"\x02" * 32)
+            calls.clear()
+            for _ in range(50):
+                table.touch(live)
+                table.add(live, ["tcp://live:1"], b"\x01" * 32)
+            assert calls == [], f"{len(calls)} entry comparisons on the hot path"
+        finally:
+            NodeEntry.__eq__ = original
+
+    def test_it_leaves_the_lookup_counters_alone(self):
+        """Being probed is not answering a lookup — the two are what tell a
+        live node from an id somebody keeps re-advertising."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1"], b"\x01" * 32)
+        table.note_unanswered(target)
+        table.touch(target)
+        entry = table.get(target)
+        assert entry.unanswered == 1 and entry.answered_at is None

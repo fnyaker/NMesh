@@ -422,6 +422,58 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   missed wake-up, not the schedule.
 - GitHub remains as the first-run route only. Docs: `Docs/Updates/guide`.
 
+### Multi-link operation (`src/mlo.py`) — done
+
+- A node reached over two media at once carries one peer's traffic down
+  **both**, in turn, instead of leaving the loser of `_link_score` idle. One
+  place spreads it (`_route_candidates` → `_stripe`), so app data and relayed
+  traffic follow the same rule and a link excluded by a forward is still
+  excluded when the turn lands on it.
+- Bundled only when the two links **measure alike** (`mlo_skew_ms`, default
+  30 ms), and the reordering that buys — twice the measured skew — is a number
+  the node publishes rather than a hope. A member losing more than
+  `mlo_drop_percent` is benched, keeps its probes, and rejoins at *half* that
+  share: one threshold in both directions is a link that flaps on a single
+  probe.
+- Paid for by a **keepalive accord**. Each node declares four numbers — a range
+  for the striping cadence and one for the idle cadence — and both ends compute
+  the same agreement from the two declarations, with nothing exchanged to settle
+  it. Every probe then announces when the next is due, under a token the answer
+  echoes so a probe can be matched to its own answer at ten a second. Three
+  behavioural findings come out of it (K1–K3), and one property holds the plane
+  up: **nothing a peer sends lowers this node's own probe interval**, because
+  both agreed cadences are a `max` over something each node declared. Four
+  numbers rather than two precisely for that — with one range the ceiling is a
+  `min`, and a `min` is a lever anybody can pull.
+- A peer whose fast range does not reach ours gets **no striping** rather than
+  one of the two paying for the other's idea of fast, which is a node's
+  strongest way to say "do not spend my battery". A cadence *request* is the
+  weak, temporary counterpart: only ever slower, and it lapses.
+- The medium has the last word on going quiet (`BaseTransport.idle_timeout`):
+  two nodes can agree to idle slower than the wire under them survives, and
+  neither can see that from the negotiation.
+- Off by default and ticked **per medium** (`tcp.mlo`, `udp.mlo`) — a probe ten
+  times a second is cheap on Ethernet and expensive on a battery — and awake
+  only while the node is being used, unless `mlo_always`. A medium that never
+  declares the option can never be bundled, which is the right answer for
+  store-and-forward.
+- Backward compatible through the negotiation, and that needed a second
+  predicate: silence means *yes* for every plane older than the announcement
+  and *no* for the ones added since (`features.SINCE_NEGOTIATION`).
+- Apps must tolerate arriving out of order — which a mesh never guaranteed
+  anyway. Chat's edits, deletions and reactions now wait for the message they
+  name instead of being dropped.
+- Probing ten times a second made the probe worth looking at, and it was
+  carrying a passenger: the unchanged address list was 71% of a PING and half
+  of what answering one cost. It now rides a probe only when the peer might not
+  have it, an empty list takes `RoutingTable.touch` instead of a full merge,
+  `advertised_uris()` is memoised on the three lists it derives from, and
+  `Packet.create` builds the packet once instead of twice and draws its nonce
+  in blocks. Measured: **312 → 92 bytes**, **30.2 → 6.4 µs** to receive one,
+  **22.1 → 6.3 µs** to send one — and the last two help every packet the node
+  emits, not just probes. No wire format changed.
+- Docs: `Docs/Architecture/transports.md`, `Docs/Setup/guide`.
+
 ### Long term
 - **Signing GitHub releases too** (or dropping that route once a node can always
   reach a publisher it trusts on the mesh).

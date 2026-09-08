@@ -20,8 +20,8 @@ is therefore safe to accept from strangers.
 
 | File | Role |
 |---|---|
-| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive, reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**. |
-| `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
+| `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive (a **due time per link**, not one interval for all), reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**, **spreading one node's traffic over two links**. |
+| `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. Building one is on the send path of everything the node emits, so it constructs the packet once rather than twice and draws its nonce in blocks — a slice of a CSPRNG draw, never a cheaper source. |
 | `activity.py` | Who is doing what: every background loop declares a name, what it does and **what wakes it**, and counts its own passes. Nothing on the packet path. |
 | `seen.py` | The replay window: a bounded, **exact** set of 64-bit ids in a flat table, generational eviction, seeded buckets. Sixteen bytes an id where boxing them cost a hundred. |
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
@@ -30,13 +30,14 @@ is therefore safe to accept from strangers.
 | `revocation.py` | A signed "I no longer vouch for this node", from its issuer and nobody else. |
 | `reputation.py` | What this node thinks of the nodes it talks to: a bounded, decaying score fed by the core and by the apps, plus `RateGate`. |
 | `app_guard.py` | An app's per-kind allowances per sender, and the one place a breach is reported to the node. |
-| `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. |
+| `features.py` | What two nodes agree they can say to each other: a set of names, not a version number. Silence means yes for every name older than the negotiation, and no for the ones added since (`SINCE_NEGOTIATION`) — the same sentence, "exactly what it received before", read in both directions. |
 | `behaviour.py` | Named rules over counters the links already keep, swept on the keepalive timer. Compares a peer to its transport class, never to a constant; a rule that fires on everyone disarms itself. |
+| `mlo.py` | **Multi-link operation**: two links to one node carrying its traffic together, and the keepalive **accord** that makes measuring them possible. Which links are close enough to bundle, what that costs in reordering, and which one is losing enough to be benched — over opaque keys, so none of it needs a mesh to be tested. |
 | `publisher_key.py` | A release-signing key kept encrypted at rest, unlocked only to sign. |
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `equivocation.py` | The one report that is **not** an opinion: two records signed by the same key that cannot both have been meant. Forging one needs the key it accuses, so the messenger's honesty is not in it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
-| `routing.py` | Kademlia routing table (k-buckets, `last_seen`), plus the two things it needed to stop chasing ghosts: addresses that answered as somebody else are **remembered**, not merely dropped, and an id that has never once answered a lookup stops being asked after, dialled, or named to others. |
+| `routing.py` | Kademlia routing table (k-buckets keyed by id so a refresh is a `move_to_end` rather than a scan under dataclass equality, `last_seen`, and a `touch` that refreshes recency without the merge `add` does — most probes now carry no addresses at all), plus the two things it needed to stop chasing ghosts: addresses that answered as somebody else are **remembered**, not merely dropped, and an id that has never once answered a lookup stops being asked after, dialled, or named to others. |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
 | `app_dht.py` | Per-app DHT (overlay): a namespace per `app_id`, entries public (in the clear) or private (AES-256-GCM under a key the app supplies). |
 | `pseudo.py` | The one canonical form of a pseudo (NFC, no invisible or directional characters, at most 50). Deterministic, so a receiver can re-derive it and call a mismatch a lie. |
@@ -73,7 +74,8 @@ is therefore safe to accept from strangers.
 3. **[routing.md](routing.md)** — routing table, `last_seen`, on-demand
    routing, Kademlia lookup, DHT, **address propagation**.
 4. **[transports.md](transports.md)** — the transport abstraction, TCP/UDP/spool,
-   NAT hole punching, STUN, reachability/AutoNAT, net monitor, keepalive.
+   NAT hole punching, STUN, reachability/AutoNAT, net monitor, keepalive, the
+   **keepalive accord** and **multi-link operation**.
 5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
    blocking network probes, hole-punch races, parallelising the tests).
    **Start here before debugging a hang or a flaky test.**
