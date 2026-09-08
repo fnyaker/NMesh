@@ -764,10 +764,17 @@ anywhere that reads it as unusual. On the receiving side an empty list takes
 `RoutingTable.touch` instead of `add` — `add` merges and re-filters everything
 already held, which is four microseconds of work to learn nothing — and falls
 back to `add` for an id we have never heard of, because `touch` will not invent
-an entry and this is the one path that may create one. What the old
-unconditional merge protected is untouched: **an authenticated PING still
-proves recency**, which is what keeps a live NATted peer with nothing to
-announce from being purged for having nothing to say.
+an entry and this is the one path that may create one.
+
+Two things `add` did are kept, and both are load-bearing rather than
+bookkeeping. **An authenticated PING still proves recency**, which is what
+keeps a live NATted peer with nothing to announce from being purged for having
+nothing to say. And **`touch` re-appends the entry to its k-bucket**: bucket
+position is the eviction order, so being heard from is what keeps a node out of
+the firing line. Refreshing `last_seen` alone — which is what the first version
+of this did — left the peer we probe ten times a second first in line to be
+evicted while an id a stranger merely mentioned was promoted past it. See
+`gotchas.md`.
 
 **`advertised_uris()` is memoised on the three lists it derives from.** It was
 15 µs of regex and per-character work per call, recomputed on every probe,

@@ -459,7 +459,7 @@ class TestNegotiatingTheCadence:
         assert peer.ka_accord == before and peer._malformed == 0
         await node.stop()
 
-    async def test_a_proposal_of_the_wrong_size_is_a_protocol_violation(self):
+    async def test_a_proposal_too_short_to_be_one_is_a_protocol_violation(self):
         node = _node()
         peer = _link(node)
         await node._handle_ka_propose(peer, Packet.create(
@@ -546,11 +546,11 @@ class TestAskingAPeerToSlowDown:
         assert peer.ka_told_ms == agreed.slow_ms
         await node.stop()
 
-    async def test_a_request_of_the_wrong_size_is_a_protocol_violation(self):
+    async def test_a_request_too_short_to_be_one_is_a_protocol_violation(self):
         node = _node()
         peer = _link(node)
         await node._handle_ka_request(peer, Packet.create(
-            KA_REQUEST, TARGET.raw, b"\xff" * 20, b"\x00" * 9))
+            KA_REQUEST, TARGET.raw, b"\xff" * 20, b"\x00" * 3))
         assert peer._malformed == 1
         await node.stop()
 
@@ -1173,3 +1173,55 @@ class TestTheAdvertisedSetIsCachedOnItsWholeInput:
         assert third != second
         node._addresses = ["udp://0.0.0.0:9001"]
         assert node.advertised_uris() != third
+
+
+class TestANewerBuildIsNotAnOffender:
+    """Too short is malformed; longer than we understand is a newer build.
+
+    Getting this backwards is the failure the capability negotiation exists to
+    prevent — a node running tomorrow's code reported by every node running
+    today's — and it is easy to write by accident, because an exact length
+    check reads like rigour. Every message added here answers to the same rule,
+    including the two that carry a fixed-size body."""
+
+    async def test_a_longer_pong_is_read_not_charged(self):
+        node = _node()
+        peer = _link(node)
+        await node.ping(peer)
+        token = _decode_ping_tail(
+            peer.transport.sent[-1].payload,
+            _decode_addresses_at(peer.transport.sent[-1].payload)[1])[1]
+        await node._handle_pong(peer, Packet.create(
+            PONG, TARGET.raw, node.id.raw,
+            _KA_TOKEN.pack(token) + b"whatever a later build adds"))
+        assert peer._malformed == 0
+        assert peer.last_rtt is not None        # …and the token was still read
+        await node.stop()
+
+    async def test_a_pong_too_short_to_hold_a_token_is_charged(self):
+        node = _node()
+        peer = _link(node)
+        await node._handle_pong(peer, Packet.create(
+            PONG, TARGET.raw, node.id.raw, b"\x00" * 3))
+        assert peer._malformed == 1
+        await node.stop()
+
+    async def test_a_longer_proposal_is_read_not_charged(self):
+        node = _node()
+        peer = _link(node)
+        await node._handle_ka_propose(peer, Packet.create(
+            KA_PROPOSE, TARGET.raw, b"\xff" * 20,
+            _KA_BOUNDS.pack(200, 1000, 15000, 20000) + b"\x00" * 8))
+        assert peer._malformed == 0 and peer.ka_impossible == 0
+        assert peer.ka_window.fast_min == 200
+        await node.stop()
+
+    async def test_a_longer_request_is_read_not_charged(self):
+        node = _node()
+        peer = _link(node)
+        peer.ka_wanted_ms = node._accord_with(peer).fast_ms
+        await node._handle_ka_request(peer, Packet.create(
+            KA_REQUEST, TARGET.raw, b"\xff" * 20,
+            _KA_WANTED.pack(20000) + b"\x00" * 8))
+        assert peer._malformed == 0 and peer.ka_told_ms == 20000
+        await node.stop()

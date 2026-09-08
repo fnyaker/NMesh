@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,24 +29,41 @@ class PacketError(Exception):
 #
 # The buffer is dropped in the child after a fork, or both sides of it would
 # hand out the same bytes to two processes that each believe them fresh.
+#
+# **Taking a lock, and not because a race was observed.** Every caller today is
+# on the event loop — checked — but handing out a slice is a read-modify-write
+# on module state, and CPython promises nothing about that. The cost of being
+# wrong is not a crash: it is two packets sharing a nonce, therefore a `msg_id`,
+# therefore a legitimate packet dropped somewhere down the mesh as a replay,
+# silently and unreproducibly. "Nothing calls this off the loop" is exactly the
+# kind of invariant nobody re-checks when they add a thread, and this project
+# has a file full of what that costs. The lock is still cheaper than the
+# `getrandom` syscall it replaced (0.51 us against 0.65), so correctness here
+# is not even a trade.
 _NONCE_BLOCK = 4096
 _NONCE_SIZE = 12
 _EMPTY_TAG = bytes(16)
+_nonce_lock = threading.Lock()
 _nonce_pool = b""
 _nonce_at = 0
 
 
 def _nonce() -> bytes:
     global _nonce_pool, _nonce_at
-    if _nonce_at + _NONCE_SIZE > len(_nonce_pool):
-        _nonce_pool, _nonce_at = os.urandom(_NONCE_BLOCK), 0
-    out = _nonce_pool[_nonce_at:_nonce_at + _NONCE_SIZE]
-    _nonce_at += _NONCE_SIZE
+    with _nonce_lock:
+        if _nonce_at + _NONCE_SIZE > len(_nonce_pool):
+            _nonce_pool, _nonce_at = os.urandom(_NONCE_BLOCK), 0
+        out = _nonce_pool[_nonce_at:_nonce_at + _NONCE_SIZE]
+        _nonce_at += _NONCE_SIZE
     return out
 
 
 def _reset_nonce_pool() -> None:
-    global _nonce_pool, _nonce_at
+    """Drop the pool. Called in a forked child, where the lock may also have
+    been left held by a thread that does not exist here any more — so it is
+    replaced rather than acquired."""
+    global _nonce_pool, _nonce_at, _nonce_lock
+    _nonce_lock = threading.Lock()
     _nonce_pool, _nonce_at = b"", 0
 
 

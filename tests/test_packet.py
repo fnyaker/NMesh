@@ -123,6 +123,29 @@ class TestBuildingAPacketCheaply:
         args = (0x01, b"\x11" * 20, b"\x22" * 20, b"same")
         assert Packet.create(*args).msg_id != Packet.create(*args).msg_id
 
+    def test_the_pool_is_safe_to_share(self):
+        """Handing out a slice is a read-modify-write on module state, and
+        CPython promises nothing about that. Every caller today is on the event
+        loop — but "nothing calls this off the loop" is the kind of invariant
+        nobody re-checks when they add a thread, and the cost of being wrong is
+        two packets sharing a nonce, therefore a `msg_id`, therefore a
+        legitimate packet dropped somewhere down the mesh as a replay."""
+        import threading
+        drawn, guard = [], threading.Lock()
+
+        def hammer():
+            mine = [packet_nonce() for _ in range(5000)]
+            with guard:
+                drawn.extend(mine)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(drawn) == 40000
+        assert len(set(drawn)) == 40000
+
     def test_the_pool_is_dropped_in_a_forked_child(self):
         """Or both sides of the fork hand out the same bytes, each believing
         them fresh."""
