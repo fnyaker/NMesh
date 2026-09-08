@@ -42,6 +42,11 @@ service).
 | `NMESH_CONNECTOR_TOKEN` | the authentication token            |
 | `NMESH_NODE_ID`         | the node's NodeID (hex)             |
 
+An app that runs whether or not anybody is there should be launched with
+`NMESH_ATTENDED=0` in its `env`: an attached app is one of the things that says
+somebody is using this node, and a daemon is not one
+([`Docs/DataConnector/guide`](../DataConnector/guide)).
+
 ## Security
 
 - Commands are **configuration declared by the operator**, not network input;

@@ -80,6 +80,7 @@ _AUTH_ASSERT = 0x0C   # body = audience(20) ‖ ctx(32) ‖ ttl(4) ‖ purpose(u
 _AUTH_VERIFY = 0x0D   # body = flags(1) ‖ ctx(32) ‖ plen(2) ‖ purpose ‖ assertion
 _ABUSE = 0x0F         # body = node_id(20) ‖ weight(B) ‖ kind(B) ‖ reason(utf-8)
 _ABUSE_REASON_MAX = 64   # characters of explanation kept, for an operator to read
+_ATTENDED = 0x10      # body = flag(1) — is a person at this app, or is it ours?
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
@@ -125,6 +126,11 @@ class DataConnector:
         self._token_bytes = self.token.encode("utf-8")
         # writer -> app_id: each client is bound to one app section.
         self._clients: dict[asyncio.StreamWriter, bytes] = {}
+        # Of those, the ones that are nobody's window (`_ATTENDED`). Held as
+        # the exception rather than as a flag per client because a client that
+        # says nothing is a program somebody started, which is the only thing
+        # every client written before the frame existed can be.
+        self._unattended: set[asyncio.StreamWriter] = set()
         # app_id -> AppAuth. One per section, kept so its replay cache persists
         # across frames and across a client reconnecting.
         self._auths: dict[bytes, object] = {}
@@ -162,14 +168,14 @@ class DataConnector:
                 self._handle_client, self._host, self.port, ssl=self._ssl)
             self.port = self._server.sockets[0].getsockname()[1]
         self._pump_task = asyncio.create_task(self._pump())
-        # An attached app is what "this node is being used" means from here,
-        # and it is a *state* rather than an event: a chat page open with
-        # nobody typing is still a page open. So the node is handed something
-        # it can ask, instead of being told once and left to time it out. See
-        # `MeshNode.hold_awake`.
+        # An app somebody is *at* is what "this node is being used" means from
+        # here, and it is a *state* rather than an event: a chat window open
+        # with nobody typing is still a window open. So the node is handed
+        # something it can ask, instead of being told once and left to time it
+        # out. See `MeshNode.hold_awake` and `attended_clients`.
         hold = getattr(self._node, "hold_awake", None)
         if hold is not None:
-            hold("app", lambda: bool(self._clients))
+            hold("app", lambda: self.attended_clients() > 0)
 
     async def stop(self) -> None:
         if self._pump_task is not None:
@@ -197,6 +203,7 @@ class DataConnector:
             except Exception:
                 pass
         self._clients.clear()
+        self._unattended.clear()
         if self._server is not None:
             self._server.close()
             await wait_closed_bounded(self._server)
@@ -314,6 +321,8 @@ class DataConnector:
                     await self._handle_app_auth(writer, app_id, ftype, body)
                 elif ftype == _ABUSE:
                     self._handle_abuse(app_id, body)
+                elif ftype == _ATTENDED:
+                    self._note_attended(writer, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -324,6 +333,7 @@ class DataConnector:
             if writer not in self._outbox:
                 self._pending = max(0, self._pending - 1)
             self._clients.pop(writer, None)
+            self._unattended.discard(writer)
             self._outbox.pop(writer, None)
             task = self._writers.pop(writer, None)
             if task is not None:
@@ -332,6 +342,36 @@ class DataConnector:
                 writer.close()
             except Exception:
                 pass
+
+    def attended_clients(self) -> int:
+        """Attached apps that are somebody's window, not sockets attached.
+
+        The difference is the whole of why this counts rather than testing
+        `self._clients`: the node attaches its **own** built-in apps at boot —
+        chat is enabled by default — so the number of sockets on this connector
+        is never zero, on the busiest node and on one nobody has touched in a
+        week alike. Read as "somebody is using this node" it kept MLO bundling
+        for ever on a machine with no page open and nobody typing, which is
+        exactly the state it exists to stay out of. An app the node started for
+        itself says so (`_ATTENDED`); what says a person is there is its page,
+        and the console is what sees that."""
+        return sum(1 for writer in self._clients
+                   if writer not in self._unattended)
+
+    def _note_attended(self, writer: asyncio.StreamWriter, body: bytes) -> None:
+        """Record whether a person is at this app.
+
+        A client that never sends the frame is attended, which is what every
+        client written before it existed is. The declaration can therefore only
+        ever claim *less* — there is nothing here a local process can say to be
+        counted as somebody who is not there. An empty body is malformed and
+        changes nothing (reject by default)."""
+        if not body:
+            return
+        if body[0]:
+            self._unattended.discard(writer)
+        else:
+            self._unattended.add(writer)
 
     async def _handle_store(self, writer: asyncio.StreamWriter, app_id: bytes,
                             ftype: int, body: bytes) -> None:
@@ -567,13 +607,21 @@ class ConnectorClient:
     """
 
     def __init__(self, host: str, port: int, token: str,
-                 app_id: bytes = GENERIC_APP_ID) -> None:
+                 app_id: bytes = GENERIC_APP_ID, *,
+                 attended: bool = True) -> None:
         if len(app_id) != APP_ID_LEN:
             raise ValueError("app_id must be APP_ID_LEN bytes")
         self._host = host
         self._port = port
         self._token = token
         self._app_id = app_id
+        # Is a person at this app? Default yes, because that is what an app a
+        # human started is, and because saying nothing has to keep meaning what
+        # it meant before the frame existed. Pass ``attended=False`` for an app
+        # that runs whether or not anybody is there — the node's own built-in
+        # apps, a daemon, anything the machine wired up for itself: it must not
+        # be read as somebody using the node (`DataConnector.attended_clients`).
+        self._attended = bool(attended)
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._inbox: list[tuple[NodeID, bytes]] = []
@@ -593,10 +641,16 @@ class ConnectorClient:
         if app_id is None:
             app_hex = e.get("NMESH_APP_ID") if hasattr(e, "get") else None
             app_id = bytes.fromhex(app_hex) if app_hex else GENERIC_APP_ID
+        # `NMESH_ATTENDED=0` is how an app launched to run on its own says it
+        # is nobody's window. Absent means attended: an app that says nothing
+        # is one somebody started.
+        raw = e.get("NMESH_ATTENDED") if hasattr(e, "get") else None
+        attended = str(raw or "1").strip().lower()
         return cls(e["NMESH_CONNECTOR_HOST"],
                    int(e["NMESH_CONNECTOR_PORT"]),
                    e["NMESH_CONNECTOR_TOKEN"],
-                   app_id)
+                   app_id,
+                   attended=attended not in ("0", "false", "no", "off"))
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
@@ -604,6 +658,10 @@ class ConnectorClient:
         ftype, _ = await _read_frame(self._reader)
         if ftype != _AUTH_OK:
             raise ConnectionError("connector authentication failed")
+        if not self._attended:
+            # Only when it is *not* the default: a frame nobody sends is a
+            # frame an old node never has to understand.
+            await _write_frame(self._writer, _ATTENDED, b"\x00")
         self._arrived = asyncio.Event()
         self._asking = asyncio.Lock()
         self._dead = None
@@ -646,6 +704,18 @@ class ConnectorClient:
         self._waiting.clear()
         if self._arrived is not None:
             self._arrived.set()
+
+    async def set_attended(self, attended: bool) -> None:
+        """Say whether somebody is at this app now.
+
+        An app whose window opens and closes says so as it happens; one that is
+        always one or the other declares it once, at construction. Answered by
+        nothing, so it is never a way to read the node's state back."""
+        self._attended = bool(attended)
+        if self._writer is None:
+            return
+        await _write_frame(self._writer, _ATTENDED,
+                           b"\x01" if self._attended else b"\x00")
 
     async def whoami(self) -> NodeID:
         return NodeID(await self._roundtrip(_WHOAMI, b"", _WHOAMI_RESP))
