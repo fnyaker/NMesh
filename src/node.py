@@ -32,6 +32,7 @@ from .reputation import (DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT,
                          HOSTILE, OK, SUSPECT, RateGate, Reputation)
 from . import behaviour
 from . import features
+from . import mlo
 from .features import MAX_RECORD as _FEATURES_MAX
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
@@ -120,6 +121,8 @@ CERT_RENEWED      = 0x23   # reply: the fresh certificate
 CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
 ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehaving"
 CAPABILITIES      = 0x26   # "here is what I can speak" — the base negotiation
+KA_PROPOSE        = 0x27   # "the keepalive cadences I can work with" (min, max)
+KA_REQUEST        = 0x28   # "slow your keepalive down to this" — never speed up
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -201,7 +204,11 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
                     RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE,
-                    ABUSE_REPORT}
+                    ABUSE_REPORT,
+                    # The keepalive accord is about *this link* and nothing
+                    # else: a cadence is a property of the pair, so it can only
+                    # ever be stated by the peer at the other end of it.
+                    KA_PROPOSE, KA_REQUEST}
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -318,6 +325,64 @@ _LINK_KEEPALIVE_INTERVAL = 20.0
 # probes outvote the dead ones. Four in a row is over a minute of one-way
 # silence on a link whose own transport reaps at sixty seconds.
 _DEAD_LINK_PROBES = 4
+# …and the time that run always stood for. A probe count answers "is this link
+# still a link" only while every link is probed on one interval; once a link can
+# negotiate its own cadence (below), four probes is four hundred milliseconds on
+# a bundle member and a minute and a half on a sleeping one. A link has to fail
+# both tests, so the verdict means the same thing at any cadence.
+_DEAD_LINK_SILENCE = _DEAD_LINK_PROBES * _LINK_KEEPALIVE_INTERVAL
+# -- multi-link operation and the keepalive accord (see mlo.py) -------------
+# The sweep the keepalive loop has always done — reap the silent, expire the
+# tarpits, judge behaviour — still runs on `_LINK_KEEPALIVE_INTERVAL`. What
+# changed is that each *link* now has its own due time, because a bundle
+# member needs a probe ten times a second and everything else must go on
+# costing exactly one wake-up every twenty seconds.
+#
+# A due-time loop with no floor is a busy loop (gotchas): a pass that finds
+# nothing due still waits this long, so nothing here can spin however the
+# arithmetic comes out.
+_KA_TICK_FLOOR = 0.02
+# The floor under "a probe with no answer is lost". The deadline itself is
+# three times *that link's* cadence (see `_link_keepalive_loop`) — a constant
+# would call every probe on a slow medium lost while the link works — and this
+# is what keeps a fast-probed link from giving up in three hundred
+# milliseconds. `LinkQuality.answered` keeps the late ones honest either way;
+# this only decides when to stop waiting.
+_KA_PROBE_DEADLINE = 3.0
+# How long after an accord changes nothing is held against a peer for speaking
+# under the old one. A proposal crosses the link at the speed of the link, and
+# both ends re-propose *before* their first probe at a new cadence — so this is
+# the width of the crossing, not a tolerance for being wrong.
+_KA_GRACE = 10.0
+# Cadence requests one link may make of us per window. A request costs us a
+# change of behaviour, which makes it the cheapest thing on this plane to send
+# and one of the more annoying to receive.
+_KA_REQUEST_WINDOW = 60.0
+_KA_REQUEST_MAX = 8
+# How long a cadence request holds before it lapses. A request is a "go quiet
+# for now", not a setting: the durable way for a node not to be probed hard is
+# the fast range it *declares*, which no request can override. Long enough that
+# repeating it costs nothing against the meter above, short enough that a peer
+# that went away does not leave a link sleeping for ever.
+_KA_TOLD_TTL = 300.0
+# How often a probe re-carries this node's advertised addresses to one peer,
+# whether or not they changed. The address gossip rides the probe; it is not
+# what a probe is *for*, and at ten probes a second re-sending an unchanged
+# list is 71% of the packet and half of what answering it costs.
+#
+# A duration and not a probe count, for the reason `_DEAD_LINK_SILENCE` exists:
+# "every Nth probe" means one cadence at rest and another while striping. At
+# the classic interval this is every probe, which is exactly what the node did
+# before — so nothing changes for a link nobody is bundling. It is also the net
+# under a lost PING: a peer that missed the update is told again within it,
+# rather than never.
+_ADDR_GOSSIP_INTERVAL = _LINK_KEEPALIVE_INTERVAL
+# How long a sign of somebody actually using this node keeps it awake for MLO.
+# Long enough that a console left open on a dashboard does not flap, short
+# enough that a laptop shut at six is back to one probe per link per twenty
+# seconds by ten past.
+_MLO_AWAKE_TTL = 120.0
+_MLO_SOURCES_MAX = 16       # distinct things that can say "somebody is here"
 # Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
 # session with, re-initiate on this cadence. Without it, a single lost handshake
 # (peer offline at send time, an ACK dropped in transit) stranded the queued data
@@ -812,8 +877,12 @@ def _encode_addresses(addresses: list[str]) -> bytes:
     return b"".join(parts)
 
 
-def _decode_addresses(data: bytes) -> list[str]:
-    """Decode a packed address list. Raises ValueError on structural errors or count > _MAX_ADDRESSES."""
+def _decode_addresses_at(data: bytes) -> tuple[list[str], int]:
+    """Decode a packed address list and say where it ended.
+
+    The offset is what lets a PING carry something *after* its addresses (see
+    :data:`_KA_TAIL`). Split out rather than duplicated: two walks over one
+    encoding is two chances for them to disagree about where it stops."""
     if not data:
         raise ValueError("empty address payload")
     count = data[0]
@@ -833,7 +902,59 @@ def _decode_addresses(data: bytes) -> list[str]:
         addr = data[offset:offset + addr_len].decode('utf-8')
         addresses.append(addr)
         offset += addr_len
-    return addresses
+    return addresses, offset
+
+
+def _decode_addresses(data: bytes) -> list[str]:
+    """Decode a packed address list. Raises ValueError on structural errors or count > _MAX_ADDRESSES."""
+    return _decode_addresses_at(data)[0]
+
+
+# What a PING carries after its addresses: how long until the next one, and a
+# token the answer echoes so a probe can be matched to *its own* answer.
+#
+# It is a trailer, and that is the whole compatibility story: `_decode_addresses`
+# has always stopped at the last address and ignored whatever followed, so a
+# build without this reads a tailed PING as exactly the PING it always read.
+# The same trick as the `_HINTS_OK` byte on a FOUND_NODE, for the same reason —
+# there is no version to bump and nothing to negotiate for the *reader*.
+#
+# The tail is only ever *sent* to a peer that announced the `keepalive` feature,
+# which is a different question: a peer that cannot echo the token would have
+# every probe charged as a loss. See `MeshNode.peer_announces`.
+_KA_TAIL = struct.Struct("!IQ")          # next_ms, token
+_KA_TOKEN = struct.Struct("!Q")
+# fast_min, fast_max, slow_min, slow_max — a KA_PROPOSE body. Four numbers,
+# not two: see `mlo.Bounds` for why a single range leaves the ceiling as a
+# lever anybody can pull.
+_KA_BOUNDS = struct.Struct("!IIII")
+_KA_WANTED = struct.Struct("!I")         # a KA_REQUEST body
+
+
+#: A probe carrying no addresses — the one byte `_encode_addresses([])` builds,
+#: hoisted because it is now the common case and a probe should not allocate to
+#: say "nothing new". Exactly what a node with no announceable address has
+#: always sent, so no build anywhere reads it as anything unusual.
+_NO_ADDRESSES = _encode_addresses([])
+
+
+def _encode_ping_tail(next_ms: int, token: int) -> bytes:
+    return _KA_TAIL.pack(max(0, min(0xFFFFFFFF, int(next_ms))), token)
+
+
+def _decode_ping_tail(data: bytes, offset: int):
+    """``(next_ms, token)`` from a PING's trailer, or ``None`` when there is
+    none.
+
+    Anything that is not exactly this trailer is *ignored*, never charged: a
+    longer tail is what a build newer than this one looks like, and the one
+    thing the negotiation exists to stop is treating that as misbehaviour."""
+    if len(data) - offset != _KA_TAIL.size:
+        return None
+    try:
+        return _KA_TAIL.unpack_from(data, offset)
+    except struct.error:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1390,50 @@ class _Peer:
         self.ping_sent_at: float | None = None
         self.last_rtt: float | None = None
         self.quality = LinkQuality()  # latency spread and probe loss
+        # -- the keepalive accord (see mlo.py) ------------------------------
+        # What the peer proposed, and what that leaves the two of us held to.
+        # `None` — not a default window — means it has proposed nothing, which
+        # is a node from before this existed and keeps the classic cadence.
+        self.ka_window: tuple | None = None
+        self.ka_accord: tuple | None = None
+        # When the accord last moved. A proposal crosses the link at the speed
+        # of the link, so nothing is held against a peer for a short while
+        # afterwards (`_KA_GRACE`).
+        self.ka_accord_at: float = 0.0
+        # The gap it last announced before its next probe, and what we last
+        # asked it for. A request is cancelled by the peer announcing the
+        # accord's floor: that is the one refusal the protocol allows, and it
+        # is what keeps "I want the fast lane back" from looking like silence.
+        self.ka_next_ms: int | None = None
+        self.ka_asked_ms: int | None = None
+        self.ka_asked_at: float = 0.0
+        # What the far end asked *us* for, and when. Only ever slower than what
+        # we were doing — a request can never make this node spend more (see
+        # `_handle_ka_request`) — and it lapses at `_KA_TOLD_TTL` rather than
+        # holding for ever: a request is a "go quiet for now", and a peer that
+        # still wants it says so again.
+        self.ka_told_ms: int | None = None
+        self.ka_told_at: float = 0.0
+        # What this link was last told about where we are, and when. `None` is
+        # "nothing yet", which no advertised set can equal — so the first probe
+        # on a link always carries the addresses.
+        self.addrs_sent: tuple | None = None
+        self.addrs_sent_at: float = 0.0
+        # When this link is next probed. A fresh one is due at the classic
+        # interval, exactly as it was when one interval served every link; what
+        # moves it in is the sweep deciding this link has a twin worth
+        # measuring against.
+        self.ka_due: float = time.monotonic() + _LINK_KEEPALIVE_INTERVAL
+        # …and what cadence that role calls for. Written by `_update_bundles`
+        # on the sweep and read per probe: deciding it per probe would walk
+        # every link to find out whether this one has a twin — ten times a
+        # second, per link.
+        self.ka_wanted_ms: int | None = None
+        # Counters the behaviour sweep reads (rules K1–K3). Integers bumped in
+        # the two handlers, never anything computed there.
+        self.ka_outside: int = 0
+        self.ka_ignored: int = 0
+        self.ka_impossible: int = 0
         self.connected_at: float = time.monotonic()
         self.counters = Counters()   # per-link throughput
         self.total = None            # node-wide Counters, set by the node
@@ -1606,6 +1771,11 @@ class MeshNode:
         # Set when address steering is switched on: it is off by default, so
         # the loop should wait on the switch rather than on a clock.
         self._steer_wakeup = asyncio.Event()
+        # Set when a link's probe cadence changes under the keepalive loop —
+        # a link authenticated, an accord moved, a peer asked us to slow down.
+        # Without it a link that just negotiated a hundred-millisecond cadence
+        # would wait out whatever was left of a twenty-second sleep first.
+        self._keepalive_wakeup = asyncio.Event()
         # Certificate renewal: the sweep that keeps our own membership alive,
         # and — as an issuer — when we last re-signed for each subject. Keyed by
         # subject rather than by link, so reconnecting buys no fresh allowance.
@@ -1757,6 +1927,26 @@ class MeshNode:
         # for it: it is a trade (a dial and a handshake against a few
         # milliseconds), and only the operator knows whether it is worth it.
         self._dynamic_address: bool = False
+        # -- multi-link operation (see mlo.py) ------------------------------
+        # Which media may be bundled is the transport's own `mlo` setting; what
+        # lives here is everything that is not the medium's business.
+        self._mlo_always: bool = False
+        self._mlo_settings = mlo.MLOSettings()
+        # identity -> Bundle. One per node we hold links to, bounded by the
+        # link ceiling and dropped with the last link to that identity.
+        self._bundles: OrderedDict[NodeID, mlo.Bundle] = OrderedDict()
+        # source -> when it last said somebody was here, and source -> a probe
+        # that answers whether it is open right now. MLO is a trade — a probe
+        # ten times a second against latency and throughput — and it is only
+        # worth making while the node is actually being used.
+        self._awake_since: OrderedDict[str, float] = OrderedDict()
+        self._awake_holds: OrderedDict[str, object] = OrderedDict()
+        # What this node offers when two of them negotiate their cadences: a
+        # range per mode, four numbers (`mlo.Bounds`).
+        self._ka_bounds = mlo.Bounds()
+        # Cadence requests, metered per link like every other plane that costs
+        # the receiver something.
+        self._ka_request_rate: OrderedDict[bytes, tuple] = OrderedDict()
         # node hex -> {uri: measured at} — so a candidate that turned out no
         # better is not measured again on the next pass.
         self._steer_seen: OrderedDict[str, OrderedDict] = OrderedDict()
@@ -1770,6 +1960,10 @@ class MeshNode:
         # link, no session and no handshake, so there is no peer to key on.
         self._punch_dgram_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._last_announced: tuple[str, ...] | None = None
+        # `advertised_uris` memoised on the three lists it derives from. See
+        # there for why the key is the whole of the input and not a flag.
+        self._advertised_key: tuple | None = None
+        self._advertised: list[str] = []
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         # STUN transaction id -> (server ip, expiry). Requests we sent and are
@@ -2137,15 +2331,33 @@ class MeshNode:
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
         listen URI expanded over the host's addresses (and any discovered
-        external address). Wildcards like 0.0.0.0 become one URI per address."""
-        out: list[str] = []
-        seen: set[str] = set()
-        for uri in self._addresses:
-            for u in expand_listen_uri(uri, self._local_ips, self._extra_addrs):
-                if u not in seen:
-                    seen.add(u)
-                    out.append(u)
-        return out
+        external address). Wildcards like 0.0.0.0 become one URI per address.
+
+        Cached on exactly what it is derived from, and on nothing else. This is
+        a pure function of three lists, and it was being recomputed on every
+        probe, every `FIND_NODE` answer and every announce — 15 µs of regex and
+        per-character work to produce the same five strings, ten times a second
+        per bundled link. Comparing the three inputs costs a fraction of that
+        and cannot go stale: there is no fourth thing to forget to invalidate,
+        which is the failure mode a cache normally buys.
+
+        The copy on the way out is not an oversight. Callers have always been
+        handed a list of their own, and handing back the cached one would make
+        this a shared mutable — a bug that would surface as addresses appearing
+        or vanishing somewhere entirely unrelated."""
+        key = (tuple(self._addresses), tuple(self._local_ips),
+               tuple(self._extra_addrs))
+        if key != self._advertised_key:
+            out: list[str] = []
+            seen: set[str] = set()
+            for uri in self._addresses:
+                for u in expand_listen_uri(uri, self._local_ips,
+                                           self._extra_addrs):
+                    if u not in seen:
+                        seen.add(u)
+                        out.append(u)
+            self._advertised_key, self._advertised = key, out
+        return list(self._advertised)
 
     async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._connect_for_join(address)
@@ -2382,10 +2594,49 @@ class MeshNode:
         return await self._data_queue.get()
 
     async def ping(self, peer: _Peer) -> None:
-        payload = _encode_addresses(self.advertised_uris())
+        """Probe one link, and say when the next probe is due.
+
+        The tail is only added for a peer that announced the `keepalive`
+        feature. Not because it would break anybody — a build without it has
+        always ignored whatever followed the addresses — but because the answer
+        has to echo the token back: a peer that cannot would leave every probe
+        unmatched, and `LinkQuality.expire` would then charge every one of them
+        as a loss on a link that is answering perfectly.
+
+        **The addresses ride a probe, they are not what a probe is for.** That
+        distinction cost nothing while every link was probed every twenty
+        seconds and it is most of the packet at ten a second: measured, five
+        advertised addresses are 221 of a PING's 312 bytes and half of what
+        answering one costs. So they go out when the peer might not have them —
+        our set changed, or `_ADDR_GOSSIP_INTERVAL` has passed — and the rest of
+        the time the probe is a probe.
+
+        Sending none is not a new kind of packet: a node with nothing
+        announceable has always sent exactly this, and every build reads it the
+        same way (`_handle_ping` merges an empty list and keeps the recency).
+        So there is nothing here to negotiate and nothing to be older than."""
+        now = time.monotonic()
+        current = tuple(self.advertised_uris())
+        if (current != peer.addrs_sent
+                or now - peer.addrs_sent_at >= _ADDR_GOSSIP_INTERVAL):
+            payload = _encode_addresses(list(current))
+            peer.addrs_sent, peer.addrs_sent_at = current, now
+        else:
+            payload = _NO_ADDRESSES
+        token = None
+        if self.peer_announces(peer, features.KEEPALIVE):
+            interval = self._keepalive_interval(peer)
+            token = int.from_bytes(os.urandom(8), "big")
+            payload += _encode_ping_tail(round(interval * 1000), token)
+            peer.ka_due = now + interval
+        else:
+            peer.ka_due = now + _LINK_KEEPALIVE_INTERVAL
         packet = Packet.create(PING, self._id.raw, NodeID(b"\xff" * 20).raw, payload)
-        peer.ping_sent_at = time.monotonic()   # for RTT measurement on the PONG
-        peer.quality.on_ping()
+        peer.ping_sent_at = now   # for RTT measurement on the PONG
+        if token is None:
+            peer.quality.on_ping()
+        else:
+            peer.quality.sent(token, now)
         await peer.send(packet)
 
     def _recent_authed_peers(self, limit: int) -> list['_Peer']:
@@ -2568,23 +2819,39 @@ class MeshNode:
             self._keepalive_task = asyncio.create_task(self._link_keepalive_loop())
 
     async def _link_keepalive_loop(self) -> None:
-        """Ping every established peer on an interval so a healthy but idle link
-        isn't torn down by the transport's read timeout. Both sides run this, so
-        each link sees inbound traffic in both directions. Never raises: a link
-        that is genuinely dead is reaped by its own receive loop.
+        """Probe every established link on the cadence *that link* negotiated,
+        so a healthy but idle one is not torn down by the transport's read
+        timeout. Both sides run this, so each link sees inbound traffic in both
+        directions. Never raises: a link that is genuinely dead is reaped by its
+        own receive loop.
 
-        The maintained set (`_neighbor_slots`) is pinged first: those are the
-        links the node commits to, so they must never be the ones starved by a
-        slow or dead peer earlier in the list. Dropping below the floor puts
-        maintenance back into its searching regime immediately."""
+        Two clocks, and keeping them apart is the shape of this loop.
+
+        - **Each link has its own due time.** A bundle member needs a probe ten
+          times a second (the accord's fast cadence) and every other link must go
+          on costing one wake-up every twenty seconds. One interval could serve
+          either of those, never both.
+        - **The sweep stays on `_LINK_KEEPALIVE_INTERVAL`.** Reaping the silent,
+          expiring tarpits, re-forming the bundles and judging behaviour are
+          per-*node* work with nothing to do with how fast one link is probed,
+          and running them ten times a second would make MLO cost more than what
+          it buys.
+
+        The maintained set (`_neighbor_slots`) is probed first: those are the
+        links the node commits to, so they must never be starved by a slow or
+        dead peer earlier in the list. Dropping below the floor puts maintenance
+        back into its searching regime immediately."""
         job = self._activity.register(
             "keepalive",
-            "pings every link so an idle one is not torn down, then reaps the silent"
-            " ones and sweeps behaviour",
-            "a 20 s timer")
+            "probes each link on the cadence that link negotiated, then reaps"
+            " the silent ones, re-forms the bundles and sweeps behaviour",
+            "each link's own due time, a 20 s sweep timer, and the keepalive"
+            " wake-up")
+        next_sweep = time.monotonic() + _LINK_KEEPALIVE_INTERVAL
         while self._running:
-            await asyncio.sleep(_LINK_KEEPALIVE_INTERVAL)
+            await self._keepalive_sleep(next_sweep)
             job.ran()
+            now = time.monotonic()
             slots = self._neighbor_slots()
             peers = sorted(self._peers,
                            key=lambda p: 0 if p.authenticated_id in slots else 1)
@@ -2593,23 +2860,86 @@ class MeshNode:
                     continue
                 if peer.tarpit_until:
                     continue     # a tarpitted link is not kept alive, only held
+                # A probe nobody answered is charged as lost rather than left
+                # pending: the recent window is what benches a bundle member,
+                # and a window that only ever grows by *answers* reads a link
+                # losing everything as a link nobody is probing.
+                #
+                # Three times *this link's own* cadence, never a constant. A
+                # fixed three seconds would mark every probe on a slow medium
+                # lost while the link works perfectly, and the number that then
+                # reads "100% loss" is on a screen an operator believes. Same
+                # rule as the UDP keepalive timeout: a death verdict is at least
+                # three times the largest legitimate cadence (gotchas §7).
+                peer.quality.expire(now, max(_KA_PROBE_DEADLINE,
+                                             3.0 * self._keepalive_interval(peer)))
+                if peer.ka_due > now:
+                    continue
                 try:
                     await self.ping(peer)
                 except Exception:
-                    pass
-            self._reap_silent_links()
-            self._reap_expired_tarpits()
-            self._behaviour_sweep()
-            # Only nudge maintenance while it is still finding things. A mesh
-            # smaller than the floor is below it permanently, and nudging every
-            # keepalive there means a certificate-carrying lookup every 20 s
-            # that can only ever learn what we already know. Real events (a peer
-            # lost or gained, an identity we had not seen) wake the loop
-            # directly and reset its backoff, so nothing is missed by staying
-            # quiet here.
-            if (len(self._live_neighbors()) < _NEIGHBOR_FLOOR
-                    and self._neighbor_idle_cycles == 0):
-                self._wake_neighbor_maintenance()
+                    # `ping` sets the next due before it sends, so a send that
+                    # failed must not leave this link due for ever.
+                    peer.ka_due = now + _LINK_KEEPALIVE_INTERVAL
+            if now >= next_sweep:
+                next_sweep = now + _LINK_KEEPALIVE_INTERVAL
+                self._reap_silent_links()
+                self._reap_expired_tarpits()
+                self._update_bundles()
+                self._behaviour_sweep()
+                # Only nudge maintenance while it is still finding things. A
+                # mesh smaller than the floor is below it permanently, and
+                # nudging every keepalive there means a certificate-carrying
+                # lookup every 20 s that can only ever learn what we already
+                # know. Real events (a peer lost or gained, an identity we had
+                # not seen) wake the loop directly and reset its backoff, so
+                # nothing is missed by staying quiet here.
+                if (len(self._live_neighbors()) < _NEIGHBOR_FLOOR
+                        and self._neighbor_idle_cycles == 0):
+                    self._wake_neighbor_maintenance()
+
+    def _keepalive_wait(self, next_sweep: float) -> float:
+        """How long until the next thing this loop owes anybody.
+
+        The floor is not decoration. This is a due-time loop, and the due times
+        come from a cadence a *peer* takes part in choosing — so a pass that
+        computes zero is not an arithmetic slip, it is a peer holding this
+        node's core (see `gotchas.md`)."""
+        now = time.monotonic()
+        soonest = next_sweep
+        for peer in self._peers:
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            if peer.tarpit_until:
+                continue
+            if peer.ka_due < soonest:
+                soonest = peer.ka_due
+        return max(_KA_TICK_FLOOR, soonest - now)
+
+    async def _keepalive_sleep(self, next_sweep: float) -> None:
+        """Wait for the next due time, or for something that moves it.
+
+        Clear, then read, then wait: the other order loses a wake that lands
+        between the read and the clear, and the loop then sleeps through the
+        very thing it was told about."""
+        self._keepalive_wakeup.clear()
+        wait = self._keepalive_wait(next_sweep)
+        try:
+            async with asyncio.timeout(wait):
+                await self._keepalive_wakeup.wait()
+        except TimeoutError:
+            return
+        # Woken early. **A wake may shorten this wait, never remove it.** What
+        # sets the event is reachable from a peer — a capability record, a
+        # cadence proposal — and no loop driven by what a peer sends may run
+        # flat out (gotchas §12). Without this floor a peer re-announcing in a
+        # loop would have this one sorting and walking every link at whatever
+        # rate it chose to send at.
+        await asyncio.sleep(_KA_TICK_FLOOR)
+
+    def _wake_keepalive(self) -> None:
+        """A link arrived, or its cadence changed: do not wait out the tick."""
+        self._keepalive_wakeup.set()
 
     def _reap_silent_links(self) -> None:
         """Cut the links that answer nothing. Never raises, never awaits.
@@ -2620,7 +2950,16 @@ class MeshNode:
         maintenance dials it again — so this heals the link rather than losing
         the node.
 
-        Relayed links carry no probes of their own and are left alone."""
+        Relayed links carry no probes of their own and are left alone.
+
+        **A run of probes is not a timeout once the cadence is negotiable.**
+        Four unanswered probes was over a minute of silence when every link was
+        probed every twenty seconds; on a bundle member probed ten times a
+        second it is four hundred milliseconds, and cutting a link for that
+        would undo the whole point of benching one instead. So the run is
+        joined by the thing it always stood for — `_DEAD_LINK_SILENCE` of
+        actual silence — and a link has to fail both."""
+        now = time.monotonic()
         dead = []
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
@@ -2629,9 +2968,10 @@ class MeshNode:
                 continue
             try:
                 silent = peer.quality.since_pong
+                quiet_for = now - peer.quality.answered_at
             except Exception:
                 continue
-            if silent >= _DEAD_LINK_PROBES:
+            if silent >= _DEAD_LINK_PROBES and quiet_for >= _DEAD_LINK_SILENCE:
                 dead.append(peer)
         for peer in dead:
             if peer in self._peers:
@@ -2655,6 +2995,565 @@ class MeshNode:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # -----------------------------------------------------------------------
+    # Is anybody actually using this node?
+    # -----------------------------------------------------------------------
+    #
+    # MLO is a trade: a probe ten times a second on every bundled link, against
+    # throughput and a link that is left behind in seconds rather than at the
+    # next sweep. It is worth making while somebody is looking at this node and
+    # not worth making while it is a relay in a cupboard — so the node has to
+    # know the difference, and it cannot guess it from traffic (a relay carries
+    # plenty and wants none of this).
+    #
+    # So the things that *are* somebody say so, in one of two shapes — because
+    # "somebody is here" arrives as two different facts and collapsing them
+    # loses one of them.
+    #
+    #   - a **moment**: the console polls, and that is what a page being open
+    #     *is*. It happened, and it stops being evidence once it is old enough.
+    #   - a **state**: an app holds a connector socket open, and that says so
+    #     however long it has been sitting there with nothing to send. A node
+    #     with a chat page open and nobody typing is being used.
+    #
+    # Nothing here is on the packet path, and nothing a peer sends can reach
+    # it — which is the point: waking this node up must not be something the
+    # network can do to it.
+
+    def note_awake(self, source: str) -> None:
+        """Something just happened that means somebody is here.
+
+        Bounded, and never called from a packet handler: what a peer sends must
+        never be able to wake this node up, or the network decides how much
+        battery it spends."""
+        key = str(source)[:32]
+        self._awake_since[key] = time.monotonic()
+        self._awake_since.move_to_end(key)
+        while len(self._awake_since) > _MLO_SOURCES_MAX:
+            self._awake_since.popitem(last=False)
+
+    def hold_awake(self, source: str, probe) -> None:
+        """Register something that can say whether it is open *right now*.
+
+        ``probe`` is called on the loop, from the keepalive sweep and from the
+        console snapshot — never per packet. One that raises is read as "not
+        open": a component that cannot answer does not get to hold the node
+        awake on the strength of its own bug."""
+        key = str(source)[:32]
+        self._awake_holds[key] = probe
+        while len(self._awake_holds) > _MLO_SOURCES_MAX:
+            self._awake_holds.popitem(last=False)
+
+    def drop_awake(self, source: str) -> None:
+        self._awake_holds.pop(str(source)[:32], None)
+
+    def awake(self) -> bool:
+        """Is anybody using this node?"""
+        return bool(self.awake_sources())
+
+    def awake_sources(self) -> list[str]:
+        """Who says so — for an operator asking why this node is spending a
+        probe every hundred milliseconds. Holds first, then the freshest
+        moments: a state outranks a memory."""
+        now = time.monotonic()
+        held = []
+        for name, probe in list(self._awake_holds.items()):
+            try:
+                if probe():
+                    held.append(name)
+            except Exception:
+                pass
+        rows = [(name, now - at) for name, at in self._awake_since.items()
+                if now - at <= _MLO_AWAKE_TTL and name not in held]
+        rows.sort(key=lambda row: row[1])
+        return held + [name for name, _ in rows]
+
+    # -----------------------------------------------------------------------
+    # The keepalive accord
+    # -----------------------------------------------------------------------
+    #
+    # Two nodes state the range of cadences they can work with and both compute
+    # the intersection; nothing is exchanged to settle it (`mlo.accord`). Every
+    # probe then announces when the next one is due, and an announcement outside
+    # the accord is a finding (rule K1) rather than an error — the point of the
+    # window is that it makes "faster than we agreed" a thing that can be said
+    # about a peer at all.
+
+    def peer_announces(self, peer: '_Peer', feature: str) -> bool:
+        """Did this peer *say* it speaks ``feature``?
+
+        The strict twin of :meth:`peer_speaks`, and the difference matters for
+        exactly the planes added after the negotiation existed. There, silence
+        is a peer that has never heard of the name — so sending it the new
+        thing is not "what it received before", it is a message it drops and an
+        answer we then wait for. See `features.SINCE_NEGOTIATION`."""
+        return peer.agreed is not None and feature in peer.agreed
+
+    def keepalive_bounds(self) -> mlo.Bounds:
+        """What this node is willing to be held to on a link: a range per mode.
+
+        Deliberately *not* a function of whether the node is awake. These are
+        what this node will agree to be **asked** for; choosing between the two
+        modes is `_keepalive_interval`, and a sleeping node picks its slow
+        cadence without narrowing what it offers. Bounds that moved with the
+        node's mood would need re-proposing every time somebody opened the
+        console, and every one of those crossings is a window in which the two
+        ends disagree about what was agreed."""
+        return self._ka_bounds
+
+    def set_keepalive_bounds(self, fast_min_ms=None, fast_max_ms=None,
+                             slow_min_ms=None, slow_max_ms=None) -> mlo.Bounds:
+        """Change what this node offers, and tell every link about it.
+
+        The re-proposal goes out **before** anything probes at a new cadence,
+        which is what keeps this from being read as a K1 violation on the far
+        side."""
+        held = self._ka_bounds
+        self._ka_bounds = mlo.clamp_bounds(
+            held.fast_min if fast_min_ms is None else fast_min_ms,
+            held.fast_max if fast_max_ms is None else fast_max_ms,
+            held.slow_min if slow_min_ms is None else slow_min_ms,
+            held.slow_max if slow_max_ms is None else slow_max_ms)
+        for peer in list(self._peers):
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            if peer.ka_window is not None:
+                peer.ka_accord = mlo.accord(self._ka_bounds, peer.ka_window)
+                peer.ka_accord_at = time.monotonic()
+            self._spawn_bounded(self._announce_keepalive(peer))
+        self._wake_keepalive()
+        return self._ka_bounds
+
+    def _accord_with(self, peer: '_Peer') -> mlo.Accord:
+        """The cadences this link is held to.
+
+        A peer that has proposed nothing is a node from before this existed: it
+        keeps the cadence it has always had, in both modes, and can never be
+        bundled — expressed as an accord rather than as a special case, so
+        every caller reads one shape."""
+        if peer.ka_accord is None:
+            classic = int(_LINK_KEEPALIVE_INTERVAL * 1000)
+            return mlo.Accord(fast_ms=classic, slow_ms=classic, fast_ok=False)
+        return peer.ka_accord
+
+    def _idle_ceiling(self, peer: '_Peer') -> float:
+        """The slowest this link may idle before its own medium reaps it, in
+        milliseconds — or ``None`` where the medium has no such timeout.
+
+        The medium declares (`BaseTransport.idle_timeout`), the core divides.
+        Two nodes that agreed to idle at five minutes over a transport that
+        reaps at sixty seconds have agreed to lose the link, and neither of
+        them can see that from the accord: it is a fact about the wire under
+        it. Applied locally rather than folded into the accord for exactly that
+        reason — the two ends may run different transports settings, and each
+        one is right about its own."""
+        try:
+            timeout = peer.transport.idle_timeout()
+        except Exception:
+            return None
+        if not timeout or timeout <= 0:
+            return None
+        return float(timeout) * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
+
+    def _keepalive_interval(self, peer: '_Peer') -> float:
+        """Seconds until this link's next probe. O(1): the role this link plays
+        was decided by `_update_bundles`, on the sweep, not here.
+
+        The two agreed cadences are the two answers and the link's role picks
+        between them. Three things may then only ever make it **slower** — a
+        peer's standing request, this node's own idle floor, the medium's
+        tolerance — and nothing anywhere may make it faster than the pair
+        agreed. That is the property the whole plane rests on, and it is why
+        every step below is a `max` or a bounded `min`."""
+        agreed = self._accord_with(peer)
+        wanted = (agreed.fast_ms if peer.ka_wanted_ms is not None
+                  else agreed.slow_ms)
+        if (peer.ka_told_ms is not None
+                and time.monotonic() - peer.ka_told_at <= _KA_TOLD_TTL):
+            # A request is honoured in **both** modes — "stop probing me so
+            # hard" is worth nothing if striping ignores it — and it lapses on
+            # its own rather than holding for ever. A peer that still wants the
+            # quiet repeats it; the next probe after that announces the fast
+            # cadence again, which is exactly the refusal this protocol
+            # defines. The durable way to not be probed hard is the *declared*
+            # fast range, which no request can override.
+            wanted = max(wanted, peer.ka_told_ms)
+        ceiling = self._idle_ceiling(peer)
+        if ceiling is not None:
+            # Never past what the medium under this link will tolerate, and
+            # never faster than the pair agreed either: the clamp may only ever
+            # take back what the medium cannot afford.
+            wanted = max(agreed.fast_ms, min(wanted, ceiling))
+        return wanted / 1000.0
+
+    def _note_announced_cadence(self, peer: '_Peer', next_ms: int) -> None:
+        """A peer said when its next probe is due. Rules K1 and K2 read this.
+
+        Runs in the receive loop, so it sets one integer and bumps at most one
+        counter — nothing is computed, nothing is sent, nothing is decided."""
+        peer.ka_next_ms = int(next_ms)
+        if peer.ka_accord is None:
+            return          # nothing agreed: there is nothing to be outside of
+        window = peer.ka_accord.window
+        now = time.monotonic()
+        if now - peer.ka_accord_at < _KA_GRACE:
+            return          # the accord just moved; a crossing is not a lie
+        if not mlo.inside(next_ms, window):
+            peer.ka_outside += 1
+            return
+        if peer.ka_asked_ms is None:
+            return
+        if next_ms >= peer.ka_asked_ms:
+            peer.ka_asked_ms = None                 # honoured
+        elif next_ms <= window[0]:
+            # The one refusal the protocol allows: "I want the fast lane back",
+            # said out loud and inside the accord. It cancels the request.
+            peer.ka_asked_ms = None
+        elif now - peer.ka_asked_at >= _KA_GRACE:
+            # Neither the cadence we asked for nor the announcement that
+            # refuses it. Counted once — asking again is what re-arms it.
+            peer.ka_ignored += 1
+            peer.ka_asked_ms = None
+
+    def _ka_negotiation_allowed(self, peer: '_Peer') -> bool:
+        """Per-link valve on the keepalive negotiation plane.
+
+        Every other plane that makes us change what we do on a peer's say-so
+        has one. This one is four bytes in and a change of cadence out, which
+        makes it the cheapest thing here to send and among the more annoying to
+        receive."""
+        now = time.monotonic()
+        for key in [k for k, (_, ws) in self._ka_request_rate.items()
+                    if now - ws > _KA_REQUEST_WINDOW]:
+            del self._ka_request_rate[key]
+        while len(self._ka_request_rate) > _MAX_PEERS:
+            self._ka_request_rate.popitem(last=False)
+        key = self._rate_key(peer)
+        count, started = self._ka_request_rate.get(key, (0, now))
+        if now - started > _KA_REQUEST_WINDOW:
+            count, started = 0, now
+        if count >= _KA_REQUEST_MAX:
+            self._ka_request_rate[key] = (count, started)
+            return False
+        self._ka_request_rate[key] = (count + 1, started)
+        return True
+
+    async def _announce_keepalive(self, peer: '_Peer') -> None:
+        """Tell one link what cadences this node can work with. Never fatal."""
+        if not self.peer_announces(peer, features.KEEPALIVE):
+            return
+        try:
+            await peer.send(Packet.create(
+                KA_PROPOSE, self._id.raw, _BROADCAST_ID,
+                _KA_BOUNDS.pack(*self.keepalive_bounds().as_tuple())))
+        except Exception:
+            pass
+
+    async def _handle_ka_propose(self, peer: '_Peer', packet: Packet) -> None:
+        """A peer states the cadences it can work with.
+
+        Both ends run `mlo.accord` over the same two windows and get the same
+        answer, so there is no acceptance message and no state where one end
+        thinks something was agreed and the other does not."""
+        # Too short is malformed; longer is a newer build saying more than this
+        # one knows how to read. See `_handle_pong`.
+        if len(packet.payload) < _KA_BOUNDS.size:
+            return self._charge_abuse(peer)
+        if not self._ka_negotiation_allowed(peer):
+            return
+        declared = _KA_BOUNDS.unpack_from(packet.payload, 0)
+        if not mlo.well_formed(*declared):
+            # A mode whose floor is not below its ceiling, or a "fast" mode
+            # slower than the "slow" one: claims that cannot be true. Counted
+            # (rule K3) and the proposal dropped — adopting a declaration we
+            # have just called impossible would be the accusation and the
+            # compliance in one breath.
+            peer.ka_impossible += 1
+            return
+        window = mlo.clamp_bounds(*declared)
+        accord = mlo.accord(self.keepalive_bounds(), window)
+        if window == peer.ka_window and accord == peer.ka_accord:
+            return                      # a re-proposal that changed nothing
+        peer.ka_window = window
+        peer.ka_accord = accord
+        peer.ka_accord_at = time.monotonic()
+        # What we were doing may now sit outside what the two of us agreed, and
+        # the peer will judge our next announcement against exactly this. Bring
+        # the next probe in, but never nearer than one full interval: a peer
+        # re-proposing in a loop must not be able to set our probe rate.
+        peer.ka_due = min(peer.ka_due,
+                          peer.ka_accord_at + self._keepalive_interval(peer))
+        self._wake_keepalive()
+
+    async def _handle_ka_request(self, peer: '_Peer', packet: Packet) -> None:
+        """A peer asks this node to slow its probes down on this link.
+
+        **A request can only ever ask for less.** Granting one that asks for
+        more would make a four-byte packet a way to spend somebody else's
+        battery and bandwidth, on a plane that exists precisely to stop that —
+        so a request at or below what we are already doing is dropped, and the
+        peer is told nothing it did not already know."""
+        if len(packet.payload) < _KA_WANTED.size:
+            return self._charge_abuse(peer)     # see `_handle_pong`
+        if not self._ka_negotiation_allowed(peer):
+            return
+        low, high = self._accord_with(peer).window
+        wanted = min(max(int(_KA_WANTED.unpack_from(packet.payload, 0)[0]),
+                         low), high)
+        if wanted <= self._keepalive_interval(peer) * 1000.0:
+            return
+        peer.ka_told_ms = wanted
+        peer.ka_told_at = time.monotonic()
+        self._wake_keepalive()
+
+    async def request_keepalive(self, target: NodeID, wanted_ms: int) -> bool:
+        """Ask a peer to slow its probes on the link we share. Returns whether
+        the request went out.
+
+        Deliberate, never automatic, and that is a design decision rather than
+        an omission: a node that asked automatically would meet a node that
+        automatically takes the fast lane back — one announces the floor, the
+        other asks again — and the pair would spend the link arguing about how
+        often to probe it. Somebody decides, and it is the operator or an app
+        that knows the machine is going to sleep."""
+        peer = self._link_to(target)
+        if peer is None or not self.peer_announces(peer, features.KEEPALIVE):
+            return False
+        low, high = self._accord_with(peer).window
+        wanted = min(max(int(wanted_ms), low), high)
+        try:
+            await peer.send(Packet.create(KA_REQUEST, self._id.raw,
+                                          _BROADCAST_ID,
+                                          _KA_WANTED.pack(wanted)))
+        except Exception:
+            return False
+        peer.ka_asked_ms = wanted
+        peer.ka_asked_at = time.monotonic()
+        return True
+
+    # -----------------------------------------------------------------------
+    # Bundles — two links carrying one node's traffic together
+    # -----------------------------------------------------------------------
+
+    def mlo_active(self) -> bool:
+        """Is this node bundling links at all right now?
+
+        Two switches, and they answer different questions. A *medium* says
+        whether a probe ten times a second is cheap on it (`tcp.mlo`,
+        `udp.mlo`) — a transport that does not declare the option at all can
+        never be bundled, which is the right answer for store-and-forward. The
+        *node* says whether it is awake enough to be worth it."""
+        return self._mlo_always or self.awake()
+
+    def _mlo_medium_ready(self, peer: '_Peer') -> bool:
+        scheme = self._peer_scheme(peer)
+        if not scheme:
+            return False
+        try:
+            return bool(self._transport_manager.setting(scheme, "mlo"))
+        except Exception:
+            return False
+
+    def _mlo_ready_link(self, peer: '_Peer') -> bool:
+        """Could this link ever be a bundle member?
+
+        Everything here is a property of the link itself. Whether there are
+        *two* of them is `_update_bundles`'s question, and whether the node is
+        awake is `mlo_active`'s."""
+        if peer.authenticated_id is None or peer.session is None:
+            return False
+        if peer.relay_only or peer.probation or peer.tarpit_until:
+            return False
+        if isinstance(peer.transport, RelayedTransport):
+            return False        # a tunnelled link has no medium of its own
+        if not self.peer_announces(peer, features.MLO):
+            return False
+        if not self.peer_announces(peer, features.KEEPALIVE):
+            return False        # without the accord there is no fast probe
+        if peer.ka_accord is None or not peer.ka_accord.fast_ok:
+            # No cadence *both* of us would call fast. Bundling anyway would
+            # measure the pair at whatever the slower one tolerates and call it
+            # multi-link operation: fifty probes at twenty seconds is
+            # seventeen minutes of history, so "this link started losing"
+            # arrives long after the traffic did. A node opts out by declaring
+            # a fast range that does not reach the other's, and that opt-out
+            # has to work — it is the whole of "do not drain the other's
+            # battery for something neither of us gets anything from".
+            return False
+        return self._mlo_medium_ready(peer)
+
+    def _forget_bundle(self, peer: '_Peer') -> None:
+        """A link went: drop the bundle it may have been in.
+
+        The next sweep rebuilds it from whatever is left. Dropping it now is
+        what stops a packet being handed to a member that has already gone."""
+        if peer.authenticated_id is not None:
+            self._bundles.pop(peer.authenticated_id, None)
+
+    def _update_bundles(self) -> None:
+        """Re-form every bundle, and set what cadence each link's role calls
+        for. Runs on the keepalive sweep; never raises, never awaits.
+
+        This is the one place candidacy is decided, and that is deliberate:
+        `_keepalive_interval` runs per probe and must stay O(1), so the answer
+        is written onto the link here rather than recomputed there."""
+        try:
+            live: dict[NodeID, list[_Peer]] = {}
+            for peer in self._peers:
+                peer.ka_wanted_ms = None
+                if self._mlo_ready_link(peer):
+                    live.setdefault(peer.authenticated_id, []).append(peer)
+            for target in [t for t in self._bundles if t not in live]:
+                del self._bundles[target]
+            if not self.mlo_active():
+                self._bundles.clear()
+                return
+            now = time.monotonic()
+            for target, links in live.items():
+                if len(links) < 2:
+                    # One link is not a bundle, and must not pay for one.
+                    self._bundles.pop(target, None)
+                    continue
+                bundle = self._bundles.get(target)
+                if bundle is None:
+                    bundle = self._bundles[target] = mlo.Bundle(self._mlo_settings)
+                    while len(self._bundles) > _MAX_PEERS:
+                        self._bundles.popitem(last=False)
+                bundle.update(
+                    mlo.Candidate(key=peer,
+                                  mean_ms=peer.quality.recent_ms(),
+                                  drop=peer.quality.recent_loss(),
+                                  probes=peer.quality.recent_probes())
+                    for peer in links)
+                for peer in links:
+                    # Candidacy, not membership, is what buys the fast probe: a
+                    # link only earns its place by being *measured* at that
+                    # cadence, so waiting for membership first is waiting for
+                    # something that can never happen. The cadence itself is
+                    # the one the pair agreed, never a constant — that is the
+                    # whole point of negotiating a fast *range*.
+                    peer.ka_wanted_ms = self._accord_with(peer).fast_ms
+                    due = now + self._keepalive_interval(peer)
+                    if due < peer.ka_due:
+                        peer.ka_due = due
+        except Exception:
+            pass
+
+    def _stripe(self, peers: list['_Peer'],
+                exclude: '_Peer | None' = None) -> list['_Peer']:
+        """Hand the lead to whichever bundle member's turn it is.
+
+        Sits on the send path of every packet, so the cost when nothing is
+        bundled — the normal case — is one truthiness test on an empty dict.
+
+        Only the *head* is swapped. The rest of the list is what it always was:
+        a fallback order, and the member that lost this turn is still in it.
+
+        ``exclude`` is not optional in spirit: a bundle knows which links go to
+        an identity and knows nothing about where the packet came from, so
+        without it the turn could land on the very link a forward is excluding
+        and send the packet straight back where it came from. The caller
+        already filtered its list; this has to filter the one thing it adds."""
+        if not self._bundles or not peers:
+            return peers
+        head = peers[0]
+        bundle = self._bundles.get(head.authenticated_id)
+        if bundle is None or not bundle.active:
+            return peers
+        turn = bundle.next_key()
+        if (turn is None or turn is head or turn is exclude
+                or turn.session is None):
+            return peers
+        return [turn] + [peer for peer in peers if peer is not turn]
+
+    def mlo_status(self) -> dict:
+        """What multi-link operation is doing, for an operator.
+
+        Every number here is read off the same places the decisions were made,
+        never recomputed: a screen that derives a bundle's skew for itself is a
+        screen that can disagree with the bundle."""
+        bundles = []
+        for target, bundle in self._bundles.items():
+            members = [{"scheme": self._peer_scheme(peer),
+                        "remote": peer.remote_addr,
+                        "mean_ms": (None if peer.quality.recent_ms() is None
+                                    else round(peer.quality.recent_ms(), 1)),
+                        "loss": (None if peer.quality.recent_loss() is None
+                                 else round(peer.quality.recent_loss(), 3)),
+                        "probes": peer.quality.recent_probes(),
+                        # What this link is *actually* probed at, not what the
+                        # accord agreed: the medium under it can take that back
+                        # (`_idle_ceiling`), and a screen showing the agreement
+                        # beside a link running at something else is a label
+                        # that lies. One expression, read off the same function
+                        # the loop schedules with.
+                        "probe_ms": round(self._keepalive_interval(peer) * 1000),
+                        "carrying": peer in bundle.keys}
+                       for peer in list(bundle.keys) + list(bundle.benched())]
+            agreed = next((self._accord_with(peer)
+                           for peer in bundle.keys), None)
+            bundles.append({
+                "node": target.raw.hex(),
+                "pseudo": self.pseudo_of(target),
+                "active": bundle.active,
+                # What the pair agreed. What each link runs at is on the
+                # member row, because the medium may have taken some of it
+                # back and the two are not the same claim.
+                "agreed_fast_ms": agreed.fast_ms if agreed else None,
+                "agreed_slow_ms": agreed.slow_ms if agreed else None,
+                "skew_ms": round(bundle.skew_ms, 2),
+                "reorder_ms": round(bundle.reorder_ms, 2),
+                "members": members,
+            })
+        return {
+            "active": self.mlo_active(),
+            "always": self._mlo_always,
+            "awake": self.awake(),
+            "awake_sources": self.awake_sources(),
+            "skew_ms": self._mlo_settings.skew_ms,
+            "drop_percent": self._mlo_settings.drop_percent,
+            # What this node offers, and what each link actually settled on.
+            # Both, because "why is this link probed every twenty seconds when
+            # I asked for a hundred milliseconds" is answered by the difference
+            # between them and by nothing else.
+            "bounds_ms": dict(zip(("fast_min", "fast_max",
+                                   "slow_min", "slow_max"),
+                                  self.keepalive_bounds().as_tuple())),
+            "bundles": bundles,
+        }
+
+    def set_mlo_always(self, enabled: bool) -> bool:
+        """Keep bundling even when nothing is using this node."""
+        self._mlo_always = bool(enabled)
+        self._update_bundles()
+        self._wake_keepalive()
+        return self._mlo_always
+
+    def set_mlo_settings(self, *, skew_ms: int | None = None,
+                         drop_percent: int | None = None) -> dict:
+        """The two numbers a bundle is judged on."""
+        current = self._mlo_settings
+        skew = current.skew_ms if skew_ms is None else max(1, min(10000, int(skew_ms)))
+        drop = (current.drop_percent if drop_percent is None
+                else max(1, min(100, int(drop_percent))))
+        self._mlo_settings = mlo.MLOSettings(skew_ms=skew, drop_percent=drop)
+        # Existing bundles hold the old settings object; rebuilding them is one
+        # sweep's work and keeps one answer to "what is this bundle judged on".
+        self._bundles.clear()
+        self._update_bundles()
+        return {"skew_ms": skew, "drop_percent": drop}
+
+    def reorder_budget_ms(self, target: NodeID) -> float:
+        """How far out of order packets from ``target`` may arrive.
+
+        Zero when nothing is bundled towards it — which is not a promise of
+        ordered delivery: a mesh routes, and a routed reply has never been
+        obliged to arrive after the one before it. This is how much *this
+        node* is deliberately adding, and an app sizing a buffer wants the
+        number rather than the reassurance."""
+        bundle = self._bundles.get(target)
+        return bundle.reorder_ms if bundle is not None else 0.0
 
     # -- choosing between the links to one node ---------------------------
     #
@@ -3028,6 +3927,9 @@ class MeshNode:
         if peer.authenticated_id is not None and peer.session is not None:
             self._activity.note(
                 "link", "link lost with " + peer.authenticated_id.raw.hex()[:16])
+        # A bundle naming a link that has gone would keep handing it packets
+        # until the next sweep. The sweep rebuilds it from what is left.
+        self._forget_bundle(peer)
         # Whatever we decide below, a link just went: the addresses behind it
         # can come due again, so the retry loop's schedule is stale. The wake
         # only asks it to recompute — `_retry_pass` still applies its own rules
@@ -3519,7 +4421,12 @@ class MeshNode:
             if hint is not None:
                 peers = [hint] + [p for p in peers
                                   if p.authenticated_id != hint.authenticated_id]
-        return peers[:_ROUTE_SEND_FANOUT]
+        # Whichever link leads, a bundle to that identity takes its turn. This
+        # is the one place traffic is spread, so "which link do I send down" has
+        # one answer whether the packet is ours or somebody else's — and
+        # `_authenticated_peers` above has already reduced each identity to its
+        # best link, which is exactly the list a bundle exists to widen again.
+        return self._stripe(peers[:_ROUTE_SEND_FANOUT], exclude)
 
     def _drop_failed_peer(self, peer: _Peer) -> None:
         """A send to this peer failed: take it out of routing *now*, tear the
@@ -4148,6 +5055,11 @@ class MeshNode:
     async def console_snapshot(self) -> dict:
         """A JSON-serialisable view of the node. Built on the event loop, so it
         reads live state atomically (no awaits mid-iteration)."""
+        # Somebody has a page open — which is the whole of what "this node is
+        # being used" means for a console, and the reason this is here rather
+        # than in the console's thread-side marshalling: that runs off the loop,
+        # and the awake book is the node's.
+        self.note_awake("console")
         peers = []
         link_now = time.monotonic()
         for p in self._peers:
@@ -4236,6 +5148,7 @@ class MeshNode:
             "pending_seeks": len(self._pending_seeks),
             "lan_discovery": self._lan_discovery is not None,
             "dynamic_address": self._dynamic_address,
+            "mlo": self.mlo_status(),
             "transport_balance": self._transport_balance,
             "transport_preference": self.transport_preference(),
             "punch_enabled": self._punch_enabled,
@@ -5434,6 +6347,7 @@ class MeshNode:
             await peer.stop()
         except Exception:
             pass
+        self._forget_bundle(peer)
         if peer in self._peers:
             self._peers.remove(peer)
             self._note_change("links")
@@ -6118,29 +7032,68 @@ class MeshNode:
         if peer.authenticated_id != src:
             return
         try:
-            raw_addrs = _decode_addresses(packet.payload)
+            raw_addrs, end = _decode_addresses_at(packet.payload)
         except (ValueError, UnicodeDecodeError):
             return
-        valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
         # An authenticated PING proves recency even when the peer currently has
         # no announceable address. Existing addresses remain as reconnect hints.
-        self._routing.add(src, valid_uris, peer.dsa_pub)
+        #
+        # Most probes now carry no addresses at all (see `ping`), and `add` is
+        # the wrong tool for those: it merges and re-filters everything already
+        # held, which is 4 µs of work to learn nothing. `touch` refreshes the
+        # recency and stops — and falls back to `add` for an id we have never
+        # heard of, because recency about an unknown node is not an entry and
+        # this is the one path that may create one.
+        if raw_addrs:
+            valid_uris = [a for a in raw_addrs if _validate_uri(a) is not None]
+            self._routing.add(src, valid_uris, peer.dsa_pub)
+        elif not self._routing.touch(src):
+            self._routing.add(src, [], peer.dsa_pub)
+        tail = _decode_ping_tail(packet.payload, end)
+        token = None
+        if tail is not None:
+            next_ms, token = tail
+            self._note_announced_cadence(peer, next_ms)
         # The PONG is unconditional: a node with nothing to advertise (a pure
         # client, or a NATted node whose addresses are all unreachable) still
         # deserves its liveness reply — withholding it leaves the sender's RTT
         # bookkeeping stuck forever and makes a healthy link look dead.
-        pong = Packet.create(PONG, self._id.raw, packet.src_id, b"")
+        #
+        # The token is echoed and nothing else: it is the peer's own number
+        # coming back, so answering says nothing we did not just receive.
+        body = b"" if token is None else _KA_TOKEN.pack(token)
+        pong = Packet.create(PONG, self._id.raw, packet.src_id, body)
         await peer.send(pong)
 
     async def _handle_pong(self, peer: _Peer, packet: Packet) -> None:
-        # Timing needs the ping this answers, and only the latest ping is kept.
-        # Liveness needs no such thing: an answer that arrived after the next
-        # probe went out has no round trip to measure and is still proof the
-        # link carries traffic both ways. Dropping it entirely — which is what
-        # used to happen — makes a link slower than the keepalive interval look
+        # Timing needs the ping this answers. A tokened answer names its own
+        # probe, which is the only way to measure anything at a cadence faster
+        # than the round trip; an untokened one can only be matched against the
+        # latest probe, which is what this always did.
+        #
+        # Liveness needs neither: an answer that arrived after the next probe
+        # went out has no round trip to measure and is still proof the link
+        # carries traffic both ways. Dropping it entirely — which is what used
+        # to happen — makes a link slower than the keepalive interval look
         # exactly like a dead one.
+        now = time.monotonic()
+        if len(packet.payload) >= _KA_TOKEN.size:
+            # At least a token: read one and ignore whatever follows. **Too
+            # short is malformed; longer than we understand is a newer build.**
+            # Charging the second is precisely what the capability negotiation
+            # exists to stop — it would report every node running tomorrow's
+            # code — and it is the same rule the PING trailer already follows.
+            rtt = peer.quality.answered(
+                _KA_TOKEN.unpack_from(packet.payload, 0)[0], now)
+            if rtt is not None:
+                peer.last_rtt = rtt
+                peer.ping_sent_at = None
+            return
+        if packet.payload:
+            # Something, but not enough to be a token. The message is not there.
+            return self._charge_abuse(peer)
         if peer.ping_sent_at is not None:
-            peer.last_rtt = max(0.0, time.monotonic() - peer.ping_sent_at)
+            peer.last_rtt = max(0.0, now - peer.ping_sent_at)
             peer.quality.on_pong(peer.last_rtt)
             peer.ping_sent_at = None
         else:
@@ -8247,6 +9200,12 @@ class MeshNode:
             # Stripping can only ever take away an optional plane, never a check,
             # which is why nothing security-critical is negotiable.
             self._spawn_bounded(self._announce_capabilities(peer))
+            # …and what cadences we can probe this link on. It goes out here,
+            # once, because the window is a property of this node and not of
+            # its mood: the only thing that re-proposes is an operator moving
+            # it (`set_keepalive_bounds`), and that re-proposal leaves before
+            # anything probes at the new rate.
+            self._spawn_bounded(self._announce_keepalive(peer))
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps
             self._schedule_release_sync(peer)  # …and on known releases
             self._schedule_pseudo_sync(peer)   # …and on who is called what
@@ -8359,6 +9318,12 @@ class MeshNode:
             # Stripping can only ever take away an optional plane, never a check,
             # which is why nothing security-critical is negotiable.
             self._spawn_bounded(self._announce_capabilities(peer))
+            # …and what cadences we can probe this link on. It goes out here,
+            # once, because the window is a property of this node and not of
+            # its mood: the only thing that re-proposes is an operator moving
+            # it (`set_keepalive_bounds`), and that re-proposal leaves before
+            # anything probes at the new rate.
+            self._spawn_bounded(self._announce_keepalive(peer))
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps
             self._schedule_release_sync(peer)  # …and on known releases
             self._schedule_pseudo_sync(peer)   # …and on who is called what
@@ -8399,8 +9364,22 @@ class MeshNode:
         theirs = features.decode(packet.payload)
         if theirs is None:
             return self._charge_abuse(peer)
+        changed = peer.agreed
         peer.features = theirs
         peer.agreed = features.agree(theirs)
+        # This is the moment a link can first be known to be bundleable: the
+        # handshake proved who is there, and only this record says what it can
+        # speak. Re-forming here rather than waiting for the sweep is what makes
+        # a second link start being measured within a probe instead of within
+        # twenty seconds.
+        #
+        # Only for a link that has authenticated, and only when the record
+        # actually said something new. This handler is reachable pre-auth by
+        # design, so an unauthenticated peer re-announcing in a loop would
+        # otherwise buy a walk of every link and a keepalive wake per packet.
+        if peer.authenticated_id is not None and peer.agreed != changed:
+            self._update_bundles()
+            self._wake_keepalive()
 
     def peer_speaks(self, peer: '_Peer', feature: str) -> bool:
         """May we use ``feature`` with this peer?
@@ -8867,6 +9846,9 @@ class MeshNode:
                     found_self=peer.found_self,
                     answers_judged=peer.answers_judged,
                     answers_disjoint=peer.answers_disjoint,
+                    ka_outside=peer.ka_outside,
+                    ka_ignored=peer.ka_ignored,
+                    ka_impossible=peer.ka_impossible,
                 )
                 for peer in self._peers
                 if peer.authenticated_id is not None and not peer.tarpit_until
@@ -9639,6 +10621,8 @@ _HANDLERS = {
     CERT_REVOKE:       MeshNode._handle_cert_revoke,
     ABUSE_REPORT:      MeshNode._handle_abuse_report,
     CAPABILITIES:      MeshNode._handle_capabilities,
+    KA_PROPOSE:        MeshNode._handle_ka_propose,
+    KA_REQUEST:        MeshNode._handle_ka_request,
 }
 
 # Which plane of the protocol each message belongs to — the map rule C1 reads.
@@ -9662,4 +10646,5 @@ _MESSAGE_PLANE = {
     CERT_RENEW: features.RENEW, CERT_RENEWED: features.RENEW,
     CERT_REVOKE: features.REVOKE,
     ABUSE_REPORT: features.ABUSE,
+    KA_PROPOSE: features.KEEPALIVE, KA_REQUEST: features.KEEPALIVE,
 }

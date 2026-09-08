@@ -29,6 +29,12 @@ cryptography; relays never see the content.
 - **Quick join** — a 34-character string (or a QR code you can scan with a
   camera) carrying the address and a single-use code, issued by a publicly
   reachable node.
+- **Multi-link operation** — a node reached over two media at once (a LAN
+  address and a punched UDP path, IPv4 and IPv6) can carry one peer's traffic
+  down *both*, in turn, instead of leaving one idle. Off by default and ticked
+  per medium: it costs a probe every hundred milliseconds on each bundled link,
+  and it runs only while somebody is using the node. A link that starts losing
+  packets is benched in seconds and measures its own way back.
 - **Web management console** + **data connector** for plugging apps in.
 - **Application identity (SSO)** — an app uses the node's mesh identity to
   authenticate its peers: signed assertions, scoped, fresh, single-use.

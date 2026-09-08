@@ -8,7 +8,7 @@ windows in memory.
 """
 import os
 import time
-from collections import deque
+from collections import OrderedDict, deque
 
 
 class Counters:
@@ -79,12 +79,39 @@ class LinkQuality:
     high lifetime share — a thousand good probes outvote the dead ones — so the
     ratio alone can never notice that it stopped answering.
 
+    A third reading sits beside those two, and it exists because neither of
+    them can answer "is this link fit to carry half of somebody's traffic right
+    now" (see `mlo.py`). The lifetime share is a whole history and moves too
+    slowly; the run since the last answer only ever separates *dead* from
+    alive. So the last :data:`WINDOW` probes are also kept as **outcomes** —
+    each one answered, with its round trip, or lost — and `recent_loss` /
+    `recent_ms` read that window. One ring, so a link's probe history has one
+    home: a second book kept beside this one is a second number that can
+    disagree with it.
+
+    Matching an answer to *its own* probe is what makes the window honest.
+    ``on_ping``/``on_pong`` keep only the latest probe, which is right at a
+    twenty-second cadence and useless at a hundred milliseconds: with several
+    probes in flight, every answer but one arrives unmatched. ``sent`` and
+    ``answered`` take a token the peer echoes, so each probe is resolved
+    individually — and one that is never resolved is charged as a loss by
+    ``expire`` rather than left pending for ever.
+
     Every method is O(1) and called at most once per liveness probe, never on
     the packet path."""
 
-    __slots__ = ("_samples", "pings", "pongs", "last", "since_pong")
+    __slots__ = ("_samples", "pings", "pongs", "last", "since_pong",
+                 "answered_at", "_window", "_pending")
 
     HISTORY = 32
+    #: Probes the *recent* window is judged over. Fifty, because that is the
+    #: sample MLO's skew and drop share are defined on — one number, stated
+    #: once, so the console and the bundle cannot read two different windows.
+    WINDOW = 50
+    #: Probes that may be in flight at once on one link. At a 100 ms cadence
+    #: and a deadline of a few seconds a healthy link holds a handful; this is
+    #: the bound that keeps a link answering nothing from growing the table.
+    MAX_PENDING = 64
 
     def __init__(self) -> None:
         self._samples: deque = deque(maxlen=self.HISTORY)
@@ -92,6 +119,19 @@ class LinkQuality:
         self.pongs = 0
         self.last: float | None = None
         self.since_pong = 0
+        # When this link last answered anything, monotonic. The run above says
+        # how many probes went unanswered; only a clock says how *long* that
+        # is, and once a cadence is negotiable those two stopped being the same
+        # question (see `node._reap_silent_links`). Starts at the link's birth:
+        # a link that has never answered has been silent since it opened, which
+        # is exactly what we want to measure.
+        self.answered_at = time.monotonic()
+        # Outcome per probe: the round trip, or None for one that never came
+        # back. Bounded by construction.
+        self._window: deque = deque(maxlen=self.WINDOW)
+        # token -> when it went out. Insertion order is time order, so expiry
+        # stops at the first probe still young enough.
+        self._pending: OrderedDict = OrderedDict()
 
     def on_ping(self) -> None:
         self.pings += 1
@@ -100,6 +140,7 @@ class LinkQuality:
     def on_pong(self, rtt: float) -> None:
         self.pongs += 1
         self.since_pong = 0
+        self.answered_at = time.monotonic()
         self.last = rtt
         self._samples.append(rtt)
 
@@ -112,6 +153,80 @@ class LinkQuality:
         one. Counting it as silence would cut the slow one."""
         self.pongs += 1
         self.since_pong = 0
+        self.answered_at = time.monotonic()
+
+    # -- probes matched to their own answer -------------------------------
+
+    def sent(self, token, at: float) -> None:
+        """One probe went out, under a token the peer will echo back."""
+        self.on_ping()
+        self._pending[token] = at
+        while len(self._pending) > self.MAX_PENDING:
+            # Overtaken by that many later probes: whatever happened to it, it
+            # is not coming back in time to mean anything.
+            self._pending.popitem(last=False)
+            self._window.append(None)
+
+    def answered(self, token, at: float) -> float | None:
+        """A probe came back. Returns its round trip, or ``None`` when the
+        answer matched no probe still in flight.
+
+        An unmatched answer is not a fault and never a loss: it is a probe this
+        link already gave up on, or a peer too old to echo the token. It is
+        still proof the link carries traffic both ways, so it resets the
+        silence run exactly as a matched one does."""
+        sent_at = self._pending.pop(token, None) if token is not None else None
+        if sent_at is None:
+            self.on_answer()
+            return None
+        rtt = max(0.0, at - sent_at)
+        self.on_pong(rtt)
+        self._window.append(rtt)
+        return rtt
+
+    def expire(self, now: float, after: float) -> int:
+        """Charge every probe older than ``after`` as lost. Returns how many.
+
+        Without this a probe nobody answers stays pending for ever and the
+        window never learns that the link is losing anything — the loss would
+        only ever show up as an *absence* of samples, which reads as a quiet
+        link rather than a broken one."""
+        lost = 0
+        for token, at in list(self._pending.items()):
+            if now - at <= after:
+                break          # insertion order is time order
+            del self._pending[token]
+            self._window.append(None)
+            lost += 1
+        return lost
+
+    def recent_ms(self) -> float | None:
+        """Mean round trip over the recent window, in milliseconds.
+
+        ``None`` while the window holds no answered probe — an unmeasured link
+        is unmeasured, never zero."""
+        answered = [rtt for rtt in self._window if rtt is not None]
+        if not answered:
+            return None
+        return sum(answered) / len(answered) * 1000.0
+
+    def recent_loss(self, minimum: int = 2) -> float | None:
+        """Share of the recent window that never came back, 0..1.
+
+        ``None`` below ``minimum`` outcomes: a link with two probes behind it
+        has not proved anything either way, and treating that as zero loss is
+        how an unproven link gets handed half of somebody's traffic."""
+        if len(self._window) < max(1, int(minimum)):
+            return None
+        lost = sum(1 for rtt in self._window if rtt is None)
+        return lost / len(self._window)
+
+    def recent_probes(self) -> int:
+        """How many outcomes the recent window actually holds."""
+        return len(self._window)
+
+    def in_flight(self) -> int:
+        return len(self._pending)
 
     @property
     def samples(self) -> list:
@@ -147,6 +262,13 @@ class LinkQuality:
             "probes": self.pings,
             "unanswered": self.since_pong,
             "samples_ms": [ms(value) for value in samples],
+            # The window MLO judges on, named for what it is so it can never be
+            # read as the lifetime figure above it.
+            "recent_ms": (None if self.recent_ms() is None
+                          else round(self.recent_ms(), 1)),
+            "recent_loss": (None if self.recent_loss() is None
+                            else round(self.recent_loss(), 3)),
+            "recent_probes": self.recent_probes(),
         }
 
 
