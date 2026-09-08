@@ -265,6 +265,27 @@ INDEX_HTML = """<!doctype html>
                   a link at the threshold does not flap in and out on one probe.</span>
                 <input id="mlo-drop" type="number" min="1" max="100" step="1"></label>
             </div>
+            <hr>
+            <p class="muted small">What this node agrees to be <em>asked</em> for, one range
+              per mode. Two nodes take the fastest floor both offered, so raising a floor here
+              is an opt-out no peer can talk back down — and a peer whose fast range does not
+              reach this one gets no striping rather than one of the two paying for the
+              other&rsquo;s idea of it. Nothing a peer sends lowers either number.</p>
+            <div class="form-grid">
+              <label class="field" for="ka-fast-min"><span>Fastest, ever</span>
+                <span class="hint">The fastest this node will be probed, striping or not.</span>
+                <input id="ka-fast-min" type="number" min="50" max="600000" step="10"></label>
+              <label class="field" for="ka-fast-max"><span>Slowest still &ldquo;fast&rdquo;</span>
+                <span class="hint">Beyond this, striping is not worth it to this node.</span>
+                <input id="ka-fast-max" type="number" min="50" max="600000" step="10"></label>
+              <label class="field" for="ka-slow-min"><span>Fastest when idle</span>
+                <span class="hint">With nothing happening, no more often than this.</span>
+                <input id="ka-slow-min" type="number" min="50" max="600000" step="1000"></label>
+              <label class="field" for="ka-slow-max"><span>Slowest when idle</span>
+                <span class="hint">Past this the link stops being believable. Kept under the
+                  medium&rsquo;s own timeout whatever is agreed.</span>
+                <input id="ka-slow-max" type="number" min="50" max="600000" step="1000"></label>
+            </div>
             <div class="table-wrap"><table>
               <thead><tr><th>Node</th><th>Link</th><th class="num">Round trip</th>
                 <th class="num">Loss</th><th>State</th><th class="num">Reordering</th></tr></thead>
@@ -2330,7 +2351,12 @@ function paintBalance(state){
 // Every number here comes off `state.mlo`, which the node built from the same
 // places the decisions were made. A page that works out a bundle's skew for
 // itself is a page that can disagree with the bundle.
+function msRange(value){
+  if(value == null) return "—";
+  return value >= 1000 ? (value / 1000) + " s" : value + " ms";
+}
 function paintMLO(state){
+  const ms = msRange;
   const mlo = state.mlo || {};
   const bundles = mlo.bundles || [];
   const carrying = bundles.filter((row) => row.active).length;
@@ -2338,14 +2364,18 @@ function paintMLO(state){
     ["Bundles carrying", carrying],
     ["State", mlo.active ? (mlo.always ? "On (always)" : "On (in use)") : "Asleep"],
     ["Woken by", (mlo.awake_sources || []).join(", ") || "nothing"],
-    ["Keepalive window", (mlo.keepalive_window_ms || []).join("–") + " ms"],
+    ["Idle probe", ms((mlo.bounds_ms || {}).slow_min) + "–" + ms((mlo.bounds_ms || {}).slow_max)],
+    ["Striping probe", ms((mlo.bounds_ms || {}).fast_min) + "–" + ms((mlo.bounds_ms || {}).fast_max)],
   ];
   setHTML("mlo-summary", summary.map(([key, value]) =>
     '<div class="stat sm"><span class="v">' + esc(value) +
     '</span><span class="k">' + esc(key) + "</span></div>").join(""));
   $("mlo-always").textContent = "Always on: " + (mlo.always ? "yes" : "no");
   // Never yank a number out from under somebody typing it.
-  for(const [id, value] of [["mlo-skew", mlo.skew_ms], ["mlo-drop", mlo.drop_percent]])
+  const bounds = mlo.bounds_ms || {};
+  for(const [id, value] of [["mlo-skew", mlo.skew_ms], ["mlo-drop", mlo.drop_percent],
+                            ["ka-fast-min", bounds.fast_min], ["ka-fast-max", bounds.fast_max],
+                            ["ka-slow-min", bounds.slow_min], ["ka-slow-max", bounds.slow_max]])
     if(document.activeElement !== $(id) && value != null) $(id).value = value;
   const rows = [];
   for(const bundle of bundles){
@@ -2356,7 +2386,9 @@ function paintMLO(state){
         "<td>" + esc(member.remote || member.scheme || "?") + "</td>" +
         '<td class="num">' + (member.mean_ms == null ? "—" : esc(member.mean_ms) + " ms") + "</td>" +
         '<td class="num">' + (member.loss == null ? "—" : esc(Math.round(member.loss * 100)) + "%") + "</td>" +
-        "<td>" + (member.carrying ? "carrying" : "benched") + "</td>" +
+        "<td>" + (member.carrying ? "carrying" : "benched") +
+          '<span class="muted"> · probed every ' + esc(msRange(member.probe_ms)) +
+          "</span></td>" +
         '<td class="num">' + (index ? "" : esc(bundle.reorder_ms) + " ms") + "</td></tr>");
     });
   }
@@ -2365,7 +2397,11 @@ function paintMLO(state){
 }
 $("mlo-always").addEventListener("click", () => STATE &&
   post("/api/mlo", {always: !((STATE.mlo || {}).always)}, "Multi-link operation updated"));
-for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"]])
+for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
+                          ["ka-fast-min", "keepalive_fast_min"],
+                          ["ka-fast-max", "keepalive_fast_max"],
+                          ["ka-slow-min", "keepalive_slow_min"],
+                          ["ka-slow-max", "keepalive_slow_max"]])
   $(id).addEventListener("change", async (event) => {
     const value = Number(event.target.value);
     try{

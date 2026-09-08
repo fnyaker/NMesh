@@ -359,6 +359,12 @@ _KA_GRACE = 10.0
 # and one of the more annoying to receive.
 _KA_REQUEST_WINDOW = 60.0
 _KA_REQUEST_MAX = 8
+# How long a cadence request holds before it lapses. A request is a "go quiet
+# for now", not a setting: the durable way for a node not to be probed hard is
+# the fast range it *declares*, which no request can override. Long enough that
+# repeating it costs nothing against the meter above, short enough that a peer
+# that went away does not leave a link sleeping for ever.
+_KA_TOLD_TTL = 300.0
 # How long a sign of somebody actually using this node keeps it awake for MLO.
 # Long enough that a console left open on a dashboard does not flap, short
 # enough that a laptop shut at six is back to one probe per link per twenty
@@ -906,7 +912,10 @@ def _decode_addresses(data: bytes) -> list[str]:
 # every probe charged as a loss. See `MeshNode.peer_announces`.
 _KA_TAIL = struct.Struct("!IQ")          # next_ms, token
 _KA_TOKEN = struct.Struct("!Q")
-_KA_WINDOW = struct.Struct("!II")        # min_ms, max_ms — a KA_PROPOSE body
+# fast_min, fast_max, slow_min, slow_max — a KA_PROPOSE body. Four numbers,
+# not two: see `mlo.Bounds` for why a single range leaves the ceiling as a
+# lever anybody can pull.
+_KA_BOUNDS = struct.Struct("!IIII")
 _KA_WANTED = struct.Struct("!I")         # a KA_REQUEST body
 
 
@@ -1379,10 +1388,13 @@ class _Peer:
         self.ka_next_ms: int | None = None
         self.ka_asked_ms: int | None = None
         self.ka_asked_at: float = 0.0
-        # What the far end asked *us* for, honoured until it asks again. Only
-        # ever slower than what we were doing — a request can never make this
-        # node spend more (see `_handle_ka_request`).
+        # What the far end asked *us* for, and when. Only ever slower than what
+        # we were doing — a request can never make this node spend more (see
+        # `_handle_ka_request`) — and it lapses at `_KA_TOLD_TTL` rather than
+        # holding for ever: a request is a "go quiet for now", and a peer that
+        # still wants it says so again.
         self.ka_told_ms: int | None = None
+        self.ka_told_at: float = 0.0
         # When this link is next probed. A fresh one is due at the classic
         # interval, exactly as it was when one interval served every link; what
         # moves it in is the sweep deciding this link has a twin worth
@@ -1905,9 +1917,9 @@ class MeshNode:
         # worth making while the node is actually being used.
         self._awake_since: OrderedDict[str, float] = OrderedDict()
         self._awake_holds: OrderedDict[str, object] = OrderedDict()
-        # The window this node offers when two of them negotiate a cadence.
-        self._ka_min_ms: int = mlo.FAST_MS
-        self._ka_max_ms: int = int(_LINK_KEEPALIVE_INTERVAL * 1000)
+        # What this node offers when two of them negotiate their cadences: a
+        # range per mode, four numbers (`mlo.Bounds`).
+        self._ka_bounds = mlo.Bounds()
         # Cadence requests, metered per link like every other plane that costs
         # the receiver something.
         self._ka_request_rate: OrderedDict[bytes, tuple] = OrderedDict()
@@ -2751,9 +2763,9 @@ class MeshNode:
         Two clocks, and keeping them apart is the shape of this loop.
 
         - **Each link has its own due time.** A bundle member needs a probe ten
-          times a second (`mlo.FAST_MS`) and every other link must go on costing
-          one wake-up every twenty seconds. One interval could serve either of
-          those, never both.
+          times a second (the accord's fast cadence) and every other link must go
+          on costing one wake-up every twenty seconds. One interval could serve
+          either of those, never both.
         - **The sweep stays on `_LINK_KEEPALIVE_INTERVAL`.** Reaping the silent,
           expiring tarpits, re-forming the bundles and judging behaviour are
           per-*node* work with nothing to do with how fast one link is probed,
@@ -3013,62 +3025,102 @@ class MeshNode:
         answer we then wait for. See `features.SINCE_NEGOTIATION`."""
         return peer.agreed is not None and feature in peer.agreed
 
-    def keepalive_window(self) -> tuple[int, int]:
-        """The cadences this node is willing to be held to on a link.
+    def keepalive_bounds(self) -> mlo.Bounds:
+        """What this node is willing to be held to on a link: a range per mode.
 
-        Deliberately *not* a function of whether the node is awake. The floor
-        is what this node will agree to be **asked** for, not what it chooses
-        to do: choosing is `_keepalive_interval`, and a sleeping node picks the
-        slow end of its own window without narrowing it. A window that moved
-        with the node's mood would need re-proposing every time somebody opened
-        the console, and every one of those crossings is a window in which the
-        two ends disagree about what was agreed."""
-        return mlo.clamp_window(self._ka_min_ms, self._ka_max_ms)
+        Deliberately *not* a function of whether the node is awake. These are
+        what this node will agree to be **asked** for; choosing between the two
+        modes is `_keepalive_interval`, and a sleeping node picks its slow
+        cadence without narrowing what it offers. Bounds that moved with the
+        node's mood would need re-proposing every time somebody opened the
+        console, and every one of those crossings is a window in which the two
+        ends disagree about what was agreed."""
+        return self._ka_bounds
 
-    def set_keepalive_window(self, min_ms: int, max_ms: int) -> tuple[int, int]:
+    def set_keepalive_bounds(self, fast_min_ms=None, fast_max_ms=None,
+                             slow_min_ms=None, slow_max_ms=None) -> mlo.Bounds:
         """Change what this node offers, and tell every link about it.
 
         The re-proposal goes out **before** anything probes at a new cadence,
         which is what keeps this from being read as a K1 violation on the far
         side."""
-        self._ka_min_ms, self._ka_max_ms = mlo.clamp_window(min_ms, max_ms)
-        window = self.keepalive_window()
+        held = self._ka_bounds
+        self._ka_bounds = mlo.clamp_bounds(
+            held.fast_min if fast_min_ms is None else fast_min_ms,
+            held.fast_max if fast_max_ms is None else fast_max_ms,
+            held.slow_min if slow_min_ms is None else slow_min_ms,
+            held.slow_max if slow_max_ms is None else slow_max_ms)
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
                 continue
             if peer.ka_window is not None:
-                peer.ka_accord = mlo.accord(window, peer.ka_window)
+                peer.ka_accord = mlo.accord(self._ka_bounds, peer.ka_window)
                 peer.ka_accord_at = time.monotonic()
             self._spawn_bounded(self._announce_keepalive(peer))
         self._wake_keepalive()
-        return window
+        return self._ka_bounds
 
-    def _accord_with(self, peer: '_Peer') -> tuple[int, int]:
-        """The window this link is held to.
+    def _accord_with(self, peer: '_Peer') -> mlo.Accord:
+        """The cadences this link is held to.
 
-        A peer that has proposed nothing is a node from before this existed,
-        and it keeps the cadence it has always had — expressed as an accord of
-        one value so every caller reads the same shape."""
+        A peer that has proposed nothing is a node from before this existed: it
+        keeps the cadence it has always had, in both modes, and can never be
+        bundled — expressed as an accord rather than as a special case, so
+        every caller reads one shape."""
         if peer.ka_accord is None:
             classic = int(_LINK_KEEPALIVE_INTERVAL * 1000)
-            return classic, classic
+            return mlo.Accord(fast_ms=classic, slow_ms=classic, fast_ok=False)
         return peer.ka_accord
+
+    def _idle_ceiling(self, peer: '_Peer') -> float:
+        """The slowest this link may idle before its own medium reaps it, in
+        milliseconds — or ``None`` where the medium has no such timeout.
+
+        The medium declares (`BaseTransport.idle_timeout`), the core divides.
+        Two nodes that agreed to idle at five minutes over a transport that
+        reaps at sixty seconds have agreed to lose the link, and neither of
+        them can see that from the accord: it is a fact about the wire under
+        it. Applied locally rather than folded into the accord for exactly that
+        reason — the two ends may run different transports settings, and each
+        one is right about its own."""
+        try:
+            timeout = peer.transport.idle_timeout()
+        except Exception:
+            return None
+        if not timeout or timeout <= 0:
+            return None
+        return float(timeout) * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
 
     def _keepalive_interval(self, peer: '_Peer') -> float:
         """Seconds until this link's next probe. O(1): the role this link plays
         was decided by `_update_bundles`, on the sweep, not here.
 
-        A bundle candidate takes the accord's floor, and it takes it back from
-        a peer that asked us to slow down. That is legitimate precisely
-        *because it is announced*: the very next probe carries the floor as its
-        `next`, which is the one refusal this protocol defines."""
-        low, high = self._accord_with(peer)
-        if peer.ka_wanted_ms is not None:
-            return min(max(peer.ka_wanted_ms, low), high) / 1000.0
-        wanted = int(_LINK_KEEPALIVE_INTERVAL * 1000)
-        if peer.ka_told_ms is not None:
+        The two agreed cadences are the two answers and the link's role picks
+        between them. Three things may then only ever make it **slower** — a
+        peer's standing request, this node's own idle floor, the medium's
+        tolerance — and nothing anywhere may make it faster than the pair
+        agreed. That is the property the whole plane rests on, and it is why
+        every step below is a `max` or a bounded `min`."""
+        agreed = self._accord_with(peer)
+        wanted = (agreed.fast_ms if peer.ka_wanted_ms is not None
+                  else agreed.slow_ms)
+        if (peer.ka_told_ms is not None
+                and time.monotonic() - peer.ka_told_at <= _KA_TOLD_TTL):
+            # A request is honoured in **both** modes — "stop probing me so
+            # hard" is worth nothing if striping ignores it — and it lapses on
+            # its own rather than holding for ever. A peer that still wants the
+            # quiet repeats it; the next probe after that announces the fast
+            # cadence again, which is exactly the refusal this protocol
+            # defines. The durable way to not be probed hard is the *declared*
+            # fast range, which no request can override.
             wanted = max(wanted, peer.ka_told_ms)
-        return min(max(wanted, low), high) / 1000.0
+        ceiling = self._idle_ceiling(peer)
+        if ceiling is not None:
+            # Never past what the medium under this link will tolerate, and
+            # never faster than the pair agreed either: the clamp may only ever
+            # take back what the medium cannot afford.
+            wanted = max(agreed.fast_ms, min(wanted, ceiling))
+        return wanted / 1000.0
 
     def _note_announced_cadence(self, peer: '_Peer', next_ms: int) -> None:
         """A peer said when its next probe is due. Rules K1 and K2 read this.
@@ -3076,20 +3128,20 @@ class MeshNode:
         Runs in the receive loop, so it sets one integer and bumps at most one
         counter — nothing is computed, nothing is sent, nothing is decided."""
         peer.ka_next_ms = int(next_ms)
-        accord = peer.ka_accord
-        if accord is None:
+        if peer.ka_accord is None:
             return          # nothing agreed: there is nothing to be outside of
+        window = peer.ka_accord.window
         now = time.monotonic()
         if now - peer.ka_accord_at < _KA_GRACE:
             return          # the accord just moved; a crossing is not a lie
-        if not mlo.inside(next_ms, accord):
+        if not mlo.inside(next_ms, window):
             peer.ka_outside += 1
             return
         if peer.ka_asked_ms is None:
             return
         if next_ms >= peer.ka_asked_ms:
             peer.ka_asked_ms = None                 # honoured
-        elif next_ms <= accord[0]:
+        elif next_ms <= window[0]:
             # The one refusal the protocol allows: "I want the fast lane back",
             # said out loud and inside the accord. It cancels the request.
             peer.ka_asked_ms = None
@@ -3127,10 +3179,9 @@ class MeshNode:
         if not self.peer_announces(peer, features.KEEPALIVE):
             return
         try:
-            low, high = self.keepalive_window()
-            await peer.send(Packet.create(KA_PROPOSE, self._id.raw,
-                                          _BROADCAST_ID,
-                                          _KA_WINDOW.pack(low, high)))
+            await peer.send(Packet.create(
+                KA_PROPOSE, self._id.raw, _BROADCAST_ID,
+                _KA_BOUNDS.pack(*self.keepalive_bounds().as_tuple())))
         except Exception:
             pass
 
@@ -3140,20 +3191,21 @@ class MeshNode:
         Both ends run `mlo.accord` over the same two windows and get the same
         answer, so there is no acceptance message and no state where one end
         thinks something was agreed and the other does not."""
-        if len(packet.payload) != _KA_WINDOW.size:
+        if len(packet.payload) != _KA_BOUNDS.size:
             return self._charge_abuse(peer)
         if not self._ka_negotiation_allowed(peer):
             return
-        low, high = _KA_WINDOW.unpack(packet.payload)
-        if not mlo.well_formed(low, high):
-            # A floor above its own ceiling is a claim that cannot be true. It
-            # is counted (rule K3) and the proposal is dropped: adopting a
-            # window we have just called impossible would be the accusation and
-            # the compliance in one breath.
+        declared = _KA_BOUNDS.unpack(packet.payload)
+        if not mlo.well_formed(*declared):
+            # A mode whose floor is not below its ceiling, or a "fast" mode
+            # slower than the "slow" one: claims that cannot be true. Counted
+            # (rule K3) and the proposal dropped — adopting a declaration we
+            # have just called impossible would be the accusation and the
+            # compliance in one breath.
             peer.ka_impossible += 1
             return
-        window = mlo.clamp_window(low, high)
-        accord = mlo.accord(self.keepalive_window(), window)
+        window = mlo.clamp_bounds(*declared)
+        accord = mlo.accord(self.keepalive_bounds(), window)
         if window == peer.ka_window and accord == peer.ka_accord:
             return                      # a re-proposal that changed nothing
         peer.ka_window = window
@@ -3179,11 +3231,12 @@ class MeshNode:
             return self._charge_abuse(peer)
         if not self._ka_negotiation_allowed(peer):
             return
-        low, high = self._accord_with(peer)
+        low, high = self._accord_with(peer).window
         wanted = min(max(int(_KA_WANTED.unpack(packet.payload)[0]), low), high)
         if wanted <= self._keepalive_interval(peer) * 1000.0:
             return
         peer.ka_told_ms = wanted
+        peer.ka_told_at = time.monotonic()
         self._wake_keepalive()
 
     async def request_keepalive(self, target: NodeID, wanted_ms: int) -> bool:
@@ -3199,7 +3252,7 @@ class MeshNode:
         peer = self._link_to(target)
         if peer is None or not self.peer_announces(peer, features.KEEPALIVE):
             return False
-        low, high = self._accord_with(peer)
+        low, high = self._accord_with(peer).window
         wanted = min(max(int(wanted_ms), low), high)
         try:
             await peer.send(Packet.create(KA_REQUEST, self._id.raw,
@@ -3250,13 +3303,15 @@ class MeshNode:
             return False
         if not self.peer_announces(peer, features.KEEPALIVE):
             return False        # without the accord there is no fast probe
-        if peer.ka_accord is None or peer.ka_accord[0] > mlo.FAST_MS:
-            # A link nobody has agreed a fast cadence on would be measured at
-            # the classic twenty seconds and called a bundle member on the
-            # strength of it: fifty probes is then seventeen minutes of
-            # history, and "this link started losing" arrives long after the
-            # traffic did. Either end raising its floor is how a node opts
-            # out, and it must be an opt-out that works.
+        if peer.ka_accord is None or not peer.ka_accord.fast_ok:
+            # No cadence *both* of us would call fast. Bundling anyway would
+            # measure the pair at whatever the slower one tolerates and call it
+            # multi-link operation: fifty probes at twenty seconds is
+            # seventeen minutes of history, so "this link started losing"
+            # arrives long after the traffic did. A node opts out by declaring
+            # a fast range that does not reach the other's, and that opt-out
+            # has to work — it is the whole of "do not drain the other's
+            # battery for something neither of us gets anything from".
             return False
         return self._mlo_medium_ready(peer)
 
@@ -3307,8 +3362,10 @@ class MeshNode:
                     # Candidacy, not membership, is what buys the fast probe: a
                     # link only earns its place by being *measured* at that
                     # cadence, so waiting for membership first is waiting for
-                    # something that can never happen.
-                    peer.ka_wanted_ms = mlo.FAST_MS
+                    # something that can never happen. The cadence itself is
+                    # the one the pair agreed, never a constant — that is the
+                    # whole point of negotiating a fast *range*.
+                    peer.ka_wanted_ms = self._accord_with(peer).fast_ms
                     due = now + self._keepalive_interval(peer)
                     if due < peer.ka_due:
                         peer.ka_due = due
@@ -3357,12 +3414,26 @@ class MeshNode:
                         "loss": (None if peer.quality.recent_loss() is None
                                  else round(peer.quality.recent_loss(), 3)),
                         "probes": peer.quality.recent_probes(),
+                        # What this link is *actually* probed at, not what the
+                        # accord agreed: the medium under it can take that back
+                        # (`_idle_ceiling`), and a screen showing the agreement
+                        # beside a link running at something else is a label
+                        # that lies. One expression, read off the same function
+                        # the loop schedules with.
+                        "probe_ms": round(self._keepalive_interval(peer) * 1000),
                         "carrying": peer in bundle.keys}
                        for peer in list(bundle.keys) + list(bundle.benched())]
+            agreed = next((self._accord_with(peer)
+                           for peer in bundle.keys), None)
             bundles.append({
                 "node": target.raw.hex(),
                 "pseudo": self.pseudo_of(target),
                 "active": bundle.active,
+                # What the pair agreed. What each link runs at is on the
+                # member row, because the medium may have taken some of it
+                # back and the two are not the same claim.
+                "agreed_fast_ms": agreed.fast_ms if agreed else None,
+                "agreed_slow_ms": agreed.slow_ms if agreed else None,
                 "skew_ms": round(bundle.skew_ms, 2),
                 "reorder_ms": round(bundle.reorder_ms, 2),
                 "members": members,
@@ -3374,7 +3445,13 @@ class MeshNode:
             "awake_sources": self.awake_sources(),
             "skew_ms": self._mlo_settings.skew_ms,
             "drop_percent": self._mlo_settings.drop_percent,
-            "keepalive_window_ms": list(self.keepalive_window()),
+            # What this node offers, and what each link actually settled on.
+            # Both, because "why is this link probed every twenty seconds when
+            # I asked for a hundred milliseconds" is answered by the difference
+            # between them and by nothing else.
+            "bounds_ms": dict(zip(("fast_min", "fast_max",
+                                   "slow_min", "slow_max"),
+                                  self.keepalive_bounds().as_tuple())),
             "bundles": bundles,
         }
 
@@ -9041,7 +9118,7 @@ class MeshNode:
             # …and what cadences we can probe this link on. It goes out here,
             # once, because the window is a property of this node and not of
             # its mood: the only thing that re-proposes is an operator moving
-            # it (`set_keepalive_window`), and that re-proposal leaves before
+            # it (`set_keepalive_bounds`), and that re-proposal leaves before
             # anything probes at the new rate.
             self._spawn_bounded(self._announce_keepalive(peer))
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps
@@ -9159,7 +9236,7 @@ class MeshNode:
             # …and what cadences we can probe this link on. It goes out here,
             # once, because the window is a property of this node and not of
             # its mood: the only thing that re-proposes is an operator moving
-            # it (`set_keepalive_window`), and that re-proposal leaves before
+            # it (`set_keepalive_bounds`), and that re-proposal leaves before
             # anything probes at the new rate.
             self._spawn_bounded(self._announce_keepalive(peer))
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps

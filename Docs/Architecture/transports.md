@@ -579,39 +579,79 @@ silence alone cuts a link on a very slow medium that nobody has probed yet.
 ## The keepalive accord (`mlo.accord`, `KA_PROPOSE` / `KA_REQUEST`)
 
 A cadence is a cost, and it is paid by **both** ends: the prober spends the
-packet, the answerer spends the answer. So neither may simply choose it.
+packet, the answerer spends the answer. So neither may simply choose it, and
+neither may be made to spend more than it offered to.
 
-Each node declares a window — `keepalive_min_ms` / `keepalive_max_ms`, defaults
-100 ms and 20 s — in a `KA_PROPOSE` sent once the link authenticates, beside the
-capability record. Both ends then apply `mlo.accord` to the two windows and get
-the same answer, so **nothing is exchanged to settle it** and there is no state
-where one end thinks something was agreed and the other does not (the same trick
-as the canonical link and the punch initiator).
+Each node declares **four** numbers — a range per mode — in a `KA_PROPOSE` sent
+once the link authenticates, beside the capability record:
+
+| | what it says | default |
+|---|---|---|
+| `keepalive_fast_min_ms` | the fastest I will ever be probed, striping or not | 100 ms |
+| `keepalive_fast_max_ms` | the slowest that is still worth calling *fast* to me | 1 s |
+| `keepalive_slow_min_ms` | the fastest I want to be probed when nothing is happening | 15 s |
+| `keepalive_slow_max_ms` | the slowest I can be probed before I stop believing the link | 20 s |
+
+Both ends then apply `mlo.accord` to the two declarations and get the same
+answer, so **nothing is exchanged to settle it** and there is no state where one
+end thinks something was agreed and the other does not (the same trick as the
+canonical link and the punch initiator).
 
 ```
-floor   = max(my floor,   their floor)      the fastest *both* said they can sustain
-ceiling = min(my ceiling, their ceiling)    never below the floor,
-                                            and never below CEILING_MIN_MS
+fast = max(the two fast floors)          … and a fast mode exists only if
+                                           fast ≤ min(the two fast ceilings)
+slow = max(the two slow floors, min(the two slow ceilings))
 ```
 
-Windows that do not overlap at all — one node's ceiling below the other's floor
-— leave that floor standing, the higher of the two: a floor is the half of a
-window a node stated as a limit on what it will be *made* to do.
+### Why four and not two
 
-> **The ceiling needs the same protection read the other way round.** The floor
-> is a `max`, so nobody can be dragged below what they declared. The ceiling is
-> a `min`, which is a lever anybody can pull — and this node clamps its own
-> cadence into the accord, so a peer proposing `(100, 150)` would have bought
-> six probes a second on that link for as long as it existed. Eight bytes,
-> once, for a permanent traffic multiplier on every link an adversary opens.
->
-> `mlo.CEILING_MIN_MS` floors it at `_LINK_KEEPALIVE_INTERVAL`, so **a peer can
-> never make this node probe faster than it already did**. Nothing legitimate
-> is lost: a ceiling exists so a peer is not left unable to tell a live link
-> from a dead one, each end's liveness verdict counts *its own* probes, and our
-> PONGs answer its probes whatever our own rate is. Going faster is governed by
-> the floor, which is where MLO asks for it and where a node opts out by
-> raising its own.
+One range was the obvious shape and it is short by half. With a single
+`[min, max]` only the **floor** protects anybody: it is a `max` across the two
+nodes, so nobody can be dragged below what they declared. The ceiling is a
+`min` — and a `min` is a lever anybody can pull. A peer proposing `(100, 150)`
+pulled the shared ceiling to 150 ms, and this node, which clamps its cadence
+into the accord, would have probed that link six times a second for as long as
+it stayed open. Eight bytes, once, per link an adversary opens.
+
+There is no way to write the two-number model where the ceiling is not either a
+lever or ignored. Four numbers give each *mode* its own floor and ceiling, and
+then **both agreed cadences are a `max` over something each node declared**:
+
+> There is no expression in `accord` a peer's number enters where being smaller
+> helps it. **Nothing a peer sends lowers this node's own probe interval** — not
+> bounded by a constant, not clamped afterwards; it is the shape of the
+> arithmetic. `test_no_declaration_at_all_can_lower_either_cadence` sweeps every
+> corner of the hard range against a node on defaults and says so.
+
+The two ceilings still do real work, and it is the honest kind:
+
+- **`fast_max` decides whether striping happens at all.** A phone offering
+  `fast = [2 s, 5 s]` and a server offering `[100 ms, 500 ms]` have no cadence
+  both would call fast, so `fast_ok` is false and the pair is **not bundled** —
+  rather than one of them paying for the other's idea of it. That is the whole
+  of "do not drain the other's battery for something neither of us gets
+  anything from", and it is a node's strongest opt-out: raising `fast_min` past
+  a peer's `fast_max` ends the question, and no request can override it.
+- **`slow_max` is how a node says a link has gone too quiet to believe.** It
+  loses to a peer's `slow_min` when the two disagree, because at rest the
+  cheaper answer is the right one — but see the medium's own timeout below,
+  which is the constraint that actually binds.
+
+### The medium has the last word on going quiet
+
+Two nodes can agree to idle at five minutes over a transport that reaps a
+silent link at sixty seconds, and neither can see that from the accord: it is a
+fact about the wire, not about the pair. So the medium declares
+(`BaseTransport.idle_timeout` — TCP reports its `read_timeout`, UDP its
+`keepalive_timeout`, a spool directory reports nothing) and the core keeps the
+idle cadence to `mlo.IDLE_TIMEOUT_SHARE` of it: the same three-to-one margin the
+UDP keepalive already holds itself to, read backwards.
+
+Applied **locally**, not folded into the accord, because the two ends may run
+different transport settings and each is right about its own — and it may only
+ever take back what the medium cannot afford, never push the cadence below what
+the pair agreed. Which is why a node wanting a genuinely deep sleep raises
+`tcp.read_timeout` as well as its own `slow_max`.
 
 Everything the pair does afterwards sits inside that accord, and three things
 follow from it.
@@ -628,9 +668,11 @@ follow from it.
   unmatched. `LinkQuality.sent`/`answered`/`expire` resolve each probe
   individually, which is what makes the recent window honest.
 - **A `next_ms` outside the accord is a finding** (rule K1), not an error. The
-  window is what makes "faster than we agreed" a thing that can be *said* about
-  a peer at all. Nothing is counted for `_KA_GRACE` after an accord moves: a
-  proposal crosses the link at the speed of the link.
+  two agreed cadences *are* the two ends of the window it is judged against —
+  nothing between striping and idling is out of bounds, nothing outside them is
+  in — and that window is what makes "faster than we agreed" a thing that can be
+  *said* about a peer at all. Nothing is counted for `_KA_GRACE` after an accord
+  moves: a proposal crosses the link at the speed of the link.
 
 ### Asking a peer to slow down (`KA_REQUEST`)
 
@@ -645,8 +687,18 @@ spend the link arguing about how often to probe it.
 > battery and bandwidth, on the one plane that exists to stop exactly that.
 
 It is clamped into the accord in both directions, so a peer can neither speed
-this node up nor slow it past what the two of them agreed. Raising
-`keepalive_max_ms` is how an operator allows a deeper sleep.
+this node up nor slow it past the idle cadence the two of them already agreed.
+
+> **A request is a "go quiet for now", never a setting.** It is honoured in
+> *both* modes — "stop probing me so hard" is worth nothing if striping ignores
+> it — and it lapses at `_KA_TOLD_TTL`; a peer that still wants the quiet says
+> so again. The **durable** way not to be probed hard is the declared fast
+> range, which no request can override and which a peer cannot ask us to widen.
+> Keeping those two apart is what stops a four-byte packet becoming a
+> configuration change somebody else made.
+
+Once the request has lapsed, the next probe carries the fast cadence again —
+which is the announcement that legitimately refuses it.
 
 The peer has two correct answers, and only two:
 
@@ -698,7 +750,7 @@ Six tests, and each one is a way this could otherwise break a mesh.
 | the **medium** declares `mlo` | `tcp.mlo` / `udp.mlo`, off by default. Only the operator knows whether a probe ten times a second is cheap on that medium — a transport that does not declare the option at all (spool) can never be bundled, and that absence is the right answer rather than a gap |
 | the **node** is awake | `mlo_active()`: somebody is using it, or `mlo_always` |
 | the **peer announced** `mlo` **and** `keepalive` | one end missing is no MLO — which is the backward-compatibility story, and it is the negotiation's, not a special case |
-| an **accord** exists whose floor allows `mlo.FAST_MS` | without it the link is measured at twenty seconds and called a member on the strength of it: fifty probes is then seventeen minutes of history. Either end raising its floor is how a node opts out, and the opt-out has to work |
+| the accord has a **fast mode** (`fast_ok`) | a cadence *both* call fast. Without one the pair would be measured at whatever the slower tolerates and called multi-link operation: fifty probes at twenty seconds is seventeen minutes of history. Either end declaring a fast range that does not reach the other's is how a node opts out, and that opt-out has to work |
 | the link is **direct** | not relayed, not `probation`, not tarpitted: a tunnelled link has no medium of its own to be a second one |
 | there are **two of them** to one identity | one link is not a bundle and must not pay for one |
 

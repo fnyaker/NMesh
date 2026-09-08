@@ -284,10 +284,16 @@ async def main() -> None:
     ap.add_argument("--mlo-drop-percent", type=int, default=None,
                     help="share of probes a bundled link may lose before it is "
                          "benched (default 10%%; it rejoins at half that)")
-    ap.add_argument("--keepalive-min-ms", type=int, default=None,
-                    help="fastest keepalive this node will agree to on a link")
-    ap.add_argument("--keepalive-max-ms", type=int, default=None,
-                    help="slowest keepalive this node will agree to on a link")
+    ap.add_argument("--keepalive-fast-min-ms", type=int, default=None,
+                    help="fastest this node will ever be probed, striping or not")
+    ap.add_argument("--keepalive-fast-max-ms", type=int, default=None,
+                    help="slowest cadence this node still calls fast; a peer "
+                         "whose fast range does not reach it gets no bundling")
+    ap.add_argument("--keepalive-slow-min-ms", type=int, default=None,
+                    help="fastest this node wants to be probed when idle")
+    ap.add_argument("--keepalive-slow-max-ms", type=int, default=None,
+                    help="slowest this node can be probed before it stops "
+                         "believing the link")
     ap.add_argument("--lan-discovery", action="store_true", default=None,
                     help="answer LAN relay-discovery beacons (be findable as a "
                          "relay by joiners on the same network)")
@@ -379,11 +385,10 @@ async def main() -> None:
     if args.mlo_skew_ms is not None or args.mlo_drop_percent is not None:
         node.set_mlo_settings(skew_ms=args.mlo_skew_ms,
                               drop_percent=args.mlo_drop_percent)
-    if args.keepalive_min_ms is not None or args.keepalive_max_ms is not None:
-        low, high = node.keepalive_window()
-        node.set_keepalive_window(
-            low if args.keepalive_min_ms is None else args.keepalive_min_ms,
-            high if args.keepalive_max_ms is None else args.keepalive_max_ms)
+    node.set_keepalive_bounds(fast_min_ms=args.keepalive_fast_min_ms,
+                              fast_max_ms=args.keepalive_fast_max_ms,
+                              slow_min_ms=args.keepalive_slow_min_ms,
+                              slow_max_ms=args.keepalive_slow_max_ms)
     if args.lan_discovery:
         await node.start_lan_discovery()
         if args.stun:

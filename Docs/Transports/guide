@@ -87,6 +87,22 @@ does not declare them simply does not take part in what they decide:
 | `retry_interval` (s, 0 = off) | how often a known but unlinked node's addresses on this medium are re-dialled |
 | `mlo` (bool) | may two links over this medium carry one peer's traffic together (**multi-link operation**) |
 
+There is one more hook the core reads and never interprets, alongside
+`endpoints()` and `stats()`:
+
+```python
+def idle_timeout(self) -> float | None:   # seconds of silence before this
+                                          # medium gives up on the link
+```
+
+Two nodes negotiate how often they probe each other (`Docs/Architecture/transports.md`)
+and can perfectly well agree on something slower than your medium will survive —
+neither of them can see that, because it is a fact about the wire and not about
+the pair. Report the number your `receive()` actually gives up at and the core
+keeps the idle cadence to a third of it. Return `None` if silence never kills a
+link on your medium (a spool directory fails on a write, not on a wait) and
+nothing is taken back.
+
 `mlo` deserves a word, because it is the one that costs something continuously.
 Declaring it does not turn anything on — it offers the operator a checkbox — but
 a bundled link is probed roughly every hundred milliseconds for as long as the

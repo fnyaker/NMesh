@@ -482,13 +482,18 @@ What is set here is everything that is not the medium's business:
 | `mlo_always` | off | Keep bundling even when nothing is using this node. Off, it wakes with the console or an attached app and sleeps again a couple of minutes after the last of them goes |
 | `mlo_skew_ms` | 30 | How far apart two links may measure and still be bundled. Further apart, striping delivers half the packets late, which every consumer reads as loss |
 | `mlo_drop_percent` | 10 | Share of its last 50 probes a bundled link may lose before it is benched. It keeps its probes — that is how it measures its way back — and rejoins at *half* this, because one number in both directions is a link that flaps in and out on a single probe |
-| `keepalive_min_ms` | 100 | The fastest cadence this node will **agree to be asked for** on a link. Raising it is how a node opts out of being probed hard, and no peer can talk it back down |
-| `keepalive_max_ms` | 20000 | The slowest. Raise it to let a peer ask this node to sleep more deeply than the classic twenty seconds. Lowering it below twenty seconds does **not** make peers probe this node harder — nothing a peer can send raises this node's own probe rate above what it had before any of this existed |
+| `keepalive_fast_min_ms` | 100 | The fastest this node will ever be probed, striping or not |
+| `keepalive_fast_max_ms` | 1000 | The slowest cadence this node still calls *fast*. A peer whose fast range does not reach it gets **no striping** — which is the strongest opt-out here, and the one a battery node wants |
+| `keepalive_slow_min_ms` | 15000 | The fastest this node wants to be probed when nothing is happening |
+| `keepalive_slow_max_ms` | 20000 | The slowest before this node stops believing the link. Kept under the medium's own timeout whatever is agreed, so a deep sleep means raising `tcp.read_timeout` too |
 
-The two `keepalive_*` numbers are a window, and two nodes take the intersection
-of their windows: neither can be dragged below what it said it could sustain,
-and neither can be made to spend more than it agreed. The mechanics, and the
-three behavioural findings that come out of it, are in
+These four are a range **per mode**, and two nodes take the fastest floor both
+offered — in each mode. Raising a floor here is therefore an opt-out no peer can
+talk back down, and nothing a peer sends lowers either of this node's cadences:
+that is the shape of the arithmetic rather than a limit bolted onto it, which is
+why there are four numbers and not two. The mechanics, the reason the
+two-number version was unsafe, and the three behavioural findings that come out
+of it are in
 [`../Architecture/transports.md`](../Architecture/transports.md).
 
 **One thing to know before switching it on:** packets spread over two links

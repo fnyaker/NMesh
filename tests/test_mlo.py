@@ -27,9 +27,9 @@ import pytest
 from src import features, mlo
 from src.metrics import LinkQuality
 from src.node import (MeshNode, _Peer, KA_PROPOSE, KA_REQUEST, PING, PONG,
-                      _KA_GRACE, _KA_PROBE_DEADLINE, _KA_TICK_FLOOR,
-                      _KA_TOKEN, _KA_WANTED,
-                      _KA_WINDOW, _LINK_KEEPALIVE_INTERVAL,
+                      _KA_BOUNDS, _KA_GRACE, _KA_PROBE_DEADLINE, _KA_TOLD_TTL,
+                      _KA_TICK_FLOOR, _KA_TOKEN, _KA_WANTED,
+                      _LINK_KEEPALIVE_INTERVAL,
                       _decode_addresses_at, _decode_ping_tail)
 from src.node_id import NodeID
 from src.packet import Packet
@@ -49,7 +49,7 @@ def _node() -> MeshNode:
 
 def _link(node: MeshNode, target: NodeID = TARGET, *, uri: str = "fake://a:1",
           speaks=SPEAKS, mean_ms: float | None = None,
-          drop: float = 0.0, probes: int = 0, window=(100, 20000)) -> _Peer:
+          drop: float = 0.0, probes: int = 0, window=mlo.Bounds()) -> _Peer:
     """An authenticated link with a probe history already behind it.
 
     The history is written through the same window a real link fills, so a test
@@ -63,8 +63,9 @@ def _link(node: MeshNode, target: NodeID = TARGET, *, uri: str = "fake://a:1",
     peer.remote_addr = uri
     peer.agreed = None if speaks is None else frozenset(speaks)
     if window is not None and speaks is not None:
-        peer.ka_window = mlo.clamp_window(*window)
-        peer.ka_accord = mlo.accord(node.keepalive_window(), peer.ka_window)
+        peer.ka_window = mlo.clamp_bounds(
+            *(window.as_tuple() if isinstance(window, mlo.Bounds) else window))
+        peer.ka_accord = mlo.accord(node.keepalive_bounds(), peer.ka_window)
         peer.ka_accord_at = time.monotonic()
     quality = LinkQuality()
     for index in range(probes):
@@ -90,53 +91,95 @@ def _ready(node: MeshNode, *schemes: str) -> None:
 # ---------------------------------------------------------------------------
 
 class TestTheAccord:
-    def test_the_floor_is_the_higher_of_the_two(self):
-        """Neither node may be dragged below what it said it could sustain."""
-        assert mlo.accord((100, 60000), (500, 40000))[0] == 500
-        assert mlo.accord((500, 40000), (100, 60000))[0] == 500
+    """Four numbers, not two, and the reason is the whole security story.
 
-    def test_the_lower_of_the_two_ceilings_wins(self):
-        assert mlo.accord((100, 60000), (500, 40000))[1] == 40000
+    With one range the *floor* protects (a `max` across the two nodes) and the
+    ceiling is a `min` — a lever anybody can pull. A peer proposing a 150 ms
+    ceiling bought six probes a second on that link for eight bytes. With a
+    range per mode every agreed cadence is a `max` over something each node
+    declared, so there is no expression a peer's number enters where being
+    smaller helps it."""
+
+    FAST = mlo.Bounds(100, 1000, 15000, 20000)          # a node on mains power
+    BATTERY = mlo.Bounds(2000, 5000, 60000, 300000)     # a phone
+    GREEDY = mlo.Bounds(50, 60, 60, 150)                # wants us probing hard
+
+    def test_the_defaults_reproduce_the_cadence_that_predates_all_of_this(self):
+        """A node shipped as-is probes an idle link every twenty seconds,
+        exactly as every link did before any of this existed."""
+        agreed = mlo.accord(mlo.Bounds(), mlo.Bounds())
+        assert agreed.slow_ms == _LINK_KEEPALIVE_INTERVAL * 1000
+        assert agreed.fast_ms == mlo.DEFAULT_FAST_MIN_MS and agreed.fast_ok
 
     def test_both_ends_compute_the_same_thing(self):
         """Nothing is exchanged to settle it, so this is the whole protocol."""
-        mine, theirs = (100, 5000), (250, 30000)
-        assert mlo.accord(mine, theirs) == mlo.accord(theirs, mine)
+        assert (mlo.accord(self.FAST, self.BATTERY)
+                == mlo.accord(self.BATTERY, self.FAST))
 
-    def test_no_overlap_leaves_the_highest_floor_standing(self):
-        """One node's ceiling below the other's floor: there is no agreement to
-        find, and a floor is the half of a window stated as a limit."""
-        assert mlo.accord((100, 200), (5000, 9000))[0] == 5000
+    def test_the_fast_cadence_is_the_fastest_both_allow(self):
+        assert mlo.accord(self.FAST, mlo.Bounds(400, 2000, 15000, 20000)
+                          ).fast_ms == 400
 
-    def test_a_peer_can_never_make_this_node_probe_faster(self):
-        """The amplifier the ceiling would otherwise be. The floor is a `max`,
-        so nobody can be dragged below what they declared; the ceiling is a
-        `min`, which is a lever anybody can pull — and this node clamps its own
-        cadence into the accord. A peer proposing a 150 ms ceiling would have
-        bought six probes a second on every link it opened, for eight bytes."""
-        greedy = mlo.accord((100, 20000), (100, 150))
-        assert greedy[1] >= mlo.CEILING_MIN_MS
-        node = _node()
-        peer = _link(node, window=(100, 150))
-        assert node._keepalive_interval(peer) == _LINK_KEEPALIVE_INTERVAL
+    def test_no_cadence_both_call_fast_means_no_bundling(self):
+        """Not "one of them pays for the other's idea of fast". A phone
+        offering 2–5 s and a server offering 100–500 ms have no overlap, and
+        the honest outcome is that the pair is not bundled at all."""
+        agreed = mlo.accord(self.FAST, self.BATTERY)
+        assert not agreed.fast_ok
 
-    def test_the_ceiling_floor_is_the_cadence_that_predates_all_of_this(self):
-        """Held in step deliberately: the promise is "no faster than it already
-        did", and that number lives in `node.py`."""
-        assert mlo.CEILING_MIN_MS == _LINK_KEEPALIVE_INTERVAL * 1000
+    def test_the_idle_cadence_takes_the_cheaper_answer(self):
+        """A node that says "leave me alone for a minute" is left alone for a
+        minute: the slow cadence is a `max`, so the quieter of the two wins."""
+        assert mlo.accord(self.FAST, self.BATTERY).slow_ms == 60000
+
+    def test_nothing_a_peer_sends_lowers_our_own_probe_interval(self):
+        """The property the four numbers exist for, stated over both modes and
+        over a peer built to attack exactly this."""
+        agreed = mlo.accord(self.FAST, self.GREEDY)
+        assert agreed.fast_ms >= self.FAST.fast_min
+        assert agreed.slow_ms >= self.FAST.slow_min
+
+    def test_no_declaration_at_all_can_lower_either_cadence(self):
+        """Swept rather than argued: every corner of the hard range, against a
+        node on defaults. If any of them wins, the model is wrong."""
+        mine = mlo.Bounds()
+        edges = (mlo.FLOOR_MS, 100, 1000, 20000, mlo.CEILING_MS)
+        for fast_min in edges:
+            for fast_max in edges:
+                for slow_min in edges:
+                    for slow_max in edges:
+                        theirs = mlo.clamp_bounds(fast_min, fast_max,
+                                                  slow_min, slow_max)
+                        agreed = mlo.accord(mine, theirs)
+                        assert agreed.fast_ms >= mine.fast_min
+                        assert agreed.slow_ms >= mine.slow_min
+
+    def test_the_window_is_the_two_cadences(self):
+        """What rule K1 judges an announcement against: nothing between
+        striping and idling is out of bounds, nothing outside them is in."""
+        agreed = mlo.accord(self.FAST, self.FAST)
+        assert agreed.window == (agreed.fast_ms, agreed.slow_ms)
+        assert mlo.inside(agreed.fast_ms, agreed.window)
+        assert mlo.inside(agreed.slow_ms, agreed.window)
+        assert not mlo.inside(agreed.fast_ms - 1, agreed.window)
+        assert not mlo.inside(agreed.slow_ms + 1, agreed.window)
 
     def test_a_proposal_is_clamped_before_it_is_believed(self):
-        low, high = mlo.clamp_window(0, 10 ** 9)
-        assert low == mlo.FLOOR_MS and high == mlo.CEILING_MS
+        clamped = mlo.clamp_bounds(0, 10 ** 9, -5, 10 ** 12)
+        assert clamped.fast_min == mlo.FLOOR_MS
+        assert clamped.slow_max == mlo.CEILING_MS
 
-    def test_a_floor_above_its_own_ceiling_is_not_a_window(self):
-        assert not mlo.well_formed(9000, 100)
-        assert not mlo.well_formed(100, 100)      # a window of nothing
-        assert mlo.well_formed(100, 20000)
+    def test_a_declaration_a_correct_node_could_not_have_meant(self):
+        assert mlo.well_formed(100, 1000, 15000, 20000)
+        assert not mlo.well_formed(1000, 100, 15000, 20000)   # fast reversed
+        assert not mlo.well_formed(100, 1000, 20000, 15000)   # slow reversed
+        assert not mlo.well_formed(100, 100, 15000, 20000)    # a range of nothing
+        # …and the one that costs a hundredfold: the two modes swapped.
+        assert not mlo.well_formed(15000, 20000, 100, 1000)
 
     def test_nonsense_never_raises(self):
-        assert mlo.clamp_window("x", None) == (mlo.FLOOR_MS, mlo.CEILING_MS)
-        assert not mlo.well_formed(None, "x")
+        assert mlo.clamp_bounds("x", None, [], {}) == mlo.Bounds()
+        assert not mlo.well_formed(None, "x", 1, 2)
         assert not mlo.inside("x", (1, 2))
 
 
@@ -386,26 +429,31 @@ class TestWhatAProbeCarries:
 # Negotiating the cadence
 # ---------------------------------------------------------------------------
 
-async def _propose(node: MeshNode, peer: _Peer, low: int, high: int) -> None:
+async def _propose(node: MeshNode, peer: _Peer, *bounds) -> None:
+    """A peer stating its four numbers, straight into the handler."""
     await node._handle_ka_propose(peer, Packet.create(
-        KA_PROPOSE, TARGET.raw, b"\xff" * 20, _KA_WINDOW.pack(low, high)))
+        KA_PROPOSE, TARGET.raw, b"\xff" * 20, _KA_BOUNDS.pack(*bounds)))
 
 
 class TestNegotiatingTheCadence:
-    async def test_a_proposal_settles_the_window_both_ends_are_held_to(self):
+    async def test_a_proposal_settles_what_both_ends_are_held_to(self):
         node = _node()
         peer = _link(node)
-        await _propose(node, peer, 500, 10000)
-        assert peer.ka_accord == mlo.accord(node.keepalive_window(), (500, 10000))
+        await _propose(node, peer, 500, 2000, 5000, 10000)
+        assert peer.ka_accord == mlo.accord(node.keepalive_bounds(),
+                                            mlo.Bounds(500, 2000, 5000, 10000))
+        # …and it is what the two of them will actually run at.
+        assert peer.ka_accord.fast_ms == 500        # the higher of the floors
+        assert peer.ka_accord.slow_ms == 15000      # our own idle floor
         await node.stop()
 
-    async def test_a_window_that_cannot_be_true_is_counted_and_dropped(self):
-        """Rule K3. Adopting a window we have just called impossible would be
+    async def test_a_declaration_that_cannot_be_true_is_counted_and_dropped(self):
+        """Rule K3. Adopting a declaration we have just called impossible would be
         the accusation and the compliance in one breath."""
         node = _node()
         peer = _link(node)
         before = peer.ka_accord
-        await _propose(node, peer, 9000, 100)
+        await _propose(node, peer, 9000, 100, 50, 20)
         assert peer.ka_impossible == 1
         assert peer.ka_accord == before and peer._malformed == 0
         await node.stop()
@@ -422,7 +470,7 @@ class TestNegotiatingTheCadence:
         node = _node()
         peer = _link(node)
         for index in range(40):
-            await _propose(node, peer, 500 + index, 10000)
+            await _propose(node, peer, 500 + index, 2000, 5000, 10000)
         # Whatever it sent, it did not get to move the accord forty times.
         assert node._ka_request_rate
         await node.stop()
@@ -446,14 +494,29 @@ class TestAskingAPeerToSlowDown:
         await node._handle_ka_request(peer, Packet.create(
             KA_REQUEST, TARGET.raw, b"\xff" * 20, _KA_WANTED.pack(wanted_ms)))
 
-    async def test_a_request_slows_this_node_down(self):
+    async def test_a_request_takes_a_striping_link_back_to_idle(self):
+        """What a request is *for*. "Stop probing me so hard" is worth nothing
+        if striping ignores it, so it is honoured in both modes."""
         node = _node()
-        node.set_keepalive_window(100, 60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
-        await self._asked(node, peer, 45000)
-        assert peer.ka_told_ms == 45000
-        assert node._keepalive_interval(peer) == 45.0
+        agreed = node._accord_with(peer)
+        peer.ka_wanted_ms = agreed.fast_ms
+        assert node._keepalive_interval(peer) == agreed.fast_ms / 1000.0
+        await self._asked(node, peer, agreed.slow_ms)
+        assert peer.ka_told_ms == agreed.slow_ms
+        assert node._keepalive_interval(peer) == agreed.slow_ms / 1000.0
+        await node.stop()
+
+    async def test_a_request_lapses_rather_than_holding_for_ever(self):
+        """A request is a "go quiet for now". The durable way not to be probed
+        hard is the *declared* fast range, which no request can override."""
+        node = _node()
+        peer = _link(node)
+        agreed = node._accord_with(peer)
+        peer.ka_wanted_ms = agreed.fast_ms
+        await self._asked(node, peer, agreed.slow_ms)
+        peer.ka_told_at -= _KA_TOLD_TTL + 1.0
+        assert node._keepalive_interval(peer) == agreed.fast_ms / 1000.0
         await node.stop()
 
     async def test_a_request_can_never_make_this_node_spend_more(self):
@@ -462,22 +525,24 @@ class TestAskingAPeerToSlowDown:
         a nicer name."""
         node = _node()
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         before = node._keepalive_interval(peer)
-        await self._asked(node, peer, mlo.FAST_MS)
+        await self._asked(node, peer, mlo.DEFAULT_FAST_MIN_MS)
         assert peer.ka_told_ms is None
         assert node._keepalive_interval(peer) == before
         await node.stop()
 
     async def test_a_request_is_clamped_into_the_accord(self):
         """A peer cannot slow us past what the two of us agreed, any more than
-        it can speed us up: the accord bounds the plane in both directions."""
+        it can speed us up: the accord bounds the plane in both directions. To
+        be left alone for longer, a node declares it — a *request* is not the
+        durable mechanism and cannot be turned into one."""
         node = _node()
-        node.set_keepalive_window(100, 60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        agreed = node._accord_with(peer)
+        peer.ka_wanted_ms = agreed.fast_ms
         await self._asked(node, peer, 10 ** 8)
-        assert peer.ka_told_ms == 60000
+        assert peer.ka_told_ms == agreed.slow_ms
         await node.stop()
 
     async def test_a_request_of_the_wrong_size_is_a_protocol_violation(self):
@@ -492,12 +557,12 @@ class TestAskingAPeerToSlowDown:
         """Legitimate precisely because it is announced: the next probe
         carries the accord's floor, which is the one refusal defined here."""
         node = _node()
-        node.set_keepalive_window(100, 60000)
+        node.set_keepalive_bounds(slow_max_ms=60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         await self._asked(node, peer, 45000)
-        peer.ka_wanted_ms = mlo.FAST_MS
-        assert node._keepalive_interval(peer) == mlo.FAST_MS / 1000.0
+        peer.ka_wanted_ms = node._accord_with(peer).fast_ms
+        assert node._keepalive_interval(peer) == mlo.DEFAULT_FAST_MIN_MS / 1000.0
         await node.stop()
 
 
@@ -509,7 +574,7 @@ class TestJudgingWhatAPeerAnnounces:
     async def test_a_cadence_outside_the_accord_is_a_finding(self):
         node = _node()
         peer = _link(node)
-        await _propose(node, peer, 500, 10000)
+        await _propose(node, peer, 500, 2000, 5000, 10000)
         self._armed(node, peer)
         node._note_announced_cadence(peer, 50)
         assert peer.ka_outside == 1
@@ -519,7 +584,7 @@ class TestJudgingWhatAPeerAnnounces:
         re-propose before probing at a new cadence."""
         node = _node()
         peer = _link(node)
-        await _propose(node, peer, 500, 10000)
+        await _propose(node, peer, 500, 2000, 5000, 10000)
         node._note_announced_cadence(peer, 50)          # inside the grace
         assert peer.ka_outside == 0
 
@@ -531,9 +596,9 @@ class TestJudgingWhatAPeerAnnounces:
 
     async def test_honouring_a_request_clears_it(self):
         node = _node()
-        node.set_keepalive_window(100, 60000)
+        node.set_keepalive_bounds(slow_max_ms=60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         self._armed(node, peer)
         peer.ka_asked_ms, peer.ka_asked_at = 45000, time.monotonic() - 60
         node._note_announced_cadence(peer, 50000)
@@ -542,21 +607,21 @@ class TestJudgingWhatAPeerAnnounces:
     async def test_announcing_the_floor_refuses_a_request_without_a_finding(self):
         """"I want the fast lane back", said out loud and inside the accord."""
         node = _node()
-        node.set_keepalive_window(100, 60000)
+        node.set_keepalive_bounds(slow_max_ms=60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         self._armed(node, peer)
         peer.ka_asked_ms, peer.ka_asked_at = 45000, time.monotonic() - 60
-        node._note_announced_cadence(peer, peer.ka_accord[0])
+        node._note_announced_cadence(peer, peer.ka_accord.fast_ms)
         assert peer.ka_asked_ms is None and peer.ka_ignored == 0
 
     async def test_a_third_cadence_is_a_finding(self):
         """Rule K2: neither the cadence asked for nor the announcement that
         refuses it."""
         node = _node()
-        node.set_keepalive_window(100, 60000)
+        node.set_keepalive_bounds(slow_max_ms=60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         self._armed(node, peer)
         peer.ka_asked_ms, peer.ka_asked_at = 45000, time.monotonic() - 60
         node._note_announced_cadence(peer, 20000)
@@ -565,9 +630,9 @@ class TestJudgingWhatAPeerAnnounces:
 
     async def test_a_request_just_made_is_given_time_to_arrive(self):
         node = _node()
-        node.set_keepalive_window(100, 60000)
+        node.set_keepalive_bounds(slow_max_ms=60000)
         peer = _link(node)
-        await _propose(node, peer, 100, 60000)
+        await _propose(node, peer, 100, 1000, 15000, 60000)
         self._armed(node, peer)
         peer.ka_asked_ms, peer.ka_asked_at = 45000, time.monotonic()
         node._note_announced_cadence(peer, 20000)
@@ -640,8 +705,8 @@ class TestFormingABundleOnANode:
         node = _node()
         first, second = self._pair(node)
         node._update_bundles()
-        assert first.ka_wanted_ms == mlo.FAST_MS
-        assert node._keepalive_interval(first) == mlo.FAST_MS / 1000.0
+        assert first.ka_wanted_ms == node._accord_with(first).fast_ms
+        assert node._keepalive_interval(first) == mlo.DEFAULT_FAST_MIN_MS / 1000.0
         await node.stop()
 
     async def test_a_medium_the_operator_did_not_tick_is_never_bundled(self):
@@ -770,6 +835,13 @@ class TestWhatAnOperatorSees:
         assert row["reorder_ms"] == pytest.approx(2 * row["skew_ms"])
         assert {member["scheme"] for member in row["members"]} == {"fake", "udp"}
         assert all(member["carrying"] for member in row["members"])
+        # What the pair agreed and what each link runs at are two claims, and
+        # a medium can take some of the second one back. Both are reported,
+        # and the per-link one is read off the function the loop schedules
+        # with rather than derived beside it.
+        assert row["agreed_fast_ms"] == mlo.DEFAULT_FAST_MIN_MS
+        assert all(member["probe_ms"] == mlo.DEFAULT_FAST_MIN_MS
+                   for member in row["members"])
         await node.stop()
 
     async def test_the_status_is_json_safe(self):
@@ -838,8 +910,8 @@ class TestGivingUpOnAProbe:
         """A constant deadline would call every probe on a medium measured in
         minutes lost, on a link answering every one of them."""
         node = _node()
-        node.set_keepalive_window(100, 600000)
-        peer = _link(node, window=(100, 600000))
+        node.set_keepalive_bounds(slow_min_ms=100000, slow_max_ms=600000)
+        peer = _link(node, window=mlo.Bounds(100, 1000, 100000, 600000))
         peer.ka_told_ms = 120000                    # two minutes between probes
         deadline = max(_KA_PROBE_DEADLINE, 3.0 * node._keepalive_interval(peer))
         assert deadline >= 3 * 120.0
@@ -847,7 +919,7 @@ class TestGivingUpOnAProbe:
     async def test_a_fast_link_still_gives_up_promptly(self):
         node = _node()
         peer = _link(node)
-        peer.ka_wanted_ms = mlo.FAST_MS
+        peer.ka_wanted_ms = node._accord_with(peer).fast_ms
         deadline = max(_KA_PROBE_DEADLINE, 3.0 * node._keepalive_interval(peer))
         assert deadline == _KA_PROBE_DEADLINE       # the floor, not 0.3 s
 
@@ -869,4 +941,104 @@ class TestStripingNeverUndoesAnExclusion:
         for _ in range(8):
             assert second not in node._route_candidates(TARGET, exclude=second)
             assert first not in node._route_candidates(TARGET, exclude=first)
+        await node.stop()
+
+
+class TestNotDrainingSomebodyElse:
+    """The whole point of four numbers rather than two, stated as the outcomes
+    an operator would notice."""
+
+    async def test_a_phone_is_left_alone_and_never_bundled(self):
+        """A node that says "2 to 5 seconds is my idea of fast, and leave me a
+        minute when nothing is happening" gets exactly that: no striping, and
+        an idle probe once a minute rather than three times."""
+        node = _node()
+        _ready(node, "fake", "udp")
+        node.note_awake("test")
+        phone = mlo.Bounds(2000, 5000, 60000, 300000)
+        first = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50,
+                      window=phone)
+        _link(node, uri="udp://a:2", mean_ms=12.0, probes=50, window=phone)
+        node._update_bundles()
+        assert TARGET not in node._bundles          # no striping at that peer
+        assert first.ka_wanted_ms is None
+        assert node._keepalive_interval(first) == 60.0
+        await node.stop()
+
+    async def test_a_greedy_peer_gets_this_nodes_own_floors(self):
+        """Declaring a tight range is how a peer *opts out*, not how it opts
+        somebody else in. Nothing in the accord rewards a smaller number."""
+        node = _node()
+        peer = _link(node, window=mlo.Bounds(50, 60, 60, 150))
+        mine = node.keepalive_bounds()
+        agreed = node._accord_with(peer)
+        assert agreed.fast_ms >= mine.fast_min
+        assert agreed.slow_ms >= mine.slow_min
+        assert node._keepalive_interval(peer) == mine.slow_min / 1000.0
+        await node.stop()
+
+    async def test_the_medium_caps_an_idle_cadence_it_cannot_survive(self):
+        """Two nodes can agree to idle slower than the wire under them will
+        tolerate, and neither can see that from the accord — it is a fact about
+        the transport, not about the pair."""
+        node = _node()
+        node.set_keepalive_bounds(slow_min_ms=300000, slow_max_ms=300000)
+        peer = _link(node, window=mlo.Bounds(100, 1000, 300000, 300000))
+        assert node._accord_with(peer).slow_ms == 300000
+        peer.transport.idle_timeout = lambda: 60.0     # a TCP-shaped medium
+        assert node._keepalive_interval(peer) == 60.0 * mlo.IDLE_TIMEOUT_SHARE
+        await node.stop()
+
+    async def test_a_medium_with_no_timeout_is_not_capped(self):
+        """Store-and-forward fails on a write, not on a silence. Nothing to
+        divide, so nothing is taken back."""
+        node = _node()
+        node.set_keepalive_bounds(slow_min_ms=300000, slow_max_ms=300000)
+        peer = _link(node, window=mlo.Bounds(100, 1000, 300000, 300000))
+        assert node._idle_ceiling(peer) is None
+        assert node._keepalive_interval(peer) == 300.0
+        await node.stop()
+
+    async def test_the_cap_never_takes_the_cadence_below_what_was_agreed(self):
+        """It may only ever take back what the medium cannot afford — a
+        transport reporting something absurd must not become a way to probe
+        faster than the accord."""
+        node = _node()
+        peer = _link(node)
+        peer.transport.idle_timeout = lambda: 0.001
+        agreed = node._accord_with(peer)
+        assert node._keepalive_interval(peer) == agreed.fast_ms / 1000.0
+        await node.stop()
+
+    def test_the_shipped_transports_report_their_own_timeout(self):
+        from src.tcp_transport import TCPTransport
+        from src.udp_transport import UDPTransport
+        assert TCPTransport().idle_timeout() == TCPTransport.setting("read_timeout")
+        assert (UDPTransport().idle_timeout()
+                == UDPTransport.setting("keepalive_timeout"))
+
+
+class TestTheStatusNeverShowsACadenceNobodyRuns:
+    """The label and the value are one claim. What the pair agreed and what a
+    link is actually probed at are two, and a medium that reaps early makes
+    them differ — so a screen that showed the agreement beside a link running
+    at something else would be lying in the way this project keeps catching."""
+
+    async def test_a_capped_link_reports_what_it_actually_runs_at(self):
+        node = _node()
+        _ready(node, "fake", "udp")
+        node.note_awake("test")
+        node.set_keepalive_bounds(slow_min_ms=300000, slow_max_ms=300000)
+        slow = mlo.Bounds(100, 1000, 300000, 300000)
+        for uri in ("fake://a:1", "udp://a:2"):
+            link = _link(node, uri=uri, mean_ms=10.0, probes=50, window=slow)
+            link.transport.idle_timeout = lambda: 60.0
+        node._update_bundles()
+        row = node.mlo_status()["bundles"][0]
+        assert row["agreed_slow_ms"] == 300000          # what was agreed
+        for member in row["members"]:
+            assert member["probe_ms"] == round(
+                node._keepalive_interval(
+                    next(p for p in node._peers
+                         if p.remote_addr == member["remote"])) * 1000)
         await node.stop()

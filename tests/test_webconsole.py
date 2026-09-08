@@ -2224,6 +2224,24 @@ class TestAddressRetryEndpoints:
         finally:
             console.stop(); await node.stop()
 
+    async def test_the_four_cadence_bounds_are_settable(self):
+        """A range per mode, not one window: two numbers leave the ceiling as
+        a lever a peer can pull (see `src/mlo.py`)."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/mlo", token,
+                {"keepalive_fast_min": 250, "keepalive_slow_max": 45000})
+            assert status == 200
+            bounds = body["mlo"]["bounds_ms"]
+            assert bounds["fast_min"] == 250 and bounds["slow_max"] == 45000
+            # The two nobody touched are still what they were.
+            assert bounds["fast_max"] == 1000 and bounds["slow_min"] == 15000
+            assert node.keepalive_bounds().fast_min == 250
+        finally:
+            console.stop(); await node.stop()
+
     async def test_the_balance_is_settable_and_shows_the_resulting_order(self):
         node, console = await _make_console()
         try:

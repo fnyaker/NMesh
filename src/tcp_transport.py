@@ -158,6 +158,12 @@ class TCPTransport(BaseTransport):
             raise ConnectionError("read timeout")
         return Packet.unpack(data)
 
+    def idle_timeout(self) -> float | None:
+        """A TCP read with nothing on it for this long raises, and the link is
+        reaped. It is the same number `receive()` waits on, read off the
+        setting rather than copied — one value, one place."""
+        return float(self.setting("read_timeout") or 0.0) or None
+
     def remote_ip(self) -> str | None:
         if self._writer is None:
             return None

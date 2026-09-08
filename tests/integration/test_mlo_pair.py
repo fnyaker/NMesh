@@ -80,13 +80,16 @@ class TestABundleOverRealSockets:
             assert await _wait(lambda: all(peer.ka_accord is not None
                                            for peer in _links_to(guest, host.id)))
             accords = {peer.ka_accord for peer in _links_to(guest, host.id)}
-            assert accords == {mlo.accord(guest.keepalive_window(),
-                                          host.keepalive_window())}
+            assert accords == {mlo.accord(guest.keepalive_bounds(),
+                                          host.keepalive_bounds())}
+            assert all(agreed.fast_ok for agreed in accords)
 
             # Candidacy buys the fast cadence, and the fast cadence is what
             # fills the window a bundle is judged on.
             guest._update_bundles()
-            assert all(peer.ka_wanted_ms == mlo.FAST_MS
+            fast = mlo.accord(guest.keepalive_bounds(),
+                              host.keepalive_bounds()).fast_ms
+            assert all(peer.ka_wanted_ms == fast
                        for peer in _links_to(guest, host.id))
             assert await _wait(
                 lambda: all(peer.quality.recent_probes() >= mlo.MIN_PROBES
@@ -121,6 +124,42 @@ class TestABundleOverRealSockets:
                        for peer in _links_to(guest, host.id))
             assert all(guest._keepalive_interval(peer) == 20.0
                        for peer in _links_to(guest, host.id))
+        finally:
+            await guest.stop()
+            await host.stop()
+
+
+@pytest.mark.asyncio
+class TestNotSpendingSomebodyElsesBattery:
+    """The declaration is binding, over real sockets, and in both directions.
+
+    The unit tests prove the arithmetic. What this adds is that the numbers
+    actually travel: a node whose four bounds say "2 to 5 seconds is my idea of
+    fast, and leave me a minute when nothing is happening" is left alone by a
+    peer that would otherwise probe it ten times a second."""
+
+    async def test_a_peer_that_declared_it_is_frugal_is_left_alone(self):
+        host, guest = await _two_linked_nodes("127.0.0.1:19465", "127.0.0.1:19466")
+        try:
+            assert await _wait(lambda: len(_links_to(guest, host.id)) >= 2)
+            # The host announces a phone's bounds. The re-proposal leaves
+            # before anything probes at a new cadence, by construction.
+            host.set_keepalive_bounds(fast_min_ms=2000, fast_max_ms=5000,
+                                      slow_min_ms=60000, slow_max_ms=300000)
+            assert await _wait(
+                lambda: all(peer.ka_window is not None
+                            and peer.ka_window.fast_min == 2000
+                            for peer in _links_to(guest, host.id)))
+
+            guest._update_bundles()
+            # No cadence both call fast → no striping at that peer at all,
+            # rather than the phone paying for the server's idea of it.
+            assert guest._bundles == {}, guest.mlo_status()
+            for peer in _links_to(guest, host.id):
+                agreed = guest._accord_with(peer)
+                assert not agreed.fast_ok
+                assert agreed.slow_ms == 60000       # the frugal floor wins
+                assert peer.ka_wanted_ms is None
         finally:
             await guest.stop()
             await host.stop()
