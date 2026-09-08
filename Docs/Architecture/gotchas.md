@@ -402,6 +402,25 @@ costs the threshold, coming back costs half of it.
 > smallest observation that can move it is.** If one sample can flip the
 > verdict, the verdict flaps at the sampling rate.
 
+## A feature whose precondition nothing produces
+
+MLO bundles two links to one node. Every rule about *which* two was written,
+tested and documented; what nobody wrote was the thing that makes there be two.
+A node holds one link to a peer — the routing walk stops at the first address
+that answers, and the retry loop skips a node it is already linked to, both
+correctly — so a bundle formed only when the pair happened to dial each other
+over two media, or when an operator pressed "Retry every address" by hand and
+accidentally supplied the missing step. The feature worked perfectly and started
+by luck, which reads from the outside as "it works sometimes".
+
+It is a shape worth recognising because every test passes: each rule is right,
+the integration test opened the second link itself in its setup, and the
+precondition looked like part of the world rather than part of the work.
+
+> **For anything that acts on a state, ask what puts the system in that state.**
+> If the answer is "something else, usually" — or if your own test has to arrange
+> it by hand — that arrangement is a piece of the feature you have not written.
+
 ## A socket the process opened for itself is not a user
 
 MLO only runs while somebody is using the node, and the data connector answered
