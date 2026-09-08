@@ -766,6 +766,12 @@ already held, which is four microseconds of work to learn nothing — and falls
 back to `add` for an id we have never heard of, because `touch` will not invent
 an entry and this is the one path that may create one.
 
+Both are cheap because the bucket is keyed by id rather than held as a list:
+refreshing an entry is a `move_to_end`, not a scan under dataclass equality.
+Restoring the second of the two below cost 11.7 µs a probe until that changed —
+a security fix that ate the whole optimisation, which is its own lesson
+(`gotchas.md`).
+
 Two things `add` did are kept, and both are load-bearing rather than
 bookkeeping. **An authenticated PING still proves recency**, which is what
 keeps a live NATted peer with nothing to announce from being purged for having
