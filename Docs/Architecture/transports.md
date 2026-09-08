@@ -662,6 +662,9 @@ follow from it.
   last address, so a build without this reads a tailed PING as the PING it
   always read. The tail is only *sent* to a peer that announced the `keepalive`
   feature, which is a different question — see **What silence means** below.
+- **…and carries the addresses only when the peer might not have them.** See
+  *What a probe weighs* below: at ten a second, an unchanged address list is
+  most of the packet and most of the work.
 - **The answer echoes the token.** `on_ping`/`on_pong` keep only the latest
   probe, which is right at twenty seconds and useless at a hundred
   milliseconds: with several probes in flight, every answer but one arrives
@@ -729,6 +732,58 @@ that will not echo the token — so every probe would be unmatched and `expire`
 would charge every one of them as a **loss on a link answering perfectly**.
 Those names are listed in `features.SINCE_NEGOTIATION` and asked through
 `peer_announces`, which requires the name to have been said.
+
+## What a probe weighs
+
+The PING carries `advertised_uris` because liveness and address gossip happened
+to want the same packet. That was free at one probe per link per twenty seconds.
+At ten a second it is the packet — measured on a node advertising five
+addresses:
+
+| | before | after |
+|---|---|---|
+| PING on the wire | 312 B | **92 B** |
+| PONG on the wire | 87 B | 87 B |
+| `_handle_ping`, receiving one | 30.2 µs | **6.4 µs** |
+| `ping()`, sending one | 22.1 µs | **6.3 µs** |
+
+Three changes, and none of them touches the wire format.
+
+**The addresses go out when the peer might not have them** — our set changed,
+or `_ADDR_GOSSIP_INTERVAL` has passed for that link — and the rest of the time
+the probe is a probe. The interval is a *duration*, not "every Nth probe", for
+the same reason `_DEAD_LINK_SILENCE` is: a probe count means one thing at rest
+and another while striping. It equals `_LINK_KEEPALIVE_INTERVAL`, so a link
+nobody is bundling carries them on every probe exactly as before, and it is
+also the net under a lost PING — a peer that missed an update is told again
+within it rather than never.
+
+Sending none is **not a new kind of packet**: a node with nothing announceable
+has always sent exactly this, so there is nothing to negotiate and no build
+anywhere that reads it as unusual. On the receiving side an empty list takes
+`RoutingTable.touch` instead of `add` — `add` merges and re-filters everything
+already held, which is four microseconds of work to learn nothing — and falls
+back to `add` for an id we have never heard of, because `touch` will not invent
+an entry and this is the one path that may create one. What the old
+unconditional merge protected is untouched: **an authenticated PING still
+proves recency**, which is what keeps a live NATted peer with nothing to
+announce from being purged for having nothing to say.
+
+**`advertised_uris()` is memoised on the three lists it derives from.** It was
+15 µs of regex and per-character work per call, recomputed on every probe,
+every `FIND_NODE` answer and every announce, to produce the same five strings.
+The key is the whole of the input, so there is no fourth thing to forget to
+invalidate — the failure a cache normally buys.
+
+**`Packet.create` builds the packet once and draws its nonce in blocks.** It
+used to construct one `Packet` purely to ask it for its own id and then a
+second one to keep, and to make a `getrandom` syscall for every packet. Neither
+is a property, both were on the send path of *every* packet this node emits:
+3.34 µs → 2.40 µs each. A slice of a CSPRNG draw is CSPRNG output, so the block
+buys a syscall and never a shortcut — and the nonce has to stay unpredictable,
+because it feeds `msg_id` and a guessable `msg_id` is a way to seed a relay's
+dedup window so a *later* legitimate packet is dropped as a replay. The pool is
+dropped in a forked child, or both sides would hand out the same bytes.
 
 ## Multi-link operation (`mlo.py`, off by default)
 

@@ -21,7 +21,7 @@ is therefore safe to accept from strangers.
 | File | Role |
 |---|---|
 | `node.py` | The core (~5000 lines): receive loop, dispatch, handshake, routing (learned return path, route acquisition outside the receive loop), DHT, E2E, hole punching, keepalive (a **due time per link**, not one interval for all), reachability, **maintaining a target neighbourhood and multi-hop recovery**, **chasing back a node whose link just died**, **spreading one node's traffic over two links**. |
-| `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. |
+| `packet.py` | Packet format, `msg_id`, GCM AAD, (de)encrypting a packet. Building one is on the send path of everything the node emits, so it constructs the packet once rather than twice and draws its nonce in blocks — a slice of a CSPRNG draw, never a cheaper source. |
 | `activity.py` | Who is doing what: every background loop declares a name, what it does and **what wakes it**, and counts its own passes. Nothing on the packet path. |
 | `seen.py` | The replay window: a bounded, **exact** set of 64-bit ids in a flat table, generational eviction, seeded buckets. Sixteen bytes an id where boxing them cost a hundred. |
 | `node_id.py` | `NodeID` = sha256(DSA public key)[:20]; Kademlia XOR distance. |
@@ -37,7 +37,7 @@ is therefore safe to accept from strangers.
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `equivocation.py` | The one report that is **not** an opinion: two records signed by the same key that cannot both have been meant. Forging one needs the key it accuses, so the messenger's honesty is not in it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). |
-| `routing.py` | Kademlia routing table (k-buckets, `last_seen`), plus the two things it needed to stop chasing ghosts: addresses that answered as somebody else are **remembered**, not merely dropped, and an id that has never once answered a lookup stops being asked after, dialled, or named to others. |
+| `routing.py` | Kademlia routing table (k-buckets, `last_seen`, and a `touch` that refreshes recency without the merge `add` does — most probes now carry no addresses at all), plus the two things it needed to stop chasing ghosts: addresses that answered as somebody else are **remembered**, not merely dropped, and an id that has never once answered a lookup stops being asked after, dialled, or named to others. |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
 | `app_dht.py` | Per-app DHT (overlay): a namespace per `app_id`, entries public (in the clear) or private (AES-256-GCM under a key the app supplies). |
 | `pseudo.py` | The one canonical form of a pseudo (NFC, no invisible or directional characters, at most 50). Deterministic, so a receiver can re-derive it and call a mismatch a lie. |

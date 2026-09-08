@@ -463,6 +463,15 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 - Apps must tolerate arriving out of order — which a mesh never guaranteed
   anyway. Chat's edits, deletions and reactions now wait for the message they
   name instead of being dropped.
+- Probing ten times a second made the probe worth looking at, and it was
+  carrying a passenger: the unchanged address list was 71% of a PING and half
+  of what answering one cost. It now rides a probe only when the peer might not
+  have it, an empty list takes `RoutingTable.touch` instead of a full merge,
+  `advertised_uris()` is memoised on the three lists it derives from, and
+  `Packet.create` builds the packet once instead of twice and draws its nonce
+  in blocks. Measured: **312 → 92 bytes**, **30.2 → 6.4 µs** to receive one,
+  **22.1 → 6.3 µs** to send one — and the last two help every packet the node
+  emits, not just probes. No wire format changed.
 - Docs: `Docs/Architecture/transports.md`, `Docs/Setup/guide`.
 
 ### Long term

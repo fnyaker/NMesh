@@ -27,6 +27,7 @@ import pytest
 from src import features, mlo
 from src.metrics import LinkQuality
 from src.node import (MeshNode, _Peer, KA_PROPOSE, KA_REQUEST, PING, PONG,
+                      _ADDR_GOSSIP_INTERVAL, _NO_ADDRESSES,
                       _KA_BOUNDS, _KA_GRACE, _KA_PROBE_DEADLINE, _KA_TOLD_TTL,
                       _KA_TICK_FLOOR, _KA_TOKEN, _KA_WANTED,
                       _LINK_KEEPALIVE_INTERVAL,
@@ -1042,3 +1043,133 @@ class TestTheStatusNeverShowsACadenceNobodyRuns:
                     next(p for p in node._peers
                          if p.remote_addr == member["remote"])) * 1000)
         await node.stop()
+
+
+class TestWhatAProbeWeighs:
+    """The address gossip rides the probe; it is not what a probe is for.
+
+    That distinction cost nothing while every link was probed every twenty
+    seconds. At ten a second the unchanged address list was 71% of the packet
+    and half of what answering one costs — measured, not guessed: 312 bytes and
+    30 us became 92 bytes and 6.4 us."""
+
+    def _uris(self, node):
+        node._addresses = ["tcp://192.168.1.20:9000", "udp://192.168.1.20:9001"]
+        node._advertised_key = None          # the cache reads the new list
+        return tuple(node.advertised_uris())
+
+    async def test_the_first_probe_on_a_link_carries_them(self):
+        node = _node()
+        self._uris(node)
+        peer = _link(node)
+        await node.ping(peer)
+        addrs, _ = _decode_addresses_at(peer.transport.sent[-1].payload)
+        assert addrs == list(self._uris(node))
+        await node.stop()
+
+    async def test_the_next_ones_do_not(self):
+        node = _node()
+        self._uris(node)
+        peer = _link(node)
+        await node.ping(peer)
+        for _ in range(5):
+            await node.ping(peer)
+            addrs, _ = _decode_addresses_at(peer.transport.sent[-1].payload)
+            assert addrs == []
+        await node.stop()
+
+    async def test_a_changed_address_set_goes_out_at_once(self):
+        """Not on the next refresh — the whole point of address gossip is that
+        a node that moved is reachable again quickly."""
+        node = _node()
+        self._uris(node)
+        peer = _link(node)
+        await node.ping(peer)
+        await node.ping(peer)
+        node._addresses = ["tcp://10.0.0.7:9000"]
+        node._advertised_key = None
+        await node.ping(peer)
+        addrs, _ = _decode_addresses_at(peer.transport.sent[-1].payload)
+        assert addrs == ["tcp://10.0.0.7:9000"]
+        await node.stop()
+
+    async def test_they_are_re_sent_after_the_refresh_interval(self):
+        """The net under a lost probe: a peer that missed the update is told
+        again, rather than never."""
+        node = _node()
+        self._uris(node)
+        peer = _link(node)
+        await node.ping(peer)
+        peer.addrs_sent_at -= _ADDR_GOSSIP_INTERVAL + 1.0
+        await node.ping(peer)
+        addrs, _ = _decode_addresses_at(peer.transport.sent[-1].payload)
+        assert addrs == list(self._uris(node))
+        await node.stop()
+
+    async def test_a_link_probed_at_the_classic_interval_is_unchanged(self):
+        """A node nobody is bundling behaves exactly as it did: the refresh
+        interval *is* the classic probe interval, so every probe carries them."""
+        assert _ADDR_GOSSIP_INTERVAL == _LINK_KEEPALIVE_INTERVAL
+
+    async def test_a_probe_with_no_addresses_still_proves_recency(self):
+        """The invariant the old unconditional merge protected. A node with
+        nothing announceable has always sent exactly this packet, and it must
+        keep counting as contact — otherwise a live NATted peer is purged from
+        the table for having nothing to say."""
+        node = _node()
+        peer = _link(node)
+        node._routing.add(TARGET, ["fake://a:1"], b"\x01" * 32)
+        entry = node._routing.get(TARGET)
+        entry.last_seen -= 3600.0
+        stale = entry.last_seen
+        await node._handle_ping(peer, Packet.create(
+            PING, TARGET.raw, b"\xff" * 20, _NO_ADDRESSES))
+        assert node._routing.get(TARGET).last_seen > stale
+        assert node._known_addresses(TARGET) == ["fake://a:1"]   # kept
+        await node.stop()
+
+    async def test_a_probe_from_an_unknown_id_still_creates_its_entry(self):
+        """`touch` refuses to invent an entry — recency about a node we have
+        never heard of is not one — so this path has to fall back to `add`,
+        which is the one door an entry comes through."""
+        node = _node()
+        peer = _link(node)
+        peer.dsa_pub = b"\x02" * 32
+        assert node._routing.get(TARGET) is None
+        await node._handle_ping(peer, Packet.create(
+            PING, TARGET.raw, b"\xff" * 20, _NO_ADDRESSES))
+        assert node._routing.get(TARGET) is not None
+        await node.stop()
+
+
+class TestTheAdvertisedSetIsCachedOnItsWholeInput:
+    """A cache is only safe when its key is everything the answer depends on.
+    Three lists go in; each one is proved to invalidate it, so there is no
+    fourth thing to have forgotten."""
+
+    def test_it_is_the_same_answer_twice(self):
+        node = _node()
+        node._addresses = ["tcp://0.0.0.0:9000"]
+        node._local_ips = ["192.168.1.20"]
+        assert node.advertised_uris() == node.advertised_uris()
+
+    def test_a_caller_cannot_corrupt_it(self):
+        node = _node()
+        node._addresses = ["tcp://10.0.0.1:9000"]
+        node.advertised_uris().append("tcp://evil:1")
+        assert "tcp://evil:1" not in node.advertised_uris()
+
+    def test_every_input_invalidates_it(self):
+        node = _node()
+        node._addresses = ["tcp://0.0.0.0:9000"]
+        node._local_ips = ["192.168.1.20"]
+        node._extra_addrs = []
+        first = node.advertised_uris()
+        node._local_ips = ["192.168.1.20", "10.0.0.5"]
+        second = node.advertised_uris()
+        assert second != first
+        node._extra_addrs = ["81.240.12.33"]
+        third = node.advertised_uris()
+        assert third != second
+        node._addresses = ["udp://0.0.0.0:9001"]
+        assert node.advertised_uris() != third

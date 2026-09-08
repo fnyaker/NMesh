@@ -184,3 +184,50 @@ class TestExportImport:
         rt.import_entries("not a list")
         rt.import_entries([{"id": "zz"}, {"bad": 1}, 42, {"id": "00", "dsa_pub": "gg"}])
         assert rt.all_entries() == []
+
+
+class TestTouchingAnEntry:
+    """`add` was how recency got refreshed, and it does far more than that:
+    it merges the addresses handed to it with the ones held, re-filters every
+    one through `wrong_address`, builds a fresh entry and re-inserts it. Right
+    when addresses arrive, four microseconds of nothing when none did — and
+    since a link can be probed ten times a second, "none did" is now almost
+    every call."""
+
+    def test_it_refreshes_recency(self):
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1"], b"\x01" * 32)
+        entry = table.get(target)
+        entry.last_seen -= 3600.0
+        stale = entry.last_seen
+        assert table.touch(target) is True
+        assert table.get(target).last_seen > stale
+
+    def test_it_keeps_everything_add_would_have_kept(self):
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1", "udp://a:2"], b"\x01" * 32)
+        table.touch(target)
+        entry = table.get(target)
+        assert entry.addresses == ["tcp://a:1", "udp://a:2"]
+        assert entry.dsa_pub == b"\x01" * 32
+
+    def test_it_never_invents_an_entry(self):
+        """Recency about a node we have never heard of is not an entry, and a
+        table filled from bare liveness signals is a table of ids nobody can
+        reach. The caller falls back to `add`, which is the one door in."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        assert table.touch(NodeID(b"\x11" * 20)) is False
+        assert table.get(NodeID(b"\x11" * 20)) is None
+
+    def test_it_leaves_the_lookup_counters_alone(self):
+        """Being probed is not answering a lookup — the two are what tell a
+        live node from an id somebody keeps re-advertising."""
+        table = RoutingTable(NodeID(b"\x00" * 20))
+        target = NodeID(b"\x11" * 20)
+        table.add(target, ["tcp://a:1"], b"\x01" * 32)
+        table.note_unanswered(target)
+        table.touch(target)
+        entry = table.get(target)
+        assert entry.unanswered == 1 and entry.answered_at is None
