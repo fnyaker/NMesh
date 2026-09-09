@@ -741,6 +741,79 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
+        <p class="eyebrow">Publishing under a key</p>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Publisher keys held here</h2>
+            <div class="sub">Keys this node can sign a release with</div></div></div>
+          <div class="card-body stack">
+            <p class="muted small">A publisher key is not this node's identity. The identity is
+              unlocked for as long as the node runs, because handshakes need it; a publisher key
+              lives on disk under a passphrase and is unlocked only for the moment it takes to
+              sign. Of everything a key signs here, a release is the one that replaces somebody
+              else's program, and it is the one signed least often.</p>
+            <div class="table-wrap">
+              <table><thead><tr><th>Name</th><th>Key</th><th>Where it came from</th>
+                <th></th></tr></thead>
+                <tbody id="key-rows"></tbody></table>
+            </div>
+            <p id="key-empty" class="empty" hidden>No publisher key here — this node signs
+              releases with its own identity.</p>
+            <div class="form-grid">
+              <label class="field"><span>Name</span>
+                <input id="key-label" placeholder="what this key is for" autocomplete="off"></label>
+              <label class="field"><span>Passphrase</span>
+                <input id="key-pass" type="password" autocomplete="new-password">
+                <span class="hint">It never leaves this machine. Lose it and the key is
+                  gone — there is no recovery, which is what makes a copied file useless.</span></label>
+            </div>
+            <div class="btn-row"><button id="key-create" class="primary">Make a key</button></div>
+            <details><summary class="small">Already have a key file?</summary>
+              <div class="stack">
+                <p class="muted small">A key made before this node had somewhere to keep them is
+                  a file nothing can name — and naming it by id is what lets a release be signed
+                  with it, or offered to somebody. Give the path and the passphrase above.</p>
+                <label class="field"><span>Path on this machine</span>
+                  <input id="key-path" class="mono" placeholder="/path/to/publisher.key"
+                         autocomplete="off" spellcheck="false"></label>
+                <div class="btn-row"><button id="key-import">Take it in</button></div>
+              </div>
+            </details>
+            <p id="key-status" class="msg"></p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Sharing a key</h2>
+            <div class="sub">Handing one to somebody else, and taking one they offer</div></div></div>
+          <div class="card-body stack">
+            <p class="muted small">Whoever holds this key can publish under it, and every node
+              that pinned it will accept what they sign. It is worth doing when a <em>team</em>
+              publishes one thing under one identity; the alternative — everybody keeps their own
+              key and consumers pin several — makes a compromise one signer rather than the
+              project. Nothing here can tell the two situations apart, so both sides say yes
+              explicitly and this node records who handed what to whom.</p>
+            <p class="muted small">The secret is sealed to a key the other side generates when
+              they accept, so it cannot travel before somebody agrees to receive it, and only
+              they can open it. They choose their own passphrase — never yours.</p>
+
+            <div id="key-offers-in" class="stack"></div>
+
+            <div class="form-grid">
+              <label class="field"><span>Key to share</span>
+                <select id="share-key"></select></label>
+              <label class="field"><span>Node id</span>
+                <input id="share-node" placeholder="who receives it" autocomplete="off"
+                       spellcheck="false" class="mono"></label>
+              <label class="field"><span>Its passphrase</span>
+                <input id="share-pass" type="password" autocomplete="current-password">
+                <span class="hint">Yours, to unlock the key here. It is not sent.</span></label>
+            </div>
+            <div class="btn-row"><button id="share-go" class="primary">Offer this key</button></div>
+            <p id="share-status" class="msg"></p>
+            <div id="key-offers-out" class="stack"></div>
+          </div>
+        </article>
+
         <p class="eyebrow">Giving one</p>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Publish this node's code</h2>
@@ -753,7 +826,15 @@ INDEX_HTML = """<!doctype html>
               carry another.</p>
             <label class="field"><span>Release notes</span>
               <textarea id="publish-notes" rows="3" placeholder="what changed"></textarea></label>
-            <div class="kv"><div>This node's publisher key</div>
+            <div class="form-grid">
+              <label class="field"><span>Sign with</span>
+                <select id="publish-signer"></select>
+                <span class="hint">A publisher key is the safer choice: it is unlocked for this
+                  one signature. The node identity is already unlocked and always will be.</span></label>
+              <label class="field" id="publish-pass-field" hidden><span>Its passphrase</span>
+                <input id="publish-pass" type="password" autocomplete="current-password"></label>
+            </div>
+            <div class="kv"><div>This node's identity key</div>
               <div><code id="publish-key" class="inline"></code></div></div>
             <div class="btn-row"><button id="publish-go">Publish</button></div>
             <p id="publish-status" class="msg"></p>
@@ -1179,7 +1260,7 @@ function onRoute(section, sub){
   // a stale form would offer to save values they no longer hold.
   if(section === "settings" && sub === "config") loadConfig();
   if(section === "settings" && sub === "diagnostics") loadTrace();
-  if(section === "settings" && sub === "updates") refreshReleases();
+  if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
 // One reader of `/api/state`, two reasons to call it.
@@ -1213,7 +1294,9 @@ async function tick(sample){
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
-    if(ROUTER.section === "settings" && ROUTER.sub === "updates") refreshReleases();
+    if(ROUTER.section === "settings" && ROUTER.sub === "updates"){
+      refreshReleases(); refreshKeys();
+    }
   }catch(error){
     if(!isStale(error)) railState("danger", "Console unreachable");
   }finally{ if(TICKING === epoch) TICKING = false; }
@@ -3039,6 +3122,209 @@ function publisherRowHTML(entry){
     '><span class="sr-only">Counts towards a quorum</span></label>' +
     '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
 }
+// ---- publisher keys, and handing one over ----------------------------------
+// A private signing key is the one secret this product copies on purpose, so
+// every step is a separate press and the node decides all of them. This file
+// renders what it is told and asks before anything moves.
+let KEYS = {keys:[], incoming:[], outgoing:[]};
+
+function keyRowHTML(row){
+  return "<tr><td>" + (row.label ? esc(row.label)
+      : '<span class="muted">unnamed</span>') +
+    '</td><td><code>' + esc(shortId(row.id)) + "</code></td><td>" +
+    (row.received_from
+      ? '<span class="tiny">handed over by <code>' +
+        esc(shortId(row.received_from)) + "</code></span>"
+      : '<span class="tiny muted">made here</span>') +
+    '</td><td class="tight"><button class="sm danger" data-key-forget="' +
+    esc(row.id) + '">Forget</button></td></tr>';
+}
+
+// An offer is a decision, so it is drawn as one thing to read and two answers —
+// never as a row in a table somebody scrolls past.
+function offerInHTML(row){
+  return '<article class="card"><div class="card-body stack">' +
+    "<p><strong>A node offers this one a publisher key.</strong></p>" +
+    '<dl class="kv"><dt>Key</dt><dd><code class="inline">' + esc(row.key_id) +
+    "</code></dd><dt>Offered by</dt><dd><code class=\"inline\">" +
+    esc(row.from) + "</code></dd>" +
+    (row.label ? "<dt>They call it</dt><dd>" + esc(row.label) + "</dd>" : "") +
+    "<dt>Expires in</dt><dd>" + esc(fmtDuration(row.expires_in)) + "</dd></dl>" +
+    '<p class="muted small">Accepting means this node can publish under that key, and every ' +
+    "node that pinned it will accept what this one signs. Check the id against what they told " +
+    "you over a channel you trust — an offer arriving is not evidence of who sent it.</p>" +
+    '<label class="field"><span>A passphrase to keep it under</span>' +
+    '<input type="password" data-key-pass="' + esc(row.offer_id) + '" autocomplete="new-password">' +
+    '<span class="hint">Yours, chosen here. Never theirs.</span></label>' +
+    '<div class="btn-row"><button class="primary" data-key-accept="' + esc(row.offer_id) +
+    '">Accept the key</button><button class="danger" data-key-refuse="' +
+    esc(row.offer_id) + '">Refuse</button></div></div></article>';
+}
+
+function offerOutHTML(row){
+  return '<p class="msg">Offered <code class="inline">' + esc(shortId(row.key_id)) +
+    "</code> to <code class=\"inline\">" + esc(shortId(row.to)) +
+    "</code> — waiting for them to accept, " + esc(fmtDuration(row.expires_in)) +
+    " left. The key is unlocked here until they answer or it expires.</p>";
+}
+
+async function refreshKeys(){
+  try{
+    const {ok, data} = await apiJson("/api/keys");
+    if(!ok) return;
+    KEYS = {keys:data.keys || [], incoming:data.incoming || [],
+            outgoing:data.outgoing || []};
+    setHTML("key-rows", KEYS.keys.map(keyRowHTML).join(""));
+    $("key-empty").hidden = KEYS.keys.length > 0;
+    setHTML("key-offers-in", KEYS.incoming.map(offerInHTML).join(""));
+    setHTML("key-offers-out", KEYS.outgoing.map(offerOutHTML).join(""));
+    paintKeyPickers();
+  }catch(_){}
+}
+
+// Two pickers over one list. Rebuilt only when the set of keys changed, so a
+// refresh does not throw away what somebody had selected.
+function paintKeyPickers(){
+  const options = KEYS.keys.map((row) =>
+    '<option value="' + esc(row.id) + '">' +
+    esc(row.label || shortId(row.id)) + "</option>").join("");
+  const share = $("share-key");
+  if(share && share.dataset.built !== options){
+    const held = share.value;
+    share.innerHTML = options ||
+      '<option value="">no publisher key on this node</option>';
+    share.dataset.built = options;
+    if(held) share.value = held;
+  }
+  const signer = $("publish-signer");
+  if(signer && signer.dataset.built !== options){
+    const held = signer.value;
+    signer.innerHTML = '<option value="">this node\'s identity</option>' + options;
+    signer.dataset.built = options;
+    if(held) signer.value = held;
+  }
+  const field = $("publish-pass-field");
+  if(field) field.hidden = !(signer && signer.value);
+}
+
+$("publish-signer").addEventListener("change", () => {
+  $("publish-pass-field").hidden = !$("publish-signer").value;
+});
+
+$("key-create").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const passphrase = $("key-pass").value;
+  if(!passphrase){ setMessage("key-status", "Choose a passphrase first", true); return; }
+  const agreed = await confirmAction({
+    title:"Make a publisher key?",
+    confirmLabel:"Make it",
+    body:'<p class="muted small">It is written to this node\'s state directory, encrypted ' +
+      "under the passphrase you just typed. There is no recovery: lose the passphrase and the " +
+      "key is gone, which is exactly what makes a copy of the file useless to whoever took it.</p>"});
+  if(!agreed) return;
+  try{
+    const {ok, data} = await apiJson("/api/keys/create", "POST",
+      {passphrase, label:$("key-label").value});
+    setMessage("key-status", ok
+      ? "Made " + shortId(data.key.id) + ". Pin it on the nodes that should accept its releases."
+      : (data.error || "Could not make a key"), !ok);
+    if(ok){ $("key-pass").value = ""; $("key-label").value = ""; }
+  }catch(_){ setMessage("key-status", "The node did not answer.", true); }
+  await refreshKeys();
+}));
+
+$("key-import").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const path = $("key-path").value.trim();
+  const passphrase = $("key-pass").value;
+  if(!path){ setMessage("key-status", "Give the path to the key file", true); return; }
+  if(!passphrase){ setMessage("key-status", "Type its passphrase in the field above", true); return; }
+  try{
+    const {ok, data} = await apiJson("/api/keys/import", "POST",
+      {path, passphrase, label:$("key-label").value});
+    setMessage("key-status", ok ? "Took in " + shortId(data.key.id) + "."
+      : (data.error || "Could not read that key"), !ok);
+    if(ok){ $("key-pass").value = ""; $("key-label").value = ""; $("key-path").value = ""; }
+  }catch(_){ setMessage("key-status", "The node did not answer.", true); }
+  await refreshKeys();
+}));
+
+$("key-rows").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-key-forget]");
+  if(!button) return;
+  const agreed = await confirmAction({
+    title:"Forget this publisher key?", danger:true, confirmLabel:"Forget it",
+    body:'<p class="muted small">The file is deleted from this machine and cannot be brought ' +
+      "back from here. Anyone you handed it to still has their copy, and nodes that pinned it " +
+      "still accept what those copies sign — forgetting a key is not revoking it.</p>"});
+  if(!agreed) return;
+  await withBusy(button, async () => {
+    const {ok, data} = await apiJson("/api/keys/forget", "POST",
+      {key_id:button.dataset.keyForget, confirm:true});
+    setMessage("key-status", ok ? "Forgotten." : (data.error || "Could not forget it"), !ok);
+    await refreshKeys();
+  });
+});
+
+$("share-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const key_id = $("share-key").value, node = $("share-node").value.trim();
+  const passphrase = $("share-pass").value;
+  if(!key_id){ setMessage("share-status", "There is no key to share", true); return; }
+  if(!node){ setMessage("share-status", "Name the node that receives it", true); return; }
+  if(!passphrase){ setMessage("share-status", "Type the key's passphrase", true); return; }
+  const agreed = await confirmAction({
+    title:"Hand this key to " + shortId(node) + "?", danger:true,
+    confirmLabel:"Offer the key",
+    body:'<p class="muted small">They will be able to publish under this key, and every node ' +
+      "that pinned it will accept what they sign. You cannot take it back: a key you have " +
+      "shared is a key two machines hold, and un-sharing it means making a new one and asking " +
+      "everybody to pin that instead.</p>" +
+      '<div class="kv"><div>Receiving node</div><div><code class="inline">' + esc(node) +
+      "</code></div></div>" +
+      '<p class="muted small">Nothing is sent until they accept. Until then this node holds the ' +
+      "key unlocked, and forgets it when they answer or when the offer expires.</p>"});
+  if(!agreed) return;
+  try{
+    const {ok, data} = await apiJson("/api/keys/offer", "POST",
+      {node, key_id, passphrase, label:$("share-key").selectedOptions[0].textContent,
+       confirm:true});
+    setMessage("share-status", ok
+      ? "Offered. It travels only once they accept."
+      : (data.error || "Could not offer that key"), !ok);
+    if(ok) $("share-pass").value = "";
+  }catch(_){ setMessage("share-status", "The node did not answer.", true); }
+  await refreshKeys();
+}));
+
+$("key-offers-in").addEventListener("click", async (event) => {
+  const refuse = event.target.closest("[data-key-refuse]");
+  if(refuse){
+    await apiJson("/api/keys/refuse", "POST", {offer_id:refuse.dataset.keyRefuse});
+    toast("Offer refused");
+    await refreshKeys();
+    return;
+  }
+  const accept = event.target.closest("[data-key-accept]");
+  if(!accept) return;
+  const offer_id = accept.dataset.keyAccept;
+  const field = document.querySelector('[data-key-pass="' + offer_id + '"]');
+  const passphrase = field ? field.value : "";
+  if(!passphrase){ toast("Choose a passphrase to keep it under", "danger"); return; }
+  const agreed = await confirmAction({
+    title:"Accept this publisher key?", danger:true, confirmLabel:"Accept it",
+    body:'<p class="muted small">This node will be able to publish releases under that key. ' +
+      "Accept it only from somebody you would let publish in your name — an offer arriving " +
+      "proves the sender holds the key, and nothing at all about who the sender is.</p>"});
+  if(!agreed) return;
+  await withBusy(accept, async () => {
+    const {ok, data} = await apiJson("/api/keys/accept", "POST",
+      {offer_id, passphrase, confirm:true});
+    setMessage("share-status", ok
+      ? "Accepted — the key arrives in a moment, sealed to this node."
+      : (data.error || "Could not accept"), !ok);
+    if(field) field.value = "";
+    await refreshKeys();
+  });
+});
+
 // ---- the node's own name ---------------------------------------------------
 async function refreshPseudo(){
   try{
@@ -3218,12 +3504,14 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
     + "moment on a busy mesh…");
   try{
     const {ok, data} = await apiJson("/api/releases/publish", "POST",
-      {notes:$("publish-notes").value});
+      {notes:$("publish-notes").value,
+       key_id:$("publish-signer").value,
+       passphrase:$("publish-pass").value});
     setMessage("publish-status", ok
       ? "Published " + data.version + " — " + data.files + " files, "
         + fmtBytes(data.package_bytes) + " to send when someone asks."
       : (data.error || "Publish failed"), !ok);
-    if(ok) await refreshReleases();
+    if(ok){ $("publish-pass").value = ""; await refreshReleases(); }
   }catch(_){
     setMessage("publish-status", "Publishing did not finish — the node may still "
       + "be working. Check Settings → Updates again in a minute.", true);

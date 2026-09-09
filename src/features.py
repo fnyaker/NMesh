@@ -85,16 +85,23 @@ ABUSE = "abuse"            # signed abuse reports
 KEEPALIVE = "keepalive"    # the negotiated keepalive cadence (KA_PROPOSE/REQUEST)
 MLO = "mlo"                # multi-link operation: two links carrying one flow
 PACKAGES = "pkgdir"        # the package directory (PKG_STORE / FIND / FOUND / ANNOUNCE)
+# Handing a publisher credential to another node (KEY_OFFER / ACCEPT / GRANT).
+# Named for the act rather than for what is handed over: a plane called after a
+# key reads like negotiated key material, and rule 3 says nothing here may be
+# that. It is not — every gate on this plane is unconditional, and the last one
+# is a human pressing accept — but a name a reviewer has to reason about is a
+# name that costs more than it saves.
+HANDOVER = "handover"
 
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENEW, REVOKE, ABUSE,
-                    KEEPALIVE, MLO, PACKAGES})
+                    KEEPALIVE, MLO, PACKAGES, HANDOVER})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
-SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES})
+SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER})
 
 
 class FeatureError(Exception):

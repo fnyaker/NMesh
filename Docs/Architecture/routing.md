@@ -308,6 +308,13 @@ name), bounded in entries and in bytes, and keeps the equivocation proof when
 one key signs two different packages as one version at one instant. Filed and
 re-filed by the same `_directory_loop` as the pseudo claim.
 
+A publisher key can also be **handed to another node** (`src/key_share.py`,
+`KEY_OFFER` / `KEY_ACCEPT` / `KEY_GRANT`, feature name `handover`), so a team
+publishes one thing under one identity instead of asking every consumer to track
+who is on the team. It is not a directory operation — the three messages are
+addressed node to node and routable like any other — but it is why the pairing
+above may name several machines for one key.
+
 See [`../Updates/guide`](../Updates/guide) for what an operator does with it.
 
 ## Target-neighbourhood maintenance and recovery at startup

@@ -94,6 +94,7 @@ receipt for routable types (see the gates).
 | KA_REQUEST | 0x28 | "slow your probes on this link to `wanted_ms(I)`, for now". Only ever *less* — a request that asks for more is dropped, or four bytes would buy somebody else's battery — and it lapses rather than sticking: the durable mechanism is the declaration above |
 | PKG_STORE / _FIND / _FOUND | 0x29 / 0x2A / 0x2B | package directory: store/seek/answer a **signed record** saying what a key publishes. Filed under the publisher id *and* the package name's prefixes, so "what does this node offer?" and "who publishes something called this?" are one lookup with two keys. The same plane carries **pairing halves** (a detached publisher key and the node using it, one signature each), filed under the same keys — a reader tries both gates on every blob (see [`../Updates/guide`](../Updates/guide)) |
 | PKG_ANNOUNCE | 0x2C | gossip of the same record — the epidemic half of the plane, terminating on "only re-gossip when our view changed" like the others |
+| KEY_OFFER / KEY_ACCEPT / KEY_GRANT | 0x2D / 0x2E / 0x2F | handing a **publisher secret key** to another node, in three steps: the offer is signed *by the publisher key* (proof of possession, both node ids inside the signature), the acceptance is signed by the recipient's identity over a **fresh ML-KEM public key** (there is no long-term encryption key to seal to, so consent is what produces one), and the grant is that secret sealed to it — unsigned, because the recipient checks the delivered secret against the public half from the offer (see [`../Updates/guide`](../Updates/guide)) |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
@@ -110,9 +111,11 @@ Groupings (constants):
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/
   `FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`, `DIR_STORE`/`DIR_FIND`/
   `DIR_FOUND`, `PKG_STORE`/`PKG_FIND`/`PKG_FOUND`, plus the release transfer
-  `RELEASE_FETCH`/`RELEASE_DATA` and the membership renewal
-  `CERT_RENEW`/`CERT_RENEWED`. → the DHT, both directories, a package download
-  and a renewal work `A→X` through relays, not only towards a direct peer.
+  `RELEASE_FETCH`/`RELEASE_DATA`, the membership renewal
+  `CERT_RENEW`/`CERT_RENEWED`, and the publisher-key handover
+  `KEY_OFFER`/`KEY_ACCEPT`/`KEY_GRANT`. → the DHT, both directories, a package
+  download, a renewal and a key handover work `A→X` through relays, not only
+  towards a direct peer.
 - `INVITE_SEEK` and `RELAY_CARRY` are handled **before** the gates (pre-auth,
   strictly bounded/token-gated).
 
