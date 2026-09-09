@@ -45,8 +45,12 @@ def _tree(root: str, version: str, note: str = "# the code\n") -> str:
     return root
 
 
-async def _pair(port: int) -> tuple[MeshNode, MeshNode]:
-    publisher, node = MeshNode(_mgr()), MeshNode(_mgr())
+async def _pair(port: int, state=None) -> tuple[MeshNode, MeshNode]:
+    """Two joined nodes. ``state`` gives each one a directory, which is what a
+    node needs before it can keep a publisher key at all."""
+    dirs = ({"release_dir": os.path.join(str(state), "a")},
+            {"release_dir": os.path.join(str(state), "b")}) if state else ({}, {})
+    publisher, node = MeshNode(_mgr(), **dirs[0]), MeshNode(_mgr(), **dirs[1])
     code = publisher.generate_invite()
     await publisher.start([f"tcp://127.0.0.1:{port}"])
     await node.join(f"tcp://127.0.0.1:{port}", code)
@@ -344,6 +348,67 @@ class TestADetachedPublisherKey:
             assert applied["version"] == "9.9.9"
         finally:
             await node.stop(); await publisher.stop()
+
+
+class TestHandingAPublisherKeyOver:
+    """A private signing key crossing a real mesh, and being published with on
+    the other side. The transfer is three routed messages; what makes it safe
+    is that the middle one only exists because a human accepted."""
+
+    async def test_a_key_crosses_and_the_recipient_publishes_with_it(
+            self, tmp_path):
+        alice, bob = await _pair(19415, tmp_path / "state")
+        try:
+            row = alice.create_publisher_key("alice pass", label="release key")
+            offer = await alice.offer_publisher_key(
+                bob.id, alice.publisher_key_path(row["id"]), "alice pass",
+                label="release key")
+
+            # The offer travels on its own; Bob's operator sees it and accepts.
+            assert await _until(
+                lambda: bool(bob.key_share_overview()["incoming"]), timeout=20.0)
+            waiting = bob.key_share_overview()["incoming"][0]
+            assert waiting["key_id"] == row["id"]
+            assert waiting["from"] == alice.id.raw.hex()
+
+            await bob.accept_publisher_key(offer["offer_id"], "bob pass")
+            assert await _until(
+                lambda: bool(bob.key_share_overview()["keys"]), timeout=20.0)
+            held = bob.key_share_overview()["keys"][0]
+            assert held["id"] == row["id"]
+            assert held["received_from"] == alice.id.raw.hex()
+
+            # …and Bob can now publish under it. The record names that key, so
+            # anybody who pinned it accepts what Bob signs.
+            info = await bob.publish_release(
+                _tree(str(tmp_path / "tree"), "9.9.9"),
+                key_path=bob.publisher_key_path(row["id"]),
+                passphrase="bob pass", notes="published by the other one")
+            assert info["publisher_id"] == row["id"]
+            await bob._publish_package_records()
+            found = await alice.search_packages("nmesh")
+            assert [entry["publisher_id"] for entry in found] == [row["id"]]
+        finally:
+            await bob.stop(); await alice.stop()
+
+    async def test_a_refused_offer_leaves_nothing_behind(self, tmp_path):
+        alice, bob = await _pair(19416, tmp_path / "state")
+        try:
+            row = alice.create_publisher_key("alice pass")
+            offer = await alice.offer_publisher_key(
+                bob.id, alice.publisher_key_path(row["id"]), "alice pass")
+            assert await _until(
+                lambda: bool(bob.key_share_overview()["incoming"]), timeout=20.0)
+            assert bob.refuse_publisher_key(offer["offer_id"]) is True
+
+            # Nothing arrives, and Alice's copy expires rather than being told:
+            # a refusal that answered would tell whoever asked that this node is
+            # here and listening.
+            await asyncio.sleep(0.5)
+            assert bob.key_share_overview()["keys"] == []
+            assert alice.key_share_overview()["outgoing"], "the offer stands"
+        finally:
+            await bob.stop(); await alice.stop()
 
 
 class TestARecordSaysNothingAboutTrust:

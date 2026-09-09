@@ -126,6 +126,13 @@ tests/
 │     refused, the keys it is filed under are derived from the name rather than
 │     declared, a source digest that ignores documentation and nothing else, and
 │     a crowded prefix bucket that drops a pointer and never a package
+├── test_key_share.py                                  — handing a publisher key
+│     to another node: an offer signed by a key the sender does not hold, an
+│     offer replayed at a node it does not name, an acceptance whose node id
+│     does not match the key inside it, a substituted KEM key, a grant opened
+│     with the wrong secret or carrying a secret that does not match the offered
+│     public half, an offer that expired, and a store that only ever keeps a
+│     file whose two halves agree
 ├── test_subscriptions.py                              — what this node watches:
 │     a corrupt or doctored file yields no subscriptions, a quorum is clamped to
 │     something reachable, and only publishers the operator chose are counted
@@ -296,7 +303,9 @@ tests/
       a release on one node and finds it on another by typing three letters, by
       the publisher's node id, pins the key that came inside the record and
       installs from it — plus the two refusals (a recommendation cannot be
-      pinned, and finding a release does not make it installable); and
+      pinned, and finding a release does not make it installable) and a
+      publisher key handed from one node to the other, the recipient then
+      signing a release with it; and
       test_fleet.py, which sends a relayed console call across a real mesh (a
       90 kB reply, so several frames) and checks that it is refused without the
       `manage` grant

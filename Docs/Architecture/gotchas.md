@@ -1099,6 +1099,24 @@ before and after.
   pins it at zero. The descriptor is kept locally when it is signed, and the
   directory sweep replicates it: work that needs the network belongs on the loop
   that already runs on the network's timing, not on a button somebody pressed.
+- **A scratch script that calls `install_package` installs into the tree you are
+  working in.** The integration tests all monkeypatch `updater.apply_files` for
+  exactly this reason; a reproduction script written in a hurry did not, and a
+  three-file test package replaced the checkout — `src/node.py` became the string
+  `# code`. Everything came back from `.nmesh-previous` (the updater's rollback
+  copy, which even held the uncommitted edits), and that is the point: the
+  installer is *working correctly* here. It is not a test helper. Anything that
+  drives an install outside the suite stubs the swap first, or runs somewhere
+  the swap is allowed to land.
+- **An offset copied from a neighbouring handler is a message that answers
+  nobody.** `_handle_key_accept` read the offer id as `payload[:16]`, which is
+  what the *grant* header puts there — the acceptance header is
+  `!BQ16sHHH`, so version and timestamp come first. Every acceptance looked like
+  an answer to a question nobody had asked, and the handover silently never
+  completed. Two headers that carry the same field at different offsets need two
+  named readers (`key_share.accept_offer_id` / `grant_offer_id`) and no literal
+  slice in the handler: the parser owns its layout, or the layout gets
+  re-derived by hand at each call site and one of them is wrong.
 
 ## Miscellaneous
 

@@ -32,6 +32,22 @@ from tests.conftest import make_manager
 PW = "correct-horse-battery-staple"
 
 
+def _key_store(tmp_path):
+    """A key store whose scrypt cost is the test's, not the product's.
+
+    The real cost is deliberately expensive — a fraction of a second an operator
+    pays once and a guessing rig pays per attempt — and a suite that pays it per
+    key pays it for nothing."""
+    from src import publisher_key as pk
+
+    class _Cheap(pk.KeyStore):
+        def put(self, public_key, secret_key, passphrase, **kwargs):
+            kwargs.setdefault("n", 2 ** 8)
+            return super().put(public_key, secret_key, passphrase, **kwargs)
+
+    return _Cheap(str(tmp_path / "publisher-keys"))
+
+
 async def _make_console(**kwargs):
     node = MeshNode(transport_manager=make_manager())
     await node._inject_peer(_FakeAuthPeerTransport())  # give it one peer to show
@@ -1980,6 +1996,139 @@ class TestPseudoEndpoints:
             assert all("pseudo" in peer for peer in body["peers"])
             assert all("pseudo" in row for row in body["routing"])
             assert all("pseudo" in row for row in body["topology"]["direct"])
+        finally:
+            console.stop(); await node.stop()
+
+
+class TestPublisherKeyEndpoints:
+    """Making a publisher key, handing one over, and taking one in.
+
+    A passphrase crosses this boundary, so the door is the whole of what this
+    layer owns: a session for every route, and an explicit confirmation on the
+    two that change what this machine can publish under."""
+
+    async def test_reading_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/keys", None)
+            assert status == 401
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_every_write_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            for path in ("/api/keys/create", "/api/keys/import",
+                         "/api/keys/offer", "/api/keys/accept",
+                         "/api/keys/refuse", "/api/keys/forget"):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", path, None, {})
+                assert status == 401, path
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_node_with_no_state_has_nowhere_to_keep_a_key(self):
+        """Said plainly rather than as a stack trace: a node started without
+        ``--data`` cannot hold a key, and that is a configuration answer."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/create", token,
+                {"passphrase": "a passphrase"})
+            assert status == 400 and "nowhere" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_key_is_made_listed_and_forgotten(self, tmp_path):
+        node, console = await _make_console(state_dir=str(tmp_path))
+        node._publisher_keys = _key_store(tmp_path)
+        try:
+            _, token = await _login(console)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/create", token,
+                {"passphrase": "a passphrase", "label": "release key"})
+            assert status == 200
+            key_id = body["key"]["id"]
+
+            _, _, _, listed = await asyncio.to_thread(
+                _request, console, "GET", "/api/keys", token)
+            assert [row["id"] for row in listed["keys"]] == [key_id]
+            assert listed["keys"][0]["label"] == "release key"
+            assert listed["incoming"] == [] and listed["outgoing"] == []
+
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/forget", token,
+                {"key_id": key_id})
+            assert status == 400          # …not without saying so
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/forget", token,
+                {"key_id": key_id, "confirm": True})
+            assert status == 200 and body["ok"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_offering_needs_a_confirmation_and_a_real_key(self, tmp_path):
+        node, console = await _make_console(state_dir=str(tmp_path))
+        node._publisher_keys = _key_store(tmp_path)
+        try:
+            _, token = await _login(console)
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/create", token,
+                {"passphrase": "a passphrase"})
+            key_id = body["key"]["id"]
+            target = NodeID.generate().raw.hex()
+
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/offer", token,
+                {"node": target, "key_id": key_id, "passphrase": "a passphrase"})
+            assert status == 400          # no confirmation
+
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/offer", token,
+                {"node": target, "key_id": "aa" * 20,
+                 "passphrase": "a passphrase", "confirm": True})
+            assert status == 404          # no such key
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/keys/offer", token,
+                {"node": target, "key_id": key_id, "passphrase": "wrong",
+                 "confirm": True})
+            assert status == 400 and "passphrase" in body["error"]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_accepting_needs_a_confirmation_and_a_passphrase(self,
+                                                                   tmp_path):
+        node, console = await _make_console(state_dir=str(tmp_path))
+        node._publisher_keys = _key_store(tmp_path)
+        try:
+            _, token = await _login(console)
+            for payload, expected in (
+                ({"offer_id": "ab" * 16}, 400),                 # no confirm
+                ({"offer_id": "ab" * 16, "confirm": True}, 400),  # no passphrase
+                ({"offer_id": "ab" * 16, "passphrase": "x",
+                  "confirm": True}, 400),                      # no such offer
+            ):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", "/api/keys/accept", token, payload)
+                assert status == expected, payload
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_publishing_can_name_a_held_key(self, tmp_path):
+        """Named by id, because a key this node was handed has no path its
+        operator ever chose."""
+        node, console = await _make_console(state_dir=str(tmp_path))
+        node._publisher_keys = _key_store(tmp_path)
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "POST", "/api/releases/publish", token,
+                {"notes": "", "key_id": "aa" * 20, "passphrase": "x"})
+            assert status == 404
         finally:
             console.stop(); await node.stop()
 
