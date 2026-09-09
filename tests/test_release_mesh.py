@@ -13,6 +13,7 @@ the payload with the most authority — so most of these tests are refusals.
 import asyncio
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -60,6 +61,13 @@ class _FakePeer:
 
     async def stop(self):
         pass
+
+
+def _ten_seconds_on():
+    """A clock a little ahead of this one, for a test that needs two publishes
+    to carry different timestamps."""
+    ahead = time.time() + 10
+    return lambda: ahead
 
 
 def _node(release_dir=None):
@@ -233,6 +241,160 @@ class TestADetachedPublisherKey:
             monkeypatch.setattr(updater, "apply_files", fake_apply)
             result = await node.install_package(record_id)
             assert result["version"] == "9.9.9" and applied["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+
+class TestARleaseIsBytesAndASignature:
+    """Nothing on the way to an install may name the publisher as a *machine*
+    or use it as an *index*.
+
+    Two bugs lived there. The fetch ended at ``NodeID(publisher_id(key))`` —
+    which names nobody when the key is detached or shared, and when it does name
+    the signing node it makes one machine the network's last resort. And the
+    install resolved a publisher id through the catalogue, which holds one entry
+    per key: click a release, install whatever that key signed most recently.
+    """
+
+    def _key(self, path):
+        from src import publisher_key
+        from src.crypto import CryptoIdentity
+        identity = CryptoIdentity()
+        publisher_key.save(path, identity.dsa_public_key,
+                           identity._signer.export_secret_key(), "pass",
+                           n=2 ** 8, r=8, p=1)
+        return identity.dsa_public_key
+
+    async def test_the_publisher_is_never_one_of_the_sources(self, tmp_path):
+        """A detached key is not a node id. Asking it is a routed lookup for a
+        machine that does not exist."""
+        node = _node()
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            info = await node.publish_release(_tree(str(tmp_path / "tree")),
+                                              key_path=path, passphrase="pass")
+            entry = node._releases.get(info["publisher_id"])
+            assert entry is not None
+            sources = node._release_sources_for(entry)
+            assert NodeID(cr.publisher_id(public)) not in sources
+            # Nor the node that signed it: what it holds is said with the
+            # `have` byte, like every other holder.
+            assert node._id not in sources
+        finally:
+            await node.stop()
+
+    async def test_a_holder_is_asked_before_any_peer(self, tmp_path):
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            entry = node._releases.get(info["publisher_id"])
+            peer = _FakePeer()
+            node._peers.append(peer)
+            holder = NodeID(os.urandom(20))
+            node._note_release_source(entry["release_id"].hex(), holder)
+            sources = node._release_sources_for(entry)
+            assert sources[0] == holder
+            assert peer.authenticated_id in sources
+        finally:
+            await node.stop()
+
+    async def test_peers_are_asked_when_nobody_claimed_to_hold_it(self, tmp_path):
+        """The swarm is whoever we can reach. With the publisher gone from the
+        list, a node with no hint used to have nowhere left to ask."""
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            entry = node._releases.get(info["publisher_id"])
+            peers = [_FakePeer() for _ in range(3)]
+            node._peers.extend(peers)
+            sources = node._release_sources_for(entry)
+            assert {p.authenticated_id for p in peers} <= set(sources)
+        finally:
+            await node.stop()
+
+    async def test_the_number_of_nodes_one_fetch_asks_is_bounded(self, tmp_path):
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            entry = node._releases.get(info["publisher_id"])
+            node._peers.extend(_FakePeer() for _ in range(60))
+            from src.node import _RELEASE_ASK_MAX
+            assert len(node._release_sources_for(entry)) <= _RELEASE_ASK_MAX
+        finally:
+            await node.stop()
+
+    async def test_installing_installs_the_descriptor_in_hand(
+            self, tmp_path, monkeypatch):
+        """The one that bites. Two releases from one key: the catalogue keeps
+        the newer, so resolving an install by publisher id installed the newer
+        one — whatever descriptor the operator was actually looking at."""
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path / "a"),
+                                             version="9.9.9"))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            described = await node.package_descriptor(record_id)
+            assert described["version"] == "9.9.9"
+
+            # Ten seconds on, or both descriptors carry one timestamp and the
+            # catalogue keeps the first — the anti-rollback rule doing its job,
+            # not the thing under test.
+            monkeypatch.setattr(cr.time, "time", _ten_seconds_on())
+            await node.publish_release(_tree(str(tmp_path / "b"),
+                                             version="9.9.10"))
+            assert node._releases.get(
+                described["publisher_id"])["version"] == "9.9.10"
+
+            node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
+            applied = {}
+
+            async def fake_apply(files, version, **kwargs):
+                applied["version"] = version
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            result = await node.install_release_entry(described["entry"])
+            assert result["version"] == "9.9.9"
+            assert applied["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+    async def test_the_install_path_does_not_consult_the_publisher_index(
+            self, tmp_path, monkeypatch):
+        """A release found by name in the directory was never gossiped at us,
+        so the catalogue may hold nothing for that key at all. It used to be
+        "no such release"; the signature was in hand the whole time."""
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
+
+            async def fake_apply(files, version, **kwargs):
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            monkeypatch.setattr(node._releases, "get",
+                                lambda key_id: pytest.fail(
+                                    "the install asked the publisher index"))
+            result = await node.install_package(record_id)
+            assert result["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+    async def test_an_unpinned_key_is_still_refused_by_the_descriptor_path(
+            self, tmp_path):
+        """Dropping the publisher *index* must not drop the publisher *gate*:
+        what is checked is the signature, and a signature nobody pinned buys
+        nothing."""
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            described = await node.package_descriptor(record_id)
+            with pytest.raises(cr.ReleaseError):
+                await node.install_release_entry(described["entry"])
         finally:
             await node.stop()
 

@@ -61,6 +61,7 @@ from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
                            ReleaseError, PUBLISHER_ID_LEN as _RELEASE_ID_LEN,
                            build_package as _core_build_package,
                            build_release as _core_build_release,
+                           catalogue_entry as _core_catalogue_entry,
                            check_tree as _core_check_tree,
                            open_package as _core_open_package,
                            parse_release as _core_parse_release,
@@ -265,6 +266,7 @@ _RELEASE_SERVE_WINDOW  = 10.0   # seconds
 _RELEASE_SERVE_MAX     = 64     # slices one link may pull from us per window
 _RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
 _RELEASE_SOURCES_TRACKED = 64   # releases we remember any sources for at all
+_RELEASE_ASK_MAX       = 12     # nodes one fetch may ask before giving up
 _PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
 _HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
 _HEX_PKG = re.compile(r"[0-9a-f]{40}")     # a package-directory entry id
@@ -8190,19 +8192,56 @@ class MeshNode:
         return bytes(parts)
 
     def _release_sources_for(self, entry: dict) -> list[NodeID]:
-        """Who to ask, nearest hint first, the publisher last.
+        """Who to ask for these bytes: whoever said they hold them, then the
+        peers we have. **Never the publisher.**
 
-        Neighbours that said they hold it are tried before the publisher: that
-        is what makes this a swarm rather than one machine serving everybody."""
+        A release is bytes and a signature. `entry["sha256"]` is what decides
+        the bytes are good, and it was signed before any of this started — so
+        who serves them cannot matter, and nothing here is allowed to name one
+        machine as *the* source.
+
+        This used to end at ``NodeID(publisher_id(key))``, which is wrong twice
+        over. A publisher key is not a machine: it can be detached from every
+        node, and since `key_share.py` it can be held by several at once — so
+        that id names nobody, and the fetch spent a full routed lookup finding
+        out. And on the ordinary path, where the signer did use its node
+        identity, it made that one machine the last resort for the whole
+        network: publish once, serve for ever, and go offline and your release
+        is gone. Both are the same mistake — looking at the publisher instead of
+        at the signature.
+
+        Hints come first because they are the only claim of actually holding it
+        (the ``have`` byte on an announce, from an authenticated link). The rest
+        of the sample is peers that speak the plane at all: a node that does not
+        have it costs one round trip and says nothing, which is cheaper than
+        assuming."""
         sources = list(reversed(
             self._release_sources.get(entry["release_id"].hex(), [])))
-        publisher = NodeID(_core_publisher_id(entry["publisher"]))
-        if publisher not in sources:
-            sources.append(publisher)
-        return [node_id for node_id in sources if node_id != self._id]
+        for peer in self._gossip_targets(None, _RELEASE_ASK_MAX,
+                                         features.RELEASE):
+            if peer.authenticated_id not in sources:
+                sources.append(peer.authenticated_id)
+        return [node_id for node_id in sources
+                if node_id is not None and node_id != self._id][:_RELEASE_ASK_MAX]
 
     async def fetch_release(self, publisher_id_hex: str):
-        """Get a release's package and open it, verified end to end.
+        """Get a pinned publisher's current release, from the catalogue.
+
+        The publisher-keyed entry point, for the console's list of keys this
+        operator pinned. Everything below it works on the descriptor."""
+        entry = self._releases.get(publisher_id_hex)
+        if entry is None:
+            return None
+        return await self.fetch_release_entry(entry)
+
+    async def fetch_release_entry(self, entry: dict):
+        """Get **this** release's package and open it, verified end to end.
+
+        Takes the descriptor's own view of a release (`core_release.
+        catalogue_entry`) rather than a publisher id, because a publisher id
+        answers a different question: it means "whatever that key has signed
+        most recently", which is not what an operator clicked on. What is
+        installed is what was signed, and the signature is in hand.
 
         Returns ``(entry, files)`` or None. The bytes are checked against the
         SHA-256 the publisher signed before anything is unpacked, and the
@@ -8210,10 +8249,8 @@ class MeshNode:
         what comes back is what was signed, or nothing at all.
 
         Whatever we end up holding, we keep: the next node to want this release
-        can ask us instead of the publisher."""
-        entry = self._releases.get(publisher_id_hex)
-        if entry is None:
-            return None
+        can ask us, which is the whole of how it stays reachable once nobody in
+        particular is serving it."""
         release_id_hex = entry["release_id"].hex()
         package = self._packages.get(release_id_hex)
         if package is None:
@@ -8379,20 +8416,39 @@ class MeshNode:
         pressing Install is the other case, and it clears that record — a
         deliberate act is a fresh start, and the console restarts on its own
         once it has answered them."""
-        from . import updater
         entry = self._releases.get(publisher_id_hex)
         if entry is None:
             raise ReleaseError("no such release")
+        return await self.install_release_entry(entry, unattended=unattended)
+
+    async def install_release_entry(self, entry: dict, *,
+                                    unattended: bool = False) -> dict:
+        """Install **this** signed release, whoever hands it over.
+
+        The gates are about the descriptor in hand and nothing else: the key
+        that signed it is pinned here, the version is strictly newer than the
+        one running, and every byte verifies against the signed root. Where the
+        bytes came from is not a gate and cannot be one — the hash was signed
+        before anybody relayed it.
+
+        This used to resolve a publisher id through the catalogue first, which
+        quietly installed *that key's newest signature* rather than the release
+        the operator was looking at, and refused outright for a release the
+        catalogue had never been gossiped (found by name in the directory, say).
+        Both came from indexing a release by its publisher. It is indexed by
+        what it is."""
+        from . import updater
         state, _action = self._release_state(entry)
         if state == "untrusted":
             raise ReleaseError("that publisher is not trusted here")
         if state != "available":
             raise ReleaseError(f"version {entry['version']} is not newer than "
                                f"{_running_version()}")
-        fetched = await self.fetch_release(publisher_id_hex)
+        fetched = await self.fetch_release_entry(entry)
         if fetched is None:
             raise ReleaseError("the release content could not be fetched")
         _entry, files = fetched
+        publisher_id_hex = entry["publisher_id"].hex()
         result = await updater.apply_files(files, entry["version"])
         if unattended:
             # Written before we leave: an attempt recorded after the exit is an
@@ -9985,11 +10041,18 @@ class MeshNode:
                 return None
             self._releases.offer(raw, self._identity.verify,
                                  self._trusts_publisher)
+            # `entry` is what an install runs on: the descriptor's own view,
+            # carried out of here rather than looked up again by publisher id.
+            # The catalogue holds one entry per key, so re-resolving through it
+            # would hand back whatever that key signed most recently instead of
+            # the release this record names.
             return {"kind": "core", "version": doc["version"],
                     "publisher_id": doc["publisher_id"].hex(),
                     "publisher": doc["publisher"].hex(),
                     "size": doc["size"], "sha256": doc["sha256"],
-                    "notes": doc["notes"]}
+                    "notes": doc["notes"],
+                    "entry": _core_catalogue_entry(
+                        doc, raw, self._trusts_publisher(doc["publisher"]))}
         try:
             doc = _app_parse_release(raw, self._identity.verify)
         except Exception:
@@ -10016,7 +10079,7 @@ class MeshNode:
         if described is None:
             return None
         if entry["kind"] == "core":
-            fetched = await self.fetch_release(described["publisher_id"])
+            fetched = await self.fetch_release_entry(described["entry"])
             if fetched is None:
                 return None
             catalogued, _files = fetched
@@ -10046,7 +10109,7 @@ class MeshNode:
         if described is None:
             raise ReleaseError("the package could not be fetched")
         if entry["kind"] == "core":
-            result = await self.install_release(described["publisher_id"])
+            result = await self.install_release_entry(described["entry"])
             self._subscriptions.note_version(record_id_hex, entry["version"])
             return result
         installed = await self.install_app(described["app_id"])

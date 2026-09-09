@@ -818,6 +818,35 @@ class ReleaseStore:
 # What the network is offering
 # ---------------------------------------------------------------------------
 
+def catalogue_entry(doc: dict, release_bytes: bytes,
+                    is_trusted: bool = False) -> dict:
+    """The shape everything downstream reads a release through.
+
+    One expression, because there are now two ways to arrive at a release: the
+    catalogue (gossiped, one entry per publisher) and a **signed descriptor
+    handed to us directly** — the record an operator clicked in the package
+    directory. The second must not go through the first: a catalogue is indexed
+    by publisher and holds only that key's newest signature, so resolving an
+    install through it installs *whatever that key has signed since*, not the
+    thing on the screen. A release is bytes and a signature; this is that
+    signature's own view of them."""
+    return {
+        "publisher_id": doc["publisher_id"],
+        "publisher": doc["publisher"],
+        "release": bytes(release_bytes),
+        # Named by the package it points at, not by the descriptor: two
+        # nodes holding the same release agree on what to ask each other
+        # for, whatever their copy of the descriptor looks like.
+        "release_id": bytes.fromhex(doc["sha256"])[:PUBLISHER_ID_LEN],
+        "version": doc["version"],
+        "sha256": doc["sha256"],
+        "size": doc["size"],
+        "notes": doc["notes"],
+        "ts": doc["ts"],
+        "trusted": bool(is_trusted),
+    }
+
+
 class ReleaseCatalog:
     """Bounded, signature-verified view of the releases the mesh is offering,
     one entry per publisher (the highest ``ts`` it has signed).
@@ -863,21 +892,7 @@ class ReleaseCatalog:
             if len(self._entries) >= self._max and not self._make_room(is_trusted):
                 return None
             outcome = "new"
-        self._entries[key] = {
-            "publisher_id": key,
-            "publisher": doc["publisher"],
-            "release": bytes(release_bytes),
-            # Named by the package it points at, not by the descriptor: two
-            # nodes holding the same release agree on what to ask each other
-            # for, whatever their copy of the descriptor looks like.
-            "release_id": bytes.fromhex(doc["sha256"])[:PUBLISHER_ID_LEN],
-            "version": doc["version"],
-            "sha256": doc["sha256"],
-            "size": doc["size"],
-            "notes": doc["notes"],
-            "ts": doc["ts"],
-            "trusted": is_trusted,
-        }
+        self._entries[key] = catalogue_entry(doc, release_bytes, is_trusted)
         return outcome
 
     def _note_equivocation(self, key: bytes, existing: dict, doc: dict,

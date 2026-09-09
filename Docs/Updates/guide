@@ -590,7 +590,27 @@ remembers who claimed to have what — a hint only, bounded on both axes, and on
 that costs at most a wasted request if it is a lie, because the hash is what
 decides.
 
-Fetching then asks, nearest hint first and the publisher last:
+Fetching then asks the holders first and the peers it has after them — and
+**never the publisher**:
+
+> A release is bytes and a signature. The SHA-256 was signed before any of this
+> started, so who serves the bytes cannot matter, and nothing in the fetch path
+> is allowed to name one machine as *the* source.
+
+That last rule is newer than the code around it. The fetch used to end at
+`NodeID(publisher_id(key))`, which is wrong twice over. A publisher key is not a
+machine: it can be detached from every node, and since the handover it can be
+held by several at once — so that id names nobody, and a fetch spent a full
+routed lookup finding out. And on the ordinary path, where the signer did use
+its node identity, it made that one machine the last resort for the whole
+network: publish once, serve for ever, and go offline and your release is gone.
+Both are the same mistake, looking at the publisher instead of at the signature.
+
+So the list is: whoever said they hold it (the `have` byte, from an
+authenticated link — the only claim of actually having the bytes), then peers
+that speak the plane at all, bounded by `_RELEASE_ASK_MAX`. A node that does not
+have it costs one round trip and says nothing, which is cheaper than assuming.
+
 
 - `RELEASE_FETCH` — `release_id(20) ‖ offset(4)`, routed, so a holder several
   hops away is reachable;
@@ -620,9 +640,19 @@ package is re-hashed when it is read back, not only when it is written.
 
 ## Installing
 
+An install is addressed by **the descriptor in hand**, never by a publisher id
+(`install_release_entry`). The catalogue is indexed by publisher and holds only
+each key's newest signature, so resolving an install through it installed
+*whatever that key had signed since* rather than the release on the screen — and
+refused outright for a release the catalogue had never been gossiped, such as
+one found by name in the directory. The publisher-keyed entry points remain for
+what is genuinely a per-key question: the console's list of the keys this
+operator pinned.
+
 Three gates, in this order — the cheap ones first:
 
-1. **the publisher is pinned** here;
+1. **the key that signed it is pinned** here — the signature, which is the only
+   thing about a publisher that ever decides anything;
 2. **the version is strictly newer** than the one running (`is_newer`), so a
    signed older release is not an install path;
 3. **every byte verifies** against the signed SHA-256, and the tree's own
@@ -764,6 +794,7 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `_RELEASE_SLICE` | 48 KB | package bytes per packet |
 | `_RELEASE_SERVE_MAX` | 64 / 10 s | slices one link may pull from us |
 | `_RELEASE_SOURCES_MAX` | 8 | nodes remembered as holding a release |
+| `_RELEASE_ASK_MAX` | 12 | nodes one fetch may ask before giving up |
 | `MAX_NOTES_LEN` | 4000 | notes are shown in a page |
 | `MAX_PUBLISHERS` | 32 | pinned keys an operator may hold |
 | `MAX_CATALOG` | 64 | publishers tracked, trusted-first |
