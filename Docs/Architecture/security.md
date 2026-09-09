@@ -261,8 +261,14 @@ Three rules, and they are load-bearing:
    happens *before* anybody has proved anything, so a name that could weaken
    something would be the way in. What is negotiated is only which **optional
    messages** are worth sending — the gossip planes, the directory, renewal,
-   revocation, abuse reports, the keepalive accord and multi-link operation. A
-   test asserts no feature name reads like a check.
+   revocation, abuse reports, the keepalive accord, multi-link operation and the
+   publisher-key handover. A test asserts no feature name reads like a check.
+
+   That test is blunt on purpose, and it should stay blunt. The handover plane
+   was first called `keyshare`, which the guard refuses because "key" is one of
+   the words a name may not contain. The name is `handover`, and the plane is
+   the same plane: a guard that grows an exemption list stops being a guard, and
+   renaming cost nothing.
 
    The accord is worth a second look against this rule, because it is the first
    negotiated thing that changes what a node *does* rather than what it sends.

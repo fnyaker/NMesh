@@ -322,6 +322,85 @@ attacker present *while you publish*; at that moment the key is in memory by
 necessity, and an operator who needs that property needs a machine that is not
 the node.
 
+## Handing that key to somebody else
+
+`src/key_share.py`. A team publishing one thing under one identity needs the
+key on more than one machine, and the way that happens otherwise is a copy over
+a chat window — which is the worst version of it: no proof the sender holds
+what they offer, no proof the recipient is who the sender meant, and a
+passphrase typed in the same window as the file.
+
+Say the cost first, because it is real: **sharing a signing key means a
+compromise is the project, not one signer**. The alternative exists and is
+already built — each person keeps their own key, consumers pin several and set
+`release_quorum` over `endorsed` ones. Sharing is right when consumers should
+not have to track who is on the team this year, and wrong the moment "one more
+person" becomes routine. Nothing here can tell those apart; what it does is
+make each act deliberate on both sides and leave a record of who handed what to
+whom.
+
+### Three messages, and why the middle one is the design
+
+```
+OFFER    sender    → recipient   "I hold key P and I offer it to you"
+ACCEPT   recipient → sender      "I want it — seal it to this KEM key"
+GRANT    sender    → recipient   the secret, sealed so only they can open it
+```
+
+There is no long-term encryption key to seal a secret to: a node's identity is
+ML-DSA, a *signing* key, and the ML-KEM keys it uses are ephemeral per link. So
+the recipient has to produce one, and it produces one **only when a human
+accepted**. Consent is therefore structural rather than checked — with no
+acceptance there is nothing to seal to, and the secret cannot leave the
+sender's machine even by mistake.
+
+### What each signature is for
+
+- The **offer is signed by the publisher key itself**, not by the node. That
+  proves the sender actually holds what they are offering; otherwise anybody
+  could offer a key they do not have and harvest acceptances. Both node ids are
+  inside the signature, so the reply goes where the *signer* said rather than to
+  whatever `src_id` a relay wrote on the packet.
+- The **acceptance is signed by the recipient's node identity**, over the KEM
+  public key, and the parser re-derives the node id from the key inside it
+  (`node_id_of(pub) == from_id`). That is what stops a relay substituting its own
+  KEM key and reading the grant: only the node the offer named can produce an
+  acceptance the sender acts on.
+- The **grant carries no signature**, and does not need one. It is sealed to the
+  accepted KEM key (`HKDF(shared, info=domain:grant:offer_id)` → AES-256-GCM,
+  with both node ids and the publisher public key as associated data), and what
+  proves it genuine is arithmetic: the recipient checks the delivered secret
+  against the public half **from the offer** via `CryptoIdentity.from_pair`. A
+  forged or tampered grant yields a pair that does not match itself and is
+  refused — the same check `publisher_key.load` already makes.
+
+### What it does not hide
+
+The sender must unlock the key to sign the offer and to seal the grant, so the
+secret sits in that process's memory for the length of the handshake. That is
+unavoidable — you cannot send what you have not unlocked. It is *bounded*
+instead: the sender forgets it when the grant goes out, or when the offer
+expires unanswered (`OFFER_TTL`, 5 minutes), whichever comes first.
+
+The recipient chooses **its own** passphrase. A shared one would make the weaker
+of the two machines the security of both, and the whole point of
+`publisher_key.py` is that the file is useless to whoever copies it.
+
+### Where the keys live
+
+`publisher_key.KeyStore` (under `<state>/publisher-keys/`) holds the encrypted
+files this node can sign with, whether created here or received. The id is
+always **re-derived from the file's own public half** on read, never taken from
+the index: a tampered index can lose a key or mislabel it, but it cannot make
+the node sign under an identity the file does not carry. Signing picks one by id
+in the publish form; the file's passphrase is asked for at that moment and kept
+nowhere.
+
+Both directions are visible in **Settings → Updates**: the keys held here, the
+offers made from here and still standing, and the offers waiting for an answer.
+Accepting asks for a passphrase and a confirmation; refusing is one click and
+tells the sender nothing beyond the offer lapsing.
+
 ## The package directory
 
 `src/pkg_dir.py`. Same shape as the pseudo directory and deliberately so: a
@@ -649,7 +728,7 @@ count is what bounds it.
 | Method | Route | Role |
 |---|---|---|
 | GET | `/api/releases` | what the mesh offers, who is pinned, what this node watches, when it looks, its own publisher key, and whether this install can update itself |
-| POST | `/api/releases/publish` | `{notes}` → sign the installed tree, announce it, file it in the directory |
+| POST | `/api/releases/publish` | `{notes, key_id?, passphrase?}` → sign the installed tree — with the node identity, or with a publisher key held here — announce it, file it in the directory |
 | POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
 | POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher by key |
 | POST | `/api/releases/untrust` | `{publisher_id}` |
@@ -662,6 +741,13 @@ count is what bounds it.
 | POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
 | POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key **inside** that record |
 | POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it, or stop |
+| GET | `/api/keys` | publisher keys held here, offers made from here, offers waiting for an answer |
+| POST | `/api/keys/create` | `{passphrase, label?}` → a fresh publisher key, encrypted under it |
+| POST | `/api/keys/import` | `{path, passphrase, label?}` → adopt an existing key file |
+| POST | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` → offer it; nothing secret travels yet |
+| POST | `/api/keys/accept` | `{offer_id, passphrase, confirm:true}` → ask for it, sealed to a fresh KEM key |
+| POST | `/api/keys/refuse` | `{offer_id}` — drop it; the sender learns only that it lapsed |
+| POST | `/api/keys/forget` | `{key_id, confirm:true}` — remove the file from this node |
 
 Every route sits behind the console session, and every decision is made in the
 node: each row arrives with its `trusted`, `attesters`, `agreeing` and
@@ -702,6 +788,11 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `_DIR_PUBLISH_MAX` | 24 | nodes one directory publish may reach across every key |
 | `_DIR_REPUBLISH` | 900 s | between directory sweeps |
 | `_DIR_LOOKUP_BUDGET` | 6 s | one directory lookup, whole round; it returns what it has |
+| `key_share.OFFER_TTL` | 300 s | how long an offer stands — the window in which the sender holds an unlocked secret |
+| `key_share.MAX_LABEL` | 64 | what the sender calls the key, shown to a human |
+| `_MAX_KEY_OFFERS` | 8 | offers held in each direction at once |
+| `_KEY_SHARE_MAX` | 8 / 60 s | key-share messages one link may push at us |
+| `publisher_key._MAX_KEYS` | 32 | publisher keys one node may hold |
 
 ## What this does not solve
 
@@ -755,8 +846,16 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
   app taking exactly the same path, a release signed with a **detached
   publisher key** reached through the pairing (and the one-half case that is
   not followed), and the refusals (a recommendation cannot be pinned; finding a
-  release does not make it installable).
+  release does not make it installable). Plus a **publisher key handed over**
+  between two nodes, and the release the recipient then signs with it.
 - [`tests/test_subscriptions.py`](../../tests/test_subscriptions.py) — what this
   node watches: a corrupt file yields nothing, a quorum is clamped, and only
   watched publishers count.
-- [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes.
+- [`tests/test_key_share.py`](../../tests/test_key_share.py) — the handover:
+  an offer signed by a key the sender does not hold, an offer replayed at a node
+  it does not name, an acceptance whose node id does not match the key inside
+  it, a substituted KEM key, a grant opened with the wrong secret, a grant whose
+  secret does not match the offered public half, expiry, and the store that only
+  ever keeps a file whose two halves agree.
+- [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes,
+  including the key endpoints and the confirmations they refuse without.

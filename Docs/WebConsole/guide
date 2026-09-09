@@ -548,7 +548,7 @@ works on a machine with no internet.
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
-| POST    | `/api/releases/publish` | `{notes}` — signs the installed tree, announces it, and files it in the package directory |
+| POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
 | POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
 | POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
 | GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node publishes, `&wide=1` also asks the network. Nothing is listed: it answers questions |
@@ -557,6 +557,10 @@ works on a machine with no internet.
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
 | POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the publisher key **carried inside** that record. **400** for a recommendation: it names somebody else's bytes |
 | POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it for new versions, and say how many watched publishers must agree on the code first |
+| GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer |
+| POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
+| POST    | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` — offer the key to another node. Signed by the key itself; **nothing secret travels yet** |
+| POST    | `/api/keys/accept` / `refuse` | `{offer_id, …}` — accept (a passphrase of your own, `confirm:true`) and the secret is sealed to a fresh KEM key the acceptance carries, or refuse and it lapses |
 | GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible |
@@ -754,6 +758,27 @@ restarts on the same terms: a tree written and never started is an update that
 did not happen. What keeps that from looping is a record written **before** the
 node leaves — a release that installs and never becomes the running version is
 retried once and then abandoned, and the log on the page says so.
+
+### Publisher keys, and handing one to somebody else
+
+Below the publishing form, two cards say what this node can sign with and who
+else it has been shared with. **Publisher keys held here** lists each key by id
+and label, whether it was made here or received and from whom, and lets an
+operator create one, adopt an existing file by path, or forget one. The publish
+form then picks a signer — this node's identity, or one of those keys, in which
+case it asks for that file's passphrase at the moment of signing and keeps it
+nowhere.
+
+**Sharing a key** is the handover: choose a key, name the node to give it to,
+unlock it, confirm. Nothing secret leaves at that point — the offer only says "I
+hold this key and I offer it to you", signed *by the key itself* so the claim is
+not free. On the other side the offer appears with its id, who sent it, what
+they call it and how long it stands; *Accept* asks for a passphrase of the
+recipient's own choosing and a confirmation, and *Refuse* drops it silently. The
+secret travels only after that acceptance, sealed to a key the acceptance
+carried, which is why a human saying yes is not a check but the thing that makes
+the transfer possible at all. The three messages and their signatures:
+[`../Updates/guide`](../Updates/guide).
 
 ### Restarting on demand (⋯ → *Restart this node*)
 
