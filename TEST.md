@@ -126,6 +126,13 @@ tests/
 │     refused, the keys it is filed under are derived from the name rather than
 │     declared, a source digest that ignores documentation and nothing else, and
 │     a crowded prefix bucket that drops a pointer and never a package
+├── test_release_mesh.py                               — releases over a mesh:
+│     publishing, gossip that terminates, the three install gates, the
+│     automatic pass and the restart it ends in — and that a release is bytes
+│     and a signature, so the publisher is never one of the nodes a fetch asks,
+│     holders come before peers, the number asked is bounded, an install runs
+│     on the descriptor in hand rather than on that key's newest, and dropping
+│     the publisher index did not drop the publisher gate
 ├── test_key_share.py                                  — handing a publisher key
 │     to another node: an offer signed by a key the sender does not hold, an
 │     offer replayed at a node it does not name, an acceptance whose node id

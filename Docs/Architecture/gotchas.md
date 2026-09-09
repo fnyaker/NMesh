@@ -1108,6 +1108,23 @@ before and after.
   installer is *working correctly* here. It is not a test helper. Anything that
   drives an install outside the suite stubs the swap first, or runs somewhere
   the swap is allowed to land.
+- **A publisher key is not a machine.** The package fetch ended at
+  `NodeID(publisher_id(key))` — derive a node id from the signing key and dial
+  it. It reads as obviously right, because a node id *is* `sha256(dsa_public)`
+  and a node signing with its own identity does publish under its own id. It is
+  still wrong twice: a detached or shared publisher key names no node at all, so
+  the fetch spends a routed lookup on a machine that cannot answer; and when the
+  id is real, it makes one machine the last resort for the whole network, which
+  is the thing a swarm exists to stop. The bytes are content-addressed and the
+  hash is signed, so **who serves them is not a question the code is allowed to
+  ask**. Sources are holders that said so, then the peers we have.
+- **A catalogue indexed by publisher is not a way to name a release.** Installs
+  resolved a publisher id through `ReleaseCatalog`, which keeps one entry per
+  key — its newest. So clicking a release installed whatever that key had signed
+  since, and a release the catalogue had never been gossiped (found by name in
+  the directory) was "no such release" while its signed descriptor sat in the
+  caller's hand. An index answers "what does this key offer now?"; it must never
+  be how "install this" is spelled.
 - **An offset copied from a neighbouring handler is a message that answers
   nobody.** `_handle_key_accept` read the offer id as `payload[:16]`, which is
   what the *grant* header puts there — the acceptance header is
