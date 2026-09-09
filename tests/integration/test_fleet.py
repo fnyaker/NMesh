@@ -392,10 +392,10 @@ class TestProvisionedNodeJoinsTheMesh:
 
     async def test_certificate_is_issued_by_the_scanning_node(self):
         provisioner = MeshNode(_mgr())
-        await provisioner.start(["tcp://127.0.0.1:19320"])
+        await provisioner.start(["tcp://127.0.0.1:19323"])
         party = await _party(
             provisioner,
-            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19320"],
+            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19323"],
                                  "code": provisioner.generate_invite(3600)})
         newcomer = MeshNode(_mgr())
         try:

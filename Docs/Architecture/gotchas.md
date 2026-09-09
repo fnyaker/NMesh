@@ -898,6 +898,25 @@ Flip the byte (`^ 0xFF`) instead of assigning a constant.
 > fixed value is a no-op exactly as often as that value comes up, and the
 > failure it produces accuses the code under test.
 
+## Two tests, one port, one worker apart
+
+The integration suite runs under `-n auto`, so two tests in the *same file* are
+routinely alive at once on different workers. Two of them binding one loopback
+port is a race, and the loser does not fail on what it was testing: it fails
+fifteen seconds later inside `wait_for_session`, which reads as "the mesh is
+flaky" rather than as "somebody reused a number".
+
+It hides, too. Locally the pair may never overlap and the suite is green for
+weeks; on a busier runner it overlaps, and the failure lands on whatever change
+happened to be in flight. Three tests in `test_chat.py` and three in
+`test_pseudo_dir.py` had been sharing 19170-19172 that way for a while.
+
+> **A convention nobody can check is a convention that has already been
+> broken.** `tests/test_integration_ports.py` maps every literal
+> `127.0.0.1:<port>` to the test function that encloses it and refuses a port
+> claimed twice — and it lives in the **fast** suite, because a guard you only
+> run alongside the thing it guards is one CI tells you about.
+
 ## Tests: parallelism & not blocking
 
 The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in

@@ -124,7 +124,7 @@ class TestDirectory:
         """The complaint this exists for: "ask the network" only ever answered
         an exact name, because a key is a hash and half a name does not hash to
         the same thing. A claim is now filed under its prefixes too."""
-        host, guest = await _pair("127.0.0.1:19174", None, "Alice Ada")
+        host, guest = await _pair("127.0.0.1:19177", None, "Alice Ada")
         try:
             await guest.publish_pseudo()
             # The host must not be answering from gossip: forget what it heard.
@@ -141,7 +141,7 @@ class TestDirectory:
     async def test_a_node_files_its_own_name_without_being_asked(self):
         """`publish_pseudo` existed and only the test suite ever called it, so
         the directory was empty on every real node."""
-        host, guest = await _pair("127.0.0.1:19175", None, "Bella Beth")
+        host, guest = await _pair("127.0.0.1:19178", None, "Bella Beth")
         try:
             guest._wake_directory_publish()
             assert await _until(
