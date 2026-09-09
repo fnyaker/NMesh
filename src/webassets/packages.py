@@ -139,6 +139,7 @@ const PACKAGES = {
         esc(this.kindLabel(row)) + " · " + esc(shortId(row.publisher_id)) +
       "</span></span>" +
       (row.trusted ? badge("pinned", "ok") : "") +
+      ((row.vouched_by || []).length ? badge("paired") : "") +
       (row.attesters > 1 ? badge(row.attesters + " agree", "ok") : "") +
       "</button>";
   },
@@ -158,6 +159,7 @@ const PACKAGES = {
     const badges = [badge(this.kindLabel(row), row.recommend ? "warn" : null)];
     if(row.trusted) badges.push(badge("publisher pinned", "ok"));
     if(row.mine) badges.push(badge("published here"));
+    if((row.vouched_by || []).length) badges.push(badge("paired with a node"));
     if(row.equivocated)
       badges.push(badge("signed two different programs as one version", "bad"));
     const facts = [
@@ -189,17 +191,31 @@ const PACKAGES = {
   // Why the buttons are what they are. A refusal that does not say what would
   // change it is a refusal somebody works around rather than understands.
   explainHTML(row){
+    const paired = row.vouched_by || [];
+    // A key that is not a node identity, tied to the machine that uses it by
+    // two signatures. Said in full because the alternative reads as a mystery:
+    // "why is this publisher not the node I opened?"
+    const pairing = paired.length
+      ? '<p class="muted small">This is a publisher key of its own, not a ' +
+        "node's identity — which is how a key that decides what your machine " +
+        "runs stays out of the memory of a node that is running. It is paired " +
+        "with " + (paired.length === 1
+          ? "node <code class=\"inline\">" + esc(shortId(paired[0])) + "</code>"
+          : plural(paired.length, "node")) +
+        ": both signed saying so, and neither could have said it for the " +
+        "other.</p>"
+      : "";
     if(row.recommend)
-      return '<p class="muted small">This node is not the publisher: it is ' +
-        "saying which release it runs. That counts towards agreement when you " +
-        "watch it, and towards nothing otherwise — pin the publisher it points " +
-        "at, never the machine that agreed with them.</p>";
+      return pairing + '<p class="muted small">This node is not the publisher: ' +
+        "it is saying which release it runs. That counts towards agreement when " +
+        "you watch it, and towards nothing otherwise — pin the publisher it " +
+        "points at, never the machine that agreed with them.</p>";
     if(row.kind === "core" && !row.trusted)
-      return '<p class="muted small">This key is not pinned here, so nothing ' +
-        "from it can replace this node's code. Pinning it is one press and a " +
-        "confirmation — the key came with the record and was checked against " +
-        "the signature it made, so there is nothing to copy across.</p>";
-    return "";
+      return pairing + '<p class="muted small">This key is not pinned here, so ' +
+        "nothing from it can replace this node's code. Pinning it is one press " +
+        "and a confirmation — the key came with the record and was checked " +
+        "against the signature it made, so there is nothing to copy across.</p>";
+    return pairing;
   },
 
   actionsHTML(row, opts){

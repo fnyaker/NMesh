@@ -360,8 +360,40 @@ A publisher id is `sha256(pubkey)[:20]`, built exactly like a node id — so a n
 signing with its own identity publishes **under its own id**, which is what lets
 a details page ask "what does this machine offer?" with nothing but the id
 already on the screen. A node that signs with a separate publisher key
-(`publisher_key.py`) is not found that way: the record names the key, and the
-key is what the signature proves.
+(`publisher_key.py`) is reached through a **pairing**, below: the record names
+the key, because that is what the signature proves.
+
+### Pairing a detached key with the machine that uses it
+
+A publisher key is deliberately not a node identity: it decides what everybody
+pinning it will run, it is used a few times a year, and it has no business
+sharing the key a node keeps unlocked to sign handshakes. But a record can only
+name its own signer, so nothing tied that key to the machine, and an operator
+looking at a node could not get from it to the code it publishes.
+
+A pairing closes that, and it takes **two halves**, because one would be
+hearsay:
+
+```
+node N signs   "P publishes for me"   → filed under N's key
+key  P signs   "N is my node"         → filed under P's key
+```
+
+Each half can only name its own author as the signer, exactly like every other
+record here. A reader follows the link only when it holds **both and each names
+the other** — `PairingBook.confirmed`. With one half alone, a node could put a
+stranger's packages on its own page; that grants no privilege (the package still
+shows its real publisher, and pinning still pins *that* publisher) but it is one
+node's word about another, believed, which is the shape the charter forbids.
+
+Both halves are signed at publish time: the publisher's while its key is open —
+the only moment it is — and the node's because it costs nothing. They travel on
+the same directory plane as package records, filed under the same keys, and a
+reader tries both gates on each blob.
+
+A key may be paired with several machines (one publisher key across a fleet),
+bounded by `_MAX_PAIRINGS_PER_KEY`; the newest half per (signer, counterpart)
+wins, so a replayed old one cannot undo a party's newer word.
 
 ### Two keys, two questions
 
@@ -660,6 +692,9 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `pkg_dir._MAX_BOOK_BYTES` | 4 MB | …and their byte budget: a record carries an ML-DSA key and signature |
 | `pkg_dir._MAX_PER_KEY` | 8 | records per directory key — a `PKG_FOUND` reply must fit one packet |
 | `pkg_dir.MAX_NOTES` | 600 | the description shown before anything is fetched |
+| `pkg_dir._MAX_PAIRINGS` | 256 | pairing halves this node remembers |
+| `pkg_dir._MAX_PAIRING_BYTES` | 2 MB | …and their byte budget |
+| `pkg_dir._MAX_PAIRINGS_PER_KEY` | 4 | machines one publisher key may be paired with |
 | `_PKG_RATE_MAX` | 64 / 10 s | package records one link may push at us |
 | `_PKG_OWN_MAX` | 32 | records this node signs and keeps re-filing |
 | `MAX_SUBSCRIPTIONS` | 64 | packages this node watches |
@@ -711,12 +746,16 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 - [`tests/test_pkg_dir.py`](../../tests/test_pkg_dir.py) — the directory record:
   a key that cannot claim somebody else's record, an unknown flag, keys derived
   from the name rather than declared, the source digest that ignores
-  documentation and nothing else, and the bounded book.
+  documentation and nothing else, and the bounded book. Plus the pairing: both
+  halves confirm, **one half confirms nothing**, a half is filed under its own
+  signer, a key cannot pair with itself, and an old half cannot undo a new one.
 - [`tests/integration/test_pkg_dir.py`](../../tests/integration/test_pkg_dir.py)
   — the same across a real mesh: found by three letters, found by node id, the
   key pinned from the record that carries it, the package downloaded whole, an
-  app taking exactly the same path, and the two refusals (a recommendation
-  cannot be pinned; finding a release does not make it installable).
+  app taking exactly the same path, a release signed with a **detached
+  publisher key** reached through the pairing (and the one-half case that is
+  not followed), and the refusals (a recommendation cannot be pinned; finding a
+  release does not make it installable).
 - [`tests/test_subscriptions.py`](../../tests/test_subscriptions.py) — what this
   node watches: a corrupt file yields nothing, a quorum is clamped, and only
   watched publishers count.

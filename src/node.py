@@ -65,7 +65,10 @@ from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
                            release_id as _core_release_id,
                            version_of as _core_version_of)
 from .subscriptions import Subscriptions, SubscriptionError
-from .pkg_dir import (PackageBook, PackageDirError,
+from .pkg_dir import (PackageBook, PackageDirError, PairingBook,
+                      MAX_PAIRING as _MAX_PAIRING,
+                      build_pairing as _pkg_build_pairing,
+                      parse_pairing as _pkg_parse_pairing,
                       MAX_RECORD as _MAX_PKG_RECORD,
                       KIND_CORE as _PKG_CORE, KIND_APP as _PKG_APP,
                       build_record as _pkg_build,
@@ -1928,6 +1931,11 @@ class MeshNode:
         # re-serve. See :mod:`src.pkg_dir`.
         self._package_book = PackageBook()
         self._package_records: dict[bytes, bytes] = {}   # ours, by entry id
+        # A release may be signed by a key that is not this node's identity, and
+        # a record can only name its own signer — so a pairing is what ties the
+        # two together, in two halves neither party can sign for the other.
+        self._pairings = PairingBook()
+        self._own_pairings: dict[tuple, bytes] = {}
         self._pending_pkg: dict[bytes, asyncio.Future] = {}
         self._pkg_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._revoke_rate: OrderedDict[bytes, tuple] = OrderedDict()
@@ -8010,6 +8018,15 @@ class MeshNode:
                 self.sign_package_record(
                     _PKG_CORE, _CORE_NAME, version, ref,
                     _pkg_source_digest(files), notes=notes, signer=signer)
+                if signer is not self._identity:
+                    # A detached key: nothing ties it to this machine, so an
+                    # operator looking at the node cannot get from it to the
+                    # code it publishes. Both halves are signed here — the
+                    # publisher's while its key is open, which is the only
+                    # moment it is, and ours because it costs nothing. Neither
+                    # is believed without the other.
+                    self.sign_pairing(self._id.raw, signer=signer)
+                    self.sign_pairing(_pkg_publisher_id(publisher_key))
             except Exception:
                 # A tree that is signed and announced is published: failing to
                 # file it costs discoverability, never the release.
@@ -9232,8 +9249,10 @@ class MeshNode:
             return None
         record = _pkg_parse(raw, self._identity.verify)
         if record is None:
-            self._charge_abuse(peer)
-            return None
+            # The same plane carries pairing halves: they are filed under the
+            # same keys, and a reader that cannot tell them apart would charge
+            # a peer for sending a perfectly good one.
+            return self._absorb_pairing(peer, raw)
         changed = self._package_book.offer(record, bytes(raw))
         self._note_equivocation(
             "publisher", record["publisher_id"],
@@ -9242,6 +9261,23 @@ class MeshNode:
             return None
         self._note_change("packages")
         return record
+
+    def _absorb_pairing(self, peer: '_Peer', raw: bytes):
+        """Verify one half of a pairing and file it.
+
+        A half is worth nothing alone — :meth:`packages_of` only follows a link
+        both parties signed — so this stores it and judges nothing."""
+        if len(raw) > _MAX_PAIRING:
+            self._charge_abuse(peer)
+            return None
+        pairing = _pkg_parse_pairing(raw, self._identity.verify)
+        if pairing is None:
+            self._charge_abuse(peer)
+            return None
+        if not self._pairings.offer(pairing, bytes(raw)):
+            return None
+        self._note_change("packages")
+        return pairing
 
     async def _handle_pkg_announce(self, peer: '_Peer', packet: Packet) -> None:
         if not self._pkg_allowed(peer):
@@ -9266,7 +9302,8 @@ class MeshNode:
             return
         key = packet.payload[:20]
         query_id = packet.payload[20:]
-        body = query_id + _pkg_encode(self._package_book.get(key))
+        body = query_id + _pkg_encode(self._package_book.get(key)
+                                      + self._pairings.get(key))
         # routes back to the querier — never inline, we are in a receive loop
         await self._route_outbound(
             Packet.create(PKG_FOUND, self._id.raw, packet.src_id, body),
@@ -9297,8 +9334,10 @@ class MeshNode:
         Ours first — the one thing this peer certainly cannot have heard from
         anybody else — then the most recently learned, bounded."""
         records = self._package_book.recent(_PKG_SYNC_MAX)
-        mine = [raw for raw in self._package_records.values()]
+        mine = (list(self._package_records.values())
+                + list(self._own_pairings.values()))
         records = mine + [raw for raw in records if raw not in mine]
+        records += [raw for raw in self._pairings.records() if raw not in records]
         for raw in records[:_PKG_SYNC_MAX]:
             if peer.authenticated_id is None or peer.session is None:
                 return
@@ -9309,7 +9348,7 @@ class MeshNode:
                 return
 
     def _schedule_package_sync(self, peer: '_Peer') -> None:
-        if not len(self._package_book):
+        if not len(self._package_book) and not len(self._pairings):
             return
         if not self.peer_announces(peer, features.PACKAGES):
             return
@@ -9377,6 +9416,26 @@ class MeshNode:
         self._wake_directory_publish()
         return raw
 
+    def sign_pairing(self, counterpart: bytes, signer=None) -> bytes:
+        """Sign one half of a pairing between this key and ``counterpart``.
+
+        Kept and re-filed by the directory loop like a package record. Both
+        halves are needed before anybody follows the link, so signing one is
+        never a claim about the other party — it is a claim about ourselves."""
+        signer = signer if signer is not None else self._identity
+        raw = _pkg_build_pairing(counterpart, signer.dsa_public_key, signer.sign)
+        pairing = _pkg_parse_pairing(raw, self._identity.verify)
+        if pairing is None:                   # never seen; a half we signed
+            raise PackageDirError("could not verify our own pairing")  # and cannot read
+        ident = (pairing["signer_id"], pairing["counterpart"])
+        self._own_pairings[ident] = raw
+        while len(self._own_pairings) > _PKG_OWN_MAX:
+            self._own_pairings.pop(next(iter(self._own_pairings)))
+        self._pairings.offer(pairing, raw)
+        self._note_change("packages")
+        self._wake_directory_publish()
+        return raw
+
     async def _publish_package_records(self) -> None:
         """File everything this node signs into the directory, and gossip it.
 
@@ -9398,6 +9457,15 @@ class MeshNode:
                     pass
             await self._gossip_package(raw)
             targets = await self._dir_publish_targets(record["keys"])
+            await asyncio.gather(*(self._pkg_store_at(nid, raw)
+                                   for nid in targets),
+                                 return_exceptions=True)
+        for raw in list(self._own_pairings.values()):
+            pairing = _pkg_parse_pairing(raw, self._identity.verify)
+            if pairing is None:
+                continue
+            await self._gossip_package(raw)
+            targets = await self._dir_publish_targets([pairing["key"]])
             await asyncio.gather(*(self._pkg_store_at(nid, raw)
                                    for nid in targets),
                                  return_exceptions=True)
@@ -9464,10 +9532,14 @@ class MeshNode:
         """What the node behind ``node_id`` publishes or recommends.
 
         A publisher id is derived like a node id, so a node signing with its own
-        identity publishes under the very id a details page already has. A node
-        that signs with a separate publisher key (:mod:`src.publisher_key`) is
-        not found this way — the record names the key, and the key is what the
-        signature proves."""
+        identity publishes under the very id a details page already has.
+
+        A node that signs with a **separate publisher key**
+        (:mod:`src.publisher_key`) is reached through a pairing: the record
+        names the key, because that is what the signature proves, and the
+        pairing is what says the key and the machine go together. Only a link
+        **both parties signed** is followed — one half is one party's word
+        about another, and this node does not act on those."""
         raw = node_id.raw if isinstance(node_id, NodeID) else node_id
         if isinstance(raw, str):
             try:
@@ -9476,14 +9548,36 @@ class MeshNode:
                 return []
         if not isinstance(raw, (bytes, bytearray)) or len(raw) != 20:
             return []
-        key = _pkg_publisher_key(bytes(raw))
+        raw = bytes(raw)
         if wide:
             try:
-                await self._lookup_package_key(key)
+                await self._lookup_package_key(_pkg_publisher_key(raw))
             except Exception:
                 pass
-        return [self._package_view(entry)
-                for entry in self._package_book.of_publisher(bytes(raw))]
+        rows = [self._package_view(entry)
+                for entry in self._package_book.of_publisher(raw)]
+        # Follow what this node named, bounded by the book's own per-key cap.
+        for counterpart in self._pairings.named_by(raw):
+            if wide:
+                try:
+                    await self._lookup_package_key(_pkg_publisher_key(counterpart))
+                except Exception:
+                    continue
+            if not self._pairings.confirmed(raw, counterpart):
+                continue          # one half only — nobody's word is enough here
+            rows += [self._package_view(entry)
+                     for entry in self._package_book.of_publisher(counterpart)]
+        return rows
+
+    def _paired_with(self, publisher_id: bytes) -> list[str]:
+        """Ids this key is paired with, **both halves signed**, as hex.
+
+        One half is one party's word about another, and following it would put
+        a stranger's packages on somebody's page. So only a mutual pair counts
+        — which neither party can produce alone."""
+        return [counterpart.hex()
+                for counterpart in self._pairings.named_by(publisher_id)
+                if self._pairings.confirmed(publisher_id, counterpart)]
 
     def _package_view(self, entry: dict) -> dict:
         """One record as a page reads it — every decision already made here.
@@ -9508,6 +9602,11 @@ class MeshNode:
             "ref": entry["ref"].hex(),
             "src": entry["src"].hex(),
             "ts": entry["ts"],
+            # The nodes this key is paired with, both halves signed. A
+            # property of what we hold about the key, not of the question that
+            # happened to reach this record — so it is derived here rather than
+            # bolted on by whichever caller asked.
+            "vouched_by": self._paired_with(entry["publisher_id"]),
             "trusted": self._trusts_publisher(entry["publisher"]),
             # "published from here", which is not the same as "signed by this
             # node's identity": a release signed with a detached publisher key

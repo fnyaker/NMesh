@@ -242,6 +242,99 @@ class TestTheBook:
         assert len(book) == 0 and book.nbytes == 0
 
 
+class TestPairingTakesTwo:
+    """A detached publisher key and the node that uses it are tied together by
+    two halves, each signed by one party. One half is one party's word about
+    another — the thing this design exists so nobody has to believe."""
+
+    def _pair(self, node, publisher):
+        node_id = pkg_dir.publisher_id(node.dsa_public_key)
+        pub_id = pkg_dir.publisher_id(publisher.dsa_public_key)
+        return (pkg_dir.build_pairing(pub_id, node.dsa_public_key, node.sign),
+                pkg_dir.build_pairing(node_id, publisher.dsa_public_key,
+                                      publisher.sign),
+                node_id, pub_id)
+
+    def test_both_halves_confirm_each_other(self, signer, other):
+        half_a, half_b, node_id, pub_id = self._pair(signer, other)
+        book = pkg_dir.PairingBook()
+        for raw in (half_a, half_b):
+            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
+        assert book.confirmed(node_id, pub_id) is True
+        assert book.confirmed(pub_id, node_id) is True
+
+    def test_one_half_confirms_nothing(self, signer, other):
+        """The attack this closes: a node naming a stranger's publisher key
+        would otherwise put that stranger's packages on its own page."""
+        half_a, _half_b, node_id, pub_id = self._pair(signer, other)
+        book = pkg_dir.PairingBook()
+        book.offer(pkg_dir.parse_pairing(half_a, signer.verify), half_a)
+        assert book.confirmed(node_id, pub_id) is False
+        assert book.named_by(node_id) == [pub_id]   # …said, not believed
+
+    def test_a_half_is_filed_under_its_own_signer(self, signer, other):
+        half_a, half_b, node_id, pub_id = self._pair(signer, other)
+        assert pkg_dir.parse_pairing(half_a, signer.verify)["key"] == \
+            pkg_dir.publisher_key(node_id)
+        assert pkg_dir.parse_pairing(half_b, signer.verify)["key"] == \
+            pkg_dir.publisher_key(pub_id)
+
+    def test_the_signer_is_derived_from_the_key_inside(self, signer, other):
+        parsed = pkg_dir.parse_pairing(
+            self._pair(signer, other)[0], signer.verify)
+        assert parsed["signer_id"] == pkg_dir.publisher_id(signer.dsa_public_key)
+
+    def test_a_flipped_byte_is_refused(self, signer, other):
+        raw = bytearray(self._pair(signer, other)[0])
+        raw[-1] ^= 0xFF
+        assert pkg_dir.parse_pairing(bytes(raw), signer.verify) is None
+
+    def test_a_key_cannot_pair_with_itself(self, signer):
+        own = pkg_dir.publisher_id(signer.dsa_public_key)
+        raw = pkg_dir.build_pairing(own, signer.dsa_public_key, signer.sign)
+        assert pkg_dir.parse_pairing(raw, signer.verify) is None
+
+    def test_an_older_half_cannot_undo_a_newer_one(self, signer, other):
+        node_id = pkg_dir.publisher_id(signer.dsa_public_key)
+        book = pkg_dir.PairingBook()
+        new = pkg_dir.build_pairing(b"\x22" * 20, signer.dsa_public_key,
+                                    signer.sign, ts=200)
+        old = pkg_dir.build_pairing(b"\x22" * 20, signer.dsa_public_key,
+                                    signer.sign, ts=100)
+        assert book.offer(pkg_dir.parse_pairing(new, signer.verify), new) is True
+        assert book.offer(pkg_dir.parse_pairing(old, signer.verify), old) is False
+
+    def test_one_key_may_name_several_but_not_without_end(self, signer):
+        book = pkg_dir.PairingBook(max_per_key=2)
+        for index in range(5):
+            raw = pkg_dir.build_pairing(bytes([index]) + b"\x00" * 19,
+                                        signer.dsa_public_key, signer.sign)
+            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
+        assert len(book.named_by(
+            pkg_dir.publisher_id(signer.dsa_public_key))) == 2
+
+    def test_the_book_is_bounded(self, signer):
+        book = pkg_dir.PairingBook(max_entries=3, max_per_key=99)
+        for index in range(9):
+            raw = pkg_dir.build_pairing(bytes([index]) + b"\x00" * 19,
+                                        signer.dsa_public_key, signer.sign)
+            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
+        assert len(book) == 3
+
+    @pytest.mark.parametrize("blob", [b"", b"\x01" * 9, None, 7,
+                                      b"\x02" + b"\x00" * 40])
+    def test_hostile_input_never_raises(self, signer, blob):
+        assert pkg_dir.parse_pairing(blob, signer.verify) is None
+
+    def test_a_package_record_does_not_parse_as_a_pairing(self, signer):
+        """One plane carries both, so each gate has to refuse the other's."""
+        record = _record(signer)
+        assert pkg_dir.parse_pairing(record, signer.verify) is None
+        half = pkg_dir.build_pairing(b"\x33" * 20, signer.dsa_public_key,
+                                     signer.sign)
+        assert pkg_dir.parse_record(half, signer.verify) is None
+
+
 class TestEncoding:
     def test_records_round_trip_through_a_reply(self, signer):
         records = [_record(signer, name=f"App {i}") for i in range(3)]

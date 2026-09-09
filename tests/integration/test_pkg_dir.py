@@ -264,6 +264,88 @@ class TestCorroboration:
             await node.stop(); await publisher.stop()
 
 
+class TestADetachedPublisherKey:
+    """A release signed with a key that is not the node's identity. The record
+    names that key — it can only name its own signer — so a pairing is what
+    ties it back to the machine, and it takes both parties to make one."""
+
+    def _key(self, path):
+        from src import publisher_key
+        from src.crypto import CryptoIdentity
+        identity = CryptoIdentity()
+        publisher_key.save(path, identity.dsa_public_key,
+                           identity._signer.export_secret_key(), "pass",
+                           n=2 ** 8, r=8, p=1)
+        return identity.dsa_public_key
+
+    async def test_a_node_id_reaches_it_through_the_pairing(self, tmp_path):
+        publisher, node = await _pair(19412)
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            await publisher.publish_release(_tree(str(tmp_path / "tree"), "9.9.9"),
+                                            key_path=path, passphrase="pass")
+            await publisher._publish_package_records()
+
+            offered = await node.packages_of(publisher.id)
+            assert [row["version"] for row in offered] == ["9.9.9"]
+            # The record names the key, not the machine…
+            assert offered[0]["publisher"] == public.hex()
+            assert offered[0]["publisher_id"] != publisher.id.raw.hex()
+            # …and the machine is reached through a link both of them signed.
+            assert offered[0]["vouched_by"] == [publisher.id.raw.hex()]
+        finally:
+            await node.stop(); await publisher.stop()
+
+    async def test_one_half_alone_is_not_followed(self, tmp_path):
+        """A node naming a stranger's key would otherwise put that stranger's
+        packages on its own page."""
+        publisher, node = await _pair(19413)
+        stranger = MeshNode(_mgr())
+        try:
+            await stranger.publish_release(_tree(str(tmp_path / "tree"), "9.9.9"))
+            for raw in stranger._package_records.values():
+                record = pkg_dir.parse_record(raw, node._identity.verify)
+                node._package_book.offer(record, raw)
+            # The publisher says the stranger's key publishes for it. The
+            # stranger never said anything back.
+            half = publisher.sign_pairing(stranger.id.raw)
+            node._pairings.offer(
+                pkg_dir.parse_pairing(half, node._identity.verify), half)
+
+            offered = await node.packages_of(publisher.id, wide=False)
+            assert offered == [], "one party's word was followed"
+            # And the stranger's own page is unaffected: nothing was attached.
+            theirs = await node.packages_of(stranger.id, wide=False)
+            assert [row["vouched_by"] for row in theirs] == [[]]
+        finally:
+            await stranger.stop(); await node.stop(); await publisher.stop()
+
+    async def test_the_key_pinned_is_the_key_that_signed_the_release(
+            self, tmp_path, monkeypatch):
+        publisher, node = await _pair(19414)
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            await publisher.publish_release(_tree(str(tmp_path / "tree"), "9.9.9"),
+                                            key_path=path, passphrase="pass")
+            await publisher._publish_package_records()
+            entry = (await node.packages_of(publisher.id))[0]
+            assert node.trust_package_publisher(entry["id"])["key"] == public.hex()
+
+            applied = {}
+
+            async def fake_apply(files, version, **kwargs):
+                applied.update({"version": version})
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            assert (await node.install_package(entry["id"]))["version"] == "9.9.9"
+            assert applied["version"] == "9.9.9"
+        finally:
+            await node.stop(); await publisher.stop()
+
+
 class TestARecordSaysNothingAboutTrust:
     async def test_a_recommendation_cannot_be_pinned(self, tmp_path):
         """Pinning the node that agreed with a release would hand the machine

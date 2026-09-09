@@ -446,6 +446,32 @@ indication why. The fix is on the publishing side — file a claim under the who
 name *and* each word's prefixes — because the query side has no room to
 manoeuvre: it has a hash, and a hash is all or nothing.
 
+## Two signers, and the record signed by the wrong one
+
+`publish_release(key_path=…)` signs the release with a detached publisher key —
+the whole point of `publisher_key.py`, since that key decides what every node
+pinning it will run. The directory record was signed with the node identity
+anyway, because that is what `sign_package_record` had to hand.
+
+Nothing failed. The card said `Publisher: <this node>` while the descriptor it
+pointed at carried a different key; pinning from the card pinned the node; and
+the install then refused with *"that publisher is not trusted here"* — naming a
+key the operator had never seen, one action after they had pinned something.
+
+> **When one operation has two signers, every artefact it produces has to say
+> which one.** A record names its signer, and that name is what a reader acts
+> on: sign it with the convenient key and the label is a lie that only shows up
+> two clicks later, as a refusal about a third party.
+
+The fix also moved *where* the record is signed — inside the block that holds
+the unlocked key, because it cannot be signed after the key is closed. A
+lifetime is part of an interface.
+
+And the honest half: a record can only name its own signer, so the detached key
+is genuinely not the node, and no amount of care makes `packages_of(node_id)`
+find it. That needs a **second artefact** (the pairing) rather than a cleverer
+reading of the first.
+
 ## A bounded bucket that evicts the record instead of the pointer
 
 Both directories index one record under several keys. `_MAX_PER_KEY` caps a
