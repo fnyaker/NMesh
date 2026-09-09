@@ -279,6 +279,11 @@ tests/
 │     the wait between passes — with a dial that raises not killing the loop.
 │     Plus the two ways a chase must end early: a membership its issuer took
 │     back, and a node the operator forgot
+├── test_integration_ports.py                          — no two integration
+│     tests bind the same loopback port: under xdist that is a race whose loser
+│     fails in `wait_for_session` fifteen seconds later, reading as a flaky mesh
+│     rather than as a reused number. Checked in the fast suite, because a guard
+│     you only run beside the thing it guards is one CI tells you about
 ├── test_ui_contrast.py                                — colour tokens: the WCAG
 │     ratio of every text/background pair in both themes, and no page redefining
 │     a token of the system

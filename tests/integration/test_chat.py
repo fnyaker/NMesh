@@ -59,8 +59,8 @@ class TestChatOverMesh:
         host = make_node()
         guest = make_node()
         code = host.generate_invite()
-        await host.start(["tcp://127.0.0.1:19170"])
-        await guest.join("tcp://127.0.0.1:19170", code)
+        await host.start(["tcp://127.0.0.1:19180"])
+        await guest.join("tcp://127.0.0.1:19180", code)
         await guest.wait_for_session(timeout=15.0)
         await host.wait_for_session(timeout=15.0)
 
@@ -107,8 +107,8 @@ class TestRichChatOverMesh:
         host = make_node()
         guest = make_node()
         code = host.generate_invite()
-        await host.start(["tcp://127.0.0.1:19172"])
-        await guest.join("tcp://127.0.0.1:19172", code)
+        await host.start(["tcp://127.0.0.1:19182"])
+        await guest.join("tcp://127.0.0.1:19182", code)
         await guest.wait_for_session(timeout=15.0)
         await host.wait_for_session(timeout=15.0)
 
@@ -158,8 +158,8 @@ class TestSocialOverMesh:
         host = make_node(pseudo="hosty")
         guest = make_node(pseudo="guesty")
         code = host.generate_invite()
-        await host.start(["tcp://127.0.0.1:19171"])
-        await guest.join("tcp://127.0.0.1:19171", code)
+        await host.start(["tcp://127.0.0.1:19181"])
+        await guest.join("tcp://127.0.0.1:19181", code)
         await guest.wait_for_session(timeout=15.0)
         await host.wait_for_session(timeout=15.0)
 
