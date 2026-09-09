@@ -56,7 +56,7 @@ def _package(tmp_path, name, version="9.9.9", marker="# the code\n"):
 
 class TestAttestation:
     def test_attesters_are_the_keys_that_signed_this_content(self, tmp_path):
-        catalog = cr.ReleaseCatalog()
+        catalog = cr.ReleaseBook()
         package = _package(tmp_path, "a")
         a, b = CryptoIdentity(), CryptoIdentity()
         for identity in (a, b):
@@ -68,7 +68,7 @@ class TestAttestation:
             self, tmp_path):
         """Two publishers agreeing on a version number while shipping different
         code is a disagreement, not a confirmation."""
-        catalog = cr.ReleaseCatalog()
+        catalog = cr.ReleaseBook()
         honest = _package(tmp_path, "honest")
         theirs = _package(tmp_path, "theirs", marker="# not the code\n")
         a, b = CryptoIdentity(), CryptoIdentity()
@@ -81,7 +81,7 @@ class TestAttestation:
     def test_one_publisher_signing_twice_is_one_attester(self, tmp_path):
         """The quantity that means something is how many distinct parties, so
         the same key twice must not price a quorum at one machine."""
-        catalog = cr.ReleaseCatalog()
+        catalog = cr.ReleaseBook()
         package = _package(tmp_path, "a")
         a = CryptoIdentity()
         catalog.offer(_signed(a, package, ts=100), cr_verify())
@@ -132,8 +132,7 @@ class TestUnattendedInstall:
     async def _catalogued(self, node, identity, package, ts=None):
         blob = _signed(identity, package, ts=ts)
         node._releases.offer(blob, node._identity.verify, node._trusts_publisher)
-        return node._releases.get(
-            cr.publisher_id(identity.dsa_public_key).hex())
+        return node._releases.get(cr.descriptor_key(blob))
 
     async def test_a_pinned_auto_publisher_is_enough(self, tmp_path):
         node = _node()

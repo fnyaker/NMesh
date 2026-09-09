@@ -1823,14 +1823,14 @@ class TestRestartingOntoNewCode:
             monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
             _, token = await _login(console)
 
-            async def installed(publisher_id):
+            async def installed(release_key):
                 return {"applied": "9.9.9", "version": "9.9.9",
                         "restart_required": True}
 
             monkeypatch.setattr(node, "install_release", installed)
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/releases/install", token,
-                {"publisher_id": "aa" * 20, "confirm": True})
+                {"release": "aa" * 20, "confirm": True})
             assert status == 200 and body["restarting"] is False
         finally:
             console.stop(); await node.stop()
@@ -2221,9 +2221,13 @@ class TestPackageEndpoints:
                 {"id": record_id, "on": True, "auto": True, "quorum": 2})
             assert status == 200 and body["subscription"]["quorum"] == 2
 
+            # A subscription is named by the package, not by the record it was
+            # pressed on: one package is one row whoever signs or serves it.
             _, _, _, overview = await asyncio.to_thread(
                 _request, console, "GET", "/api/releases", token)
-            assert [row["id"] for row in overview["subscriptions"]] == [record_id]
+            watching = overview["subscriptions"]
+            assert [row["name"] for row in watching] == ["NMesh"]
+            assert watching[0]["package"]["id"] == record_id
 
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/packages/subscribe", token,
@@ -2397,12 +2401,11 @@ class TestReleaseEndpoints:
         finally:
             console.stop(); await node.stop()
 
-    async def test_installing_needs_a_publisher_and_a_confirmation(self):
+    async def test_installing_needs_a_release_and_a_confirmation(self):
         node, console = await _make_console()
         try:
             _, token = await _login(console)
-            for payload in ({}, {"publisher_id": 5},
-                            {"publisher_id": "aa" * 20}):
+            for payload in ({}, {"release": 5}, {"release": "aa" * 20}):
                 status, _, _, _ = await asyncio.to_thread(
                     _request, console, "POST", "/api/releases/install", token,
                     payload)
@@ -2416,7 +2419,7 @@ class TestReleaseEndpoints:
             _, token = await _login(console)
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/releases/install", token,
-                {"publisher_id": "aa" * 20, "confirm": True})
+                {"release": "aa" * 20, "confirm": True})
             assert status == 400 and "no such release" in body["error"]
         finally:
             console.stop(); await node.stop()

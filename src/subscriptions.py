@@ -1,11 +1,14 @@
 """
 What this node watches for new versions — and what it may take on its own.
 
-A subscription names one publisher's offering of one package: *this* key, this
-kind, this name. Subscribing to several publishers of the same package is the
-point rather than a side effect, because of what a **quorum** then means:
+A subscription names **a package**, not a publisher: this kind, this name. It
+used to name one key's offering of one package, which made a signing key into a
+name for a thing — so a package could only be watched through whoever happened
+to sign it, and a second signer of the same code was a second subscription.
 
-    install only when this many subscribed publishers carry the same code.
+What a subscription asks for is a **quorum**:
+
+    install only when this many endorsed keys have signed the same code.
 
 "The same code" is :func:`src.pkg_dir.source_digest` — a digest over the
 package's files with its documentation left out — so two publishers who build
@@ -15,15 +18,16 @@ answer to "am I looking at the official version?", and it is answerable
 record.
 
 A quorum of one is "I do not care, install it" and is the default: an operator
-who wants corroboration asks for it. A quorum only ever *withholds* an install,
-never authorises one that the publisher pins would refuse — see
-``MeshNode.may_auto_install``.
+who wants corroboration asks for it. It is counted over keys the operator
+**endorsed** one at a time, which is what keeps "several parties agree" out of
+reach of somebody minting parties. A quorum only ever *withholds* an install,
+never authorises one the pins would refuse — see ``MeshNode.may_auto_install``.
 
 Three things this file is not
 -----------------------------
-- **Not a trust store.** Subscribing to a publisher is watching them, not
-  accepting their code: :class:`src.core_release.TrustedPublishers` is what says
-  whose signature may replace this node's program, and nothing here changes it.
+- **Not a trust store.** Watching a package is not accepting anybody's code:
+  :class:`src.core_release.TrustedPublishers` is what says whose signature may
+  replace this node's program, and nothing here changes it.
 - **Not writable from the network.** Every entry comes from an operator acting
   locally, exactly like a pin.
 - **Not a cache.** It is small, deliberate and persisted; a corrupt file yields
@@ -37,12 +41,27 @@ import os
 import re
 import time
 
+import hashlib
+
 from .pkg_dir import KINDS, MAX_NAME, MAX_VERSION
-from .pseudo import fold
+from .pseudo import canonical, fold
 
 MAX_SUBSCRIPTIONS = 64
 MAX_QUORUM = 8
 _HEX_ID = re.compile(r"[0-9a-f]{40}")
+
+
+def subscription_id(kind: int, name: str) -> str:
+    """What a subscription is named by: the package, and nothing else.
+
+    Derived from the kind and the folded name, so the same package is the same
+    subscription however it was reached — a search, a node's page, a record
+    signed by somebody new. It used to be the directory entry id, which carries
+    the *node* that filed the record: two nodes offering one package were two
+    subscriptions, and unsubscribing from one left the other watching."""
+    return hashlib.sha256(
+        b"nmesh-subscription-v2" + bytes([int(kind)])
+        + fold(name).encode("utf-8")).digest()[:20].hex()
 
 
 class SubscriptionError(Exception):
@@ -52,10 +71,8 @@ class SubscriptionError(Exception):
 class Subscriptions:
     """The packages this node watches, persisted as plain JSON.
 
-    Keyed by the directory entry id (publisher ‖ kind ‖ folded name), which is
-    the same identity the package directory files a record under — so a
-    subscription and the record it watches are never two ways of naming one
-    thing that can drift apart."""
+    Keyed by :func:`subscription_id` — the kind and the folded name — so one
+    package is one row whoever signs or serves it."""
 
     def __init__(self, path: str | None = None,
                  max_entries: int = MAX_SUBSCRIPTIONS) -> None:
@@ -89,14 +106,16 @@ class Subscriptions:
             return None
         if not isinstance(value, dict):
             return None
-        publisher = value.get("publisher_id")
         name = value.get("name")
         kind = value.get("kind")
-        if not isinstance(publisher, str) or not _HEX_ID.fullmatch(publisher):
-            return None
         if not isinstance(name, str) or not 0 < len(name) <= MAX_NAME:
             return None
         if not isinstance(kind, int) or isinstance(kind, bool) or kind not in KINDS:
+            return None
+        # The key has to be the one this name and kind produce. A file naming a
+        # row something else is a file whose rows cannot be found by the only
+        # question anybody asks of them.
+        if key != subscription_id(kind, name):
             return None
         quorum = value.get("quorum")
         if not isinstance(quorum, int) or isinstance(quorum, bool):
@@ -104,7 +123,6 @@ class Subscriptions:
         seen = value.get("version_seen")
         return {
             "id": key,
-            "publisher_id": publisher,
             "kind": kind,
             "name": name,
             "auto": value.get("auto") is True,
@@ -132,34 +150,39 @@ class Subscriptions:
 
     # -- mutation ---------------------------------------------------------
 
-    def add(self, entry_id_hex: str, publisher_id_hex: str, kind: int,
-            name: str, *, auto: bool = False, quorum: int = 1) -> dict:
-        """Watch this publisher's offering of this package.
+    def add(self, kind: int, name: str, *, auto: bool = False,
+            quorum: int = 1) -> dict:
+        """Watch this package for new versions.
 
         Re-subscribing updates the flags rather than adding a second entry: one
-        offering is one row, however many times somebody presses the toggle."""
-        if not _HEX_ID.fullmatch(entry_id_hex or ""):
-            raise SubscriptionError("that is not a package")
-        if not _HEX_ID.fullmatch(publisher_id_hex or ""):
-            raise SubscriptionError("that is not a publisher")
+        package is one row, however many times somebody presses the toggle and
+        whoever signed the release they pressed it on."""
         if kind not in KINDS:
             raise SubscriptionError("unknown package kind")
-        if (entry_id_hex not in self._entries
-                and len(self._entries) >= self._max):
+        try:
+            # The one accepted form of a displayed name, and the same one the
+            # directory files a record under. A name this refuses is a name no
+            # record could carry, so a subscription to it would watch nothing.
+            name = canonical(name)
+        except Exception:
+            raise SubscriptionError("that is not a package name") from None
+        if not 0 < len(name) <= MAX_NAME:
+            raise SubscriptionError("that is not a package name")
+        ident = subscription_id(kind, name)
+        if ident not in self._entries and len(self._entries) >= self._max:
             raise SubscriptionError("too many subscriptions")
-        existing = self._entries.get(entry_id_hex, {})
-        self._entries[entry_id_hex] = {
-            "id": entry_id_hex,
-            "publisher_id": publisher_id_hex,
+        existing = self._entries.get(ident, {})
+        self._entries[ident] = {
+            "id": ident,
             "kind": int(kind),
-            "name": str(name)[:MAX_NAME],
+            "name": name,
             "auto": bool(auto),
             "quorum": max(1, min(int(quorum), MAX_QUORUM)),
             "version_seen": existing.get("version_seen", ""),
             "added": existing.get("added") or int(time.time()),
         }
         self._save()
-        return dict(self._entries[entry_id_hex])
+        return dict(self._entries[ident])
 
     def remove(self, entry_id_hex: str) -> bool:
         if entry_id_hex not in self._entries:
@@ -186,19 +209,13 @@ class Subscriptions:
     def has(self, entry_id_hex: str) -> bool:
         return entry_id_hex in self._entries
 
-    def publishers_for(self, kind: int, name_folded: str) -> set:
-        """Which publishers this operator watches for one package.
-
-        The set a quorum is counted against: a signature from somebody nobody
-        subscribed to says nothing here, which is what keeps "several parties
-        agree" from being reachable by minting parties."""
-        return {entry["publisher_id"] for entry in self._entries.values()
-                if entry["kind"] == kind and fold(entry["name"]) == name_folded}
+    def for_package(self, kind: int, name) -> dict | None:
+        """The subscription watching this package, if any."""
+        return self.get(subscription_id(kind, name))
 
     def list(self) -> list[dict]:
         return sorted((dict(entry) for entry in self._entries.values()),
-                      key=lambda entry: (entry["name"].lower(),
-                                         entry["publisher_id"]))
+                      key=lambda entry: (entry["name"].lower(), entry["kind"]))
 
     def __len__(self) -> int:
         return len(self._entries)

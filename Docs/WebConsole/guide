@@ -549,14 +549,14 @@ works on a machine with no internet.
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
 | POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
-| POST    | `/api/releases/install` | `{publisher_id, confirm}` — fetches, verifies and installs a pinned publisher's release |
+| POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key |
 | POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
-| GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node publishes, `&wide=1` also asks the network. Nothing is listed: it answers questions |
+| GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node holds and serves, `&wide=1` also asks the network. Nothing is listed: it answers questions |
 | GET     | `/api/packages/<id>` | one signed record, as a page reads it; `?fetch=1` also pulls the descriptor it points at |
 | GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
-| POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the publisher key **carried inside** that record. **400** for a recommendation: it names somebody else's bytes |
-| POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it for new versions, and say how many watched publishers must agree on the code first |
+| POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
+| POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many endorsed signing keys must agree on the code first |
 | GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer |
 | POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
 | POST    | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` — offer the key to another node. Signed by the key itself; **nothing secret travels yet** |
@@ -758,6 +758,29 @@ restarts on the same terms: a tree written and never started is an update that
 did not happen. What keeps that from looping is a record written **before** the
 node leaves — a release that installs and never becomes the running version is
 retried once and then abandoned, and the log on the page says so.
+
+### A node's packages (the node card, and `/node`)
+
+The details window for any node carries a **Packages** section, and it is the
+only place in the console where a package is tied to a machine. What it lists is
+what that node signed about itself — *I hold this release and I serve it* — in
+four groups:
+
+```
+Node software it publishes     Node software it serves
+Apps it publishes              Apps it serves
+```
+
+"Publishes" is the same sentence plus a proof that the node also holds the key
+which signed the release; "serves" is a node that has the bytes and will hand
+them over. Both mean the package can be had from there. Neither is authority:
+what may be installed is decided by the keys this console has pinned, never by
+which list a row landed in — and only a published row carries a key to pin,
+because pinning a mirror would hand the machine to whoever handed you a copy.
+
+Each row opens the package page (version, who signed it, the mini-readme, a
+download, install, and the watch toggle). *Ask the network* re-runs the lookup
+wide instead of answering from what this node already holds.
 
 ### Publisher keys, and handing one to somebody else
 

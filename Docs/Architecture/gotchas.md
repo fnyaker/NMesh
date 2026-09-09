@@ -467,10 +467,12 @@ The fix also moved *where* the record is signed — inside the block that holds
 the unlocked key, because it cannot be signed after the key is closed. A
 lifetime is part of an interface.
 
-And the honest half: a record can only name its own signer, so the detached key
-is genuinely not the node, and no amount of care makes `packages_of(node_id)`
-find it. That needs a **second artefact** (the pairing) rather than a cleverer
-reading of the first.
+And the honest half: a record can only name its own signer, so while records
+were signed by the *publisher key*, the detached key was genuinely not the node
+and no amount of care made `packages_of(node_id)` find it. That took a second
+artefact — a pairing — until the record's subject changed to the node itself
+(see "An index by publisher is not a directory of packages" below). Then the
+same signature answers both questions and nothing is left to pair.
 
 ## A bounded bucket that evicts the record instead of the pointer
 
@@ -1108,6 +1110,25 @@ before and after.
   installer is *working correctly* here. It is not a test helper. Anything that
   drives an install outside the suite stubs the swap first, or runs somewhere
   the swap is allowed to land.
+- **An index by publisher is not a directory of packages.** Records were filed
+  under a *publisher key*, which reads as fine because a node signing with its
+  own identity publishes under its own node id. It stops being fine the moment
+  the key is detached or shared: the key names no machine, so a node's page
+  found nothing, and closing that took a whole second artefact — a two-halved
+  pairing, a second plane gate, its own bounds and its own tests. The record was
+  saying the wrong thing. What a node actually knows is *"I hold this release
+  and I serve it"*, which it can sign itself; the key that signed the release
+  co-signs a proof naming that node, and the pairing, the halves and the
+  "believed only when both exist" rule all disappear. When a mechanism needs a
+  second mechanism to answer an obvious question, suspect the first one's
+  subject, not its plumbing.
+- **A publication proof has to name who is claiming it.** The proof is a
+  signature by the key that signed the release. Signed over the release alone it
+  is a bearer token: copy it onto your own record and your machine claims to
+  have published somebody else's code. It names the node **and** the release, so
+  a lifted one verifies against a node id that is not the thief's and fails.
+  There is a test for each half, and neither is hypothetical — the first version
+  of this signed the same input as the node's own statement.
 - **A publisher key is not a machine.** The package fetch ended at
   `NodeID(publisher_id(key))` — derive a node id from the signing key and dial
   it. It reads as obviously right, because a node id *is* `sha256(dsa_public)`

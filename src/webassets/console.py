@@ -683,7 +683,7 @@ INDEX_HTML = """<!doctype html>
             <div class="sub">Packages this node checks on, and what it may install alone</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Package</th><th>Publisher</th><th>Agreeing</th>
+              <table><thead><tr><th>Package</th><th>Signed by</th><th>Agreeing</th>
                 <th>Automatic</th><th></th></tr></thead>
                 <tbody id="watch-rows"></tbody></table>
             </div>
@@ -3100,10 +3100,13 @@ function watchRowHTML(row){
   const enough = row.agreeing >= row.quorum;
   return '<tr><td><strong>' + esc(row.name) + "</strong>" +
     (pkg.version ? '<div class="tiny muted">' + esc(pkg.version) + "</div>" : "") +
-    '</td><td><code>' + esc(shortId(row.publisher_id)) + "</code></td>" +
-    // The label and the number are one claim: "2 of 3" is how many publishers
-    // this operator watches that have signed the same code, out of how many
-    // they asked to agree.
+    '</td><td>' + (pkg.signer_id
+      ? "<code>" + esc(shortId(pkg.signer_id)) + "</code>"
+      : '<span class="muted small">nobody yet</span>') + "</td>" +
+    // The label and the number are one claim: "2 of 3" is how many endorsed
+    // keys have signed the same code, out of how many this operator asked to
+    // agree. A subscription watches a package, so there is no one publisher to
+    // name in the row — only whoever has signed the version it currently sees.
     "<td>" + esc(row.agreeing + " of " + row.quorum) +
     (enough ? "" : ' <span class="badge warn">holding</span>') + "</td>" +
     "<td>" + (row.auto ? '<span class="badge ok">yes</span>'
