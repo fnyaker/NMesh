@@ -51,6 +51,10 @@ from .app_channel import deployed_id as _app_deployed_id
 from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .app_catalog import AppCatalog, InstalledApps
 from .version import is_newer as _is_newer
+from .publisher_key import (KeyStore as PublisherKeyStore,
+                            PublisherKeyError,
+                            load as _publisher_key_load,
+                            publisher_id as _key_id)
 from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
                            ReleaseCatalog, ReleaseStore,
                            TrustedPublishers, MAX_AUTO_ATTEMPTS,
@@ -65,6 +69,8 @@ from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
                            release_id as _core_release_id,
                            version_of as _core_version_of)
 from .subscriptions import Subscriptions, SubscriptionError
+from . import key_share as _key_share
+from .key_share import KeyShareError
 from .pkg_dir import (PackageBook, PackageDirError, PairingBook,
                       MAX_PAIRING as _MAX_PAIRING,
                       build_pairing as _pkg_build_pairing,
@@ -147,6 +153,9 @@ PKG_STORE         = 0x29   # store a signed package-directory record
 PKG_FIND          = 0x2A   # look up package-directory records by key
 PKG_FOUND         = 0x2B   # reply: the records held for a package key
 PKG_ANNOUNCE      = 0x2C   # gossip a signed record: "this key publishes that"
+KEY_OFFER         = 0x2D   # "I hold this publisher key and offer it to you"
+KEY_ACCEPT        = 0x2E   # "I want it — seal it to this KEM key" (signed)
+KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -283,6 +292,11 @@ _PKG_RATE_MAX        = 64       # package records one link may push at us per wi
 _PKG_SEARCH_MAX      = 50       # results one package search may return
 _PKG_SYNC_MAX        = 64       # records pushed at a peer when it authenticates
 _PKG_OWN_MAX         = 32       # records this node signs and keeps re-filing
+_KEY_SHARE_WINDOW    = 60.0     # seconds
+_KEY_SHARE_MAX       = 8        # key-share messages one link may push per window
+# Offers held at once, in each direction. Small: each is a decision waiting for
+# a human, and an outgoing one holds an unlocked secret until it is answered.
+_MAX_KEY_OFFERS      = 8
 _PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
 _REVOKE_RATE_WINDOW  = 10.0     # seconds
 _REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
@@ -315,6 +329,9 @@ _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_R
                     FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
                     DIR_STORE, DIR_FIND, DIR_FOUND,
                     PKG_STORE, PKG_FIND, PKG_FOUND,
+                    # Handing a publisher key to somebody is a conversation
+                    # between two operators who may be several hops apart.
+                    KEY_OFFER, KEY_ACCEPT, KEY_GRANT,
                     # A package comes from whoever has it, which may be several
                     # hops away — the publisher, or any node that kept a copy.
                     RELEASE_FETCH, RELEASE_DATA,
@@ -1885,6 +1902,12 @@ class MeshNode:
         # code, so nothing arriving from the network writes to them.
         self._publishers = TrustedPublishers(
             os.path.join(release_dir, "publishers.json") if release_dir else None)
+        # The publisher keys this node can sign *with* — its own, and any it was
+        # handed. Beside the pins deliberately: one says whose code we accept,
+        # the other whose name we can publish under, and confusing them is the
+        # mistake worth making hard to make.
+        self._publisher_keys = PublisherKeyStore(
+            os.path.join(release_dir, "publisher-keys") if release_dir else None)
         self._releases = ReleaseCatalog()
         # The packages we hold and can serve, and who else said they hold one.
         self._packages = ReleaseStore(
@@ -1936,6 +1959,15 @@ class MeshNode:
         # two together, in two halves neither party can sign for the other.
         self._pairings = PairingBook()
         self._own_pairings: dict[tuple, bytes] = {}
+        # Handing a publisher key to somebody else. Three tables, all bounded
+        # and all short-lived: an offer waiting for a human here, an offer we
+        # made that is holding an unlocked secret until it is answered, and an
+        # acceptance whose passphrase we are holding until the grant lands.
+        # See :mod:`src.key_share`.
+        self._key_offers_in: OrderedDict[bytes, dict] = OrderedDict()
+        self._key_offers_out: OrderedDict[bytes, dict] = OrderedDict()
+        self._key_accepts: OrderedDict[bytes, dict] = OrderedDict()
+        self._key_share_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._pending_pkg: dict[bytes, asyncio.Future] = {}
         self._pkg_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._revoke_rate: OrderedDict[bytes, tuple] = OrderedDict()
@@ -9220,6 +9252,295 @@ class MeshNode:
             pass          # the local answer is still worth returning
         return self.find_pseudo(query, limit)
 
+    # -- handing a publisher key to somebody else -------------------------
+    #
+    # Three messages, and the middle one is the design: there is no long-term
+    # encryption key to seal a secret to, so the recipient makes one — and only
+    # after a human accepted. Consent is structural rather than checked. See
+    # :mod:`src.key_share` for the formats and for what each signature is for.
+    #
+    # Every table here is bounded and short-lived. The outgoing one is the
+    # expensive one: it holds an unlocked secret until the offer is answered,
+    # which is unavoidable (you cannot send what you have not unlocked) and is
+    # why the window is minutes rather than open-ended.
+
+    def _key_share_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._key_share_rate, peer,
+                                    _KEY_SHARE_WINDOW, _KEY_SHARE_MAX)
+
+    def _sweep_key_shares(self) -> None:
+        """Forget what has run out of time, in all three directions.
+
+        On every touch rather than on a timer: these tables are read by a
+        handler or by an operator, and a sweep that only runs on a schedule
+        would leave an unlocked secret in memory between ticks."""
+        now = time.monotonic()
+        for table in (self._key_offers_in, self._key_offers_out,
+                      self._key_accepts):
+            for offer_id in [k for k, row in table.items()
+                             if now >= row["deadline"]]:
+                table.pop(offer_id, None)
+
+    def _remember_key_share(self, table: 'OrderedDict', offer_id: bytes,
+                            row: dict) -> None:
+        row["deadline"] = time.monotonic() + _key_share.OFFER_TTL
+        table[offer_id] = row
+        while len(table) > _MAX_KEY_OFFERS:
+            table.popitem(last=False)
+
+    async def _handle_key_offer(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._key_share_allowed(peer):
+            return
+        self._sweep_key_shares()
+        # `src_id` is not authenticated on a routed packet — but it is inside
+        # the offer's signature, made by the key being offered. So an offer that
+        # verifies has told us who to answer, and one whose src_id a relay
+        # rewrote simply fails to verify and is dropped.
+        offer = _key_share.parse_offer(packet.payload, packet.src_id,
+                                       self._id.raw, self._identity.verify)
+        if offer is None:
+            self._charge_abuse(peer)
+            return
+        if offer["offer_id"] in self._key_offers_in:
+            return                    # already waiting for a human
+        self._remember_key_share(self._key_offers_in, offer["offer_id"], {
+            "from_id": bytes(packet.src_id),
+            "publisher": offer["publisher"],
+            "label": offer["label"],
+            "at": int(time.time()),
+        })
+        self._note_change("packages")
+        self._activity.note(
+            "warn", "a node offers this one its publisher key "
+                    + _key_id(offer["publisher"]).hex()[:12]
+                    + " — accept it in Settings, Updates")
+
+    async def _handle_key_accept(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._key_share_allowed(peer):
+            return
+        self._sweep_key_shares()
+        offer_id = _key_share.accept_offer_id(packet.payload)
+        if offer_id is None:
+            self._charge_abuse(peer)
+            return
+        pending = self._key_offers_out.get(offer_id)
+        if pending is None:
+            return       # an answer to a question we did not ask; say nothing
+        accept = _key_share.parse_accept(
+            packet.payload, pending["to_id"], self._id.raw,
+            self._identity.verify,
+            lambda public: NodeID.from_public_key(public).raw)
+        if accept is None:
+            self._charge_abuse(peer)
+            return
+        try:
+            grant = _key_share.seal_grant(
+                offer_id, self._id.raw, pending["to_id"], pending["publisher"],
+                pending["secret"], accept["kem_public"],
+                self._identity.kem_encapsulate)
+        except Exception:
+            return
+        # The secret goes as soon as the grant is built, whether or not it
+        # arrives: this table is the only thing holding it, and a delivery that
+        # failed is a re-offer rather than a reason to keep a key unlocked.
+        self._key_offers_out.pop(offer_id, None)
+        await self._route_outbound(
+            Packet.create(KEY_GRANT, self._id.raw, pending["to_id"], grant),
+            blocking=False)
+        self._note_change("packages")
+        self._activity.note(
+            "release", "handed publisher key "
+                       + _key_id(pending["publisher"]).hex()[:12] + " to "
+                       + pending["to_id"].hex()[:12])
+
+    async def _handle_key_grant(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._key_share_allowed(peer):
+            return
+        self._sweep_key_shares()
+        offer_id = _key_share.grant_offer_id(packet.payload)
+        if offer_id is None:
+            self._charge_abuse(peer)
+            return
+        pending = self._key_accepts.get(offer_id)
+        if pending is None:
+            return       # nothing we are waiting for; not worth an accusation
+        secret = _key_share.open_grant(
+            packet.payload, pending["from_id"], self._id.raw,
+            pending["publisher"], pending["kem_secret"],
+            self._identity.kem_decapsulate)
+        if secret is None:
+            self._charge_abuse(peer)
+            return
+        self._key_accepts.pop(offer_id, None)
+        try:
+            # The pair is checked against itself before anything is written: a
+            # secret that does not produce the public half we were offered is
+            # not that key, however well it was sealed, and no signature would
+            # have caught it.
+            probe = CryptoIdentity.from_pair(pending["publisher"], secret)
+            probe.close()
+            row = self._publisher_keys.put(
+                pending["publisher"], secret, pending["passphrase"],
+                label=pending["label"],
+                received_from=pending["from_id"].hex())
+        except Exception as exc:
+            self._activity.note(
+                "warn", "a publisher key arrived but could not be kept: "
+                        + str(exc)[:80])
+            return
+        finally:
+            pending["passphrase"] = ""
+        self._note_change("packages")
+        self._activity.note(
+            "release", "accepted publisher key " + row["id"][:12] + " from "
+                       + pending["from_id"].hex()[:12])
+
+    # -- what an operator does ---------------------------------------------
+
+    def create_publisher_key(self, passphrase: str, label: str = "") -> dict:
+        """Make a publisher key and keep it, encrypted under ``passphrase``.
+
+        A key generated here is **not** the node's identity, which is the whole
+        point: the identity is unlocked for as long as the node runs because
+        handshakes need it, and this one is unlocked for as long as it takes to
+        sign a release. The secret exists in this process only for the moment it
+        takes to write it down."""
+        if not isinstance(passphrase, str) or not passphrase:
+            raise PublisherKeyError("a passphrase is required")
+        identity = CryptoIdentity()
+        try:
+            return self._publisher_keys.put(
+                identity.dsa_public_key, identity._signer.export_secret_key(),
+                passphrase, label=label)
+        finally:
+            identity.close()
+
+    def import_publisher_key(self, path: str, passphrase: str,
+                             label: str = "") -> dict:
+        """Take a publisher key file this operator already has into the store.
+
+        Without this a key made before there was a store is a file nothing can
+        name — and naming it by id is what lets a release be signed with it, and
+        what lets it be offered to somebody else."""
+        public, secret = _publisher_key_load(path, passphrase)
+        return self._publisher_keys.put(public, secret, passphrase, label=label)
+
+    async def offer_publisher_key(self, node_id, key_path: str,
+                                  passphrase: str, *, label: str = "") -> dict:
+        """Offer a publisher key to one node. Returns the offer.
+
+        The key is unlocked here — the offer is signed with it, which is what
+        proves we hold it — and the secret is held until the offer is answered
+        or expires. That window is the cost of sharing a key at all, and it is
+        why an offer is made to one named node rather than announced."""
+        target = node_id if isinstance(node_id, NodeID) else NodeID.from_hex(
+            node_id if isinstance(node_id, str) else bytes(node_id).hex())
+        if target == self._id:
+            raise KeyShareError("that is this node")
+        public, secret = _publisher_key_load(key_path, passphrase)
+        offer_id = _key_share.new_offer_id()
+        signer = CryptoIdentity.from_pair(public, secret)
+        try:
+            offer = _key_share.build_offer(
+                offer_id, self._id.raw, target.raw, public, signer.sign,
+                label=label)
+        finally:
+            signer.close()
+        self._sweep_key_shares()
+        self._remember_key_share(self._key_offers_out, offer_id, {
+            "to_id": target.raw,
+            "publisher": public,
+            "secret": secret,
+            "label": label,
+            "at": int(time.time()),
+        })
+        await self._route_outbound(
+            Packet.create(KEY_OFFER, self._id.raw, target.raw, offer))
+        self._note_change("packages")
+        return {"offer_id": offer_id.hex(), "to": target.raw.hex(),
+                "key_id": _key_id(public).hex(), "label": label}
+
+    async def accept_publisher_key(self, offer_id_hex: str,
+                                   passphrase: str) -> dict:
+        """Accept an offered key, to be kept under **our own** passphrase.
+
+        This is what produces the key material the sender can seal to, so it is
+        also the consent: refuse, and there is nothing for the secret to travel
+        inside."""
+        if not isinstance(passphrase, str) or not passphrase:
+            raise KeyShareError("choose a passphrase to keep the key under")
+        self._sweep_key_shares()
+        try:
+            offer_id = bytes.fromhex(offer_id_hex)
+        except (ValueError, TypeError):
+            raise KeyShareError("no such offer") from None
+        offer = self._key_offers_in.pop(offer_id, None)
+        if offer is None:
+            raise KeyShareError("no such offer — it may have expired")
+        kem_public, kem_secret = self._identity.generate_kem_keypair()
+        accept = _key_share.build_accept(
+            offer_id, self._id.raw, offer["from_id"], kem_public,
+            self._identity.dsa_public_key, self._identity.sign)
+        self._remember_key_share(self._key_accepts, offer_id, {
+            "from_id": offer["from_id"],
+            "publisher": offer["publisher"],
+            "label": offer["label"],
+            "kem_secret": kem_secret,
+            "passphrase": passphrase,
+        })
+        await self._route_outbound(
+            Packet.create(KEY_ACCEPT, self._id.raw, offer["from_id"], accept))
+        self._note_change("packages")
+        return {"offer_id": offer_id.hex(),
+                "key_id": _key_id(offer["publisher"]).hex()}
+
+    def refuse_publisher_key(self, offer_id_hex: str) -> bool:
+        """Drop an offer. Nothing is sent: an answer would tell whoever asked
+        that this node is here and listening, and a refusal owes them that no
+        more than any other unanswered offer does. The sender's own copy
+        expires."""
+        try:
+            offer_id = bytes.fromhex(offer_id_hex)
+        except (ValueError, TypeError):
+            return False
+        dropped = self._key_offers_in.pop(offer_id, None) is not None
+        if dropped:
+            self._note_change("packages")
+        return dropped
+
+    def key_share_overview(self) -> dict:
+        """The keys this node can sign with, and the offers in flight."""
+        self._sweep_key_shares()
+        now = time.monotonic()
+        return {
+            "keys": self._publisher_keys.list(),
+            "incoming": [{
+                "offer_id": offer_id.hex(),
+                "from": row["from_id"].hex(),
+                "key_id": _key_id(row["publisher"]).hex(),
+                "label": row["label"],
+                "expires_in": max(0, int(row["deadline"] - now)),
+            } for offer_id, row in self._key_offers_in.items()],
+            "outgoing": [{
+                "offer_id": offer_id.hex(),
+                "to": row["to_id"].hex(),
+                "key_id": _key_id(row["publisher"]).hex(),
+                "label": row["label"],
+                "expires_in": max(0, int(row["deadline"] - now)),
+            } for offer_id, row in self._key_offers_out.items()],
+        }
+
+    def publisher_key_path(self, key_id_hex: str) -> str | None:
+        """Where a held key lives, so a publish can name it by id."""
+        return self._publisher_keys.path_for(key_id_hex) \
+            if self._publisher_keys.get(key_id_hex) else None
+
+    def forget_publisher_key(self, key_id_hex: str) -> bool:
+        forgotten = self._publisher_keys.forget(key_id_hex)
+        if forgotten:
+            self._note_change("packages")
+        return forgotten
+
     # -- the package directory (who publishes what, findable by name) ------
     #
     # Two planes over one book, exactly like pseudos. Gossip (PKG_ANNOUNCE)
@@ -11847,6 +12168,9 @@ _HANDLERS = {
     PKG_FIND:          MeshNode._handle_pkg_find,
     PKG_FOUND:         MeshNode._handle_pkg_found,
     PKG_ANNOUNCE:      MeshNode._handle_pkg_announce,
+    KEY_OFFER:         MeshNode._handle_key_offer,
+    KEY_ACCEPT:        MeshNode._handle_key_accept,
+    KEY_GRANT:         MeshNode._handle_key_grant,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
@@ -11871,6 +12195,8 @@ _MESSAGE_PLANE = {
     DIR_FOUND: features.DIRECTORY,
     PKG_STORE: features.PACKAGES, PKG_FIND: features.PACKAGES,
     PKG_FOUND: features.PACKAGES, PKG_ANNOUNCE: features.PACKAGES,
+    KEY_OFFER: features.HANDOVER, KEY_ACCEPT: features.HANDOVER,
+    KEY_GRANT: features.HANDOVER,
     PSEUDO_ANNOUNCE: features.PSEUDO,
     CATALOG_ANNOUNCE: features.CATALOG,
     RELEASE_ANNOUNCE: features.RELEASE, RELEASE_FETCH: features.RELEASE,

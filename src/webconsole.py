@@ -1277,6 +1277,16 @@ def _make_handler(console: WebConsole):
                 except Exception:
                     self._json(503, {"error": "node unavailable"})
                 return
+            if path == "/api/keys":
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                try:
+                    self._json(200, console._call(
+                        _wrap(console._node.key_share_overview)))
+                except Exception:
+                    self._json(503, {"error": "node unavailable"})
+                return
             if path == "/api/packages":
                 self._handle_packages_get()
                 return
@@ -1857,6 +1867,9 @@ def _make_handler(console: WebConsole):
             if path.startswith("/api/packages/"):
                 self._handle_package_post(path, _parse_json(body))
                 return
+            if path.startswith("/api/keys/"):
+                self._handle_key_post(path, _parse_json(body))
+                return
             if path == "/api/pseudo":
                 self._handle_pseudo_save(_parse_json(body))
                 return
@@ -2008,6 +2021,102 @@ def _make_handler(console: WebConsole):
             self._json(200, {"ok": True, "pseudo": adopted,
                              "saved": saved, "error": problem})
 
+        def _handle_key_post(self, path: str, data) -> None:
+            """Offering, accepting and forgetting a publisher key.
+
+            A passphrase crosses this boundary — the sender's to unlock what it
+            is offering, the recipient's to keep what it accepts — so these
+            routes exist only over the console session, and nothing here writes
+            one down. The node holds the recipient's just long enough for the
+            grant to land, and drops it either way."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            data = data if isinstance(data, dict) else {}
+            node = console._node
+            try:
+                if path == "/api/keys/create":
+                    passphrase = data.get("passphrase")
+                    if not isinstance(passphrase, str) or not passphrase:
+                        self._json(400, {"error": "passphrase required"})
+                        return
+                    label = data.get("label")
+                    row = console._call(_wrap(
+                        node.create_publisher_key, passphrase,
+                        label if isinstance(label, str) else ""),
+                        timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": True, "key": row})
+                    return
+                if path == "/api/keys/import":
+                    for name in ("path", "passphrase"):
+                        if not isinstance(data.get(name), str) or not data[name]:
+                            self._json(400, {"error": f"{name} required"})
+                            return
+                    label = data.get("label")
+                    row = console._call(_wrap(
+                        node.import_publisher_key, data["path"],
+                        data["passphrase"],
+                        label if isinstance(label, str) else ""),
+                        timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": True, "key": row})
+                    return
+                if path == "/api/keys/offer":
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    for name in ("node", "key_id", "passphrase"):
+                        if not isinstance(data.get(name), str) or not data[name]:
+                            self._json(400, {"error": f"{name} required"})
+                            return
+                    key_path = console._call(
+                        _wrap(node.publisher_key_path, data["key_id"]))
+                    if key_path is None:
+                        self._json(404, {"error": "no such publisher key"})
+                        return
+                    label = data.get("label")
+                    offer = console._call(node.offer_publisher_key(
+                        data["node"], key_path, data["passphrase"],
+                        label=label if isinstance(label, str) else ""),
+                        timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": True, "offer": offer})
+                    return
+                if path == "/api/keys/accept":
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    for name in ("offer_id", "passphrase"):
+                        if not isinstance(data.get(name), str) or not data[name]:
+                            self._json(400, {"error": f"{name} required"})
+                            return
+                    accepted = console._call(node.accept_publisher_key(
+                        data["offer_id"], data["passphrase"]),
+                        timeout=_APP_CALL_TIMEOUT)
+                    self._json(200, {"ok": True, **accepted})
+                    return
+                if path == "/api/keys/refuse":
+                    offer_id = data.get("offer_id")
+                    if not isinstance(offer_id, str):
+                        self._json(400, {"error": "offer_id required"})
+                        return
+                    self._json(200, {"ok": console._call(
+                        _wrap(node.refuse_publisher_key, offer_id))})
+                    return
+                if path == "/api/keys/forget":
+                    key_id = data.get("key_id")
+                    if not isinstance(key_id, str):
+                        self._json(400, {"error": "key_id required"})
+                        return
+                    if data.get("confirm") is not True:
+                        self._json(400, {"error": "confirmation required"})
+                        return
+                    self._json(200, {"ok": console._call(
+                        _wrap(node.forget_publisher_key, key_id))})
+                    return
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": str(exc)[:200]})
+                return
+            self._json(404, {"error": "not found"})
+
         def _handle_package_post(self, path: str, data) -> None:
             """Installing, pinning and subscribing from a package record.
 
@@ -2081,9 +2190,24 @@ def _make_handler(console: WebConsole):
             try:
                 if path == "/api/releases/publish":
                     notes = data.get("notes")
+                    # Signing with a held publisher key rather than the node
+                    # identity: named by id, because a key this node was handed
+                    # has no path its operator ever chose.
+                    key_id = data.get("key_id")
+                    key_path = None
+                    if isinstance(key_id, str) and key_id:
+                        key_path = console._call(
+                            _wrap(node.publisher_key_path, key_id))
+                        if key_path is None:
+                            self._json(404, {"error": "no such publisher key"})
+                            return
+                    passphrase = data.get("passphrase")
                     result = console._call(
                         node.publish_release(
-                            notes=notes if isinstance(notes, str) else ""),
+                            notes=notes if isinstance(notes, str) else "",
+                            key_path=key_path,
+                            passphrase=passphrase
+                            if isinstance(passphrase, str) else None),
                         timeout=300.0)
                     self._json(200, {"ok": True, **result})
                     return

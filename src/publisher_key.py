@@ -44,14 +44,31 @@ Choices, and why
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import struct
+import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 MAGIC = b"NMPK"
 VERSION = 1
+
+# A key is named by the hash of its public half, exactly like a node id and a
+# publisher id elsewhere: there is no id to lie about, only a key that does or
+# does not produce it.
+PUBLISHER_ID_LEN = 20
+_HEX_ID = re.compile(r"[0-9a-f]{%d}" % (PUBLISHER_ID_LEN * 2))
+_MAX_KEYS = 32             # publisher keys one node may hold
+_MAX_LABEL = 64
+
+
+def publisher_id(public_key: bytes) -> bytes:
+    return hashlib.sha256(bytes(public_key)).digest()[:PUBLISHER_ID_LEN]
+
 
 # scrypt cost. n=2^17, r=8, p=1 is roughly 128 MiB and a fraction of a second —
 # chosen so that a laptop notices it once at publish time and a guessing rig
@@ -176,3 +193,157 @@ def _read(path: str) -> tuple[bytes, bytes, bytes]:
     if end >= len(blob):
         raise PublisherKeyError("the key file is truncated")
     return blob[:_HDR.size], blob[_HDR.size:end], blob[end:]
+
+
+# ---------------------------------------------------------------------------
+# The keys this node holds
+# ---------------------------------------------------------------------------
+
+class KeyStore:
+    """A directory of publisher keys, one file per key id.
+
+    Without this a publisher key is a path an operator has to remember and
+    retype, which is the ergonomics that made pasting hex keys around normal in
+    the first place. A key received from somebody else has no path they chose at
+    all, so it needed a home before it could have a name.
+
+    The **files are the truth**: the id of a key is derived from its public half
+    (:func:`publisher_id`), so the store is re-read from disk rather than from
+    an index that could disagree with it. ``index.json`` beside them carries
+    only what the files cannot say — a label, when it arrived, and who handed it
+    over — and a corrupt or missing index costs those and nothing else."""
+
+    def __init__(self, directory: str | None = None) -> None:
+        self._dir = directory
+        if self._dir:
+            try:
+                os.makedirs(self._dir, mode=0o700, exist_ok=True)
+            except OSError:
+                self._dir = None          # no store; this node holds no keys
+
+    # -- where things are -------------------------------------------------
+
+    def path_for(self, key_id_hex: str) -> str | None:
+        """The file a key id lives in, or None when the id is not one."""
+        if not self._dir or not _HEX_ID.fullmatch(key_id_hex or ""):
+            return None
+        return os.path.join(self._dir, f"{key_id_hex}.key")
+
+    def _index_path(self) -> str | None:
+        return os.path.join(self._dir, "index.json") if self._dir else None
+
+    def _index(self) -> dict:
+        path = self._index_path()
+        if not path:
+            return {}
+        try:
+            with open(path) as handle:
+                doc = json.load(handle)
+        except (FileNotFoundError, OSError, ValueError):
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    def _write_index(self, index: dict) -> None:
+        path = self._index_path()
+        if not path:
+            return
+        tmp = f"{path}.tmp.{os.getpid()}"
+        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(handle, "w") as stream:
+                json.dump(index, stream)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, path)
+
+    # -- mutation ---------------------------------------------------------
+
+    def put(self, public_key: bytes, secret_key: bytes, passphrase: str, *,
+            label: str = "", received_from: str = "", **costs) -> dict:
+        """Keep a key, encrypted under ``passphrase``. Returns its row.
+
+        The id is derived from the public half, so a key that arrives twice
+        replaces itself rather than accumulating — including under a new
+        passphrase, which is how somebody changes one."""
+        key_id = publisher_id(public_key).hex()
+        path = self.path_for(key_id)
+        if path is None:
+            raise PublisherKeyError("this node has nowhere to keep a key")
+        save(path, public_key, secret_key, passphrase, **costs)
+        index = self._index()
+        existing = index.get(key_id) or {}
+        index[key_id] = {
+            "label": str(label or existing.get("label", ""))[:_MAX_LABEL],
+            "added": existing.get("added") or int(time.time()),
+            "received_from": str(received_from
+                                 or existing.get("received_from", ""))[:40],
+        }
+        while len(index) > _MAX_KEYS:
+            index.pop(next(iter(index)))
+        self._write_index(index)
+        return self.get(key_id) or {}
+
+    def forget(self, key_id_hex: str) -> bool:
+        """Delete a key from this machine. It is not recoverable from here —
+        which is the point of a store that holds secrets rather than a cache."""
+        path = self.path_for(key_id_hex)
+        if path is None or not os.path.isfile(path):
+            return False
+        try:
+            os.unlink(path)
+        except OSError:
+            return False
+        index = self._index()
+        if index.pop(key_id_hex, None) is not None:
+            self._write_index(index)
+        return True
+
+    # -- reading ----------------------------------------------------------
+
+    def ids(self) -> list[str]:
+        if not self._dir:
+            return []
+        try:
+            names = os.listdir(self._dir)
+        except OSError:
+            return []
+        return sorted(name[:-4] for name in names if name.endswith(".key")
+                      and _HEX_ID.fullmatch(name[:-4]))
+
+    def get(self, key_id_hex: str) -> dict | None:
+        """One key as a page reads it: id, public half, label, provenance.
+
+        The public half is re-read from the file and the id re-derived from it,
+        so a file renamed to somebody else's id answers as what it actually
+        is — never as what it is filed under."""
+        path = self.path_for(key_id_hex)
+        if path is None or not os.path.isfile(path):
+            return None
+        try:
+            public = public_of(path)
+        except PublisherKeyError:
+            return None
+        if publisher_id(public).hex() != key_id_hex:
+            return None
+        meta = self._index().get(key_id_hex) or {}
+        return {
+            "id": key_id_hex,
+            "key": public.hex(),
+            "label": str(meta.get("label", ""))[:_MAX_LABEL],
+            "added": int(meta["added"]) if isinstance(meta.get("added"), int)
+                     and not isinstance(meta.get("added"), bool) else 0,
+            "received_from": str(meta.get("received_from", ""))[:40],
+        }
+
+    def list(self) -> list[dict]:
+        rows = [row for row in (self.get(key_id) for key_id in self.ids())
+                if row is not None]
+        rows.sort(key=lambda row: (row["label"].lower(), row["id"]))
+        return rows
+
+    def __len__(self) -> int:
+        return len(self.ids())
