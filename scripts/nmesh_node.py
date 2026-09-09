@@ -364,6 +364,11 @@ async def main() -> None:
         gossip_abuse=not getattr(args, "no_abuse_gossip", False),
         release_quorum=getattr(args, "release_quorum", 0) or 0,
         release_auto_publish=bool(getattr(args, "release_auto_publish", False)),
+        # When this node goes looking for an update, and whether it bothers
+        # while nobody is using it.
+        update_check_minutes=getattr(args, "update_check_minutes", 5),
+        update_when_active=bool(getattr(args, "update_when_active", False)),
+        recommend_version=bool(getattr(args, "recommend_version", False)),
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it

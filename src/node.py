@@ -47,10 +47,12 @@ from .app_package import (
     reassemble_bytes as _app_reassemble_bytes,
     build_release as _app_build_release, parse_release as _app_parse_release,
 )
+from .app_channel import deployed_id as _app_deployed_id
 from .app_dht import frame as _app_dht_frame, read as _app_dht_read, AppDHTError
 from .app_catalog import AppCatalog, InstalledApps
 from .version import is_newer as _is_newer
-from .core_release import (AutoInstallJournal, ReleaseCatalog, ReleaseStore,
+from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
+                           ReleaseCatalog, ReleaseStore,
                            TrustedPublishers, MAX_AUTO_ATTEMPTS,
                            ReleaseError, PUBLISHER_ID_LEN as _RELEASE_ID_LEN,
                            build_package as _core_build_package,
@@ -62,8 +64,26 @@ from .core_release import (AutoInstallJournal, ReleaseCatalog, ReleaseStore,
                            read_tree as _core_read_tree,
                            release_id as _core_release_id,
                            version_of as _core_version_of)
+from .subscriptions import Subscriptions, SubscriptionError
+from .pkg_dir import (PackageBook, PackageDirError, PairingBook,
+                      MAX_PAIRING as _MAX_PAIRING,
+                      build_pairing as _pkg_build_pairing,
+                      parse_pairing as _pkg_parse_pairing,
+                      MAX_RECORD as _MAX_PKG_RECORD,
+                      KIND_CORE as _PKG_CORE, KIND_APP as _PKG_APP,
+                      build_record as _pkg_build,
+                      parse_record as _pkg_parse,
+                      entry_key as _pkg_entry_key,
+                      encode_records as _pkg_encode,
+                      decode_records as _pkg_decode,
+                      name_key as _pkg_name_key,
+                      publisher_key as _pkg_publisher_key,
+                      publisher_id as _pkg_publisher_id,
+                      source_digest as _pkg_source_digest,
+                      canonical_name as _pkg_canonical_name)
 from .pseudo import canonical as _pseudo_canonical
 from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_key,
+                         dir_keys as _dir_keys,
                          build_claim as _dir_build_claim,
                          parse_claim as _dir_parse_claim,
                          encode_claims as _dir_encode, decode_claims as _dir_decode,
@@ -123,6 +143,10 @@ ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehavi
 CAPABILITIES      = 0x26   # "here is what I can speak" — the base negotiation
 KA_PROPOSE        = 0x27   # "the keepalive cadences I can work with" (min, max)
 KA_REQUEST        = 0x28   # "slow your keepalive down to this" — never speed up
+PKG_STORE         = 0x29   # store a signed package-directory record
+PKG_FIND          = 0x2A   # look up package-directory records by key
+PKG_FOUND         = 0x2B   # reply: the records held for a package key
+PKG_ANNOUNCE      = 0x2C   # gossip a signed record: "this key publishes that"
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -203,8 +227,8 @@ _PUNCH_ACK_MAGIC = b"NPAK"
 # through relays (A→…→X), not just a direct peer.
 _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, CERT_REVOKE,
-                    ABUSE_REPORT,
+                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, PKG_ANNOUNCE,
+                    CERT_REVOKE, ABUSE_REPORT,
                     # The keepalive accord is about *this link* and nothing
                     # else: a cadence is a property of the pair, so it can only
                     # ever be stated by the peer at the other end of it.
@@ -213,7 +237,10 @@ _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
 _RELEASE_RATE_MAX    = 32       # release announces one link may push per window
-_RELEASE_TICK        = 300.0    # seconds between auto-install sweeps
+# "Never go looking" (`update_check_minutes = 0`). Not an infinite wait: the
+# loop must still come round to notice the setting changed, and a day is far
+# enough away to be "never" while staying a number the loop can survive.
+_RELEASE_NEVER_TICK  = 86400.0
 # A release that arrives wakes the pass instead of waiting out a whole sweep,
 # and the first pass runs shortly after start rather than five minutes in — a
 # node that reboots into an update it was told to take should not spend the
@@ -231,12 +258,31 @@ _RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
 _RELEASE_SOURCES_TRACKED = 64   # releases we remember any sources for at all
 _PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
 _HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
+_HEX_PKG = re.compile(r"[0-9a-f]{40}")     # a package-directory entry id
 _DIR_RATE_WINDOW     = 10.0     # seconds
 _DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
 _DIR_K               = 6        # replicate/query the pseudo directory across K
+_DIR_PUBLISH_MAX     = 24       # nodes one directory publish may reach in total
+# How often a node re-files what it publishes into the directory. Not "once, at
+# startup": the K nodes closest to a key change as the mesh does, a directory
+# holder may restart, and a node that published before it had any peer published
+# to nobody. Cheap — a claim is one packet to a bounded set of nodes.
+_DIR_REPUBLISH       = 900.0    # seconds between directory publishes
+_DIR_FIRST_PUBLISH   = 20.0     # …and how long after start the first one waits
+# The whole "ask the network" round: a Kademlia lookup plus one query to every
+# target. Bounded, and it returns what it has: a caller behind a 10-second
+# bridge must get a partial answer rather than a timeout, which is what turned
+# a slow directory lookup into "the search does not work".
+_DIR_LOOKUP_BUDGET   = 6.0      # seconds one directory lookup may take
+_DIR_LOOKUP_ROUNDS   = 3        # Kademlia rounds a directory lookup may spend
 _PSEUDO_RATE_WINDOW  = 10.0     # seconds
 _PSEUDO_RATE_MAX     = 64       # pseudo claims one link may gossip at us per window
 _PSEUDO_SEARCH_MAX   = 50       # results one search may return
+_PKG_RATE_WINDOW     = 10.0     # seconds
+_PKG_RATE_MAX        = 64       # package records one link may push at us per window
+_PKG_SEARCH_MAX      = 50       # results one package search may return
+_PKG_SYNC_MAX        = 64       # records pushed at a peer when it authenticates
+_PKG_OWN_MAX         = 32       # records this node signs and keeps re-filing
 _PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
 _REVOKE_RATE_WINDOW  = 10.0     # seconds
 _REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
@@ -268,6 +314,7 @@ _MAX_EXTRA_ADDRS = 8
 _ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
                     FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
                     DIR_STORE, DIR_FIND, DIR_FOUND,
+                    PKG_STORE, PKG_FIND, PKG_FOUND,
                     # A package comes from whoever has it, which may be several
                     # hops away — the publisher, or any node that kept a copy.
                     RELEASE_FETCH, RELEASE_DATA,
@@ -1666,7 +1713,10 @@ class MeshNode:
                  abuse_halflife: float = DEFAULT_HALFLIFE,
                  gossip_abuse: bool = True,
                  release_quorum: int = 0,
-                 release_auto_publish: bool = False) -> None:
+                 release_auto_publish: bool = False,
+                 update_check_minutes: int = 5,
+                 update_when_active: bool = False,
+                 recommend_version: bool = False) -> None:
         if identity_path:
             self._identity = CryptoIdentity.load(identity_path)
             self._identity.save(identity_path)
@@ -1727,6 +1777,18 @@ class MeshNode:
         # this signs a release with the identity the node keeps unlocked, and a
         # release is the one payload that replaces somebody else's program.
         self._release_auto_publish = bool(release_auto_publish)
+        # How often the node goes looking, and whether it bothers when nobody
+        # is here. An announcement still wakes the pass either way: this is the
+        # sweep that covers what a missed announcement dropped, and on a phone
+        # it is the difference between a battery spent every five minutes and
+        # one spent when somebody opens the console.
+        self._update_check_seconds = max(0, int(update_check_minutes)) * 60
+        self._update_when_active = bool(update_when_active)
+        # Whether this node says which release id it runs. A recommendation
+        # points at somebody else's bytes and carries no authority — see
+        # :mod:`src.pkg_dir`.
+        self._recommend_version = bool(recommend_version)
+        self._recommended: str = ""
         # The version we last tried to publish, and when. One attempt per
         # version per `_AUTO_PUBLISH_RETRY`: reading and hashing the tree is
         # not free, and a tree that cannot be published will not start being
@@ -1832,6 +1894,7 @@ class MeshNode:
         self._release_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._release_serve_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._release_task: asyncio.Task | None = None
+        self._directory_task: asyncio.Task | None = None
         self._release_tried: OrderedDict[bytes, str] = OrderedDict()
         self._release_log: list[dict] = []
         # An automatic install only takes effect when the node comes back on
@@ -1840,11 +1903,17 @@ class MeshNode:
         # in-memory `_release_tried` cannot.
         self._auto_journal = AutoInstallJournal(
             os.path.join(release_dir, "autoinstall.json") if release_dir else None)
+        # The packages this operator watches for a new version, and what they
+        # let one install on its own. Local, deliberate, never writable from the
+        # network — like the pins beside it. See :mod:`src.subscriptions`.
+        self._subscriptions = Subscriptions(
+            os.path.join(release_dir, "subscriptions.json") if release_dir else None)
         for version in self._auto_journal.settle(_running_version()):
             self._note_release(version, "did not take",
                                "installed automatically, but this node came "
                                f"back on {_running_version()}")
         self._release_wake = asyncio.Event()
+        self._directory_wake = asyncio.Event()
         self._restart_hook = None
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
         # Pseudos: the changeable name beside the unchangeable id. One book
@@ -1856,6 +1925,19 @@ class MeshNode:
         self._pending_dir: dict[bytes, asyncio.Future] = {}   # query_id -> future
         self._dir_rate: OrderedDict[bytes, tuple] = OrderedDict()      # _rate_key(peer)->(n,win)
         self._pseudo_rate: OrderedDict[bytes, tuple] = OrderedDict()   # _rate_key(peer)->(n,win)
+        # Packages: who publishes what, findable by name and by node. Same
+        # shape as the pseudo book above, and for the same reason — a record is
+        # signed by the key it names, so a stranger's is safe to hold and
+        # re-serve. See :mod:`src.pkg_dir`.
+        self._package_book = PackageBook()
+        self._package_records: dict[bytes, bytes] = {}   # ours, by entry id
+        # A release may be signed by a key that is not this node's identity, and
+        # a record can only name its own signer — so a pairing is what ties the
+        # two together, in two halves neither party can sign for the other.
+        self._pairings = PairingBook()
+        self._own_pairings: dict[tuple, bytes] = {}
+        self._pending_pkg: dict[bytes, asyncio.Future] = {}
+        self._pkg_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._revoke_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._detached: set = set()   # fire-and-forget tasks, bounded
         self._transport_manager = transport_manager
@@ -2049,6 +2131,7 @@ class MeshNode:
         self._ensure_address_steering()
         self._ensure_mlo_dial()
         self._ensure_release_watch()
+        self._ensure_directory_publish()
         self._ensure_cert_renewal()
         self._announce_own_pseudo()   # peers that were already up learn our name
 
@@ -2562,6 +2645,7 @@ class MeshNode:
         await self._stop_address_steering()
         await self._stop_mlo_dial()
         await self._stop_release_watch()
+        await self._stop_directory_publish()
         await self._stop_cert_renewal()
         await self._stop_deferred_routes()
         await self._stop_state_writer()
@@ -7664,16 +7748,33 @@ class MeshNode:
 
     async def publish_store_app(self, name: str, version: str,
                                 files: dict[str, bytes],
-                                ts: int | None = None) -> dict:
-        """Publish a signed app and announce it to the network catalog. Returns
-        ``{"release_id", "app_id"}``. Every node that hears the announce (and
-        re-gossips it) can then discover and install the app. A later ``ts`` (or
-        just publishing again later) supersedes the previous version network-wide."""
+                                ts: int | None = None,
+                                notes: str = "") -> dict:
+        """Publish a signed app and file it in the package directory.
+
+        Returns ``{"release_id", "app_id"}``. ``notes`` is the few lines shown
+        beside the package before anybody fetches it — the only description a
+        reader has to go on, so it travels signed with the record.
+
+        Two things happen and they are not the same. The **directory** is how
+        somebody finds this: they type part of the name, or ask this node's id
+        what it offers, and nothing has to have been listed anywhere. The
+        **catalogue** is the older gossiped set, kept because a node that
+        already holds it should not lose what it knows — but nothing is
+        published *to* be listed any more, which is what took the spam problem
+        off the table: an unlisted directory has nothing to flood."""
         info = await self.publish_signed_app(name, version, files, ts)
         release_bytes = await self.dht_get(bytes.fromhex(info["release_id"]))
         if release_bytes is not None:
             if self._catalog.offer(release_bytes, self._identity.verify):
                 await self._gossip_catalog(release_bytes)
+        try:
+            self.sign_package_record(
+                _PKG_APP, name, version, bytes.fromhex(info["release_id"]),
+                _pkg_source_digest(files), notes=notes)
+        except Exception:
+            self._activity.note("warn", "could not file " + str(name)[:50]
+                                + " in the package directory")
         return info
 
     def catalog_list(self) -> list[dict]:
@@ -7900,11 +8001,40 @@ class MeshNode:
             release_bytes = _core_build_release(
                 package, version, signer.dsa_public_key, signer.sign, ts, notes)
             publisher_key = signer.dsa_public_key
+            if len(release_bytes) > MAX_VALUE:
+                raise ReleaseError("release descriptor too large")
+            # Filed here, while the signer is still open, and signed by **that**
+            # key: the record names its own signer as the publisher, and that
+            # name is what a reader pins from. Signed with the node identity
+            # instead, the card would say one thing and the release another.
+            #
+            # Kept locally rather than replicated: publishing is signing and
+            # announcing, and a Kademlia lookup on this path is what made
+            # publishing take minutes on a real mesh. The directory sweep
+            # replicates it, which is where work that needs the network belongs.
+            try:
+                ref = _content_key(release_bytes)
+                self._dht_store.put(ref, release_bytes)
+                self.sign_package_record(
+                    _PKG_CORE, _CORE_NAME, version, ref,
+                    _pkg_source_digest(files), notes=notes, signer=signer)
+                if signer is not self._identity:
+                    # A detached key: nothing ties it to this machine, so an
+                    # operator looking at the node cannot get from it to the
+                    # code it publishes. Both halves are signed here — the
+                    # publisher's while its key is open, which is the only
+                    # moment it is, and ours because it costs nothing. Neither
+                    # is believed without the other.
+                    self.sign_pairing(self._id.raw, signer=signer)
+                    self.sign_pairing(_pkg_publisher_id(publisher_key))
+            except Exception:
+                # A tree that is signed and announced is published: failing to
+                # file it costs discoverability, never the release.
+                self._activity.note("warn", "could not file " + version
+                                    + " in the package directory")
         finally:
             if signer is not self._identity:
                 signer.close()
-        if len(release_bytes) > MAX_VALUE:
-            raise ReleaseError("release descriptor too large")
         release_id = _core_release_id(package)
         if not self._packages.put(release_id.hex(), package,
                                   hashlib.sha256(package).hexdigest()):
@@ -8128,6 +8258,7 @@ class MeshNode:
                              "unattended_why": why})
         from . import updater
         ok, reason = updater.updatable()
+        can_restart, restart_why = updater.restart_possible()
         return {
             "current": _running_version(),
             "publisher_id": _core_publisher_id(
@@ -8136,9 +8267,15 @@ class MeshNode:
             "publishers": self._publishers.list(),
             "quorum": self._release_quorum,
             "releases": releases,
+            "subscriptions": self.subscriptions(),
+            "check_minutes": self._update_check_seconds // 60,
+            "when_active": self._update_when_active,
+            "recommending": self._recommend_version,
             "log": list(self._release_log),
             "updatable": ok,
             "reason": reason,
+            "can_restart": can_restart,
+            "restart_blocked": restart_why,
         }
 
     def trust_publisher(self, key_hex: str, name: str = "",
@@ -8257,20 +8394,26 @@ class MeshNode:
 
         Two things wake it: a release arriving (:meth:`_wake_release_pass`, so
         an update an operator published lands in seconds rather than at the end
-        of a five-minute sweep) and the sweep itself, which is what covers a
-        release we already held when we started and anything a missed wake-up
-        would have dropped.
+        of a sweep) and the sweep itself, which is what covers a release we
+        already held when we started, a subscription whose publisher never
+        announced at us, and anything a missed wake-up would have dropped.
+
+        How often the sweep comes round is ``update_check_minutes``, and
+        ``update_when_active`` decides whether it comes round at all while
+        nobody is using this node — a phone in a pocket should not spend a
+        battery going to look.
 
         Never raises: this loop dying would silently stop the updates an
         operator asked for."""
         job = self._activity.register(
             "releases",
-            "settles announced releases and installs one when a pinned publisher is"
-            " allowed to",
+            "settles announced releases and installs one when a pinned publisher"
+            " or a subscription is allowed to",
             "a release was announced")
         delay = _RELEASE_FIRST_TICK
         while self._running:
             job.ran()
+            woken = True
             try:
                 await asyncio.wait_for(self._release_wake.wait(), delay)
                 # A peer catching us up sends every release it holds; waiting a
@@ -8278,11 +8421,19 @@ class MeshNode:
                 # announce.
                 await asyncio.sleep(_RELEASE_SETTLE)
             except asyncio.TimeoutError:
-                pass
+                woken = False
             except asyncio.CancelledError:
                 raise
-            delay = _RELEASE_TICK
+            delay = self._release_sweep_delay()
             self._release_wake.clear()
+            # "Only while somebody is here" applies to the *sweep*, never to an
+            # announcement: an operator who published an update and is watching
+            # for it to land is exactly the case that must not wait for the
+            # node to be woken by something else. So a wake always works, and
+            # what this holds back is the node going to look on its own — which
+            # on a phone is the whole cost.
+            if not woken and self._update_when_active and not self.awake():
+                continue
             try:
                 await self._auto_publish_pass()
             except asyncio.CancelledError:
@@ -8295,6 +8446,17 @@ class MeshNode:
                 raise
             except Exception:
                 pass
+
+    def _release_sweep_delay(self) -> float:
+        """How long until the next sweep for an installable update.
+
+        ``update_check_minutes = 0`` is "never go looking": the loop still runs,
+        because an announcement still has to be able to wake it, but it wakes on
+        nothing else. Expressed as a very long sleep rather than as a second
+        code path — one loop, one place a delay comes from."""
+        if self._update_check_seconds <= 0:
+            return _RELEASE_NEVER_TICK
+        return float(self._update_check_seconds)
 
     def _wake_release_pass(self) -> None:
         """A release worth acting on just arrived — do not wait out the sweep."""
@@ -8615,6 +8777,9 @@ class MeshNode:
         except RuntimeError:
             return
         self._spawn_bounded(self._gossip_pseudo(self._pseudo_claim))
+        # …and file it in the directory, which is the half that makes a node
+        # findable by name from somebody who has never met it.
+        self._wake_directory_publish()
 
     def pseudo_of(self, node_id) -> str:
         """What a node is called, or "" when we have never seen a claim for it.
@@ -8716,10 +8881,17 @@ class MeshNode:
         every one of its claims is genuinely new. A bounded fan-out keeps the
         epidemic reaching everyone — that is what an epidemic does — while
         costing a fixed amount per hop."""
+        # Which predicate decides is the feature's own business: a plane older
+        # than the negotiation reads silence as yes (`peer_speaks`), one added
+        # since reads it as "never heard of it" (`peer_announces`). Asking the
+        # wrong one either cuts off every peer from before the name or sends a
+        # message the far side drops. See `features.SINCE_NEGOTIATION`.
+        speaks = (self.peer_announces if feature in features.SINCE_NEGOTIATION
+                  else self.peer_speaks)
         live = [p for p in self._peers
                 if p is not exclude and p.authenticated_id is not None
                 and p.session is not None
-                and (feature is None or self.peer_speaks(p, feature))]
+                and (feature is None or speaks(p, feature))]
         if len(live) <= fanout:
             return live
         return random.sample(live, fanout)
@@ -8755,6 +8927,9 @@ class MeshNode:
                 return
 
     def _schedule_pseudo_sync(self, peer: '_Peer') -> None:
+        # A link is what a directory publish needs, so a peer coming up is the
+        # moment to file — a node that started alone had nobody to file with.
+        self._wake_directory_publish()
         if not len(self._pseudo_book):
             return
         if not self.peer_speaks(peer, features.PSEUDO):
@@ -8851,46 +9026,153 @@ class MeshNode:
                 out.append(nid)
         return out
 
-    async def _dir_targets(self, key: bytes) -> list[NodeID]:
+    async def _dir_targets(self, key: bytes,
+                           rounds: int = _DIR_LOOKUP_ROUNDS) -> list[NodeID]:
         """Union of the K nodes closest to ``key`` and our direct peers — bounded,
-        deduplicated, self excluded."""
+        deduplicated, self excluded.
+
+        ``rounds`` bounds the Kademlia lookup. The default is far below
+        ``kad_lookup``'s own ceiling on purpose: a directory question is asked
+        while somebody watches a search field, and ten rounds of five seconds is
+        a lookup nobody is still waiting for."""
         targets, seen = [], set()
-        for nid in (await self.kad_lookup(NodeID(key)))[:_DIR_K] + self._direct_peer_ids():
+        closest = await self.kad_lookup(NodeID(key), max_rounds=rounds)
+        for nid in closest[:_DIR_K] + self._direct_peer_ids():
             if nid != self._id and nid.raw not in seen:
                 seen.add(nid.raw)
                 targets.append(nid)
+        return targets
+
+    async def _dir_publish_targets(self, keys: list[bytes]) -> list[NodeID]:
+        """Who to file a claim with, across every key it is filed under.
+
+        Deduplicated and capped: a name has up to ``MAX_INDEX_TERMS`` keys, and
+        one STORE per key per K nodes would turn a rename into a burst. A node
+        that receives the claim indexes it under *all* of its keys anyway — it
+        re-derives them — so reaching a node once is reaching it for every
+        term."""
+        targets, seen = [], set()
+        for key in keys:
+            for nid in await self._dir_targets(key):
+                if nid.raw in seen:
+                    continue
+                seen.add(nid.raw)
+                targets.append(nid)
+                if len(targets) >= _DIR_PUBLISH_MAX:
+                    return targets
         return targets
 
     async def publish_pseudo(self) -> str:
         """Replicate our claim into the keyed directory and gossip it.
 
         Gossip alone reaches everyone we can talk to; the directory copy is what
-        makes us findable by exact name from a node that has never heard of us.
-        Returns the directory key, or "" when this node has no pseudo."""
+        makes us findable **by name** from a node that has never heard of us —
+        and, since a claim is filed under its prefixes too, findable by a
+        partial one. Returns the exact directory key, or "" when this node has
+        no pseudo."""
         if self._pseudo_claim is None:
             return ""
         claim = self._pseudo_claim
-        key = _dir_key(self._pseudo)
+        keys = _dir_keys(self._pseudo)
         await self._gossip_pseudo(claim)
         await asyncio.gather(
-            *(self._dir_store_at(nid, claim) for nid in await self._dir_targets(key)),
+            *(self._dir_store_at(nid, claim)
+              for nid in await self._dir_publish_targets(keys)),
             return_exceptions=True,
         )
-        return key.hex()
+        return (keys[0] if keys else _dir_key(self._pseudo)).hex()
+
+    def _ensure_directory_publish(self) -> None:
+        if self._directory_task is None or self._directory_task.done():
+            self._directory_task = asyncio.create_task(self._directory_loop())
+
+    async def _stop_directory_publish(self) -> None:
+        task = self._directory_task
+        self._directory_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _directory_loop(self) -> None:
+        """Keep what this node publishes filed in the keyed directory.
+
+        Gossip is what spreads a claim to the nodes we can reach; the directory
+        is what makes it findable from a node that has never heard of us, and
+        the directory needs *filing*. Nothing did it: ``publish_pseudo`` existed
+        and only the test suite ever called it, so "ask the network" asked
+        nodes that had been told nothing — a search that could only ever answer
+        from gossip, which is exactly the complaint.
+
+        Filed again on a slow cadence rather than once, because the answer
+        changes underneath us: the K nodes closest to a key move as the mesh
+        does, a holder restarts, and a node that published before it had a
+        single peer published to nobody.
+
+        Never raises: this loop dying would silently take the directory with
+        it."""
+        job = self._activity.register(
+            "directory",
+            "files this node's name and packages in the keyed directory so"
+            " other nodes can look them up by name",
+            "a name or a package changes, and a slow sweep")
+        delay = _DIR_FIRST_PUBLISH
+        while self._running:
+            try:
+                await asyncio.wait_for(self._directory_wake.wait(), delay)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            self._directory_wake.clear()
+            job.ran()
+            if not self._authenticated_peers():
+                # Nobody to file with. Keep the short delay rather than sliding
+                # to the slow one: a node that started before its first link
+                # would otherwise be unfindable for the whole sweep.
+                delay = _DIR_FIRST_PUBLISH
+                continue
+            delay = _DIR_REPUBLISH
+            try:
+                await self.publish_pseudo()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                await self._publish_package_records()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    def _wake_directory_publish(self) -> None:
+        """Something we publish just changed — do not wait out the sweep."""
+        try:
+            self._directory_wake.set()
+        except Exception:                     # noqa: BLE001 — never crash a caller
+            pass
 
     async def lookup_pseudo(self, pseudo: str) -> list[dict]:
-        """Every node claiming exactly ``pseudo``, network-wide.
+        """Every node filed under ``pseudo``, network-wide, whole or partial.
 
         Pseudos are not unique, so this returns a list; the node id in each row
         is the real identity. Queries the nodes closest to the key and our
         direct peers **in parallel**, so one slow or unreachable peer cannot
-        stall the whole lookup."""
+        stall the whole lookup — and the whole round is bounded, so a caller
+        gets a partial answer instead of a timeout."""
         key = _dir_key(pseudo)
         found: dict[str, dict] = {}
 
         def absorb(raw: bytes) -> None:
             claim = _dir_parse_claim(raw, self._identity.verify)
-            if claim is None or claim["key"] != key:
+            # Filed under any of the claim's own keys, not only its exact one:
+            # that is what a prefix lookup answers with. The keys are derived
+            # from the pseudo inside the signed claim, so this still refuses
+            # anything filed under a name its author never claimed.
+            if claim is None or key not in claim["keys"]:
                 return
             if self._pseudo_book.offer(claim, raw):  # cache → this node re-serves it
                 self._persist_pseudos()
@@ -8900,10 +9182,15 @@ class MeshNode:
 
         for raw in self._pseudo_book.get(key):
             absorb(raw)
-        blobs = await asyncio.gather(
-            *(self._dir_find_at(nid, key) for nid in await self._dir_targets(key)),
-            return_exceptions=True,
-        )
+        try:
+            async with asyncio.timeout(_DIR_LOOKUP_BUDGET):
+                targets = await self._dir_targets(key)
+                blobs = await asyncio.gather(
+                    *(self._dir_find_at(nid, key) for nid in targets),
+                    return_exceptions=True,
+                )
+        except (asyncio.TimeoutError, TimeoutError):
+            return list(found.values())   # what we have beats nothing at all
         for blob in blobs:
             if isinstance(blob, (bytes, bytearray)):
                 for raw in _dir_decode(blob):
@@ -8919,11 +9206,12 @@ class MeshNode:
         return self._pseudo_book.search(query, min(int(limit), _PSEUDO_SEARCH_MAX))
 
     async def search_pseudo(self, query: str, limit: int = 20) -> list[dict]:
-        """:meth:`find_pseudo`, widened by one exact directory lookup.
+        """:meth:`find_pseudo`, widened by one directory lookup.
 
         The local book only knows names that reached us by gossip. Asking the
         directory for the query *as typed* is what finds somebody whose node we
-        have never met — and costs one round of parallel queries, so it stays a
+        have never met — whole name or prefix, because that is how claims are
+        filed. It costs one bounded round of parallel queries, so it stays a
         deliberate act rather than something a keystroke triggers."""
         limit = min(int(limit), _PSEUDO_SEARCH_MAX)
         try:
@@ -8931,6 +9219,730 @@ class MeshNode:
         except Exception:
             pass          # the local answer is still worth returning
         return self.find_pseudo(query, limit)
+
+    # -- the package directory (who publishes what, findable by name) ------
+    #
+    # Two planes over one book, exactly like pseudos. Gossip (PKG_ANNOUNCE)
+    # spreads a record to everyone we can reach; the keyed directory
+    # (PKG_STORE / PKG_FIND / PKG_FOUND) covers the rest — a package whose
+    # publisher sits beyond our gossip horizon, found by typing part of its
+    # name, or by asking a node id what it offers.
+    #
+    # A record is signed by the key it names and carries nothing but a pointer:
+    # what the bytes are is settled by hashes, and whether they may replace this
+    # node's code is settled by the pins its operator holds. So a record from a
+    # stranger is safe to accept, cache and re-serve, and worth no authority at
+    # all. See :mod:`src.pkg_dir`.
+
+    def _pkg_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._pkg_rate, peer,
+                                    _PKG_RATE_WINDOW, _PKG_RATE_MAX)
+
+    def _absorb_package(self, peer: '_Peer', raw: bytes):
+        """Verify a record that arrived from ``peer`` and file it.
+
+        Returns the record if our view changed (so gossip should continue), None
+        otherwise. A record that does not verify is charged to the peer that
+        sent it: an honest relay verifies before re-sending."""
+        if not raw or len(raw) > _MAX_PKG_RECORD:
+            self._charge_abuse(peer)
+            return None
+        record = _pkg_parse(raw, self._identity.verify)
+        if record is None:
+            # The same plane carries pairing halves: they are filed under the
+            # same keys, and a reader that cannot tell them apart would charge
+            # a peer for sending a perfectly good one.
+            return self._absorb_pairing(peer, raw)
+        changed = self._package_book.offer(record, bytes(raw))
+        self._note_equivocation(
+            "publisher", record["publisher_id"],
+            self._package_book.equivocated(record["publisher_id"]))
+        if not changed:
+            return None
+        self._note_change("packages")
+        return record
+
+    def _absorb_pairing(self, peer: '_Peer', raw: bytes):
+        """Verify one half of a pairing and file it.
+
+        A half is worth nothing alone — :meth:`packages_of` only follows a link
+        both parties signed — so this stores it and judges nothing."""
+        if len(raw) > _MAX_PAIRING:
+            self._charge_abuse(peer)
+            return None
+        pairing = _pkg_parse_pairing(raw, self._identity.verify)
+        if pairing is None:
+            self._charge_abuse(peer)
+            return None
+        if not self._pairings.offer(pairing, bytes(raw)):
+            return None
+        self._note_change("packages")
+        return pairing
+
+    async def _handle_pkg_announce(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._pkg_allowed(peer):
+            return
+        # Re-gossip only when our view actually changed, so the epidemic dies
+        # out instead of circulating for ever.
+        if self._absorb_package(peer, packet.payload) is not None:
+            self._spawn_bounded(self._gossip_package(packet.payload, exclude=peer))
+
+    async def _handle_pkg_store(self, peer: '_Peer', packet: Packet) -> None:
+        if not self._pkg_allowed(peer):
+            return
+        self._absorb_package(peer, packet.payload)
+
+    async def _handle_pkg_find(self, peer: '_Peer', packet: Packet) -> None:
+        if len(packet.payload) != 20 + _QID_LEN:
+            return
+        # The same valve as FIND_VALUE and DIR_FIND, for the same reason: 28
+        # bytes of question buy up to a packet of signed records, routed to a
+        # src_id nothing has verified.
+        if not self._query_allowed(peer):
+            return
+        key = packet.payload[:20]
+        query_id = packet.payload[20:]
+        body = query_id + _pkg_encode(self._package_book.get(key)
+                                      + self._pairings.get(key))
+        # routes back to the querier — never inline, we are in a receive loop
+        await self._route_outbound(
+            Packet.create(PKG_FOUND, self._id.raw, packet.src_id, body),
+            blocking=False)
+
+    async def _handle_pkg_found(self, peer: '_Peer', packet: Packet) -> None:
+        if len(packet.payload) < _QID_LEN:
+            return
+        query_id = packet.payload[:_QID_LEN]
+        future = self._pending_pkg.pop(query_id, None)
+        if future is not None and not future.done():
+            future.set_result(packet.payload[_QID_LEN:])
+
+    async def _gossip_package(self, raw: bytes,
+                              exclude: '_Peer | None' = None) -> None:
+        # Re-stamp src_id to us at each hop so the next node's direct-type gate
+        # (src_id must equal the immediate sender) accepts it.
+        pkt = Packet.create(PKG_ANNOUNCE, self._id.raw, _BROADCAST_ID, raw)
+        for p in self._gossip_targets(exclude, _GOSSIP_FANOUT, features.PACKAGES):
+            try:
+                await p.send(pkt)
+            except Exception:
+                pass
+
+    async def _sync_packages_to(self, peer: '_Peer') -> None:
+        """Catch a freshly authenticated peer up on the packages we know.
+
+        Ours first — the one thing this peer certainly cannot have heard from
+        anybody else — then the most recently learned, bounded."""
+        records = self._package_book.recent(_PKG_SYNC_MAX)
+        mine = (list(self._package_records.values())
+                + list(self._own_pairings.values()))
+        records = mine + [raw for raw in records if raw not in mine]
+        records += [raw for raw in self._pairings.records() if raw not in records]
+        for raw in records[:_PKG_SYNC_MAX]:
+            if peer.authenticated_id is None or peer.session is None:
+                return
+            try:
+                await peer.send(Packet.create(PKG_ANNOUNCE, self._id.raw,
+                                              _BROADCAST_ID, raw))
+            except Exception:
+                return
+
+    def _schedule_package_sync(self, peer: '_Peer') -> None:
+        if not len(self._package_book) and not len(self._pairings):
+            return
+        if not self.peer_announces(peer, features.PACKAGES):
+            return
+        try:
+            self._spawn_bounded(self._sync_packages_to(peer))
+        except RuntimeError:
+            pass  # no running loop (e.g. teardown) — nothing to sync
+
+    async def _pkg_store_at(self, node_id: NodeID, raw: bytes) -> None:
+        try:
+            await self._route_outbound(
+                Packet.create(PKG_STORE, self._id.raw, node_id.raw, raw))
+        except Exception:
+            pass
+
+    async def _pkg_find_at(self, node_id: NodeID, key: bytes) -> bytes | None:
+        query_id = os.urandom(_QID_LEN)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_pkg[query_id] = future
+        try:
+            await self._route_outbound(
+                Packet.create(PKG_FIND, self._id.raw, node_id.raw, key + query_id))
+            return await asyncio.wait_for(asyncio.shield(future), _DHT_QUERY_TIMEOUT)
+        except Exception:
+            self._forget_route_hint(node_id)   # unanswered — re-pick next time
+            return None
+        finally:
+            self._pending_pkg.pop(query_id, None)
+            if not future.done():
+                future.cancel()
+
+    # -- publishing a record ----------------------------------------------
+
+    def sign_package_record(self, kind: int, name: str, version: str,
+                            ref: bytes, src: bytes, *, notes: str = "",
+                            recommend: bool = False, signer=None,
+                            ts: int | None = None) -> bytes:
+        """Sign a record saying this key publishes (or recommends) a package.
+
+        ``signer`` defaults to this node's identity. It must be **the key that
+        signed the descriptor the record points at**: the record names its own
+        signer as the publisher, and that name is what a reader pins from. Sign
+        the record with the node identity while the release carries a separate
+        publisher key and the card says one thing while the package says
+        another — an operator pins the wrong key and the install then refuses
+        the release they were looking at.
+
+        Kept and re-filed by the directory loop, so a record signed once stays
+        findable as the mesh moves underneath it. Bounded: a node that could
+        sign records without end would be filing without end too."""
+        signer = signer if signer is not None else self._identity
+        name = _pkg_canonical_name(name)
+        raw = _pkg_build(kind, name, version, ref, src,
+                         signer.dsa_public_key, signer.sign,
+                         notes=notes, recommend=recommend, ts=ts)
+        record = _pkg_parse(raw, self._identity.verify)
+        if record is None:                    # never seen; a record we signed
+            raise PackageDirError("could not verify our own record")  # and cannot read
+        ident = _pkg_entry_key(record)
+        self._package_records[ident] = raw
+        while len(self._package_records) > _PKG_OWN_MAX:
+            self._package_records.pop(next(iter(self._package_records)))
+        self._package_book.offer(record, raw)
+        self._note_change("packages")
+        self._wake_directory_publish()
+        return raw
+
+    def sign_pairing(self, counterpart: bytes, signer=None) -> bytes:
+        """Sign one half of a pairing between this key and ``counterpart``.
+
+        Kept and re-filed by the directory loop like a package record. Both
+        halves are needed before anybody follows the link, so signing one is
+        never a claim about the other party — it is a claim about ourselves."""
+        signer = signer if signer is not None else self._identity
+        raw = _pkg_build_pairing(counterpart, signer.dsa_public_key, signer.sign)
+        pairing = _pkg_parse_pairing(raw, self._identity.verify)
+        if pairing is None:                   # never seen; a half we signed
+            raise PackageDirError("could not verify our own pairing")  # and cannot read
+        ident = (pairing["signer_id"], pairing["counterpart"])
+        self._own_pairings[ident] = raw
+        while len(self._own_pairings) > _PKG_OWN_MAX:
+            self._own_pairings.pop(next(iter(self._own_pairings)))
+        self._pairings.offer(pairing, raw)
+        self._note_change("packages")
+        self._wake_directory_publish()
+        return raw
+
+    async def _publish_package_records(self) -> None:
+        """File everything this node signs into the directory, and gossip it.
+
+        One pass over our own records: the directory holders for a key change as
+        the mesh does, so this is a sweep rather than a one-off."""
+        for raw in list(self._package_records.values()):
+            record = _pkg_parse(raw, self._identity.verify)
+            if record is None:
+                continue
+            # The descriptor the record points at, replicated here rather than
+            # when it was signed: whoever finds the record has to be able to
+            # resolve the pointer, and this is the sweep that may spend a
+            # lookup on it.
+            pointed = self._dht_store.get(record["ref"])
+            if pointed is not None:
+                try:
+                    await self.dht_put(pointed)
+                except Exception:
+                    pass
+            await self._gossip_package(raw)
+            targets = await self._dir_publish_targets(record["keys"])
+            await asyncio.gather(*(self._pkg_store_at(nid, raw)
+                                   for nid in targets),
+                                 return_exceptions=True)
+        for raw in list(self._own_pairings.values()):
+            pairing = _pkg_parse_pairing(raw, self._identity.verify)
+            if pairing is None:
+                continue
+            await self._gossip_package(raw)
+            targets = await self._dir_publish_targets([pairing["key"]])
+            await asyncio.gather(*(self._pkg_store_at(nid, raw)
+                                   for nid in targets),
+                                 return_exceptions=True)
+
+    # -- asking the directory ---------------------------------------------
+
+    async def _lookup_package_key(self, key: bytes) -> list[dict]:
+        """Every record filed under one directory key, network-wide.
+
+        Bounded like the pseudo lookup and for the same reason: this is asked
+        while somebody watches a search field, and a partial answer beats a
+        timeout."""
+        found: dict[bytes, dict] = {}
+
+        def absorb(raw: bytes) -> None:
+            record = _pkg_parse(raw, self._identity.verify)
+            # Filed under one of the record's own keys, derived from what it
+            # signed — never from what the sender said it was answering.
+            if record is None or key not in record["keys"]:
+                return
+            self._package_book.offer(record, raw)   # cache → we re-serve it
+            found[_pkg_entry_key(record)] = record
+
+        for raw in self._package_book.get(key):
+            absorb(raw)
+        try:
+            async with asyncio.timeout(_DIR_LOOKUP_BUDGET):
+                targets = await self._dir_targets(key)
+                blobs = await asyncio.gather(
+                    *(self._pkg_find_at(nid, key) for nid in targets),
+                    return_exceptions=True,
+                )
+        except (asyncio.TimeoutError, TimeoutError):
+            return list(found.values())
+        for blob in blobs:
+            if isinstance(blob, (bytes, bytearray)):
+                for raw in _pkg_decode(blob):
+                    absorb(raw)
+        if found:
+            self._note_change("packages")
+        return list(found.values())
+
+    def find_packages(self, query: str, limit: int = 20) -> list[dict]:
+        """Packages whose name matches ``query``, from what this node holds.
+
+        Instant and free, so a field can search as somebody types — the same
+        bargain :meth:`find_pseudo` makes."""
+        return [self._package_view(entry) for entry in
+                self._package_book.search(query, min(int(limit), _PKG_SEARCH_MAX))]
+
+    async def search_packages(self, query: str, limit: int = 20) -> list[dict]:
+        """:meth:`find_packages`, widened by one directory lookup.
+
+        This is what replaced a gossiped store: there is no catalogue to fill
+        and nothing to keep spam out of, because nothing is listed. You ask for
+        a name and the directory answers with what was filed under it."""
+        try:
+            await self._lookup_package_key(_pkg_name_key(query))
+        except Exception:
+            pass          # the local answer is still worth returning
+        return self.find_packages(query, limit)
+
+    async def packages_of(self, node_id, *, wide: bool = True) -> list[dict]:
+        """What the node behind ``node_id`` publishes or recommends.
+
+        A publisher id is derived like a node id, so a node signing with its own
+        identity publishes under the very id a details page already has.
+
+        A node that signs with a **separate publisher key**
+        (:mod:`src.publisher_key`) is reached through a pairing: the record
+        names the key, because that is what the signature proves, and the
+        pairing is what says the key and the machine go together. Only a link
+        **both parties signed** is followed — one half is one party's word
+        about another, and this node does not act on those."""
+        raw = node_id.raw if isinstance(node_id, NodeID) else node_id
+        if isinstance(raw, str):
+            try:
+                raw = bytes.fromhex(raw)
+            except ValueError:
+                return []
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) != 20:
+            return []
+        raw = bytes(raw)
+        if wide:
+            try:
+                await self._lookup_package_key(_pkg_publisher_key(raw))
+            except Exception:
+                pass
+        rows = [self._package_view(entry)
+                for entry in self._package_book.of_publisher(raw)]
+        # Follow what this node named, bounded by the book's own per-key cap.
+        for counterpart in self._pairings.named_by(raw):
+            if wide:
+                try:
+                    await self._lookup_package_key(_pkg_publisher_key(counterpart))
+                except Exception:
+                    continue
+            if not self._pairings.confirmed(raw, counterpart):
+                continue          # one half only — nobody's word is enough here
+            rows += [self._package_view(entry)
+                     for entry in self._package_book.of_publisher(counterpart)]
+        return rows
+
+    def _paired_with(self, publisher_id: bytes) -> list[str]:
+        """Ids this key is paired with, **both halves signed**, as hex.
+
+        One half is one party's word about another, and following it would put
+        a stranger's packages on somebody's page. So only a mutual pair counts
+        — which neither party can produce alone."""
+        return [counterpart.hex()
+                for counterpart in self._pairings.named_by(publisher_id)
+                if self._pairings.confirmed(publisher_id, counterpart)]
+
+    def _package_view(self, entry: dict) -> dict:
+        """One record as a page reads it — every decision already made here.
+
+        ``attesters`` is how many *distinct publishers* have signed a package
+        carrying the same code (documentation excluded). That is the number
+        "put X packages in competition" counts, and it is the only one an
+        attacker cannot get for free: mirroring bytes is cheap, a second
+        signature over the same source is a second party."""
+        agree = self._package_book.by_source(entry["src"])
+        attesters = {row["publisher_id"] for row in agree}
+        agreeing, needed = self._package_agreement(entry)
+        return {
+            "id": entry["id"].hex(),
+            "publisher_id": entry["publisher_id"].hex(),
+            "publisher": entry["publisher"].hex(),
+            "kind": "core" if entry["kind"] == _PKG_CORE else "app",
+            "recommend": entry["recommend"],
+            "name": entry["name"],
+            "version": entry["version"],
+            "notes": entry["notes"],
+            "ref": entry["ref"].hex(),
+            "src": entry["src"].hex(),
+            "ts": entry["ts"],
+            # The nodes this key is paired with, both halves signed. A
+            # property of what we hold about the key, not of the question that
+            # happened to reach this record — so it is derived here rather than
+            # bolted on by whichever caller asked.
+            "vouched_by": self._paired_with(entry["publisher_id"]),
+            "trusted": self._trusts_publisher(entry["publisher"]),
+            # "published from here", which is not the same as "signed by this
+            # node's identity": a release signed with a detached publisher key
+            # is still ours, and reading `not yours` against your own release
+            # is what makes a page look broken.
+            "mine": (entry["publisher"] == self._identity.dsa_public_key
+                     or entry["id"] in self._package_records),
+            "attesters": len(attesters),
+            # What this operator watches, and how far the code they watch
+            # agrees with itself. `attesters` counts everybody; `agreeing`
+            # counts only publishers they chose, which is the number a quorum
+            # is allowed to rest on.
+            "subscription": self._subscriptions.get(entry["id"].hex()),
+            "agreeing": agreeing,
+            "needed": needed,
+            "equivocated": self._package_book.equivocated(
+                entry["publisher_id"]) is not None,
+        }
+
+    def package_entry(self, record_id_hex: str) -> dict | None:
+        """One record by its directory id, as a page reads it."""
+        try:
+            ident = bytes.fromhex(record_id_hex)
+        except (ValueError, TypeError):
+            return None
+        entry = self._package_book.entry(ident)
+        return self._package_view(entry) if entry is not None else None
+
+    # -- acting on a package record ---------------------------------------
+    #
+    # A record is a signed pointer. Everything below turns one into bytes, and
+    # the order is always the same: fetch the descriptor the record points at,
+    # verify it, then let the machinery that already exists move and check the
+    # content. Nothing here decides trust — the pins do that, and an install
+    # from an unpinned publisher is refused exactly where it always was.
+
+    async def package_descriptor(self, record_id_hex: str):
+        """Pull the signed descriptor a record points at, and file it.
+
+        Returns the descriptor's own view (``version`` / ``publisher_id`` /
+        size) or None. For a core release this is what puts the release into
+        the catalogue the installer reads, so a package found by name becomes
+        installable without anybody having gossiped it at us."""
+        entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
+            if _HEX_PKG.fullmatch(record_id_hex or "") else None
+        if entry is None or entry["ref"] == b"\x00" * 20:
+            return None
+        raw = await self.dht_get(entry["ref"])
+        if raw is None:
+            return None
+        if entry["kind"] == _PKG_CORE:
+            try:
+                doc = _core_parse_release(raw, self._identity.verify)
+            except Exception:
+                return None
+            self._releases.offer(raw, self._identity.verify,
+                                 self._trusts_publisher)
+            return {"kind": "core", "version": doc["version"],
+                    "publisher_id": doc["publisher_id"].hex(),
+                    "publisher": doc["publisher"].hex(),
+                    "size": doc["size"], "sha256": doc["sha256"],
+                    "notes": doc["notes"]}
+        try:
+            doc = _app_parse_release(raw, self._identity.verify)
+        except Exception:
+            return None
+        if self._catalog.offer(raw, self._identity.verify):
+            await self._gossip_catalog(raw)
+        return {"kind": "app", "version": doc["version"],
+                "name": doc["name"], "app_id": doc["app_id"].hex(),
+                "publisher_id": _pkg_publisher_id(doc["author"]).hex(),
+                "publisher": doc["author"].hex()}
+
+    async def fetch_package(self, record_id_hex: str):
+        """Get a package's bytes, verified end to end. ``(entry, blob, name)``.
+
+        The blob is what an operator downloads to open by hand: for a core
+        release the ``tar.gz`` the publisher signed, for an app a ``tar.gz``
+        this node builds from the verified files. Either way every byte has
+        been checked against a hash the author signed before it is handed
+        over."""
+        entry = self.package_entry(record_id_hex)
+        if entry is None:
+            return None
+        described = await self.package_descriptor(record_id_hex)
+        if described is None:
+            return None
+        if entry["kind"] == "core":
+            fetched = await self.fetch_release(described["publisher_id"])
+            if fetched is None:
+                return None
+            catalogued, _files = fetched
+            package = self._packages.get(catalogued["release_id"].hex())
+            if package is None:
+                return None
+            return entry, package, f"nmesh-{catalogued['version']}.tar.gz"
+        record = self._package_book.entry(bytes.fromhex(record_id_hex))
+        result = await self.fetch_signed_app(record["ref"])
+        if result is None:
+            return None
+        meta, files = result
+        blob = _core_build_package(files)
+        safe = re.sub(r"[^A-Za-z0-9._-]", "-", meta["name"])[:40] or "app"
+        return entry, blob, f"{safe}-{meta['version']}.tar.gz"
+
+    async def install_package(self, record_id_hex: str) -> dict:
+        """Install what a record points at. Raises with the reason if it cannot.
+
+        The two kinds part company here and nowhere else: a core release
+        replaces this node's program (and needs its publisher pinned), an app is
+        written into its own directory."""
+        entry = self.package_entry(record_id_hex)
+        if entry is None:
+            raise ReleaseError("no such package")
+        described = await self.package_descriptor(record_id_hex)
+        if described is None:
+            raise ReleaseError("the package could not be fetched")
+        if entry["kind"] == "core":
+            result = await self.install_release(described["publisher_id"])
+            self._subscriptions.note_version(record_id_hex, entry["version"])
+            return result
+        installed = await self.install_app(described["app_id"])
+        if installed is None:
+            raise ReleaseError("the app could not be installed")
+        self._subscriptions.note_version(record_id_hex, entry["version"])
+        return installed
+
+    def trust_package_publisher(self, record_id_hex: str, *,
+                                auto: bool = False,
+                                endorsed: bool = False) -> dict:
+        """Pin the key a record carries, in one act.
+
+        The record already holds the publisher's full public key — that is what
+        its signature was checked under — so there is nothing for an operator to
+        copy across from anywhere. What was a hex string pasted from a channel
+        nobody could vouch for becomes a key that arrived with the thing it
+        signed. It is still a decision, and still theirs: the console asks
+        before calling this, and shows the id that will be pinned."""
+        entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
+            if _HEX_PKG.fullmatch(record_id_hex or "") else None
+        if entry is None:
+            raise ReleaseError("no such package")
+        if entry["recommend"]:
+            # A recommendation names somebody else's bytes. Pinning the
+            # recommender would hand the machine to whoever agreed with a
+            # release, which is not what anybody meant by agreeing.
+            raise ReleaseError("that is a recommendation, not a publication — "
+                               "pin the publisher it points at instead")
+        return self.trust_publisher(entry["publisher"].hex(), entry["name"],
+                                    auto, endorsed)
+
+    # -- subscriptions -----------------------------------------------------
+
+    def subscribe_package(self, record_id_hex: str, *, auto: bool = False,
+                          quorum: int = 1) -> dict:
+        """Watch this publisher's offering of this package for new versions."""
+        entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
+            if _HEX_PKG.fullmatch(record_id_hex or "") else None
+        if entry is None:
+            raise SubscriptionError("no such package")
+        subscription = self._subscriptions.add(
+            record_id_hex, entry["publisher_id"].hex(), entry["kind"],
+            entry["name"], auto=auto, quorum=quorum)
+        self._wake_release_pass()
+        self._note_change("packages")
+        return subscription
+
+    def unsubscribe_package(self, record_id_hex: str) -> bool:
+        removed = self._subscriptions.remove(record_id_hex)
+        if removed:
+            self._note_change("packages")
+        return removed
+
+    def subscriptions(self) -> list[dict]:
+        """Every subscription, with what this node currently sees for it."""
+        rows = []
+        for subscription in self._subscriptions.list():
+            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
+            view = self._package_view(entry) if entry is not None else None
+            rows.append({**subscription, "package": view,
+                         "agreeing": view["agreeing"] if view else 0})
+        return rows
+
+    def _package_agreement(self, entry: dict) -> tuple[int, int]:
+        """How many **subscribed** publishers carry this exact code, and how
+        many this operator asked for.
+
+        Counted over the source digest, so two publishers whose release notes
+        differ still agree; and only over publishers this operator subscribed
+        to, because a signature from somebody nobody chose is a party an
+        attacker can mint. Same argument as the endorsed quorum next door."""
+        subscription = self._subscriptions.get(entry["id"].hex())
+        needed = subscription["quorum"] if subscription else 1
+        watched = self._subscriptions.publishers_for(
+            entry["kind"], entry["folded"])
+        # Same kind and same name, not merely the same bytes: a fork published
+        # under another name is a different package, and the operator who wants
+        # it counted subscribes to it. Loosening this would let one publisher's
+        # second offering vouch for its first.
+        agreeing = {row["publisher_id"].hex()
+                    for row in self._package_book.by_source(entry["src"])
+                    if row["kind"] == entry["kind"]
+                    and row["folded"] == entry["folded"]
+                    and row["publisher_id"].hex() in watched}
+        return len(agreeing), needed
+
+    async def _subscription_pass(self) -> None:
+        """Ask the directory what each subscribed publisher offers now.
+
+        This is the half an announcement cannot cover: a publisher whose
+        announce never reached us, or one we met long after it published.
+        Bounded by the subscription count, which an operator sets."""
+        seen: set[bytes] = set()
+        for subscription in self._subscriptions.list():
+            try:
+                pub_id = bytes.fromhex(subscription["publisher_id"])
+            except ValueError:
+                continue
+            if pub_id in seen:
+                continue          # one publisher, one lookup, however many rows
+            seen.add(pub_id)
+            try:
+                await self._lookup_package_key(_pkg_publisher_key(pub_id))
+            except Exception:
+                pass          # one unreachable publisher is not the whole sweep
+        for subscription in self._subscriptions.list():
+            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
+            if entry is None or entry["version"] == subscription["version_seen"]:
+                continue
+            if entry["kind"] == _PKG_CORE and not _is_newer(
+                    entry["version"], _running_version()):
+                continue
+            self._subscriptions.note_version(subscription["id"],
+                                             entry["version"])
+            self._activity.note(
+                "release", f"{entry['name']} {entry['version']} is offered by "
+                           f"{subscription['publisher_id'][:12]}")
+            self._note_change("packages")
+
+    async def _subscribed_install_pass(self) -> None:
+        """Install what a subscription is allowed to install on its own.
+
+        One package per pass, like the release sweep beside it: an install ends
+        in a restart, and a loop that could start two has one too many."""
+        for subscription in self._subscriptions.list():
+            if not subscription["auto"]:
+                continue
+            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
+            if entry is None:
+                continue
+            agreeing, needed = self._package_agreement(entry)
+            if agreeing < needed:
+                continue
+            if entry["kind"] == _PKG_APP:
+                # The app id follows from the author key and the name, exactly
+                # as the release descriptor derives it — so "do we already have
+                # this?" is answered here rather than by a DHT round trip per
+                # subscription per sweep.
+                app_id = _app_deployed_id(entry["publisher"], entry["name"]).hex()
+                installed = self._installed.get(app_id)
+                if installed is not None and installed.get("version") == entry["version"]:
+                    continue
+                try:
+                    await self.install_package(subscription["id"])
+                except Exception:
+                    continue
+                return
+            # A core release goes through the same three gates as any other:
+            # the publisher is pinned, the version is strictly newer, and every
+            # byte verifies. `install_release` refuses otherwise, and a
+            # subscription does not widen any of them.
+            if not _is_newer(entry["version"], _running_version()):
+                continue
+            try:
+                described = await self.package_descriptor(subscription["id"])
+            except Exception:
+                continue
+            if described is None:
+                continue
+            catalogued = self._releases.get(described["publisher_id"])
+            if catalogued is None:
+                continue
+            allowed, _why = self.may_auto_install(catalogued)
+            if not allowed:
+                continue
+            try:
+                await self.install_release(described["publisher_id"],
+                                           unattended=True)
+            except Exception as exc:
+                self._note_release(entry["version"], "failed", str(exc))
+            return
+
+    async def _recommend_pass(self) -> None:
+        """Say which release id this node runs, if the operator asked it to.
+
+        A recommendation is not a publication: it points at somebody else's
+        bytes. What makes it worth anything is the **source digest of the tree
+        actually running here** — a second party saying "this code is what I am
+        executing", which is the one thing in a supply chain an attacker cannot
+        obtain by minting identities.
+
+        Once per version: reading and hashing the tree is not free, and the
+        answer cannot change while the version does not."""
+        if not self._recommend_version:
+            return
+        version = _running_version()
+        if self._recommended == version:
+            return
+        # The descriptor's own content key, not the package's: a record points at
+        # something `dht_get` can resolve, and the package moves on the release
+        # transfer instead. Keeping it locally is what makes the pointer good —
+        # the directory sweep replicates it a moment later.
+        ref = b"\x00" * 20
+        for listed in self._releases.list():
+            if listed["version"] != version:
+                continue
+            catalogued = self._releases.get(listed["publisher_id"])
+            if catalogued is None:
+                continue
+            ref = _content_key(catalogued["release"])
+            self._dht_store.put(ref, catalogued["release"])
+            break
+        try:
+            from . import updater
+            files = _core_read_tree(updater.install_root())
+            digest = _pkg_source_digest(files)
+        except Exception:
+            return          # a tree we cannot read is not a tree we can vouch for
+        try:
+            self.sign_package_record(_PKG_CORE, _CORE_NAME, version, ref,
+                                     digest, recommend=True)
+        except Exception:
+            return
+        self._recommended = version
+        self._activity.note("release", "published which version this node runs ("
+                            + version + ")")
 
     # -- application packages ---------------------------------------------
 
@@ -9424,6 +10436,7 @@ class MeshNode:
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps
             self._schedule_release_sync(peer)  # …and on known releases
             self._schedule_pseudo_sync(peer)   # …and on who is called what
+            self._schedule_package_sync(peer)  # …and on who publishes what
             self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         # This peer connected to us (server side) and authenticated → positive,
         # zero-cost evidence that we are reachable on this transport. Never let
@@ -9542,6 +10555,7 @@ class MeshNode:
             self._schedule_catalog_sync(peer)  # catch this peer up on known apps
             self._schedule_release_sync(peer)  # …and on known releases
             self._schedule_pseudo_sync(peer)   # …and on who is called what
+            self._schedule_package_sync(peer)  # …and on who publishes what
             self._schedule_revocation_sync(peer)  # …and on who is no longer vouched for
         self._persist_state()  # persist the newly-known peer for restart recovery
 
@@ -10829,6 +11843,10 @@ _HANDLERS = {
     DIR_STORE:         MeshNode._handle_dir_store,
     DIR_FIND:          MeshNode._handle_dir_find,
     DIR_FOUND:         MeshNode._handle_dir_found,
+    PKG_STORE:         MeshNode._handle_pkg_store,
+    PKG_FIND:          MeshNode._handle_pkg_find,
+    PKG_FOUND:         MeshNode._handle_pkg_found,
+    PKG_ANNOUNCE:      MeshNode._handle_pkg_announce,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
@@ -10851,6 +11869,8 @@ _MESSAGE_PLANE = {
     E2E_HANDSHAKE: features.E2E, E2E_HANDSHAKE_ACK: features.E2E,
     DIR_STORE: features.DIRECTORY, DIR_FIND: features.DIRECTORY,
     DIR_FOUND: features.DIRECTORY,
+    PKG_STORE: features.PACKAGES, PKG_FIND: features.PACKAGES,
+    PKG_FOUND: features.PACKAGES, PKG_ANNOUNCE: features.PACKAGES,
     PSEUDO_ANNOUNCE: features.PSEUDO,
     CATALOG_ANNOUNCE: features.CATALOG,
     RELEASE_ANNOUNCE: features.RELEASE, RELEASE_FETCH: features.RELEASE,

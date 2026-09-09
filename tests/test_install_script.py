@@ -156,6 +156,19 @@ class TestServiceUnits:
         assert "NMESH_SERVICE_MANAGED=1" in out
         assert 'OQS_INSTALL_PATH="/opt/nmesh/_oqs"' in out
 
+    def test_runit_service_says_something_will_restart_it(self, tmp_path):
+        """Android has no init a package can reach; runsv is what watches a node
+        under Termux. Without this the node refuses to leave after installing an
+        update and the phone keeps running yesterday's code."""
+        out = run_snippet(
+            tmp_path,
+            'PREFIX=/data/data/com.termux/files/usr '
+            'runit_service /opt/nmesh /var/lib/nmesh "--fleet"').stdout
+        assert "exec ./start.sh --fleet" in out
+        assert 'export NMESH_DATA="/var/lib/nmesh"' in out
+        assert "export NMESH_SERVICE_MANAGED=1" in out
+        assert 'export OQS_INSTALL_PATH="/opt/nmesh/_oqs"' in out
+
     def test_launchd_plist_is_well_formed(self, tmp_path):
         out = run_snippet(
             tmp_path,

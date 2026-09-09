@@ -1,21 +1,56 @@
-# App store — a shared catalogue, installing, updating
+# Apps — finding one, installing it, updating it
 
-One node publishes an app; **every** node discovers it and can install, update
-or uninstall it — through a **Store** page in the console. The catalogue is
-**shared and re-announced** automatically by the network.
+One node publishes an app; **any** node can find it by typing part of its name,
+read what it says about itself, download it to look, install it and watch it for
+new versions.
 
-Modules: [`src/app_catalog.py`](../../src/app_catalog.py) (catalogue + installed
-registry), signed releases in
-[`src/app_package.py`](../../src/app_package.py), gossip in `src/node.py`.
+## There is no store
+
+There was one, and removing it is the point of this page. A store is a **list**,
+and a list on a decentralised mesh is a thing to fill: publishing costs an
+attacker nothing an attacker does not already have — a release is signed by the
+key it names, and any node can sign its own. Keeping such a list clean is a
+moderation problem, and moderation needs an authority nobody on this network is
+in a position to be. Every defence the catalogue grew (a per-author share,
+trusted-first eviction) is a way of losing that fight more slowly.
+
+So nothing is listed. Finding an app works exactly the way finding a person by
+name works: you **ask** for a name, and signed records filed under it come back
+from the [package directory](../Updates/guide). Nothing to enumerate, nothing to
+flood, and the same view, the same page and the same three buttons as a node
+release — because it is the same problem twice.
+
+Modules: [`src/pkg_dir.py`](../../src/pkg_dir.py) (the directory record and its
+keys), [`src/app_package.py`](../../src/app_package.py) (content-addressed
+packages, signed releases), [`src/app_catalog.py`](../../src/app_catalog.py)
+(the installed registry, and the older gossiped catalogue), the package section
+of `src/node.py`.
+
+## Finding one
+
+Console → **Apps → Find an app**. Typing searches what this node already holds;
+**Ask the network** spends one bounded round of directory queries. Opening a
+result shows the package page (`/package#<id>`): name, version, author, the few
+signed lines the author wrote, how many publishers have signed the same code,
+and the three things you can do — **download** it to open the archive by hand,
+**install** it, **watch** it for new versions.
+
+That is the same page a node release opens, and deliberately: an operator should
+not have to learn two ways to look at a signed package.
 
 ## Two layers
 
-- **Catalogue** (network-wide, in memory) — the directory of *published* apps.
-  Each entry is a **signed release** (see `Docs/AppSharing/guide`):
-  self-verifying, bound to the author's ML-DSA key, carrying a **signed `ts`**
-  (the publication time). A node keeps the highest `ts` per `app_id`.
+- **The directory** (network-wide, asked rather than listed) — a signed record
+  per published app, filed under its author's publisher id and under its name's
+  prefixes. See [`../Updates/guide`](../Updates/guide) for the record format.
 - **Installed** (local, persisted) — what *this* node has actually installed
   (fetched + written to disk), distinct from what exists on the network.
+
+The older gossiped **catalogue** is still there and still fills from
+`CATALOG_ANNOUNCE`: a node that already holds entries should not lose what it
+knows, and a release descriptor pulled through the directory is offered to it so
+the installer can read it. Nothing is published *in order to be listed* any
+more, which is what took the flooding problem off the table.
 
 ## Propagation (bounded epidemic gossip)
 
@@ -50,32 +85,44 @@ catalogue is capped (`MAX_APPS`), and a release is ≤ one DHT value.
 ## Node API
 
 ```python
-info = await node.publish_store_app(name, version, files)  # publishes + announces
-node.catalog_list()          # apps known on the network
-node.installed_list()        # apps installed locally
-node.store_overview()        # the UI view: annotated catalogue (state/action) + installed
-await node.install_app(app_id_hex)     # fetch+verify+install → record | None
-await node.update_app(app_id_hex)      # reinstalls if the ts is newer → record | None
-node.uninstall_app(app_id_hex)          # drops the record + the files → bool
+# Publishes, announces, and files a record under the app's name. `notes` is the
+# few lines anybody sees before they fetch anything, so it travels signed.
+info = await node.publish_store_app(name, version, files, notes="what it is")
+
+await node.search_packages("sketch")   # ask the directory (local + network)
+node.find_packages("sketch")           # …local only: instant, free, search-as-you-type
+await node.packages_of(node_id)        # what that node publishes or recommends
+node.package_entry(record_id_hex)      # one record, as a page reads it
+
+await node.install_package(record_id_hex)   # fetch + verify + install
+await node.fetch_package(record_id_hex)     # (entry, blob, filename) — the bytes, verified
+node.subscribe_package(record_id_hex, auto=False, quorum=1)
+node.unsubscribe_package(record_id_hex)
+
+node.installed_list()                  # apps installed locally
+node.uninstall_app(app_id_hex)         # drops the record + the files → bool
 ```
 
-**Every decision is made in Python**: `store_overview()` computes, for each app
-in the catalogue, its `state` (`install` / `update` / `installed`) and the
-`action` to POST. The front end only **renders** that view.
+**Every decision is made in Python**: a record arrives with its `trusted`,
+`attesters`, `agreeing` and `subscription` already worked out. The front end
+only **renders** that view.
 
 ## Console API (Bearer/cookie auth)
 
+The package routes are shared with node releases and are listed in
+[`../Updates/guide`](../Updates/guide#console-api): `/api/packages` to ask,
+`/api/packages/<id>` to read, `…/download` to fetch the archive,
+`…/install`, `…/trust` and `…/subscribe` to act.
+
+What remains here is the installed set and publishing:
+
 | Method | Route | Role |
 |---|---|---|
-| GET  | `/api/store`            | the full view (`{catalog:[…state,action], installed:[…]}`) |
-| POST | `/api/store/publish`    | `{name, version, files:{path:b64}}` → publishes + announces |
-| POST | `/api/store/install`    | `{app_id}` → installs |
-| POST | `/api/store/update`     | `{app_id}` → updates if newer |
-| POST | `/api/store/uninstall`  | `{app_id}` → uninstalls |
-
-The console's **App Store** page lists the available apps (an Install/Update
-button according to the state computed on the node) and the installed ones
-(Uninstall), and can publish an app to the network.
+| GET  | `/api/store`            | the local view (`{catalog, installed}`) |
+| POST | `/api/store/publish`    | `{name, version, notes?, files:{path:b64}}` → publish and file it |
+| POST | `/api/store/install`    | `{app_id}` → install an app already in the catalogue |
+| POST | `/api/store/update`     | `{app_id}` → update if newer |
+| POST | `/api/store/uninstall`  | `{app_id}` → uninstall |
 
 ## Wiring
 

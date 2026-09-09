@@ -121,6 +121,15 @@ tests/
 │     quorum of endorsed keys that 200 minted publishers cannot reach, a
 │     disputed version refused by both routes, and a publisher key that stays
 │     encrypted at rest
+├── test_pkg_dir.py                                    — the package directory:
+│     a record can only say what its own key signed, an unknown flag or kind is
+│     refused, the keys it is filed under are derived from the name rather than
+│     declared, a source digest that ignores documentation and nothing else, and
+│     a crowded prefix bucket that drops a pointer and never a package
+├── test_subscriptions.py                              — what this node watches:
+│     a corrupt or doctored file yields no subscriptions, a quorum is clamped to
+│     something reachable, and only publishers the operator chose are counted
+│     towards one
 ├── test_behaviour.py                                  — the detection frame: a
 │     rule that fires on everyone disarms itself, transport classes judged
 │     apart, being new / quiet / unfamiliar are never signals, every rule
@@ -212,7 +221,8 @@ tests/
 ├── test_updater.py                                    — GitHub update:
 │     version comparison, hostile fields bounded, a booby-trapped archive
 │     (absolute path, traversal, symlink, special file), state and venv never
-│     touched, restore after a failure, the repository pinned
+│     touched, restore after a failure, the repository pinned, and the two ways
+│     a node comes back after an install — a supervisor, or re-execing itself
 ├── test_config.py                                     — configuration file:
 │     hostile parsing (a broken line, an unknown key, a huge file, random bytes,
 │     a value trying to open a second line), precedence, settings not editable
@@ -269,6 +279,11 @@ tests/
 │     the wait between passes — with a dial that raises not killing the loop.
 │     Plus the two ways a chase must end early: a membership its issuer took
 │     back, and a node the operator forgot
+├── test_integration_ports.py                          — no two integration
+│     tests bind the same loopback port: under xdist that is a race whose loser
+│     fails in `wait_for_session` fifteen seconds later, reading as a flaky mesh
+│     rather than as a reused number. Checked in the fast suite, because a guard
+│     you only run beside the thing it guards is one CI tells you about
 ├── test_ui_contrast.py                                — colour tokens: the WCAG
 │     ratio of every text/background pair in both themes, and no page redefining
 │     a token of the system
@@ -277,7 +292,12 @@ tests/
       FIND_NODE/FOUND_NODE loop that used to saturate the link), and discovery
       still works when there really is something to find; test_join_ticket.py:
       a real join from the ticket alone, single use, an expired ticket, a forged
-      code, the "confirmed public address" gate; and test_fleet.py, which sends a
-      relayed console call across a real mesh (a 90 kB reply, so several frames)
-      and checks that it is refused without the `manage` grant
+      code, the "confirmed public address" gate; test_pkg_dir.py, which publishes
+      a release on one node and finds it on another by typing three letters, by
+      the publisher's node id, pins the key that came inside the record and
+      installs from it — plus the two refusals (a recommendation cannot be
+      pinned, and finding a release does not make it installable); and
+      test_fleet.py, which sends a relayed console call across a real mesh (a
+      90 kB reply, so several frames) and checks that it is refused without the
+      `manage` grant
 ```

@@ -81,7 +81,7 @@ receipt for routable types (see the gates).
 | RELAY_CARRY | 0x15 | carries a handshake packet between two nodes through a relay |
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT: "call me back to confirm I am reachable" |
 | CATALOG_ANNOUNCE | 0x18 | gossip of a **signed release** for the app store catalogue |
-| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id (exact name; the partial search is answered from the gossiped book) |
+| DIR_STORE / _FIND / _FOUND | 0x19 / 0x1A / 0x1B | pseudo directory: store/seek/answer a **signed claim** pseudo→node_id. A claim is filed under the whole folded name **and each word's prefixes**, so a lookup answers a partial name too (see [`routing.md`](routing.md)) |
 | ECHO_REQUEST / _REPLY | 0x1C / 0x1D | **routable liveness probe**: reach a node id multi-hop (a remote ping through relays) |
 | RELEASE_ANNOUNCE | 0x1E | gossip of a **signed release of the node's own code**, prefixed by a `have` byte saying whether the sender holds the package (see [`../Updates/guide`](../Updates/guide)) |
 | RELEASE_FETCH / _DATA | 0x1F / 0x20 | "send me this release's package from this offset" and a slice in answer — **routable**, so a holder several hops away is reachable |
@@ -92,6 +92,8 @@ receipt for routable types (see the gates).
 | CAPABILITIES | 0x26 | "here is what I can speak": a **set of feature names**, not a version. Sent pre-auth alongside the challenge and again once authenticated; silence means the classic set (see [`security.md`](security.md)) |
 | KA_PROPOSE | 0x27 | "the cadences I can work with", a range per mode: `fast_min(I) ‖ fast_max(I) ‖ slow_min(I) ‖ slow_max(I)`. Both ends compute the same accord from the two declarations; nothing is exchanged to settle it. Four and not two because with one range the ceiling is a `min`, and a `min` is a lever anybody can pull (see [`transports.md`](transports.md)) |
 | KA_REQUEST | 0x28 | "slow your probes on this link to `wanted_ms(I)`, for now". Only ever *less* — a request that asks for more is dropped, or four bytes would buy somebody else's battery — and it lapses rather than sticking: the durable mechanism is the declaration above |
+| PKG_STORE / _FIND / _FOUND | 0x29 / 0x2A / 0x2B | package directory: store/seek/answer a **signed record** saying what a key publishes. Filed under the publisher id *and* the package name's prefixes, so "what does this node offer?" and "who publishes something called this?" are one lookup with two keys. The same plane carries **pairing halves** (a detached publisher key and the node using it, one signature each), filed under the same keys — a reader tries both gates on every blob (see [`../Updates/guide`](../Updates/guide)) |
+| PKG_ANNOUNCE | 0x2C | gossip of the same record — the epidemic half of the plane, terminating on "only re-gossip when our view changed" like the others |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
@@ -99,17 +101,18 @@ Groupings (constants):
   per-link: `PING`/`PONG` (keepalive), `OBSERVED_ADDR`, the punch signalling
   (`PUNCH_*`, `REACH_PROBE*`), the keepalive accord (`KA_PROPOSE`,
   `KA_REQUEST` — a cadence is a property of the pair, so it can only ever be
-  stated by the peer at the other end of it), and the five gossip planes
-  `CATALOG_ANNOUNCE` / `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` / `CERT_REVOKE` /
-  `ABUSE_REPORT` (re-stamped at every hop during epidemic gossip).
+  stated by the peer at the other end of it), and the six gossip planes
+  `CATALOG_ANNOUNCE` / `RELEASE_ANNOUNCE` / `PSEUDO_ANNOUNCE` / `PKG_ANNOUNCE` /
+  `CERT_REVOKE` / `ABUSE_REPORT` (re-stamped at every hop during epidemic
+  gossip).
 - `_ROUTABLE_TYPES`: **everything addressed to a `node id`** → relayed multi-hop
   towards `dst_id` (`_forward_packet`). Includes `DATA`, `E2E_HANDSHAKE`/`_ACK`,
   `ECHO_REQUEST`/`_REPLY`, **and the Kademlia/DHT control plane**: `FIND_NODE`/
   `FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`, `DIR_STORE`/`DIR_FIND`/
-  `DIR_FOUND`, plus the release transfer `RELEASE_FETCH`/`RELEASE_DATA` and the
-  membership renewal `CERT_RENEW`/`CERT_RENEWED`. → the DHT, the directory, a
-  package download and a renewal work `A→X` through relays, not only towards a
-  direct peer.
+  `DIR_FOUND`, `PKG_STORE`/`PKG_FIND`/`PKG_FOUND`, plus the release transfer
+  `RELEASE_FETCH`/`RELEASE_DATA` and the membership renewal
+  `CERT_RENEW`/`CERT_RENEWED`. → the DHT, both directories, a package download
+  and a renewal work `A→X` through relays, not only towards a direct peer.
 - `INVITE_SEEK` and `RELAY_CARRY` are handled **before** the gates (pre-auth,
   strictly bounded/token-gated).
 

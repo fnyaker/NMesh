@@ -12,6 +12,7 @@ No test touches the network: the downloads are simulated.
 import io
 import json
 import os
+import sys
 import tarfile
 import tomllib
 from pathlib import Path
@@ -488,6 +489,40 @@ class TestGuards:
         assert updater.service_managed() is False
         monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
         assert updater.service_managed() is True
+
+    def test_a_supervisor_is_preferred_over_re_execing(self, monkeypatch):
+        monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
+        mode, _launch, reason = updater.restart_plan()
+        assert mode == updater.RESTART_SERVICE and reason == ""
+
+    def test_it_re_execs_itself_with_no_supervisor(self, monkeypatch, tmp_path):
+        """The Termux case: no init a package can reach, so the node replaces
+        its own process image rather than sitting on an installed update."""
+        monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+        script = tmp_path / "nmesh_node.py"
+        script.write_text("")
+        monkeypatch.setattr(updater, "_LAUNCH",
+                            (sys.executable, [str(script), "--fleet"],
+                             str(tmp_path)))
+        mode, launch, reason = updater.restart_plan()
+        assert mode == updater.RESTART_REEXEC and reason == ""
+        assert launch == (sys.executable, [str(script), "--fleet"], str(tmp_path))
+        assert updater.restart_possible() == (True, "")
+
+    def test_it_refuses_when_the_launch_is_gone(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+        monkeypatch.setattr(updater, "_LAUNCH",
+                            (sys.executable, [str(tmp_path / "vanished.py")],
+                             str(tmp_path)))
+        ok, reason = updater.restart_possible()
+        assert ok is False and "vanished.py" in reason
+
+    def test_it_refuses_with_no_interpreter(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+        monkeypatch.setattr(updater, "_LAUNCH",
+                            (str(tmp_path / "gone"), ["x.py"], str(tmp_path)))
+        ok, reason = updater.restart_possible()
+        assert ok is False and "interpreter" in reason
 
     def test_install_root_holds_src(self):
         assert os.path.isdir(os.path.join(updater.install_root(), "src"))

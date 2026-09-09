@@ -221,6 +221,18 @@ def _as_quorum(raw: str) -> int:
     return value
 
 
+def _as_check_minutes(raw: str) -> int:
+    """How often the node looks for an update it may install. 0 turns the sweep
+    off — the node still hears announcements, it just stops going to look.
+
+    Bounded below at a minute, because a sweep is a Kademlia lookup per
+    subscription and "every second" is a node that spends its link on asking."""
+    value = int(str(raw).strip())
+    if value != 0 and not 1 <= value <= 10080:
+        raise ValueError("0, or between 1 minute and a week (10080 minutes)")
+    return value
+
+
 def _as_branch(raw: str) -> str:
     """A branch to follow instead of the published releases. Empty = releases.
 
@@ -371,6 +383,24 @@ SETTINGS = {
     # publish. A branch is whatever was pushed to it a minute ago, so following
     # one is a deliberate choice — a test fleet tracking `main` — and the answer
     # then comes from `src/version.py` at that branch, not from a release.
+    # How often this node goes looking for an update, and whether it bothers
+    # when nobody is using it. Announcements still arrive and still wake the
+    # pass; this is the sweep that covers what a missed announcement dropped.
+    # A phone is the case that wants both: hourly rather than every five
+    # minutes, and not at all while it sits in a pocket.
+    "update_check_minutes": (_as_check_minutes, 5, True,
+                        "Minutes between sweeps for an installable update "
+                        "(0 = never go looking; announcements still arrive)"),
+    "update_when_active": (_as_bool, False, True,
+                        "Only sweep for updates while somebody is using this "
+                        "node (a console, an app, a call)"),
+    # Saying which version this node runs, so somebody who watches it can see
+    # it — a recommendation, pointing at a release id somebody else signed. It
+    # publishes no code and authorises nothing: whoever reads it decides what
+    # their own operator's subscriptions make of it.
+    "recommend_version": (_as_bool, False, True,
+                        "Publish which release id this node runs, so nodes "
+                        "watching it can see the version it settled on"),
     "update_branch":   (_as_branch, "", True,
                         "Branch whose src/version.py says what the latest "
                         "version is, instead of the published GitHub releases "
