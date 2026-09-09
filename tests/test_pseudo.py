@@ -8,7 +8,8 @@ look like another.
 """
 import pytest
 
-from src.pseudo import (MAX_PSEUDO, PseudoError, canonical, is_canonical, fold,
+from src.pseudo import (MAX_INDEX_TERMS, MAX_PSEUDO, MAX_TERM, PseudoError,
+                        canonical, is_canonical, fold, key_terms,
                         rank, EXACT, PREFIX, WORD, CONTAINS)
 
 
@@ -84,6 +85,49 @@ class TestFold:
 
     def test_unusable_input_folds_to_nothing(self):
         assert fold("") == "" and fold(None) == "" and fold(123) == ""
+
+
+class TestKeyTerms:
+    """The terms a name is filed under, so a *partial* query finds it on a node
+    that has never met the claimant. Half a name does not hash to the same key
+    as the whole one, which is why this exists at all."""
+
+    def test_the_whole_name_and_every_word_prefix(self):
+        terms = key_terms("Alice Ada")
+        assert terms[0] == "alice ada"
+        for term in ("al", "ali", "alic", "alice", "ad", "ada"):
+            assert term in terms, term
+
+    def test_the_terms_are_the_ranks_that_can_be_hashed(self):
+        """EXACT, PREFIX and WORD each have a term; CONTAINS cannot have one —
+        you cannot hash the middle of a word."""
+        terms = key_terms("Alice Ada")
+        assert fold("alice ada") in terms          # EXACT
+        assert fold("ali") in terms                # PREFIX
+        assert fold("ada") in terms                # WORD
+        assert fold("lic") not in terms            # CONTAINS
+
+    def test_folding_applies_so_accents_and_case_land_together(self):
+        assert key_terms("José") == key_terms("jose")
+
+    def test_a_single_letter_is_not_a_term(self):
+        """Every name in the mesh would land on one key, and a directory bucket
+        holds a handful — so it would answer with a handful of arbitrary names."""
+        assert "a" not in key_terms("Alice Ada")
+
+    def test_a_one_letter_word_is_indexed_as_itself(self):
+        assert "a" in key_terms("a team")
+
+    def test_the_list_is_deduplicated_and_bounded(self):
+        terms = key_terms(" ".join(f"word{index}" for index in range(20)))
+        assert len(terms) == len(set(terms)) <= MAX_INDEX_TERMS
+
+    def test_a_long_word_stops_at_the_ceiling(self):
+        terms = key_terms("a" * 40)
+        assert max(len(term) for term in terms if term != fold("a" * 40)) <= MAX_TERM
+
+    def test_nothing_usable_yields_nothing(self):
+        assert key_terms("") == [] and key_terms(None) == []
 
 
 class TestRank:

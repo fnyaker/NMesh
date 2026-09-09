@@ -421,6 +421,90 @@ precondition looked like part of the world rather than part of the work.
 > If the answer is "something else, usually" — or if your own test has to arrange
 > it by hand — that arrangement is a piece of the feature you have not written.
 
+## A publish path that only the test suite ever called
+
+`publish_pseudo()` replicated this node's name claim into the keyed directory.
+It was written, documented, and covered by four tests. Nothing in the product
+ever called it. So "ask the network" asked the `_DIR_K` nodes closest to the key
+— nodes that had been told nothing — and the only reason the search ever
+returned anything is that gossip had already filled the local book, which is the
+half that was working all along.
+
+Every test passed, because every test called it. The integration test named the
+call in its own setup, which reads as arranging a precondition rather than as
+supplying the feature.
+
+> **Grep for who calls it, not for whether it works.** A public method whose only
+> callers are under `tests/` is a feature that has not been wired up, however
+> green it is. `grep -rn "publish_pseudo" src/` was the whole diagnosis.
+
+And the sibling trap: **a hash of a whole name cannot answer half of one.** The
+same search offered a partial match locally (rank the book) and an exact one over
+the network (hash the query), and the difference lived in one word of a
+docstring. Somebody typing three letters got nothing from the network and no
+indication why. The fix is on the publishing side — file a claim under the whole
+name *and* each word's prefixes — because the query side has no room to
+manoeuvre: it has a hash, and a hash is all or nothing.
+
+## Two signers, and the record signed by the wrong one
+
+`publish_release(key_path=…)` signs the release with a detached publisher key —
+the whole point of `publisher_key.py`, since that key decides what every node
+pinning it will run. The directory record was signed with the node identity
+anyway, because that is what `sign_package_record` had to hand.
+
+Nothing failed. The card said `Publisher: <this node>` while the descriptor it
+pointed at carried a different key; pinning from the card pinned the node; and
+the install then refused with *"that publisher is not trusted here"* — naming a
+key the operator had never seen, one action after they had pinned something.
+
+> **When one operation has two signers, every artefact it produces has to say
+> which one.** A record names its signer, and that name is what a reader acts
+> on: sign it with the convenient key and the label is a lie that only shows up
+> two clicks later, as a refusal about a third party.
+
+The fix also moved *where* the record is signed — inside the block that holds
+the unlocked key, because it cannot be signed after the key is closed. A
+lifetime is part of an interface.
+
+And the honest half: a record can only name its own signer, so the detached key
+is genuinely not the node, and no amount of care makes `packages_of(node_id)`
+find it. That needs a **second artefact** (the pairing) rather than a cleverer
+reading of the first.
+
+## A bounded bucket that evicts the record instead of the pointer
+
+Both directories index one record under several keys. `_MAX_PER_KEY` caps a
+bucket, and the pseudo book enforced it by *forgetting the claim* whose pointer
+was oldest. With one key per claim that was the same thing. With prefix keys it
+is not: `al` is shared by every second name, so a crowded prefix would evict
+somebody who was still the only answer to their own exact name.
+
+> **When an index grows a second key, re-read every bound written for one.** The
+> bucket is a search term; the record is a thing. Dropping the pointer costs a
+> hit on one crowded term. Dropping the record costs the whole entry, and the
+> memory bound that actually matters (`_enforce_bounds`, in bytes) was never the
+> one doing the evicting.
+
+## A round trip with no timeout is a lock held for ever
+
+`ConnectorClient._roundtrip` held a lock so one question was in flight at a time
+— replies carry no request id, so they are matched by order — and then awaited
+the answer with no bound at all. Every question an app would ever ask sat behind
+whichever one did not come back. A directory lookup on a mesh with one slow peer
+is exactly that question.
+
+Three layers had to agree, and they did not: the node bounded nothing, the
+connector bounded nothing, and the chat bridge gave up at ten seconds and
+swallowed the `TimeoutError`. So a search that was merely slow reached the user
+as a search that found nothing.
+
+> **A bound at one layer is not a bound.** When a call crosses a thread bridge, a
+> socket and an event loop, each hop needs its own ceiling *and* the outer ones
+> have to be larger than the inner ones — otherwise the caller gives up on an
+> answer that was about to arrive, and the work carries on with nobody waiting
+> for it.
+
 ## A socket the process opened for itself is not a user
 
 MLO only runs while somebody is using the node, and the data connector answered
@@ -814,6 +898,25 @@ Flip the byte (`^ 0xFF`) instead of assigning a constant.
 > fixed value is a no-op exactly as often as that value comes up, and the
 > failure it produces accuses the code under test.
 
+## Two tests, one port, one worker apart
+
+The integration suite runs under `-n auto`, so two tests in the *same file* are
+routinely alive at once on different workers. Two of them binding one loopback
+port is a race, and the loser does not fail on what it was testing: it fails
+fifteen seconds later inside `wait_for_session`, which reads as "the mesh is
+flaky" rather than as "somebody reused a number".
+
+It hides, too. Locally the pair may never overlap and the suite is green for
+weeks; on a busier runner it overlaps, and the failure lands on whatever change
+happened to be in flight. Three tests in `test_chat.py` and three in
+`test_pseudo_dir.py` had been sharing 19170-19172 that way for a while.
+
+> **A convention nobody can check is a convention that has already been
+> broken.** `tests/test_integration_ports.py` maps every literal
+> `127.0.0.1:<port>` to the test function that encloses it and refuses a port
+> claimed twice — and it lives in the **fast** suite, because a guard you only
+> run alongside the thing it guards is one CI tells you about.
+
 ## Tests: parallelism & not blocking
 
 The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
@@ -968,9 +1071,34 @@ before and after.
   `auto` now wakes the loop (after a short settle, so one peer catching us up
   costs one pass), and the first pass runs 20 s after start. The sweep stays as
   the net under a missed wake-up.
-- **A test that patches `_RELEASE_TICK` must patch `_RELEASE_FIRST_TICK` and
+- **A test that shortens the sweep must shorten `_RELEASE_FIRST_TICK` and
   `_RELEASE_SETTLE` too**, or it waits 20 s for the first pass and fails on the
-  timeout net rather than on what it was testing.
+  timeout net rather than on what it was testing. The sweep itself is no longer
+  a module constant: it comes from `update_check_minutes` through
+  `MeshNode._release_sweep_delay`, so a test overrides that method.
+- **The environment variable that says "something will restart me" has to be in
+  *every* unit.** `install.sh` wrote `NMESH_SERVICE_MANAGED=1` into the systemd
+  unit, the OpenRC script and the launchd plist — and not into the runit `run`
+  script it writes for Termux. `runsv` would have restarted the node perfectly
+  well; the node could not tell, so it applied the update and refused to leave.
+  There was a test per unit and none for that one. Android is where this hurt
+  most and where it was least likely to be noticed, because the answer looked
+  like "phones are awkward".
+- **"A process cannot restart itself" is not true.** It cannot *exit* and come
+  back, which is a different sentence, and the code had generalised the wrong
+  one into a refusal. `os.execv` replaces the process image in place — same pid,
+  same terminal, fresh interpreter reading the tree that was just written — and
+  every descriptor Python opens is close-on-exec (PEP 446), so the listening
+  sockets are gone before the new image binds them. A supervisor is still
+  preferred when there is one (the whole image goes, C library state included);
+  re-exec is what makes an update land on a machine with no init a package can
+  reach.
+- **Publishing must not spend a Kademlia lookup.** Filing a release in the
+  package directory needs its descriptor on the DHT, and `dht_put` is a lookup —
+  which is exactly the cost `publish_release` was written to avoid, and a test
+  pins it at zero. The descriptor is kept locally when it is signed, and the
+  directory sweep replicates it: work that needs the network belongs on the loop
+  that already runs on the network's timing, not on a button somebody pressed.
 
 ## Miscellaneous
 

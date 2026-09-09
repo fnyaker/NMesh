@@ -5,10 +5,19 @@ has it, and hands it over to whoever asks. A node that received it keeps it and
 becomes somewhere else to ask. If the operator pinned that publisher's key, the
 release can be installed — optionally on its own.
 
+Finding one is a **question**, not a list: you type part of a name, or you open
+a node's details and see what that machine offers. What comes back is a signed
+record carrying its publisher's key — so pinning is a confirmation of something
+that arrived with the thing it signed, rather than a hex string copied from a
+channel nobody could vouch for.
+
 Code: [`src/core_release.py`](../../src/core_release.py) (the format, the pins,
-the catalogue), the release section of [`src/node.py`](../../src/node.py)
-(publishing, gossip, installing), [`src/updater.py`](../../src/updater.py) (the
-tree swap, shared with the GitHub path).
+the catalogue), [`src/pkg_dir.py`](../../src/pkg_dir.py) (the directory: signed
+records, the keys they are filed under, the source digest),
+[`src/subscriptions.py`](../../src/subscriptions.py) (what this node watches),
+the release and package sections of [`src/node.py`](../../src/node.py)
+(publishing, gossip, lookup, installing), [`src/updater.py`](../../src/updater.py)
+(the tree swap, shared with the GitHub path).
 
 ## Why
 
@@ -110,15 +119,56 @@ ship them code.**
 The publisher keeps the package (`<data>/packages/`) so it has something to
 hand over. Everything else happens on demand.
 
+Publishing also **files a record in the package directory**: a small signed
+pointer at the descriptor, filed under this key's publisher id and under the
+name's prefixes. That is what makes the release findable by somebody who has
+never heard of the key. It costs no lookup at publish time either — the record
+is signed and the descriptor kept locally; the directory sweep is what
+replicates both, which is where work that needs the network belongs.
+
+## Finding a package
+
+Console → **Settings → Updates → From the mesh**, or **Apps → Find an app**, or
+any node's details page. Three entry points, one view
+([`src/webassets/packages.py`](../../src/webassets/packages.py)), and one shape
+of answer.
+
+Typing searches what this node already holds — instant and free, so a field can
+answer as somebody types. **Ask the network** spends one bounded round of
+directory queries, which is why it is a button. A node's details page asks the
+other half of the question: *does this machine publish a version, or does it
+simply say which one it runs?*
+
+Opening a record shows a page of its own (`/package#<id>`):
+
+- **what it is and whose it is** — name, version, publisher, and whether this is
+  a publication or a recommendation;
+- **what it says about itself** — the few signed lines the publisher wrote. It is
+  the only description anybody has before fetching, so it is shown before any
+  button;
+- **what agrees with it** — how many publishers have signed a package carrying
+  the same *code*, documentation excluded;
+- **what you can do** — download it to open by hand, install it, watch it. In
+  that order, because reading before running is the whole argument for offering
+  a download at all.
+
 ## Pinning a publisher
 
-Console → **Settings → Updates → Publishers you accept**. Paste the key, name
-it, and decide separately whether their releases install automatically — that
-box is ticked by default, because a pinned publisher whose releases nobody ever
-installs is a fleet that quietly stops being updated.
+From the package that key signed: one press and a confirmation naming the id
+that will be pinned. The key came inside the record and was checked against the
+signature it made, so there is nothing to copy across and nothing to get wrong —
+which was the point of removing the paste-a-hex-key form. Whether their releases
+install automatically is a separate tick in the same dialog, and it starts
+unticked: trusting a publisher and handing them a scheduled restart are two
+decisions.
 
-Pinning is the only way a key enters that list — no packet, no peer, no app can
-add one. The file (`<data>/publishers.json`, mode 0600) holds public keys and
+A **recommendation** cannot be pinned. It names somebody else's bytes, and
+pinning the machine that agreed with a release would hand this node to whoever
+agreed — which is not what agreeing means. The console says so and points at the
+publisher it references.
+
+Pinning is still the only way a key enters that list — no packet, no peer, no app
+can add one. The file (`<data>/publishers.json`, mode 0600) holds public keys and
 two booleans; a corrupt or doctored file yields **no** trusted publisher rather
 than a guess. An entry whose id does not follow from its key is dropped, so a
 tampered file cannot slip a publisher in under a familiar id.
@@ -272,6 +322,158 @@ attacker present *while you publish*; at that moment the key is in memory by
 necessity, and an operator who needs that property needs a machine that is not
 the node.
 
+## The package directory
+
+`src/pkg_dir.py`. Same shape as the pseudo directory and deliberately so: a
+**self-authenticating record**, safe to accept from a stranger, cache and
+re-serve, worth no authority at all.
+
+```
+record = version ‖ kind ‖ flags ‖ ts ‖ pubkey ‖ name ‖ pkg_version
+         ‖ notes ‖ ref ‖ src ‖ ML-DSA signature
+signed over  "nmesh-package-dir-v1" ‖ publisher_id ‖ kind ‖ flags ‖ ts
+             ‖ name ‖ pkg_version ‖ notes ‖ ref ‖ src
+```
+
+| Field | What it is |
+|---|---|
+| `kind` | `core` (the node's own code) or `app` (a third-party application) |
+| `flags` | `FLAG_RECOMMEND`: the signer is not the author — "this is the release id I run" |
+| `name` | the displayed name, in the same canonical form a pseudo takes |
+| `notes` | the few lines shown before anything is fetched, ≤ `MAX_NOTES` |
+| `ref` | the **DHT content key** of the signed descriptor this points at |
+| `src` | a digest over the package's code with its documentation left out |
+
+Three properties, and together they are the security argument:
+
+- **the publisher id is derived from the pubkey inside the record**, and the
+  signature is checked under that same key — a record can only ever say what its
+  own author publishes. Nobody can file a package against somebody else's
+  identity, which is what makes a directory of strangers usable at all;
+- **the keys are derived, never declared.** A reader recomputes them from the
+  name inside the signed record, so a publisher cannot file itself under a name
+  it did not sign;
+- **`ts` only moves forward** per (publisher, kind, name), so a relay replaying
+  an old record cannot walk anybody back to a stale version.
+
+A publisher id is `sha256(pubkey)[:20]`, built exactly like a node id — so a node
+signing with its own identity publishes **under its own id**, which is what lets
+a details page ask "what does this machine offer?" with nothing but the id
+already on the screen. A node that signs with a separate publisher key
+(`publisher_key.py`) is reached through a **pairing**, below: the record names
+the key, because that is what the signature proves.
+
+### Pairing a detached key with the machine that uses it
+
+A publisher key is deliberately not a node identity: it decides what everybody
+pinning it will run, it is used a few times a year, and it has no business
+sharing the key a node keeps unlocked to sign handshakes. But a record can only
+name its own signer, so nothing tied that key to the machine, and an operator
+looking at a node could not get from it to the code it publishes.
+
+A pairing closes that, and it takes **two halves**, because one would be
+hearsay:
+
+```
+node N signs   "P publishes for me"   → filed under N's key
+key  P signs   "N is my node"         → filed under P's key
+```
+
+Each half can only name its own author as the signer, exactly like every other
+record here. A reader follows the link only when it holds **both and each names
+the other** — `PairingBook.confirmed`. With one half alone, a node could put a
+stranger's packages on its own page; that grants no privilege (the package still
+shows its real publisher, and pinning still pins *that* publisher) but it is one
+node's word about another, believed, which is the shape the charter forbids.
+
+Both halves are signed at publish time: the publisher's while its key is open —
+the only moment it is — and the node's because it costs nothing. They travel on
+the same directory plane as package records, filed under the same keys, and a
+reader tries both gates on each blob.
+
+A key may be paired with several machines (one publisher key across a fleet),
+bounded by `_MAX_PAIRINGS_PER_KEY`; the newest half per (signer, counterpart)
+wins, so a replayed old one cannot undo a party's newer word.
+
+### Two keys, two questions
+
+```
+sha256(domain : "pub:"  ‖ publisher_id)[:20]     what does this key offer?
+sha256(domain : "name:" ‖ term)[:20]             who offers something called this?
+```
+
+`term` runs over the whole folded name and each word's prefixes
+(`pseudo.key_terms`, shared with the pseudo directory because a name is a name).
+So typing three letters lands on a key the package was already filed under.
+
+### The source digest — "am I looking at the official version?"
+
+`pkg_dir.source_digest` hashes the package's files **excluding its
+documentation**: `README*`, `Docs/`, `CHANGELOG`, `LICENSE`, `CLAUDE.md` and the
+like. Nothing in that set is executed by anything, which is the whole test for
+what may be excluded — a file that runs must change the digest, or "these
+parties agree on the code" would be a sentence about nothing.
+
+Two publishers who build the same source with different release notes therefore
+ship different bytes and carry the same `src`. The digest travels in the record,
+so the question is answerable **before anything is downloaded**.
+
+It never replaces the content hash. What gets installed is still verified byte
+for byte against the descriptor the operator chose; `src` only decides whether
+enough independent parties agree on the code.
+
+## Watching a package
+
+Turn on **Watch for new versions** on a package's page. A subscription names one
+publisher's offering of one package
+([`src/subscriptions.py`](../../src/subscriptions.py), `<data>/subscriptions.json`,
+mode 0600), and carries two things:
+
+- **Install them without asking** — this subscription may install on its own,
+  subject to every gate below;
+- **Publishers that must agree** — the quorum. Watch several publishers of the
+  same package and ask for two, and an automatic install waits until two of the
+  ones *you watch* have signed the same `src`. Ask for one, which is the default,
+  and it installs whatever that publisher offers.
+
+Counted over publishers this operator chose, never over everybody who signed
+something: a signature from somebody nobody subscribed to is a party an attacker
+can mint. Same argument as the endorsed quorum next door, applied to a set the
+operator built one package at a time.
+
+A quorum only ever **withholds**. It cannot authorise an install the publisher
+pins would refuse — a core release still needs its publisher pinned, still has
+to be strictly newer, and still has to verify byte for byte.
+
+The sweep also asks the directory what each subscribed publisher offers now
+(`_subscription_pass`), which is the half an announcement cannot cover: a
+publisher whose announce never reached us, or one we met long after it
+published.
+
+## When this node goes looking
+
+Three settings in `nmesh.conf`, all editable from **Settings → Configuration**:
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `update_check_minutes` | 5 | minutes between sweeps; **0 = never go looking** |
+| `update_when_active` | off | only sweep while somebody is using this node (a console, an app, a call) |
+| `recommend_version` | off | publish which release id this node runs, so nodes watching it can see the version it settled on |
+
+An announcement still wakes the node whatever these say. What they control is
+the node going to look **on its own**, which on a phone is where the battery
+goes: an hourly sweep that skips while the screen is off is a different machine
+from one checking every five minutes in a pocket.
+
+`recommend_version` publishes a record with `FLAG_RECOMMEND`: it points at the
+release id this node runs and carries the **source digest of the tree actually
+running here**. That is a second party saying "this code is what I am
+executing" — the one thing in a supply chain an attacker cannot obtain by
+minting identities. It publishes no code and authorises nothing; whoever reads
+it decides what their own subscriptions make of it. Computed once per version,
+because reading and hashing the tree is not free and the answer cannot change
+while the version does not.
+
 ## What the mesh offers
 
 `RELEASE_ANNOUNCE` (0x1E) carries a descriptor between **direct authenticated**
@@ -359,32 +561,45 @@ directory are never touched.
 ### Installing, then restarting
 
 Replacing the tree changes nothing in a process that is already running: the
-code is loaded, and an update only takes effect when the node starts again. So
-the node **leaves, and lets the service manager bring it back** — the same route
-a crash would take, which is why it only does that when something is watching:
+code is loaded. So the node has to come back, and there are **two ways** it can
+(`updater.restart_plan`):
 
-| | Restarts itself | Why |
+| Route | When | What happens |
 |---|---|---|
-| you press **Install** (mesh or GitHub) | yes, if `NMESH_SERVICE_MANAGED` | you asked, you are watching, and `.nmesh-previous` is there if it goes wrong |
-| you press Install with no service manager | no | exiting with nothing to bring it back is worse than running yesterday's code — the console says so and waits for you |
-| an **automatic** install | yes, if `NMESH_SERVICE_MANAGED` | a tree written and never started is an update that did not happen — and on an unattended machine, "something will restart it eventually" means never |
-| an automatic install with no service manager | no | same reason as above; the node says "restart this node to run it" in its release log |
+| **the supervisor** | `NMESH_SERVICE_MANAGED=1` | the node stops properly and exits; systemd / runit / launchd starts it again. Preferred whenever it is available: the whole process image goes, along with any file descriptor, thread or C library state an update may have invalidated |
+| **re-exec** | otherwise | `os.execv` replaces this process with a fresh interpreter on the same command line, keeping the pid, the session and the terminal. Not an exit: nothing outside has to cooperate |
+| nothing | no interpreter to run, or the script the node was started from is gone | the node stays up and the console says why — leaving with nothing to catch it is worse than running yesterday's code |
 
-The restart answers the operator first, then stops the node properly (bounded,
-so a peer refusing to close cannot keep the old code running for ever) and
-exits. `install.sh` writes `Restart=always` into the systemd unit and `KeepAlive`
-into the launchd plist, and sets `NMESH_SERVICE_MANAGED=1` in both — that
-variable is the node's only way of knowing anything will catch it.
+**Re-exec is what Android needed.** Termux has no init a package can reach.
+Without `termux-services` a phone installed an update and then sat on it until
+somebody reopened the app and typed the command again — the update was applied
+and the old code kept running, which is the failure mode hardest to notice. Every
+descriptor Python opens is close-on-exec (PEP 446), so the listening sockets are
+gone by the time the new image binds them; the node is stopped first anyway,
+because a peer deserves a closed link rather than a reset one.
+
+`install.sh` writes `Restart=always` into the systemd unit, `KeepAlive` into the
+launchd plist, and `NMESH_SERVICE_MANAGED=1` into **every** unit it writes — the
+runit service under Termux included, which is where it was missing: `runsv`
+restarts the script whenever it exits, but the node could not tell, so it refused
+to leave.
 
 ### Automatic installs
 
-Per publisher. The console's **Pin publisher** form ticks *"Install their
-releases automatically"* by default, and a machine provisioned from *Fleet →
-Discover & deploy* is handed its operator's publishers with that flag on
-([`../Apps/fleet`](../Apps/fleet)) — a headless box has nobody to paste a
-publisher key into a console, so if it is not told at install time it accepts
-nothing, for ever. Pinning and auto-installing stay two separate decisions; the
-default answer to the second one is now yes.
+Three routes in, and they answer different questions:
+
+- **a pinned key marked `auto`** — one key an operator handed a scheduled
+  restart. Fast, and exactly as strong as that one key;
+- **a quorum of endorsed publishers** over the same `(version, sha256)` — for
+  code from parties none of whom you would hand the machine to alone;
+- **a subscription marked "install without asking"**, once enough watched
+  publishers agree on the same `src`. The same idea as the quorum, over a set
+  the operator built one package at a time rather than one key at a time.
+
+A machine provisioned from *Fleet → Discover & deploy* is handed its operator's
+publishers with `auto` on ([`../Apps/fleet`](../Apps/fleet)) — a headless box has
+nobody to sit at a console, so if it is not told at install time it accepts
+nothing, for ever. Pinning and auto-installing stay two separate decisions.
 
 A pass installs at most one release and remembers the release ids it has already
 tried, so a failing one is not retried in a loop. Failures are recorded (visible
@@ -399,7 +614,7 @@ and then wait for a restart that never came. Now:
 |---|---|
 | a release **arrives** from a publisher marked `auto` | the announce wakes the pass (`_RELEASE_SETTLE`, 3 s, so a peer catching us up with a burst costs one pass, not one per release) |
 | the first pass after start | `_RELEASE_FIRST_TICK`, 20 s — enough to have peers, soon enough that a node rebooting into an update does not sit on the old version |
-| the sweep | every `_RELEASE_TICK` (300 s), which covers a release we already held and any wake-up that went missing |
+| the sweep | every `update_check_minutes` (5 by default, 0 = never), which covers a release we already held, a subscribed publisher that never announced at us, and any wake-up that went missing. `update_when_active` holds the sweep back while nobody is using the node — never the wake-up |
 
 An announce from a publisher that is **not** pinned for automatic installation
 wakes nothing: arrival must not be a lever a stranger can pull.
@@ -433,18 +648,24 @@ count is what bounds it.
 
 | Method | Route | Role |
 |---|---|---|
-| GET | `/api/releases` | what the mesh offers, who is pinned, this node's own publisher key, and whether this install can update itself |
-| POST | `/api/releases/publish` | `{notes}` → sign the installed tree and announce it |
+| GET | `/api/releases` | what the mesh offers, who is pinned, what this node watches, when it looks, its own publisher key, and whether this install can update itself |
+| POST | `/api/releases/publish` | `{notes}` → sign the installed tree, announce it, file it in the directory |
 | POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
-| POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher |
+| POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher by key |
 | POST | `/api/releases/untrust` | `{publisher_id}` |
 | POST | `/api/releases/auto` | `{publisher_id, auto}` — hand this one key a scheduled restart |
 | POST | `/api/releases/endorse` | `{publisher_id, endorsed}` — let its signature count towards `release_quorum` |
+| GET | `/api/packages?q=…[&wide=1]` | ask the directory for a name — `wide` also asks the network |
+| GET | `/api/packages?node=<id>[&wide=1]` | what that node publishes or recommends |
+| GET | `/api/packages/<id>[?fetch=1]` | one record; `fetch` also pulls the descriptor it points at |
+| GET | `/api/packages/<id>/download` | the verified package, as an opaque `tar.gz` |
+| POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
+| POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key **inside** that record |
+| POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it, or stop |
 
 Every route sits behind the console session, and every decision is made in the
-node: each release row arrives with its own `state` (`available` / `running` /
-`older` / `untrusted`) and the `action` to POST, so the page never re-derives a
-rule that lives in Python.
+node: each row arrives with its `trusted`, `attesters`, `agreeing` and
+`subscription`, so the page never re-derives a rule that lives in Python.
 
 ## Bounds
 
@@ -467,6 +688,20 @@ rule that lives in Python.
 | `_RELEASE_SETTLE` | 3 s | a burst of announces becomes one pass |
 | `MAX_AUTO_ATTEMPTS` | 2 | automatic installs of a release that never takes |
 | `MAX_AUTO_JOURNAL` | 8 | releases the restart guard remembers attempting |
+| `pkg_dir._MAX_ENTRIES` | 512 | package records this node remembers at all |
+| `pkg_dir._MAX_BOOK_BYTES` | 4 MB | …and their byte budget: a record carries an ML-DSA key and signature |
+| `pkg_dir._MAX_PER_KEY` | 8 | records per directory key — a `PKG_FOUND` reply must fit one packet |
+| `pkg_dir.MAX_NOTES` | 600 | the description shown before anything is fetched |
+| `pkg_dir._MAX_PAIRINGS` | 256 | pairing halves this node remembers |
+| `pkg_dir._MAX_PAIRING_BYTES` | 2 MB | …and their byte budget |
+| `pkg_dir._MAX_PAIRINGS_PER_KEY` | 4 | machines one publisher key may be paired with |
+| `_PKG_RATE_MAX` | 64 / 10 s | package records one link may push at us |
+| `_PKG_OWN_MAX` | 32 | records this node signs and keeps re-filing |
+| `MAX_SUBSCRIPTIONS` | 64 | packages this node watches |
+| `MAX_QUORUM` | 8 | publishers a subscription may require to agree |
+| `_DIR_PUBLISH_MAX` | 24 | nodes one directory publish may reach across every key |
+| `_DIR_REPUBLISH` | 900 s | between directory sweeps |
+| `_DIR_LOOKUP_BUDGET` | 6 s | one directory lookup, whole round; it returns what it has |
 
 ## What this does not solve
 
@@ -508,4 +743,20 @@ rule that lives in Python.
   that a publisher signed two programs as one version: what verifies, and the
   much longer list of near-misses that must not (a rebuild, a fork, one record
   shown twice, a half signed by somebody else, a forged descriptor).
+- [`tests/test_pkg_dir.py`](../../tests/test_pkg_dir.py) — the directory record:
+  a key that cannot claim somebody else's record, an unknown flag, keys derived
+  from the name rather than declared, the source digest that ignores
+  documentation and nothing else, and the bounded book. Plus the pairing: both
+  halves confirm, **one half confirms nothing**, a half is filed under its own
+  signer, a key cannot pair with itself, and an old half cannot undo a new one.
+- [`tests/integration/test_pkg_dir.py`](../../tests/integration/test_pkg_dir.py)
+  — the same across a real mesh: found by three letters, found by node id, the
+  key pinned from the record that carries it, the package downloaded whole, an
+  app taking exactly the same path, a release signed with a **detached
+  publisher key** reached through the pairing (and the one-half case that is
+  not followed), and the refusals (a recommendation cannot be pinned; finding a
+  release does not make it installable).
+- [`tests/test_subscriptions.py`](../../tests/test_subscriptions.py) — what this
+  node watches: a corrupt file yields nothing, a quorum is clamped, and only
+  watched publishers count.
 - [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes.

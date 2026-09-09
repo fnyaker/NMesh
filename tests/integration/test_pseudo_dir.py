@@ -1,10 +1,11 @@
 """
 Integration: names across a real mesh, over real TCP with real ML-DSA.
 
-Two planes are exercised. Gossip (``PSEUDO_ANNOUNCE``) is what makes a *partial*
-search work at all: it fills every node's book, and a search is then answered
-locally. The keyed directory (``DIR_STORE`` / ``DIR_FIND`` / ``DIR_FOUND``)
-covers the rest — an exact name whose owner sits beyond the gossip horizon.
+Two planes are exercised. Gossip (``PSEUDO_ANNOUNCE``) fills every node's book,
+and a search is then answered locally, instantly. The keyed directory
+(``DIR_STORE`` / ``DIR_FIND`` / ``DIR_FOUND``) covers the rest — a name whose
+owner sits beyond the gossip horizon, found whole **or partial**, because a
+claim is filed under each of its prefixes as well as under itself.
 
 Excluded from the default suite (see pyproject addopts).
 """
@@ -115,6 +116,36 @@ class TestDirectory:
             assert any(r["id"] == guest.id.raw.hex() for r in res)
             # Having looked it up, the host holds the claim → re-serves it.
             assert host._pseudo_book.get(dir_key("alice"))
+        finally:
+            await guest.stop()
+            await host.stop()
+
+    async def test_a_partial_name_resolves_from_the_directory(self):
+        """The complaint this exists for: "ask the network" only ever answered
+        an exact name, because a key is a hash and half a name does not hash to
+        the same thing. A claim is now filed under its prefixes too."""
+        host, guest = await _pair("127.0.0.1:19177", None, "Alice Ada")
+        try:
+            await guest.publish_pseudo()
+            # The host must not be answering from gossip: forget what it heard.
+            host._pseudo_book.forget(guest.id.raw)
+            for query in ("ali", "ada", "alice ada"):
+                res = await asyncio.wait_for(host.lookup_pseudo(query),
+                                             timeout=30.0)
+                assert any(r["id"] == guest.id.raw.hex() for r in res), query
+                host._pseudo_book.forget(guest.id.raw)
+        finally:
+            await guest.stop()
+            await host.stop()
+
+    async def test_a_node_files_its_own_name_without_being_asked(self):
+        """`publish_pseudo` existed and only the test suite ever called it, so
+        the directory was empty on every real node."""
+        host, guest = await _pair("127.0.0.1:19178", None, "Bella Beth")
+        try:
+            guest._wake_directory_publish()
+            assert await _until(
+                lambda: bool(host._pseudo_book.get(dir_key("bel"))), timeout=30.0)
         finally:
             await guest.stop()
             await host.stop()

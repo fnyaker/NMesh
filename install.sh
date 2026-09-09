@@ -404,6 +404,11 @@ cd "$dir" || exit 1
 export HOME="$dir"
 export OQS_INSTALL_PATH="$dir/_oqs"
 export NMESH_DATA="$data"
+# runsv restarts this script whenever it exits, which is exactly what the node
+# needs after installing an update. Without this the node cannot tell, refuses
+# to leave, and a phone is left running yesterday's code until somebody reopens
+# Termux by hand — the one thing this service exists to avoid.
+export NMESH_SERVICE_MANAGED=1
 exec ./start.sh $args
 EOF
 }

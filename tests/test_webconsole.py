@@ -14,12 +14,14 @@ import http.client
 import json
 import os
 import ssl
+import sys
 import tempfile
 import threading
 import time
 
 import pytest
 
+from src import updater
 from src.node import MeshNode
 from src.node_id import NodeID
 from src.webconsole import (WebConsole, _Changes, _LOGIN_MAX_FAILURES,
@@ -1661,7 +1663,7 @@ class TestRestartingOnDemand:
             monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
-                                lambda self: left.append(True))
+                                lambda self, mode: left.append(mode))
             _, token = await _login(console)
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/restart", token, {})
@@ -1671,19 +1673,20 @@ class TestRestartingOnDemand:
         finally:
             console.stop(); await node.stop()
 
-    async def test_it_refuses_and_says_why_with_nothing_watching(self, monkeypatch):
+    async def test_it_refuses_and_says_why_with_no_way_back(self, monkeypatch):
         node, console = await _make_console()
         try:
-            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            monkeypatch.setattr(updater, "restart_plan",
+                                lambda: ("", (), "no interpreter to start again"))
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
-                                lambda self: left.append(True))
+                                lambda self, mode: left.append(mode))
             _, token = await _login(console)
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/restart", token, {"confirm": True})
             assert status == 409
             assert body["restarting"] is False
-            assert "service manager" in body["error"]
+            assert "no interpreter to start again" in body["error"]
             await asyncio.sleep(0.05)
             assert left == []
         finally:
@@ -1695,7 +1698,7 @@ class TestRestartingOnDemand:
             monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
-                                lambda self: left.append(True))
+                                lambda self, mode: left.append(mode))
             _, token = await _login(console)
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/restart", token, {"confirm": True})
@@ -1704,7 +1707,7 @@ class TestRestartingOnDemand:
                 if left:
                     break
                 await asyncio.sleep(0.01)
-            assert left == [True]
+            assert left == [updater.RESTART_SERVICE]
         finally:
             console.stop(); await node.stop()
 
@@ -1717,11 +1720,13 @@ class TestRestartingOnDemand:
             monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
             _, _, _, body = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)
-            assert body["service_managed"] is True
-            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            assert body["can_restart"] is True
+            monkeypatch.setattr(updater, "restart_plan",
+                                lambda: ("", (), "nothing to start again"))
             _, _, _, body = await asyncio.to_thread(
                 _request, console, "GET", "/api/state", token)
-            assert body["service_managed"] is False
+            assert body["can_restart"] is False
+            assert body["restart_blocked"] == "nothing to start again"
         finally:
             console.stop(); await node.stop()
 
@@ -1730,10 +1735,10 @@ class TestRestartingOntoNewCode:
     """Replacing the tree changes nothing in a running process: the update only
     takes effect when the node starts again.
 
-    So the node has to leave, and let the service manager bring it back. What
-    matters is that it leaves **only** when something is watching — exiting with
-    nothing to restart it is a worse outcome than running yesterday's code — and
-    that the console reports what actually happened rather than what it hoped."""
+    Two ways back — a supervisor that starts it again, or re-execing itself —
+    and the console reports which actually happened rather than what it hoped.
+    What matters is that it never leaves with *neither* available: exiting with
+    nothing to restart it is a worse outcome than running yesterday's code."""
 
     async def test_it_leaves_when_a_service_manager_will_bring_it_back(
             self, monkeypatch):
@@ -1742,24 +1747,52 @@ class TestRestartingOntoNewCode:
             monkeypatch.setenv("NMESH_SERVICE_MANAGED", "1")
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
-                                lambda self: left.append(True))
+                                lambda self, mode: left.append(mode))
             assert console.restart() is True
             # The worker runs in its own thread; give it a moment to be seen.
             for _ in range(50):
                 if left:
                     break
                 await asyncio.sleep(0.01)
-            assert left == [True]
+            assert left == [updater.RESTART_SERVICE]
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_it_re_execs_itself_when_nothing_supervises_it(
+            self, monkeypatch, tmp_path):
+        """Android has no init a package can reach. Without this a phone
+        installs an update and sits on it until somebody reopens Termux."""
+        node, console = await _make_console()
+        try:
+            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            # The launch is captured at import, so under a test runner it is the
+            # runner's. Say what this node was started from instead of asserting
+            # on how the suite happens to have been invoked.
+            monkeypatch.setattr(updater, "_LAUNCH",
+                                (sys.executable, ["scripts/nmesh_node.py"],
+                                 str(tmp_path)))
+            (tmp_path / "scripts").mkdir()
+            (tmp_path / "scripts" / "nmesh_node.py").write_text("")
+            left = []
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self, mode: left.append(mode))
+            assert console.restart() is True
+            for _ in range(50):
+                if left:
+                    break
+                await asyncio.sleep(0.01)
+            assert left == [updater.RESTART_REEXEC]
         finally:
             console.stop(); await node.stop()
 
     async def test_it_stays_up_when_nothing_would_restart_it(self, monkeypatch):
         node, console = await _make_console()
         try:
-            monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            monkeypatch.setattr(updater, "restart_plan",
+                                lambda: ("", (), "no way back"))
             left = []
             monkeypatch.setattr(type(console), "_restart_worker",
-                                lambda self: left.append(True))
+                                lambda self, mode: left.append(mode))
             assert console.restart() is False
             await asyncio.sleep(0.05)
             assert left == []
@@ -1947,6 +1980,158 @@ class TestPseudoEndpoints:
             assert all("pseudo" in peer for peer in body["peers"])
             assert all("pseudo" in row for row in body["routing"])
             assert all("pseudo" in row for row in body["topology"]["direct"])
+        finally:
+            console.stop(); await node.stop()
+
+
+class TestPackageEndpoints:
+    """Finding, reading, pinning, installing and watching a package.
+
+    The console owns none of the decisions here either — the node does — so
+    these check the door: a session is required, an id that is not an id is
+    refused, and the two acts that change what this machine runs (pin, install)
+    both need an explicit confirmation."""
+
+    def _tree(self, root):
+        os.makedirs(os.path.join(root, "src"), exist_ok=True)
+        with open(os.path.join(root, "src", "version.py"), "w") as handle:
+            handle.write('__version__ = "9.9.9"\n')
+        with open(os.path.join(root, "start.sh"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        return root
+
+    async def test_reading_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            for path in ("/api/packages?q=nmesh", "/api/packages/" + "a" * 40):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "GET", path, None)
+                assert status == 401, path
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_every_write_needs_a_session(self):
+        node, console = await _make_console()
+        try:
+            for path in ("/api/packages/install", "/api/packages/trust",
+                         "/api/packages/subscribe"):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", path, None, {})
+                assert status == 401, path
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_search_with_no_question_is_refused(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages", token)
+            assert status == 400
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_an_unknown_package_is_not_found(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages/" + "a" * 40, token)
+            assert status == 404
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_published_package_is_found_read_and_watched(self, tmp_path):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await node.publish_release(self._tree(str(tmp_path / "tree")),
+                                       notes="what changed")
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages?q=nme", token)
+            assert status == 200
+            found = body["results"]
+            assert [row["version"] for row in found] == ["9.9.9"]
+            assert found[0]["notes"] == "what changed"
+            record_id = found[0]["id"]
+
+            # …and by the id of the node that published it, which is what a
+            # details page has to hand.
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/packages?node=" + node.id.raw.hex(), token)
+            assert status == 200 and body["results"][0]["id"] == record_id
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages/" + record_id, token)
+            assert status == 200 and body["subscription"] is None
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/packages/subscribe", token,
+                {"id": record_id, "on": True, "auto": True, "quorum": 2})
+            assert status == 200 and body["subscription"]["quorum"] == 2
+
+            _, _, _, overview = await asyncio.to_thread(
+                _request, console, "GET", "/api/releases", token)
+            assert [row["id"] for row in overview["subscriptions"]] == [record_id]
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/packages/subscribe", token,
+                {"id": record_id, "on": False})
+            assert status == 200 and body["ok"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_pinning_and_installing_both_need_confirmation(self, tmp_path):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await node.publish_release(self._tree(str(tmp_path / "tree")))
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages?q=nmesh", token)
+            record_id = body["results"][0]["id"]
+            for path in ("/api/packages/trust", "/api/packages/install"):
+                status, _, _, _ = await asyncio.to_thread(
+                    _request, console, "POST", path, token, {"id": record_id})
+                assert status == 400, path
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_key_is_pinned_from_the_record_that_carries_it(self, tmp_path):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await node.publish_release(self._tree(str(tmp_path / "tree")))
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages?q=nmesh", token)
+            record_id = body["results"][0]["id"]
+
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "POST", "/api/packages/trust", token,
+                {"id": record_id, "confirm": True, "auto": False})
+            assert status == 200
+            assert body["publisher"]["key"] == node._identity.dsa_public_key.hex()
+            assert body["publisher"]["auto"] is False
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_package_downloads_as_an_opaque_archive(self, tmp_path):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            await node.publish_release(self._tree(str(tmp_path / "tree")))
+            _, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages?q=nmesh", token)
+            record_id = body["results"][0]["id"]
+            status, headers, raw, _ = await asyncio.to_thread(
+                _request, console, "GET",
+                "/api/packages/" + record_id + "/download", token)
+            assert status == 200
+            assert headers["content-type"] == "application/octet-stream"
+            assert headers["x-content-type-options"] == "nosniff"
+            from src import core_release as cr
+            assert cr.version_of(cr.open_package(raw)) == "9.9.9"
         finally:
             console.stop(); await node.stop()
 

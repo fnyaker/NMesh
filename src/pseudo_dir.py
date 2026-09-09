@@ -41,7 +41,7 @@ import time
 from collections import OrderedDict
 
 from .node_id import NodeID
-from .pseudo import MAX_PSEUDO, fold, is_canonical, rank_folded
+from .pseudo import MAX_PSEUDO, fold, is_canonical, key_terms, rank_folded
 
 _DOMAIN = b"nmesh-pseudo-v2"
 KEY_LEN = 20
@@ -66,14 +66,31 @@ class PseudoDirError(Exception):
     pass
 
 
-def dir_key(pseudo: str) -> bytes:
-    """The directory key a lookup can compute from the pseudo alone. Derived
-    from the *folded* pseudo, so ``José`` and ``jose`` land on the same key."""
+def _term_key(term: str) -> bytes:
     h = hashlib.sha256()
     h.update(_DOMAIN)
     h.update(b":")
-    h.update(fold(pseudo).encode("utf-8"))
+    h.update(term.encode("utf-8"))
     return h.digest()[:KEY_LEN]
+
+
+def dir_key(pseudo: str) -> bytes:
+    """The directory key a lookup can compute from the pseudo alone. Derived
+    from the *folded* pseudo, so ``José`` and ``jose`` land on the same key.
+
+    This is the **query** side: whatever was typed, folded, hashed once."""
+    return _term_key(fold(pseudo))
+
+
+def dir_keys(pseudo: str) -> list[bytes]:
+    """Every key a claim is filed under — the **publishing** side.
+
+    The whole folded name and each word's prefixes (:func:`src.pseudo.key_terms`),
+    so a lookup for ``ali`` lands on a key ``Alice Ada`` was stored under. A
+    reader derives these from the pseudo *inside the signed claim*, never from
+    anything the sender says, so nobody can file themselves under a name they
+    did not claim — the same argument that makes the exact key safe."""
+    return [_term_key(term) for term in key_terms(pseudo)]
 
 
 def _signing_input(node_id: bytes, pseudo: str, ts: int) -> bytes:
@@ -103,8 +120,9 @@ def build_claim(pseudo: str, pubkey: bytes, sign, ts: int | None = None) -> byte
 def parse_claim(data: bytes, verify) -> dict | None:
     """Parse and cryptographically verify a claim. ``verify(msg, sig, pubkey)``.
 
-    Returns ``{node_id, pubkey, pseudo, ts, key}`` (``node_id`` and ``key`` as
-    bytes), or ``None`` for anything malformed, oversized, non-canonical or
+    Returns ``{node_id, pubkey, pseudo, ts, key, keys}`` (``node_id`` and the
+    keys as bytes; ``keys`` is every term the claim is filed under, ``key`` the
+    exact one), or ``None`` for anything malformed, oversized, non-canonical or
     badly signed. Never raises on hostile input: this is the gate, and a gate
     that can throw is a gate that can be used to kill a receive loop."""
     if not isinstance(data, (bytes, bytearray)) or not (_HDR.size <= len(data) <= MAX_CLAIM):
@@ -136,7 +154,7 @@ def parse_claim(data: bytes, verify) -> dict | None:
     except Exception:
         return None
     return {"node_id": node_id, "pubkey": pubkey, "pseudo": pseudo, "ts": ts,
-            "key": dir_key(pseudo)}
+            "key": dir_key(pseudo), "keys": dir_keys(pseudo)}
 
 
 # Wire encoding of a claim list in a DIR_FOUND reply: length-prefixed claims,
@@ -175,7 +193,8 @@ class PseudoBook:
 
     Indexed twice from a single set of entries: by node id (to answer "what is
     this node called?" and to keep the newest claim per node), and by directory
-    key (to answer a ``DIR_FIND`` for an exact pseudo). Bounded in entries *and*
+    key — the exact name **and** each of its prefixes (:func:`dir_keys`), which
+    is what lets a ``DIR_FIND`` answer a partial name. Bounded in entries *and*
     in bytes, LRU on both."""
 
     def __init__(self, max_nodes: int = _MAX_NODES,
@@ -219,22 +238,23 @@ class PseudoBook:
         # every entry and `rank` folds both sides — NFC, casefold, NFD, filter,
         # NFC — so a console field searching as somebody types was ~2 000
         # Unicode normalisations a keystroke.
+        keys = claim.get("keys") or [claim["key"]]
         entry = {"ts": ts, "pseudo": claim["pseudo"], "key": claim["key"],
-                 "raw": raw, "folded": fold(claim["pseudo"])}
+                 "keys": list(keys), "raw": raw,
+                 "folded": fold(claim["pseudo"])}
         self._by_node[node_id] = entry
         self._by_node.move_to_end(node_id)
         self._bytes += len(raw)
-        bucket = self._by_key.setdefault(claim["key"], [])
-        bucket.append(node_id)
-        # Pop first, then forget. `forget` shrinks the bucket only through
-        # `_unindex`, which removes from `self._by_key[entry["key"]]` — the
-        # *entry's* key, not this list. The two are the same today because
-        # `offer` always unindexes before re-indexing, so the loop terminated;
-        # but a `while` whose progress depends on an invariant maintained three
-        # methods away, on the path that absorbs claims from strangers, is not
-        # a loop to leave standing.
-        while len(bucket) > self._max_per_key:
-            self.forget(bucket.pop(0))
+        for key in keys:
+            bucket = self._by_key.setdefault(key, [])
+            bucket.append(node_id)
+            # Only the *pointer* is dropped, never the claim. A bucket is a
+            # search term, and the hot ones are the short prefixes every second
+            # name shares: forgetting the entry (which is what this used to do)
+            # would let a busy `al` bucket evict a claim that is still the only
+            # answer to its own exact name. The claim's memory is bounded by
+            # `_enforce_bounds` below, which is where a byte budget belongs.
+            del bucket[:-self._max_per_key]
         self._enforce_bounds()
         # Whether it *survived* the bounds, not merely whether it was accepted:
         # a claim evicted on the way in is one we do not hold, and saying we
@@ -279,14 +299,18 @@ class PseudoBook:
 
     def _unindex(self, node_id: bytes, entry: dict) -> None:
         self._bytes -= len(entry["raw"])
-        bucket = self._by_key.get(entry["key"])
-        if bucket is not None:
+        for key in entry.get("keys") or [entry["key"]]:
+            bucket = self._by_key.get(key)
+            if bucket is None:
+                continue
+            # A pointer may already be gone: a full bucket drops its oldest
+            # rather than the whole claim, so the entry outlives the pointer.
             try:
                 bucket.remove(node_id)
             except ValueError:
                 pass
             if not bucket:
-                del self._by_key[entry["key"]]
+                del self._by_key[key]
 
     def _enforce_bounds(self) -> None:
         while self._by_node and (len(self._by_node) > self._max_nodes
@@ -298,7 +322,11 @@ class PseudoBook:
     # -- reading ----------------------------------------------------------
 
     def get(self, key: bytes) -> list[bytes]:
-        """Raw claims filed under a directory key (for a ``DIR_FIND`` reply)."""
+        """Raw claims filed under a directory key (for a ``DIR_FIND`` reply).
+
+        One key answers an exact name *and* the prefixes it was filed under, so
+        this is what makes ``ali`` find ``Alice Ada`` on a node that has never
+        met her — see :func:`dir_keys`."""
         out = []
         for node_id in self._by_key.get(key, []):
             entry = self._by_node.get(node_id)

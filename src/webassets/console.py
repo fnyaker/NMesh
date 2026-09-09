@@ -511,19 +511,19 @@ INDEX_HTML = """<!doctype html>
     <section id="panel-apps" class="content panel" role="tabpanel" data-panel="apps" hidden>
       <div class="page-head">
         <div class="grow"><p class="eyebrow">Software</p><h1>Apps</h1>
-          <p class="lede">Built-in applications on this node, and the signed catalog the mesh
-            shares. The catalog is browsed page by page — it is never loaded whole.</p></div>
+          <p class="lede">Built-in applications on this node, and how to find one on the mesh.
+            There is no catalogue to browse: you ask for a name and signed records come back.</p></div>
       </div>
       <nav class="subnav" role="tablist" aria-label="App views">
         <button role="tab" data-subtab="installed" aria-selected="true">Installed</button>
-        <button role="tab" data-subtab="store" aria-selected="false">App store</button>
+        <button role="tab" data-subtab="store" aria-selected="false">Find an app</button>
       </nav>
 
       <div data-sub="installed" class="stack">
         <div id="builtin-apps" class="cards"></div>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Local packages <span id="installed-count" class="badge"></span></h2>
-            <div class="sub">Fetched from the catalog and unpacked on this node</div></div>
+            <div class="sub">Fetched from the mesh and unpacked on this node</div></div>
             <label class="search"><span class="sr-only">Search installed apps</span>
               <input id="installed-search" type="search" placeholder="Search installed…"></label></div>
           <div class="card-body tight"><div class="table-wrap"><table>
@@ -535,14 +535,21 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="store" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>App store <span id="catalog-count" class="badge"></span></h2>
-            <div class="sub">Signed releases published to the mesh</div></div>
-            <label class="search"><span class="sr-only">Search catalog</span>
-              <input id="catalog-search" type="search" placeholder="Search name, version, id, author…"></label></div>
-          <div class="card-body tight"><div class="table-wrap"><table>
-            <thead><tr><th>App</th><th>Version</th><th>Id</th><th class="tight"></th></tr></thead>
-            <tbody id="catalog-list"></tbody></table></div>
-            <div id="catalog-pager" class="pager"></div></div>
+          <div class="card-head"><div class="grow"><h2>Find an app</h2>
+            <div class="sub">Type a name — the mesh answers, nothing is listed</div></div>
+            <button id="app-wide" title="Ask the network, not just what this node already holds">Ask the network</button></div>
+          <div class="card-body stack">
+            <p class="muted small">There is no store. A store is a list, and a list is a thing to
+              fill with whatever an attacker feels like publishing — keeping that clean is a
+              moderation problem nobody on a decentralised mesh is in a position to solve. So this
+              works the way finding a person by name does: you ask for something, and signed
+              records filed under that name come back. Each carries its author's key, checked
+              against the signature it made.</p>
+            <label class="field"><span>App name</span>
+              <input id="app-search" type="search" autocomplete="off" spellcheck="false"
+                     placeholder="sketchpad"></label>
+            <div id="app-results"></div>
+          </div>
         </article>
         <details class="card"><summary>Publish a signed release</summary>
           <div class="card-body">
@@ -550,8 +557,10 @@ INDEX_HTML = """<!doctype html>
               <label class="field"><span>Name</span><input id="store-name"></label>
               <label class="field"><span>Version</span><input id="store-version" value="1.0.0"></label>
             </div>
+            <label class="field"><span>What it is</span>
+              <textarea id="store-notes" rows="3" placeholder="a few lines — this is all anybody sees before they fetch it"></textarea></label>
             <label class="field"><span>Files</span><input id="store-files" type="file" multiple></label>
-            <div class="btn-row"><button id="store-publish-btn" class="primary">Publish to store</button></div>
+            <div class="btn-row"><button id="store-publish-btn" class="primary">Publish</button></div>
             <p id="store-status" class="msg"></p>
           </div>
         </details>
@@ -651,19 +660,56 @@ INDEX_HTML = """<!doctype html>
 
         <article class="card">
           <div class="card-head"><div class="grow"><h2>From the mesh</h2>
-            <div class="sub">Releases published by nodes, signed — no web host in the way</div></div></div>
+            <div class="sub">Find a package by name, or by the node that publishes it</div></div>
+            <button id="pkg-wide" title="Ask the network, not just what this node already holds">Ask the network</button></div>
           <div class="card-body stack">
             <p class="muted small">A node publishes its own code, signed with its identity, and
-              hands the package to whoever asks — publisher or any node that kept a copy. You
-              decide whose signature this node accepts: nothing arriving from the network can add
-              a publisher, and a release from anyone you have not pinned is shown but never
-              installed.</p>
+              hands the package to whoever asks — publisher or any node that kept a copy. Nothing
+              is listed anywhere: you ask for a name and the directory answers with signed records,
+              each carrying its publisher's key. Opening one shows what it says about itself, what
+              agrees with it, and the three things you can do — read it, install it, watch it.</p>
+            <label class="field"><span>Package name</span>
+              <input id="pkg-search" type="search" autocomplete="off" spellcheck="false"
+                     placeholder="nmesh"></label>
+            <div id="pkg-results"></div>
+            <p class="muted small">A node's own details page answers the other half of the
+              question: open any node and it says whether that machine publishes a version, or
+              simply says which one it runs.</p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>What you are watching</h2>
+            <div class="sub">Packages this node checks on, and what it may install alone</div></div></div>
+          <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Version</th><th>Publisher</th><th>Published</th><th></th></tr></thead>
-                <tbody id="release-rows"></tbody></table>
+              <table><thead><tr><th>Package</th><th>Publisher</th><th>Agreeing</th>
+                <th>Automatic</th><th></th></tr></thead>
+                <tbody id="watch-rows"></tbody></table>
             </div>
-            <p id="release-empty" class="empty" hidden>No node has announced a release yet.</p>
-            <p id="release-status" class="msg"></p>
+            <p id="watch-empty" class="empty" hidden>Nothing is being watched. Open a package and
+              turn on <em>Watch for new versions</em>.</p>
+            <p class="muted small">Watching several publishers of one package is the point:
+              <strong>Agreeing</strong> counts how many of the ones you watch have signed a package
+              carrying the same code, with its documentation left out of the comparison. Ask for
+              more than one and an automatic install waits until that many agree; ask for one and
+              it installs whatever that publisher offers.</p>
+            <p id="watch-status" class="msg"></p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>When this node looks</h2>
+            <div class="sub">How often it goes checking, and whether it bothers when idle</div></div></div>
+          <div class="card-body">
+            <div class="kv"><div>Sweep</div><div id="update-cadence">—</div></div>
+            <div class="kv"><div>While nobody is here</div><div id="update-idle">—</div></div>
+            <div class="kv"><div>Says which version it runs</div><div id="update-recommend">—</div></div>
+            <p class="muted small">An announcement always wakes the node, whatever these say: what
+              they control is the node going to look on its own, which on a phone is where the
+              battery goes. Change them under <strong>Configuration</strong>
+              (<code>update_check_minutes</code>, <code>update_when_active</code>,
+              <code>recommend_version</code>).</p>
           </div>
         </article>
 
@@ -678,7 +724,10 @@ INDEX_HTML = """<!doctype html>
                 <tbody id="publisher-rows"></tbody></table>
             </div>
             <p id="publisher-empty" class="empty" hidden>No publisher pinned — this node installs
-              nothing from the mesh.</p>
+              nothing from the mesh. Find a package above and pin the key that signed it.</p>
+            <p class="muted small">Keys are pinned from the package they signed, one press and a
+              confirmation: the key arrives inside the record and is checked against the signature
+              it made, so there is nothing to copy across from anywhere and nothing to get wrong.</p>
             <p class="muted small">The two columns are different statements.
               <strong>Install automatically</strong> hands that one key a scheduled restart: whoever
               holds it holds this machine. <strong>Counts towards a quorum</strong> is far weaker —
@@ -688,23 +737,6 @@ INDEX_HTML = """<!doctype html>
               configuration to say how many must agree; 0 turns that route off. Endorsing is done
               by hand, one key at a time, because that is what somebody minting two hundred
               publishers cannot get around.</p>
-            <div class="form-grid">
-              <label class="field"><span>Publisher key</span>
-                <input id="pin-key" placeholder="the public key they gave you" autocomplete="off">
-                <span class="hint">Get it from them over a channel you trust. Anyone who can change
-                  it can ship you code.</span></label>
-              <label class="field"><span>Name</span>
-                <input id="pin-name" placeholder="who this is" autocomplete="off"></label>
-            </div>
-            <label class="check"><input id="pin-auto" type="checkbox" checked>
-              <span>Install their releases automatically</span></label>
-            <p class="muted small">An automatic install takes effect the way any other does — the
-              node restarts onto the new code, if a service manager is there to bring it back.
-              A release that installs and never becomes the running version is retried once and
-              then abandoned, so that pair can never become a restart loop. Trusting a publisher
-              and letting them install while nobody is watching stay two separate decisions;
-              this box is the second one, and it starts ticked.</p>
-            <div class="btn-row"><button id="pin-add" class="primary">Pin publisher</button></div>
             <p id="pin-status" class="msg"></p>
           </div>
         </article>
@@ -1064,12 +1096,12 @@ CONSOLE_PAGE_CSS = """
 .app-tile h3{flex:1 1 auto;min-width:0}
 .app-tile p{font-size:var(--fs-sm);color:var(--text-muted);flex:1 1 auto}
 .app-tile .btn-row{margin-top:auto}
-/* A release row stays one line high: the notes are a hint, not the row. The
-   wrapper scrolls on a narrow screen rather than squeezing the version into a
+/* A watched row stays one line high: the version is a hint, not the row. The
+   wrapper scrolls on a narrow screen rather than squeezing the name into a
    column one character wide. */
-#release-rows td:first-child strong{white-space:nowrap}
-#release-rows .tiny{max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#release-rows code,#publisher-rows code{white-space:nowrap}
+#watch-rows td:first-child strong{white-space:nowrap}
+#watch-rows .tiny{max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#watch-rows code,#publisher-rows code{white-space:nowrap}
 """
 
 
@@ -1189,7 +1221,7 @@ async function tick(sample){
 // The node says when something structural moved; the page reads then. Every
 // event inside one frame is answered by one repaint (EVENTS.FRAME), so a burst
 // of forty link changes is one pass over the list rather than forty.
-EVENTS.on(["links", "nodes", "names", "reach"], () => tick(false));
+EVENTS.on(["links", "nodes", "names", "reach", "packages"], () => tick(false));
 
 function trackRates(state){
   let inbound = 0, outbound = 0;
@@ -1815,15 +1847,14 @@ $("self-node").addEventListener("click", () => STATE &&
   openNode(STATE.id, {id:STATE.id, connected:true, self:true, addresses:STATE.advertised || []}));
 
 // ---- paged lists -----------------------------------------------------------
-// One paging implementation for peers, packages and catalog: same controls,
+// One paging implementation for peers and installed packages: same controls,
 // same empty states, same failure text.
 const PAGES = {
   active:{scope:"active", query:"", limit:20, offset:0, total:0},
   known:{scope:"known", query:"", limit:20, offset:0, total:0},
-  catalog:{query:"", limit:20, offset:0, total:0},
   installed:{query:"", limit:20, offset:0, total:0},
 };
-const PAGE_URL = {catalog:"/api/store/catalog", installed:"/api/store/installed"};
+const PAGE_URL = {installed:"/api/store/installed"};
 async function fetchPage(kind){
   const page = PAGES[kind];
   const params = new URLSearchParams({q:page.query, limit:String(page.limit),
@@ -2820,7 +2851,9 @@ $("builtin-apps").addEventListener("click", async (event) => {
 });
 async function refreshApps(){
   if(ROUTER.section !== "apps") return;
-  await paintAppList(ROUTER.sub === "store" ? "catalog" : "installed");
+  // Only the installed set is a list here. Finding one is a question asked of
+  // the directory, and a question has no page to repaint.
+  if(ROUTER.sub !== "store") await paintAppList("installed");
 }
 async function paintAppList(kind){
   const body = $(kind + "-list");
@@ -2839,32 +2872,27 @@ async function paintAppList(kind){
         '<td class="mono" title="' + esc(app.app_id) + '">' + esc(shortId(app.app_id)) + "</td>" +
         '<td class="tight">' + cell + "</td></tr>";
     }).join("") : spanRow(4, emptyHTML(
-      PAGES[kind].query ? "Nothing matches that"
-        : kind === "installed" ? "No local package" : "The catalog is empty",
-      kind === "installed" ? "Install one from the App store tab."
-        : "Releases published by any node on this mesh appear here."));
+      PAGES[kind].query ? "Nothing matches that" : "No local package",
+      "Find one under Apps → Find an app, and install it from its page."));
     paintPager(kind, kind + "-pager", () => paintAppList(kind));
   }catch(_){
     body.innerHTML = spanRow(4, errorHTML("App list unavailable",
-      "The catalog could not be read just now."));
+      "The installed set could not be read just now."));
   }
 }
 $("installed-search").addEventListener("input", debounce(() => {
   PAGES.installed.query = $("installed-search").value.trim();
   PAGES.installed.offset = 0; paintAppList("installed");
 }));
-$("catalog-search").addEventListener("input", debounce(() => {
-  PAGES.catalog.query = $("catalog-search").value.trim();
-  PAGES.catalog.offset = 0; paintAppList("catalog");
-}));
-[$("catalog-list"), $("installed-list")].forEach((list) => list.addEventListener("click",
+mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"});
+[$("installed-list")].forEach((list) => list.addEventListener("click",
   async (event) => {
     const button = event.target.closest("[data-app-action]");
     if(!button) return;
     const action = button.dataset.appAction, appId = button.dataset.appId;
     if(action === "uninstall"){
       const agreed = await confirmAction({title:"Delete this app from this node?",
-        body:'<p class="muted small">The mesh catalog is not changed — it can be installed again.</p>',
+        body:'<p class="muted small">Nothing on the mesh changes — it can be found and installed again.</p>',
         confirmLabel:"Delete", danger:true});
       if(!agreed) return;
     }
@@ -2901,11 +2929,13 @@ $("store-publish-btn").addEventListener("click", (event) => withBusy(event.targe
   setMessage("store-status", "Reading and signing files…");
   try{
     const {ok, data} = await apiJson("/api/store/publish", "POST",
-      {name, version, files:await selectedFiles(input)});
-    setMessage("store-status", ok ? "Release published to the mesh." : (data.error || "Publish failed"), !ok);
+      {name, version, notes:$("store-notes").value,
+       files:await selectedFiles(input)});
+    setMessage("store-status", ok
+      ? "Published and filed under its name — anybody can now find it by typing it."
+      : (data.error || "Publish failed"), !ok);
     if(ok){ input.value = ""; toast("Published " + name + " " + version); }
   }catch(_){ setMessage("store-status", "Publish failed", true); }
-  finally{ await paintAppList("catalog"); }
 }));
 
 // ---- updates ---------------------------------------------------------------
@@ -2977,45 +3007,27 @@ async function applyUpdate(event){
 $("update-check").addEventListener("click", checkForUpdates);
 $("update-apply").addEventListener("click", applyUpdate);
 
-// ---- releases from the mesh ------------------------------------------------
-// The node decides everything worth deciding — whose signature it accepts,
-// which version is newer, whether this install can be updated at all. Each row
-// arrives with its own state and the verb to POST, so nothing here re-derives
-// a rule that lives in Python.
-function releaseRowHTML(entry){
-  const words = {available:"", running:"running now", older:"older than what you run",
-                 untrusted:"publisher not pinned"};
-  const action = entry.action === "install"
-    ? '<button class="sm primary" data-install="' + esc(entry.publisher_id) + '">Install</button>'
-    : '<span class="muted small">' + esc(words[entry.state] || entry.state) + "</span>";
-  // The size belongs with the version: it is how much this release costs to
-  // fetch, not a fact about the publisher.
-  const aside = [entry.size ? fmtBytes(entry.size) : "",
-                 entry.notes ? esc(entry.notes.slice(0, 140)) : ""].filter(Boolean);
-  return "<tr><td><strong>" + esc(entry.version) + "</strong>" +
-    (aside.length ? '<div class="tiny muted">' + aside.join(" · ") + "</div>" : "") +
-    "</td><td><code>" + esc(shortId(entry.publisher_id)) + "</code>" +
-    // Three separate claims, and each says only what it knows. `pinned` is
-    // asked of the pins; `this node` is who signed it. A node that publishes
-    // its own code and has not pinned its own key is the ordinary case, and
-    // reading "unpinned" against your own release with nothing saying it is
-    // yours is what makes that page look broken.
-    (entry.mine ? ' <span class="badge">this node</span>' : "") +
-    (entry.trusted ? ' <span class="badge ok">pinned</span>'
-                   : ' <span class="badge">unpinned</span>') +
-    // Two different claims and only one of them names a culprit. `disputed`
-    // says somebody else signed other bytes for this version — a fork looks
-    // exactly like that, so it warns and blames nobody. `equivocated` says
-    // this key signed both, which no accident produces and which the node can
-    // prove without trusting whoever showed it. Both stop an unattended
-    // install; a human is still allowed to install, and is told first.
-    (entry.equivocated
-      ? ' <span class="badge danger" title="This key signed two different ' +
-        'programs under one version number.">contradicts itself</span>' : "") +
-    (entry.disputed
-      ? ' <span class="badge warn" title="Another publisher signed different ' +
-        'content for this version.">disputed</span>' : "") +
-    "</td><td>" + fmtAgo(Date.now() / 1000 - entry.ts) + "</td><td>" + action + "</td></tr>";
+// ---- packages from the mesh ------------------------------------------------
+// Nothing is listed here any more. The search field asks the directory a name;
+// what comes back is drawn by PACKAGES (webassets/packages.py), which is also
+// what the node view and /package mount — one description of a package, not
+// three that drift.
+function watchRowHTML(row){
+  const pkg = row.package || {};
+  const enough = row.agreeing >= row.quorum;
+  return '<tr><td><strong>' + esc(row.name) + "</strong>" +
+    (pkg.version ? '<div class="tiny muted">' + esc(pkg.version) + "</div>" : "") +
+    '</td><td><code>' + esc(shortId(row.publisher_id)) + "</code></td>" +
+    // The label and the number are one claim: "2 of 3" is how many publishers
+    // this operator watches that have signed the same code, out of how many
+    // they asked to agree.
+    "<td>" + esc(row.agreeing + " of " + row.quorum) +
+    (enough ? "" : ' <span class="badge warn">holding</span>') + "</td>" +
+    "<td>" + (row.auto ? '<span class="badge ok">yes</span>'
+                       : '<span class="muted small">no</span>') + "</td>" +
+    '<td class="tight"><button class="sm" data-watch-open="' + esc(row.id) +
+    '">Open</button> <button class="sm danger" data-watch-drop="' + esc(row.id) +
+    '">Stop</button></td></tr>';
 }
 function publisherRowHTML(entry){
   return '<tr><td>' + (entry.name ? esc(entry.name) : '<span class="muted">unnamed</span>') +
@@ -3112,17 +3124,27 @@ async function refreshReleases(){
     // Every field defaulted: one missing key used to throw inside this try,
     // and the catch below is silent — so a single absent field left both tables
     // painted with whatever they last held, for ever, with nothing said.
-    const releases = data.releases || [], publishers = data.publishers || [];
-    setHTML("release-rows", releases.map(releaseRowHTML).join(""));
-    $("release-empty").hidden = releases.length > 0;
+    const watching = data.subscriptions || [], publishers = data.publishers || [];
+    setHTML("watch-rows", watching.map(watchRowHTML).join(""));
+    $("watch-empty").hidden = watching.length > 0;
     setHTML("publisher-rows", publishers.map(publisherRowHTML).join(""));
     $("publisher-empty").hidden = publishers.length > 0;
     $("publish-key").textContent = data.publisher_key || "";
-    // Standing, not feedback, and that is why it has its own line now. These
-    // two are conditions of the install and stay true until something changes
-    // them; written into `release-status` they wiped out whatever the operator
-    // had just been told, because every action on this page ends by calling
-    // this function.
+    // Read the sentence out loud against the value: "every 5 minutes" is a
+    // cadence, "never" is the setting turned off, and they are not the same
+    // number with a different label.
+    $("update-cadence").textContent = data.check_minutes
+      ? "every " + plural(data.check_minutes, "minute")
+      : "never — it only acts on what is announced to it";
+    $("update-idle").textContent = data.when_active
+      ? "does not go looking" : "goes looking anyway";
+    $("update-recommend").textContent = data.recommending
+      ? "yes — other nodes can see the version this one settled on" : "no";
+    // Standing, not feedback, and that is why it has its own line. These two
+    // are conditions of the install and stay true until something changes
+    // them; written into a status line they wiped out whatever the operator had
+    // just been told, because every action on this page ends by calling this
+    // function.
     const log = data.log || [], last = log[log.length - 1];
     const blocked = !data.updatable && !!data.reason;
     setMessage("update-standing",
@@ -3132,34 +3154,24 @@ async function refreshReleases(){
         : "", blocked);
   }catch(_){}
 }
-$("release-rows").addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-install]");
-  if(!button) return;
-  const row = button.closest("tr");
-  const version = row ? row.querySelector("strong").textContent : "";
+mountPackageSearch({input:"pkg-search", results:"pkg-results", wide:"pkg-wide"});
+
+$("watch-rows").addEventListener("click", async (event) => {
+  const open = event.target.closest("[data-watch-open]");
+  if(open){ openLinked("/package#" + open.dataset.watchOpen, "nmesh-package"); return; }
+  const drop = event.target.closest("[data-watch-drop]");
+  if(!drop) return;
   const agreed = await confirmAction({
-    title:"Install " + version + "?",
-    body:'<p class="muted small">The node fetches this release from the mesh, checks every byte ' +
-      "against the signature you pinned, and replaces its own files. It then restarts if a " +
-      "service manager is there to bring it back. The previous files are kept either way.</p>",
-    confirmLabel:"Install " + version});
+    title:"Stop watching this package?",
+    body:'<p class="muted small">Nothing installed is removed, and the package stays findable. ' +
+      "This node simply stops checking for a newer version of it — and stops counting this " +
+      "publisher towards what the others have to agree with.</p>",
+    confirmLabel:"Stop watching", danger:true});
   if(!agreed) return;
-  await withBusy(button, async () => {
-    setMessage("release-status", "Asking a node that has it, and verifying…");
-    try{
-      const {ok, data} = await apiJson("/api/releases/install", "POST",
-        {publisher_id:button.dataset.install, confirm:true});
-      setMessage("release-status", ok
-        ? (data.restarting
-           ? "Installed " + data.version + ". The node is restarting — reload in a moment."
-           : "Installed " + data.version + ". Restart the node to run it (previous files kept).")
-        : (data.error || "Install failed"), !ok);
-    }catch(_){
-      // A restart cuts the connection mid-answer, which is a success we cannot
-      // read. Say what is true: reload and look.
-      setMessage("release-status", "The console stopped answering — if the node "
-        + "was restarting, reload this page in a moment.", true);
-    }
+  await withBusy(drop, async () => {
+    const {ok, data} = await apiJson("/api/packages/subscribe", "POST",
+      {id:drop.dataset.watchDrop, on:false});
+    setMessage("watch-status", ok ? "" : (data.error || "Could not stop"), !ok);
     await refreshReleases();
   });
 });
@@ -3192,17 +3204,6 @@ $("publisher-rows").addEventListener("change", async (event) => {
   else toast(endorse.checked ? "Their signature now counts towards a quorum"
                              : "Their signature no longer counts towards a quorum");
 });
-$("pin-add").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const key = $("pin-key").value.trim();
-  if(!key){ setMessage("pin-status", "Paste the publisher's key first", true); return; }
-  try{
-    const {ok, data} = await apiJson("/api/releases/trust", "POST",
-      {key, name:$("pin-name").value.trim(), auto:$("pin-auto").checked});
-    setMessage("pin-status", ok ? "Pinned." : (data.error || "Could not pin that key"), !ok);
-    if(ok){ $("pin-key").value = ""; $("pin-name").value = ""; $("pin-auto").checked = true; }
-  }catch(_){ setMessage("pin-status", "The node did not answer.", true); }
-  await refreshReleases();
-}));
 $("publish-go").addEventListener("click", (event) => withBusy(event.target, async () => {
   const agreed = await confirmAction({
     title:"Publish this node's code?",
@@ -3274,7 +3275,10 @@ function paintConfig(data){
     }else{
       input = document.createElement("input");
       input.type = setting.kind === "int" ? "number" : "text";
-      if(setting.kind === "int"){ input.min = 1; input.max = 65535; }
+      // The node validates and says why it refused; a browser range guessed
+      // from "it is probably a port" refused values that are correct — 0 turns
+      // the update sweep off, and this form could not type it.
+      if(setting.kind === "int") input.min = 0;
       input.value = setting.value == null ? "" : String(setting.value);
       label.appendChild(input);
     }
@@ -3309,8 +3313,8 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
         (data.rejected ? ": " + data.rejected.join(" · ") : ""), true);
       return;
     }
-    setMessage("config-status", data.service_managed
-      ? "Saved. Restart the node for it to take effect (systemd will bring it back)."
+    setMessage("config-status", data.can_restart
+      ? "Saved. Restart the node for it to take effect — it comes back on its own."
       : "Saved. Restart the node for it to take effect.");
     toast("Configuration saved");
     await loadConfig();
@@ -3692,11 +3696,13 @@ CONTEXT.subscribe(() => {
   stopTracePolling();
   // A camera is not something to leave running behind a hidden panel.
   stopScan();
-  ["active", "known", "catalog", "installed"].forEach((kind) => {
+  ["active", "known", "installed"].forEach((kind) => {
     PAGES[kind].offset = 0; PAGES[kind].query = "";
     LINKS_OPEN[kind] && LINKS_OPEN[kind].clear();
     $(kind + "-list").innerHTML = "";
   });
+  setHTML("app-results", ""); setHTML("pkg-results", "");
+  $("app-search").value = ""; $("pkg-search").value = "";
   // A node card describes a peer of the machine we just left.
   if($("node-dialog").open) $("node-dialog").close();
   $("ctx-node").value = CONTEXT.node;
@@ -3802,20 +3808,22 @@ $("pref-open").addEventListener("change", (event) => {
     : "to suit the screen"));
 });
 // ---- restarting the node ---------------------------------------------------
-// A process cannot restart itself; it can only exit and be started again. So
-// the offer depends on there being a service manager watching, and when there
-// is not, the item says why rather than disappearing — an operator looking for
-// "restart" deserves to find out it is not available and what would make it so.
+// A node comes back either because a supervisor starts it again or because it
+// re-execs itself. The node answers whether either is available, and when
+// neither is, the item says why rather than disappearing — an operator looking
+// for "restart" deserves to find out it is not available and what would make it
+// so.
 function paintRestart(state){
-  const managed = !!state.service_managed;
+  const able = !!state.can_restart;
   const item = $("more-restart");
-  item.disabled = !managed;
+  item.disabled = !able;
   item.textContent = CONTEXT.node
     ? "Restart " + (CONTEXT.label || shortId(CONTEXT.node)) : "Restart this node";
   const why = $("more-restart-why");
-  why.hidden = managed;
-  why.textContent = managed ? ""
-    : "This node runs outside a service manager, so nothing would start it again.";
+  why.hidden = able;
+  why.textContent = able ? ""
+    : ("Nothing would start this node again" +
+       (state.restart_blocked ? " — " + state.restart_blocked : "") + ".");
 }
 
 async function restartNode(){

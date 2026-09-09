@@ -33,6 +33,11 @@ from .chat import (
 _MAX_BODY = 64 * 1024
 _MESSAGES_MAX = 2000
 _CALL_TIMEOUT = 10.0
+# A search that asks the network is the one call here that deliberately waits on
+# other nodes. The node bounds that round and the connector bounds the question;
+# this bridge only has to outlast both, or the answer arrives to nobody — which
+# is what made "search by name" look broken rather than slow.
+_SEARCH_TIMEOUT = 35.0
 _MESSAGES_KEY = "messages"        # drawer key holding the persisted feed
 _MESSAGES_BUDGET = 220 * 1024     # serialised feed ceiling (under the drawer cap)
 _TYPING_TTL = 6.0                 # seconds a typing indicator stays live
@@ -339,10 +344,10 @@ class ChatBridge:
 
     # -- actions (called from the web thread; sends marshalled onto loop) --
 
-    def _run(self, coro):
+    def _run(self, coro, timeout: float = _CALL_TIMEOUT):
         if self._loop is None:
             raise RuntimeError("bridge not started")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=_CALL_TIMEOUT)
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
 
     async def _safe(self, coro):
         try:
@@ -513,7 +518,8 @@ class ChatBridge:
         owner we have never met."""
         hits = {h["id"]: h for h in self._chat.state.find_by_pseudo(pseudo)}
         try:
-            for r in self._run(self._chat.search_pseudo(pseudo, wide=True)):
+            for r in self._run(self._chat.search_pseudo(pseudo, wide=True),
+                               timeout=_SEARCH_TIMEOUT):
                 nid = r.get("id")
                 if isinstance(nid, str):
                     hits[nid] = {"id": nid, "pseudo": r.get("pseudo", ""),

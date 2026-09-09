@@ -97,9 +97,25 @@ learned. Names spread by gossip: when two nodes connect they exchange the names
 they know, and a rename ripples outward from there. So a mesh you are part of
 fills in on its own.
 
-**Ask the network** does one more thing: a directory lookup for the name exactly
-as typed, which finds somebody whose node you have never met. It costs a round
-of queries, so it is a button rather than something typing triggers.
+**Ask the network** does one more thing: a directory lookup for what you typed,
+which finds somebody whose node you have never met. It costs a round of queries,
+so it is a button rather than something typing triggers.
+
+That lookup answers a **partial** name too, which it did not use to. A directory
+key is a hash, and half a name does not hash to the same thing as the whole one —
+so a claim is filed under several keys: the whole folded name, and each word's
+prefixes. `ali` lands on a key `Alice Ada` was already stored under. Those are
+exactly the three matches ranked above (exact, prefix, word); the fourth — a
+fragment inside a word — has no key, because you cannot hash the middle of a
+word, and the local book still finds it.
+
+The other half of the fix was that **nothing ever filed anything**. A node
+published its claim into the directory only when a test asked it to, so "ask the
+network" asked nodes that had been told nothing, and could only ever answer from
+gossip. A node now files its claim shortly after it starts, again whenever the
+name changes or a peer comes up, and then on a slow sweep — because the nodes
+closest to a key move as the mesh does, and a node that published before it had a
+single peer published to nobody.
 
 ### Names are kept across a restart
 
@@ -126,7 +142,7 @@ them; it **cannot set one**:
 ```python
 await client.my_pseudo()                    # what is this node called?
 await client.lookup_pseudo("ali")           # ranked, partial, from the local book
-await client.lookup_pseudo("alice", wide=True)   # …and ask the network too
+await client.lookup_pseudo("ali", wide=True)     # …and ask the network too, partial included
 await client.pseudos_of([id_hex, ...])      # resolve ids to names, in one call
 await client.refresh_names(ids)             # the same, into a cache
 client.name_of(id_hex)                      # read that cache, synchronously
@@ -171,6 +187,13 @@ most `_PSEUDO_SYNC_MAX` claims, ours first; the rest arrives by gossip.
 
 Gossip stops on its own: a node passes a claim on **only when it changed what it
 knew**, so a name that has finished spreading stops moving.
+
+Filing costs one packet to at most `_DIR_PUBLISH_MAX` nodes, however many keys
+the name has: a node that receives the claim re-derives every key itself, so
+reaching it once is reaching it for every prefix. The index is pointers — one
+node id per key, a bucket capped at `_MAX_PER_KEY` — and a full bucket drops its
+oldest **pointer**, never the claim, so a crowded prefix cannot evict somebody
+who is still the only answer to their own exact name.
 
 ## See also
 
