@@ -294,6 +294,14 @@ keys   = sha256(domain : "pub:" ‖ publisher_id)[:20]        — what this key 
   node signing with its own identity publishes **under its own id**. That is
   what lets a node's details page ask "what does this machine offer?" with
   nothing but the id already on the screen.
+- A **detached publisher key** (`publisher_key.py`) is tied to the machine that
+  uses it by a **pairing**: two halves, `node signs "P publishes for me"` filed
+  under the node's key and `key signs "N is my node"` filed under the
+  publisher's. Each names only its own signer, and a reader follows the link
+  only when both exist and name each other (`PairingBook.confirmed`). One half
+  is one node's word about another — believed, it would put a stranger's
+  packages on somebody's page. Halves travel on the same plane, filed under the
+  same keys; a reader tries both gates on each blob.
 
 The book (`PackageBook`) keeps the highest `ts` per (publisher, kind, folded
 name), bounded in entries and in bytes, and keeps the equivocation proof when

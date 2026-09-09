@@ -361,6 +361,194 @@ def decode_records(blob: bytes) -> list[bytes]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Pairing a detached publisher key with the node that uses it
+# ---------------------------------------------------------------------------
+#
+# A release may be signed by a key that is not the node's identity
+# (:mod:`src.publisher_key`): that key decides what everybody pinning it will
+# run, is used a few times a year, and has no business sharing the key the node
+# keeps unlocked to sign handshakes. The record then names *that* key — it can
+# only ever name its own signer — so asking a node id what it offers finds
+# nothing, and the operator looking at a machine cannot get from it to the code
+# it publishes.
+#
+# A pairing closes that, and it takes **two halves** because one would be
+# hearsay. Each half is signed by one of the parties and can only name its own
+# author as the signer:
+#
+#     node N signs   "P publishes for me"   → filed under N's key
+#     key  P signs   "N is my node"         → filed under P's key
+#
+# A reader believes the link only when it holds both and each names the other.
+# With one half alone, a node could put a stranger's packages on its own page —
+# which grants no privilege (a package still shows its real publisher, and
+# pinning still pins that publisher) but is exactly the shape the charter
+# forbids: one node's word about another, believed.
+#
+# The publisher's half costs nothing: that key is unlocked at publish time
+# anyway, so it is signed while it is open.
+
+_PAIR_DOMAIN = b"nmesh-package-pair-v1"
+PAIRING_VERSION = 1
+
+# pairing = version(B) ‖ ts(Q) ‖ pubkey_len(H) ‖ sig_len(H)
+#           ‖ pubkey ‖ counterpart(20) ‖ sig
+_PAIR_HDR = struct.Struct("!BQHH")
+COUNTERPART_LEN = 20
+MAX_PAIRING = _PAIR_HDR.size + _MAX_PUBKEY + COUNTERPART_LEN + _MAX_SIG
+
+_MAX_PAIRINGS = 256                # pairings this node remembers at all
+_MAX_PAIRING_BYTES = 2 * 1024 * 1024
+_MAX_PAIRINGS_PER_KEY = 4          # counterparts one key may name
+
+
+def _pair_signing_input(signer_id: bytes, ts: int, counterpart: bytes) -> bytes:
+    return _PAIR_DOMAIN + signer_id + struct.pack("!Q", ts) + counterpart
+
+
+def build_pairing(counterpart: bytes, pubkey: bytes, sign,
+                  ts: int | None = None) -> bytes:
+    """Sign one half of a pairing: "``counterpart`` and I go together".
+
+    ``counterpart`` is the other party's id — a node id when a publisher key
+    signs, a publisher id when a node identity does. Both are twenty bytes
+    derived from a public key, and neither half means anything alone."""
+    if not isinstance(counterpart, (bytes, bytearray)) or len(counterpart) != COUNTERPART_LEN:
+        raise PackageDirError("counterpart id invalid")
+    ts = int(ts if ts is not None else time.time())
+    if ts < 0 or ts > 0xFFFFFFFFFFFFFFFF:
+        raise PackageDirError("bad timestamp")
+    signer_id = publisher_id(pubkey)
+    counterpart = bytes(counterpart)
+    sig = sign(_pair_signing_input(signer_id, ts, counterpart))
+    if len(pubkey) > _MAX_PUBKEY or len(sig) > _MAX_SIG:
+        raise PackageDirError("pairing field too large")
+    return (_PAIR_HDR.pack(PAIRING_VERSION, ts, len(pubkey), len(sig))
+            + pubkey + counterpart + sig)
+
+
+def parse_pairing(data: bytes, verify) -> dict | None:
+    """Parse and cryptographically verify one half of a pairing.
+
+    Returns ``{signer_id, signer, counterpart, ts, key}`` — ``key`` being the
+    directory key it is filed under, which is the **signer's**, so a half can
+    only ever be filed against its own author. ``None`` for anything malformed,
+    oversized or badly signed; never raises, because this is a gate."""
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    if not (_PAIR_HDR.size <= len(data) <= MAX_PAIRING):
+        return None
+    data = bytes(data)
+    version, ts, pk_len, sig_len = _PAIR_HDR.unpack_from(data, 0)
+    if version != PAIRING_VERSION:
+        return None
+    if pk_len > _MAX_PUBKEY or sig_len > _MAX_SIG:
+        return None
+    off = _PAIR_HDR.size
+    if len(data) != off + pk_len + COUNTERPART_LEN + sig_len:
+        return None
+    pubkey = data[off:off + pk_len]
+    counterpart = data[off + pk_len:off + pk_len + COUNTERPART_LEN]
+    sig = data[off + pk_len + COUNTERPART_LEN:]
+    try:
+        signer_id = publisher_id(pubkey)
+        if not verify(_pair_signing_input(signer_id, ts, counterpart), sig, pubkey):
+            return None
+    except Exception:
+        return None
+    if signer_id == counterpart:
+        return None          # a key pairing with itself says nothing
+    return {"signer_id": signer_id, "signer": pubkey, "counterpart": counterpart,
+            "ts": ts, "key": publisher_key(signer_id)}
+
+
+class PairingBook:
+    """The pairing halves we hold, indexed by the key each was signed with.
+
+    Deliberately thinner than :class:`PackageBook`: a half has no name, no
+    content and nothing to rank. What it needs is the same two bounds — entries
+    and bytes, because a half carries an ML-DSA key and signature — and the
+    same anti-rollback, so a replayed old half cannot undo a party's newer
+    word."""
+
+    def __init__(self, max_entries: int = _MAX_PAIRINGS,
+                 max_bytes: int = _MAX_PAIRING_BYTES,
+                 max_per_key: int = _MAX_PAIRINGS_PER_KEY) -> None:
+        self._max_entries = max_entries
+        self._max_bytes = max_bytes
+        self._max_per_key = max_per_key
+        # (signer_id, counterpart) -> {ts, raw, key, signer_id, counterpart}
+        self._entries: "OrderedDict[tuple, dict]" = OrderedDict()
+        self._bytes = 0
+
+    def offer(self, pairing: dict, raw: bytes) -> bool:
+        """Take an already-verified half. True only when our view changed."""
+        raw = bytes(raw)
+        if len(raw) > MAX_PAIRING:
+            return False
+        ident = (pairing["signer_id"], pairing["counterpart"])
+        current = self._entries.get(ident)
+        if current is not None and pairing["ts"] <= current["ts"]:
+            return False                     # older or replayed — anti-rollback
+        if current is not None:
+            self._bytes -= len(current["raw"])
+            self._entries.pop(ident)
+        self._entries[ident] = {"ts": pairing["ts"], "raw": raw,
+                                "key": pairing["key"],
+                                "signer_id": pairing["signer_id"],
+                                "counterpart": pairing["counterpart"]}
+        self._bytes += len(raw)
+        self._enforce_per_key(pairing["signer_id"])
+        self._enforce_bounds()
+        return ident in self._entries
+
+    def _enforce_per_key(self, signer_id: bytes) -> None:
+        held = [ident for ident in self._entries if ident[0] == signer_id]
+        for ident in held[:max(0, len(held) - self._max_per_key)]:
+            self._drop(ident)
+
+    def _enforce_bounds(self) -> None:
+        while self._entries and (len(self._entries) > self._max_entries
+                                 or self._bytes > self._max_bytes):
+            self._drop(next(iter(self._entries)))
+
+    def _drop(self, ident: tuple) -> None:
+        entry = self._entries.pop(ident, None)
+        if entry is not None:
+            self._bytes -= len(entry["raw"])
+
+    def get(self, key: bytes) -> list[bytes]:
+        """Raw halves filed under a directory key (for a ``PKG_FOUND`` reply)."""
+        return [entry["raw"] for entry in self._entries.values()
+                if entry["key"] == key]
+
+    def named_by(self, signer_id: bytes) -> list[bytes]:
+        """Who this key says it goes with — counterpart ids."""
+        signer_id = bytes(signer_id)
+        return [ident[1] for ident in self._entries if ident[0] == signer_id]
+
+    def confirmed(self, one: bytes, other: bytes) -> bool:
+        """Do both halves exist and name each other?
+
+        The only question worth asking of this book. One half alone is one
+        party's word about another, and this whole file exists so that it is
+        never enough."""
+        one, other = bytes(one), bytes(other)
+        return ((one, other) in self._entries
+                and (other, one) in self._entries)
+
+    def records(self) -> list[bytes]:
+        return [entry["raw"] for entry in self._entries.values()]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def nbytes(self) -> int:
+        return self._bytes
+
+
 class PackageBook:
     """Every package record we have learned, one entry per publisher-kind-name.
 
