@@ -9985,49 +9985,76 @@ Hints come first (the ``have`` byte on an announce, from an
     # content. Nothing here decides trust — the pins do that, and an install
     # from an unpinned publisher is refused exactly where it always was.
 
-    async def package_descriptor(self, record_id_hex: str):
-        """Pull the signed descriptor a record points at, and file it.
+    async def _resolve_record(self, record_id_hex: str):
+        """Pull and verify the signed descriptor a record points at.
 
-        Returns the descriptor's own view (``version`` / ``publisher_id`` /
-        size) or None. For a core release this is what puts the release into
-        the catalogue the installer reads, so a package found by name becomes
-        installable without anybody having gossiped it at us."""
+        Returns ``(described, release)``: what a page may read, and — for a core
+        release — the entry an install runs on. ``(None, None)`` for anything
+        that does not resolve.
+
+        Two return values because they are two different things, and the
+        difference is not cosmetic. ``described`` is text and numbers, bound for
+        a JSON response; ``release`` is the descriptor's own view, full of raw
+        bytes, and belongs only to code in this process. Handing one object to
+        both readers put bytes in an HTTP body, and `json.dumps` raising inside
+        a handler does not answer 500 — it closes the socket, and the page that
+        asked spins for ever.
+
+        For a core release this is also what puts the release in the book the
+        installer reads, so a package found by name becomes installable without
+        anybody having gossiped it at us."""
         entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None or entry["release"] == b"\x00" * 20:
-            return None
+            return None, None
         raw = await self.dht_get(entry["release"])
         if raw is None:
-            return None
+            return None, None
         if entry["kind"] == _PKG_CORE:
             try:
                 doc = _core_parse_release(raw, self._identity.verify)
             except Exception:
-                return None
+                return None, None
             self._releases.offer(raw, self._identity.verify,
                                  self._trusts_publisher)
-            # `entry` is what an install runs on: the descriptor's own view,
-            # carried out of here rather than looked up again by publisher id.
-            # The catalogue holds one entry per key, so re-resolving through it
-            # would hand back whatever that key signed most recently instead of
-            # the release this record names.
-            return {"kind": "core", "version": doc["version"],
-                    "publisher_id": doc["publisher_id"].hex(),
-                    "publisher": doc["publisher"].hex(),
-                    "size": doc["size"], "sha256": doc["sha256"],
-                    "notes": doc["notes"],
-                    "entry": _core_catalogue_entry(
-                        doc, raw, self._trusts_publisher(doc["publisher"]))}
+            # Carried out of here rather than looked up again by signing key:
+            # a key is not a name for a release, so re-resolving through one
+            # would hand back whatever it signed most recently instead of the
+            # release this record names.
+            return ({"kind": "core", "version": doc["version"],
+                     "publisher_id": doc["publisher_id"].hex(),
+                     "publisher": doc["publisher"].hex(),
+                     "size": doc["size"], "sha256": doc["sha256"],
+                     "notes": doc["notes"]},
+                    _core_catalogue_entry(
+                        doc, raw, self._trusts_publisher(doc["publisher"])))
         try:
             doc = _app_parse_release(raw, self._identity.verify)
         except Exception:
-            return None
+            return None, None
         if self._catalog.offer(raw, self._identity.verify):
             await self._gossip_catalog(raw)
         return {"kind": "app", "version": doc["version"],
                 "name": doc["name"], "app_id": doc["app_id"].hex(),
                 "publisher_id": _pkg_identity_id(doc["author"]).hex(),
-                "publisher": doc["author"].hex()}
+                "publisher": doc["author"].hex()}, None
+
+    async def package_descriptor(self, record_id_hex: str):
+        """What a page may read about the release a record points at.
+
+        Text and numbers only — every value here goes into a JSON body. The
+        entry an install runs on is :meth:`package_release`, and the two are
+        deliberately not one call."""
+        described, _release = await self._resolve_record(record_id_hex)
+        return described
+
+    async def package_release(self, record_id_hex: str):
+        """The signed core release a record points at, as the installer reads
+        it. ``None`` for an app, or for anything that does not resolve.
+
+        Raw bytes: for code in this process, never for a response."""
+        _described, release = await self._resolve_record(record_id_hex)
+        return release
 
     async def fetch_package(self, record_id_hex: str):
         """Get a package's bytes, verified end to end. ``(entry, blob, name)``.
@@ -10040,11 +10067,11 @@ Hints come first (the ``have`` byte on an announce, from an
         entry = self.package_entry(record_id_hex)
         if entry is None:
             return None
-        described = await self.package_descriptor(record_id_hex)
+        described, release = await self._resolve_record(record_id_hex)
         if described is None:
             return None
         if entry["kind"] == "core":
-            fetched = await self.fetch_release_entry(described["entry"])
+            fetched = await self.fetch_release_entry(release)
             if fetched is None:
                 return None
             catalogued, _files = fetched
@@ -10074,11 +10101,11 @@ Hints come first (the ``have`` byte on an announce, from an
         entry = self.package_entry(record_id_hex)
         if entry is None:
             raise ReleaseError("no such package")
-        described = await self.package_descriptor(record_id_hex)
+        described, release = await self._resolve_record(record_id_hex)
         if described is None:
             raise ReleaseError("the package could not be fetched")
         if entry["kind"] == "core":
-            result = await self.install_release_entry(described["entry"])
+            result = await self.install_release_entry(release)
             self._subscriptions.note_version(record_id_hex, entry["version"])
             return result
         installed = await self.install_app(described["app_id"])
@@ -10274,17 +10301,16 @@ Hints come first (the ``have`` byte on an announce, from an
             if not _is_newer(entry["version"], _running_version()):
                 continue
             try:
-                described = await self.package_descriptor(entry["id"].hex())
+                release = await self.package_release(entry["id"].hex())
             except Exception:
                 continue
-            if described is None:
+            if release is None:
                 continue
-            allowed, _why = self.may_auto_install(described["entry"])
+            allowed, _why = self.may_auto_install(release)
             if not allowed:
                 continue
             try:
-                await self.install_release_entry(described["entry"],
-                                                 unattended=True)
+                await self.install_release_entry(release, unattended=True)
             except Exception as exc:
                 self._note_release(entry["version"], "failed", str(exc))
             return

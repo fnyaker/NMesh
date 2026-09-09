@@ -11,6 +11,7 @@ A release replaces the node's own code — of everything the mesh carries, this 
 the payload with the most authority — so most of these tests are refusals.
 """
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -358,6 +359,7 @@ class TestARleaseIsBytesAndASignature:
                                              version="9.9.9"))
             record_id = node.find_packages("nmesh")[0]["id"]
             described = await node.package_descriptor(record_id)
+            release = await node.package_release(record_id)
             assert described["version"] == "9.9.9"
 
             # Ten seconds on, or both descriptors carry one timestamp and the
@@ -379,7 +381,7 @@ class TestARleaseIsBytesAndASignature:
                 return {"applied": version, "restart_required": True}
 
             monkeypatch.setattr(updater, "apply_files", fake_apply)
-            result = await node.install_release_entry(described["entry"])
+            result = await node.install_release_entry(release)
             assert result["version"] == "9.9.9"
             assert applied["version"] == "9.9.9"
         finally:
@@ -417,9 +419,85 @@ class TestARleaseIsBytesAndASignature:
         try:
             await node.publish_release(_tree(str(tmp_path)))
             record_id = node.find_packages("nmesh")[0]["id"]
-            described = await node.package_descriptor(record_id)
+            release = await node.package_release(record_id)
             with pytest.raises(cr.ReleaseError):
-                await node.install_release_entry(described["entry"])
+                await node.install_release_entry(release)
+        finally:
+            await node.stop()
+
+
+class TestWhatAPageMayRead:
+    """`package_descriptor` answers a **page**, so every value in it has to
+    survive `json.dumps`. It did not: it carried the installer's entry, which
+    is raw bytes, and the console handler died mid-response — no status, no
+    body, the socket closed. The package page had already drawn its skeleton,
+    so it drew nothing else, for ever."""
+
+    async def test_a_descriptor_is_json(self, tmp_path):
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            described = await node.package_descriptor(record_id)
+            assert described is not None
+            json.dumps(described)          # raises if anything here is bytes
+        finally:
+            await node.stop()
+
+    async def test_the_whole_package_row_is_json(self, tmp_path):
+        """What the route actually sends: the record and the descriptor
+        together, which is where the bytes ended up."""
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            entry = node.package_entry(record_id)
+            described = await node.package_descriptor(record_id)
+            json.dumps({**entry, "descriptor": described})
+        finally:
+            await node.stop()
+
+    async def test_an_app_descriptor_is_json_too(self, tmp_path):
+        node = _node()
+        try:
+            await node.publish_store_app("Sketchpad", "1.0.0",
+                                         {"main.py": b"print(1)\n"})
+            record_id = node.find_packages("sketch")[0]["id"]
+            described = await node.package_descriptor(record_id)
+            json.dumps({**node.package_entry(record_id),
+                        "descriptor": described})
+        finally:
+            await node.stop()
+
+    async def test_the_installer_still_gets_its_bytes(self, tmp_path,
+                                                      monkeypatch):
+        """The other half: splitting the two must not leave the install path
+        without the entry it runs on."""
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            record_id = node.find_packages("nmesh")[0]["id"]
+            release = await node.package_release(record_id)
+            assert release is not None
+            assert release["key"] == bytes.fromhex(info["release"])
+
+            node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
+
+            async def fake_apply(files, version, **kwargs):
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            assert (await node.install_package(record_id))["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+    async def test_an_app_has_no_release_entry(self, tmp_path):
+        node = _node()
+        try:
+            await node.publish_store_app("Sketchpad", "1.0.0",
+                                         {"main.py": b"print(1)\n"})
+            record_id = node.find_packages("sketch")[0]["id"]
+            assert await node.package_release(record_id) is None
         finally:
             await node.stop()
 
