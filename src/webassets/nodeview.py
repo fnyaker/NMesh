@@ -317,7 +317,8 @@ const NODEVIEW = {
       view.id, view.self, view.direct, view.knownHere, view.has_key,
       view.links.map((link) => this.linkKey(link)),
       view.addresses.map((row) => row.uri),
-      (extras.packages || []).map((row) => row.id + ":" + row.version),
+      (extras.packages || []).map(
+        (row) => row.id + ":" + row.version + ":" + (row.published ? "p" : "s")),
       (options.hide || []), !!extras.chat, !!chat.contact, !!chat.seen,
       !!chat.unread, !!extras.fleet, !!fleet.managed, !!fleet.operator,
       (fleet.caps || []), (fleet.operator_caps || []),
@@ -697,17 +698,34 @@ const NODEVIEW = {
         "</tr>").join("") + "</tbody></table></div>";
   },
 
-  // What this node offers. Two different sentences, and the difference is the
-  // whole reason this section exists: a *publication* is code signed by this
-  // key, a *recommendation* is this node saying which release it runs. One can
-  // be installed; the other is somebody agreeing, and agreeing is not authority.
+  // What this node offers. **The only place a package is tied to a node**, and
+  // the tie is a sentence the node signed about itself: "I hold this and I
+  // serve it". Four groups, because two distinctions matter to whoever is
+  // looking: what kind of thing it is, and whether the node also proved it
+  // holds the key the release was signed with.
+  //
+  // Neither group is authority. Both mean the same practical thing — the bytes
+  // can be had from here — and what may be installed is decided by the keys
+  // this console has pinned, never by which list a row landed in.
+  packageGroupHTML(rows, kind, published, title){
+    const found = rows.filter((row) => row.kind === kind
+                              && !!row.published === published);
+    if(!found.length) return "";
+    return '<p class="eyebrow">' + esc(title) + "</p>" +
+      PACKAGES.hitsHTML(found);
+  },
+
   packagesHTML(view, extras){
     const rows = extras.packages || [];
-    const body = rows.length
-      ? PACKAGES.hitsHTML(rows)
-      : '<p class="small muted">This node offers nothing — it has published no ' +
-        "version, and does not say which one it runs.</p>";
-    return this.foldHTML("What it publishes",
+    const groups =
+      this.packageGroupHTML(rows, "core", true, "Node software it publishes") +
+      this.packageGroupHTML(rows, "core", false, "Node software it serves") +
+      this.packageGroupHTML(rows, "app", true, "Apps it publishes") +
+      this.packageGroupHTML(rows, "app", false, "Apps it serves");
+    const body = groups ||
+      '<p class="small muted">This node offers nothing — it holds no release ' +
+      "it is willing to serve.</p>";
+    return this.foldHTML("Packages",
       body + '<div class="btn-row"><button data-nv-act="packages">' +
       "Ask the network</button></div>",
       rows.length ? String(rows.length) : "none");

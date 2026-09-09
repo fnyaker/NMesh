@@ -124,8 +124,14 @@ const PACKAGES = {
   },
 
   kindLabel(row){
-    if(row.recommend) return "recommended";
     return row.kind === "core" ? "node software" : "app";
+  },
+
+  // The one sentence a record makes. "Serves" is not a lesser version of
+  // "publishes": both mean the bytes are here and can be had from here, and
+  // only one of them also carries the key they were signed with.
+  roleLabel(row){
+    return row.published ? "publishes" : "serves";
   },
 
   // A hit is a button: the whole row opens the card, because a row with one
@@ -136,10 +142,9 @@ const PACKAGES = {
         icon(row.kind === "core" ? "server" : "window") + "</span>" +
       '<span class="grow"><b>' + esc(row.name) + "</b>" +
       '<span class="tiny">' + esc(row.version) + " · " +
-        esc(this.kindLabel(row)) + " · " + esc(shortId(row.publisher_id)) +
+        esc(this.kindLabel(row)) + " · " + esc(this.roleLabel(row)) +
       "</span></span>" +
       (row.trusted ? badge("pinned", "ok") : "") +
-      ((row.vouched_by || []).length ? badge("paired") : "") +
       (row.attesters > 1 ? badge(row.attesters + " agree", "ok") : "") +
       "</button>";
   },
@@ -156,17 +161,20 @@ const PACKAGES = {
 
   cardHTML(row, options){
     const opts = options || {};
-    const badges = [badge(this.kindLabel(row), row.recommend ? "warn" : null)];
-    if(row.trusted) badges.push(badge("publisher pinned", "ok"));
-    if(row.mine) badges.push(badge("published here"));
-    if((row.vouched_by || []).length) badges.push(badge("paired with a node"));
+    const badges = [badge(this.kindLabel(row)),
+                    badge(this.roleLabel(row), row.published ? null : "warn")];
+    if(row.trusted) badges.push(badge("signing key pinned", "ok"));
+    if(row.mine) badges.push(badge("this node"));
     if(row.equivocated)
-      badges.push(badge("signed two different programs as one version", "bad"));
+      badges.push(badge("offered two different releases as one version", "bad"));
     const facts = [
       ["Version", esc(row.version)],
-      ["Publisher", '<code class="inline">' + esc(shortId(row.publisher_id)) + "</code>"],
-      ["Published", esc(fmtAgo(Date.now() / 1000 - row.ts))],
-      ["Agreeing publishers", String(row.attesters)],
+      ["Signed by", row.signer_id
+        ? '<code class="inline">' + esc(shortId(row.signer_id)) + "</code>"
+        : '<span class="muted">not stated here</span>'],
+      ["Held by", '<code class="inline">' + esc(shortId(row.node_id)) + "</code>"],
+      ["Said", esc(fmtAgo(Date.now() / 1000 - row.ts))],
+      ["Agreeing keys", String(row.attesters)],
     ];
     return '<div class="pkg-card" data-pkg-id="' + esc(row.id) + '">' +
       '<div class="pkg-head">' +
@@ -191,53 +199,41 @@ const PACKAGES = {
   // Why the buttons are what they are. A refusal that does not say what would
   // change it is a refusal somebody works around rather than understands.
   explainHTML(row){
-    const paired = row.vouched_by || [];
-    // A key that is not a node identity, tied to the machine that uses it by
-    // two signatures. Said in full because the alternative reads as a mystery:
-    // "why is this publisher not the node I opened?"
-    const pairing = paired.length
-      ? '<p class="muted small">This is a publisher key of its own, not a ' +
-        "node's identity — which is how a key that decides what your machine " +
-        "runs stays out of the memory of a node that is running. It is paired " +
-        "with " + (paired.length === 1
-          ? "node <code class=\"inline\">" + esc(shortId(paired[0])) + "</code>"
-          : plural(paired.length, "node")) +
-        ": both signed saying so, and neither could have said it for the " +
-        "other.</p>"
-      : "";
-    if(row.recommend)
-      return pairing + '<p class="muted small">This node is not the publisher: ' +
-        "it is saying which release it runs. That counts towards agreement when " +
-        "you watch it, and towards nothing otherwise — pin the publisher it " +
-        "points at, never the machine that agreed with them.</p>";
+    if(!row.published)
+      return '<p class="muted small">This node holds these bytes and will ' +
+        "serve them — it did not sign them, and it is not saying who did. The " +
+        "release itself carries that signature, and it is checked before " +
+        "anything is installed either way. Open a copy that was published to " +
+        "pin the key.</p>";
     if(row.kind === "core" && !row.trusted)
-      return pairing + '<p class="muted small">This key is not pinned here, so ' +
-        "nothing from it can replace this node's code. Pinning it is one press " +
-        "and a confirmation — the key came with the record and was checked " +
-        "against the signature it made, so there is nothing to copy across.</p>";
-    return pairing;
+      return '<p class="muted small">This signing key is not pinned here, so ' +
+        "nothing signed with it can replace this node's code. Pinning it is one " +
+        "press and a confirmation — the key came with the record and was " +
+        "checked against a signature it made, so there is nothing to copy " +
+        "across.</p>";
+    return "";
   },
 
   actionsHTML(row, opts){
     const buttons = [];
-    if(!row.recommend){
-      buttons.push('<a class="btn" download href="/api/packages/' +
-        encodeURIComponent(row.id) + '/download">' + icon("arrowDown") +
-        " Download</a>");
-      if(row.kind === "core" && !row.trusted)
-        buttons.push('<button class="primary" data-pkg-act="trust">' +
-          "Pin this publisher</button>");
-      else
-        buttons.push('<button class="primary" data-pkg-act="install">' +
-          "Install</button>");
-    }
+    // Downloading works off any copy: the bytes are content-addressed and the
+    // hash was signed, so who hands them over is not a question worth asking.
+    buttons.push('<a class="btn" download href="/api/packages/' +
+      encodeURIComponent(row.id) + '/download">' + icon("arrowDown") +
+      " Download</a>");
+    if(row.kind === "core" && !row.trusted)
+      buttons.push('<button class="primary" data-pkg-act="trust"' +
+        (row.published ? "" : " disabled") + ">Pin the signing key</button>");
+    else
+      buttons.push('<button class="primary" data-pkg-act="install">' +
+        "Install</button>");
     if(!opts.hideOpen)
       buttons.push('<button data-pkg-act="page">Open on its own</button>');
     return '<div class="pkg-actions">' + buttons.join("") + "</div>";
   },
 
   watchHTML(row, opts){
-    if(row.recommend && opts.hideWatch) return "";
+    if(opts.hideWatch) return "";
     const sub = row.subscription || null;
     const quorum = sub ? sub.quorum : 1;
     return '<div class="pkg-watch">' +
@@ -246,7 +242,7 @@ const PACKAGES = {
       '<label class="check"><input type="checkbox" data-pkg-act="auto"' +
         (sub && sub.auto ? " checked" : "") + (sub ? "" : " disabled") +
         "><span>Install them without asking</span></label>" +
-      '<label class="pkg-quorum"><span>Publishers that must agree</span>' +
+      '<label class="pkg-quorum"><span>Signing keys that must agree</span>' +
         '<input type="number" min="1" max="8" data-pkg-act="quorum" value="' +
         esc(quorum) + '"' + (sub ? "" : " disabled") + "></label>" +
       '<p class="muted small">Agreement is over the package’s code with its ' +
@@ -320,14 +316,15 @@ const PACKAGES = {
 
   async trust(row, element){
     const agreed = await confirmAction({
-      title:"Pin " + row.name + "’s publisher?",
+      title:"Pin the key that signed " + row.name + "?",
       confirmLabel:"Pin this key",
       body:'<p class="muted small">Whoever holds this key can offer code that ' +
         "replaces this node’s own. The key below came inside the record and " +
-        "was checked against the signature it made — so it is the key that " +
-        "signed what you are looking at, and nothing else.</p>" +
-        '<div class="kv"><div>Publisher</div><div><code class="inline">' +
-        esc(row.publisher_id) + "</code></div></div>" +
+        "was checked against a signature it made — so it is the key that " +
+        "signed what you are looking at, and nothing else. It is the only " +
+        "thing pinned: not the node that handed it over, not a name.</p>" +
+        '<div class="kv"><div>Signing key</div><div><code class="inline">' +
+        esc(row.signer_id || "") + "</code></div></div>" +
         '<label class="check"><input id="pkg-pin-auto" type="checkbox">' +
         "<span>Let this key install its releases without asking</span></label>",
     });
@@ -336,7 +333,7 @@ const PACKAGES = {
     const {ok, data} = await this.ask("/api/packages/trust", "POST",
                                       {id:row.id, confirm:true, auto});
     if(!ok){ setMessage("pkg-status", data.error || "Could not pin", true); return; }
-    toast("Pinned " + shortId(row.publisher_id), "ok");
+    toast("Pinned " + shortId(row.signer_id), "ok");
     await this.repaint(element);
   },
 

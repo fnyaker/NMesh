@@ -68,7 +68,7 @@ class TestAReleaseCrossesTheMesh:
 
             # The announce reaches the other node by itself.
             async with asyncio.timeout(20.0):
-                while node._releases.get(info["publisher_id"]) is None:
+                while node._releases.get(info["release"]) is None:
                     await asyncio.sleep(0.1)
 
             entry = node.release_overview()["releases"][0]
@@ -81,7 +81,7 @@ class TestAReleaseCrossesTheMesh:
 
             # The package really crosses the mesh, in slices, and verifies.
             assert not node._packages.has(info["release_id"])
-            fetched = await node.fetch_release(info["publisher_id"])
+            fetched = await node.fetch_release(info["release"])
             assert fetched is not None
             _entry, files = fetched
             assert cr.version_of(files) == "9.9.9"
@@ -104,7 +104,7 @@ class TestAReleaseCrossesTheMesh:
                 return {"applied": version, "restart_required": True}
 
             monkeypatch.setattr(updater, "apply_files", fake_apply)
-            result = await node.install_release(info["publisher_id"])
+            result = await node.install_release(info["release"])
             assert result["version"] == "9.9.9"
             assert applied["files"]["src/version.py"] == b'__version__ = "9.9.9"\n'
         finally:
@@ -119,10 +119,10 @@ class TestAReleaseCrossesTheMesh:
             info = await publisher.publish_release(
                 _tree(str(tmp_path / "tree"), "9.9.9"))
             async with asyncio.timeout(20.0):
-                while middle._releases.get(info["publisher_id"]) is None:
+                while middle._releases.get(info["release"]) is None:
                     await asyncio.sleep(0.1)
             middle.trust_publisher(publisher._identity.dsa_public_key.hex())
-            assert await middle.fetch_release(info["publisher_id"]) is not None
+            assert await middle.fetch_release(info["release"]) is not None
             assert middle._packages.has(info["release_id"])
 
             # A third node joins through the middle one, and the publisher is
@@ -132,13 +132,13 @@ class TestAReleaseCrossesTheMesh:
             await latecomer.join("tcp://127.0.0.1:19394", code)
             await latecomer.wait_for_session(timeout=15.0)
             async with asyncio.timeout(20.0):
-                while latecomer._releases.get(info["publisher_id"]) is None:
+                while latecomer._releases.get(info["release"]) is None:
                     await asyncio.sleep(0.1)
             await publisher.stop()
 
             latecomer.trust_publisher(
                 publisher._identity.dsa_public_key.hex())
-            fetched = await latecomer.fetch_release(info["publisher_id"])
+            fetched = await latecomer.fetch_release(info["release"])
             assert fetched is not None, "the middle node did not serve it"
             assert cr.version_of(fetched[1]) == "9.9.9"
             assert latecomer._packages.has(info["release_id"])
@@ -155,18 +155,22 @@ class TestAReleaseCrossesTheMesh:
             first = await publisher.publish_release(
                 _tree(str(tmp_path / "one"), "1.0.0"), ts=1000)
             async with asyncio.timeout(20.0):
-                while node._releases.get(first["publisher_id"]) is None:
+                while node._releases.get(first["release"]) is None:
                     await asyncio.sleep(0.1)
 
-            await publisher.publish_release(
+            second = await publisher.publish_release(
                 _tree(str(tmp_path / "two"), "2.0.0"), ts=2000)
             async with asyncio.timeout(20.0):
-                while (node._releases.get(first["publisher_id"])["version"]
-                       != "2.0.0"):
+                while node._releases.get(second["release"]) is None:
                     await asyncio.sleep(0.1)
 
-            # One entry per publisher, holding the newest thing they signed.
-            assert len(node._releases) == 1
+            # Both are held: a release is named by its own descriptor, and one
+            # key signing a second thing does not un-sign the first. Which one
+            # gets installed is decided at the install gate — the version has to
+            # be strictly newer than the one running — and never by a key's slot
+            # in a table.
+            assert len(node._releases) == 2
+            assert node._releases.get(first["release"])["version"] == "1.0.0"
         finally:
             await node.stop(); await publisher.stop()
 
@@ -179,14 +183,14 @@ class TestAReleaseCrossesTheMesh:
             info = await publisher.publish_release(
                 _tree(str(tmp_path / "tree"), "3.0.0"))
             async with asyncio.timeout(20.0):
-                while first._releases.get(info["publisher_id"]) is None:
+                while first._releases.get(info["release"]) is None:
                     await asyncio.sleep(0.1)
 
             code = publisher.generate_invite()
             await latecomer.join("tcp://127.0.0.1:19392", code)
             await latecomer.wait_for_session(timeout=15.0)
             async with asyncio.timeout(20.0):
-                while latecomer._releases.get(info["publisher_id"]) is None:
+                while latecomer._releases.get(info["release"]) is None:
                     await asyncio.sleep(0.1)
             assert latecomer.release_overview()["releases"][0]["version"] == "3.0.0"
         finally:

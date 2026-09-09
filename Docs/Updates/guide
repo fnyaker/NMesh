@@ -407,83 +407,88 @@ tells the sender nothing beyond the offer lapsing.
 **self-authenticating record**, safe to accept from a stranger, cache and
 re-serve, worth no authority at all.
 
+A node says exactly one thing here, **about itself**:
+
+> I hold release R, and I serve it.
+
 ```
-record = version ‖ kind ‖ flags ‖ ts ‖ pubkey ‖ name ‖ pkg_version
-         ‖ notes ‖ ref ‖ src ‖ ML-DSA signature
-signed over  "nmesh-package-dir-v1" ‖ publisher_id ‖ kind ‖ flags ‖ ts
-             ‖ name ‖ pkg_version ‖ notes ‖ ref ‖ src
+record = version ‖ kind ‖ flags ‖ ts ‖ node_pub ‖ name ‖ pkg_version
+         ‖ notes ‖ release_key ‖ src ‖ node_sig
+         [‖ signer_pub ‖ signer_sig]        when FLAG_PUBLISHED is set
+
+node   signs   "nmesh-package-dir-v2:hold:" ‖ node_id ‖ kind ‖ flags ‖ ts
+               ‖ name ‖ pkg_version ‖ notes ‖ release_key ‖ src
+signer signs   "nmesh-package-dir-v2:sign:" ‖ node_id ‖ signer_id ‖ release_key
 ```
 
 | Field | What it is |
 |---|---|
 | `kind` | `core` (the node's own code) or `app` (a third-party application) |
-| `flags` | `FLAG_RECOMMEND`: the signer is not the author — "this is the release id I run" |
+| `flags` | `FLAG_PUBLISHED`: this node also holds the key that signed the release, and here is the proof |
 | `name` | the displayed name, in the same canonical form a pseudo takes |
 | `notes` | the few lines shown before anything is fetched, ≤ `MAX_NOTES` |
-| `ref` | the **DHT content key** of the signed descriptor this points at |
+| `release_key` | the **DHT content key** of the signed descriptor this points at |
 | `src` | a digest over the package's code with its documentation left out |
 
 Three properties, and together they are the security argument:
 
-- **the publisher id is derived from the pubkey inside the record**, and the
-  signature is checked under that same key — a record can only ever say what its
-  own author publishes. Nobody can file a package against somebody else's
-  identity, which is what makes a directory of strangers usable at all;
+- **the node id is derived from the pubkey inside the record**, and the signature
+  is checked under that same key — a record can only ever say what its own
+  author holds. Nobody can file a package against somebody else's identity,
+  which is what makes a directory of strangers usable at all;
 - **the keys are derived, never declared.** A reader recomputes them from the
-  name inside the signed record, so a publisher cannot file itself under a name
-  it did not sign;
-- **`ts` only moves forward** per (publisher, kind, name), so a relay replaying
-  an old record cannot walk anybody back to a stale version.
+  name and the release inside the signed record, so nothing can be filed under
+  a name or a release it did not sign;
+- **`ts` only moves forward** per (node, kind, name), so a relay replaying an old
+  record cannot walk anybody back to a stale version.
 
-A publisher id is `sha256(pubkey)[:20]`, built exactly like a node id — so a node
-signing with its own identity publishes **under its own id**, which is what lets
-a details page ask "what does this machine offer?" with nothing but the id
-already on the screen. A node that signs with a separate publisher key
-(`publisher_key.py`) is reached through a **pairing**, below: the record names
-the key, because that is what the signature proves.
+### Recommending is holding
 
-### Pairing a detached key with the machine that uses it
+There is no separate "recommendation". A node files a record only for a release
+whose bytes it actually has, so the set of records under a release **is the set
+of machines that can serve it**. There is no second mechanism for "who has
+this", and no publisher to fall back on when nobody does. Installing something
+files one too (`_offer_to_serve`): everyone who installed a release is somewhere
+the next node can get it.
 
-A publisher key is deliberately not a node identity: it decides what everybody
-pinning it will run, it is used a few times a year, and it has no business
-sharing the key a node keeps unlocked to sign handshakes. But a record can only
-name its own signer, so nothing tied that key to the machine, and an operator
-looking at a node could not get from it to the code it publishes.
+This is also the whole of the join between a package and a node. It is a
+sentence the machine signed about itself; nothing here is one party's word about
+another.
 
-A pairing closes that, and it takes **two halves**, because one would be
-hearsay:
+### Publishing is holding, plus a proof
 
-```
-node N signs   "P publishes for me"   → filed under N's key
-key  P signs   "N is my node"         → filed under P's key
-```
+A publication is that same sentence with `FLAG_PUBLISHED` and a second signature
+by **the key that signed the release descriptor**. That second statement names
+*the node*, which is what makes it non-transferable: lifting somebody else's
+proof onto your own record produces a signature over a node id that is not
+yours, and it fails. A record whose flag is set and whose proof does not verify
+is refused entirely — a claim that comes with its own broken evidence is not a
+weaker claim, it is a malformed one.
 
-Each half can only name its own author as the signer, exactly like every other
-record here. A reader follows the link only when it holds **both and each names
-the other** — `PairingBook.confirmed`. With one half alone, a node could put a
-stranger's packages on its own page; that grants no privilege (the package still
-shows its real publisher, and pinning still pins *that* publisher) but it is one
-node's word about another, believed, which is the shape the charter forbids.
+That is what replaced the two-halved **pairing**. A publisher key is
+deliberately not a node identity, so records filed under the *key* named a
+machine only by coincidence and named nothing at all once the key was detached
+or shared — and it took a second artefact, in two halves, to get back to the
+machine. Now the node signs the record and the key co-signs a proof naming that
+node: one record, one lookup, and the property the pairing existed to protect
+(nobody puts a stranger's packages on their own page) comes free, because a
+record can only be filed under its own signer.
 
-Both halves are signed at publish time: the publisher's while its key is open —
-the only moment it is — and the node's because it costs nothing. They travel on
-the same directory plane as package records, filed under the same keys, and a
-reader tries both gates on each blob.
-
-A key may be paired with several machines (one publisher key across a fleet),
-bounded by `_MAX_PAIRINGS_PER_KEY`; the newest half per (signer, counterpart)
-wins, so a replayed old one cannot undo a party's newer word.
-
-### Two keys, two questions
+### Three keys, three questions
 
 ```
-sha256(domain : "pub:"  ‖ publisher_id)[:20]     what does this key offer?
-sha256(domain : "name:" ‖ term)[:20]             who offers something called this?
+sha256(domain : "node:" ‖ node_id)[:20]        what does this machine offer?
+sha256(domain : "rel:"  ‖ release_key)[:20]    who can serve this release?
+sha256(domain : "name:" ‖ term)[:20]           who offers something called this?
 ```
 
 `term` runs over the whole folded name and each word's prefixes
 (`pseudo.key_terms`, shared with the pseudo directory because a name is a name).
 So typing three letters lands on a key the package was already filed under.
+
+The middle one is what makes a fetch work **through routing**: ask the directory
+who holds a release, then ask them. `PKG_STORE` / `PKG_FIND` / `PKG_FOUND` are
+routable like everything else, so the answer comes from several hops away.
 
 ### The source digest — "am I looking at the official version?"
 
@@ -503,31 +508,33 @@ enough independent parties agree on the code.
 
 ## Watching a package
 
-Turn on **Watch for new versions** on a package's page. A subscription names one
-publisher's offering of one package
+Turn on **Watch for new versions** on a package's page. A subscription names **a
+package** — this kind, this name
 ([`src/subscriptions.py`](../../src/subscriptions.py), `<data>/subscriptions.json`,
-mode 0600), and carries two things:
+mode 0600) — not a publisher. Pressing the toggle on one node's copy and on
+another's is one subscription, and a new signer of a watched package is found
+without anybody having subscribed to *them*. It carries two things:
 
 - **Install them without asking** — this subscription may install on its own,
   subject to every gate below;
-- **Publishers that must agree** — the quorum. Watch several publishers of the
-  same package and ask for two, and an automatic install waits until two of the
-  ones *you watch* have signed the same `src`. Ask for one, which is the default,
-  and it installs whatever that publisher offers.
+- **Signing keys that must agree** — the quorum. Ask for two and an automatic
+  install waits until two **endorsed** keys have signed the same `src`. Ask for
+  one, the default, and it installs what it finds.
 
-Counted over publishers this operator chose, never over everybody who signed
-something: a signature from somebody nobody subscribed to is a party an attacker
-can mint. Same argument as the endorsed quorum next door, applied to a set the
-operator built one package at a time.
+Counted in *signing keys*, and only over keys this operator endorsed one at a
+time. A second node serving the same bytes is a mirror, and mirrors are free; a
+second signature over the same source is a second party, and that is the one
+thing here an attacker cannot get for nothing. Same argument and now the same
+set of keys as the release quorum next door.
 
-A quorum only ever **withholds**. It cannot authorise an install the publisher
-pins would refuse — a core release still needs its publisher pinned, still has
-to be strictly newer, and still has to verify byte for byte.
+A quorum only ever **withholds**. It cannot authorise an install the pins would
+refuse — a core release still needs the key that signed it pinned, still has to
+be strictly newer, and still has to verify byte for byte.
 
-The sweep also asks the directory what each subscribed publisher offers now
+The sweep also asks the directory **by name** what is offered now
 (`_subscription_pass`), which is the half an announcement cannot cover: a
-publisher whose announce never reached us, or one we met long after it
-published.
+release whose announce never reached us, or a node we met long after it filed
+its record.
 
 ## When this node goes looking
 
@@ -560,10 +567,17 @@ peers, re-stamped at each hop, exactly like the app catalogue's gossip
 ([`../AppStore/guide`](../AppStore/guide)):
 
 1. verify the signature — reject by default;
-2. keep it only if the publisher is unknown to us or the `ts` is strictly higher
-   (anti-rollback: replaying an old signed release cannot walk a node back);
-3. re-gossip **only when our view changed**, which is what makes the epidemic
-   terminate.
+2. keep it unless we already hold **this exact release**, which is what makes
+   the epidemic terminate. A release is named by its own descriptor's content
+   key, so a changed descriptor is a different release and the same one arriving
+   twice is a duplicate whatever its timestamp says;
+3. re-gossip only in that case.
+
+There is no anti-rollback here any more, deliberately. An old release cannot
+walk this node backwards because the **install** gate refuses anything not
+strictly newer than what is running; keeping the old descriptor is how an
+operator can still look at it and a node can still serve it to somebody who
+wants it.
 
 A freshly authenticated peer is caught up on what we hold, so a node that joins
 learns about releases published before it arrived.
@@ -572,10 +586,15 @@ learns about releases published before it arrived.
 Refusing to relay what we would not install ourselves would break discovery for
 every other operator. It is shown flagged `unpinned`, and offers no action.
 
-The catalogue is bounded (one entry per publisher, `MAX_CATALOG`) and reserves
-room for pinned publishers: when it is full, a trusted newcomer evicts the
+The book is bounded (`MAX_CATALOG` **releases**, several per signing key) and
+reserves room for pinned ones: when it is full, a trusted newcomer evicts the
 oldest untrusted entry and an untrusted newcomer is simply refused. A flood of
-strangers cannot push out the publisher you actually rely on.
+strangers cannot push out the release you actually rely on.
+
+It used to hold one entry per publisher — its newest signature — which made a
+key into a name for a release. Two things broke on that: clicking a release
+installed whatever that key had signed since, and a release found by name in the
+directory, never gossiped at us, could not be held at all.
 
 Announces are rate-limited per ingress link (`_RELEASE_RATE_MAX` per window):
 verifying an ML-DSA signature is work, and a peer does not get to ask for it
@@ -606,10 +625,12 @@ its node identity, it made that one machine the last resort for the whole
 network: publish once, serve for ever, and go offline and your release is gone.
 Both are the same mistake, looking at the publisher instead of at the signature.
 
-So the list is: whoever said they hold it (the `have` byte, from an
-authenticated link — the only claim of actually having the bytes), then peers
-that speak the plane at all, bounded by `_RELEASE_ASK_MAX`. A node that does not
-have it costs one round trip and says nothing, which is cheaper than assuming.
+So the list is: whoever said they hold it in a gossip announce (the `have` byte,
+from an authenticated link), then **whoever filed a record saying so** — the
+directory answer, which is what makes this work through routing from several
+hops away — then the peers we happen to have. Bounded by `_RELEASE_ASK_MAX`. A
+node that does not have it costs one round trip and says nothing, which is
+cheaper than assuming.
 
 
 - `RELEASE_FETCH` — `release_id(20) ‖ offset(4)`, routed, so a holder several
@@ -640,14 +661,15 @@ package is re-hashed when it is read back, not only when it is written.
 
 ## Installing
 
-An install is addressed by **the descriptor in hand**, never by a publisher id
-(`install_release_entry`). The catalogue is indexed by publisher and holds only
-each key's newest signature, so resolving an install through it installed
-*whatever that key had signed since* rather than the release on the screen — and
-refused outright for a release the catalogue had never been gossiped, such as
-one found by name in the directory. The publisher-keyed entry points remain for
-what is genuinely a per-key question: the console's list of the keys this
-operator pinned.
+An install is addressed by **the descriptor in hand**
+(`install_release_entry`), or by the release's own name — its descriptor's
+content key. Never by a publisher id. Indexing releases by their signing key
+made a key into a name for a release, and two things broke on it: clicking a
+release installed whatever that key had signed since, and a release found by
+name in the directory, never gossiped at us, could not be held at all.
+
+Installing also **files a record saying this node now holds the release**
+(`_offer_to_serve`), so the next node has somewhere to ask.
 
 Three gates, in this order — the cheap ones first:
 
@@ -759,7 +781,7 @@ count is what bounds it.
 |---|---|---|
 | GET | `/api/releases` | what the mesh offers, who is pinned, what this node watches, when it looks, its own publisher key, and whether this install can update itself |
 | POST | `/api/releases/publish` | `{notes, key_id?, passphrase?}` → sign the installed tree — with the node identity, or with a publisher key held here — announce it, file it in the directory |
-| POST | `/api/releases/install` | `{publisher_id, confirm:true}` → fetch, verify, install |
+| POST | `/api/releases/install` | `{release, confirm:true}` → fetch, verify, install. `release` is the descriptor's content key, not a publisher |
 | POST | `/api/releases/trust` | `{key, name?, auto?, endorsed?}` → pin a publisher by key |
 | POST | `/api/releases/untrust` | `{publisher_id}` |
 | POST | `/api/releases/auto` | `{publisher_id, auto}` — hand this one key a scheduled restart |
@@ -769,8 +791,8 @@ count is what bounds it.
 | GET | `/api/packages/<id>[?fetch=1]` | one record; `fetch` also pulls the descriptor it points at |
 | GET | `/api/packages/<id>/download` | the verified package, as an opaque `tar.gz` |
 | POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
-| POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key **inside** that record |
-| POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch it, or stop |
+| POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried in the record's publication proof. **400** for a record from a node that only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
+| POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch **the package** that record names, or stop |
 | GET | `/api/keys` | publisher keys held here, offers made from here, offers waiting for an answer |
 | POST | `/api/keys/create` | `{passphrase, label?}` → a fresh publisher key, encrypted under it |
 | POST | `/api/keys/import` | `{path, passphrase, label?}` → adopt an existing key file |
@@ -797,7 +819,7 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `_RELEASE_ASK_MAX` | 12 | nodes one fetch may ask before giving up |
 | `MAX_NOTES_LEN` | 4000 | notes are shown in a page |
 | `MAX_PUBLISHERS` | 32 | pinned keys an operator may hold |
-| `MAX_CATALOG` | 64 | publishers tracked, trusted-first |
+| `MAX_CATALOG` | 64 | **releases** tracked, trusted-first — several per signing key |
 | `MAX_EQUIVOCATIONS` | 8 | publishers we keep a self-contradiction proof about, pinned-first |
 | `_RELEASE_RATE_MAX` | 32 / 10 s | signature verifications one link may ask for |
 | `_RELEASE_TRIED_MAX` | 32 | release ids remembered as already attempted |
@@ -806,16 +828,14 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `MAX_AUTO_ATTEMPTS` | 2 | automatic installs of a release that never takes |
 | `MAX_AUTO_JOURNAL` | 8 | releases the restart guard remembers attempting |
 | `pkg_dir._MAX_ENTRIES` | 512 | package records this node remembers at all |
-| `pkg_dir._MAX_BOOK_BYTES` | 4 MB | …and their byte budget: a record carries an ML-DSA key and signature |
-| `pkg_dir._MAX_PER_KEY` | 8 | records per directory key — a `PKG_FOUND` reply must fit one packet |
+| `pkg_dir._MAX_BOOK_BYTES` | 8 MB | …and their byte budget: a published record carries **two** ML-DSA keys and two signatures |
+| `pkg_dir._MAX_PER_KEY` | 8 | pointers per directory key |
+| `pkg_dir._FOUND_BUDGET` | 56 KB | what a `PKG_FOUND` reply may carry, so it fits one packet — the byte budget matters more than the count now that a record may be ~10 kB |
 | `pkg_dir.MAX_NOTES` | 600 | the description shown before anything is fetched |
-| `pkg_dir._MAX_PAIRINGS` | 256 | pairing halves this node remembers |
-| `pkg_dir._MAX_PAIRING_BYTES` | 2 MB | …and their byte budget |
-| `pkg_dir._MAX_PAIRINGS_PER_KEY` | 4 | machines one publisher key may be paired with |
 | `_PKG_RATE_MAX` | 64 / 10 s | package records one link may push at us |
 | `_PKG_OWN_MAX` | 32 | records this node signs and keeps re-filing |
 | `MAX_SUBSCRIPTIONS` | 64 | packages this node watches |
-| `MAX_QUORUM` | 8 | publishers a subscription may require to agree |
+| `MAX_QUORUM` | 8 | endorsed signing keys a subscription may require to agree |
 | `_DIR_PUBLISH_MAX` | 24 | nodes one directory publish may reach across every key |
 | `_DIR_REPUBLISH` | 900 s | between directory sweeps |
 | `_DIR_LOOKUP_BUDGET` | 6 s | one directory lookup, whole round; it returns what it has |
@@ -867,21 +887,26 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
   shown twice, a half signed by somebody else, a forged descriptor).
 - [`tests/test_pkg_dir.py`](../../tests/test_pkg_dir.py) — the directory record:
   a key that cannot claim somebody else's record, an unknown flag, keys derived
-  from the name rather than declared, the source digest that ignores
-  documentation and nothing else, and the bounded book. Plus the pairing: both
-  halves confirm, **one half confirms nothing**, a half is filed under its own
-  signer, a key cannot pair with itself, and an old half cannot undo a new one.
+  from the name and from the release rather than declared, the source digest
+  that ignores documentation and nothing else, and the bounded book. Plus the
+  publication proof: a proof made for another node is refused, so is one made
+  for another release, a flag with no proof and a proof with no flag are both
+  refused, and a record that only holds carries no key to pin.
 - [`tests/integration/test_pkg_dir.py`](../../tests/integration/test_pkg_dir.py)
   — the same across a real mesh: found by three letters, found by node id, the
   key pinned from the record that carries it, the package downloaded whole, an
-  app taking exactly the same path, a release signed with a **detached
-  publisher key** reached through the pairing (and the one-half case that is
-  not followed), and the refusals (a recommendation cannot be pinned; finding a
-  release does not make it installable). Plus a **publisher key handed over**
-  between two nodes, and the release the recipient then signs with it.
+  app taking exactly the same path, a release signed with a **detached publisher
+  key** found from a node id with no second artefact, and the refusals (a node
+  that only serves carries no key to pin; finding a release does not make it
+  installable). Plus a **publisher key handed over** between two nodes and the
+  release the recipient then signs with it, and **recommending is serving** — a
+  release found by the directory key derived from it, the holders being where a
+  fetch looks with no hint and no peers, and installing making this node a
+  source too.
 - [`tests/test_subscriptions.py`](../../tests/test_subscriptions.py) — what this
-  node watches: a corrupt file yields nothing, a quorum is clamped, and only
-  watched publishers count.
+  node watches: a subscription is named by the package so two signers of one
+  thing are one row, a row filed under a key its own kind and name do not
+  produce is dropped, a corrupt file yields nothing, and a quorum is clamped.
 - [`tests/test_key_share.py`](../../tests/test_key_share.py) — the handover:
   an offer signed by a key the sender does not hold, an offer replayed at a node
   it does not name, an acceptance whose node id does not match the key inside

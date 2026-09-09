@@ -123,16 +123,20 @@ tests/
 │     encrypted at rest
 ├── test_pkg_dir.py                                    — the package directory:
 │     a record can only say what its own key signed, an unknown flag or kind is
-│     refused, the keys it is filed under are derived from the name rather than
-│     declared, a source digest that ignores documentation and nothing else, and
-│     a crowded prefix bucket that drops a pointer and never a package
+│     refused, the keys it is filed under are derived from the name and from
+│     the release rather than declared, a source digest that ignores
+│     documentation and nothing else, a crowded prefix bucket that drops a
+│     pointer and never a package — and the publication proof, which names the
+│     node and the release so it cannot be lifted onto another record
 ├── test_release_mesh.py                               — releases over a mesh:
 │     publishing, gossip that terminates, the three install gates, the
 │     automatic pass and the restart it ends in — and that a release is bytes
 │     and a signature, so the publisher is never one of the nodes a fetch asks,
 │     holders come before peers, the number asked is bounded, an install runs
 │     on the descriptor in hand rather than on that key's newest, and dropping
-│     the publisher index did not drop the publisher gate
+│     the publisher index did not drop the publisher gate; plus recommending is
+│     holding — a record is the node's own sentence, a detached key needs no
+│     second artefact, and a release nobody can point at is not recommended
 ├── test_key_share.py                                  — handing a publisher key
 │     to another node: an offer signed by a key the sender does not hold, an
 │     offer replayed at a node it does not name, an acceptance whose node id

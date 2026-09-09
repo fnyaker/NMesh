@@ -1,45 +1,65 @@
 """
-The package directory — who publishes what, findable by name and by node.
+The package directory — what a node holds, findable by name, by node, by release.
 
 A node's own code and a third-party app are the same problem twice: somebody
 signed some bytes, and somebody else has to find them, judge them and install
 them. This module is the *finding* half.
 
-    record = version ‖ kind ‖ flags ‖ ts ‖ pubkey ‖ name ‖ pkg_version
-             ‖ notes ‖ ref ‖ src ‖ ML-DSA signature
-    signed over  DOMAIN ‖ publisher_id ‖ kind ‖ flags ‖ ts ‖ name
-                 ‖ pkg_version ‖ notes ‖ ref ‖ src
+One statement, and only one
+---------------------------
+A node says exactly one thing here, about itself::
 
-It is deliberately the same shape as :mod:`src.pseudo_dir`, and for the same
-reason: a record is **self-authenticating**, so it is safe to accept from a
-stranger, cache, and re-serve.
+    "I hold release R, and I serve it."
 
-  - the **publisher id is derived from the pubkey inside the record**, and the
+    record = version ‖ kind ‖ flags ‖ ts ‖ node_pub ‖ name ‖ pkg_version
+             ‖ notes ‖ release_key ‖ src ‖ node_sig
+             [‖ signer_pub ‖ signer_sig]     when FLAG_PUBLISHED is set
+
+Everything else follows from that sentence. **Recommending is holding**: a node
+files a record only for a release whose bytes it actually has, so the set of
+records under a release is the set of machines that can serve it. There is no
+separate "who has this" mechanism, and no node to fall back on when nobody does.
+
+The record is **self-authenticating**, so it is safe to accept from a stranger,
+cache and re-serve:
+
+  - the **node id is derived from the pubkey inside the record**, and the
     signature is checked under that same key — so a record can only ever say
-    what its own author publishes. Nobody can file a package against somebody
+    what its own author holds. Nobody can file a package against somebody
     else's identity, which is what makes a directory of strangers usable.
   - the **name is canonical** (:mod:`src.pseudo`, the same form a pseudo takes)
-    and the keys it is filed under are **derived from it**, never declared. A
-    publisher cannot file itself under a name it did not sign.
-  - the **timestamp only moves forward** per (publisher, kind, name), so a relay
+    and the keys it is filed under are **derived from it**, never declared.
+  - the **timestamp only moves forward** per (node, kind, name), so a relay
     replaying an old record cannot walk anybody back to a stale version.
+
+Publishing is holding, plus a proof
+-----------------------------------
+There is no separate kind of record for "I published this". A publication is a
+node holding a release *and* being able to prove it holds the key that signed
+the descriptor — ``FLAG_PUBLISHED``, carrying a second signature by that key::
+
+    node   signs   DOMAIN ‖ ":hold:" ‖ node_id ‖ kind ‖ flags ‖ ts ‖ name
+                   ‖ version ‖ notes ‖ release_key ‖ src
+    signer signs   DOMAIN ‖ ":sign:" ‖ node_id ‖ signer_id ‖ release_key
+
+The second statement names **the node**, which is what makes it non-transferable:
+lifting somebody else's proof onto your own record produces a signature over a
+node id that is not yours, and it fails. A record whose flag is set and whose
+proof does not verify is **refused entirely** — a claim that comes with its own
+broken evidence is not a weaker claim, it is a malformed one.
+
+This is deliberately the only place a package and a node are joined. A release
+is bytes and a signature; who *serves* it is a separate, local, revocable fact
+that each node states about itself and nobody states about anybody else.
 
 What a record is not
 --------------------
-It is **not authority to install anything**. It names a publisher, a version and
-a content reference; what the bytes are is decided by hashes, and whether they
-may replace this node's code is decided by the pins the operator holds. A record
-from an unpinned publisher is carried, displayed and never acted on. This is the
-charter's "hearsay is never authority", applied to the one payload that replaces
-a program.
-
-Two things a publisher can say
-------------------------------
-``KIND_CORE`` / ``KIND_APP`` say *what* is being published. ``FLAG_RECOMMEND``
-says the signer is not the author: "I run this release id", pointing at somebody
-else's bytes. That is worth exactly as much as the operator decides — it counts
-towards corroboration when they subscribed to that node, and towards nothing
-otherwise.
+It is **not authority to install anything**. It names a release, a version and a
+content reference; what the bytes are is decided by hashes, and whether they may
+replace this node's code is decided by the pinned signing keys the operator
+holds. A record from an unpinned signer is carried, displayed and never acted
+on. This is the charter's "hearsay is never authority", applied to the one
+payload that replaces a program.
 
 The source digest
 -----------------
@@ -60,38 +80,44 @@ from collections import OrderedDict
 
 from .pseudo import MAX_PSEUDO, canonical, fold, is_canonical, key_terms, rank_folded
 
-_DOMAIN = b"nmesh-package-dir-v1"
+# Version 2 of this plane. Version 1 filed records under a *publisher key* and
+# needed a second artefact (a two-halved pairing) to get from a node to the code
+# it published. Both are gone: the record is signed by the node, so the link is
+# in the thing itself. Old records are refused rather than translated — a format
+# that means two things is worse than one nobody can read.
+_DOMAIN = b"nmesh-package-dir-v2"
 KEY_LEN = 20
-PUBLISHER_ID_LEN = 20
-RECORD_VERSION = 1
+ID_LEN = 20
+RECORD_VERSION = 2
 
 KIND_CORE = 1          # the node's own code (see src/core_release.py)
 KIND_APP = 2           # a third-party application (see src/app_package.py)
 KINDS = (KIND_CORE, KIND_APP)
 
-# The signer is not the author: it points at a release id somebody else signed
-# and says "this is the one I run". Corroboration, never authority.
-FLAG_RECOMMEND = 0x01
-_KNOWN_FLAGS = FLAG_RECOMMEND
+# "…and the key that signed this release is one I hold." Proved, never asserted:
+# see the second signature above.
+FLAG_PUBLISHED = 0x01
+_KNOWN_FLAGS = FLAG_PUBLISHED
 
 MAX_NAME = MAX_PSEUDO              # one definition of what a displayed name is
 MAX_VERSION = 64
 MAX_NOTES = 600                    # the few lines shown before anything is fetched
-REF_LEN = 20                       # a DHT content key
+RELEASE_KEY_LEN = 20               # a DHT content key: the signed descriptor
 SRC_LEN = 32                       # a SHA-256
 
-# record = version(B) ‖ kind(B) ‖ flags(B) ‖ ts(Q) ‖ pubkey_len(H) ‖ name_len(H)
-#          ‖ version_len(H) ‖ notes_len(H) ‖ sig_len(H)
-_HDR = struct.Struct("!BBBQHHHHH")
+# record = version(B) ‖ kind(B) ‖ flags(B) ‖ ts(Q) ‖ node_len(H) ‖ name_len(H)
+#          ‖ version_len(H) ‖ notes_len(H) ‖ node_sig_len(H) ‖ signer_len(H)
+#          ‖ signer_sig_len(H)
+_HDR = struct.Struct("!BBBQHHHHHHH")
 _MAX_PUBKEY = 4096                 # ML-DSA-65 public key ~1952 B
 _MAX_SIG = 5000                    # ML-DSA-65 signature ~3309 B
 _MAX_NAME_BYTES = MAX_NAME * 4     # 50 characters, worst case in UTF-8
-MAX_RECORD = (_HDR.size + _MAX_PUBKEY + _MAX_NAME_BYTES + MAX_VERSION
-              + MAX_NOTES * 4 + REF_LEN + SRC_LEN + _MAX_SIG)
+MAX_RECORD = (_HDR.size + 2 * _MAX_PUBKEY + _MAX_NAME_BYTES + MAX_VERSION
+              + MAX_NOTES * 4 + RELEASE_KEY_LEN + SRC_LEN + 2 * _MAX_SIG)
 
-_MAX_ENTRIES = 512                 # packages this node remembers at all
-_MAX_BOOK_BYTES = 4 * 1024 * 1024
-_MAX_PER_KEY = 8                   # a PKG_FOUND reply must fit one packet
+_MAX_ENTRIES = 512                 # records this node remembers at all
+_MAX_BOOK_BYTES = 8 * 1024 * 1024  # two keys and two signatures fit in a record
+_MAX_PER_KEY = 8                   # pointers per directory key
 _MAX_EQUIVOCATIONS = 8
 
 # Documentation a source digest deliberately ignores. Nothing here is executed
@@ -109,7 +135,7 @@ class PackageDirError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Keys: one derivation, two questions
+# Keys: one derivation, three questions
 # ---------------------------------------------------------------------------
 
 def _key(prefix: bytes, material: bytes) -> bytes:
@@ -120,16 +146,29 @@ def _key(prefix: bytes, material: bytes) -> bytes:
     return h.digest()[:KEY_LEN]
 
 
-def publisher_key(publisher_id: bytes) -> bytes:
-    """The directory key holding what this publisher publishes.
+def node_key(node_id: bytes) -> bytes:
+    """The directory key holding what this node offers.
 
-    Takes the publisher id — which is derived exactly like a ``NodeID``, so for
-    a node signing with its own identity it *is* its node id. That is what lets
-    a node's details page ask "what does this machine publish?" with nothing but
-    the id already on the screen."""
-    if not isinstance(publisher_id, (bytes, bytearray)):
-        raise PackageDirError("publisher id must be bytes")
-    return _key(b":pub:", bytes(publisher_id))
+    Takes a **node id**, which is what the details page for a machine already
+    has on screen. It used to be a publisher id — a key hash that names a
+    machine only by coincidence, and names nothing at all once the key is
+    detached or shared."""
+    if not isinstance(node_id, (bytes, bytearray)):
+        raise PackageDirError("node id must be bytes")
+    return _key(b":node:", bytes(node_id))
+
+
+def release_key(release: bytes) -> bytes:
+    """The directory key holding **who can serve this release**.
+
+    Derived from the release's own content key, so every node computes the same
+    one from the thing itself. This is what makes a fetch work through routing
+    with nobody to fall back on: ask the directory who holds it, then ask
+    them."""
+    if (not isinstance(release, (bytes, bytearray))
+            or len(release) != RELEASE_KEY_LEN):
+        raise PackageDirError("release key must be 20 bytes")
+    return _key(b":rel:", bytes(release))
 
 
 def name_key(name) -> bytes:
@@ -147,10 +186,15 @@ def name_keys(name) -> list[bytes]:
     return [_key(b":name:", term.encode("utf-8")) for term in key_terms(name)]
 
 
-def publisher_id(public_key: bytes) -> bytes:
-    """A publisher is named by the hash of its key, like a NodeID: there is no
-    id to lie about, only a key that does or does not produce it."""
-    return hashlib.sha256(public_key).digest()[:PUBLISHER_ID_LEN]
+def identity_id(public_key: bytes) -> bytes:
+    """The id of any ML-DSA identity: the hash of its key, like a ``NodeID``.
+
+    One function for both ids a record carries — the node that signed it and the
+    key that signed the release — because they are the same derivation, and two
+    spellings of one quantity is two chances to disagree. What each *means* is
+    carried by the field name (``node_id``, ``signer_id``), never by a second
+    copy of this."""
+    return hashlib.sha256(public_key).digest()[:ID_LEN]
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +222,7 @@ def source_digest(files: dict) -> bytes:
     parties agree on the *code* without downloading anything from any of them.
 
     This is a comparison key, never a trust decision: an install still verifies
-    every byte against the content hash the chosen publisher signed."""
+    every byte against the content hash the chosen key signed."""
     parts = {}
     for path, content in files.items():
         if not isinstance(path, str) or is_documentation(path):
@@ -192,23 +236,43 @@ def source_digest(files: dict) -> bytes:
 # The record
 # ---------------------------------------------------------------------------
 
-def _signing_input(pub_id: bytes, kind: int, flags: int, ts: int, name: str,
-                   version: str, notes: str, ref: bytes, src: bytes) -> bytes:
-    return (_DOMAIN + pub_id + bytes([kind, flags]) + struct.pack("!Q", ts)
+def _hold_input(node_id: bytes, kind: int, flags: int, ts: int, name: str,
+                version: str, notes: str, release: bytes, src: bytes) -> bytes:
+    """What the **node** signs: everything it is saying, bound to itself."""
+    return (_DOMAIN + b":hold:" + node_id + bytes([kind, flags])
+            + struct.pack("!Q", ts)
             + name.encode("utf-8") + b"\x00" + version.encode("utf-8") + b"\x00"
-            + notes.encode("utf-8") + b"\x00" + ref + src)
+            + notes.encode("utf-8") + b"\x00" + release + src)
 
 
-def build_record(kind: int, name: str, version: str, ref: bytes, src: bytes,
-                 pubkey: bytes, sign, *, notes: str = "", ts: int | None = None,
-                 recommend: bool = False) -> bytes:
-    """Sign a record saying what this key publishes.
+def _publisher_input(node_id: bytes, signer_id: bytes, release: bytes) -> bytes:
+    """What the **release's signing key** signs to let one node claim it
+    published: this node, this key, this release.
 
-    ``ref`` is the DHT content key of the signed descriptor the record points
-    at — a core release descriptor or an app release descriptor. ``src`` is
-    :func:`source_digest` over the package's code, or 32 zero bytes when the
-    signer has not read the package (a recommendation of somebody else's bytes
-    may honestly have nothing to say about them).
+    Deliberately short, and deliberately naming the node. It says nothing about
+    the version, the name or the notes — those are the node's own words, and a
+    signing key that had to re-sign them would be re-signing a sentence it did
+    not write. What it does say cannot be lifted: a proof carries the node id it
+    was made for, so copying it onto another record verifies a different node
+    id and fails."""
+    return _DOMAIN + b":sign:" + node_id + signer_id + release
+
+
+def build_record(kind: int, name: str, version: str, release: bytes,
+                 src: bytes, node_pub: bytes, sign, *, notes: str = "",
+                 ts: int | None = None, signer_pub: bytes | None = None,
+                 signer_sign=None) -> bytes:
+    """Sign a record saying this node holds and serves a release.
+
+    ``release`` is the DHT content key of the signed descriptor — a core release
+    descriptor or an app release descriptor. ``src`` is :func:`source_digest`
+    over the package's code, or 32 zero bytes when the signer has not read it
+    (holding somebody else's bytes may honestly say nothing about them).
+
+    Pass ``signer_pub`` **and** ``signer_sign`` to add the proof that this node
+    also holds the key which signed that descriptor; the record then carries
+    ``FLAG_PUBLISHED``. Passing one without the other is refused rather than
+    silently downgraded — half a proof is a mistake, not an intention.
 
     The name is checked here too: signing a form we would refuse on receipt only
     produces a record the whole network drops."""
@@ -218,72 +282,96 @@ def build_record(kind: int, name: str, version: str, ref: bytes, src: bytes,
         raise PackageDirError("package name is not in canonical form")
     if not isinstance(version, str) or not 0 < len(version) <= MAX_VERSION:
         raise PackageDirError("package version invalid")
-    if not isinstance(ref, (bytes, bytearray)) or len(ref) != REF_LEN:
-        raise PackageDirError("package reference invalid")
+    if (not isinstance(release, (bytes, bytearray))
+            or len(release) != RELEASE_KEY_LEN):
+        raise PackageDirError("release key invalid")
     if not isinstance(src, (bytes, bytearray)) or len(src) != SRC_LEN:
         raise PackageDirError("source digest invalid")
+    if (signer_pub is None) != (signer_sign is None):
+        raise PackageDirError("a publication proof needs both key and signer")
     notes = str(notes or "")[:MAX_NOTES]
     ts = int(ts if ts is not None else time.time())
     if ts < 0 or ts > 0xFFFFFFFFFFFFFFFF:
         raise PackageDirError("bad timestamp")
-    flags = FLAG_RECOMMEND if recommend else 0
-    pub_id = publisher_id(pubkey)
-    ref, src = bytes(ref), bytes(src)
-    sig = sign(_signing_input(pub_id, kind, flags, ts, name, version, notes,
-                              ref, src))
+    flags = FLAG_PUBLISHED if signer_pub is not None else 0
+    node_id = identity_id(node_pub)
+    release, src = bytes(release), bytes(src)
+    node_sig = sign(_hold_input(node_id, kind, flags, ts, name, version, notes,
+                                release, src))
+    if signer_pub is not None:
+        signer_pub = bytes(signer_pub)
+        signer_sig = signer_sign(_publisher_input(
+            node_id, identity_id(signer_pub), release))
+    else:
+        signer_pub = signer_sig = b""
     encoded_name = name.encode("utf-8")
     encoded_version = version.encode("utf-8")
     encoded_notes = notes.encode("utf-8")
-    if (len(pubkey) > _MAX_PUBKEY or len(sig) > _MAX_SIG
+    if (len(node_pub) > _MAX_PUBKEY or len(node_sig) > _MAX_SIG
+            or len(signer_pub) > _MAX_PUBKEY or len(signer_sig) > _MAX_SIG
             or len(encoded_name) > _MAX_NAME_BYTES
             or len(encoded_notes) > MAX_NOTES * 4):
         raise PackageDirError("record field too large")
-    return (_HDR.pack(RECORD_VERSION, kind, flags, ts, len(pubkey),
+    return (_HDR.pack(RECORD_VERSION, kind, flags, ts, len(node_pub),
                       len(encoded_name), len(encoded_version),
-                      len(encoded_notes), len(sig))
-            + pubkey + encoded_name + encoded_version + encoded_notes
-            + ref + src + sig)
+                      len(encoded_notes), len(node_sig), len(signer_pub),
+                      len(signer_sig))
+            + node_pub + encoded_name + encoded_version + encoded_notes
+            + release + src + node_sig + signer_pub + signer_sig)
 
 
 def parse_record(data: bytes, verify) -> dict | None:
     """Parse and cryptographically verify a record.
 
     Returns the record, or ``None`` for anything malformed, oversized,
-    non-canonical, carrying a flag we do not know, or badly signed. Never raises
-    on hostile input: this is the gate, and a gate that can throw is a gate that
-    can be used to kill a receive loop."""
+    non-canonical, carrying a flag we do not know, or badly signed — including a
+    ``FLAG_PUBLISHED`` whose proof does not check. Never raises on hostile
+    input: this is the gate, and a gate that can throw is a gate that can be
+    used to kill a receive loop."""
     if not isinstance(data, (bytes, bytearray)):
         return None
     if not (_HDR.size <= len(data) <= MAX_RECORD):
         return None
     data = bytes(data)
-    (version, kind, flags, ts, pk_len, name_len, ver_len, notes_len,
-     sig_len) = _HDR.unpack_from(data, 0)
+    (version, kind, flags, ts, node_len, name_len, ver_len, notes_len,
+     nsig_len, signer_len, ssig_len) = _HDR.unpack_from(data, 0)
     if version != RECORD_VERSION or kind not in KINDS:
         return None
     if flags & ~_KNOWN_FLAGS:
         return None            # a flag we do not know is a meaning we cannot honour
-    if (pk_len > _MAX_PUBKEY or sig_len > _MAX_SIG
+    published = bool(flags & FLAG_PUBLISHED)
+    # The proof and the flag are one statement: a proof nobody claimed is as
+    # wrong as a claim with no proof, and letting either through would leave two
+    # spellings of "published" for a reader to disagree about.
+    if published == (signer_len == 0 or ssig_len == 0):
+        return None
+    if (node_len > _MAX_PUBKEY or nsig_len > _MAX_SIG
+            or signer_len > _MAX_PUBKEY or ssig_len > _MAX_SIG
             or name_len > _MAX_NAME_BYTES or ver_len > MAX_VERSION
             or notes_len > MAX_NOTES * 4):
         return None
     off = _HDR.size
-    expected = off + pk_len + name_len + ver_len + notes_len + REF_LEN + SRC_LEN + sig_len
+    expected = (off + node_len + name_len + ver_len + notes_len
+                + RELEASE_KEY_LEN + SRC_LEN + nsig_len + signer_len + ssig_len)
     if len(data) != expected:
         return None
-    pubkey = data[off:off + pk_len]
-    off += pk_len
+    node_pub = data[off:off + node_len]
+    off += node_len
     name_bytes = data[off:off + name_len]
     off += name_len
     version_bytes = data[off:off + ver_len]
     off += ver_len
     notes_bytes = data[off:off + notes_len]
     off += notes_len
-    ref = data[off:off + REF_LEN]
-    off += REF_LEN
+    release = data[off:off + RELEASE_KEY_LEN]
+    off += RELEASE_KEY_LEN
     src = data[off:off + SRC_LEN]
     off += SRC_LEN
-    sig = data[off:]
+    node_sig = data[off:off + nsig_len]
+    off += nsig_len
+    signer_pub = data[off:off + signer_len]
+    off += signer_len
+    signer_sig = data[off:off + ssig_len]
     try:
         name = name_bytes.decode("utf-8")
         pkg_version = version_bytes.decode("utf-8")
@@ -297,41 +385,53 @@ def parse_record(data: bytes, verify) -> dict | None:
     if len(notes) > MAX_NOTES:
         return None
     try:
-        pub_id = publisher_id(pubkey)
-        if not verify(_signing_input(pub_id, kind, flags, ts, name, pkg_version,
-                                     notes, ref, src), sig, pubkey):
+        node_id = identity_id(node_pub)
+        if not verify(_hold_input(node_id, kind, flags, ts, name, pkg_version,
+                                  notes, release, src), node_sig, node_pub):
             return None
+        signer_id = None
+        if published:
+            signer_id = identity_id(signer_pub)
+            if not verify(_publisher_input(node_id, signer_id, release),
+                          signer_sig, signer_pub):
+                return None
     except Exception:
         return None
     return {
-        "publisher_id": pub_id,
-        "publisher": pubkey,
+        "node_id": node_id,
+        "node": node_pub,
         "kind": kind,
         "flags": flags,
-        "recommend": bool(flags & FLAG_RECOMMEND),
+        "published": published,
+        "signer_id": signer_id,
+        "signer": signer_pub if published else None,
         "name": name,
         "version": pkg_version,
         "notes": notes,
-        "ref": ref,
+        "release": release,
         "src": src,
         "ts": ts,
-        "keys": [publisher_key(pub_id)] + name_keys(name),
+        "keys": ([node_key(node_id), release_key(release)] + name_keys(name)),
     }
 
 
 def entry_key(record: dict) -> bytes:
-    """What one record supersedes: this publisher, this kind, this name.
+    """What one record supersedes: this node, this kind, this name.
 
-    One publisher may offer several apps, and both a core release and an app —
-    so the identity of an entry is the three together, never the publisher
-    alone."""
+    A node may hold several apps, and both a core release and an app — so the
+    identity of an entry is the three together, never the node alone. One
+    statement per package per node is also what "recommending is holding" means
+    in practice: a node says which version of a thing it runs, not every version
+    it has ever seen."""
     return hashlib.sha256(
-        record["publisher_id"] + bytes([record["kind"]])
+        record["node_id"] + bytes([record["kind"]])
         + fold(record["name"]).encode("utf-8")).digest()[:KEY_LEN]
 
 
 # Wire encoding of a record list in a PKG_FOUND reply: length-prefixed records,
-# capped to a byte budget so the reply always fits one packet payload.
+# capped to a byte budget so the reply always fits one packet payload. The
+# budget matters more than the count now that a record may carry two keys and
+# two signatures.
 _REC_LEN = struct.Struct("!H")
 _FOUND_BUDGET = 56 * 1024
 
@@ -361,201 +461,14 @@ def decode_records(blob: bytes) -> list[bytes]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Pairing a detached publisher key with the node that uses it
-# ---------------------------------------------------------------------------
-#
-# A release may be signed by a key that is not the node's identity
-# (:mod:`src.publisher_key`): that key decides what everybody pinning it will
-# run, is used a few times a year, and has no business sharing the key the node
-# keeps unlocked to sign handshakes. The record then names *that* key — it can
-# only ever name its own signer — so asking a node id what it offers finds
-# nothing, and the operator looking at a machine cannot get from it to the code
-# it publishes.
-#
-# A pairing closes that, and it takes **two halves** because one would be
-# hearsay. Each half is signed by one of the parties and can only name its own
-# author as the signer:
-#
-#     node N signs   "P publishes for me"   → filed under N's key
-#     key  P signs   "N is my node"         → filed under P's key
-#
-# A reader believes the link only when it holds both and each names the other.
-# With one half alone, a node could put a stranger's packages on its own page —
-# which grants no privilege (a package still shows its real publisher, and
-# pinning still pins that publisher) but is exactly the shape the charter
-# forbids: one node's word about another, believed.
-#
-# The publisher's half costs nothing: that key is unlocked at publish time
-# anyway, so it is signed while it is open.
-
-_PAIR_DOMAIN = b"nmesh-package-pair-v1"
-PAIRING_VERSION = 1
-
-# pairing = version(B) ‖ ts(Q) ‖ pubkey_len(H) ‖ sig_len(H)
-#           ‖ pubkey ‖ counterpart(20) ‖ sig
-_PAIR_HDR = struct.Struct("!BQHH")
-COUNTERPART_LEN = 20
-MAX_PAIRING = _PAIR_HDR.size + _MAX_PUBKEY + COUNTERPART_LEN + _MAX_SIG
-
-_MAX_PAIRINGS = 256                # pairings this node remembers at all
-_MAX_PAIRING_BYTES = 2 * 1024 * 1024
-_MAX_PAIRINGS_PER_KEY = 4          # counterparts one key may name
-
-
-def _pair_signing_input(signer_id: bytes, ts: int, counterpart: bytes) -> bytes:
-    return _PAIR_DOMAIN + signer_id + struct.pack("!Q", ts) + counterpart
-
-
-def build_pairing(counterpart: bytes, pubkey: bytes, sign,
-                  ts: int | None = None) -> bytes:
-    """Sign one half of a pairing: "``counterpart`` and I go together".
-
-    ``counterpart`` is the other party's id — a node id when a publisher key
-    signs, a publisher id when a node identity does. Both are twenty bytes
-    derived from a public key, and neither half means anything alone."""
-    if not isinstance(counterpart, (bytes, bytearray)) or len(counterpart) != COUNTERPART_LEN:
-        raise PackageDirError("counterpart id invalid")
-    ts = int(ts if ts is not None else time.time())
-    if ts < 0 or ts > 0xFFFFFFFFFFFFFFFF:
-        raise PackageDirError("bad timestamp")
-    signer_id = publisher_id(pubkey)
-    counterpart = bytes(counterpart)
-    sig = sign(_pair_signing_input(signer_id, ts, counterpart))
-    if len(pubkey) > _MAX_PUBKEY or len(sig) > _MAX_SIG:
-        raise PackageDirError("pairing field too large")
-    return (_PAIR_HDR.pack(PAIRING_VERSION, ts, len(pubkey), len(sig))
-            + pubkey + counterpart + sig)
-
-
-def parse_pairing(data: bytes, verify) -> dict | None:
-    """Parse and cryptographically verify one half of a pairing.
-
-    Returns ``{signer_id, signer, counterpart, ts, key}`` — ``key`` being the
-    directory key it is filed under, which is the **signer's**, so a half can
-    only ever be filed against its own author. ``None`` for anything malformed,
-    oversized or badly signed; never raises, because this is a gate."""
-    if not isinstance(data, (bytes, bytearray)):
-        return None
-    if not (_PAIR_HDR.size <= len(data) <= MAX_PAIRING):
-        return None
-    data = bytes(data)
-    version, ts, pk_len, sig_len = _PAIR_HDR.unpack_from(data, 0)
-    if version != PAIRING_VERSION:
-        return None
-    if pk_len > _MAX_PUBKEY or sig_len > _MAX_SIG:
-        return None
-    off = _PAIR_HDR.size
-    if len(data) != off + pk_len + COUNTERPART_LEN + sig_len:
-        return None
-    pubkey = data[off:off + pk_len]
-    counterpart = data[off + pk_len:off + pk_len + COUNTERPART_LEN]
-    sig = data[off + pk_len + COUNTERPART_LEN:]
-    try:
-        signer_id = publisher_id(pubkey)
-        if not verify(_pair_signing_input(signer_id, ts, counterpart), sig, pubkey):
-            return None
-    except Exception:
-        return None
-    if signer_id == counterpart:
-        return None          # a key pairing with itself says nothing
-    return {"signer_id": signer_id, "signer": pubkey, "counterpart": counterpart,
-            "ts": ts, "key": publisher_key(signer_id)}
-
-
-class PairingBook:
-    """The pairing halves we hold, indexed by the key each was signed with.
-
-    Deliberately thinner than :class:`PackageBook`: a half has no name, no
-    content and nothing to rank. What it needs is the same two bounds — entries
-    and bytes, because a half carries an ML-DSA key and signature — and the
-    same anti-rollback, so a replayed old half cannot undo a party's newer
-    word."""
-
-    def __init__(self, max_entries: int = _MAX_PAIRINGS,
-                 max_bytes: int = _MAX_PAIRING_BYTES,
-                 max_per_key: int = _MAX_PAIRINGS_PER_KEY) -> None:
-        self._max_entries = max_entries
-        self._max_bytes = max_bytes
-        self._max_per_key = max_per_key
-        # (signer_id, counterpart) -> {ts, raw, key, signer_id, counterpart}
-        self._entries: "OrderedDict[tuple, dict]" = OrderedDict()
-        self._bytes = 0
-
-    def offer(self, pairing: dict, raw: bytes) -> bool:
-        """Take an already-verified half. True only when our view changed."""
-        raw = bytes(raw)
-        if len(raw) > MAX_PAIRING:
-            return False
-        ident = (pairing["signer_id"], pairing["counterpart"])
-        current = self._entries.get(ident)
-        if current is not None and pairing["ts"] <= current["ts"]:
-            return False                     # older or replayed — anti-rollback
-        if current is not None:
-            self._bytes -= len(current["raw"])
-            self._entries.pop(ident)
-        self._entries[ident] = {"ts": pairing["ts"], "raw": raw,
-                                "key": pairing["key"],
-                                "signer_id": pairing["signer_id"],
-                                "counterpart": pairing["counterpart"]}
-        self._bytes += len(raw)
-        self._enforce_per_key(pairing["signer_id"])
-        self._enforce_bounds()
-        return ident in self._entries
-
-    def _enforce_per_key(self, signer_id: bytes) -> None:
-        held = [ident for ident in self._entries if ident[0] == signer_id]
-        for ident in held[:max(0, len(held) - self._max_per_key)]:
-            self._drop(ident)
-
-    def _enforce_bounds(self) -> None:
-        while self._entries and (len(self._entries) > self._max_entries
-                                 or self._bytes > self._max_bytes):
-            self._drop(next(iter(self._entries)))
-
-    def _drop(self, ident: tuple) -> None:
-        entry = self._entries.pop(ident, None)
-        if entry is not None:
-            self._bytes -= len(entry["raw"])
-
-    def get(self, key: bytes) -> list[bytes]:
-        """Raw halves filed under a directory key (for a ``PKG_FOUND`` reply)."""
-        return [entry["raw"] for entry in self._entries.values()
-                if entry["key"] == key]
-
-    def named_by(self, signer_id: bytes) -> list[bytes]:
-        """Who this key says it goes with — counterpart ids."""
-        signer_id = bytes(signer_id)
-        return [ident[1] for ident in self._entries if ident[0] == signer_id]
-
-    def confirmed(self, one: bytes, other: bytes) -> bool:
-        """Do both halves exist and name each other?
-
-        The only question worth asking of this book. One half alone is one
-        party's word about another, and this whole file exists so that it is
-        never enough."""
-        one, other = bytes(one), bytes(other)
-        return ((one, other) in self._entries
-                and (other, one) in self._entries)
-
-    def records(self) -> list[bytes]:
-        return [entry["raw"] for entry in self._entries.values()]
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    @property
-    def nbytes(self) -> int:
-        return self._bytes
-
-
 class PackageBook:
-    """Every package record we have learned, one entry per publisher-kind-name.
+    """Every record we have learned, one entry per node-kind-name.
 
-    Indexed from a single set of entries: by publisher key (to answer "what does
-    this node publish?"), and by name key — the whole name and each of its
-    prefixes — to answer a search for a package nobody here has installed.
-    Bounded in entries *and* in bytes, LRU on both."""
+    Indexed from a single set of entries: by node key (to answer "what does this
+    machine offer?"), by release key (to answer "who can serve this?" — the
+    swarm, which is what makes a fetch work through routing), and by name key —
+    the whole name and each of its prefixes — to answer a search for a package
+    nobody here has installed. Bounded in entries *and* in bytes, LRU on both."""
 
     def __init__(self, max_entries: int = _MAX_ENTRIES,
                  max_bytes: int = _MAX_BOOK_BYTES,
@@ -566,8 +479,8 @@ class PackageBook:
         self._entries: "OrderedDict[bytes, dict]" = OrderedDict()
         self._by_key: dict[bytes, list[bytes]] = {}
         self._bytes = 0
-        # Publishers caught signing two different packages as one version at one
-        # instant. One proof per publisher, bounded like everything an outsider
+        # Nodes caught saying they hold two different releases of one package at
+        # one instant. One proof per node, bounded like everything an outsider
         # can grow.
         self._equivocations: dict[bytes, bytes] = {}
 
@@ -589,23 +502,25 @@ class PackageBook:
             # older half second is exactly how a contradiction slips past a
             # check that ran after. Same shape as the pseudo book.
             if (record["ts"] == current["ts"]
-                    and (record["ref"] != current["ref"]
+                    and (record["release"] != current["release"]
                          or record["version"] != current["version"])):
-                self._note_equivocation(record["publisher_id"], current["raw"], raw)
+                self._note_equivocation(record["node_id"], current["raw"], raw)
             if record["ts"] <= current["ts"]:
                 return False
             self._unindex(ident, current)
         entry = {
             "id": ident,
-            "publisher_id": record["publisher_id"],
-            "publisher": record["publisher"],
+            "node_id": record["node_id"],
+            "node": record["node"],
             "kind": record["kind"],
-            "recommend": record["recommend"],
+            "published": record["published"],
+            "signer_id": record["signer_id"],
+            "signer": record["signer"],
             "name": record["name"],
             "folded": fold(record["name"]),
             "version": record["version"],
             "notes": record["notes"],
-            "ref": record["ref"],
+            "release": record["release"],
             "src": record["src"],
             "ts": record["ts"],
             "raw": raw,
@@ -628,21 +543,21 @@ class PackageBook:
         # under memory pressure.
         return ident in self._entries
 
-    def _note_equivocation(self, pub_id: bytes, held: bytes,
+    def _note_equivocation(self, node_id: bytes, held: bytes,
                            incoming: bytes) -> None:
-        if pub_id in self._equivocations or len(self._equivocations) >= _MAX_EQUIVOCATIONS:
+        if node_id in self._equivocations or len(self._equivocations) >= _MAX_EQUIVOCATIONS:
             return
         from . import equivocation
         try:
-            self._equivocations[pub_id] = equivocation.build(
+            self._equivocations[node_id] = equivocation.build(
                 equivocation.KIND_RELEASE, held, incoming)
         except Exception:
             pass          # a proof we cannot frame is not a reason to fail the offer
 
-    def equivocated(self, pub_id) -> bytes | None:
-        if not isinstance(pub_id, (bytes, bytearray)):
+    def equivocated(self, node_id) -> bytes | None:
+        if not isinstance(node_id, (bytes, bytearray)):
             return None
-        return self._equivocations.get(bytes(pub_id))
+        return self._equivocations.get(bytes(node_id))
 
     def forget(self, ident: bytes) -> None:
         entry = self._entries.pop(ident, None)
@@ -691,10 +606,22 @@ class PackageBook:
             return []        # "I did not read the package" is not agreement
         return [entry for entry in self._entries.values() if entry["src"] == src]
 
-    def of_publisher(self, pub_id: bytes) -> list[dict]:
-        pub_id = bytes(pub_id)
+    def of_node(self, node_id: bytes) -> list[dict]:
+        """What one machine says it holds — the only join between a package and
+        a node, and one the node makes about itself."""
+        node_id = bytes(node_id)
         return [entry for entry in self._entries.values()
-                if entry["publisher_id"] == pub_id]
+                if entry["node_id"] == node_id]
+
+    def holders(self, release: bytes) -> list[dict]:
+        """Every node that says it holds these bytes and will serve them.
+
+        A recommendation *is* the offer to serve, so this is the swarm. It is a
+        claim, not a fact: a node that lies costs the asker one round trip,
+        because the hash decides what the bytes are."""
+        release = bytes(release)
+        return [entry for entry in self._entries.values()
+                if entry["release"] == release]
 
     def records(self) -> list[bytes]:
         """Every record we hold, oldest-touched first — what a freshly connected
@@ -737,4 +664,3 @@ def canonical_name(name) -> str:
     because it is displayed in the same places and impersonation lives in the
     same difference between what was sent and what renders."""
     return canonical(name)
-

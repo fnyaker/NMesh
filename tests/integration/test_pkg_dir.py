@@ -100,7 +100,8 @@ class TestFindingAPackage:
             await publisher._publish_package_records()
             offered = await node.packages_of(publisher.id)
             assert [row["version"] for row in offered] == ["9.9.9"]
-            assert offered[0]["publisher_id"] == publisher.id.raw.hex()
+            assert offered[0]["node_id"] == publisher.id.raw.hex()
+            assert offered[0]["published"] is True
         finally:
             await node.stop(); await publisher.stop()
 
@@ -116,7 +117,7 @@ class TestFindingAPackage:
 
             assert node._publishers.trusts(
                 publisher._identity.dsa_public_key) is False
-            pinned = node.trust_package_publisher(entry["id"])
+            pinned = node.trust_package_signer(entry["id"])
             assert pinned["key"] == publisher._identity.dsa_public_key.hex()
             assert node._publishers.trusts(
                 publisher._identity.dsa_public_key) is True
@@ -199,7 +200,7 @@ class TestCorroboration:
                 node._package_book.offer(record, raw)
 
             entry = next(row for row in await node.search_packages("nmesh")
-                         if row["publisher_id"] == publisher.id.raw.hex())
+                         if row["node_id"] == publisher.id.raw.hex())
             assert entry["attesters"] == 2
         finally:
             await second.stop(); await node.stop(); await publisher.stop()
@@ -217,7 +218,7 @@ class TestCorroboration:
                 record = pkg_dir.parse_record(raw, node._identity.verify)
                 node._package_book.offer(record, raw)
             entry = next(row for row in await node.search_packages("nmesh")
-                         if row["publisher_id"] == publisher.id.raw.hex())
+                         if row["node_id"] == publisher.id.raw.hex())
             assert entry["attesters"] == 1
         finally:
             await second.stop(); await node.stop(); await publisher.stop()
@@ -237,8 +238,13 @@ class TestCorroboration:
                 record = pkg_dir.parse_record(raw, node._identity.verify)
                 node._package_book.offer(record, raw)
 
+            # A quorum counts keys the operator endorsed one at a time: a
+            # signature from somebody nobody chose is a party an attacker can
+            # mint, and that is the whole reason the number means anything.
             for row in await node.search_packages("nmesh"):
-                node.subscribe_package(row["id"], quorum=2)
+                node.trust_package_signer(row["id"], endorsed=True)
+            node.subscribe_package(
+                (await node.packages_of(publisher.id))[0]["id"], quorum=2)
             entry = node._package_book.entry(bytes.fromhex(
                 (await node.packages_of(publisher.id))[0]["id"]))
             assert node._package_agreement(entry) == (2, 2)
@@ -253,7 +259,7 @@ class TestCorroboration:
             await publisher.publish_release(_tree(str(tmp_path / "tree"), "9.9.9"))
             await publisher._publish_package_records()
             entry = (await node.search_packages("nmesh"))[0]
-            node.trust_package_publisher(entry["id"], auto=True)
+            node.trust_package_signer(entry["id"], auto=True, endorsed=True)
             node.subscribe_package(entry["id"], auto=True, quorum=2)
 
             record = node._package_book.entry(bytes.fromhex(entry["id"]))
@@ -261,7 +267,7 @@ class TestCorroboration:
             assert (agreeing, needed) == (1, 2)
 
             installs = []
-            node.install_release = lambda *a, **k: installs.append(a)
+            node.install_release_entry = lambda *a, **k: installs.append(a)
             await node._subscribed_install_pass()
             assert installs == []
         finally:
@@ -269,9 +275,13 @@ class TestCorroboration:
 
 
 class TestADetachedPublisherKey:
-    """A release signed with a key that is not the node's identity. The record
-    names that key — it can only name its own signer — so a pairing is what
-    ties it back to the machine, and it takes both parties to make one."""
+    """A release signed with a key that is not the node's identity.
+
+    This used to need a second artefact — a two-halved pairing — because records
+    were filed under the *publisher key*, which names a machine only by
+    coincidence and names nothing at all once the key is detached. Now the node
+    signs the record and the key co-signs a proof naming that node, so one
+    record says both things and one lookup finds it."""
 
     def _key(self, path):
         from src import publisher_key
@@ -282,7 +292,7 @@ class TestADetachedPublisherKey:
                            n=2 ** 8, r=8, p=1)
         return identity.dsa_public_key
 
-    async def test_a_node_id_reaches_it_through_the_pairing(self, tmp_path):
+    async def test_a_node_id_finds_it_with_no_second_artefact(self, tmp_path):
         publisher, node = await _pair(19412)
         try:
             path = str(tmp_path / "publisher.key")
@@ -293,17 +303,19 @@ class TestADetachedPublisherKey:
 
             offered = await node.packages_of(publisher.id)
             assert [row["version"] for row in offered] == ["9.9.9"]
-            # The record names the key, not the machine…
-            assert offered[0]["publisher"] == public.hex()
-            assert offered[0]["publisher_id"] != publisher.id.raw.hex()
-            # …and the machine is reached through a link both of them signed.
-            assert offered[0]["vouched_by"] == [publisher.id.raw.hex()]
+            # The record is the machine's own sentence about itself…
+            assert offered[0]["node_id"] == publisher.id.raw.hex()
+            # …and it names the key the release was signed with, proved.
+            assert offered[0]["published"] is True
+            assert offered[0]["signer"] == public.hex()
+            assert offered[0]["signer_id"] != publisher.id.raw.hex()
         finally:
             await node.stop(); await publisher.stop()
 
-    async def test_one_half_alone_is_not_followed(self, tmp_path):
-        """A node naming a stranger's key would otherwise put that stranger's
-        packages on its own page."""
+    async def test_a_node_cannot_put_a_strangers_package_on_its_own_page(
+            self, tmp_path):
+        """The property the pairing existed to protect, now free: a record can
+        only be filed under the node that signed it."""
         publisher, node = await _pair(19413)
         stranger = MeshNode(_mgr())
         try:
@@ -311,17 +323,10 @@ class TestADetachedPublisherKey:
             for raw in stranger._package_records.values():
                 record = pkg_dir.parse_record(raw, node._identity.verify)
                 node._package_book.offer(record, raw)
-            # The publisher says the stranger's key publishes for it. The
-            # stranger never said anything back.
-            half = publisher.sign_pairing(stranger.id.raw)
-            node._pairings.offer(
-                pkg_dir.parse_pairing(half, node._identity.verify), half)
 
-            offered = await node.packages_of(publisher.id, wide=False)
-            assert offered == [], "one party's word was followed"
-            # And the stranger's own page is unaffected: nothing was attached.
+            assert await node.packages_of(publisher.id, wide=False) == []
             theirs = await node.packages_of(stranger.id, wide=False)
-            assert [row["vouched_by"] for row in theirs] == [[]]
+            assert [row["node_id"] for row in theirs] == [stranger.id.raw.hex()]
         finally:
             await stranger.stop(); await node.stop(); await publisher.stop()
 
@@ -335,7 +340,7 @@ class TestADetachedPublisherKey:
                                             key_path=path, passphrase="pass")
             await publisher._publish_package_records()
             entry = (await node.packages_of(publisher.id))[0]
-            assert node.trust_package_publisher(entry["id"])["key"] == public.hex()
+            assert node.trust_package_signer(entry["id"])["key"] == public.hex()
 
             applied = {}
 
@@ -387,7 +392,10 @@ class TestHandingAPublisherKeyOver:
             assert info["publisher_id"] == row["id"]
             await bob._publish_package_records()
             found = await alice.search_packages("nmesh")
-            assert [entry["publisher_id"] for entry in found] == [row["id"]]
+            assert [entry["signer_id"] for entry in found] == [row["id"]]
+            # …and the record is bob's own sentence about bob's machine, even
+            # though the key that signed the release came from alice.
+            assert found[0]["node_id"] == bob.id.raw.hex()
         finally:
             await bob.stop(); await alice.stop()
 
@@ -411,21 +419,93 @@ class TestHandingAPublisherKeyOver:
             await bob.stop(); await alice.stop()
 
 
-class TestARecordSaysNothingAboutTrust:
-    async def test_a_recommendation_cannot_be_pinned(self, tmp_path):
-        """Pinning the node that agreed with a release would hand the machine
-        to whoever agreed, which is not what agreeing means."""
-        publisher, node = await _pair(19408)
+class TestRecommendingIsServing:
+    """The sentence a node signs is "I hold this and I serve it", so the set of
+    records under a release **is** the set of machines that can hand it over.
+    That is the whole of how a fetch works through routing with no publisher to
+    fall back on."""
+
+    async def test_a_recommendation_is_found_by_the_release_it_names(
+            self, tmp_path):
+        publisher, node = await _pair(19417)
         try:
+            info = await publisher.publish_release(
+                _tree(str(tmp_path / "tree"), "9.9.9"))
+            await publisher._publish_package_records()
+
+            holders = await node.package_holders(bytes.fromhex(info["release"]))
+            assert holders == [publisher.id]
+        finally:
+            await node.stop(); await publisher.stop()
+
+    async def test_the_holders_are_where_a_fetch_looks(self, tmp_path):
+        """No hint, no announce that reached us, no publisher fallback — the
+        directory is what says who has the bytes."""
+        publisher, node = await _pair(19418)
+        try:
+            info = await publisher.publish_release(
+                _tree(str(tmp_path / "tree"), "9.9.9"))
+            await publisher._publish_package_records()
+            node._release_sources.clear()
+            node._peers = []          # nothing to ask but the directory
+
+            entry = node._releases.get(info["release"])
+            if entry is None:
+                described = await node.package_descriptor(
+                    (await node.search_packages("nmesh"))[0]["id"])
+                entry = described["entry"]
+            assert publisher.id in await node._release_sources_for(entry)
+        finally:
+            await node.stop(); await publisher.stop()
+
+    async def test_installing_makes_this_node_a_source_too(self, tmp_path):
+        """Everyone who installed it is somewhere the next node can get it.
+        This is what replaces "ask the publisher, they will always have it"."""
+        publisher, node = await _pair(19419)
+        try:
+            await publisher.publish_store_app(
+                "Sketchpad", "1.0.0", {"main.py": b"print('hi')\n"})
+            await publisher._publish_package_records()
+            entry = (await node.search_packages("sketch"))[0]
+
+            await node.install_package(entry["id"])
+
+            ours = await node.packages_of(node.id, wide=False)
+            assert [row["name"] for row in ours] == ["Sketchpad"]
+            assert ours[0]["published"] is False      # we hold it, we did not sign it
+            assert bytes.fromhex(ours[0]["release"]) == \
+                bytes.fromhex(entry["release"])
+        finally:
+            await node.stop(); await publisher.stop()
+
+
+class TestARecordSaysNothingAboutTrust:
+    async def test_a_node_that_only_serves_carries_no_key_to_pin(self, tmp_path):
+        """Pinning whoever handed you a copy would hand the machine to a
+        mirror. A record without the publication proof carries no key at all,
+        which is the refusal rather than a check somebody could forget."""
+        from src.version import __version__ as running
+        publisher, node = await _pair(19408)
+        stranger = MeshNode(_mgr())
+        try:
+            # The publisher runs a version somebody else signed: it holds the
+            # release and offers to serve it, and that is all it says.
+            blob = (await stranger.publish_release(
+                _tree(str(tmp_path / "tree"), running)))
+            descriptor = stranger._releases.get(blob["release"])["release"]
+            publisher._releases.offer(descriptor, publisher._identity.verify,
+                                      publisher._trusts_publisher)
             publisher._recommend_version = True
             await publisher._recommend_pass()
             await publisher._publish_package_records()
+
             offered = await node.packages_of(publisher.id)
-            assert offered and offered[0]["recommend"] is True
-            with pytest.raises(Exception, match="recommendation"):
-                node.trust_package_publisher(offered[0]["id"])
+            assert offered and offered[0]["published"] is False
+            assert offered[0]["signer"] is None
+            with pytest.raises(Exception, match="did not sign"):
+                node.trust_package_signer(offered[0]["id"])
         finally:
-            await node.stop(); await publisher.stop()
+            await stranger.stop(); await node.stop(); await publisher.stop()
 
     async def test_a_recommendation_points_at_a_descriptor_that_resolves(
             self, tmp_path):
@@ -440,8 +520,7 @@ class TestARecordSaysNothingAboutTrust:
             publisher._recommend_version = True
             await publisher._recommend_pass()
             await publisher._publish_package_records()
-            offered = [row for row in await node.packages_of(publisher.id)
-                       if row["recommend"]]
+            offered = await node.packages_of(publisher.id)
             assert offered, "nothing was recommended"
             described = await node.package_descriptor(offered[0]["id"])
             assert described is not None and described["version"] == running
