@@ -73,6 +73,7 @@ import os
 import re
 import tarfile
 import time
+from collections import OrderedDict
 
 _DOMAIN = b"nmesh-core-release-v1"
 
@@ -90,7 +91,7 @@ MAX_VERSION_LEN = 64
 MAX_NOTES_LEN = 4000
 MAX_NAME_LEN = 64
 MAX_PUBLISHERS = 32          # pinned keys an operator may hold
-MAX_CATALOG = 64             # publishers tracked in the gossiped catalogue
+MAX_CATALOG = 64             # releases tracked in the gossiped book
 MAX_EQUIVOCATIONS = 8        # publishers we keep a self-contradiction proof about
 MAX_HELD_PACKAGES = 4        # packages this node keeps to serve others
 PUBLISHER_ID_LEN = 20
@@ -818,6 +819,17 @@ class ReleaseStore:
 # What the network is offering
 # ---------------------------------------------------------------------------
 
+def descriptor_key(release_bytes: bytes) -> bytes:
+    """Where a signed descriptor lives on the DHT — and what names the release.
+
+    The same derivation the DHT uses for any value, so a node that stores a
+    descriptor and a node that names one arrive at the same 20 bytes without
+    telling each other anything. This is the release's name everywhere: in the
+    book, in the directory key that lists who can serve it, and in the record a
+    node signs to say it holds it."""
+    return hashlib.sha256(bytes(release_bytes)).digest()[:PUBLISHER_ID_LEN]
+
+
 def catalogue_entry(doc: dict, release_bytes: bytes,
                     is_trusted: bool = False) -> dict:
     """The shape everything downstream reads a release through.
@@ -831,6 +843,10 @@ def catalogue_entry(doc: dict, release_bytes: bytes,
     thing on the screen. A release is bytes and a signature; this is that
     signature's own view of them."""
     return {
+        # What names this release, everywhere: the descriptor's own content
+        # key. Derived here so nothing downstream has to re-derive it and get a
+        # different answer.
+        "key": descriptor_key(release_bytes),
         "publisher_id": doc["publisher_id"],
         "publisher": doc["publisher"],
         "release": bytes(release_bytes),
@@ -847,69 +863,84 @@ def catalogue_entry(doc: dict, release_bytes: bytes,
     }
 
 
-class ReleaseCatalog:
-    """Bounded, signature-verified view of the releases the mesh is offering,
-    one entry per publisher (the highest ``ts`` it has signed).
+class ReleaseBook:
+    """Every signed release we know, keyed by **the descriptor's own content
+    key** — one entry per release, several per signing key.
 
-    Untrusted publishers are kept and relayed on purpose — refusing to carry
-    what we do not install ourselves would break discovery for everyone else.
-    They can never crowd out a pinned one: when the catalogue is full, an
-    untrusted entry is evicted for a trusted newcomer, and an untrusted
-    newcomer is simply refused."""
+    It used to be one entry per publisher: its newest signature, and nothing
+    else. That made a key a *name for a release*, which it is not. Two things
+    broke on it. Installing resolved a publisher id through here, so clicking a
+    release installed whatever that key had signed since; and a release found by
+    name in the directory, never gossiped at us, could not be held at all
+    because a newer one from the same key was already in its slot.
+
+    A release is bytes and a signature. The signature says who may replace this
+    node's code — that is decided by the pins, at the install gate — and the
+    bytes are named by their hash. Neither is a reason to index by publisher.
+
+    Untrusted signers are kept and relayed on purpose: refusing to carry what we
+    do not install ourselves would break discovery for everyone else. They can
+    never crowd out a pinned one — when the book is full, an untrusted entry is
+    evicted for a trusted newcomer, and an untrusted newcomer is simply
+    refused."""
 
     def __init__(self, max_entries: int = MAX_CATALOG) -> None:
         self._max = max_entries
-        self._entries: dict[bytes, dict] = {}
-        # Publishers caught signing one version twice, with different bytes each
-        # time. One proof per publisher, bounded beside the table it describes.
+        self._entries: "OrderedDict[bytes, dict]" = OrderedDict()
+        # Signing keys caught signing one version twice, with different bytes
+        # each time. One proof per key, bounded beside the table it describes.
         self._equivocations: dict[bytes, bytes] = {}
+
+    # -- mutation ---------------------------------------------------------
 
     def offer(self, release_bytes: bytes, verify, trusted=None) -> str | None:
         """Consider a signed release.
 
-        Returns ``"new"`` / ``"updated"`` when our view changed (the caller
-        should re-gossip it), or ``None`` when it was invalid, a duplicate, or
-        older than what we hold — which is what stops the epidemic."""
+        Returns ``"new"`` when our view changed (the caller should re-gossip
+        it), or ``None`` when it was invalid or one we already hold — which is
+        what stops the epidemic. There is no "updated": a descriptor is named by
+        its own bytes, so a changed descriptor is a different release, and the
+        same one arriving twice is a duplicate whatever its timestamp says.
+
+        No anti-rollback here, deliberately. An old release cannot walk this node
+        backwards because the **install** gate refuses anything that is not
+        strictly newer than what is running; keeping the old descriptor in a book
+        is how an operator can still look at it, and how a node can still serve
+        it to somebody who wants it."""
         try:
             doc = parse_release(release_bytes, verify)
         except ReleaseError:
             return None
-        key = doc["publisher_id"]
+        key = descriptor_key(release_bytes)
+        if key in self._entries:
+            self._entries.move_to_end(key)
+            return None
         is_trusted = bool(trusted(doc["publisher"])) if trusted else False
-        existing = self._entries.get(key)
-        if existing is not None:
-            # Before the rollback check, deliberately. One publisher signing two
-            # different programs under one version is not a stale descriptor to
-            # drop, it is a proof to keep — and an attacker showing the older
-            # half second is exactly how it would slip past a check that ran
-            # after. See `equivocation.py`: unlike everything else a node hears
-            # about another node, this needs nobody's honesty to stand up.
-            self._note_equivocation(key, existing, doc, release_bytes, is_trusted)
-            if doc["ts"] <= existing["ts"]:
-                return None                      # anti-rollback
-            outcome = "updated"
-        else:
-            if len(self._entries) >= self._max and not self._make_room(is_trusted):
-                return None
-            outcome = "new"
+        self._note_equivocation(doc, release_bytes, is_trusted)
+        if len(self._entries) >= self._max and not self._make_room(is_trusted):
+            return None
         self._entries[key] = catalogue_entry(doc, release_bytes, is_trusted)
-        return outcome
+        return "new"
 
-    def _note_equivocation(self, key: bytes, existing: dict, doc: dict,
-                           incoming: bytes, is_trusted: bool) -> None:
-        """Keep the pair when one publisher signs one version twice, differently.
+    def _note_equivocation(self, doc: dict, incoming: bytes,
+                           is_trusted: bool) -> None:
+        """Keep the pair when one key signs one version twice, differently.
 
-        One proof per publisher, the first one seen: a second is the same fact
-        about the same key, and the table is bounded like every other thing here
-        that an outsider can grow. When it is full a proof about a publisher
-        this operator never pinned makes way for one about a publisher they did
-        — the table's whole use is refusing an unattended install, so the keys
-        that could actually cause one are the keys worth the room."""
-        if key in self._equivocations:
+        One proof per key, the first one seen: a second is the same fact about
+        the same key, and the table is bounded like every other thing here that
+        an outsider can grow. When it is full a proof about a key this operator
+        never pinned makes way for one about a key they did — the table's whole
+        use is refusing an unattended install, so the keys that could actually
+        cause one are the keys worth the room."""
+        signer = doc["publisher_id"]
+        if signer in self._equivocations:
             return
-        if existing["version"] != doc["version"]:
-            return
-        if existing["sha256"] == doc["sha256"]:
+        existing = next(
+            (entry for entry in self._entries.values()
+             if entry["publisher_id"] == signer
+             and entry["version"] == doc["version"]
+             and entry["sha256"] != doc["sha256"]), None)
+        if existing is None:
             return
         from . import equivocation
         try:
@@ -920,33 +951,15 @@ class ReleaseCatalog:
         if len(self._equivocations) >= MAX_EQUIVOCATIONS:
             if not is_trusted or not self._evict_equivocation():
                 return
-        self._equivocations[key] = proof
+        self._equivocations[signer] = proof
 
     def _evict_equivocation(self) -> bool:
-        for key in self._equivocations:
-            entry = self._entries.get(key)
-            if entry is None or not entry["trusted"]:
-                del self._equivocations[key]
+        for signer in self._equivocations:
+            if not any(entry["publisher_id"] == signer and entry["trusted"]
+                       for entry in self._entries.values()):
+                del self._equivocations[signer]
                 return True
         return False
-
-    def equivocations(self) -> dict[bytes, bytes]:
-        """``publisher_id -> proof``, for whoever wants to act on it or pass it
-        on. A copy: nothing outside may edit the catalogue by iterating it."""
-        return dict(self._equivocations)
-
-    def equivocated(self, key) -> bytes | None:
-        """The proof that this publisher contradicted itself, if we hold one.
-
-        Takes the publisher id or the key it is derived from: both are what a
-        caller has to hand, and deriving one from the other is not a decision
-        worth making at four call sites."""
-        if not isinstance(key, (bytes, bytearray)):
-            return None
-        key = bytes(key)
-        if len(key) != PUBLISHER_ID_LEN:
-            key = publisher_id(key)
-        return self._equivocations.get(key)
 
     def _make_room(self, for_trusted: bool) -> bool:
         if not for_trusted:
@@ -960,31 +973,80 @@ class ReleaseCatalog:
 
     def retrust(self, trusted) -> None:
         """Re-evaluate the trusted flag — a pin added now applies to what we
-        already heard, without waiting for the publisher to announce again."""
+        already heard, without waiting for anybody to announce again."""
         for entry in self._entries.values():
             entry["trusted"] = bool(trusted(entry["publisher"]))
 
-    def get(self, publisher_id_hex: str) -> dict | None:
-        try:
-            key = bytes.fromhex(publisher_id_hex)
-        except (ValueError, TypeError):
+    # -- reading ----------------------------------------------------------
+
+    def get(self, key) -> dict | None:
+        """One release, by its descriptor key (bytes or hex)."""
+        if isinstance(key, str):
+            try:
+                key = bytes.fromhex(key)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(key, (bytes, bytearray)):
             return None
-        return self._entries.get(key)
+        return self._entries.get(bytes(key))
+
+    def equivocations(self) -> dict[bytes, bytes]:
+        """``signer_id -> proof``, for whoever wants to act on it or pass it
+        on. A copy: nothing outside may edit the book by iterating it."""
+        return dict(self._equivocations)
+
+    def equivocated(self, key) -> bytes | None:
+        """The proof that this signing key contradicted itself, if we hold one.
+
+        Takes the id or the key it is derived from: both are what a caller has
+        to hand, and deriving one from the other is not a decision worth making
+        at four call sites."""
+        if not isinstance(key, (bytes, bytearray)):
+            return None
+        key = bytes(key)
+        if len(key) != PUBLISHER_ID_LEN:
+            key = publisher_id(key)
+        return self._equivocations.get(key)
 
     def releases(self) -> list[bytes]:
         return [entry["release"] for entry in self._entries.values()]
 
+    def by_signer(self, signer_id) -> list[dict]:
+        """Every release this key has signed that we hold, newest first.
+
+        A view, not the storage. The console asks it because "what has this key
+        I pinned offered?" is a real question; nothing on the install path does,
+        because "which release?" is answered by a release."""
+        if isinstance(signer_id, str):
+            try:
+                signer_id = bytes.fromhex(signer_id)
+            except (ValueError, TypeError):
+                return []
+        signer_id = bytes(signer_id)
+        found = [entry for entry in self._entries.values()
+                 if entry["publisher_id"] == signer_id]
+        found.sort(key=lambda entry: entry["ts"], reverse=True)
+        return found
+
     def attesters(self, version: str, sha256: str) -> list[bytes]:
-        """The publisher keys that have signed **this exact content**.
+        """The signing keys that have signed **this exact content**.
 
         This is what corroboration is counted in. Not the nodes serving the
         package: mirroring bytes is free and the content hash already makes
         them safe to fetch from anyone, so a thousand mirrors say nothing that
         one does not. A second *signature* over the same hash says a second
         party put their key behind the same code, and that is the only thing
-        here an attacker cannot get for nothing."""
-        return [entry["publisher"] for entry in self._entries.values()
-                if entry["version"] == version and entry["sha256"] == sha256]
+        here an attacker cannot get for nothing.
+
+        De-duplicated by key: one key signing a version twice is one party, and
+        counting it twice would price a quorum at one compromised machine."""
+        found: list[bytes] = []
+        for entry in self._entries.values():
+            if entry["version"] != version or entry["sha256"] != sha256:
+                continue
+            if entry["publisher"] not in found:
+                found.append(entry["publisher"])
+        return found
 
     def contradicts(self, version: str, sha256: str) -> bool:
         """Does anybody claim this version with *different* content?
@@ -998,8 +1060,10 @@ class ReleaseCatalog:
                    for entry in self._entries.values())
 
     def list(self) -> list[dict]:
-        """UI-facing metadata (no raw bytes), newest first."""
+        """UI-facing metadata (no raw bytes), newest first — one row per
+        release, each naming the key that signed it."""
         out = [{
+            "key": entry["key"].hex(),
             "publisher_id": entry["publisher_id"].hex(),
             "publisher": entry["publisher"].hex(),
             "release_id": entry["release_id"].hex(),

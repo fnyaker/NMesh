@@ -265,55 +265,61 @@ to an app holding a connector token.
 
 ## The package directory (who publishes what)
 
-Same shape again, different subject, and deliberately so: a **signed record**
-naming what one key publishes, filed under keys derived from what it signed.
-`src/pkg_dir.py`, `PKG_STORE` / `PKG_FIND` / `PKG_FOUND` / `PKG_ANNOUNCE`,
-feature name `pkgdir`.
+Same shape again, different subject, and deliberately so: a **signed record** in
+which a node says one thing about itself — *I hold this release and I serve it*
+— filed under keys derived from what it signed. `src/pkg_dir.py`, `PKG_STORE` /
+`PKG_FIND` / `PKG_FOUND` / `PKG_ANNOUNCE`, feature name `pkgdir`.
 
 ```
-record = version ‖ kind ‖ flags ‖ ts ‖ pubkey ‖ name ‖ pkg_version
-         ‖ notes ‖ ref ‖ src ‖ ML-DSA signature
-signed over  "nmesh-package-dir-v1" ‖ publisher_id ‖ kind ‖ flags ‖ ts
-             ‖ name ‖ pkg_version ‖ notes ‖ ref ‖ src
-keys   = sha256(domain : "pub:" ‖ publisher_id)[:20]        — what this key offers
+record = version ‖ kind ‖ flags ‖ ts ‖ node_pub ‖ name ‖ pkg_version
+         ‖ notes ‖ release_key ‖ src ‖ node_sig
+         [‖ signer_pub ‖ signer_sig]                    when FLAG_PUBLISHED
+node   signs  "…-v2:hold:" ‖ node_id ‖ kind ‖ flags ‖ ts ‖ name
+              ‖ pkg_version ‖ notes ‖ release_key ‖ src
+signer signs  "…-v2:sign:" ‖ node_id ‖ signer_id ‖ release_key
+keys   = sha256(domain : "node:" ‖ node_id)[:20]            — what this machine offers
+         sha256(domain : "rel:"  ‖ release_key)[:20]        — who can serve this release
          sha256(domain : "name:" ‖ term)[:20]  per term     — who offers this name
 ```
 
-- `ref` is a **DHT content key**: the signed descriptor the record points at (a
-  core release descriptor, or an app release descriptor). The record is small
-  enough to travel in a directory reply; the descriptor and the package itself
-  move on the paths that already existed.
+- `release_key` is a **DHT content key**: the signed descriptor the record points
+  at (a core release descriptor, or an app release descriptor). The record is
+  small enough to travel in a directory reply; the descriptor and the package
+  itself move on the paths that already existed. The `rel:` key is derived from
+  it, so **who can serve a release is a routed lookup** — which is what makes a
+  fetch work with no publisher to fall back on.
 - `src` is a digest over the package's **code with its documentation left out**
   (`pkg_dir.source_digest`), so "do these publishers agree on the code?" is
   answerable before anything is downloaded. It never replaces the content hash:
   an install still verifies every byte against the descriptor the operator chose.
-- `kind` is `core` (the node's own code) or `app`; `FLAG_RECOMMEND` says the
-  signer is not the author — "this is the release id I run". Corroboration,
-  never authority.
-- A publisher id is `sha256(pubkey)[:20]`, built exactly like a node id, so a
-  node signing with its own identity publishes **under its own id**. That is
-  what lets a node's details page ask "what does this machine offer?" with
-  nothing but the id already on the screen.
-- A **detached publisher key** (`publisher_key.py`) is tied to the machine that
-  uses it by a **pairing**: two halves, `node signs "P publishes for me"` filed
-  under the node's key and `key signs "N is my node"` filed under the
-  publisher's. Each names only its own signer, and a reader follows the link
-  only when both exist and name each other (`PairingBook.confirmed`). One half
-  is one node's word about another — believed, it would put a stranger's
-  packages on somebody's page. Halves travel on the same plane, filed under the
-  same keys; a reader tries both gates on each blob.
+- `kind` is `core` (the node's own code) or `app`. `FLAG_PUBLISHED` says the node
+  also holds the key that signed the release, and carries the proof: a second
+  signature naming **this node**, so it cannot be lifted onto anybody else's
+  record. Without it the record still means the bytes can be had from here —
+  which is all a fetch needs, and no claim about them.
+- **Recommending is holding.** A node files a record only for a release it
+  actually has, so the set of records under a release is the set of machines
+  that can serve it. Installing files one too, which is how a release stays
+  reachable once nobody in particular is serving it.
+- A node id is `sha256(pubkey)[:20]`, so a details page asks "what does this
+  machine offer?" with nothing but the id already on the screen. A **detached
+  publisher key** (`publisher_key.py`) needs no second artefact: the node signs
+  the record and the key co-signs the proof, so one record carries both facts.
+  This replaced a two-halved **pairing**, which existed only because records
+  were filed under a publisher key — a key that names a machine by coincidence
+  and names nothing at all once it is detached or shared.
 
-The book (`PackageBook`) keeps the highest `ts` per (publisher, kind, folded
-name), bounded in entries and in bytes, and keeps the equivocation proof when
-one key signs two different packages as one version at one instant. Filed and
+The book (`PackageBook`) keeps the highest `ts` per (node, kind, folded name),
+bounded in entries and in bytes, and keeps the equivocation proof when one node
+offers two different releases of one package at one instant. Filed and
 re-filed by the same `_directory_loop` as the pseudo claim.
 
 A publisher key can also be **handed to another node** (`src/key_share.py`,
 `KEY_OFFER` / `KEY_ACCEPT` / `KEY_GRANT`, feature name `handover`), so a team
 publishes one thing under one identity instead of asking every consumer to track
 who is on the team. It is not a directory operation — the three messages are
-addressed node to node and routable like any other — but it is why the pairing
-above may name several machines for one key.
+addressed node to node and routable like any other — but it is why one signing
+key may show up in the records of several machines.
 
 See [`../Updates/guide`](../Updates/guide) for what an operator does with it.
 
