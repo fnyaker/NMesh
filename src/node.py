@@ -7993,11 +7993,31 @@ class MeshNode:
             release_bytes = _core_build_release(
                 package, version, signer.dsa_public_key, signer.sign, ts, notes)
             publisher_key = signer.dsa_public_key
+            if len(release_bytes) > MAX_VALUE:
+                raise ReleaseError("release descriptor too large")
+            # Filed here, while the signer is still open, and signed by **that**
+            # key: the record names its own signer as the publisher, and that
+            # name is what a reader pins from. Signed with the node identity
+            # instead, the card would say one thing and the release another.
+            #
+            # Kept locally rather than replicated: publishing is signing and
+            # announcing, and a Kademlia lookup on this path is what made
+            # publishing take minutes on a real mesh. The directory sweep
+            # replicates it, which is where work that needs the network belongs.
+            try:
+                ref = _content_key(release_bytes)
+                self._dht_store.put(ref, release_bytes)
+                self.sign_package_record(
+                    _PKG_CORE, _CORE_NAME, version, ref,
+                    _pkg_source_digest(files), notes=notes, signer=signer)
+            except Exception:
+                # A tree that is signed and announced is published: failing to
+                # file it costs discoverability, never the release.
+                self._activity.note("warn", "could not file " + version
+                                    + " in the package directory")
         finally:
             if signer is not self._identity:
                 signer.close()
-        if len(release_bytes) > MAX_VALUE:
-            raise ReleaseError("release descriptor too large")
         release_id = _core_release_id(package)
         if not self._packages.put(release_id.hex(), package,
                                   hashlib.sha256(package).hexdigest()):
@@ -8008,26 +8028,6 @@ class MeshNode:
         if self._releases.offer(release_bytes, self._identity.verify,
                                 self._trusts_publisher):
             await self._gossip_release(release_bytes)
-        # …and file it in the package directory, so somebody who has never
-        # heard of this key can find it by typing the name, or by asking this
-        # node's id what it offers. The descriptor goes on the content DHT and
-        # the record points at it: one signed pointer, small enough to travel
-        # in a directory reply.
-        try:
-            # Kept locally, not replicated here: publishing is signing and
-            # announcing, and a Kademlia lookup on this path is what made
-            # publishing take minutes on a real mesh. The directory sweep
-            # replicates it, which is where work that needs the network belongs.
-            ref = _content_key(release_bytes)
-            self._dht_store.put(ref, release_bytes)
-            self.sign_package_record(
-                _PKG_CORE, _CORE_NAME, version, ref,
-                _pkg_source_digest(files), notes=notes)
-        except Exception:
-            # A tree that is published and announced is published: failing to
-            # file it costs discoverability, never the release.
-            self._activity.note("warn", "could not file " + version
-                                + " in the package directory")
         return {
             "version": version,
             "release_id": release_id.hex(),
@@ -9345,16 +9345,25 @@ class MeshNode:
 
     def sign_package_record(self, kind: int, name: str, version: str,
                             ref: bytes, src: bytes, *, notes: str = "",
-                            recommend: bool = False,
+                            recommend: bool = False, signer=None,
                             ts: int | None = None) -> bytes:
-        """Sign a record saying this node publishes (or recommends) a package.
+        """Sign a record saying this key publishes (or recommends) a package.
+
+        ``signer`` defaults to this node's identity. It must be **the key that
+        signed the descriptor the record points at**: the record names its own
+        signer as the publisher, and that name is what a reader pins from. Sign
+        the record with the node identity while the release carries a separate
+        publisher key and the card says one thing while the package says
+        another — an operator pins the wrong key and the install then refuses
+        the release they were looking at.
 
         Kept and re-filed by the directory loop, so a record signed once stays
         findable as the mesh moves underneath it. Bounded: a node that could
         sign records without end would be filing without end too."""
+        signer = signer if signer is not None else self._identity
         name = _pkg_canonical_name(name)
         raw = _pkg_build(kind, name, version, ref, src,
-                         self._identity.dsa_public_key, self._identity.sign,
+                         signer.dsa_public_key, signer.sign,
                          notes=notes, recommend=recommend, ts=ts)
         record = _pkg_parse(raw, self._identity.verify)
         if record is None:                    # never seen; a record we signed
@@ -9500,7 +9509,12 @@ class MeshNode:
             "src": entry["src"].hex(),
             "ts": entry["ts"],
             "trusted": self._trusts_publisher(entry["publisher"]),
-            "mine": entry["publisher"] == self._identity.dsa_public_key,
+            # "published from here", which is not the same as "signed by this
+            # node's identity": a release signed with a detached publisher key
+            # is still ours, and reading `not yours` against your own release
+            # is what makes a page look broken.
+            "mine": (entry["publisher"] == self._identity.dsa_public_key
+                     or entry["id"] in self._package_records),
             "attesters": len(attesters),
             # What this operator watches, and how far the code they watch
             # agrees with itself. `attesters` counts everybody; `agreeing`

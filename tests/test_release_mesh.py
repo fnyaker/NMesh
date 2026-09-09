@@ -176,6 +176,67 @@ class TestPublishing:
             await node.stop()
 
 
+class TestADetachedPublisherKey:
+    """`publish_release(key_path=…)` signs the release with a key that is not
+    the node's identity. Everything downstream has to name **that** key.
+
+    It did not: the directory record was signed with the node identity while
+    the descriptor carried the publisher key, so the card said one thing and
+    the release another — an operator pinned the node, and the install then
+    refused the very release they were looking at."""
+
+    def _key(self, path):
+        from src import publisher_key
+        from src.crypto import CryptoIdentity
+        identity = CryptoIdentity()
+        publisher_key.save(path, identity.dsa_public_key,
+                           identity._signer.export_secret_key(), "pass",
+                           n=2 ** 8, r=8, p=1)
+        return identity.dsa_public_key
+
+    async def test_the_record_names_the_key_that_signed_the_release(
+            self, tmp_path):
+        node = _node()
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            info = await node.publish_release(_tree(str(tmp_path / "tree")),
+                                              key_path=path, passphrase="pass")
+            rows = node.find_packages("nmesh")
+            assert [row["publisher_id"] for row in rows] == [info["publisher_id"]]
+            assert rows[0]["publisher"] == public.hex()
+            # …and it is still recognisably ours, though it is not our identity.
+            assert rows[0]["mine"] is True
+        finally:
+            await node.stop()
+
+    async def test_pinning_from_the_card_pins_the_publisher(self, tmp_path,
+                                                            monkeypatch):
+        node = _node()
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            await node.publish_release(_tree(str(tmp_path / "tree")),
+                                       key_path=path, passphrase="pass")
+            record_id = node.find_packages("nmesh")[0]["id"]
+            pinned = node.trust_package_publisher(record_id)
+            assert pinned["key"] == public.hex()
+
+            # And the install then goes through, which is the whole point: the
+            # key that was pinned is the key the release is checked against.
+            applied = {}
+
+            async def fake_apply(files, version, **kwargs):
+                applied.update({"version": version})
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            result = await node.install_package(record_id)
+            assert result["version"] == "9.9.9" and applied["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+
 class TestPublishingTouchesNothing:
     """Publishing is signing and announcing. The first cut of this pushed the
     tree onto the DHT as ~120 chunks, a Kademlia lookup each, paid up front for
