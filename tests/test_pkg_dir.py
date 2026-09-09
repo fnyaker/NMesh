@@ -23,12 +23,16 @@ def other():
     return CryptoIdentity()
 
 
-def _record(identity, name="Chat Deluxe", version="1.2.3", ref=b"\x11" * 20,
-            src=b"\x22" * 32, kind=pkg_dir.KIND_APP, notes="", ts=None,
-            recommend=False):
-    return pkg_dir.build_record(kind, name, version, ref, src,
+def _record(identity, name="Chat Deluxe", version="1.2.3",
+            release=b"\x11" * 20, src=b"\x22" * 32, kind=pkg_dir.KIND_APP,
+            notes="", ts=None, signer=None):
+    """A node saying it holds a release. ``signer`` adds the proof that it also
+    holds the key which signed that release."""
+    return pkg_dir.build_record(kind, name, version, release, src,
                                 identity.dsa_public_key, identity.sign,
-                                notes=notes, ts=ts, recommend=recommend)
+                                notes=notes, ts=ts,
+                                signer_pub=signer.dsa_public_key if signer else None,
+                                signer_sign=signer.sign if signer else None)
 
 
 class TestTheRecordSaysOnlyWhatWasSigned:
@@ -39,14 +43,14 @@ class TestTheRecordSaysOnlyWhatWasSigned:
         assert doc["name"] == "Chat Deluxe"
         assert doc["version"] == "1.2.3"
         assert doc["notes"] == "a chat client\nwith two lines"
-        assert doc["ref"] == b"\x11" * 20
+        assert doc["release"] == b"\x11" * 20
         assert doc["src"] == b"\x22" * 32
         assert doc["kind"] == pkg_dir.KIND_APP
-        assert doc["recommend"] is False
+        assert doc["published"] is False
 
-    def test_the_publisher_id_follows_from_the_key(self, signer):
+    def test_the_node_id_follows_from_the_key(self, signer):
         doc = pkg_dir.parse_record(_record(signer), signer.verify)
-        assert doc["publisher_id"] == pkg_dir.publisher_id(signer.dsa_public_key)
+        assert doc["node_id"] == pkg_dir.identity_id(signer.dsa_public_key)
 
     def test_a_flipped_byte_is_refused(self, signer):
         raw = bytearray(_record(signer))
@@ -59,7 +63,7 @@ class TestTheRecordSaysOnlyWhatWasSigned:
         raw = _record(signer)
         doc = pkg_dir.parse_record(raw, signer.verify)
         forged = (raw[:pkg_dir._HDR.size] + other.dsa_public_key
-                  + raw[pkg_dir._HDR.size + len(doc["publisher"]):])
+                  + raw[pkg_dir._HDR.size + len(doc["node"]):])
         assert pkg_dir.parse_record(forged, signer.verify) is None
 
     def test_a_name_that_is_not_canonical_is_refused(self, signer):
@@ -80,15 +84,21 @@ class TestTheRecordSaysOnlyWhatWasSigned:
         assert pkg_dir.parse_record(_record(signer) + b"x", signer.verify) is None
 
     @pytest.mark.parametrize("blob", [b"", b"\x00", b"\x01" * 40, None, 7,
-                                      struct.pack("!BBBQHHHHH", 1, 1, 0, 0,
-                                                  0xFFFF, 0, 0, 0, 0)])
+                                      struct.pack("!BBBQHHHHHHH", 2, 1, 0, 0,
+                                                  0xFFFF, 0, 0, 0, 0, 0, 0)])
     def test_hostile_input_never_raises(self, signer, blob):
         assert pkg_dir.parse_record(blob, signer.verify) is None
 
-    def test_a_recommendation_says_so(self, signer):
-        doc = pkg_dir.parse_record(_record(signer, recommend=True), signer.verify)
-        assert doc["recommend"] is True
-        assert doc["flags"] == pkg_dir.FLAG_RECOMMEND
+    def test_a_publication_says_so_and_names_the_key(self, signer, other):
+        doc = pkg_dir.parse_record(_record(signer, signer=other), signer.verify)
+        assert doc["published"] is True
+        assert doc["flags"] == pkg_dir.FLAG_PUBLISHED
+        assert doc["signer"] == other.dsa_public_key
+        assert doc["signer_id"] == pkg_dir.identity_id(other.dsa_public_key)
+
+    def test_a_record_that_only_holds_names_no_key(self, signer):
+        doc = pkg_dir.parse_record(_record(signer), signer.verify)
+        assert doc["signer"] is None and doc["signer_id"] is None
 
 
 class TestKeysAreDerivedNeverDeclared:
@@ -98,9 +108,16 @@ class TestKeysAreDerivedNeverDeclared:
         for query in ("chat deluxe", "cha", "del", "chat"):
             assert pkg_dir.name_key(query) in doc["keys"], query
 
-    def test_it_is_filed_under_its_publisher(self, signer):
+    def test_it_is_filed_under_its_node(self, signer):
         doc = pkg_dir.parse_record(_record(signer), signer.verify)
-        assert pkg_dir.publisher_key(doc["publisher_id"]) in doc["keys"]
+        assert pkg_dir.node_key(doc["node_id"]) in doc["keys"]
+
+    def test_it_is_filed_under_the_release_it_holds(self, signer):
+        """This is what makes a fetch work through routing: the key everybody
+        derives from the release itself lists who can serve it."""
+        doc = pkg_dir.parse_record(_record(signer, release=b"\x33" * 20),
+                                   signer.verify)
+        assert pkg_dir.release_key(b"\x33" * 20) in doc["keys"]
 
     def test_a_name_key_folds_case_and_accents(self):
         assert pkg_dir.name_key("JOSÉ") == pkg_dir.name_key("jose")
@@ -142,13 +159,14 @@ class TestTheSourceDigest:
 
 
 class TestTheBook:
-    def test_a_record_is_found_by_name_and_by_publisher(self, signer):
+    def test_a_record_is_found_by_name_by_node_and_by_release(self, signer):
         book = pkg_dir.PackageBook()
-        raw = _record(signer, name="Chat Deluxe")
+        raw = _record(signer, name="Chat Deluxe", release=b"\x55" * 20)
         doc = pkg_dir.parse_record(raw, signer.verify)
         assert book.offer(doc, raw) is True
         assert book.get(pkg_dir.name_key("cha")) == [raw]
-        assert book.get(pkg_dir.publisher_key(doc["publisher_id"])) == [raw]
+        assert book.get(pkg_dir.node_key(doc["node_id"])) == [raw]
+        assert book.get(pkg_dir.release_key(b"\x55" * 20)) == [raw]
 
     def test_a_newer_record_replaces_an_older_one(self, signer):
         book = pkg_dir.PackageBook()
@@ -165,7 +183,7 @@ class TestTheBook:
         book.offer(pkg_dir.parse_record(new, signer.verify), new)
         assert book.offer(pkg_dir.parse_record(old, signer.verify), old) is False
 
-    def test_two_publishers_of_one_name_are_two_entries(self, signer, other):
+    def test_two_nodes_holding_one_name_are_two_entries(self, signer, other):
         book = pkg_dir.PackageBook()
         mine = _record(signer, name="NMesh", kind=pkg_dir.KIND_CORE)
         theirs = _record(other, name="NMesh", kind=pkg_dir.KIND_CORE)
@@ -173,7 +191,7 @@ class TestTheBook:
         book.offer(pkg_dir.parse_record(theirs, signer.verify), theirs)
         assert len(book) == 2
 
-    def test_one_publisher_may_offer_a_core_release_and_an_app(self, signer):
+    def test_one_node_may_offer_a_core_release_and_an_app(self, signer):
         book = pkg_dir.PackageBook()
         core = _record(signer, name="NMesh", kind=pkg_dir.KIND_CORE)
         app = _record(signer, name="NMesh", kind=pkg_dir.KIND_APP)
@@ -185,7 +203,7 @@ class TestTheBook:
         book = pkg_dir.PackageBook()
         for identity in (signer, other):
             raw = _record(identity, name="NMesh", kind=pkg_dir.KIND_CORE,
-                          src=b"\x33" * 32, ref=b"\x44" * 20)
+                          src=b"\x33" * 32, release=b"\x44" * 20)
             book.offer(pkg_dir.parse_record(raw, identity.verify), raw)
         assert len(book.by_source(b"\x33" * 32)) == 2
 
@@ -225,12 +243,12 @@ class TestTheBook:
 
     def test_two_versions_at_one_instant_are_kept_as_a_proof(self, signer):
         book = pkg_dir.PackageBook()
-        one = _record(signer, version="1.0.0", ref=b"\x11" * 20, ts=500)
-        two = _record(signer, version="1.0.0", ref=b"\x99" * 20, ts=500)
+        one = _record(signer, version="1.0.0", release=b"\x11" * 20, ts=500)
+        two = _record(signer, version="1.0.0", release=b"\x99" * 20, ts=500)
         doc = pkg_dir.parse_record(one, signer.verify)
         book.offer(doc, one)
         book.offer(pkg_dir.parse_record(two, signer.verify), two)
-        assert book.equivocated(doc["publisher_id"]) is not None
+        assert book.equivocated(doc["node_id"]) is not None
 
     def test_forgetting_leaves_no_pointer_behind(self, signer):
         book = pkg_dir.PackageBook()
@@ -242,97 +260,81 @@ class TestTheBook:
         assert len(book) == 0 and book.nbytes == 0
 
 
-class TestPairingTakesTwo:
-    """A detached publisher key and the node that uses it are tied together by
-    two halves, each signed by one party. One half is one party's word about
-    another — the thing this design exists so nobody has to believe."""
+class TestThePublicationProof:
+    """"I hold this" is one sentence; "and I signed it" is a second, and it has
+    to be proved. The proof names the node, which is what stops it being lifted
+    onto somebody else's record."""
 
-    def _pair(self, node, publisher):
-        node_id = pkg_dir.publisher_id(node.dsa_public_key)
-        pub_id = pkg_dir.publisher_id(publisher.dsa_public_key)
-        return (pkg_dir.build_pairing(pub_id, node.dsa_public_key, node.sign),
-                pkg_dir.build_pairing(node_id, publisher.dsa_public_key,
-                                      publisher.sign),
-                node_id, pub_id)
+    def test_a_proof_made_for_another_node_is_refused(self, signer, other):
+        """The attack: take a real publisher's proof and put it on your own
+        record, so your machine claims to have published their release."""
+        victim = pkg_dir.identity_id(signer.dsa_public_key)
+        release = b"\x77" * 20
+        genuine = other.sign(pkg_dir._publisher_input(
+            victim, pkg_dir.identity_id(other.dsa_public_key), release))
 
-    def test_both_halves_confirm_each_other(self, signer, other):
-        half_a, half_b, node_id, pub_id = self._pair(signer, other)
-        book = pkg_dir.PairingBook()
-        for raw in (half_a, half_b):
-            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
-        assert book.confirmed(node_id, pub_id) is True
-        assert book.confirmed(pub_id, node_id) is True
+        thief = CryptoIdentity()
+        forged = pkg_dir.build_record(
+            pkg_dir.KIND_APP, "Chat Deluxe", "1.2.3", release, b"\x22" * 32,
+            thief.dsa_public_key, thief.sign,
+            signer_pub=other.dsa_public_key,
+            signer_sign=lambda _message: genuine)
+        assert pkg_dir.parse_record(forged, signer.verify) is None
 
-    def test_one_half_confirms_nothing(self, signer, other):
-        """The attack this closes: a node naming a stranger's publisher key
-        would otherwise put that stranger's packages on its own page."""
-        half_a, _half_b, node_id, pub_id = self._pair(signer, other)
-        book = pkg_dir.PairingBook()
-        book.offer(pkg_dir.parse_pairing(half_a, signer.verify), half_a)
-        assert book.confirmed(node_id, pub_id) is False
-        assert book.named_by(node_id) == [pub_id]   # …said, not believed
+    def test_a_proof_made_for_another_release_is_refused(self, signer, other):
+        """The proof names the release too, so holding a real one for version A
+        does not authorise a claim about version B."""
+        node = pkg_dir.identity_id(signer.dsa_public_key)
+        elsewhere = other.sign(pkg_dir._publisher_input(
+            node, pkg_dir.identity_id(other.dsa_public_key), b"\x11" * 20))
+        forged = pkg_dir.build_record(
+            pkg_dir.KIND_APP, "Chat Deluxe", "1.2.3", b"\x99" * 20,
+            b"\x22" * 32, signer.dsa_public_key, signer.sign,
+            signer_pub=other.dsa_public_key,
+            signer_sign=lambda _message: elsewhere)
+        assert pkg_dir.parse_record(forged, signer.verify) is None
 
-    def test_a_half_is_filed_under_its_own_signer(self, signer, other):
-        half_a, half_b, node_id, pub_id = self._pair(signer, other)
-        assert pkg_dir.parse_pairing(half_a, signer.verify)["key"] == \
-            pkg_dir.publisher_key(node_id)
-        assert pkg_dir.parse_pairing(half_b, signer.verify)["key"] == \
-            pkg_dir.publisher_key(pub_id)
+    def test_a_flag_with_no_proof_is_refused(self, signer):
+        raw = bytearray(_record(signer))
+        raw[2] = pkg_dir.FLAG_PUBLISHED
+        assert pkg_dir.parse_record(bytes(raw), signer.verify) is None
 
-    def test_the_signer_is_derived_from_the_key_inside(self, signer, other):
-        parsed = pkg_dir.parse_pairing(
-            self._pair(signer, other)[0], signer.verify)
-        assert parsed["signer_id"] == pkg_dir.publisher_id(signer.dsa_public_key)
+    def test_a_proof_with_no_flag_is_refused(self, signer, other):
+        """Two spellings of "published" is one for a reader to disagree
+        about."""
+        raw = bytearray(_record(signer, signer=other))
+        raw[2] = 0
+        assert pkg_dir.parse_record(bytes(raw), signer.verify) is None
 
-    def test_a_flipped_byte_is_refused(self, signer, other):
-        raw = bytearray(self._pair(signer, other)[0])
-        raw[-1] ^= 0xFF
-        assert pkg_dir.parse_pairing(bytes(raw), signer.verify) is None
+    def test_half_a_proof_is_a_mistake_not_a_downgrade(self, signer, other):
+        with pytest.raises(pkg_dir.PackageDirError):
+            pkg_dir.build_record(pkg_dir.KIND_APP, "Chat", "1.0.0",
+                                 b"\x11" * 20, b"\x22" * 32,
+                                 signer.dsa_public_key, signer.sign,
+                                 signer_pub=other.dsa_public_key)
 
-    def test_a_key_cannot_pair_with_itself(self, signer):
-        own = pkg_dir.publisher_id(signer.dsa_public_key)
-        raw = pkg_dir.build_pairing(own, signer.dsa_public_key, signer.sign)
-        assert pkg_dir.parse_pairing(raw, signer.verify) is None
+    def test_a_node_may_prove_it_signed_with_its_own_identity(self, signer):
+        """The ordinary case: one key, doing both jobs."""
+        doc = pkg_dir.parse_record(_record(signer, signer=signer),
+                                   signer.verify)
+        assert doc["published"] is True
+        assert doc["signer_id"] == doc["node_id"]
 
-    def test_an_older_half_cannot_undo_a_newer_one(self, signer, other):
-        node_id = pkg_dir.publisher_id(signer.dsa_public_key)
-        book = pkg_dir.PairingBook()
-        new = pkg_dir.build_pairing(b"\x22" * 20, signer.dsa_public_key,
-                                    signer.sign, ts=200)
-        old = pkg_dir.build_pairing(b"\x22" * 20, signer.dsa_public_key,
-                                    signer.sign, ts=100)
-        assert book.offer(pkg_dir.parse_pairing(new, signer.verify), new) is True
-        assert book.offer(pkg_dir.parse_pairing(old, signer.verify), old) is False
+    def test_a_holder_and_a_publisher_of_one_release_are_both_kept(
+            self, signer, other):
+        """Both are sources for the same bytes, which is the point: the
+        directory key derived from a release lists everyone who can serve it."""
+        book = pkg_dir.PackageBook()
+        published = _record(signer, signer=signer, release=b"\x66" * 20)
+        held = _record(other, release=b"\x66" * 20)
+        for raw in (published, held):
+            book.offer(pkg_dir.parse_record(raw, signer.verify), raw)
+        assert len(book.holders(b"\x66" * 20)) == 2
+        assert len(book.get(pkg_dir.release_key(b"\x66" * 20))) == 2
 
-    def test_one_key_may_name_several_but_not_without_end(self, signer):
-        book = pkg_dir.PairingBook(max_per_key=2)
-        for index in range(5):
-            raw = pkg_dir.build_pairing(bytes([index]) + b"\x00" * 19,
-                                        signer.dsa_public_key, signer.sign)
-            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
-        assert len(book.named_by(
-            pkg_dir.publisher_id(signer.dsa_public_key))) == 2
-
-    def test_the_book_is_bounded(self, signer):
-        book = pkg_dir.PairingBook(max_entries=3, max_per_key=99)
-        for index in range(9):
-            raw = pkg_dir.build_pairing(bytes([index]) + b"\x00" * 19,
-                                        signer.dsa_public_key, signer.sign)
-            book.offer(pkg_dir.parse_pairing(raw, signer.verify), raw)
-        assert len(book) == 3
-
-    @pytest.mark.parametrize("blob", [b"", b"\x01" * 9, None, 7,
-                                      b"\x02" + b"\x00" * 40])
-    def test_hostile_input_never_raises(self, signer, blob):
-        assert pkg_dir.parse_pairing(blob, signer.verify) is None
-
-    def test_a_package_record_does_not_parse_as_a_pairing(self, signer):
-        """One plane carries both, so each gate has to refuse the other's."""
-        record = _record(signer)
-        assert pkg_dir.parse_pairing(record, signer.verify) is None
-        half = pkg_dir.build_pairing(b"\x33" * 20, signer.dsa_public_key,
-                                     signer.sign)
-        assert pkg_dir.parse_record(half, signer.verify) is None
+    def test_only_a_published_record_carries_a_key_to_pin(self, signer):
+        held = pkg_dir.parse_record(_record(signer), signer.verify)
+        assert held["signer"] is None
 
 
 class TestEncoding:

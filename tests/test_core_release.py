@@ -500,103 +500,135 @@ class TestTheAutoInstallJournal:
         assert journal.attempts(rid) == 1
 
 
-class TestTheCatalogue:
+class TestTheReleaseBook:
+    """One entry per **release**, several per signing key. A key is not a name
+    for a release: indexing by publisher made clicking one release install
+    whatever that key had signed since, and made a release the book had never
+    been gossiped impossible to hold at all."""
+
     def test_a_release_is_kept_and_worth_gossiping_once(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        book = cr.ReleaseBook()
         blob = _release(idn)
-        assert catalogue.offer(blob, idn.verify) == "new"
-        assert catalogue.offer(blob, idn.verify) is None      # epidemic stops
-        assert catalogue.list()[0]["version"] == "0.2.0"
+        assert book.offer(blob, idn.verify) == "new"
+        assert book.offer(blob, idn.verify) is None          # epidemic stops
+        assert book.list()[0]["version"] == "0.2.0"
 
-    def test_a_newer_signed_release_supersedes(self):
+    def test_two_releases_from_one_key_are_two_entries(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
-        catalogue.offer(_release(idn, "0.2.0", ts=1000), idn.verify)
-        assert catalogue.offer(_release(idn, "0.3.0", ts=2000),
-                               idn.verify) == "updated"
-        assert catalogue.list()[0]["version"] == "0.3.0"
+        book = cr.ReleaseBook()
+        assert book.offer(_release(idn, "0.2.0", ts=1000), idn.verify) == "new"
+        assert book.offer(_release(idn, "0.3.0", ts=2000), idn.verify) == "new"
+        assert len(book) == 2
+        assert [row["version"] for row in book.list()] == ["0.3.0", "0.2.0"]
 
-    def test_replaying_an_older_one_cannot_walk_us_back(self):
+    def test_an_older_release_is_kept_rather_than_refused(self):
+        """It cannot walk this node backwards — the install gate refuses
+        anything not strictly newer than what is running — and keeping it is
+        how an operator can still look at it and a node can still serve it."""
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        book = cr.ReleaseBook()
         old = _release(idn, "0.2.0", ts=1000)
-        catalogue.offer(_release(idn, "0.3.0", ts=2000), idn.verify)
-        assert catalogue.offer(old, idn.verify) is None
-        assert catalogue.list()[0]["version"] == "0.3.0"
+        book.offer(_release(idn, "0.3.0", ts=2000), idn.verify)
+        assert book.offer(old, idn.verify) == "new"
+        assert book.get(cr.descriptor_key(old))["version"] == "0.2.0"
 
-    def test_one_entry_per_publisher_not_per_release(self):
+    def test_a_release_is_named_by_its_own_descriptor(self):
+        idn = CryptoIdentity()
+        book = cr.ReleaseBook()
+        blob = _release(idn)
+        book.offer(blob, idn.verify)
+        entry = book.get(cr.descriptor_key(blob))
+        assert entry is not None and entry["release"] == blob
+        assert book.get(cr.descriptor_key(blob).hex()) is entry
+
+    def test_by_signer_lists_what_one_key_offered(self):
         first, second = CryptoIdentity(), CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
-        catalogue.offer(_release(first), first.verify)
-        catalogue.offer(_release(second), second.verify)
-        assert len(catalogue) == 2
+        book = cr.ReleaseBook()
+        book.offer(_release(first, "0.2.0", ts=1000), first.verify)
+        book.offer(_release(first, "0.3.0", ts=2000), first.verify)
+        book.offer(_release(second, "0.9.0"), second.verify)
+        mine = book.by_signer(cr.publisher_id(first.dsa_public_key))
+        assert [row["version"] for row in mine] == ["0.3.0", "0.2.0"]
 
     def test_an_unsigned_or_forged_release_is_never_stored(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
-        assert catalogue.offer(b"garbage", idn.verify) is None
-        assert catalogue.offer(os.urandom(200), idn.verify) is None
-        assert len(catalogue) == 0
+        book = cr.ReleaseBook()
+        assert book.offer(b"garbage", idn.verify) is None
+        assert book.offer(os.urandom(200), idn.verify) is None
+        assert len(book) == 0
 
-    def test_an_untrusted_publisher_is_carried_but_flagged(self):
+    def test_an_untrusted_signer_is_carried_but_flagged(self):
         """We relay what we do not install — refusing to carry it would break
         discovery for everyone else."""
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
-        assert catalogue.offer(_release(idn), idn.verify,
-                               trusted=lambda key: False) == "new"
-        assert catalogue.list()[0]["trusted"] is False
+        book = cr.ReleaseBook()
+        assert book.offer(_release(idn), idn.verify,
+                          trusted=lambda key: False) == "new"
+        assert book.list()[0]["trusted"] is False
 
-    def test_a_flood_of_strangers_cannot_evict_the_pinned_publisher(self):
+    def test_a_flood_of_strangers_cannot_evict_the_pinned_release(self):
         pinned = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog(max_entries=3)
+        book = cr.ReleaseBook(max_entries=3)
         trusted = lambda key: key == pinned.dsa_public_key
-        assert catalogue.offer(_release(pinned, ts=500), pinned.verify,
-                               trusted) == "new"
+        blob = _release(pinned, ts=500)
+        assert book.offer(blob, pinned.verify, trusted) == "new"
         for index in range(20):
             stranger = CryptoIdentity()
-            catalogue.offer(_release(stranger, ts=1000 + index),
-                            stranger.verify, trusted)
-        assert len(catalogue) == 3
-        mine = catalogue.get(cr.publisher_id(pinned.dsa_public_key).hex())
+            book.offer(_release(stranger, ts=1000 + index),
+                       stranger.verify, trusted)
+        assert len(book) == 3
+        mine = book.get(cr.descriptor_key(blob))
         assert mine is not None and mine["trusted"] is True
 
     def test_a_trusted_newcomer_evicts_a_stranger_when_full(self):
-        catalogue = cr.ReleaseCatalog(max_entries=2)
+        book = cr.ReleaseBook(max_entries=2)
         strangers = [CryptoIdentity() for _ in range(2)]
         for index, stranger in enumerate(strangers):
-            catalogue.offer(_release(stranger, ts=1000 + index),
-                            stranger.verify, lambda key: False)
+            book.offer(_release(stranger, ts=1000 + index),
+                       stranger.verify, lambda key: False)
         pinned = CryptoIdentity()
-        assert catalogue.offer(_release(pinned), pinned.verify,
-                               lambda key: key == pinned.dsa_public_key) == "new"
-        assert len(catalogue) == 2
-        assert catalogue.get(cr.publisher_id(pinned.dsa_public_key).hex())
+        blob = _release(pinned)
+        assert book.offer(blob, pinned.verify,
+                          lambda key: key == pinned.dsa_public_key) == "new"
+        assert len(book) == 2
+        assert book.get(cr.descriptor_key(blob))
 
     def test_a_stranger_is_simply_refused_when_full(self):
-        catalogue = cr.ReleaseCatalog(max_entries=1)
+        book = cr.ReleaseBook(max_entries=1)
         first, second = CryptoIdentity(), CryptoIdentity()
-        catalogue.offer(_release(first), first.verify, lambda key: False)
-        assert catalogue.offer(_release(second), second.verify,
-                               lambda key: False) is None
+        book.offer(_release(first), first.verify, lambda key: False)
+        assert book.offer(_release(second), second.verify,
+                          lambda key: False) is None
 
     def test_pinning_later_applies_to_what_we_already_heard(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
-        catalogue.offer(_release(idn), idn.verify, lambda key: False)
-        assert catalogue.list()[0]["trusted"] is False
-        catalogue.retrust(lambda key: key == idn.dsa_public_key)
-        assert catalogue.list()[0]["trusted"] is True
+        book = cr.ReleaseBook()
+        book.offer(_release(idn), idn.verify, lambda key: False)
+        assert book.list()[0]["trusted"] is False
+        book.retrust(lambda key: key == idn.dsa_public_key)
+        assert book.list()[0]["trusted"] is True
 
     def test_releases_are_handed_back_verbatim_for_syncing(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        book = cr.ReleaseBook()
         blob = _release(idn)
-        catalogue.offer(blob, idn.verify)
-        assert catalogue.releases() == [blob]
+        book.offer(blob, idn.verify)
+        assert book.releases() == [blob]
 
-    def test_an_unreadable_publisher_id_finds_nothing(self):
-        catalogue = cr.ReleaseCatalog()
+    def test_attesters_count_keys_and_not_signatures(self):
+        """One key signing the same content twice is one party. Counting it
+        twice would price a quorum at one compromised machine."""
+        idn = CryptoIdentity()
+        book = cr.ReleaseBook()
+        blob = _release(idn, "0.2.0", ts=1000)
+        book.offer(blob, idn.verify)
+        again = _release(idn, "0.2.0", ts=2000)
+        book.offer(again, idn.verify)
+        doc = cr.parse_release(blob, idn.verify)
+        assert book.attesters("0.2.0", doc["sha256"]) == [idn.dsa_public_key]
+
+    def test_an_unreadable_release_key_finds_nothing(self):
+        book = cr.ReleaseBook()
         for bad in ("", "zz", None, "aa" * 40):
-            assert catalogue.get(bad) is None
+            assert book.get(bad) is None

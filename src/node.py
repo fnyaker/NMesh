@@ -56,12 +56,13 @@ from .publisher_key import (KeyStore as PublisherKeyStore,
                             load as _publisher_key_load,
                             publisher_id as _key_id)
 from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
-                           ReleaseCatalog, ReleaseStore,
+                           ReleaseBook, ReleaseStore,
                            TrustedPublishers, MAX_AUTO_ATTEMPTS,
                            ReleaseError, PUBLISHER_ID_LEN as _RELEASE_ID_LEN,
                            build_package as _core_build_package,
                            build_release as _core_build_release,
                            catalogue_entry as _core_catalogue_entry,
+                           descriptor_key as _core_descriptor_key,
                            check_tree as _core_check_tree,
                            open_package as _core_open_package,
                            parse_release as _core_parse_release,
@@ -69,13 +70,11 @@ from .core_release import (AutoInstallJournal, PROJECT_NAME as _CORE_NAME,
                            read_tree as _core_read_tree,
                            release_id as _core_release_id,
                            version_of as _core_version_of)
-from .subscriptions import Subscriptions, SubscriptionError
+from .subscriptions import (Subscriptions, SubscriptionError,
+                            subscription_id as _subscription_id)
 from . import key_share as _key_share
 from .key_share import KeyShareError
-from .pkg_dir import (PackageBook, PackageDirError, PairingBook,
-                      MAX_PAIRING as _MAX_PAIRING,
-                      build_pairing as _pkg_build_pairing,
-                      parse_pairing as _pkg_parse_pairing,
+from .pkg_dir import (PackageBook, PackageDirError,
                       MAX_RECORD as _MAX_PKG_RECORD,
                       KIND_CORE as _PKG_CORE, KIND_APP as _PKG_APP,
                       build_record as _pkg_build,
@@ -84,11 +83,12 @@ from .pkg_dir import (PackageBook, PackageDirError, PairingBook,
                       encode_records as _pkg_encode,
                       decode_records as _pkg_decode,
                       name_key as _pkg_name_key,
-                      publisher_key as _pkg_publisher_key,
-                      publisher_id as _pkg_publisher_id,
+                      node_key as _pkg_node_key,
+                      release_key as _pkg_release_key,
+                      identity_id as _pkg_identity_id,
                       source_digest as _pkg_source_digest,
                       canonical_name as _pkg_canonical_name)
-from .pseudo import canonical as _pseudo_canonical
+from .pseudo import canonical as _pseudo_canonical, fold as _pseudo_fold
 from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_key,
                          dir_keys as _dir_keys,
                          build_claim as _dir_build_claim,
@@ -1910,7 +1910,7 @@ class MeshNode:
         # mistake worth making hard to make.
         self._publisher_keys = PublisherKeyStore(
             os.path.join(release_dir, "publisher-keys") if release_dir else None)
-        self._releases = ReleaseCatalog()
+        self._releases = ReleaseBook()
         # The packages we hold and can serve, and who else said they hold one.
         self._packages = ReleaseStore(
             os.path.join(release_dir, "packages") if release_dir else None)
@@ -1956,11 +1956,6 @@ class MeshNode:
         # re-serve. See :mod:`src.pkg_dir`.
         self._package_book = PackageBook()
         self._package_records: dict[bytes, bytes] = {}   # ours, by entry id
-        # A release may be signed by a key that is not this node's identity, and
-        # a record can only name its own signer — so a pairing is what ties the
-        # two together, in two halves neither party can sign for the other.
-        self._pairings = PairingBook()
-        self._own_pairings: dict[tuple, bytes] = {}
         # Handing a publisher key to somebody else. Three tables, all bounded
         # and all short-lived: an offer waiting for a human here, an offer we
         # made that is holding an unlocked secret until it is answered, and an
@@ -7803,9 +7798,14 @@ class MeshNode:
             if self._catalog.offer(release_bytes, self._identity.verify):
                 await self._gossip_catalog(release_bytes)
         try:
+            # `signer` is this node's identity because that is what signed the
+            # app's release descriptor (`publish_signed_app`) — so the record
+            # carries the proof, and a reader can pin the key that signed the
+            # app rather than the machine that happens to be serving it.
             self.sign_package_record(
                 _PKG_APP, name, version, bytes.fromhex(info["release_id"]),
-                _pkg_source_digest(files), notes=notes)
+                _pkg_source_digest(files), notes=notes,
+                signer=self._identity)
         except Exception:
             self._activity.note("warn", "could not file " + str(name)[:50]
                                 + " in the package directory")
@@ -8037,30 +8037,22 @@ class MeshNode:
             publisher_key = signer.dsa_public_key
             if len(release_bytes) > MAX_VALUE:
                 raise ReleaseError("release descriptor too large")
-            # Filed here, while the signer is still open, and signed by **that**
-            # key: the record names its own signer as the publisher, and that
-            # name is what a reader pins from. Signed with the node identity
-            # instead, the card would say one thing and the release another.
+            # Filed here, while the signer is still open: the record is signed
+            # by **this node** (it says "I hold this and I serve it") and
+            # co-signed by the release's key, which is the proof that turns
+            # holding into publishing. That second signature is only possible
+            # while the key is unlocked, which is now.
             #
             # Kept locally rather than replicated: publishing is signing and
             # announcing, and a Kademlia lookup on this path is what made
             # publishing take minutes on a real mesh. The directory sweep
             # replicates it, which is where work that needs the network belongs.
             try:
-                ref = _content_key(release_bytes)
-                self._dht_store.put(ref, release_bytes)
+                release = _core_descriptor_key(release_bytes)
+                self._dht_store.put(release, release_bytes)
                 self.sign_package_record(
-                    _PKG_CORE, _CORE_NAME, version, ref,
+                    _PKG_CORE, _CORE_NAME, version, release,
                     _pkg_source_digest(files), notes=notes, signer=signer)
-                if signer is not self._identity:
-                    # A detached key: nothing ties it to this machine, so an
-                    # operator looking at the node cannot get from it to the
-                    # code it publishes. Both halves are signed here — the
-                    # publisher's while its key is open, which is the only
-                    # moment it is, and ours because it costs nothing. Neither
-                    # is believed without the other.
-                    self.sign_pairing(self._id.raw, signer=signer)
-                    self.sign_pairing(_pkg_publisher_id(publisher_key))
             except Exception:
                 # A tree that is signed and announced is published: failing to
                 # file it costs discoverability, never the release.
@@ -8081,6 +8073,11 @@ class MeshNode:
             await self._gossip_release(release_bytes)
         return {
             "version": version,
+            # What names this release everywhere: its descriptor's content key.
+            # `release_id` names the *package* (what RELEASE_FETCH asks for);
+            # `publisher_id` names the key that signed it, and neither of those
+            # names the release.
+            "release": _core_descriptor_key(release_bytes).hex(),
             "release_id": release_id.hex(),
             "publisher_id": _core_publisher_id(publisher_key).hex(),
             "publisher_key": publisher_key.hex(),
@@ -8191,7 +8188,7 @@ class MeshNode:
                 return None                    # more than was signed for
         return bytes(parts)
 
-    def _release_sources_for(self, entry: dict) -> list[NodeID]:
+    async def _release_sources_for(self, entry: dict) -> list[NodeID]:
         """Who to ask for these bytes: whoever said they hold them, then the
         peers we have. **Never the publisher.**
 
@@ -8210,13 +8207,23 @@ class MeshNode:
         is gone. Both are the same mistake — looking at the publisher instead of
         at the signature.
 
-        Hints come first because they are the only claim of actually holding it
-        (the ``have`` byte on an announce, from an authenticated link). The rest
-        of the sample is peers that speak the plane at all: a node that does not
-        have it costs one round trip and says nothing, which is cheaper than
-        assuming."""
+Hints come first (the ``have`` byte on an announce, from an
+        authenticated link), then the nodes whose signed records say they hold
+        it, then the peers we happen to have: a node that does not have it costs
+        one round trip and says nothing, which is cheaper than assuming."""
         sources = list(reversed(
             self._release_sources.get(entry["release_id"].hex(), [])))
+        # Then the nodes that filed a record saying they hold it. This is what
+        # makes a fetch work **through routing** with nobody to fall back on:
+        # a recommendation is the offer to serve, so the directory answers "who
+        # has this?" from several hops away, and a release stays reachable as
+        # long as anybody at all kept a copy.
+        try:
+            for node_id in await self.package_holders(entry["key"]):
+                if node_id not in sources:
+                    sources.append(node_id)
+        except Exception:
+            pass          # the hints and the peers are still worth asking
         for peer in self._gossip_targets(None, _RELEASE_ASK_MAX,
                                          features.RELEASE):
             if peer.authenticated_id not in sources:
@@ -8224,12 +8231,9 @@ class MeshNode:
         return [node_id for node_id in sources
                 if node_id is not None and node_id != self._id][:_RELEASE_ASK_MAX]
 
-    async def fetch_release(self, publisher_id_hex: str):
-        """Get a pinned publisher's current release, from the catalogue.
-
-        The publisher-keyed entry point, for the console's list of keys this
-        operator pinned. Everything below it works on the descriptor."""
-        entry = self._releases.get(publisher_id_hex)
+    async def fetch_release(self, release_key_hex: str):
+        """Get one release by name — its descriptor's content key."""
+        entry = self._releases.get(release_key_hex)
         if entry is None:
             return None
         return await self.fetch_release_entry(entry)
@@ -8238,9 +8242,9 @@ class MeshNode:
         """Get **this** release's package and open it, verified end to end.
 
         Takes the descriptor's own view of a release (`core_release.
-        catalogue_entry`) rather than a publisher id, because a publisher id
-        answers a different question: it means "whatever that key has signed
-        most recently", which is not what an operator clicked on. What is
+        catalogue_entry`) rather than a signing key, because a key answers a
+        different question: it means "whatever that key has signed most
+        recently", which is not what an operator clicked on. What is
         installed is what was signed, and the signature is in hand.
 
         Returns ``(entry, files)`` or None. The bytes are checked against the
@@ -8254,7 +8258,7 @@ class MeshNode:
         release_id_hex = entry["release_id"].hex()
         package = self._packages.get(release_id_hex)
         if package is None:
-            for source in self._release_sources_for(entry):
+            for source in await self._release_sources_for(entry):
                 package = await self._pull_package(source, entry)
                 if package is None:
                     continue
@@ -8298,7 +8302,7 @@ class MeshNode:
         """Everything a UI needs, with every decision already made here."""
         releases = []
         for listed in self._releases.list():
-            entry = self._releases.get(listed["publisher_id"])
+            entry = self._releases.get(listed["key"])
             if entry is None:
                 continue
             state, action = self._release_state(entry)
@@ -8401,9 +8405,9 @@ class MeshNode:
                                   "outcome": outcome, "detail": detail[:200]})
         del self._release_log[:-16]
 
-    async def install_release(self, publisher_id_hex: str, *,
+    async def install_release(self, release_key_hex: str, *,
                               unattended: bool = False) -> dict:
-        """Install a release from a pinned publisher.
+        """Install one release by name — its descriptor's content key.
 
         Three gates, in this order: the publisher is pinned, the version is
         strictly newer than the one running, and every byte verifies against the
@@ -8416,7 +8420,7 @@ class MeshNode:
         pressing Install is the other case, and it clears that record — a
         deliberate act is a fresh start, and the console restarts on its own
         once it has answered them."""
-        entry = self._releases.get(publisher_id_hex)
+        entry = self._releases.get(release_key_hex)
         if entry is None:
             raise ReleaseError("no such release")
         return await self.install_release_entry(entry, unattended=unattended)
@@ -8591,8 +8595,12 @@ class MeshNode:
         is not."""
         publisher = entry.get("publisher")
         version, digest = entry.get("version", ""), entry.get("sha256", "")
-        if self._releases.contradicts(version, digest):
-            return False, "another publisher signed different content for this version"
+        # The self-contradiction is asked **first**: a key that signed one
+        # version twice also makes `contradicts` true, and answering "somebody
+        # else disagrees" about a key disagreeing with itself names the wrong
+        # party. It became reachable when the book started holding several
+        # releases per key — before, the second descriptor replaced the first
+        # and only another publisher could produce the disagreement.
         if publisher is not None and self._releases.equivocated(publisher) is not None:
             # The one refusal here that rests on nothing but the accused's own
             # signature: two descriptors signed by this key, one version, two
@@ -8600,6 +8608,8 @@ class MeshNode:
             # unlike everything else a node hears about another node, no
             # messenger's honesty is in it — see `src/equivocation.py`.
             return False, "this publisher has signed two different programs as one version"
+        if self._releases.contradicts(version, digest):
+            return False, "another publisher signed different content for this version"
         attesters = self._releases.attesters(version, digest)
         if self._publishers.auto_for(publisher):
             return True, "signed by a publisher pinned for automatic install"
@@ -8652,7 +8662,7 @@ class MeshNode:
         """Is this exact version already offered by *our* key?"""
         mine = self._identity.dsa_public_key
         for listed in self._releases.list():
-            entry = self._releases.get(listed["publisher_id"])
+            entry = self._releases.get(listed["key"])
             if (entry is not None and entry["publisher"] == mine
                     and entry["version"] == version):
                 return True
@@ -8700,7 +8710,7 @@ class MeshNode:
         :data:`MAX_AUTO_ATTEMPTS` times without ever becoming the running
         version is abandoned instead of tried again."""
         for listed in self._releases.list():
-            entry = self._releases.get(listed["publisher_id"])
+            entry = self._releases.get(listed["key"])
             if entry is None:
                 continue
             state, _action = self._release_state(entry)
@@ -8728,8 +8738,7 @@ class MeshNode:
             while len(self._release_tried) > _RELEASE_TRIED_MAX:
                 self._release_tried.popitem(last=False)
             try:
-                await self.install_release(listed["publisher_id"],
-                                           unattended=True)
+                await self.install_release_entry(entry, unattended=True)
                 return entry["version"]
             except Exception as exc:
                 self._note_release(entry["version"], "failed", str(exc))
@@ -9626,35 +9635,16 @@ class MeshNode:
             return None
         record = _pkg_parse(raw, self._identity.verify)
         if record is None:
-            # The same plane carries pairing halves: they are filed under the
-            # same keys, and a reader that cannot tell them apart would charge
-            # a peer for sending a perfectly good one.
-            return self._absorb_pairing(peer, raw)
+            self._charge_abuse(peer)
+            return None
         changed = self._package_book.offer(record, bytes(raw))
         self._note_equivocation(
-            "publisher", record["publisher_id"],
-            self._package_book.equivocated(record["publisher_id"]))
+            "node", record["node_id"],
+            self._package_book.equivocated(record["node_id"]))
         if not changed:
             return None
         self._note_change("packages")
         return record
-
-    def _absorb_pairing(self, peer: '_Peer', raw: bytes):
-        """Verify one half of a pairing and file it.
-
-        A half is worth nothing alone — :meth:`packages_of` only follows a link
-        both parties signed — so this stores it and judges nothing."""
-        if len(raw) > _MAX_PAIRING:
-            self._charge_abuse(peer)
-            return None
-        pairing = _pkg_parse_pairing(raw, self._identity.verify)
-        if pairing is None:
-            self._charge_abuse(peer)
-            return None
-        if not self._pairings.offer(pairing, bytes(raw)):
-            return None
-        self._note_change("packages")
-        return pairing
 
     async def _handle_pkg_announce(self, peer: '_Peer', packet: Packet) -> None:
         if not self._pkg_allowed(peer):
@@ -9679,8 +9669,7 @@ class MeshNode:
             return
         key = packet.payload[:20]
         query_id = packet.payload[20:]
-        body = query_id + _pkg_encode(self._package_book.get(key)
-                                      + self._pairings.get(key))
+        body = query_id + _pkg_encode(self._package_book.get(key))
         # routes back to the querier — never inline, we are in a receive loop
         await self._route_outbound(
             Packet.create(PKG_FOUND, self._id.raw, packet.src_id, body),
@@ -9711,10 +9700,8 @@ class MeshNode:
         Ours first — the one thing this peer certainly cannot have heard from
         anybody else — then the most recently learned, bounded."""
         records = self._package_book.recent(_PKG_SYNC_MAX)
-        mine = (list(self._package_records.values())
-                + list(self._own_pairings.values()))
+        mine = list(self._package_records.values())
         records = mine + [raw for raw in records if raw not in mine]
-        records += [raw for raw in self._pairings.records() if raw not in records]
         for raw in records[:_PKG_SYNC_MAX]:
             if peer.authenticated_id is None or peer.session is None:
                 return
@@ -9725,7 +9712,7 @@ class MeshNode:
                 return
 
     def _schedule_package_sync(self, peer: '_Peer') -> None:
-        if not len(self._package_book) and not len(self._pairings):
+        if not len(self._package_book):
             return
         if not self.peer_announces(peer, features.PACKAGES):
             return
@@ -9760,27 +9747,31 @@ class MeshNode:
     # -- publishing a record ----------------------------------------------
 
     def sign_package_record(self, kind: int, name: str, version: str,
-                            ref: bytes, src: bytes, *, notes: str = "",
-                            recommend: bool = False, signer=None,
-                            ts: int | None = None) -> bytes:
-        """Sign a record saying this key publishes (or recommends) a package.
+                            release: bytes, src: bytes, *, notes: str = "",
+                            signer=None, ts: int | None = None) -> bytes:
+        """Sign a record saying **this node holds a release and serves it**.
 
-        ``signer`` defaults to this node's identity. It must be **the key that
-        signed the descriptor the record points at**: the record names its own
-        signer as the publisher, and that name is what a reader pins from. Sign
-        the record with the node identity while the release carries a separate
-        publisher key and the card says one thing while the package says
-        another — an operator pins the wrong key and the install then refuses
-        the release they were looking at.
+        Always signed by the node identity, because that is what the sentence is
+        about: this machine, these bytes, on offer. There is no separate record
+        for "I published it" — pass ``signer``, the key that signed the
+        descriptor, and the record carries the extra signature proving this node
+        holds that key too (``FLAG_PUBLISHED``). That proof names this node, so
+        it cannot be lifted onto anybody else's record.
+
+        The caller is making a promise: a record filed for bytes this node does
+        not have is a source that wastes one round trip for whoever believes it.
+        Sign one only for a release :attr:`_packages` (or the app store) can
+        actually serve.
 
         Kept and re-filed by the directory loop, so a record signed once stays
         findable as the mesh moves underneath it. Bounded: a node that could
         sign records without end would be filing without end too."""
-        signer = signer if signer is not None else self._identity
         name = _pkg_canonical_name(name)
-        raw = _pkg_build(kind, name, version, ref, src,
-                         signer.dsa_public_key, signer.sign,
-                         notes=notes, recommend=recommend, ts=ts)
+        raw = _pkg_build(kind, name, version, release, src,
+                         self._identity.dsa_public_key, self._identity.sign,
+                         notes=notes, ts=ts,
+                         signer_pub=signer.dsa_public_key if signer else None,
+                         signer_sign=signer.sign if signer else None)
         record = _pkg_parse(raw, self._identity.verify)
         if record is None:                    # never seen; a record we signed
             raise PackageDirError("could not verify our own record")  # and cannot read
@@ -9789,26 +9780,6 @@ class MeshNode:
         while len(self._package_records) > _PKG_OWN_MAX:
             self._package_records.pop(next(iter(self._package_records)))
         self._package_book.offer(record, raw)
-        self._note_change("packages")
-        self._wake_directory_publish()
-        return raw
-
-    def sign_pairing(self, counterpart: bytes, signer=None) -> bytes:
-        """Sign one half of a pairing between this key and ``counterpart``.
-
-        Kept and re-filed by the directory loop like a package record. Both
-        halves are needed before anybody follows the link, so signing one is
-        never a claim about the other party — it is a claim about ourselves."""
-        signer = signer if signer is not None else self._identity
-        raw = _pkg_build_pairing(counterpart, signer.dsa_public_key, signer.sign)
-        pairing = _pkg_parse_pairing(raw, self._identity.verify)
-        if pairing is None:                   # never seen; a half we signed
-            raise PackageDirError("could not verify our own pairing")  # and cannot read
-        ident = (pairing["signer_id"], pairing["counterpart"])
-        self._own_pairings[ident] = raw
-        while len(self._own_pairings) > _PKG_OWN_MAX:
-            self._own_pairings.pop(next(iter(self._own_pairings)))
-        self._pairings.offer(pairing, raw)
         self._note_change("packages")
         self._wake_directory_publish()
         return raw
@@ -9826,7 +9797,7 @@ class MeshNode:
             # when it was signed: whoever finds the record has to be able to
             # resolve the pointer, and this is the sweep that may spend a
             # lookup on it.
-            pointed = self._dht_store.get(record["ref"])
+            pointed = self._dht_store.get(record["release"])
             if pointed is not None:
                 try:
                     await self.dht_put(pointed)
@@ -9834,15 +9805,6 @@ class MeshNode:
                     pass
             await self._gossip_package(raw)
             targets = await self._dir_publish_targets(record["keys"])
-            await asyncio.gather(*(self._pkg_store_at(nid, raw)
-                                   for nid in targets),
-                                 return_exceptions=True)
-        for raw in list(self._own_pairings.values()):
-            pairing = _pkg_parse_pairing(raw, self._identity.verify)
-            if pairing is None:
-                continue
-            await self._gossip_package(raw)
-            targets = await self._dir_publish_targets([pairing["key"]])
             await asyncio.gather(*(self._pkg_store_at(nid, raw)
                                    for nid in targets),
                                  return_exceptions=True)
@@ -9906,17 +9868,18 @@ class MeshNode:
         return self.find_packages(query, limit)
 
     async def packages_of(self, node_id, *, wide: bool = True) -> list[dict]:
-        """What the node behind ``node_id`` publishes or recommends.
+        """What the node behind ``node_id`` holds and serves.
 
-        A publisher id is derived like a node id, so a node signing with its own
-        identity publishes under the very id a details page already has.
+        One lookup on one key, because a node signs its own records: the join
+        between a package and a machine is a sentence the machine said about
+        itself, and it is the only join there is. It used to take a pairing —
+        a second artefact, in two halves, existing only because records were
+        filed under a *publisher key* that names a machine by coincidence and
+        names nothing at all once it is detached or shared.
 
-        A node that signs with a **separate publisher key**
-        (:mod:`src.publisher_key`) is reached through a pairing: the record
-        names the key, because that is what the signature proves, and the
-        pairing is what says the key and the machine go together. Only a link
-        **both parties signed** is followed — one half is one party's word
-        about another, and this node does not act on those."""
+        Each row says which of the two sentences it is (``published``: the node
+        also proved it holds the key that signed the release). Neither is
+        authority: what may be installed is decided by the pins."""
         raw = node_id.raw if isinstance(node_id, NodeID) else node_id
         if isinstance(raw, str):
             try:
@@ -9928,33 +9891,34 @@ class MeshNode:
         raw = bytes(raw)
         if wide:
             try:
-                await self._lookup_package_key(_pkg_publisher_key(raw))
+                await self._lookup_package_key(_pkg_node_key(raw))
+            except Exception:
+                pass          # the local answer is still worth returning
+        return [self._package_view(entry)
+                for entry in self._package_book.of_node(raw)]
+
+    async def package_holders(self, release: bytes, *,
+                              wide: bool = True) -> list[NodeID]:
+        """Which nodes say they hold this release and will serve it.
+
+        The swarm, asked through routing. A recommendation *is* the offer to
+        serve, so there is no second mechanism for "who has this" and no
+        publisher to fall back on when nobody answers. A node that lies costs
+        one round trip: the hash decides what the bytes are."""
+        release = bytes(release)
+        if len(release) != 20:
+            return []
+        if wide:
+            try:
+                await self._lookup_package_key(_pkg_release_key(release))
             except Exception:
                 pass
-        rows = [self._package_view(entry)
-                for entry in self._package_book.of_publisher(raw)]
-        # Follow what this node named, bounded by the book's own per-key cap.
-        for counterpart in self._pairings.named_by(raw):
-            if wide:
-                try:
-                    await self._lookup_package_key(_pkg_publisher_key(counterpart))
-                except Exception:
-                    continue
-            if not self._pairings.confirmed(raw, counterpart):
-                continue          # one half only — nobody's word is enough here
-            rows += [self._package_view(entry)
-                     for entry in self._package_book.of_publisher(counterpart)]
-        return rows
-
-    def _paired_with(self, publisher_id: bytes) -> list[str]:
-        """Ids this key is paired with, **both halves signed**, as hex.
-
-        One half is one party's word about another, and following it would put
-        a stranger's packages on somebody's page. So only a mutual pair counts
-        — which neither party can produce alone."""
-        return [counterpart.hex()
-                for counterpart in self._pairings.named_by(publisher_id)
-                if self._pairings.confirmed(publisher_id, counterpart)]
+        found: list[NodeID] = []
+        for entry in self._package_book.holders(release):
+            node_id = NodeID(entry["node_id"])
+            if node_id != self._id and node_id not in found:
+                found.append(node_id)
+        return found
 
     def _package_view(self, entry: dict) -> dict:
         """One record as a page reads it — every decision already made here.
@@ -9965,42 +9929,43 @@ class MeshNode:
         attacker cannot get for free: mirroring bytes is cheap, a second
         signature over the same source is a second party."""
         agree = self._package_book.by_source(entry["src"])
-        attesters = {row["publisher_id"] for row in agree}
+        # Counted in **signing keys**, never in nodes: a second node serving the
+        # same bytes is a mirror, and mirrors are free. A second signature over
+        # the same source is a second party, and that is what an attacker cannot
+        # get for nothing. A record with no proof of publication contributes
+        # nothing here, whoever is holding it.
+        attesters = {row["signer_id"] for row in agree
+                     if row["signer_id"] is not None}
         agreeing, needed = self._package_agreement(entry)
+        signer = entry["signer"]
         return {
             "id": entry["id"].hex(),
-            "publisher_id": entry["publisher_id"].hex(),
-            "publisher": entry["publisher"].hex(),
+            "node_id": entry["node_id"].hex(),
             "kind": "core" if entry["kind"] == _PKG_CORE else "app",
-            "recommend": entry["recommend"],
+            "published": entry["published"],
+            # The key the *release* is signed by, when this node proved it holds
+            # it. That key — not the node, not a publisher id — is what a reader
+            # pins and what an install is checked against.
+            "signer_id": entry["signer_id"].hex() if entry["signer_id"] else None,
+            "signer": signer.hex() if signer else None,
             "name": entry["name"],
             "version": entry["version"],
             "notes": entry["notes"],
-            "ref": entry["ref"].hex(),
+            "release": entry["release"].hex(),
             "src": entry["src"].hex(),
             "ts": entry["ts"],
-            # The nodes this key is paired with, both halves signed. A
-            # property of what we hold about the key, not of the question that
-            # happened to reach this record — so it is derived here rather than
-            # bolted on by whichever caller asked.
-            "vouched_by": self._paired_with(entry["publisher_id"]),
-            "trusted": self._trusts_publisher(entry["publisher"]),
-            # "published from here", which is not the same as "signed by this
-            # node's identity": a release signed with a detached publisher key
-            # is still ours, and reading `not yours` against your own release
-            # is what makes a page look broken.
-            "mine": (entry["publisher"] == self._identity.dsa_public_key
-                     or entry["id"] in self._package_records),
+            "trusted": bool(signer) and self._trusts_publisher(signer),
+            "mine": entry["node_id"] == self._id.raw,
             "attesters": len(attesters),
             # What this operator watches, and how far the code they watch
             # agrees with itself. `attesters` counts everybody; `agreeing`
-            # counts only publishers they chose, which is the number a quorum
-            # is allowed to rest on.
+            # counts only keys they chose, which is the number a quorum is
+            # allowed to rest on.
             "subscription": self._subscriptions.get(entry["id"].hex()),
             "agreeing": agreeing,
             "needed": needed,
             "equivocated": self._package_book.equivocated(
-                entry["publisher_id"]) is not None,
+                entry["node_id"]) is not None,
         }
 
     def package_entry(self, record_id_hex: str) -> dict | None:
@@ -10029,9 +9994,9 @@ class MeshNode:
         installable without anybody having gossiped it at us."""
         entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
-        if entry is None or entry["ref"] == b"\x00" * 20:
+        if entry is None or entry["release"] == b"\x00" * 20:
             return None
-        raw = await self.dht_get(entry["ref"])
+        raw = await self.dht_get(entry["release"])
         if raw is None:
             return None
         if entry["kind"] == _PKG_CORE:
@@ -10061,7 +10026,7 @@ class MeshNode:
             await self._gossip_catalog(raw)
         return {"kind": "app", "version": doc["version"],
                 "name": doc["name"], "app_id": doc["app_id"].hex(),
-                "publisher_id": _pkg_publisher_id(doc["author"]).hex(),
+                "publisher_id": _pkg_identity_id(doc["author"]).hex(),
                 "publisher": doc["author"].hex()}
 
     async def fetch_package(self, record_id_hex: str):
@@ -10088,7 +10053,7 @@ class MeshNode:
                 return None
             return entry, package, f"nmesh-{catalogued['version']}.tar.gz"
         record = self._package_book.entry(bytes.fromhex(record_id_hex))
-        result = await self.fetch_signed_app(record["ref"])
+        result = await self.fetch_signed_app(record["release"])
         if result is None:
             return None
         meta, files = result
@@ -10100,8 +10065,12 @@ class MeshNode:
         """Install what a record points at. Raises with the reason if it cannot.
 
         The two kinds part company here and nowhere else: a core release
-        replaces this node's program (and needs its publisher pinned), an app is
-        written into its own directory."""
+        replaces this node's program (and needs the key that signed it pinned),
+        an app is written into its own directory.
+
+        Installing is also holding: whatever ends up on this machine is filed as
+        a record saying so, which is how a node that installed something becomes
+        somewhere the next node can get it."""
         entry = self.package_entry(record_id_hex)
         if entry is None:
             raise ReleaseError("no such package")
@@ -10116,108 +10085,149 @@ class MeshNode:
         if installed is None:
             raise ReleaseError("the app could not be installed")
         self._subscriptions.note_version(record_id_hex, entry["version"])
+        self._offer_to_serve(entry)
         return installed
 
-    def trust_package_publisher(self, record_id_hex: str, *,
-                                auto: bool = False,
-                                endorsed: bool = False) -> dict:
-        """Pin the key a record carries, in one act.
+    def _offer_to_serve(self, entry: dict) -> None:
+        """Say we hold what we just installed, so the next node can ask us.
 
-        The record already holds the publisher's full public key — that is what
-        its signature was checked under — so there is nothing for an operator to
-        copy across from anywhere. What was a hex string pasted from a channel
-        nobody could vouch for becomes a key that arrived with the thing it
-        signed. It is still a decision, and still theirs: the console asks
-        before calling this, and shows the id that will be pinned."""
+        This is the whole of how a release stays reachable once its publisher
+        stops being special: everyone who installed it is a source, and saying
+        so is one signed record. Never fatal — a node that cannot file the
+        record still runs the code."""
+        try:
+            self.sign_package_record(
+                _PKG_CORE if entry["kind"] == "core" else _PKG_APP,
+                entry["name"], entry["version"],
+                bytes.fromhex(entry["release"]), bytes.fromhex(entry["src"]),
+                notes=entry["notes"])
+        except Exception:
+            self._activity.note("warn", "could not offer to serve "
+                                + entry["name"])
+
+    def trust_package_signer(self, record_id_hex: str, *,
+                             auto: bool = False,
+                             endorsed: bool = False) -> dict:
+        """Pin **the key that signed this release**, in one act.
+
+        The record carries that key in full when its holder proved it also
+        signed the descriptor — that is what the second signature is — so there
+        is nothing for an operator to copy across from anywhere. What was a hex
+        string pasted from a channel nobody could vouch for becomes a key that
+        arrived with the thing it signed. It is still a decision, and still
+        theirs: the console asks before calling this, and shows the id.
+
+        A record from a node that only *holds* the release carries no such key,
+        and there is nothing here to pin. That is the point rather than a gap:
+        serving bytes is not a claim about them, and pinning whoever handed you
+        a copy would hand the machine to a mirror."""
         entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None:
             raise ReleaseError("no such package")
-        if entry["recommend"]:
-            # A recommendation names somebody else's bytes. Pinning the
-            # recommender would hand the machine to whoever agreed with a
-            # release, which is not what anybody meant by agreeing.
-            raise ReleaseError("that is a recommendation, not a publication — "
-                               "pin the publisher it points at instead")
-        return self.trust_publisher(entry["publisher"].hex(), entry["name"],
+        if not entry["published"]:
+            raise ReleaseError("this node holds that release, it did not sign "
+                               "it — open the release to see who did")
+        return self.trust_publisher(entry["signer"].hex(), entry["name"],
                                     auto, endorsed)
 
     # -- subscriptions -----------------------------------------------------
 
     def subscribe_package(self, record_id_hex: str, *, auto: bool = False,
                           quorum: int = 1) -> dict:
-        """Watch this publisher's offering of this package for new versions."""
+        """Watch **this package** for new versions, whoever signs or serves it.
+
+        The record is where an operator pressed the toggle; what is stored is
+        the package it names. Subscribing from one node's copy and from
+        another's is the same subscription."""
         entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None:
             raise SubscriptionError("no such package")
         subscription = self._subscriptions.add(
-            record_id_hex, entry["publisher_id"].hex(), entry["kind"],
-            entry["name"], auto=auto, quorum=quorum)
+            entry["kind"], entry["name"], auto=auto, quorum=quorum)
         self._wake_release_pass()
         self._note_change("packages")
         return subscription
 
     def unsubscribe_package(self, record_id_hex: str) -> bool:
-        removed = self._subscriptions.remove(record_id_hex)
+        entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
+            if _HEX_PKG.fullmatch(record_id_hex or "") else None
+        ident = _subscription_id(entry["kind"], entry["name"]) \
+            if entry is not None else record_id_hex
+        removed = self._subscriptions.remove(ident)
         if removed:
             self._note_change("packages")
         return removed
 
     def subscriptions(self) -> list[dict]:
-        """Every subscription, with what this node currently sees for it."""
+        """Every subscription, with the best record this node currently holds
+        for it — signed by anybody, served by anybody."""
         rows = []
         for subscription in self._subscriptions.list():
-            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
+            entry = self._best_for_subscription(subscription)
             view = self._package_view(entry) if entry is not None else None
             rows.append({**subscription, "package": view,
                          "agreeing": view["agreeing"] if view else 0})
         return rows
 
+    def _best_for_subscription(self, subscription: dict) -> dict | None:
+        """The newest record we hold for a watched package.
+
+        A subscription names a package, so this searches by kind and name rather
+        than by an id that carries whoever filed the record. Preferring a
+        published record over a held one is only about what a page can show —
+        the key that signed it — and never about what may be installed, which
+        the pins decide either way."""
+        folded = _pseudo_fold(subscription["name"])
+        best = None
+        for entry in self._package_book.search(subscription["name"], limit=64):
+            if entry["kind"] != subscription["kind"] or entry["folded"] != folded:
+                continue
+            if best is None or (entry["published"], entry["ts"]) > \
+                    (best["published"], best["ts"]):
+                best = entry
+        return best
+
     def _package_agreement(self, entry: dict) -> tuple[int, int]:
-        """How many **subscribed** publishers carry this exact code, and how
-        many this operator asked for.
+        """How many **endorsed keys** have signed this exact code, and how many
+        this operator asked for.
 
         Counted over the source digest, so two publishers whose release notes
-        differ still agree; and only over publishers this operator subscribed
-        to, because a signature from somebody nobody chose is a party an
-        attacker can mint. Same argument as the endorsed quorum next door."""
-        subscription = self._subscriptions.get(entry["id"].hex())
+        differ still agree; over *signing keys*, because a node serving a copy
+        is a mirror and mirrors are free; and only over keys this operator
+        endorsed one at a time, because a signature from somebody nobody chose
+        is a party an attacker can mint. Same argument as the release quorum
+        next door, and now the same set of keys."""
+        subscription = self._subscriptions.for_package(entry["kind"],
+                                                       entry["name"])
         needed = subscription["quorum"] if subscription else 1
-        watched = self._subscriptions.publishers_for(
-            entry["kind"], entry["folded"])
         # Same kind and same name, not merely the same bytes: a fork published
         # under another name is a different package, and the operator who wants
         # it counted subscribes to it. Loosening this would let one publisher's
         # second offering vouch for its first.
-        agreeing = {row["publisher_id"].hex()
-                    for row in self._package_book.by_source(entry["src"])
-                    if row["kind"] == entry["kind"]
-                    and row["folded"] == entry["folded"]
-                    and row["publisher_id"].hex() in watched}
-        return len(agreeing), needed
+        signers = [row["signer"] for row in
+                   self._package_book.by_source(entry["src"])
+                   if row["published"] and row["kind"] == entry["kind"]
+                   and row["folded"] == entry["folded"]]
+        return len(self._publishers.endorsed_among(signers)), needed
 
     async def _subscription_pass(self) -> None:
         """Ask the directory what each subscribed publisher offers now.
 
-        This is the half an announcement cannot cover: a publisher whose
-        announce never reached us, or one we met long after it published.
-        Bounded by the subscription count, which an operator sets."""
-        seen: set[bytes] = set()
+        This is the half an announcement cannot cover: a release whose announce
+        never reached us, or a node we met long after it filed its record.
+        Asked **by name**, because that is what a subscription names — so a new
+        signer of a watched package is found without anybody having subscribed
+        to them. Bounded by the subscription count, which an operator sets."""
         for subscription in self._subscriptions.list():
             try:
-                pub_id = bytes.fromhex(subscription["publisher_id"])
-            except ValueError:
-                continue
-            if pub_id in seen:
-                continue          # one publisher, one lookup, however many rows
-            seen.add(pub_id)
-            try:
-                await self._lookup_package_key(_pkg_publisher_key(pub_id))
+                await self._lookup_package_key(
+                    _pkg_name_key(subscription["name"]))
             except Exception:
-                pass          # one unreachable publisher is not the whole sweep
+                pass          # one unreachable name is not the whole sweep
         for subscription in self._subscriptions.list():
-            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
+            entry = self._best_for_subscription(subscription)
             if entry is None or entry["version"] == subscription["version_seen"]:
                 continue
             if entry["kind"] == _PKG_CORE and not _is_newer(
@@ -10226,8 +10236,7 @@ class MeshNode:
             self._subscriptions.note_version(subscription["id"],
                                              entry["version"])
             self._activity.note(
-                "release", f"{entry['name']} {entry['version']} is offered by "
-                           f"{subscription['publisher_id'][:12]}")
+                "release", f"{entry['name']} {entry['version']} is offered")
             self._note_change("packages")
 
     async def _subscribed_install_pass(self) -> None:
@@ -10238,9 +10247,9 @@ class MeshNode:
         for subscription in self._subscriptions.list():
             if not subscription["auto"]:
                 continue
-            entry = self._package_book.entry(bytes.fromhex(subscription["id"]))
-            if entry is None:
-                continue
+            entry = self._best_for_subscription(subscription)
+            if entry is None or not entry["published"]:
+                continue          # nothing to check a signature against
             agreeing, needed = self._package_agreement(entry)
             if agreeing < needed:
                 continue
@@ -10249,48 +10258,51 @@ class MeshNode:
                 # as the release descriptor derives it — so "do we already have
                 # this?" is answered here rather than by a DHT round trip per
                 # subscription per sweep.
-                app_id = _app_deployed_id(entry["publisher"], entry["name"]).hex()
+                app_id = _app_deployed_id(entry["signer"], entry["name"]).hex()
                 installed = self._installed.get(app_id)
                 if installed is not None and installed.get("version") == entry["version"]:
                     continue
                 try:
-                    await self.install_package(subscription["id"])
+                    await self.install_package(entry["id"].hex())
                 except Exception:
                     continue
                 return
             # A core release goes through the same three gates as any other:
-            # the publisher is pinned, the version is strictly newer, and every
-            # byte verifies. `install_release` refuses otherwise, and a
-            # subscription does not widen any of them.
+            # the key that signed it is pinned, the version is strictly newer,
+            # and every byte verifies. `install_release_entry` refuses
+            # otherwise, and a subscription does not widen any of them.
             if not _is_newer(entry["version"], _running_version()):
                 continue
             try:
-                described = await self.package_descriptor(subscription["id"])
+                described = await self.package_descriptor(entry["id"].hex())
             except Exception:
                 continue
             if described is None:
                 continue
-            catalogued = self._releases.get(described["publisher_id"])
-            if catalogued is None:
-                continue
-            allowed, _why = self.may_auto_install(catalogued)
+            allowed, _why = self.may_auto_install(described["entry"])
             if not allowed:
                 continue
             try:
-                await self.install_release(described["publisher_id"],
-                                           unattended=True)
+                await self.install_release_entry(described["entry"],
+                                                 unattended=True)
             except Exception as exc:
                 self._note_release(entry["version"], "failed", str(exc))
             return
 
     async def _recommend_pass(self) -> None:
-        """Say which release id this node runs, if the operator asked it to.
+        """Say which release this node runs and will serve, if asked to.
 
-        A recommendation is not a publication: it points at somebody else's
-        bytes. What makes it worth anything is the **source digest of the tree
+        A recommendation is a **package**, not a publisher, and saying it is a
+        promise: whoever finds this record can ask this node for those bytes.
+        What makes it worth anything on top is the **source digest of the tree
         actually running here** — a second party saying "this code is what I am
         executing", which is the one thing in a supply chain an attacker cannot
         obtain by minting identities.
+
+        A release nobody here can point at is not recommended at all. There is
+        no zero reference any more: a record whose pointer resolves to nothing
+        is a source that wastes everybody's round trip, and the whole value of
+        the record is that it can be followed.
 
         Once per version: reading and hashing the tree is not free, and the
         answer cannot change while the version does not."""
@@ -10303,16 +10315,18 @@ class MeshNode:
         # something `dht_get` can resolve, and the package moves on the release
         # transfer instead. Keeping it locally is what makes the pointer good —
         # the directory sweep replicates it a moment later.
-        ref = b"\x00" * 20
-        for listed in self._releases.list():
-            if listed["version"] != version:
+        release = None
+        for entry in self._releases.list():
+            if entry["version"] != version:
                 continue
-            catalogued = self._releases.get(listed["publisher_id"])
-            if catalogued is None:
+            held = self._releases.get(entry["key"])
+            if held is None:
                 continue
-            ref = _content_key(catalogued["release"])
-            self._dht_store.put(ref, catalogued["release"])
+            release = held["key"]
+            self._dht_store.put(release, held["release"])
             break
+        if release is None:
+            return
         try:
             from . import updater
             files = _core_read_tree(updater.install_root())
@@ -10320,8 +10334,8 @@ class MeshNode:
         except Exception:
             return          # a tree we cannot read is not a tree we can vouch for
         try:
-            self.sign_package_record(_PKG_CORE, _CORE_NAME, version, ref,
-                                     digest, recommend=True)
+            self.sign_package_record(_PKG_CORE, _CORE_NAME, version, release,
+                                     digest)
         except Exception:
             return
         self._recommended = version

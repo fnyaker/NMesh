@@ -193,10 +193,10 @@ class TestHostileInput:
             equivocation.build(equivocation.KIND_RELEASE, b"a" * (65 * 1024), b"b")
 
 
-class TestTheCatalogueCatchesIt:
+class TestTheReleaseBookCatchesIt:
     def test_one_publisher_signing_one_version_twice_is_kept(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         catalogue.offer(_release(idn, ts=1000, package=ONE), idn.verify)
         catalogue.offer(_release(idn, ts=1001, package=TWO), idn.verify)
         key = cr.publisher_id(idn.dsa_public_key)
@@ -207,19 +207,18 @@ class TestTheCatalogueCatchesIt:
         assert found is not None and found["subject_pub"] == idn.dsa_public_key
 
     def test_the_older_half_arriving_second_is_still_caught(self):
-        """The check runs before the anti-rollback drop, deliberately: showing
-        the older half second is exactly how a publisher would slip past one
-        that ran after."""
+        """Order does not matter any more — the book keeps both releases — but
+        the property is the one worth keeping: a publisher cannot hide a
+        contradiction by choosing which half to show first."""
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         catalogue.offer(_release(idn, ts=1001, package=TWO), idn.verify)
-        assert catalogue.offer(_release(idn, ts=1000, package=ONE),
-                               idn.verify) is None      # rolled back, dropped
+        catalogue.offer(_release(idn, ts=1000, package=ONE), idn.verify)
         assert catalogue.equivocated(cr.publisher_id(idn.dsa_public_key)) is not None
 
     def test_an_honest_publisher_is_never_recorded(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         catalogue.offer(_release(idn, version="0.2.0", ts=1000, package=ONE),
                         idn.verify)
         catalogue.offer(_release(idn, version="0.2.1", ts=1001, package=TWO),
@@ -227,7 +226,7 @@ class TestTheCatalogueCatchesIt:
         assert catalogue.equivocations() == {}
 
     def test_the_table_is_bounded(self):
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         for _ in range(cr.MAX_EQUIVOCATIONS + 4):
             idn = CryptoIdentity()
             catalogue.offer(_release(idn, ts=1000, package=ONE), idn.verify)
@@ -239,7 +238,7 @@ class TestTheCatalogueCatchesIt:
         that could actually cause one are the ones worth the room. A flood of
         strangers contradicting themselves must not hide the pinned key doing
         the same."""
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         for _ in range(cr.MAX_EQUIVOCATIONS):
             idn = CryptoIdentity()
             catalogue.offer(_release(idn, ts=1000, package=ONE), idn.verify)
@@ -255,11 +254,11 @@ class TestTheCatalogueCatchesIt:
 
     def test_a_proof_is_kept_once_and_not_rewritten(self):
         idn = CryptoIdentity()
-        catalogue = cr.ReleaseCatalog()
+        catalogue = cr.ReleaseBook()
         catalogue.offer(_release(idn, ts=1000, package=ONE), idn.verify)
         catalogue.offer(_release(idn, ts=1001, package=TWO), idn.verify)
         first = catalogue.equivocated(idn.dsa_public_key)
-        catalogue.offer(_release(idn, ts=1002, package=ONE), idn.verify)
+        catalogue.offer(_release(idn, ts=1002, package=TWO), idn.verify)
         assert catalogue.equivocated(idn.dsa_public_key) == first
 
 
@@ -338,9 +337,10 @@ class TestTheNodeActsOnIt:
         node.trust_publisher(publisher.dsa_public_key.hex(), "them", auto=True)
         node._releases.offer(_release(publisher, ts=1000, package=ONE),
                              node._identity.verify, node._trusts_publisher)
-        node._releases.offer(_release(publisher, ts=1001, package=TWO),
-                             node._identity.verify, node._trusts_publisher)
-        return node._releases.get(cr.publisher_id(publisher.dsa_public_key).hex())
+        second = _release(publisher, ts=1001, package=TWO)
+        node._releases.offer(second, node._identity.verify,
+                             node._trusts_publisher)
+        return node._releases.get(cr.descriptor_key(second))
 
     async def test_a_pinned_publisher_that_contradicts_itself_installs_nothing(self):
         node, publisher = self._node(), CryptoIdentity()
@@ -358,10 +358,10 @@ class TestTheNodeActsOnIt:
         try:
             node.trust_publisher(publisher.dsa_public_key.hex(), "them",
                                  auto=True)
-            node._releases.offer(_release(publisher, ts=1000, package=ONE),
-                                 node._identity.verify, node._trusts_publisher)
-            entry = node._releases.get(
-                cr.publisher_id(publisher.dsa_public_key).hex())
+            blob = _release(publisher, ts=1000, package=ONE)
+            node._releases.offer(blob, node._identity.verify,
+                                 node._trusts_publisher)
+            entry = node._releases.get(cr.descriptor_key(blob))
             assert node.may_auto_install(entry)[0] is True
         finally:
             await node.stop()

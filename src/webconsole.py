@@ -2152,7 +2152,7 @@ def _make_handler(console: WebConsole):
                         self._json(400, {"error": "confirmation required"})
                         return
                     entry = console._call(_wrap(
-                        node.trust_package_publisher, record_id,
+                        node.trust_package_signer, record_id,
                         auto=data.get("auto") is True,
                         endorsed=data.get("endorsed") is True))
                     self._json(200, {"ok": True, "publisher": entry})
@@ -2212,14 +2212,14 @@ def _make_handler(console: WebConsole):
                     self._json(200, {"ok": True, **result})
                     return
                 if path == "/api/releases/install":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
+                    release = data.get("release")
+                    if not isinstance(release, str):
+                        self._json(400, {"error": "release required"})
                         return
                     if data.get("confirm") is not True:
                         self._json(400, {"error": "confirmation required"})
                         return
-                    result = console._call(node.install_release(publisher),
+                    result = console._call(node.install_release(release),
                                            timeout=400.0)
                     # An operator pressed Install and is watching, so the
                     # restart is immediate. The unattended path restarts too,

@@ -63,6 +63,28 @@ class _FakePeer:
         pass
 
 
+def _somebody_holds(entry):
+    """Somebody else's record saying they hold this release and will serve it.
+    Returns ``(raw, their node id)`` — the id follows from the key that signed
+    it, so it is handed back rather than chosen."""
+    from src.crypto import CryptoIdentity
+    from src import pkg_dir
+    identity = CryptoIdentity()
+    raw = pkg_dir.build_record(pkg_dir.KIND_CORE, "NMesh", entry["version"],
+                               entry["key"], b"\x00" * 32,
+                               identity.dsa_public_key, identity.sign)
+    return raw, NodeID(pkg_dir.identity_id(identity.dsa_public_key))
+
+
+def _running_version_is(node, version):
+    """Make this node think it is running ``version`` for one call, and hand
+    back the undo."""
+    import src.node as node_module
+    original = node_module._running_version
+    node_module._running_version = lambda: version
+    return lambda: setattr(node_module, "_running_version", original)
+
+
 def _ten_seconds_on():
     """A clock a little ahead of this one, for a test that needs two publishes
     to carry different timestamps."""
@@ -82,7 +104,7 @@ class TestPublishing:
                                               notes="first cut")
             assert info["version"] == "9.9.9"
             node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
-            fetched = await node.fetch_release(info["publisher_id"])
+            fetched = await node.fetch_release(info["release"])
             assert fetched is not None
             entry, files = fetched
             assert entry["notes"] == "first cut"
@@ -173,7 +195,7 @@ class TestPublishing:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
             entry = node.release_overview()["releases"][0]
@@ -211,8 +233,9 @@ class TestADetachedPublisherKey:
             info = await node.publish_release(_tree(str(tmp_path / "tree")),
                                               key_path=path, passphrase="pass")
             rows = node.find_packages("nmesh")
-            assert [row["publisher_id"] for row in rows] == [info["publisher_id"]]
-            assert rows[0]["publisher"] == public.hex()
+            assert [row["signer_id"] for row in rows] == [info["publisher_id"]]
+            assert rows[0]["signer"] == public.hex()
+            assert rows[0]["published"] is True
             # …and it is still recognisably ours, though it is not our identity.
             assert rows[0]["mine"] is True
         finally:
@@ -227,7 +250,7 @@ class TestADetachedPublisherKey:
             await node.publish_release(_tree(str(tmp_path / "tree")),
                                        key_path=path, passphrase="pass")
             record_id = node.find_packages("nmesh")[0]["id"]
-            pinned = node.trust_package_publisher(record_id)
+            pinned = node.trust_package_signer(record_id)
             assert pinned["key"] == public.hex()
 
             # And the install then goes through, which is the whole point: the
@@ -274,9 +297,9 @@ class TestARleaseIsBytesAndASignature:
             public = self._key(path)
             info = await node.publish_release(_tree(str(tmp_path / "tree")),
                                               key_path=path, passphrase="pass")
-            entry = node._releases.get(info["publisher_id"])
+            entry = node._releases.get(info["release"])
             assert entry is not None
-            sources = node._release_sources_for(entry)
+            sources = await node._release_sources_for(entry)
             assert NodeID(cr.publisher_id(public)) not in sources
             # Nor the node that signed it: what it holds is said with the
             # `have` byte, like every other holder.
@@ -288,12 +311,12 @@ class TestARleaseIsBytesAndASignature:
         node = _node()
         try:
             info = await node.publish_release(_tree(str(tmp_path)))
-            entry = node._releases.get(info["publisher_id"])
+            entry = node._releases.get(info["release"])
             peer = _FakePeer()
             node._peers.append(peer)
             holder = NodeID(os.urandom(20))
             node._note_release_source(entry["release_id"].hex(), holder)
-            sources = node._release_sources_for(entry)
+            sources = await node._release_sources_for(entry)
             assert sources[0] == holder
             assert peer.authenticated_id in sources
         finally:
@@ -305,10 +328,10 @@ class TestARleaseIsBytesAndASignature:
         node = _node()
         try:
             info = await node.publish_release(_tree(str(tmp_path)))
-            entry = node._releases.get(info["publisher_id"])
+            entry = node._releases.get(info["release"])
             peers = [_FakePeer() for _ in range(3)]
             node._peers.extend(peers)
-            sources = node._release_sources_for(entry)
+            sources = await node._release_sources_for(entry)
             assert {p.authenticated_id for p in peers} <= set(sources)
         finally:
             await node.stop()
@@ -317,10 +340,10 @@ class TestARleaseIsBytesAndASignature:
         node = _node()
         try:
             info = await node.publish_release(_tree(str(tmp_path)))
-            entry = node._releases.get(info["publisher_id"])
+            entry = node._releases.get(info["release"])
             node._peers.extend(_FakePeer() for _ in range(60))
             from src.node import _RELEASE_ASK_MAX
-            assert len(node._release_sources_for(entry)) <= _RELEASE_ASK_MAX
+            assert len(await node._release_sources_for(entry)) <= _RELEASE_ASK_MAX
         finally:
             await node.stop()
 
@@ -343,8 +366,10 @@ class TestARleaseIsBytesAndASignature:
             monkeypatch.setattr(cr.time, "time", _ten_seconds_on())
             await node.publish_release(_tree(str(tmp_path / "b"),
                                              version="9.9.10"))
-            assert node._releases.get(
-                described["publisher_id"])["version"] == "9.9.10"
+            # The book holds both releases now, which is the point; what it
+            # must not do is decide which one an install means.
+            assert {row["version"] for row in node._releases.list()} == {
+                "9.9.9", "9.9.10"}
 
             node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
             applied = {}
@@ -399,6 +424,106 @@ class TestARleaseIsBytesAndASignature:
             await node.stop()
 
 
+class TestRecommendingIsHolding:
+    """A node signs one sentence about itself — "I hold this release and I
+    serve it" — and everything else is read off it. Publishing is that sentence
+    plus a proof that this node also holds the key the release was signed with.
+    """
+
+    def _key(self, path):
+        from src import publisher_key
+        from src.crypto import CryptoIdentity
+        identity = CryptoIdentity()
+        publisher_key.save(path, identity.dsa_public_key,
+                           identity._signer.export_secret_key(), "pass",
+                           n=2 ** 8, r=8, p=1)
+        return identity.dsa_public_key
+
+    async def test_a_record_is_the_nodes_own_sentence(self, tmp_path):
+        node = _node()
+        try:
+            await node.publish_release(_tree(str(tmp_path)))
+            row = node.find_packages("nmesh")[0]
+            assert row["node_id"] == node.id.raw.hex()
+            assert row["published"] is True
+            assert row["signer"] == node._identity.dsa_public_key.hex()
+        finally:
+            await node.stop()
+
+    async def test_a_detached_key_needs_no_second_artefact(self, tmp_path):
+        """It took a two-halved pairing, because records were filed under the
+        publisher key — which names a machine by coincidence, and names nothing
+        at all once the key is detached."""
+        node = _node()
+        try:
+            path = str(tmp_path / "publisher.key")
+            public = self._key(path)
+            await node.publish_release(_tree(str(tmp_path / "tree")),
+                                       key_path=path, passphrase="pass")
+            row = node.find_packages("nmesh")[0]
+            assert row["node_id"] == node.id.raw.hex()      # this machine…
+            assert row["signer"] == public.hex()            # …that key
+            assert row["published"] is True
+        finally:
+            await node.stop()
+
+    async def test_a_record_is_filed_under_the_release_it_holds(self, tmp_path):
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            entry = node._package_book.entry(
+                bytes.fromhex(node.find_packages("nmesh")[0]["id"]))
+            assert entry["release"] == bytes.fromhex(info["release"])
+            assert node._package_book.holders(entry["release"]) == [entry]
+        finally:
+            await node.stop()
+
+    async def test_only_a_published_record_offers_a_key_to_pin(self, tmp_path):
+        """A node serving a copy is a mirror, and pinning a mirror would hand
+        the machine to whoever handed you the bytes."""
+        publisher, node = _node(), _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            descriptor = publisher._releases.get(info["release"])["release"]
+            node._releases.offer(descriptor, node._identity.verify,
+                                 node._trusts_publisher)
+            node._recommend_version = True
+            monkey = _running_version_is(node, info["version"])
+            await node._recommend_pass()
+            monkey()
+            row = node.find_packages("nmesh")[0]
+            assert row["published"] is False and row["signer"] is None
+            with pytest.raises(cr.ReleaseError, match="did not sign"):
+                node.trust_package_signer(row["id"])
+        finally:
+            await node.stop(); await publisher.stop()
+
+    async def test_a_release_nobody_here_can_point_at_is_not_recommended(
+            self, tmp_path):
+        """A record whose pointer resolves to nothing is a source that wastes
+        everybody's round trip."""
+        node = _node()
+        try:
+            node._recommend_version = True
+            await node._recommend_pass()
+            assert node.find_packages("nmesh") == []
+        finally:
+            await node.stop()
+
+    async def test_the_holders_are_where_a_fetch_looks(self, tmp_path):
+        node = _node()
+        try:
+            info = await node.publish_release(_tree(str(tmp_path)))
+            from src import pkg_dir
+            entry = node._releases.get(info["release"])
+            raw, holder = _somebody_holds(entry)
+            node._package_book.offer(
+                pkg_dir.parse_record(raw, node._identity.verify), raw)
+            assert holder in await node._release_sources_for(entry)
+        finally:
+            await node.stop()
+
+
 class TestPublishingTouchesNothing:
     """Publishing is signing and announcing. The first cut of this pushed the
     tree onto the DHT as ~120 chunks, a Kademlia lookup each, paid up front for
@@ -448,13 +573,13 @@ class TestPublishingTouchesNothing:
 class TestGossip:
     async def _release_from(self, publisher, tmp_path, version="9.9.9"):
         info = await publisher.publish_release(_tree(str(tmp_path), version))
-        return (publisher._releases.get(info["publisher_id"])["release"],
-                info["publisher_id"])
+        return (publisher._releases.get(info["release"])["release"],
+                info["release"])
 
     async def test_an_announce_is_learned_and_passed_on_once(self, tmp_path):
         publisher, node = _node(), _node()
         try:
-            blob, publisher_id = await self._release_from(publisher, tmp_path)
+            blob, release_key = await self._release_from(publisher, tmp_path)
             ingress, downstream = _FakePeer(), _FakePeer()
             node._peers = [ingress, downstream]
             packet = Packet.create(RELEASE_ANNOUNCE,
@@ -462,7 +587,7 @@ class TestGossip:
                                    b"\xff" * 20, b"\x00" + blob)
             await node._handle_release_announce(ingress, packet)
             await settle(node)
-            assert node._releases.get(publisher_id) is not None
+            assert node._releases.get(release_key) is not None
             assert any(p.type == RELEASE_ANNOUNCE for p in downstream.sent)
             assert ingress.sent == []          # never back where it came from
 
@@ -478,7 +603,7 @@ class TestGossip:
         for every other operator."""
         publisher, node = _node(), _node()
         try:
-            blob, publisher_id = await self._release_from(publisher, tmp_path)
+            blob, release_key = await self._release_from(publisher, tmp_path)
             ingress, downstream = _FakePeer(), _FakePeer()
             node._peers = [ingress, downstream]
             await node._handle_release_announce(
@@ -548,10 +673,10 @@ class TestGossip:
             old_root = _tree(str(tmp_path / "old"), "1.0.0")
             new_root = _tree(str(tmp_path / "new"), "2.0.0")
             old = await publisher.publish_release(old_root, ts=1000)
-            old_descriptor = publisher._releases.get(old["publisher_id"])["release"]
+            old_descriptor = publisher._releases.get(old["release"])["release"]
             new = await publisher.publish_release(new_root, ts=2000)
             old_blob = old_descriptor
-            new_blob = publisher._releases.get(new["publisher_id"])["release"]
+            new_blob = publisher._releases.get(new["release"])["release"]
             ingress = _FakePeer()
             node._peers = [ingress]
             for blob in (new_blob, old_blob):
@@ -559,7 +684,7 @@ class TestGossip:
                     ingress, Packet.create(RELEASE_ANNOUNCE,
                                            ingress.authenticated_id.raw,
                                            b"\xff" * 20, b"\x00" + blob))
-            assert node._releases.get(new["publisher_id"])["version"] == "2.0.0"
+            assert node._releases.get(new["release"])["version"] == "2.0.0"
         finally:
             await publisher.stop(); await node.stop()
 
@@ -568,7 +693,7 @@ class TestWhatMayBeInstalled:
     async def _offer(self, node, publisher, tmp_path, version="9.9.9", ts=None):
         info = await publisher.publish_release(_tree(str(tmp_path), version),
                                                ts=ts)
-        blob = publisher._releases.get(info["publisher_id"])["release"]
+        blob = publisher._releases.get(info["release"])["release"]
         node._releases.offer(blob, node._identity.verify,
                              node._trusts_publisher)
         # The package lives with the publisher; in a two-node test with no link
@@ -581,7 +706,7 @@ class TestWhatMayBeInstalled:
         try:
             info = await self._offer(node, publisher, tmp_path)
             with pytest.raises(cr.ReleaseError, match="not trusted"):
-                await node.install_release(info["publisher_id"])
+                await node.install_release(info["release"])
         finally:
             await publisher.stop(); await node.stop()
 
@@ -600,7 +725,7 @@ class TestWhatMayBeInstalled:
                 return {"applied": version, "restart_required": True}
 
             monkeypatch.setattr(updater, "apply_files", fake_apply)
-            result = await node.install_release(info["publisher_id"])
+            result = await node.install_release(info["release"])
             assert result["version"] == "9.9.9"
             assert applied["files"]["src/node.py"] == b"# the code\n"
         finally:
@@ -617,7 +742,7 @@ class TestWhatMayBeInstalled:
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
             assert node.release_overview()["releases"][0]["state"] == "older"
             with pytest.raises(cr.ReleaseError, match="not newer"):
-                await node.install_release(info["publisher_id"])
+                await node.install_release(info["release"])
         finally:
             await publisher.stop(); await node.stop()
 
@@ -659,7 +784,7 @@ class TestWhatMayBeInstalled:
                     {"src/version.py": b'__version__ = "6.6.6"\n',
                      "start.sh": b"#!/bin/sh\n"}))
             with pytest.raises(cr.ReleaseError, match="announces"):
-                await node.install_release(info["publisher_id"])
+                await node.install_release(info["release"])
         finally:
             await publisher.stop(); await node.stop()
 
@@ -671,9 +796,12 @@ class TestWhatMayBeInstalled:
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
 
             monkeypatch.setattr(node._packages, "get", lambda ident: None)
-            monkeypatch.setattr(node, "_release_sources_for", lambda entry: [])
+            async def _nowhere(entry):
+                return []
+
+            monkeypatch.setattr(node, "_release_sources_for", _nowhere)
             with pytest.raises(cr.ReleaseError, match="could not be fetched"):
-                await node.install_release(info["publisher_id"])
+                await node.install_release(info["release"])
         finally:
             await publisher.stop(); await node.stop()
 
@@ -699,7 +827,7 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
             assert node.release_overview()["releases"][0]["trusted"] is False
@@ -712,7 +840,7 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
             entry = node.trust_publisher(
@@ -729,11 +857,11 @@ class TestPinsOnTheNode:
         publisher, node = _node(), _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node.trust_publisher(publisher._identity.dsa_public_key.hex())
             node._releases.offer(blob, node._identity.verify,
                                  node._trusts_publisher)
-            entry = node._releases.get(info["publisher_id"])
+            entry = node._releases.get(info["release"])
             assert entry["trusted"] is True
 
             # Drop the pin behind the catalogue's back, leaving the flag set.
@@ -741,7 +869,7 @@ class TestPinsOnTheNode:
                 publisher._identity.dsa_public_key).hex())
             assert entry["trusted"] is True
             with pytest.raises(cr.ReleaseError, match="not trusted"):
-                await node.install_release(info["publisher_id"])
+                await node.install_release(info["release"])
         finally:
             await publisher.stop(); await node.stop()
 
@@ -767,7 +895,7 @@ class TestTheRestartGuard:
         """A node on ``state_dir`` that is offered 9.9.9 by an auto publisher."""
         publisher = _node()
         info = await publisher.publish_release(_tree(str(tmp_path / "tree")))
-        blob = publisher._releases.get(info["publisher_id"])["release"]
+        blob = publisher._releases.get(info["release"])["release"]
         node = _node(str(state_dir))
         node._packages = publisher._packages
         node.trust_publisher(publisher._identity.dsa_public_key.hex(), "them",
@@ -849,9 +977,9 @@ class TestTheRestartGuard:
         node.set_restart_hook(lambda: True)
         try:
             await node._release_pass()
-            release_id = node._releases.get(info["publisher_id"])["release_id"]
+            release_id = node._releases.get(info["release"])["release_id"]
             assert node._auto_journal.attempts(release_id.hex()) == 1
-            await node.install_release(info["publisher_id"])
+            await node.install_release(info["release"])
             assert node._auto_journal.attempts(release_id.hex()) == 0
         finally:
             await publisher.stop(); await node.stop()
@@ -861,7 +989,7 @@ class TestAutomaticInstall:
     async def _ready(self, tmp_path, monkeypatch, auto=True):
         publisher, node = _node(), _node()
         info = await publisher.publish_release(_tree(str(tmp_path)))
-        blob = publisher._releases.get(info["publisher_id"])["release"]
+        blob = publisher._releases.get(info["release"])["release"]
         node._packages = publisher._packages
         entry = node.trust_publisher(
             publisher._identity.dsa_public_key.hex(), "them", auto=auto)
@@ -973,7 +1101,7 @@ class TestAutomaticInstall:
         publisher = _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node = _node()
             node.trust_publisher(publisher._identity.dsa_public_key.hex(),
                                  "them", auto=True)
@@ -993,7 +1121,7 @@ class TestAutomaticInstall:
         publisher = _node()
         try:
             info = await publisher.publish_release(_tree(str(tmp_path)))
-            blob = publisher._releases.get(info["publisher_id"])["release"]
+            blob = publisher._releases.get(info["release"])["release"]
             node = _node()
             try:
                 await node._handle_release_announce(
@@ -1004,7 +1132,7 @@ class TestAutomaticInstall:
                 # Pinned, but not for automatic installation: still no wake.
                 node.trust_publisher(publisher._identity.dsa_public_key.hex(),
                                      "them", auto=False)
-                node._releases = cr.ReleaseCatalog()
+                node._releases = cr.ReleaseBook()
                 await node._handle_release_announce(
                     _FakePeer(), Packet.create(RELEASE_ANNOUNCE,
                                                publisher.id.raw, node.id.raw,
