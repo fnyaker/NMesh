@@ -451,9 +451,8 @@ class TestRecommendingIsServing:
 
             entry = node._releases.get(info["release"])
             if entry is None:
-                described = await node.package_descriptor(
+                entry = await node.package_release(
                     (await node.search_packages("nmesh"))[0]["id"])
-                entry = described["entry"]
             assert publisher.id in await node._release_sources_for(entry)
         finally:
             await node.stop(); await publisher.stop()

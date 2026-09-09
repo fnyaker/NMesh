@@ -436,6 +436,20 @@ These numbers come from the transport itself (`endpoints()` / `stats()`), so a
 new medium appears here with no change to the console. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
 
+## Every route answers
+
+`do_GET` and `do_POST` both run through `_answering`, which turns any unhandled
+exception into **500** with a fixed sentence. Without it an exception unwinds
+through `handle_one_request`, which sends no status and closes the socket: a
+page sees a dropped connection rather than an error, and whatever spinner it
+drew stays on screen for ever. The text is fixed on purpose — an exception's
+message is this machine's internals, and some routes answer before anybody has
+proved anything.
+
+The page side is the same rule: `PACKAGES.ask` returns a failure rather than
+throwing, so a fetch that dies draws an error card instead of leaving a
+skeleton. A spinner with no end is a bug report nobody can act on.
+
 ## Security model
 
 - **TLS**, self-signed (ECDSA P-256), fingerprint printed at startup.
