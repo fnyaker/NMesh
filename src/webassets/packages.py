@@ -605,8 +605,8 @@ async function boot(){
 
   SESSION.load();
   try{
-    const response = await api("/api/state");
-    if(response.ok){ enter(); return; }
+    const {ok} = await CHANNEL.ask("node.state");
+    if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();
   $("login").classList.remove("hidden");

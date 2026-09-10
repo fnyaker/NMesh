@@ -48,7 +48,8 @@ is therefore safe to accept from strangers.
 | `transport.py` / `transport_manager.py` | The `BaseTransport`/`BaseServer` interfaces + a registry by URL scheme. |
 | `tcp_transport.py` / `udp_transport.py` / `spool_transport.py` | Concrete transports. |
 | `net_monitor.py` / `stun.py` / `ip_utils.py` | Address tracking, STUN, local IPs, **enumerating the attached networks** (interface + real mask, via `/proc/net/route`, ioctl, `ip`/`ifconfig`, then a fallback), a bounded DNS resolver outside the executor. |
-| `webconsole.py` / `webassets/` | The web management console (HTTPS, stdlib). The node reports what moved (`set_change_listener`) and the console coalesces it into a `text/event-stream`, so a link appears the moment it does instead of on a timer. The assets are a package: `ui.py` carries the design system, one module per page, `nodeview.py` carries the **node view** — mounted by the console's dialog, by chat, by fleet, *and* served at `/node` — and `terminal.py` carries the **terminal**: the emulator, the session driver, and the full-screen page at `/term` that fleet's panel shares them with. See [`Docs/WebConsole/design`](../WebConsole/design). |
+| `control/` | **The control plane**: what a node can be asked to do about itself, declared once and reached over a channel. A module (`node`, `config`, `transports`, `trace`, `pseudo`, `control`) declares its operations, their arguments, their ceiling and whether an operator at *another* console may reach them — `remote=False` by default, which is what replaced a denylist of URL prefixes. One frame carries a request either way: `LocalChannel` answers it here, `RemoteChannel` points the same channel at a node somebody manages. See [`control-plane.md`](control-plane.md). |
+| `webconsole.py` / `webassets/` | The web management console (HTTPS, stdlib). The node reports what moved (`set_change_listener`) and the console coalesces it into a `text/event-stream`, so a link appears the moment it does instead of on a timer. `POST /api/control` is the plane's one route — everything else beside it is a route that has not moved onto it yet, and a migrated one is a thin adapter over the same operation rather than a second implementation. The assets are a package: `ui.py` carries the design system, `channel.py` the browser's half of the plane, one module per page, `nodeview.py` carries the **node view** — mounted by the console's dialog, by chat, by fleet, *and* served at `/node` — and `terminal.py` carries the **terminal**: the emulator, the session driver, and the full-screen page at `/term` that fleet's panel shares them with. See [`Docs/WebConsole/design`](../WebConsole/design). |
 | `app_channel.py` | App sections: `app_id ‖ payload` framing inside the DATA payload, built-in/deployed ids (connector demultiplexing). |
 | `data_connector.py` / `process_launcher.py` / `apps/` | Plugging apps into the mesh (one section per app). |
 | `apps/chat*.py` | The built-in chat app: messages/files/stream (`chat.py`), the social layer of contacts/groups (`chat_state.py`), the console UI (`chat_web.py`). Names are mirrored from the node, never carried in a chat message. |
@@ -82,7 +83,11 @@ is therefore safe to accept from strangers.
 5. **[gotchas.md](gotchas.md)** — the traps learned the hard way (asyncio 3.12,
    blocking network probes, hole-punch races, parallelising the tests).
    **Start here before debugging a hang or a flaky test.**
-6. **[behaviour-rules.md](behaviour-rules.md)** — what a node measures to
+6. **[control-plane.md](control-plane.md)** — the management plane: one frame
+   between a front end and a node, the declaration that decides what an
+   operator at another console may ask for, the two channels, and the ledger of
+   what has moved onto it. **Read it before adding a console route.**
+7. **[behaviour-rules.md](behaviour-rules.md)** — what a node measures to
    notice one that is not playing the protocol. Partly implemented
    (`behaviour.py`), mostly still a catalogue. Chain-of-trust genealogy, signature correlation, protocol
    conformance, traffic shape, routing, gossip, the update chain — with the

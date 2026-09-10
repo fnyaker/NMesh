@@ -1,0 +1,701 @@
+"""
+The control plane: what it refuses, and what it holds together.
+
+The plane is the management surface of a node, reached from a page on this
+machine *and* from a peer driving us through the fleet relay — which the threat
+model says is an adversary. So these tests are mostly about refusals: an
+operation nobody declared, an argument nobody declared, a frame that is not one,
+a local-only operation asked for from a remote console, a ceiling that does not
+fit the pipe it would have to cross.
+
+The rest hold two files together — the frame's bounds against the relay's, every
+remotely-reachable operation's ceiling against the budget — because a bound at
+one layer is not a bound (`Docs/Architecture/gotchas.md`).
+"""
+import asyncio
+import json
+import os
+import tempfile
+
+import pytest
+
+from src import control
+from src.apps import fleet as fleet_app
+from src.apps import fleet_console
+from src.control import frame as frame_mod
+from src.control import params as params_mod
+from src.control.errors import ControlError
+from src.control.plane import ControlPlane, Origin, REMOTE_BUDGET, operation
+from src.node import MeshNode
+from src.webconsole import CONTROL_PATH, WebConsole, _STATUS_BY_CODE
+from tests.conftest import make_manager
+
+PW = "correct-horse-battery-staple"
+
+
+# --------------------------------------------------------------------------
+# A module small enough to reason about, used by the dispatch tests.
+# --------------------------------------------------------------------------
+
+class _Sample:
+    NAME = "sample"
+    OPERATIONS = (
+        operation("read", "Give something back", remote=True),
+        operation("here", "Local only, deliberately"),
+        operation("named", "Takes arguments",
+                  [control.param("node", "node"),
+                   control.param("label", "text", required=False, default="")],
+                  remote=True),
+        operation("boom", "Throws", remote=True),
+        operation("plain", "Answers with something that is not a mapping",
+                  remote=True),
+        operation("mine", "Depends on who is asking", remote=True,
+                  wants_origin=True),
+    )
+
+    def op_read(self):
+        return {"value": 7}
+
+    def op_here(self):
+        return {"value": "local"}
+
+    def op_named(self, node, label):
+        return {"node": node, "label": label}
+
+    def op_boom(self):
+        raise RuntimeError("a secret about this machine")
+
+    def op_plain(self):
+        return 42
+
+    def op_mine(self, origin):
+        return {"origin": origin}
+
+
+def _plane():
+    plane = ControlPlane()
+    plane.register(_Sample())
+    return plane
+
+
+class TestDeclaration:
+    """A declaration that does not make sense fails at import, not on a press."""
+
+    def test_a_bad_operation_name_is_refused(self):
+        for name in ("", "Read", "read-it", "_read", "x" * 40):
+            with pytest.raises(ControlError):
+                operation(name, "no")
+
+    def test_one_parameter_cannot_be_declared_twice(self):
+        with pytest.raises(ControlError):
+            operation("read", "no", [control.param("node", "node"),
+                                     control.param("node", "text")])
+
+    def test_a_remote_operation_must_fit_the_relay(self):
+        # The whole point of the budget: an operator asking a distant machine
+        # for something that takes longer than the pipe carries would wait for
+        # the pipe to give up and be told nothing about why.
+        with pytest.raises(ControlError):
+            operation("slow", "no", remote=True, timeout=REMOTE_BUDGET + 1)
+        # The same ceiling is fine when the operation stays local.
+        assert operation("slow", "ok", timeout=REMOTE_BUDGET + 1)["timeout"]
+
+    def test_the_injected_origin_cannot_also_be_declared(self):
+        with pytest.raises(ControlError):
+            operation("mine", "no", [control.param("origin", "text")],
+                      wants_origin=True)
+
+    def test_a_module_must_implement_what_it_declares(self):
+        class Missing:
+            NAME = "missing"
+            OPERATIONS = (operation("gone", "declared and not written"),)
+
+        with pytest.raises(ControlError):
+            ControlPlane().register(Missing())
+
+    def test_a_module_is_registered_once(self):
+        plane = _plane()
+        with pytest.raises(ControlError):
+            plane.register(_Sample())
+
+    def test_a_module_with_nothing_to_offer_is_not_a_module(self):
+        class Empty:
+            NAME = "empty"
+            OPERATIONS = ()
+
+        with pytest.raises(ControlError):
+            ControlPlane().register(Empty())
+
+
+class TestDispatch:
+    def test_an_operation_nobody_declared_does_not_exist(self):
+        plane = _plane()
+        for op in ("sample.nope", "nope.read", "read", "sample.read.more",
+                   "", None, 7, "op_read", "sample.op_read"):
+            reply = plane.dispatch(control.Request(op))
+            assert reply.ok is False
+            assert reply.code == "not_found"
+
+    def test_an_argument_nobody_declared_is_refused(self):
+        reply = _plane().dispatch(control.Request("sample.read", {"extra": 1}))
+        assert reply.ok is False and reply.code == "bad_request"
+
+    def test_a_required_argument_missing_is_refused(self):
+        reply = _plane().dispatch(control.Request("sample.named", {}))
+        assert reply.ok is False and "node is required" in reply.error
+
+    def test_arguments_are_coerced_before_the_module_sees_them(self):
+        plane = _plane()
+        good = plane.dispatch(control.Request(
+            "sample.named", {"node": "AB" * 20, "label": " hi "}))
+        assert good.result == {"node": "ab" * 20, "label": "hi"}
+        bad = plane.dispatch(control.Request("sample.named", {"node": "nope"}))
+        assert bad.ok is False and bad.code == "bad_request"
+
+    def test_a_module_that_throws_says_nothing_about_this_machine(self):
+        reply = _plane().dispatch(control.Request("sample.boom"))
+        assert reply.ok is False and reply.code == "failed"
+        assert "secret" not in reply.error
+        assert "RuntimeError" in reply.error
+
+    def test_an_answer_that_is_not_a_mapping_still_is_one(self):
+        assert _plane().dispatch(control.Request("sample.plain")).result == {"result": 42}
+
+    def test_the_request_id_comes_back_untouched(self):
+        reply = _plane().dispatch(control.Request("sample.read", {}, "abc"))
+        assert reply.document()["id"] == "abc"
+
+
+class TestRemoteIsRefusedByDefault:
+    def test_a_local_only_operation_is_refused_from_a_remote_console(self):
+        plane = _plane()
+        assert plane.dispatch(control.Request("sample.here"), Origin.LOCAL).ok
+        refused = plane.dispatch(control.Request("sample.here"), Origin.REMOTE)
+        assert refused.ok is False and refused.code == "refused"
+
+    def test_an_unknown_origin_is_refused(self):
+        assert _plane().dispatch(control.Request("sample.read"), "whoever").ok is False
+
+    def test_the_catalogue_says_what_this_origin_can_reach(self):
+        plane = _plane()
+        local = plane.catalogue(Origin.LOCAL)[0]["operations"]
+        remote = plane.catalogue(Origin.REMOTE)[0]["operations"]
+        assert {entry["name"] for entry in local} > {entry["name"] for entry in remote}
+        assert "here" not in {entry["name"] for entry in remote}
+        # Machinery does not travel: a page reads this to draw buttons.
+        assert all("wants_origin" not in entry for entry in local)
+
+    def test_who_is_asking_is_injected_not_accepted(self):
+        plane = _plane()
+        assert plane.dispatch(control.Request("sample.mine"),
+                              Origin.REMOTE).result == {"origin": "remote"}
+        # A caller cannot claim to be somebody else: the name is not declared,
+        # so supplying it is an unknown argument.
+        assert plane.dispatch(control.Request("sample.mine", {"origin": "local"}),
+                              Origin.REMOTE).ok is False
+
+
+class TestFrames:
+    def test_hostile_bytes_never_raise_and_never_pass(self):
+        chan = control.LocalChannel(_plane())
+        hostile = [
+            b"", b" ", b"{", b"}", b"[]", b"null", b"3", b'"op"',
+            b'{"op": null}', b'{"op": 3}', b'{"op": ["sample.read"]}',
+            b'{"v": 2, "op": "sample.read"}', b'{"v": "1", "op": "sample.read"}',
+            b'{"op": "sample.read", "params": []}',
+            b'{"op": "sample.read", "params": "x"}',
+            b'{"op": "sample.read", "id": 4}',
+            b'{"op": "sample.read", "id": "' + b"i" * 200 + b'"}',
+            b'{"op": "' + b"o" * 200 + b'"}',
+            b"\x00\x01\x02", b"\xff\xfe", "é".encode("latin-1"),
+            b'{"op": "sample.read", "params": {"' + b"k" * 200 + b'": 1}}',
+            b'{"op": "sample.read", "params": {' + b",".join(
+                b'"k%d": 1' % i for i in range(frame_mod.MAX_PARAMS + 5)) + b"}}",
+            b"x" * (frame_mod.MAX_FRAME + 1),
+            json.dumps({"op": "sample.read", "params": {"a": [[[[1]]]]}}).encode(),
+        ]
+        for raw in hostile:
+            answer = json.loads(chan.send(raw))
+            assert answer["ok"] is False, raw[:40]
+            assert answer["code"] in control.CODES
+
+    def test_a_frame_that_is_too_large_is_refused_on_its_bytes(self):
+        # Refused before parsing: parsing a huge document to then decide it was
+        # too big is the work an attacker was hoping for.
+        with pytest.raises(control.FrameError):
+            frame_mod.decode_request(b'{"op":"a.b","params":{"x":"' +
+                                     b"y" * frame_mod.MAX_FRAME + b'"}}')
+
+    def test_an_answer_that_cannot_be_encoded_is_still_an_answer(self):
+        raw = frame_mod.encode({"v": 1, "result": {"socket": object()}})
+        assert json.loads(raw)["ok"] is False
+
+    def test_a_reply_from_somewhere_else_is_read_with_suspicion(self):
+        for raw in [b"", b"{", b"[]", b'{"ok": "yes"}', b'{"ok": true, "result": 3}',
+                    b'{"ok": false, "code": 7, "error": 9}']:
+            try:
+                reply = frame_mod.decode_reply(raw)
+            except control.FrameError:
+                continue
+            assert isinstance(reply.result, dict)
+            assert isinstance(reply.code, str) and isinstance(reply.error, str)
+
+    def test_a_refusals_detail_is_bounded_on_the_way_in(self):
+        crowded = {"code": "bad_request", "ok": False,
+                   "detail": {str(i): i for i in range(50)}}
+        assert frame_mod.decode_reply(json.dumps(crowded).encode()).detail == {}
+
+
+class TestParams:
+    def test_text_is_text_and_not_repaired(self):
+        field = control.param("label", "text")
+        assert control.coerce(field, " hi ") == "hi"
+        for bad in (42, True, ["a"], {"a": 1}):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+
+    def test_a_line_may_be_long_but_stays_one_line(self):
+        field = control.param("uri", "line")
+        assert control.coerce(field, "tcp://host:9000") == "tcp://host:9000"
+        for bad in ("a\nb", "a\rb", "a\x00b", "x" * (params_mod.MAX_LINE + 1)):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+
+    def test_a_document_is_two_levels_and_bounded(self):
+        field = control.param("settings", "document")
+        assert control.coerce(field, {"a": 1, "b": {"c": "d"}}) == {"a": 1, "b": {"c": "d"}}
+        deep = {"a": {"b": {"c": 1}}}
+        many = {f"k{i}": 1 for i in range(params_mod.MAX_KEYS + 1)}
+        for bad in (deep, many, [1], "x", {"a": "x" * (params_mod.MAX_VALUE + 1)},
+                    {"bad name": 1}, {"a": object()}, {"a": "x\x00y"}):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+
+    def test_a_choice_is_one_of_the_names_the_operation_wrote_down(self):
+        field = control.param("action", "choice", choices=("start", "stop"))
+        assert control.coerce(field, "stop") == "stop"
+        for bad in ("START", "clear", "", None):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+        with pytest.raises(ControlError):
+            control.param("action", "choice")
+
+    def test_a_count_with_a_limit_is_clamped_because_something_owns_it(self):
+        field = control.param("seconds", "count", limit=60)
+        assert control.coerce(field, 10 ** 9) == 60
+        assert control.coerce(field, -5) == 0
+        with pytest.raises(ControlError):
+            control.coerce(field, "soon")
+        # Only a count has something downstream to defer to.
+        with pytest.raises(ControlError):
+            control.param("label", "text", limit=10)
+
+    def test_a_count_with_no_limit_is_refused_rather_than_guessed_at(self):
+        with pytest.raises(ControlError):
+            control.coerce(control.param("n", "count"), 10 ** 9)
+
+
+class TestBoundsFitTheRelay:
+    """Two files that have to agree, and a test instead of a comment."""
+
+    def test_a_frame_fits_what_the_relay_carries(self):
+        assert frame_mod.MAX_FRAME <= fleet_app.CONSOLE_REQ_MAX
+        assert frame_mod.MAX_REPLY <= fleet_app.CONSOLE_RESP_MAX
+        assert frame_mod.MAX_REPLY <= fleet_console.READ_MAX
+
+    def test_the_remote_budget_is_inside_the_relays_own_ceiling(self):
+        assert REMOTE_BUDGET < fleet_console.CALL_TIMEOUT
+        assert REMOTE_BUDGET < fleet_app.CONSOLE_TIMEOUT
+
+    def test_every_remotely_reachable_operation_fits_the_budget(self):
+        plane = control.build(control.Context(node=None))
+        for module in plane.catalogue(Origin.REMOTE):
+            for entry in module["operations"]:
+                assert entry["timeout"] <= REMOTE_BUDGET, entry["name"]
+
+    def test_every_code_a_refusal_can_carry_has_a_status(self):
+        assert set(control.CODES) <= set(_STATUS_BY_CODE)
+
+
+class TestChannels:
+    def test_the_local_channel_goes_through_the_frame(self):
+        chan = control.LocalChannel(_plane())
+        assert json.loads(chan.send(control.encode(
+            {"v": 1, "id": "z", "op": "sample.read"})))["result"] == {"value": 7}
+
+    def test_a_relay_that_fails_is_unavailable_not_a_refusal(self):
+        def broken(node_hex, raw):
+            raise OSError("the mesh ate it")
+
+        reply = control.RemoteChannel("ab" * 20, broken).call("sample.read")
+        assert reply.ok is False and reply.code == "unavailable"
+
+    def test_a_relay_that_answers_nonsense_never_crashes_the_caller(self):
+        for answer in (None, "", b"not json", b'{"ok": true}', 7):
+            chan = control.RemoteChannel("ab" * 20, lambda n, r, a=answer: a)
+            reply = chan.call("sample.read")
+            assert isinstance(reply.ok, bool)
+
+    def test_the_relay_carries_the_frame_it_was_given(self):
+        seen = {}
+
+        def relay(node_hex, raw):
+            seen["node"], seen["frame"] = node_hex, json.loads(raw)
+            return control.encode({"v": 1, "id": seen["frame"]["id"], "ok": True,
+                                   "result": {"from": "over there"}})
+
+        reply = control.RemoteChannel("CD" * 20, relay).call(
+            "sample.read", {"a": 1}, "7")
+        assert seen["node"] == "cd" * 20
+        assert seen["frame"]["op"] == "sample.read"
+        assert reply.result == {"from": "over there"}
+
+
+# --------------------------------------------------------------------------
+# The built-in modules, over a node.
+# --------------------------------------------------------------------------
+
+class _FakeNode:
+    """Enough of a node for the modules that only read it."""
+
+    pseudo = ""
+
+    class _Id:
+        raw = bytes(range(20))
+
+    id = _Id()
+
+    def __init__(self) -> None:
+        self.trace = _FakeTrace()
+
+    def set_pseudo(self, wanted):
+        from src.pseudo import canonical
+        self.pseudo = canonical(wanted)
+        return self.pseudo
+
+    def find_pseudo(self, query, limit=20):
+        return [{"pseudo": self.pseudo, "id": self.id.raw.hex()}] if self.pseudo else []
+
+
+class _FakeTrace:
+    def __init__(self) -> None:
+        self.started = None
+
+    def start(self, *, seconds, events, names=None):
+        self.started = (seconds, events)
+        return {"running": True, "seconds": seconds, "capacity": events}
+
+    def stop(self):
+        return {"running": False}
+
+    def clear(self):
+        self.started = None
+
+    def status(self):
+        return {"running": False}
+
+    def summary(self):
+        return {"rows": []}
+
+    def events(self, limit=0):
+        return []
+
+    def export(self):
+        return {"format": "nmesh-trace-1"}
+
+
+def _built(node, config_path="", changes=None):
+    context = control.Context(node=node, loop=asyncio.get_event_loop(),
+                              config_path=config_path, changes=changes)
+    return control.build(context)
+
+
+class TestBuiltInModules:
+    async def test_the_name_is_read_and_written_through_the_plane(self):
+        node = _FakeNode()
+        chan = control.LocalChannel(_built(node))
+        assert chan.call("pseudo.get").result["max"]
+        # From a thread, like the console's server: an operation that touches
+        # the node marshals onto its loop and waits, so calling it *from* that
+        # loop is refused outright rather than hanging (`Context.call`).
+        saved = await asyncio.to_thread(chan.call, "pseudo.save",
+                                        {"pseudo": "  Ada  "})
+        assert saved.result["pseudo"] == "Ada"
+        assert node.pseudo == "Ada"
+        # A number is not a name: the plane does not repair a value into one.
+        assert chan.call("pseudo.save", {"pseudo": 42}).ok is False
+        on_the_loop = chan.call("pseudo.save", {"pseudo": "Grace"})
+        assert on_the_loop.ok is False and node.pseudo == "Ada"
+
+    async def test_a_name_the_mesh_refuses_is_refused_here(self):
+        chan = control.LocalChannel(_built(_FakeNode()))
+        for bad in ("x" * 60, "ali‮ce", "bo​b"):
+            reply = await asyncio.to_thread(chan.call, "pseudo.save",
+                                            {"pseudo": bad})
+            assert reply.ok is False and reply.code == "bad_request"
+
+    async def test_the_trace_clamps_what_it_owns(self):
+        from src import trace as trace_mod
+        node = _FakeNode()
+        chan = control.LocalChannel(_built(node))
+        chan.call("trace.set", {"action": "start", "seconds": 10 ** 9,
+                                "events": 10 ** 9})   # the trace is in-process
+        seconds, events = node.trace.started
+        assert seconds <= trace_mod.MAX_SECONDS and events <= trace_mod.MAX_EVENTS
+        assert chan.call("trace.set", {"action": "sideways"}).ok is False
+
+    async def test_the_configuration_is_read_and_written_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "nmesh.conf")
+            chan = control.LocalChannel(_built(_FakeNode(), config_path=path))
+            assert chan.call("config.get").result["available"] is True
+            assert chan.call("config.save", {"settings": {"fleet": True}}).result["saved"]
+            refused = chan.call("config.save", {"settings": {"console_port": 99999}})
+            assert refused.ok is False and refused.detail["rejected"]
+            # A refused value writes nothing: the file still says what it said.
+            assert "99999" not in open(path).read()
+
+    async def test_a_node_with_no_configuration_file_says_so(self):
+        chan = control.LocalChannel(_built(_FakeNode()))
+        assert chan.call("config.get").result["available"] is False
+        conflict = chan.call("config.save", {"settings": {"fleet": True}})
+        assert conflict.ok is False and conflict.code == "conflict"
+
+    async def test_what_has_moved_is_a_pull_as_well_as_a_stream(self):
+        from src.webconsole import _Changes
+        book = _Changes()
+        chan = control.LocalChannel(_built(_FakeNode(), changes=book))
+        first = chan.call("control.changes", {"since": 0}).result
+        assert first["available"] is True and first["topics"] == []
+        book.note("links")
+        book.note("nodes")
+        second = chan.call("control.changes", {"since": first["seq"]}).result
+        assert sorted(second["topics"]) == ["links", "nodes"]
+        # Asking again from the new sequence says nothing moved since.
+        assert chan.call("control.changes",
+                         {"since": second["seq"]}).result["topics"] == []
+
+    async def test_a_node_that_is_not_running_is_unavailable_not_a_crash(self):
+        # No loop bound: every operation that needs the node must answer, and
+        # answer honestly. This is the shape a console gets during shutdown.
+        plane = control.build(control.Context(node=_FakeNode()))
+        reply = await asyncio.to_thread(
+            control.LocalChannel(plane).call, "pseudo.search", {"query": "a"})
+        assert reply.ok is False and reply.code == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# The console's door onto it.
+# --------------------------------------------------------------------------
+
+async def _make_console(**kwargs):
+    node = MeshNode(transport_manager=make_manager())
+    console = WebConsole(node, host="127.0.0.1", port=0, use_tls=False,
+                         password=PW, **kwargs)
+    console.start(loop=asyncio.get_running_loop())
+    return node, console
+
+
+def _post(console, body, token=None, headers=None):
+    """One POST to the control route, from a worker thread."""
+    import http.client
+
+    connection = http.client.HTTPConnection(console.host, console.port, timeout=8)
+    sent = dict(headers or {})
+    sent["Content-Type"] = "application/json"
+    if token:
+        sent["Authorization"] = "Bearer " + token
+    connection.request("POST", CONTROL_PATH,
+                       body=body if isinstance(body, bytes) else json.dumps(body).encode(),
+                       headers=sent)
+    response = connection.getresponse()
+    payload = response.read()
+    connection.close()
+    try:
+        return response.status, json.loads(payload)
+    except Exception:
+        return response.status, None
+
+
+def _with_fleet(monkeypatch, bridge):
+    """Stand a fleet bridge in front of every console in this process.
+
+    Through ``monkeypatch`` rather than by assignment: ``_fleet`` is a property
+    on the class, so a test that replaced it by hand would have to put it back
+    — and a test that gets that wrong takes every other console test in the
+    worker down with it, which is exactly what happened once.
+    """
+    monkeypatch.setattr(WebConsole, "_fleet", property(lambda self: bridge))
+
+
+async def _login(console):
+    import http.client
+
+    def call():
+        connection = http.client.HTTPConnection(console.host, console.port, timeout=8)
+        connection.request("POST", "/api/login",
+                           body=json.dumps({"password": PW}).encode(),
+                           headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        token = json.loads(response.read())["token"]
+        connection.close()
+        return token
+
+    return await asyncio.to_thread(call)
+
+
+class TestConsoleControlRoute:
+    async def test_a_stranger_gets_nothing(self):
+        node, console = await _make_console()
+        try:
+            status, body = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "node.state"})
+            assert status == 401
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_one_frame_in_one_frame_out(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            status, body = await asyncio.to_thread(
+                _post, console, {"v": 1, "id": "9", "op": "pseudo.get"}, token)
+            assert status == 200 and body["ok"] is True and body["id"] == "9"
+            assert body["result"]["id"] == node.id.raw.hex()
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_refusals_code_becomes_this_channels_status(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            for op, expected in (("nope.nope", 404),
+                                 ("config.save", 400)):
+                status, body = await asyncio.to_thread(
+                    _post, console, {"v": 1, "op": op}, token)
+                assert status == expected, op
+                assert body["ok"] is False and body["code"] in control.CODES
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_body_that_is_not_a_frame_is_answered_anyway(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            for raw in (b"", b"{", b"[]", b"\x00\x01", b'{"op": 3}'):
+                status, body = await asyncio.to_thread(_post, console, raw, token)
+                assert status == 400 and body["ok"] is False
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_peers_replayed_frame_reaches_the_plane_as_remote(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            # The marker the fleet relay sets on a call it is replaying against
+            # our own console: the same frame, and a local-only operation is
+            # refused rather than answered.
+            headers = {fleet_console.REPLAY_HEADER: "1"}
+            status, body = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "pseudo.lookup",
+                                 "params": {"query": "ada"}}, token, headers)
+            assert status == 403
+            assert body["code"] == "refused"
+            # And what it *may* ask for still works.
+            status, body = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "pseudo.get"}, token, headers)
+            assert status == 200 and body["ok"] is True
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_the_catalogue_a_remote_console_reads_is_the_narrow_one(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            here = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "control.catalogue"}, token)
+            there = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "control.catalogue"}, token,
+                {fleet_console.REPLAY_HEADER: "1"})
+
+            def names(answer):
+                return {module["module"] + "." + entry["name"]
+                        for module in answer[1]["result"]["modules"]
+                        for entry in module["operations"]}
+
+            assert "node.retry" in names(here)
+            assert "node.retry" not in names(there)
+            assert names(there) < names(here)
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_driving_a_node_with_no_fleet_app_says_which_it_is(self):
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            status, body = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "node.state"}, token,
+                {"X-NMesh-Node": "ab" * 20})
+            # The status describes the console we asked — it answered — and the
+            # frame describes the node we asked about, which we could not reach.
+            assert status == 200
+            assert body["ok"] is False and body["code"] == "conflict"
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_frame_travels_to_the_node_it_names(self, monkeypatch):
+        node, console = await _make_console()
+        seen = {}
+
+        class _FakeFleetBridge:
+            def remote_call(self, session, node_hex, method, path, body):
+                seen.update(session=session, node=node_hex, method=method,
+                            path=path, frame=json.loads(body))
+                return 200, "application/json", control.encode(
+                    {"v": 1, "id": seen["frame"]["id"], "ok": True,
+                     "result": {"pseudo": "over there"}})
+
+        try:
+            token = await _login(console)
+            _with_fleet(monkeypatch, _FakeFleetBridge())
+            # The console's own channel, pointed elsewhere: what the page's
+            # `X-NMesh-Node` header does, without a mesh to stand up.
+            channel = control.RemoteChannel(
+                "ab" * 20, console._control_relay(token))
+            reply = await asyncio.to_thread(channel.call, "pseudo.get")
+            assert reply.result == {"pseudo": "over there"}
+            assert seen["path"] == CONTROL_PATH and seen["method"] == "POST"
+            assert seen["node"] == "ab" * 20 and seen["frame"]["op"] == "pseudo.get"
+            assert seen["session"] == token
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_the_far_nodes_session_expiring_is_not_ours(self, monkeypatch):
+        node, console = await _make_console()
+
+        class _NoSession:
+            def remote_call(self, session, node_hex, method, path, body):
+                return 401, "application/json", json.dumps(
+                    {"error": "no session on that node"}).encode()
+
+        try:
+            token = await _login(console)
+            _with_fleet(monkeypatch, _NoSession())
+            channel = control.RemoteChannel(
+                "ab" * 20, console._control_relay(token))
+            reply = await asyncio.to_thread(channel.call, "pseudo.get")
+            # Phrased as a refusal *of that node*, so nothing here reads it as
+            # this console signing the operator out.
+            assert reply.ok is False and reply.code == "unauthorized"
+            assert "that node" in reply.error
+        finally:
+            console.stop()
+            await node.stop()

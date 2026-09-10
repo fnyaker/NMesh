@@ -198,6 +198,21 @@ Settings):
 
 → [`Docs/WebConsole/guide`](Docs/WebConsole/guide)
 
+### One channel, and it can be pointed at another machine
+
+The console does not *have* the management logic; it is one door onto it. What a
+node can be asked to do about itself is declared once, operation by operation
+(`node.state`, `config.save`, `trace.set`…), each saying what it takes, how long
+it may take, and **whether an operator at another console may ask for it at
+all** — no by default.
+
+A page asks for an operation; whether that reaches this machine or one you
+manage is which channel carried it, not a different set of pages. So remote
+management is the same console, with the same refusals and the same bounds, and
+what a peer may do to a node is a list that node keeps about itself rather than
+a rule about the shape of a URL.
+→ [`Docs/Architecture/control-plane.md`](Docs/Architecture/control-plane.md)
+
 ## Plugging an application in
 
 The **data** plane: an app (same host or a container) connects to the connector
@@ -291,6 +306,7 @@ no hostile byte crashes a parser. Details and priorities:
 
 ```
 src/              the core: node, crypto, packets, routing, transports, console, connector
+src/control/      the management plane: one declared operation per thing a node can be asked
 scripts/          nmesh_node.py (launcher), nmesh_config.py, nmesh_password.py, build_pyz.py
 start.sh          installs dependencies and runs a node from the current tree
 install.sh        installs the tree for good + a start-at-boot service, then runs it

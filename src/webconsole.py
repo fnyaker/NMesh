@@ -40,14 +40,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 from . import app_api
+from . import control
 from . import updater
-from . import config as node_config
 from . import console_auth
+from .control.modules.settings import write_settings
 from .core_release import ReleaseError
 from . import join_ticket
 from . import qr
-from .node import MESSAGE_NAMES
-from .pseudo import MAX_PSEUDO, PseudoError
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
@@ -57,19 +56,36 @@ from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_console import REPLAY_HEADER
-from . import transport as transport_option
 
 # The page names the node it is driving with this header. Absent (or naming us)
 # means "this node", which is what a page that has never heard of contexts does.
 _REMOTE_HEADER = "X-NMesh-Node"
 
+# The control channel's one route. Everything the management plane carries goes
+# through here as a frame (`src/control/frame.py`), whichever node it is for:
+# the header above decides whether this console answers it or relays it, and
+# that is the only difference between managing this machine and managing
+# another. The routes beside it are what has not moved onto the plane yet —
+# `Docs/Architecture/control-plane.md` keeps the ledger.
+CONTROL_PATH = "/api/control"
 
-def _field(manager, scheme: str, name: str) -> dict:
-    """The declaration of one field, for writing its value back as text."""
-    for entry in manager.options().get(scheme, []):
-        if entry["name"] == name:
-            return entry
-    return {"kind": "text"}
+# A refusal's code, in HTTP. The plane speaks codes because it is reached over
+# more than one channel (a page here, a peer through the fleet relay), and a
+# status number is this channel's word for what happened — so the translation
+# lives at this door and nowhere else.
+_STATUS_BY_CODE = {
+    "bad_request": 400,
+    "unauthorized": 401,
+    "refused": 403,
+    "not_found": 404,
+    "conflict": 409,
+    "unavailable": 503,
+    "failed": 500,
+}
+# And back, for the one caller that has a status and needs a code: the relay to
+# another node, when what came back was not a frame at all (no session there, a
+# node that never answered) and has to be phrased as a refusal anyway.
+_CODE_BY_STATUS = {status: code for code, status in _STATUS_BY_CODE.items()}
 
 
 def _is_node_hex(value) -> bool:
@@ -260,6 +276,16 @@ class WebConsole:
         self._changes = _Changes()
         self._streams = 0
         self._streams_lock = threading.Lock()
+
+        # The management plane, and the context the modules on it act through.
+        # Built here rather than at the first request: what this node can be
+        # asked to do must not depend on whether anybody has asked yet, and a
+        # module whose declaration is wrong should fail to *start* the console
+        # rather than to answer one call (`src/control/plane.py`).
+        self._control_context = control.Context(
+            node=node, config_path=config_path, apps=self._apps,
+            changes=self._changes)
+        self._plane = control.build(self._control_context)
 
         # Sessions: token -> expiry monotonic deadline.
         self._tokens: dict[str, float] = {}
@@ -523,37 +549,6 @@ class WebConsole:
                          "description": ""})
         return apps
 
-    def _pseudo_state(self) -> dict:
-        """This node's name and id, for the field that edits it."""
-        return {"pseudo": self._node.pseudo,
-                "id": self._node.id.raw.hex(),
-                "max": MAX_PSEUDO}
-
-    def _persist_pseudo(self, pseudo: str):
-        """Record the adopted pseudo in the configuration file.
-
-        The name already survives a restart on its own: the node signed a claim
-        and its name store keeps it (see :class:`src.session_store.PseudoStore`).
-        What the file adds is that the *declared* value agrees — a configuration
-        still naming the old one wins at startup, so leaving it stale is how a
-        rename comes undone on the next boot.
-
-        Returns ``(saved, problem)`` — never raises: the rename already happened
-        on the node, and this is only about the file."""
-        if not self._config_path:
-            return False, None   # nothing declares a name here; the store keeps it
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            merged["pseudo"] = pseudo
-            node_config.save(self._config_path, merged)
-        except OSError as exc:
-            return False, f"could not write the configuration: {exc.strerror or 'error'}"
-        except Exception as exc:
-            return False, str(exc)[:200]
-        return True, None
-
     def _update_branch(self) -> str:
         """Which branch *this* node follows for updates, or "" for releases.
 
@@ -561,26 +556,6 @@ class WebConsole:
         wherever the default would be: a node started with ``--config``
         elsewhere must not be told what some other file says."""
         return updater.update_branch(self._config_path)
-
-    def _config_snapshot(self) -> dict:
-        """The configuration as the settings page needs it: current values,
-        which of them may be edited from here, and anything wrong with the file.
-
-        Read from disk on every request rather than cached: the file can be
-        edited by hand, and a page showing what the node was started with rather
-        than what the file now says would be actively misleading."""
-        if not self._config_path:
-            return {"available": False,
-                    "reason": "this node was not started from a configuration file"}
-        values, problems = node_config.load(self._config_path)
-        merged = node_config.defaults()
-        merged.update(values)
-        return {"available": True,
-                "path": self._config_path,
-                "settings": node_config.public(merged),
-                "problems": problems[:16],
-                "restart_required": False,
-                "can_restart": updater.restart_possible()[0]}
 
     @property
     def _api(self) -> "app_api.AppAPI":
@@ -593,60 +568,15 @@ class WebConsole:
     def _persist_setting(self, name: str, value) -> bool:
         """Remember one live toggle in the configuration file.
 
-        Best effort, exactly like the transport settings: a node with no file
-        still applies the change to the running process, it just will not
-        remember it. The toggle itself never depends on this working."""
-        if not self._config_path:
-            return False
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            merged[name] = value
-            node_config.save(self._config_path, merged)
-            return True
-        except (OSError, ValueError, KeyError):
-            return False
-
-    def _transport_options(self) -> dict:
-        """What every registered transport says it takes.
-
-        The console renders this without knowing a single transport: a medium
-        added tomorrow gets a form for free, and one that declares nothing
-        simply does not appear."""
-        manager = self._node._transport_manager
-        try:
-            declared = manager.options()
-        except Exception:
-            declared = {}
-        return {"transports": [{"scheme": scheme, "options": fields}
-                               for scheme, fields in declared.items()],
-                "persisted": bool(self._config_path)}
-
-    def _persist_transports(self) -> tuple:
-        """Write what is not at its default into the configuration file.
-
-        Best effort by design: a node with no file still applies the change to
-        the running process, it just will not remember it."""
-        if not self._config_path:
-            return False, "not stored — this node has no configuration file"
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            manager = self._node._transport_manager
-            merged["transports"] = {
-                scheme: {name: transport_option.as_text(
-                    _field(manager, scheme, name), value)
-                    for name, value in fields.items()}
-                for scheme, fields in manager.settings().items()}
-            node_config.save(self._config_path, merged)
-        except Exception as exc:
-            return False, f"could not write the file: {type(exc).__name__}"
-        return True, ""
+        Best effort: a node with no file still applies the change to the
+        running process, it just will not remember it — the toggle never
+        depends on this working. The write itself is the config module's, so
+        this file has one fewer copy of "load, merge, save"."""
+        return write_settings(self._config_path, {name: value})[0]
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
+        self._control_context.bind_loop(self._loop)
         # A page holding the change stream open is somebody here for as long as
         # it holds it — the *state* half of what the node's awake book takes,
         # the requests below being the moments. See `MeshNode.hold_awake`.
@@ -670,6 +600,52 @@ class WebConsole:
             target=lambda: self._server.serve_forever(poll_interval=_SHUTDOWN_POLL),
             name="nmesh-console", daemon=True)
         self._thread.start()
+
+    # -- the control channel ----------------------------------------------
+    #
+    # Two channels, one plane, and the choice between them is the whole of what
+    # "managing another node" means here. Nothing above this decides anything:
+    # a page asks for `node.state`, and which machine answers is which channel
+    # carried the frame (`Docs/Architecture/control-plane.md`).
+
+    def local_channel(self, origin: str = control.Origin.LOCAL):
+        """This node's plane. ``origin`` is never the caller's to choose — the
+        request handler knows where the frame came from and says so."""
+        return control.LocalChannel(self._plane, origin)
+
+    def remote_channel(self, session: str, node_hex: str):
+        """The same channel, pointed at a node this operator manages."""
+        return control.RemoteChannel(node_hex, self._control_relay(session))
+
+    def _control_relay(self, session: str):
+        """How a frame reaches another node: the fleet's ``manage`` capability,
+        replaying it against that node's console exactly as a browser there
+        would (:mod:`src.apps.fleet_console`).
+
+        The relay is a pipe and translates only failures *of the pipe*: an
+        answer that came back is the far node's plane speaking for itself, and
+        is handed on untouched."""
+        def relay(node_hex: str, frame: bytes) -> bytes:
+            fleet = self._fleet
+            if fleet is None:
+                raise control.ControlError("conflict",
+                                           "the fleet app is not running")
+            status, _ctype, payload = fleet.remote_call(
+                session, node_hex, "POST", CONTROL_PATH, frame)
+            if 200 <= int(status) < 300:
+                return payload
+            # Not a frame: the relay itself refused (no session on that node,
+            # a node that never answered). Phrased as one, with the code the
+            # status meant, so a page reads one shape of answer whatever went
+            # wrong. `unauthorized` here is *that* node's session, never ours —
+            # which is why this never travels as an HTTP 401 to the page.
+            note = _parse_json(payload) or {}
+            message = note.get("error") if isinstance(note.get("error"), str) else ""
+            return control.encode({
+                "v": 1, "id": "", "ok": False,
+                "code": _CODE_BY_STATUS.get(int(status), "failed"),
+                "error": message or "that node could not be reached"})
+        return relay
 
     # -- restarting --------------------------------------------------------
     #
@@ -1049,6 +1025,67 @@ def _make_handler(console: WebConsole):
                 self._session_token() or "", node_hex, self.command, path, body)
             self._send(status, str(ctype)[:128], payload)
 
+        # -- the control channel -------------------------------------------
+        #
+        # One route for the whole management plane, and one decision in it:
+        # which channel the frame goes down. Everything else — what the
+        # operation is, what it may be given, whether a remote console may ask
+        # for it at all — belongs to the plane, declared next to the module
+        # that answers it (`Docs/Architecture/control-plane.md`).
+
+        def _control_channel(self):
+            """The channel this request is for, and the origin it speaks as."""
+            remote = self._remote_node()
+            if remote:
+                return console.remote_channel(self._session_token() or "", remote)
+            # A call a peer is replaying through the fleet's `manage` right is a
+            # page on *their* machine, so it reaches the plane as a remote
+            # origin — which is what turns "what may the network ask of this
+            # node?" into one `remote=True` per operation, in a list this node
+            # keeps about itself (`fleet_console.REPLAY_HEADER`).
+            origin = (control.Origin.REMOTE if self.headers.get(REPLAY_HEADER)
+                      else control.Origin.LOCAL)
+            return console.local_channel(origin)
+
+        def _handle_control(self, body) -> None:
+            """One frame in, one frame out.
+
+            **The status describes the console you asked; the frame describes
+            the node you asked about.** So a refusal from a *managed* node comes
+            back as a 200 carrying a refusal: that node's session expiring must
+            not read to this page as its own session expiring, which is what an
+            HTTP 401 means to every client we have — and what used to sign an
+            operator out of their own console when a remote one dropped them."""
+            channel = self._control_channel()
+            answer = channel.send(body or b"")
+            if channel.target:
+                self._send(200, "application/json; charset=utf-8", answer)
+                return
+            reply = control.decode_reply(answer)
+            self._send(200 if reply.ok
+                       else _STATUS_BY_CODE.get(reply.code, 500),
+                       "application/json; charset=utf-8", answer)
+
+        def _from_plane(self, op: str, params=None) -> None:
+            """Answer one of the older routes from the plane.
+
+            The route stays because things call it — a page nobody has
+            rewritten, a script, a `curl` in a runbook — but it is not a second
+            implementation: it asks the plane exactly what a frame would and
+            unwraps the answer into the shape that route always had."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            reply = self._control_channel().call(op, params or {})
+            if reply.ok:
+                self._json(200, reply.result)
+                return
+            # A refusal's structured half travels under the keys the module
+            # chose, beside the sentence — which is the shape these routes
+            # always had (`{"error": …, "rejected": […]}`).
+            self._json(_STATUS_BY_CODE.get(reply.code, 500),
+                       {"error": reply.error, **reply.detail})
+
         # -- routing --
 
         def do_GET(self) -> None:
@@ -1127,24 +1164,7 @@ def _make_handler(console: WebConsole):
                 self._handle_list_get(path)
                 return
             if path == "/api/state":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    snap = console._call(console._node.console_snapshot())
-                    snap["server_time"] = time.time()
-                    snap["apps"] = console._apps()
-                    snap["version"] = updater.__version__
-                    # Whether a restart would come back. The page needs it to
-                    # decide between offering the action and saying why not —
-                    # so it is that question, asked of `restart_plan`, not the
-                    # narrower "is a service manager watching?" it used to be.
-                    can, why = updater.restart_possible()
-                    snap["can_restart"] = can
-                    snap["restart_blocked"] = why
-                    self._json(200, snap)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.state")
                 return
             if path == "/api/app-api":
                 # What a page may offer. Authenticated like everything else:
@@ -1230,72 +1250,33 @@ def _make_handler(console: WebConsole):
                     self._json(503, {"error": "node unavailable"})
                 return
             if path == "/api/pseudo":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                # `q` searches; without it, this is "what am I called?".
+                # `q` searches; without it, this is "what am I called?". And
+                # `wide` is a different question rather than a louder one — it
+                # asks the directory, which costs a Kademlia round, so it is a
+                # named operation with its own ceiling (`pseudo.lookup`).
                 query = self._query("q")
-                try:
-                    if query is None:
-                        self._json(200, console._call(_wrap(console._pseudo_state)))
-                    else:
-                        # `wide` also asks the network, which costs a round of
-                        # queries — so it is opt-in, not what typing triggers,
-                        # and it is given longer than a local call: the node
-                        # bounds that round itself, and giving up here at ten
-                        # seconds turned a slow answer into "node unavailable".
-                        wide = self._query("wide") == "1"
-                        self._json(200, {"results": console._call(
-                            console._node.search_pseudo(query) if wide
-                            else _wrap(console._node.find_pseudo, query),
-                            timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                if query is None:
+                    self._from_plane("pseudo.get")
+                elif self._query("wide") == "1":
+                    self._from_plane("pseudo.lookup", {"query": query})
+                else:
+                    self._from_plane("pseudo.search", {"query": query})
                 return
             if path == "/api/config":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, console._config_snapshot())
+                self._from_plane("config.get")
                 return
             if path == "/api/transports":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, console._transport_options())
+                self._from_plane("transports.options")
                 return
             if path == "/api/trace":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                trace = console._node.trace
-                payload = {"status": trace.status(), "summary": trace.summary()}
-                from urllib.parse import parse_qs
-                query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                if query.get("events", ["0"])[0] == "1":
-                    payload["events"] = trace.events(limit=400)
-                self._json(200, payload)
+                self._from_plane("trace.status",
+                                 {"events": self._query("events") == "1"})
                 return
             if path == "/api/trace/export":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                import json as _json_mod
-                # Served as an opaque download: a trace is routing metadata and
-                # has no business being rendered inline by the browser.
-                self._send_binary(
-                    _json_mod.dumps(console._node.trace.export(), indent=1).encode(),
-                    "nmesh-trace.json")
+                self._handle_trace_export()
                 return
             if path == "/api/rootcert":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    hexcert = console._call(_wrap(console._node.console_root_cert_hex))
-                    self._json(200, {"cert_hex": hexcert})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.rootcert")
                 return
             if path == "/api/store":
                 if not self._authed():
@@ -1492,6 +1473,14 @@ def _make_handler(console: WebConsole):
             if path == "/api/login" and remote is None:
                 self._handle_login(body)
                 return
+            if path == CONTROL_PATH:
+                # Before the relay below, deliberately: a control frame is not
+                # proxied *by path* like the older routes — the channel itself
+                # decides whether it answers here or travels, which is what
+                # makes remote management one decision instead of a denylist of
+                # prefixes.
+                self._handle_control(body)
+                return
             if remote is not None:
                 if not remote:
                     self._json(400, {"error": "bad node id"})
@@ -1597,58 +1586,22 @@ def _make_handler(console: WebConsole):
                     self._json(503, {"error": "node unavailable"})
                 return
             if path == "/api/ping":
-                try:
-                    result = console._call(console._node.console_ping_peers())
-                    self._json(200, {"ok": True, **result})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.ping")
                 return
             if path == "/api/ping/node":
-                data = _parse_json(body)
-                node_id = (data or {}).get("id", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                try:
-                    result = console._call(
-                        console._node.console_ping_node(node_id), timeout=15.0)
-                    self._json(200, result)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                # These routes name the node `id`; the plane calls it what it
+                # is everywhere else. One translation, at the door.
+                self._from_plane("node.ping_node",
+                                 {"node": (_parse_json(body) or {}).get("id", "")})
                 return
             if path == "/api/nodes/forget":
-                data = _parse_json(body)
-                node_id = (data or {}).get("id", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                try:
-                    ok = console._call(console._node.console_forget_node(node_id))
-                    self._json(200 if ok else 404, {"ok": bool(ok)})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                self._from_plane("node.forget",
+                                 {"node": (_parse_json(body) or {}).get("id", "")})
                 return
             if path == "/api/peers/retry":
                 data = _parse_json(body) or {}
-                node_id = data.get("id", "")
-                uri = data.get("uri", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                if not isinstance(uri, str):
-                    self._json(400, {"error": "uri must be a string"})
-                    return
-                try:
-                    # A dial per address, each bounded by the node — the whole
-                    # walk can outlast the default call timeout on a node with
-                    # several dead addresses, which is precisely the case the
-                    # button is pressed in.
-                    result = console._call(
-                        console._node.console_retry_addresses(node_id, uri),
-                        timeout=60.0)
-                    self._json(200 if result.get("ok") else 400, result)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.retry", {"node": data.get("id", ""),
+                                                "uri": data.get("uri", "")})
                 return
             if path == "/api/addressing/balance":
                 data = _parse_json(body) or {}
@@ -1901,16 +1854,26 @@ def _make_handler(console: WebConsole):
                 self._handle_key_post(path, _parse_json(body))
                 return
             if path == "/api/pseudo":
-                self._handle_pseudo_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("pseudo.save", {"pseudo": data.get("pseudo", "")})
                 return
             if path == "/api/config":
-                self._handle_config_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("config.save",
+                                 {"settings": data.get("settings") or {}})
                 return
             if path == "/api/transports":
-                self._handle_transport_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("transports.save",
+                                 {"scheme": data.get("scheme") or "",
+                                  "values": data.get("values") or {}})
                 return
             if path == "/api/trace":
-                self._handle_trace(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("trace.set", {
+                    "action": data.get("action") or "",
+                    "seconds": _number(data.get("seconds")),
+                    "events": _number(data.get("events"))})
                 return
             if path == "/api/password":
                 self._handle_password(_parse_json(body))
@@ -1997,59 +1960,24 @@ def _make_handler(console: WebConsole):
             revoked = console._revoke_all_tokens_except(self._session_token())
             self._json(200, {"changed": True, "sessions_revoked": revoked})
 
-        def _handle_trace(self, data) -> None:
-            """Start or stop the protocol trace.
+        def _handle_trace_export(self) -> None:
+            """The trace as a file.
 
-            Bounded on the way in as well as inside: an operator asking for a
-            week-long trace of a million packets gets the largest one the node
-            is willing to hold, not the one they typed."""
+            The one migrated route that is not a plain unwrap: the *answer* is
+            the same document the plane returns, but it is served as an opaque
+            download rather than as JSON a page reads — a trace is routing
+            metadata and has no business being rendered inline by the browser."""
             if not self._authed():
                 self._json(401, {"error": "unauthorized"})
                 return
-            data = data or {}
-            action = data.get("action")
-            trace = console._node.trace
-            if action == "start":
-                self._json(200, trace.start(seconds=_number(data.get("seconds")),
-                                            events=_number(data.get("events")),
-                                            names=MESSAGE_NAMES))
+            reply = self._control_channel().call("trace.export")
+            if not reply.ok:
+                self._json(_STATUS_BY_CODE.get(reply.code, 500),
+                           {"error": reply.error})
                 return
-            if action == "stop":
-                self._json(200, trace.stop())
-                return
-            if action == "clear":
-                trace.clear()
-                self._json(200, trace.status())
-                return
-            self._json(400, {"error": "action must be start, stop or clear"})
-
-        def _handle_pseudo_save(self, data) -> None:
-            """Rename this node.
-
-            Two writes, deliberately: the node signs a fresh claim and announces
-            it now, and the configuration file records it so a restart keeps the
-            name. If the file cannot be written the rename still stands for this
-            run and the problem is reported — losing the name on restart is
-            worth saying, not worth refusing the rename over."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            wanted = data.get("pseudo", "")
-            if not isinstance(wanted, str):
-                self._json(400, {"error": "pseudo must be text"})
-                return
-            try:
-                adopted = console._call(_wrap(console._node.set_pseudo, wanted))
-            except PseudoError as exc:
-                self._json(400, {"error": str(exc)})
-                return
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            saved, problem = console._persist_pseudo(adopted)
-            self._json(200, {"ok": True, "pseudo": adopted,
-                             "saved": saved, "error": problem})
+            self._send_binary(
+                json.dumps(reply.result, indent=1).encode("utf-8"),
+                "nmesh-trace.json")
 
         def _handle_key_post(self, path: str, data) -> None:
             """Offering, accepting and forgetting a publisher key.
@@ -2341,41 +2269,6 @@ def _make_handler(console: WebConsole):
                 return
             self._json(200, {"ok": True, "result": result})
 
-        def _handle_config_save(self, data) -> None:
-            """Write the node's configuration file.
-
-            Every field is validated before anything is written: a rejected
-            value leaves the stored one alone, so one bad entry in a form can
-            never produce a file the node would refuse to start on. Nothing is
-            applied live — the node reads this at startup, and the answer says
-            so rather than letting the page imply otherwise."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            if not console._config_path:
-                self._json(409, {"error": "this node was not started from a "
-                                          "configuration file"})
-                return
-            current, _problems = node_config.load(console._config_path)
-            merged = node_config.defaults()
-            merged.update(current)
-            merged, rejected = node_config.apply_edits(
-                merged, (data or {}).get("settings"))
-            if rejected:
-                self._json(400, {"error": "some settings were refused",
-                                 "rejected": rejected[:16]})
-                return
-            try:
-                node_config.save(console._config_path, merged)
-            except OSError as exc:
-                self._json(500, {"error": f"could not write the configuration: "
-                                          f"{exc.strerror or 'error'}"})
-                return
-            self._json(200, {"saved": True,
-                             "path": console._config_path,
-                             "restart_required": True,
-                             "can_restart": updater.restart_possible()[0]})
-
         def _handle_restart(self, data) -> None:
             """Restart this node, if something will bring it back.
 
@@ -2528,31 +2421,6 @@ def _make_handler(console: WebConsole):
                  "attachment; filename=\"%s\"" % _safe_filename(name))])
 
         # -- remote consoles ---------------------------------------------
-
-        def _handle_transport_save(self, data) -> None:
-            """Apply one transport's settings, then write them to the file.
-
-            Applied first, stored second: a value the transport refuses must
-            never reach the file, or the next start would refuse it too — with
-            nobody at the keyboard to read why."""
-            data = data or {}
-            scheme = str(data.get("scheme") or "")[:32]
-            values = data.get("values")
-            if not isinstance(values, dict):
-                self._json(400, {"error": "no settings given"})
-                return
-            manager = console._node._transport_manager
-            try:
-                result = console._call(_wrap(manager.configure, scheme, values))
-            except Exception as exc:
-                self._json(400, {"error": str(exc)[:200]})
-                return
-            saved, note = console._persist_transports()
-            self._json(200, {"ok": not result["rejected"],
-                             "applied": {name: value for name, value
-                                         in result["applied"].items()},
-                             "rejected": result["rejected"],
-                             "persisted": saved, "note": note})
 
         # -- the change stream ---------------------------------------------
         #
@@ -3094,6 +2962,7 @@ def _parse_json(body: bytes):
         return None
 
 
-async def _wrap(fn, *args, **kwargs):
-    """Adapt a sync node method into an awaitable run on the loop thread."""
-    return fn(*args, **kwargs)
+# Adapting a sync node method into an awaitable run on the loop thread. The
+# plane's modules need exactly this and defined it first, so this is that one
+# rather than a second spelling of it (`src/control/context.py`).
+_wrap = control.on_loop

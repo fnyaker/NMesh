@@ -1293,9 +1293,7 @@ async function tick(sample){
   if(TICKING === epoch) return;
   TICKING = epoch;
   try{
-    const response = await api("/api/state");
-    if(!response.ok) return;
-    STATE = await response.json();
+    STATE = await CHANNEL.call("node.state");
     if(sample === false) STATE._rates = RATE_NOW;
     else trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); paintFirstRun(STATE);
@@ -2169,7 +2167,7 @@ $("known-limit").addEventListener("change", () => {
 });
 $("ping-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/ping", "POST");
+    const data = await CHANNEL.call("node.ping");
     toast("Sent " + (data.sent || 0) + " probe(s)");
     setTimeout(tick, 800);
   }catch(_){ toast("Ping failed", "danger"); }
@@ -2784,7 +2782,7 @@ async function loadTransportOptions(){
   const declared = {};
   let persisted = true;
   try{
-    const {data} = await apiJson("/api/transports");
+    const data = await CHANNEL.call("transports.options");
     TRANSPORT_FORM = data.transports || [];
     persisted = data.persisted !== false;
     TRANSPORT_FORM.forEach((entry) => { declared[entry.scheme] = entry.options; });
@@ -2870,14 +2868,14 @@ async function applyTransport(scheme, button){
     if(value !== null && value === value) values[field.name] = value;
   }
   await withBusy(button, async () => {
-    const {ok, data} = await apiJson("/api/transports", "POST", {scheme, values});
+    const {ok, error, data} = await CHANNEL.ask("transports.save", {scheme, values});
     const refused = Object.entries(data.rejected || {});
     if(!ok || refused.length){
       // Deliberately no redraw: what was typed stays on screen next to the
       // reason it was refused, which is the only way to fix it.
       setMessage("opt-msg-" + scheme,
         refused.map(([name, why]) => name + ": " + why).join(" · ") ||
-        (data.error || "refused"), true);
+        (error || "refused"), true);
       return;
     }
     await loadTransportOptions();
@@ -3367,8 +3365,7 @@ $("key-offers-in").addEventListener("click", async (event) => {
 // ---- the node's own name ---------------------------------------------------
 async function refreshPseudo(){
   try{
-    const {ok, data} = await apiJson("/api/pseudo");
-    if(!ok) return;
+    const data = await CHANNEL.call("pseudo.get");
     // Never overwrite a name being typed: this also runs on every tab entry.
     if(document.activeElement !== $("pseudo-input")) $("pseudo-input").value = data.pseudo || "";
     $("pseudo-id").value = data.id || "";
@@ -3377,9 +3374,9 @@ async function refreshPseudo(){
 }
 
 async function savePseudo(wanted){
-  const {ok, data} = await apiJson("/api/pseudo", "POST", {pseudo:wanted});
+  const {ok, error, data} = await CHANNEL.ask("pseudo.save", {pseudo:wanted});
   if(!ok){
-    setMessage("pseudo-status", data.error || "The node refused that name.", true);
+    setMessage("pseudo-status", error || "The node refused that name.", true);
     return;
   }
   $("pseudo-input").value = data.pseudo || "";
@@ -3424,11 +3421,10 @@ async function searchPseudo(wide){
     return;
   }
   try{
-    const {ok, data} = await apiJson("/api/pseudo?q=" + encodeURIComponent(query) +
-                                     (wide ? "&wide=1" : ""));
-    if(!ok) return;
-    setHTML("pseudo-results", data.results.map(pseudoRowHTML).join(""));
-    setMessage("pseudo-search-status", data.results.length ? "" :
+    const data = await CHANNEL.call(wide ? "pseudo.lookup" : "pseudo.search",
+                                    {query});
+    setHTML("pseudo-results", (data.results || []).map(pseudoRowHTML).join(""));
+    setMessage("pseudo-search-status", (data.results || []).length ? "" :
       (wide ? "Nobody on this mesh answers to that."
             : "Nothing here by that name — try asking the network."));
   }catch(_){}
@@ -3621,7 +3617,7 @@ function paintConfig(data){
   }
 }
 async function loadConfig(){
-  try{ paintConfig((await apiJson("/api/config")).data); }
+  try{ paintConfig(await CHANNEL.call("config.get")); }
   catch(_){ setMessage("config-status", "Could not read the configuration.", true); }
 }
 $("config-save").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -3634,10 +3630,12 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
   }
   setMessage("config-status", "Saving…");
   try{
-    const {ok, data} = await apiJson("/api/config", "POST", {settings});
+    const {ok, error, detail, data} = await CHANNEL.ask("config.save", {settings});
     if(!ok){
-      setMessage("config-status", (data.error || "Save failed") +
-        (data.rejected ? ": " + data.rejected.join(" · ") : ""), true);
+      // The sentence and the fields: a refusal names which settings were
+      // refused so the rest of what was typed can stay on screen.
+      setMessage("config-status", (error || "Save failed") +
+        (detail.rejected ? ": " + detail.rejected.join(" · ") : ""), true);
       return;
     }
     setMessage("config-status", data.can_restart
@@ -3808,7 +3806,7 @@ function paintTrace(data){
 }
 async function loadTrace(){
   try{
-    const {data} = await apiJson("/api/trace");
+    const data = await CHANNEL.call("trace.status");
     paintTrace(data);
     if(!data.status || !data.status.running) stopTracePolling();
   }catch(_){ stopTracePolling(); }
@@ -3816,8 +3814,8 @@ async function loadTrace(){
 function stopTracePolling(){ if(TRACE_POLL){ clearInterval(TRACE_POLL); TRACE_POLL = null; } }
 async function traceAction(action, extra){
   try{
-    const {ok, data} = await apiJson("/api/trace", "POST", Object.assign({action}, extra || {}));
-    if(!ok){ setMessage("trace-status", data.error || "Trace command failed", true); return; }
+    const {ok, error} = await CHANNEL.ask("trace.set", Object.assign({action}, extra || {}));
+    if(!ok){ setMessage("trace-status", error || "Trace command failed", true); return; }
     await loadTrace();
     if(action === "start" && !TRACE_POLL) TRACE_POLL = setInterval(loadTrace, 2000);
     if(action !== "start") stopTracePolling();
@@ -3883,7 +3881,7 @@ $("gen-invite").addEventListener("click", (event) => withBusy(event.target, asyn
   }catch(_){ setMessage("invite-status", "Invite generation failed", true); }
 }));
 $("show-cert").addEventListener("click", (event) => withBusy(event.target, async () => {
-  try{ $("cert-out").value = (await apiJson("/api/rootcert")).data.cert_hex; }
+  try{ $("cert-out").value = (await CHANNEL.call("node.rootcert")).cert_hex; }
   catch(_){ setMessage("invite-status", "Certificate unavailable", true); }
 }));
 $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -4189,7 +4187,11 @@ mountShell();
 // password; anything else drops to the gate.
 (async function resume(){
   try{
-    const response = await fetch("/api/state");
+    // Cookie-only on purpose: this asks whether the browser still holds a
+    // session, before any token is loaded. One frame, like everything else.
+    const response = await fetch(CONTROL_PATH, {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({v:1, id:"resume", op:"node.state", params:{}})});
     if(response.ok){ enterConsole(); return; }
   }catch(_){}
   showGate();
