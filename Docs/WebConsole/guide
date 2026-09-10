@@ -570,7 +570,7 @@ works on a machine with no internet.
 | GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
 | POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
-| POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many endorsed signing keys must agree on the code first |
+| POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many of the signing keys this operator chose must agree on the code first. Stopping also accepts the subscription's own id: it is all the watching table has when this node holds no record for the package |
 | GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer |
 | POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
 | POST    | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` — offer the key to another node. Signed by the key itself; **nothing secret travels yet** |

@@ -1010,12 +1010,24 @@ before and after.
   metrics 8/8 elements replaced per tick, addressing 6/6, the app tiles, the
   transport listener chips (each carries a button), the fleet pickers. After: 0,
   and the only thing that moves is the text of a number that moved.
+- **Skipping an identical write leaves a control the operator just changed
+  showing their change.** `checked` is a property, not an attribute, so a box
+  somebody ticked serialises exactly as it did before: the repaint after a
+  subscribe compared equal, wrote nothing, and left the tick on screen with
+  nothing behind it. It read as "the toggle works" until the next load, and as
+  "it forgot everything" after — which is what a card that could never learn it
+  was watching anything looks like from the outside. **A repaint is not how you
+  find out what the node stored.** The state has to come off the row *and* be
+  able to change the markup; here the card was asking for its subscription under
+  the wrong id, so the two paints were identical for a reason.
 - **`mountShell`, `REFRESH.mount` and `ROUTER.start` must be idempotent.** The
   apps call them from the function that runs after signing in, and that runs
   again whenever a session is lost and taken up again. Every listener was then
   registered twice: the theme button toggled twice and looked dead, the palette
-  moved two rows per arrow, a subtab routed twice. **Any wiring inside a
-  function that can run twice needs a guard.**
+  moved two rows per arrow, a subtab routed twice. `PACKAGES.mount` is the same
+  shape — `/package` remounts on every `hashchange` — and guards its element
+  with `dataset.pkgWired`, as the node view does with `nvWired`. **Any wiring
+  inside a function that can run twice needs a guard.**
 - **An SVG rebuilt on the cadence loses the keyboard.** The topology graph
   called `replaceChildren()` every tick, so a node dot — `tabindex="0"`,
   `role="button"` — could be tabbed to and never pressed: measured, focus was
@@ -1163,6 +1175,30 @@ before and after.
   the directory) was "no such release" while its signed descriptor sat in the
   caller's hand. An index answers "what does this key offer now?"; it must never
   be how "install this" is spelled.
+- **Two ids of one shape, and the button handed the wrong one.** A subscription
+  is named by the **package** it watches; a directory record is named by the
+  **node holding** one. Both are twenty bytes, both render as forty hex
+  characters, and nothing about either says which it is. So the card asked "is
+  this watched?" with a *record* id and was always told no — the box never
+  stayed ticked, and the two settings beside it (install without asking, how
+  many keys must agree) stayed disabled with no way to reach them — while the
+  watching table's **Open** carried a *subscription* id to a page that reads
+  records, which answered *"package not found"* about a package this node was
+  holding. Nothing failed: each call got a truthful answer to a question about
+  something else. **Where two ids of one shape meet, the difference lives in the
+  names** — the parameter (`record_id_hex` / `ident_hex`), a function that
+  accepts either saying so in its docstring, and the id a page acts on taken
+  from the row that knows it (`row.package.id`), never from the row beside it.
+- **A default that cannot be met is a feature nobody can use.** A subscription's
+  quorum counted *endorsed* keys only, and endorsement is a second decision
+  nothing prompts an operator to make. The default of one — documented and
+  labelled "install what it finds" — therefore held every unattended install
+  back for ever, and the row read `0 of 1` beside a card reading `2`. It counts
+  the key the release in front of the operator is **pinned** under as well,
+  which is the decision they were actually asked for, and it still only ever
+  withholds: `may_auto_install` decides what may run. **Read a default out loud
+  against the gate it has to pass** — "one" has to be reachable by somebody who
+  did only what the interface asked of them.
 - **An offset copied from a neighbouring handler is a message that answers
   nobody.** `_handle_key_accept` read the offer id as `payload[:16]`, which is
   what the *grant* header puts there — the acceptance header is
