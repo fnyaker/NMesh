@@ -1038,10 +1038,12 @@ async function saveProfile(){
   // is signed by it, the bio and avatar are the chat app's own.
   const name = $("set-name").value.trim();
   if(name !== (ST.pseudo || "")){
-    const res = await api("/api/pseudo", "POST", {pseudo:name}).catch(() => null);
-    if(res && !res.ok){
-      const body = await res.json().catch(() => ({}));
-      toast(body.error || "That name cannot be used.", "danger");
+    // The name is the node's, so it is the node's operation — the same one
+    // the console's own field calls, not a second route that agrees with it.
+    const {ok, error} = await CHANNEL.ask("pseudo.save", {pseudo:name},
+                                          {local:true});
+    if(!ok){
+      toast(error || "That name cannot be used.", "danger");
       return;
     }
   }

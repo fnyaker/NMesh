@@ -175,10 +175,16 @@ const NODEVIEW = {
   // Set when the next repaint has to re-ask the apps as well as the node.
   deep: false,
 
-  // Every call this view makes goes through here, so a mount cannot half
-  // follow the context.
+  // Every call this view makes goes through one of these two, so a mount
+  // cannot half follow the context. `op` is the control plane — what this view
+  // asks of a node — and `ask` is the routes that have not moved onto it yet
+  // (`Docs/Architecture/control-plane.md`).
   ask(path, method, body){
     return apiJson(path, method, body, {local:this.here});
+  },
+
+  op(name, params){
+    return CHANNEL.call(name, params, {local:this.here});
   },
 
   async catalogue(){
@@ -188,6 +194,11 @@ const NODEVIEW = {
       (data.apps || []).forEach((entry) => { out[entry.app] = entry.operations; });
       this.apps = out;
     }catch(_){ this.apps = {}; }
+    // And what the node itself exposes to whoever is driving it. Not every
+    // operation reaches a remote console — dialling a node's addresses back
+    // takes longer than the relay carries — so the buttons for those are not
+    // drawn rather than drawn and refused (`src/control/plane.py`).
+    if(!this.here) await CHANNEL.operations();
     return this.apps;
   },
 
@@ -246,7 +257,7 @@ const NODEVIEW = {
 
   async ownAddresses(){
     try{
-      const {data} = await this.ask("/api/state");
+      const data = await this.op("node.state");
       return (data.advertised || []).map((uri) => ({uri, outcome:"advertised"}));
     }catch(_){ return []; }
   },
@@ -682,7 +693,8 @@ const NODEVIEW = {
     // A node advertising four addresses of which one works is the normal case;
     // "try that one again, now" is the question an operator has while looking
     // at this table, so the button is in the table.
-    const action = view.self ? "" : '<th class="tight"></th>';
+    const offered = !view.self && (this.here || CHANNEL.has("node.retry"));
+    const action = offered ? '<th class="tight"></th>' : "";
     return '<div class="table-wrap"><table><thead><tr>' +
       '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
       "</tr></thead><tbody>" +
@@ -692,9 +704,9 @@ const NODEVIEW = {
         ' <span class="tiny muted" data-v="' +
         esc("addr:" + row.uri + ":detail") + '"></span>' +
         '</td><td class="num" data-v="' + esc("addr:" + row.uri + ":tried") + '">' +
-        "</td>" + (view.self ? "" :
+        "</td>" + (offered ?
           '<td class="tight"><button class="sm" data-nv-retry="' +
-          esc(row.uri) + '">Retry</button></td>') +
+          esc(row.uri) + '">Retry</button></td>' : "") +
         "</tr>").join("") + "</tbody></table></div>";
   },
 
@@ -762,8 +774,7 @@ const NODEVIEW = {
     let selfId = options.selfId || null;
     if(selfId == null){
       try{
-        const {data} = await this.ask("/api/state");
-        selfId = data.id;
+        selfId = (await this.op("node.state")).id;
       }catch(_){ selfId = null; }
     }
     if(!element.dataset.nvWired){
@@ -892,7 +903,7 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, "Pinging through the mesh…");
       try{
-        const {data} = await this.ask("/api/ping/node", "POST", {id});
+        const data = await this.op("node.ping_node", {node:id});
         this.say(element, data.reachable
           ? "Reachable in " + (data.rtt_ms == null ? "an unknown time" : data.rtt_ms + " ms") +
             " via " + (data.via || "the mesh")
@@ -906,8 +917,9 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, uri ? "Dialling " + uri + "…" : "Dialling every address…");
       try{
-        const {ok, data} = await this.ask("/api/peers/retry", "POST", {id, uri:uri || ""});
-        if(!ok){ this.say(element, data.error || "Retry refused", true); return; }
+        const {ok, error, data} = await CHANNEL.ask(
+          "node.retry", {node:id, uri:uri || ""}, {local:this.here});
+        if(!ok){ this.say(element, error || "Retry refused", true); return; }
         this.say(element, (data.results || []).map((row) =>
           row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""))
           .join(" · ") || "Nothing to dial", !data.connected);
@@ -1009,7 +1021,7 @@ const NODEVIEW = {
     });
     if(!agreed) return;
     try{
-      await this.ask("/api/nodes/forget", "POST", {id});
+      await this.op("node.forget", {node:id});
       toast("Node forgotten");
       this.current = null;
       if(options.onGone) options.onGone();
@@ -1190,8 +1202,8 @@ async function boot(){
   // the same test every other page in this product makes.
   SESSION.load();
   try{
-    const response = await api("/api/state");
-    if(response.ok){ enter(); return; }
+    const {ok} = await CHANNEL.ask("node.state");
+    if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();
   $("login").classList.remove("hidden");

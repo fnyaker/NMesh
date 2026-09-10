@@ -779,6 +779,11 @@ class TestManagement:
             assert node._routing.contains(known_id)
 
             _, token = await _login(console)
+            # A refusal from the control plane is one shape wherever it comes
+            # from: the code says what kind it was, the sentence says why
+            # (`src/control/errors.py`). So these check the status and that
+            # something was said, rather than a per-route flag.
+            #
             # Missing id → 400.
             status, _, _, _ = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token, {})
@@ -788,19 +793,20 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": "aa" * 20})
-            assert status == 404 and j["ok"] is False
+            assert status == 404 and j["error"]
 
-            # Malformed hex → 404, no crash.
+            # Malformed hex → 400: not a node identity at all, which is the
+            # caller's mistake rather than a node we have never heard of.
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": "not-hex"})
-            assert status == 404 and j["ok"] is False
+            assert status == 400 and j["error"]
 
             # Own id → refused, no crash.
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": node._id.raw.hex()})
-            assert status == 404 and j["ok"] is False
+            assert status == 404 and j["error"]
 
             # Known id → removed from the routing table.
             status, _, _, j = await asyncio.to_thread(

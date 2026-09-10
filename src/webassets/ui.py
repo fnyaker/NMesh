@@ -1011,6 +1011,12 @@ const SESSION = {
 // part of managing their machine. Signing in and out are this console's own.
 // The rule is written on both sides on purpose — sending the header anyway
 // would turn a designed refusal into a 403 every page has to explain.
+//
+// This list is what is left of that idea: an operation on the control plane
+// says for itself whether a remote console may reach it, so `CHANNEL` needs no
+// list at all (`src/control/plane.py`). These are the routes that have not
+// moved onto the plane yet — `Docs/Architecture/control-plane.md` keeps the
+// ledger, and this shrinks as it advances.
 const LOCAL_ONLY = ["/api/remote/", "/api/fleet/", "/api/chat/",
                     "/api/login", "/api/logout"];
 const local = (path) => LOCAL_ONLY.some((prefix) => path.startsWith(prefix));
@@ -1529,9 +1535,11 @@ const PALETTE = {
 //     measurement says nothing new and costs the whole list.
 //
 // The stream is the local console's: it is a connection held open, and the
-// fleet relay moves one bounded request and its answer. Driving another node
-// therefore keeps the cadence, and `EVENTS.live` is how a page says which of
-// the two it is on.
+// fleet relay moves one bounded request and its answer. So driving another node
+// *pulls* the same topics through the control channel instead (`CHANGES`, in
+// channel.js) — same handlers, same frame, one question on the cadence rather
+// than a page that has to hope. `EVENTS.live` is how a page says which of the
+// two it is on, because an interval means something different under each.
 const EVENTS = {
   FRAME: 100,
   source: null,
@@ -1550,9 +1558,11 @@ const EVENTS = {
 
   start(){
     this.stop();
-    // Driving another node: there is nothing to listen to here, and pretending
-    // otherwise would leave the page waiting on a stream that never speaks.
-    if(CONTEXT.remote || typeof EventSource === "undefined"){ this.say(false); return; }
+    // Driving another node: there is nothing to listen to *here*. The topics
+    // still arrive — asked for over the channel, which is the one thing the
+    // relay can carry — and land in the same `pending` set as a stream event.
+    if(CONTEXT.remote){ this.say(false); CHANGES.start(); return; }
+    if(typeof EventSource === "undefined"){ this.say(false); return; }
     let source;
     try{ source = new EventSource("/api/events"); }
     catch(_){ this.say(false); return; }
@@ -1572,6 +1582,7 @@ const EVENTS = {
   stop(){
     if(this.source){ this.source.close(); this.source = null; }
     if(this.timer){ clearTimeout(this.timer); this.timer = null; }
+    CHANGES.stop();
     this.pending.clear();
     this.say(false);
   },

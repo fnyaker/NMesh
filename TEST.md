@@ -271,6 +271,15 @@ tests/
 │     inferred from a single probe, a bounded history, per-address status (in use
 │     beats the log, "never tried" ≠ "broken"), a log bounded on both axes, and a
 │     transport that raises or returns nonsense not breaking the snapshot
+├── test_control_plane.py                              — the management plane: an
+│     operation nobody declared does not exist (even when the method is there),
+│     an undeclared argument is refused, a frame that is not one is answered
+│     anyway, a local-only operation is refused from a remote console and the
+│     catalogue a remote console reads is the narrow one, a module that throws
+│     says nothing about this machine — plus the bounds held against the relay's
+│     (a frame that fits `CONSOLE_REQ_MAX`, every remote operation's ceiling
+│     inside `REMOTE_BUDGET`), and that a far node's session expiring is not read
+│     as ours
 ├── test_app_api.py                                    — the app API surface: an
 │     operation that is not declared does not exist (even when the method is
 │     there), an undeclared argument is refused and not ignored, every value is

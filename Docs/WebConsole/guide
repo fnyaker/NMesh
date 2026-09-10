@@ -101,10 +101,19 @@ and printed to a log on a box with no screen. Taking it back on that node ends
 the session immediately. See [`Docs/Apps/fleet`](../Apps/fleet).
 
 Technically the page adds an `X-NMesh-Node: <id>` header to every call; the
-console relays the call over the mesh, and the target node **replays it against
-its own console** over loopback. Nothing is reimplemented: same routes, same
+console relays it over the mesh, and the target node **replays it against its
+own console** over loopback. Nothing is reimplemented: same operations, same
 caps, same lockout. Full detail, bounds and refused paths:
 [`Docs/Apps/fleet`](../Apps/fleet).
+
+What travels is a **control frame** — one request, one answer, over the channel
+described in [`../Architecture/control-plane.md`](../Architecture/control-plane.md).
+So what an operator may do to a node they manage is a list that node keeps about
+itself, one `remote=True` per operation, rather than a denylist of URL prefixes
+that every new route joined by default. Two operations stay local for a reason
+that is a ceiling rather than a secret: dialling a node's addresses back and
+asking the directory for a name both take longer than the relay carries, and a
+refusal that says so beats a wait that says nothing.
 
 ### What makes the switch reliable
 
@@ -132,7 +141,10 @@ never get wrong.
   managed node is not a jump host; the proxy must not drive the proxy; somebody
   else's conversations were never part of managing their machine). The page
   knows the same list, so those calls are never *addressed* to it — and the
-  strip on `/chat` and `/fleet` says in words that the app runs here. A view
+  strip on `/chat` and `/fleet` says in words that the app runs here. For
+  everything on the control plane the page does not need a list at all: it reads
+  the far node's catalogue (`control.catalogue`, filtered by who is asking) and
+  draws the buttons that node will actually answer. A view
   mounted inside one of those apps asks this node too: *"what is my link to this
   person"* is a different question depending on who "my" is, and answering it
   from the machine being managed would be a confidently wrong answer rather than
@@ -144,6 +156,12 @@ The console used to read the node on a timer. At two seconds a link that came
 up was invisible for two seconds; at a tenth of a second it was two hundred
 questions a minute answered "nothing". `GET /api/events` inverts it: the node
 says when something moved, and the page reads only then.
+
+Driving another node, the same information arrives by asking rather than by
+listening: the relay carries one bounded call and its answer, never a socket
+held open, so the page asks `control.changes` on its cadence and repaints on
+what moved. Same topics, same handlers — where it used to be told nothing at all
+and fall back to a timer.
 
 **Only that something moved** — never what. The frame names topics
 (`links`, `nodes`, `names`, `reach`) and the page reads the state it already
@@ -504,15 +522,28 @@ works on a machine with no internet.
 
 ## API (all JSON, Bearer or cookie auth except login)
 
+Two doors, and one of them is the future: **`POST /api/control`** carries the
+management plane — one frame naming an operation, one frame back — and the rest
+of the table is what has not moved onto it yet. A route that *has* moved is a
+thin adapter over the same operation rather than a second implementation, so
+both stay true at once. The ledger of what is where, and what a refusal means:
+[`../Architecture/control-plane.md`](../Architecture/control-plane.md).
+
+A refusal is one shape everywhere: the status from a code out of a closed set,
+`{"error": "…"}`, and whatever structure the operation attached (the settings
+form gets its `rejected` list). Where a route used to answer `{"ok": false}`, it
+now answers `{"error": …}` with the same status.
+
 | Method | Route            | Role                                           |
 |---------|------------------|------------------------------------------------|
+| POST    | `/api/control`   | the control channel: `{v:1, id, op, params}` → `{v:1, id, ok, result}` or `{ok:false, code, error, detail?}`. With `X-NMesh-Node` the **same frame** is relayed to that node and its answer handed back — the status then describes this console (200: it answered) and the frame describes that node |
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state` |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
-| POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
-| POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
+| POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) — `node.forget` |
+| POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses — `node.retry`, **local only**: one dial per address outlasts what the relay carries |
 | POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
 | POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
 | POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
@@ -521,7 +552,7 @@ works on a machine with no internet.
 | POST    | `/api/invite`    | generates an invitation code                   |
 | POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
 | POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
-| GET     | `/api/rootcert`  | our root certificate (hex) to share            |
+| GET     | `/api/rootcert`  | our root certificate (hex) to share — `node.rootcert` |
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
 | POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
 | POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
@@ -545,12 +576,12 @@ works on a machine with no internet.
 | POST    | `/api/chat/contact`| `{op:add\|remove, id}`                          |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
 | POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
-| GET     | `/api/pseudo`      | this node's name, id and the length limit; `?q=…` searches names instead (`&wide=1` also asks the network) |
+| GET     | `/api/pseudo`      | this node's name, id and the length limit (`pseudo.get`); `?q=…` searches the names this node holds (`pseudo.search`), `&wide=1` asks the directory instead (`pseudo.lookup`, **local only** — a Kademlia round does not fit the relay) |
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
-| GET     | `/api/transports` | what each transport declares it takes, with the values in force |
-| POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` |
+| GET     | `/api/transports` | what each transport declares it takes, with the values in force — `transports.options` |
+| POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` — `transports.save` |
 | GET     | `/api/fleet/keys`  | available SSH keys (disk + imported) — **metadata only** |
 | POST    | `/api/fleet/keys` / `keys-remove` | imports / removes a private key (encrypted drawer) |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
@@ -578,11 +609,11 @@ works on a machine with no internet.
 | GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible |
-| GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
-| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
-| GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) |
-| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed |
-| GET     | `/api/trace/export` | the whole trace as JSON (download)          |
+| GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
+| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save` |
+| GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
+| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
+| GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |
 | POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
 The **Expert — addressing & transports** section shows every concrete URI
