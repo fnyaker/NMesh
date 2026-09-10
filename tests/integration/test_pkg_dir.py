@@ -115,11 +115,13 @@ class TestFindingAPackage:
             await publisher._publish_package_records()
             entry = (await node.search_packages("nmesh"))[0]
 
-            assert node._publishers.trusts(
+            assert node._publishers.may_install_code(
                 publisher._identity.dsa_public_key) is False
             pinned = node.trust_package_signer(entry["id"])
             assert pinned["key"] == publisher._identity.dsa_public_key.hex()
-            assert node._publishers.trusts(
+            # Pinned from a record of node software, so it is a key that may
+            # replace this node's program — which is what the install below is.
+            assert node._publishers.may_install_code(
                 publisher._identity.dsa_public_key) is True
 
             # …and the release is then installable, end to end, with the
