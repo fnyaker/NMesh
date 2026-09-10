@@ -41,6 +41,7 @@ from urllib.parse import parse_qs
 
 from . import app_api
 from . import control
+from .control import listing
 from . import updater
 from . import console_auth
 from .control.modules.settings import write_settings
@@ -124,9 +125,12 @@ _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
 # the node bounds the whole round itself — this only has to be the larger of the
 # two, or the console would give up on an answer the node was about to hand it.
 _PKG_LOOKUP_TIMEOUT = 30.0
-_LIST_DEFAULT_LIMIT = 20
-_LIST_MAX_LIMIT = 100
-_LIST_MAX_QUERY = 128
+# What a list may be asked for, from the one place that decides it
+# (`src/control/listing.py`) — this door parses a query string, it does not get
+# to have its own opinion about how long a query may be.
+_LIST_DEFAULT_LIMIT = listing.DEFAULT_LIMIT
+_LIST_MAX_LIMIT = listing.MAX_LIMIT
+_LIST_MAX_QUERY = listing.MAX_QUERY
 # serve_forever() only notices a shutdown() between polls; the stdlib default is
 # 0.5s, which makes every stop() block that long. Poll tighter so teardown is
 # near-instant (idle cost is one cheap select wakeup per interval).
@@ -875,35 +879,6 @@ def _number(raw, default: int = 0) -> int:
         return default
 
 
-def _page_by_node(links: list, offset: int, limit: int) -> tuple:
-    """One page of *nodes*, carrying every link each of them holds.
-
-    Returns ``(links_on_this_page, node_total)``. The node order is the order
-    the links arrived in, so the caller's sort still decides it."""
-    order, by_node = [], {}
-    for link in links:
-        bucket = by_node.get(link["id"])
-        if bucket is None:
-            bucket = by_node[link["id"]] = []
-            order.append(link["id"])
-        bucket.append(link)
-    page = order[offset:offset + limit]
-    return [link for node_id in page for link in by_node[node_id]], len(order)
-
-
-def _matches_list_query(item: dict, query: str) -> bool:
-    if not query:
-        return True
-    for value in item.values():
-        if isinstance(value, str) and query in value.casefold():
-            return True
-        if isinstance(value, (list, tuple)):
-            if any(isinstance(part, str) and query in part.casefold()
-                   for part in value):
-                return True
-    return False
-
-
 def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1393,19 +1368,12 @@ def _make_handler(console: WebConsole):
             except ValueError:
                 self._json(400, {"error": "invalid query"})
                 return
+            if path == "/api/nodes":
+                self._from_plane("node.list", {"scope": scope, "query": query,
+                                               "limit": limit, "offset": offset})
+                return
             try:
-                if path == "/api/nodes":
-                    items = console._call(
-                        _wrap(console._node.console_nodes, scope))
-                    if scope == "known":
-                        items.sort(key=lambda item: (
-                            item["seen_ago"], item["id"]))
-                    else:
-                        items.sort(key=lambda item: (
-                            item["id"], item.get("transport") or "",
-                            item.get("is_client_side", False),
-                            tuple(item.get("addresses", ()))))
-                elif path == "/api/store/catalog":
+                if path == "/api/store/catalog":
                     items = console._call(
                         _wrap(console._node.store_overview))["catalog"]
                     items.sort(key=lambda item: (-item["ts"], item["app_id"]))
@@ -1416,16 +1384,8 @@ def _make_handler(console: WebConsole):
                         str(item.get("name", "")).casefold(),
                         str(item.get("app_id", ""))))
                 matched = [item for item in items
-                           if _matches_list_query(item, query)]
-                # The active table shows one row per *node*, unfolding onto that
-                # node's links, so it has to be paged by node: paging by link
-                # would let one node's links straddle a page boundary and show
-                # the node twice, once with each half — and would count links
-                # under a heading that says nodes.
-                if path == "/api/nodes" and scope == "active":
-                    rows, total = _page_by_node(matched, offset, limit)
-                else:
-                    rows, total = matched[offset:offset + limit], len(matched)
+                           if listing.matches(item, query)]
+                rows, total = matched[offset:offset + limit], len(matched)
                 self._json(200, {
                     "items": rows,
                     "total": total,

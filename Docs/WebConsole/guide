@@ -550,7 +550,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state` |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
-| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
+| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes — `node.list`, which pages the **active** scope by node so one node's links never straddle a page |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) — `node.forget` |
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses — `node.retry`, **local only**: one dial per address outlasts what the relay carries |
 | POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node — `network.dynamic` |

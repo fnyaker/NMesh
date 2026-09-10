@@ -1957,14 +1957,20 @@ const PAGES = {
 const PAGE_URL = {installed:"/api/store/installed"};
 async function fetchPage(kind){
   const page = PAGES[kind];
-  const params = new URLSearchParams({q:page.query, limit:String(page.limit),
-                                      offset:String(page.offset)});
-  if(page.scope) params.set("scope", page.scope);
-  const response = await api((PAGE_URL[kind] || "/api/nodes") + "?" + params.toString());
-  if(!response.ok) throw new Error("list failed");
-  const data = await response.json();
+  // The node tables are an operation; the installed list is still a route.
+  const data = page.scope
+    ? await CHANNEL.call("node.list", {scope:page.scope, query:page.query,
+                                       limit:page.limit, offset:page.offset})
+    : await legacyPage(kind, page);
   page.total = data.total;
   return data.items || [];
+}
+async function legacyPage(kind, page){
+  const params = new URLSearchParams({q:page.query, limit:String(page.limit),
+                                      offset:String(page.offset)});
+  const response = await api(PAGE_URL[kind] + "?" + params.toString());
+  if(!response.ok) throw new Error("list failed");
+  return response.json();
 }
 function paintPager(kind, id, redraw){
   const page = PAGES[kind], element = $(id);

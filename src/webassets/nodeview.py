@@ -237,15 +237,19 @@ const NODEVIEW = {
   // this console has never heard of still renders: the identity is real, the
   // rest is simply empty.
   //
-  // `/api/nodes?scope=active` answers one row **per link**, and a node may hold
-  // several. Taking the first and calling it "the link" is what made a node
-  // reached over tcp *and* udp look like a node reached over tcp.
+  // `node.list` with scope "active" answers one row **per link**, and a node
+  // may hold several. Taking the first and calling it "the link" is what made a
+  // node reached over tcp *and* udp look like a node reached over tcp.
   async facts(id, selfId, seed, keep){
     const rows = async (scope) => {
-      const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
-      const {ok, data} = await this.ask("/api/nodes?" + params.toString());
-      if(!ok) return [];
-      return (data.items || []).filter((item) => item.id === id);
+      try{
+        const data = await this.op("node.list",
+                                   {scope, query:id, limit:20, offset:0});
+        return (data.items || []).filter((item) => item.id === id);
+      }catch(error){
+        if(isStale(error)) throw error;
+        return [];
+      }
     };
     // `keep` is the previous read's routing-table row, handed back on the
     // cadence. Every number that moves — latency, jitter, loss, what the link

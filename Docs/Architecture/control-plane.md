@@ -255,16 +255,21 @@ keeps working, with one implementation behind it.
 | `pseudo` | `get` `search` `lookup`\* `save` | `/api/pseudo` (`?q=`, `?wide=1`) |
 | `control` | `catalogue` `changes` | — (new) |
 | `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
+| `node` (lists) | `list` | `/api/nodes` |
 
 \* local only.
 
-Still routes of their own, and the ledger to work through: the node and package
-lists (`/api/nodes`, `/api/packages/…`), invitations, tickets and joining,
+Still routes of their own, and the ledger to work through: the package
+directory (`/api/packages/…`) and the app store's lists, invitations, tickets
+and joining,
 releases and updates, publisher keys, the app store, chat and fleet's own
 surfaces, login/logout. Three of those are not candidates at all: **login** is
 how a session begins, **the console password** is that door's own key rather
 than the node's state, and **uploads** carry bytes rather than a sentence (a
-control frame is capped to fit `fleet.CONSOLE_REQ_MAX`). Chat and fleet keep
+control frame is capped to fit `fleet.CONSOLE_REQ_MAX` — which is also why the
+**relay and connect blocks** stay where they are: `_RELAY_BLOCK_MAX_LEN` is
+32 kB, larger than a frame, and a block is pasted into the console of the node
+you are sitting at anyway). Chat and fleet keep
 their page APIs by design — a managed node is not a jump host — while what they
 choose to expose *as operations* travels on the plane like everything else.
 
