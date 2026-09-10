@@ -32,8 +32,16 @@ Console → **Apps → Find an app**. Typing searches what this node already hol
 **Ask the network** spends one bounded round of directory queries. Opening a
 result shows the package page (`/package#<id>`): name, version, author, the few
 signed lines the author wrote, how many publishers have signed the same code,
-and the three things you can do — **download** it to open the archive by hand,
-**install** it, **watch** it for new versions.
+and the things you can do — **download** it to open the archive by hand,
+**install** it, **watch** it for new versions, and **pin the key that signed
+it**.
+
+Installing asks for no pin: a person pressed the button. The pin is for the
+other half — a new version of a watched app landing on its own, which waits
+until enough of the keys this operator chose have signed the same code. It is
+recorded as a key accepted **for apps**: nothing signed by it may replace the
+node's own program, however many apps it signs
+([`../Updates/guide`](../Updates/guide#pinning-a-signing-key)).
 
 That is the same page a node release opens, and deliberately: an operator should
 not have to learn two ways to look at a signed package.

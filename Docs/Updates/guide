@@ -157,7 +157,7 @@ Opening a record shows a page of its own (`/package#<id>`):
   that order, because reading before running is the whole argument for offering
   a download at all.
 
-## Pinning a publisher
+## Pinning a signing key
 
 From the package that key signed: one press and a confirmation naming the id
 that will be pinned. The key came inside the record and was checked against the
@@ -167,6 +167,21 @@ install automatically is a separate tick in the same dialog, and it starts
 unticked: trusting a publisher and handing them a scheduled restart are two
 decisions.
 
+**What the key is pinned for follows the record it was pinned from**, and the
+node decides that, not the page. From node software, it is a key that may
+replace this node's program; from an **app**, it is a party to that app and
+nothing more (`code`, below). This is why the button can sit on an app's card at
+all: without the distinction, one press on a page about a text editor would have
+put its author on the list of people who may hand this machine a new operating
+program.
+
+The two cards differ in which act comes first, and for a reason. Nothing signed
+by an unpinned key may replace this node's code, so on a **release** the pin
+*is* the button and Install appears once it is done. An app needs no pin to be
+installed — a person pressed the button — so there Install stays first and the
+pin sits beside it, for the operator who wants a later version to land without
+being asked.
+
 A **recommendation** cannot be pinned. It names somebody else's bytes, and
 pinning the machine that agreed with a release would hand this node to whoever
 agreed — which is not what agreeing means. The console says so and points at the
@@ -174,23 +189,35 @@ publisher it references.
 
 Pinning is still the only way a key enters that list — no packet, no peer, no app
 can add one. The file (`<data>/publishers.json`, mode 0600) holds public keys and
-two booleans; a corrupt or doctored file yields **no** trusted publisher rather
+three booleans; a corrupt or doctored file yields **no** trusted publisher rather
 than a guess. An entry whose id does not follow from its key is dropped, so a
-tampered file cannot slip a publisher in under a familiar id.
+tampered file cannot slip a publisher in under a familiar id, and a row claiming
+`auto` without `code` is read as the narrower of the two.
 
 Failing closed there costs an operator one re-pin. Failing open costs them the
 machine.
 
-### Two flags, two different statements
+### Three flags, three different statements
 
-A pinned key carries **`auto`** and **`endorsed`**, and neither implies the
-other:
+A pinned key carries **`code`**, **`auto`** and **`endorsed`**, and none of them
+implies another:
 
+- **`code`** — "releases of *this node's own program* signed by this key may be
+  installed here". The strongest of the three, set by the kind of record the pin
+  was made from, and the one a key pinned from an app does not get. Settings →
+  Updates shows it per key under **Accepted for**.
 - **`auto`** — "this one key may replace my code without asking me". Fast, and
-  exactly as strong as that key: whoever holds it holds the machine.
+  exactly as strong as that key: whoever holds it holds the machine. It means
+  nothing without `code`, so it is refused for a key that has none rather than
+  stored as a promise nothing honours.
 - **`endorsed`** — "this key's word counts towards a quorum". Much weaker alone,
   and it is the route for code from parties none of whom you would hand the
   machine to individually.
+
+A re-pin **widens** `code` and never narrows it: pinning the key of an app you
+already accept node software from is not a decision to stop accepting node
+software from it, and silently making it one would take a permission away in the
+middle of a sentence about something else.
 
 ## Installing from people you do not individually trust
 
@@ -539,12 +566,10 @@ default asking for a decision nobody is prompted to make, so a subscription
 marked *install without asking* read `0 of 1` and held for ever
 (`MeshNode._package_agreement`).
 
-That pin is the **publisher pin** — the list that decides what may replace this
-node's code — so an **app** that is to install itself unattended needs its
-author's key in that list as well. No button offers to put it there from an
-app's record, and that is deliberate: a key in that list is a statement about
-node software. Watching an app and pressing **Install** yourself asks for
-nothing of the sort; only the unattended half does.
+For an **app**, the key to pin is its author's, and its card offers that beside
+Install — pinned *for the app*, never for this node's code (see
+[Pinning a signing key](#pinning-a-signing-key)). Watching an app and pressing
+Install yourself asks for nothing of the sort; only the unattended half does.
 
 A quorum only ever **withholds**. It cannot authorise an install the pins would
 refuse — a core release still needs the key that signed it pinned, still has to
@@ -834,7 +859,7 @@ count is what bounds it.
 | GET | `/api/packages/<id>[?fetch=1]` | one record; `fetch` also pulls the descriptor it points at |
 | GET | `/api/packages/<id>/download` | the verified package, as an opaque `tar.gz` |
 | POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
-| POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried in the record's publication proof. **400** for a record from a node that only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
+| POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried in the record's publication proof. What it is accepted for follows the record's kind: node software pins a key that may replace this program, an app pins a party to that app. **400** for a record from a node that only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
 | POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch **the package** that record names, or stop. Stopping also accepts the subscription's own id, which is all the watching table has when no record for it is held here |
 | GET | `/api/keys` | publisher keys held here, offers made from here, offers waiting for an answer |
 | POST | `/api/keys/create` | `{passphrase, label?}` → a fresh publisher key, encrypted under it |

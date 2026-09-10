@@ -564,12 +564,12 @@ works on a machine with no internet.
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
 | POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
 | POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key |
-| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves, or let their signature count towards a quorum |
+| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum |
 | GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node holds and serves, `&wide=1` also asks the network. Nothing is listed: it answers questions |
 | GET     | `/api/packages/<id>` | one signed record, as a page reads it; `?fetch=1` also pulls the descriptor it points at |
 | GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
-| POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
+| POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. What it is accepted for follows the record: node software pins a key that may replace this program, an app pins a party to that app. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
 | POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many of the signing keys this operator chose must agree on the code first. Stopping also accepts the subscription's own id: it is all the watching table has when this node holds no record for the package |
 | GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer |
 | POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
@@ -747,7 +747,8 @@ answer, since "up to date" means a different thing against each. See
 
 A row says three separate things about a release and each says only what it
 knows: **this node** is who signed it, **pinned** is whether that key is one this
-node accepts code from, and the state on the right is what can be done with it.
+node accepts *code* from — a key pinned from an app's page is on the list and is
+not that — and the state on the right is what can be done with it.
 A node that publishes its own code and has not pinned its own key is the ordinary
 case — publishing is not trusting — and the row shows both badges rather than
 leaving you to read "unpinned" against your own release. A version this node is
@@ -759,7 +760,9 @@ signs the tree and announces it; the package itself moves only when someone asks
 for it, and whoever receives it can serve the next node. You pin the publisher
 keys this node accepts; a release from anyone else is shown and relayed but
 never installed, and pinning a publisher is a separate decision from letting
-them install while nobody is watching. This node's own code can be signed and
+them install while nobody is watching. **Signing keys you accept** lists what is
+pinned and, per key, what its signature is accepted for: this node's code, or
+only the apps it signs. This node's own code can be signed and
 offered from the same page. The full mechanism — the descriptor, the
 gossip, the three gates before anything touches disk:
 [`../Updates/guide`](../Updates/guide).

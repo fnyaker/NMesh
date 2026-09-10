@@ -329,8 +329,8 @@ class TestPinnedPublishers:
         pins = cr.TrustedPublishers()
         entry = pins.add(idn.dsa_public_key, "me")
         assert entry["id"] == cr.publisher_id(idn.dsa_public_key).hex()
-        assert pins.trusts(idn.dsa_public_key)
-        assert not pins.trusts(CryptoIdentity().dsa_public_key)
+        assert pins.pinned(idn.dsa_public_key)
+        assert not pins.pinned(CryptoIdentity().dsa_public_key)
 
     def test_re_pinning_updates_rather_than_duplicates(self):
         idn = CryptoIdentity()
@@ -357,7 +357,7 @@ class TestPinnedPublishers:
         entry = pins.add(idn.dsa_public_key)
         assert pins.remove(entry["id"]) is True
         assert pins.remove(entry["id"]) is False
-        assert not pins.trusts(idn.dsa_public_key)
+        assert not pins.pinned(idn.dsa_public_key)
 
     def test_the_list_is_bounded(self):
         pins = cr.TrustedPublishers(max_publishers=2)
@@ -378,7 +378,7 @@ class TestPinnedPublishers:
         first = cr.TrustedPublishers(path)
         first.add(idn.dsa_public_key, "me", auto=True)
         again = cr.TrustedPublishers(path)
-        assert again.trusts(idn.dsa_public_key)
+        assert again.pinned(idn.dsa_public_key)
         assert again.auto_for(idn.dsa_public_key) is True
 
     def test_the_file_is_owner_only(self, tmp_path):
@@ -408,7 +408,7 @@ class TestPinnedPublishers:
         }))
         pins = cr.TrustedPublishers(str(path))
         assert len(pins) == 0
-        assert not pins.trusts(other.dsa_public_key)
+        assert not pins.pinned(other.dsa_public_key)
 
     def test_a_stored_list_is_bounded_on_load(self, tmp_path):
         path = tmp_path / "publishers.json"

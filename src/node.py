@@ -7898,7 +7898,19 @@ class MeshNode:
                                     _RELEASE_RATE_WINDOW, _RELEASE_RATE_MAX)
 
     def _trusts_publisher(self, public_key: bytes) -> bool:
-        return self._publishers.trusts(public_key)
+        """May this key replace the program this node runs?
+
+        The narrow question, and the only one the release path asks. Being in
+        the pin list at all is :meth:`_chose_publisher` — a key pinned from an
+        app's record is a party to that app and nothing more."""
+        return self._publishers.may_install_code(public_key)
+
+    def _chose_publisher(self, public_key: bytes) -> bool:
+        """Did this operator pin this key, for anything at all?
+
+        What a quorum counts, because what it counts is parties a human picked
+        one at a time — not what any of them is allowed to install."""
+        return self._publishers.pinned(public_key)
 
     async def _handle_release_announce(self, peer: '_Peer', packet: Packet) -> None:
         from .dht import MAX_VALUE
@@ -8352,18 +8364,20 @@ Hints come first (the ``have`` byte on an announce, from an
         }
 
     def trust_publisher(self, key_hex: str, name: str = "",
-                        auto: bool = False, endorsed: bool = False) -> dict:
-        """Pin a publisher key. The only way a key enters this list is here —
-        an operator acting locally, never a packet.
+                        auto: bool = False, endorsed: bool = False,
+                        code: bool = True) -> dict:
+        """Pin a signing key. The only way a key enters this list is here — an
+        operator acting locally, never a packet.
 
-        ``auto`` and ``endorsed`` are different statements and neither implies
-        the other: the first hands this one key a scheduled restart, the second
-        only lets its word count towards a quorum."""
+        ``code``, ``auto`` and ``endorsed`` are different statements and none
+        implies another: the first accepts this key's signature over the node's
+        own program, the second hands that one key a scheduled restart, the
+        third only lets its word count towards a quorum."""
         try:
             public_key = bytes.fromhex(key_hex)
         except (ValueError, TypeError) as exc:
             raise ReleaseError("that is not a public key") from exc
-        entry = self._publishers.add(public_key, name, auto, endorsed)
+        entry = self._publishers.add(public_key, name, auto, endorsed, code)
         self._releases.retrust(self._trusts_publisher)
         return entry
 
@@ -9951,7 +9965,12 @@ Hints come first (the ``have`` byte on an announce, from an
             "release": entry["release"].hex(),
             "src": entry["src"].hex(),
             "ts": entry["ts"],
-            "trusted": bool(signer) and self._trusts_publisher(signer),
+            # "Pinned" against the record in front of the reader: for node
+            # software that means the key may replace this program, for an app
+            # it means the operator chose that key. Answering the wider question
+            # for a core release would paint a pinned badge over an install that
+            # then refuses — the refusal naming a key they had just pinned.
+            "trusted": self._publisher_trusted(entry),
             "mine": entry["node_id"] == self._id.raw,
             "attesters": len(parties),
             # What this operator watches, and how far the code they watch
@@ -9972,6 +9991,14 @@ Hints come first (the ``have`` byte on an announce, from an
             "equivocated": self._package_book.equivocated(
                 entry["node_id"]) is not None,
         }
+
+    def _publisher_trusted(self, entry: dict) -> bool:
+        """Is this record's signing key pinned for what this record is?"""
+        signer = entry["signer"]
+        if signer is None:
+            return False
+        return (self._trusts_publisher(signer) if entry["kind"] == _PKG_CORE
+                else self._chose_publisher(signer))
 
     def package_entry(self, record_id_hex: str) -> dict | None:
         """One record by its directory id, as a page reads it."""
@@ -10162,7 +10189,14 @@ Hints come first (the ``have`` byte on an announce, from an
         A record from a node that only *holds* the release carries no such key,
         and there is nothing here to pin. That is the point rather than a gap:
         serving bytes is not a claim about them, and pinning whoever handed you
-        a copy would hand the machine to a mirror."""
+        a copy would hand the machine to a mirror.
+
+        **What the key is pinned for follows the record it came from.** From an
+        app, this pins a party to that app; only a record of the node's own
+        software pins somebody who may replace the node's own software. The two
+        are one button and one list, and without that distinction the button on
+        an app's page would have been a way to hand over the machine — an app
+        author is not somebody an operator decided to take a program from."""
         entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None:
@@ -10171,7 +10205,8 @@ Hints come first (the ``have`` byte on an announce, from an
             raise ReleaseError("this node holds that release, it did not sign "
                                "it — open the release to see who did")
         return self.trust_publisher(entry["signer"].hex(), entry["name"],
-                                    auto, endorsed)
+                                    auto, endorsed,
+                                    code=entry["kind"] == _PKG_CORE)
 
     # -- subscriptions -----------------------------------------------------
 
@@ -10241,7 +10276,7 @@ Hints come first (the ``have`` byte on an announce, from an
 
         def rank(entry):
             signer = entry["signer"]
-            return (signer is not None and self._trusts_publisher(signer),
+            return (signer is not None and self._chose_publisher(signer),
                     entry["published"], entry["ts"])
 
         best = None
@@ -10307,7 +10342,7 @@ Hints come first (the ``have`` byte on an announce, from an
         # source digest attests to nothing, whoever signed it and however
         # firmly this operator pinned them.
         signer = entry["signer"]
-        if signer in parties and self._trusts_publisher(signer):
+        if signer in parties and self._chose_publisher(signer):
             counted.add(_core_publisher_id(signer).hex())
         return len(counted), needed
 

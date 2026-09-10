@@ -714,24 +714,32 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
-        <p class="eyebrow">Who may replace this node's code</p>
+        <p class="eyebrow">Signing keys you accept</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Publishers you accept</h2>
-            <div class="sub">Whose signature may replace this node's code</div></div></div>
+          <div class="card-head"><div class="grow"><h2>Signing keys you accept</h2>
+            <div class="sub">Each key, and what its signature is accepted for</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Name</th><th>Key</th><th>Install automatically</th>
+              <table><thead><tr><th>Name</th><th>Key</th><th>Accepted for</th>
+                <th>Install automatically</th>
                 <th>Counts towards a quorum</th><th></th></tr></thead>
                 <tbody id="publisher-rows"></tbody></table>
             </div>
-            <p id="publisher-empty" class="empty" hidden>No publisher pinned — this node installs
-              nothing from the mesh. Find a package above and pin the key that signed it.</p>
+            <p id="publisher-empty" class="empty" hidden>No key pinned — this node installs
+              nothing from the mesh on its own. Find a package above and pin the key that signed
+              it.</p>
             <p class="muted small">Keys are pinned from the package they signed, one press and a
               confirmation: the key arrives inside the record and is checked against the signature
               it made, so there is nothing to copy across from anywhere and nothing to get wrong.</p>
-            <p class="muted small">The two columns are different statements.
+            <p class="muted small">Being on this list is not one permission.
+              <strong>Accepted for</strong> is the first and strongest of the three: a key pinned
+              from an app is a party to that app, and nothing signed by it may replace this node's
+              own program. That is decided by the record it was pinned from, never by a box here —
+              an app's author is not somebody you decided to take a program from.</p>
+            <p class="muted small">The other two are separate statements again.
               <strong>Install automatically</strong> hands that one key a scheduled restart: whoever
-              holds it holds this machine. <strong>Counts towards a quorum</strong> is far weaker —
+              holds it holds this machine, so it applies only to a key accepted for this node's
+              code. <strong>Counts towards a quorum</strong> is far weaker —
               it only lets the key's word count when several endorsed publishers have independently
               signed the <em>same</em> release, which is how code from people you would not trust
               individually can still install itself. Set <code>release_quorum</code> in the
@@ -3132,9 +3140,22 @@ function watchRowHTML(row){
 }
 function publisherRowHTML(entry){
   return '<tr><td>' + (entry.name ? esc(entry.name) : '<span class="muted">unnamed</span>') +
-    "</td><td><code>" + esc(shortId(entry.id)) + "</code></td><td>" +
-    '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
-    (entry.auto ? " checked" : "") + '><span class="sr-only">Install automatically</span></label>' +
+    "</td><td><code>" + esc(shortId(entry.id)) + "</code></td>" +
+    // What this key is accepted for, which the record it was pinned from
+    // decided. A row with no such answer would be a list of keys whose
+    // strongest permission is the one nothing on screen mentions.
+    "<td>" + (entry.code
+      ? badge("this node's code", "warn")
+      : '<span class="muted small">apps signed by it</span>') + "</td><td>" +
+    // No box where there is nothing for it to allow: a scheduled restart is a
+    // statement about node software, and a key that may not carry any has no
+    // automatic install to turn on. A ticked box the node would refuse is
+    // worse than no box.
+    (entry.code
+      ? '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
+        (entry.auto ? " checked" : "") +
+        '><span class="sr-only">Install automatically</span></label>'
+      : '<span class="muted small">does not apply</span>') +
     '</td><td><label class="check"><input type="checkbox" data-endorse="' + esc(entry.id) + '"' +
     (entry.endorsed ? " checked" : "") +
     '><span class="sr-only">Counts towards a quorum</span></label>' +

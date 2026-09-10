@@ -1175,6 +1175,19 @@ before and after.
   the directory) was "no such release" while its signed descriptor sat in the
   caller's hand. An index answers "what does this key offer now?"; it must never
   be how "install this" is spelled.
+- **One list, two permissions, and only one of them on screen.** The pinned
+  keys are what may replace this node's program, and "pin the key that signed
+  this" was about to be offered on an **app's** page — where the operator is
+  thinking about a text editor, not about who gets to hand their machine a new
+  operating program. Being in the list would have been one permission for two
+  very different decisions, and the weaker-looking press would have granted the
+  stronger one. The entry therefore carries what it is accepted *for* (`code`),
+  set by the kind of record the pin was made from and never by a box on the
+  page; `pinned()` and `may_install_code()` are two methods because they are two
+  questions, and the release path only ever asks the second. **Before putting an
+  existing permission behind a new button, say out loud what the button grants
+  where it now sits.** If that sentence is not the one the old button made, the
+  permission needs splitting first.
 - **Two ids of one shape, and the button handed the wrong one.** A subscription
   is named by the **package** it watches; a directory record is named by the
   **node holding** one. Both are twenty bytes, both render as forty hex
