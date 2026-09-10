@@ -1052,6 +1052,36 @@ def _make_handler(console: WebConsole):
         # -- routing --
 
         def do_GET(self) -> None:
+            self._answering(self._get)
+
+        def do_POST(self) -> None:
+            self._answering(self._post)
+
+        def _answering(self, handler) -> None:
+            """Run a request handler, and **always answer**.
+
+            An unhandled exception here does not become a 500 on its own: it
+            unwinds through `handle_one_request`, which sends nothing and closes
+            the socket. A page that asked sees a connection drop, not an error —
+            so a skeleton stays on screen for ever and the bug reads as "it
+            loads infinitely", which says nothing about where it is.
+
+            That is exactly what happened: a value that was not JSON-serialisable
+            reached `_json`, `json.dumps` raised, and the package page spun. The
+            answer is a floor under every route rather than a `try` around the
+            one that failed."""
+            try:
+                handler()
+            except Exception:
+                # Nothing about the failure travels: an exception's text is our
+                # internals, and this is answered before anybody has proved
+                # anything on some routes.
+                try:
+                    self._json(500, {"error": "the console could not answer"})
+                except Exception:
+                    self.close_connection = True
+
+        def _get(self) -> None:
             path = self.path.split("?", 1)[0]
             remote = self._remote_node()
             if remote is not None:
@@ -1429,7 +1459,7 @@ def _make_handler(console: WebConsole):
         def do_HEAD(self) -> None:
             self.do_GET()
 
-        def do_POST(self) -> None:
+        def _post(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/api/app/publish", "/api/store/publish"):
                 cap = _MAX_APP_BODY

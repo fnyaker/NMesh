@@ -192,7 +192,10 @@ tests/
 │     only be dropped locally, records that survive a restart
 ├── test_fuzz.py                                       — hostile inputs
 ├── test_spool.py                                      — bundle & file transport
-├── test_webconsole.py / test_data_connector.py        — console & connector
+├── test_webconsole.py / test_data_connector.py        — console & connector,
+│     including that **every route answers**: a handler that raises, or a body
+│     that is not JSON, becomes a 500 and not a closed socket — which is what a
+│     page draws a spinner for ever on
 ├── test_app_auth.py                                   — application identity:
 │     scoping (app/audience/purpose/ctx), freshness, anti-replay, key binding,
 │     hostile parsing, mutual login
