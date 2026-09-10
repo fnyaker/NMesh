@@ -580,6 +580,69 @@ class TestAppsOnTheChannel:
         assert remotes(FleetBridge) == {"relation"}
 
 
+class TestTheNodeTable:
+    """The list every page reads, and the two things it has to get right."""
+
+    class _Node:
+        pseudo = ""
+
+        class _Id:
+            raw = bytes(range(20))
+
+        id = _Id()
+
+        def console_nodes(self, scope):
+            if scope == "known":
+                return [{"id": "cc" * 20, "seen_ago": 3, "pseudo": "far"},
+                        {"id": "aa" * 20, "seen_ago": 1, "pseudo": "near"}]
+            # One row per *link*: two nodes, and one of them holds two links.
+            return [{"id": "aa" * 20, "transport": "tcp", "addresses": []},
+                    {"id": "aa" * 20, "transport": "udp", "addresses": []},
+                    {"id": "bb" * 20, "transport": "tcp", "addresses": []}]
+
+    def _channel(self):
+        return control.LocalChannel(control.build(control.Context(
+            node=self._Node(), loop=asyncio.get_event_loop())))
+
+    async def test_the_active_table_is_paged_by_node_not_by_link(self):
+        chan = self._channel()
+        page = (await asyncio.to_thread(chan.call, "node.list",
+                                        {"scope": "active", "limit": 1})).result
+        # One node, both of its links, and a total that counts *nodes* — the
+        # number under a heading that says nodes.
+        assert page["total"] == 2
+        assert [row["id"] for row in page["items"]] == ["aa" * 20] * 2
+
+    async def test_the_known_table_is_paged_by_row(self):
+        page = (await asyncio.to_thread(self._channel().call, "node.list",
+                                        {"scope": "known", "limit": 1})).result
+        assert page["total"] == 2 and len(page["items"]) == 1
+        # Sorted by how long ago each was seen, so the first is the freshest.
+        assert page["items"][0]["seen_ago"] == 1
+
+    async def test_a_query_matches_anything_a_row_carries(self):
+        found = (await asyncio.to_thread(self._channel().call, "node.list",
+                                         {"scope": "known", "query": "FAR"})).result
+        assert [row["pseudo"] for row in found["items"]] == ["far"]
+
+    async def test_a_scope_nobody_declared_does_not_exist(self):
+        chan = self._channel()
+        for scope in ("everything", "", "installed", None):
+            reply = await asyncio.to_thread(chan.call, "node.list",
+                                            {"scope": scope})
+            assert reply.ok is False and reply.code == "bad_request", scope
+
+    async def test_the_page_size_is_the_consoles_to_bound(self):
+        from src.control import listing
+        page = (await asyncio.to_thread(self._channel().call, "node.list",
+                                        {"scope": "known", "limit": 10 ** 6})).result
+        assert page["limit"] == listing.MAX_LIMIT
+        long_one = await asyncio.to_thread(
+            self._channel().call, "node.list",
+            {"scope": "known", "query": "x" * (listing.MAX_QUERY + 1)})
+        assert long_one.ok is False and long_one.code == "bad_request"
+
+
 class TestTrustAndNetwork:
     """The two modules an operator uses on a machine that is not in front of
     them: what this node vouches for, and how it is reachable."""

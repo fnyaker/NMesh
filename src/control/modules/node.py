@@ -21,6 +21,7 @@ import time
 
 from ... import updater
 from ...pseudo import PseudoError
+from .. import listing
 from ..context import on_loop
 from ..errors import ControlError
 from ..params import param
@@ -38,6 +39,14 @@ class NodeModule:
 
     OPERATIONS = (
         operation("state", "Everything the console draws about this node",
+                  remote=True, timeout=_READ),
+        operation("list", "The nodes this one is linked to, or has heard of",
+                  [param("scope", "choice", choices=("active", "known")),
+                   param("query", "text", required=False, default=""),
+                   param("limit", "count", required=False,
+                         default=listing.DEFAULT_LIMIT,
+                         limit=listing.MAX_LIMIT),
+                   param("offset", "count", required=False, default=0)],
                   remote=True, timeout=_READ),
         operation("ping", "Ping every authenticated peer now",
                   changes=True, remote=True, timeout=_READ),
@@ -96,6 +105,36 @@ class NodeModule:
         snapshot["can_restart"] = can
         snapshot["restart_blocked"] = why
         return snapshot
+
+    def op_list(self, scope: str, query: str, limit: int, offset: int) -> dict:
+        """One page of the table, sorted, filtered and counted here.
+
+        The **active** scope answers one row per *link*, and a node may hold
+        several — so it is paged by node. Paging by link would show one node
+        twice across a boundary, once with each half, and would count links
+        under a heading that says nodes."""
+        if len(query or "") > listing.MAX_QUERY:
+            # The `text` kind's own ceiling is wider than a search box needs,
+            # and `listing.MAX_QUERY` is the figure the HTTP door already
+            # enforces — one bound for the question, wherever it is asked.
+            raise ControlError("bad_request",
+                               f"a query is at most {listing.MAX_QUERY} characters")
+        rows = self._ask(on_loop(self._node.console_nodes, scope), _READ)
+        if scope == "known":
+            rows.sort(key=lambda item: (item["seen_ago"], item["id"]))
+        else:
+            rows.sort(key=lambda item: (
+                item["id"], item.get("transport") or "",
+                item.get("is_client_side", False),
+                tuple(item.get("addresses", ()))))
+        matched = [item for item in rows
+                   if listing.matches(item, (query or "").casefold())]
+        limit = limit or listing.DEFAULT_LIMIT
+        if scope == "active":
+            page, total = listing.page_by_node(matched, offset, limit)
+        else:
+            page, total = matched[offset:offset + limit], len(matched)
+        return {"items": page, "total": total, "limit": limit, "offset": offset}
 
     def op_rootcert(self) -> dict:
         return {"cert_hex": self._ask(
