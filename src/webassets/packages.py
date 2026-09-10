@@ -233,9 +233,21 @@ const PACKAGES = {
         "press and a confirmation — the key came with the record and was " +
         "checked against a signature it made, so there is nothing to copy " +
         "across.</p>";
+    if(!row.trusted)
+      return '<p class="muted small">Installing this yourself asks for no ' +
+        "pin: you pressed the button. Pinning the key that signed it is for " +
+        "the other half — a new version landing on its own, which waits until " +
+        "enough keys you chose have signed the same code. It is accepted for " +
+        "this app, never for the node's own program.</p>";
     return "";
   },
 
+  // Which of the two acts is the primary one is the whole design here. Nothing
+  // signed by an unpinned key may replace this node's program, so for node
+  // software the pin *is* the button and Install comes after it. An app needs
+  // no pin to be installed by hand — a person pressed it — so Install stays
+  // primary and the pin sits beside it, for the operator who wants a version
+  // of it to land without being asked.
   actionsHTML(row, opts){
     const buttons = [];
     // Downloading works off any copy: the bytes are content-addressed and the
@@ -243,12 +255,15 @@ const PACKAGES = {
     buttons.push('<a class="btn" download href="/api/packages/' +
       encodeURIComponent(row.id) + '/download">' + icon("arrowDown") +
       " Download</a>");
-    if(row.kind === "core" && !row.trusted)
+    const core = row.kind === "core";
+    if(core && !row.trusted)
       buttons.push('<button class="primary" data-pkg-act="trust"' +
         (row.published ? "" : " disabled") + ">Pin the signing key</button>");
     else
       buttons.push('<button class="primary" data-pkg-act="install">' +
         "Install</button>");
+    if(!core && row.published && !row.trusted)
+      buttons.push('<button data-pkg-act="trust">Pin the signing key</button>');
     if(!opts.hideOpen)
       buttons.push('<button data-pkg-act="page">Open on its own</button>');
     return '<div class="pkg-actions">' + buttons.join("") + "</div>";
@@ -365,19 +380,36 @@ const PACKAGES = {
     await this.repaint(element);
   },
 
+  // What a pin *means* follows the record it is made from, and the node decides
+  // that — the page only has to say it. Pinning from an app is a party to that
+  // app; pinning from node software is somebody who may replace this program.
+  // One dialog that said the second sentence over both would have been asking
+  // for the machine on an app's page.
   async trust(row, element){
+    const core = row.kind === "core";
     const agreed = await confirmAction({
       title:"Pin the key that signed " + row.name + "?",
       confirmLabel:"Pin this key",
-      body:'<p class="muted small">Whoever holds this key can offer code that ' +
-        "replaces this node’s own. The key below came inside the record and " +
-        "was checked against a signature it made — so it is the key that " +
-        "signed what you are looking at, and nothing else. It is the only " +
-        "thing pinned: not the node that handed it over, not a name.</p>" +
+      danger:core,
+      body:'<p class="muted small">' + (core
+        ? "Whoever holds this key can offer code that replaces this node’s " +
+          "own. "
+        : "This key signs " + esc(row.name) + ". Pinning it counts its " +
+          "signature as one you chose, which is what a version of this app " +
+          "installing itself waits for — it is not accepted for this node’s " +
+          "own code, and nothing here can make it so. ") +
+        "The key below came inside the record and was checked against a " +
+        "signature it made — so it is the key that signed what you are " +
+        "looking at, and nothing else. It is the only thing pinned: not the " +
+        "node that handed it over, not a name.</p>" +
         '<div class="kv"><div>Signing key</div><div><code class="inline">' +
-        esc(row.signer_id || "") + "</code></div></div>" +
-        '<label class="check"><input id="pkg-pin-auto" type="checkbox">' +
-        "<span>Let this key install its releases without asking</span></label>",
+        esc(row.signer_id || "") + "</code></div>" +
+        "<div>Accepted for</div><div>" +
+        esc(core ? "this node’s own code" : "apps signed by it") +
+        "</div></div>" +
+        (core ? '<label class="check"><input id="pkg-pin-auto" type="checkbox">' +
+          "<span>Let this key install its releases without asking</span></label>"
+          : ""),
     });
     if(!agreed) return;
     const auto = !!($("pkg-pin-auto") || {}).checked;

@@ -13,6 +13,7 @@ servers — and the keys whose signatures count are chosen by a human, one at a
 time, which is what a quorum has to be to survive somebody minting two hundred
 identities.
 """
+import json
 import os
 
 import pytest
@@ -122,6 +123,77 @@ class TestEndorsement:
                                        auto=True, endorsed=True)
         entry = cr.TrustedPublishers(path).entry(one.dsa_public_key)
         assert entry["auto"] is True and entry["endorsed"] is True
+
+
+class TestWhatAKeyIsAcceptedFor:
+    """Being in this list is not one permission.
+
+    A key is pinned from the record that carries it, and an app's record is not
+    a decision about node software. One list without that distinction would have
+    made "pin the key that signed this app" a way to hand over the machine — the
+    same button, two meanings, and only one of them on screen."""
+
+    def test_a_key_pinned_for_apps_may_not_replace_the_program(self):
+        pins = cr.TrustedPublishers()
+        author = CryptoIdentity()
+        pins.add(author.dsa_public_key, "an app", code=False)
+        assert pins.pinned(author.dsa_public_key) is True
+        assert pins.may_install_code(author.dsa_public_key) is False
+
+    def test_it_is_still_a_party_this_operator_chose(self):
+        """Which is the whole point of pinning it: a quorum counts keys a human
+        picked, and this one was picked."""
+        pins = cr.TrustedPublishers()
+        author = CryptoIdentity()
+        pins.add(author.dsa_public_key, "an app", code=False, endorsed=True)
+        assert pins.endorsed_among([author.dsa_public_key]) != []
+
+    def test_an_unattended_install_cannot_be_switched_on_for_it(self):
+        """A scheduled restart is a statement about node software. With no code
+        to replace there is nothing for the flag to allow, so it is refused
+        rather than stored as a promise nothing honours."""
+        pins = cr.TrustedPublishers()
+        author = CryptoIdentity()
+        entry = pins.add(author.dsa_public_key, "an app", auto=True, code=False)
+        assert entry["auto"] is False
+        assert pins.set_auto(entry["id"], True) is False
+        assert pins.auto_for(author.dsa_public_key) is False
+
+    def test_a_stored_row_saying_both_things_is_read_as_the_narrower_one(
+            self, tmp_path):
+        path = tmp_path / "publishers.json"
+        author = CryptoIdentity()
+        path.write_text(json.dumps({
+            cr.publisher_id(author.dsa_public_key).hex(): {
+                "key": author.dsa_public_key.hex(), "name": "an app",
+                "code": False, "auto": True},
+        }))
+        pins = cr.TrustedPublishers(str(path))
+        assert pins.auto_for(author.dsa_public_key) is False
+
+    def test_a_row_written_before_the_field_existed_is_a_code_pin(self, tmp_path):
+        """The only thing that could write one was a core release's record.
+        Reading it as anything else would stop a node already running from
+        updating itself, and would misreport what its operator decided."""
+        path = tmp_path / "publishers.json"
+        one = CryptoIdentity()
+        path.write_text(json.dumps({
+            cr.publisher_id(one.dsa_public_key).hex(): {
+                "key": one.dsa_public_key.hex(), "name": "them", "auto": True},
+        }))
+        pins = cr.TrustedPublishers(str(path))
+        assert pins.may_install_code(one.dsa_public_key) is True
+        assert pins.auto_for(one.dsa_public_key) is True
+
+    def test_pinning_an_app_from_a_key_already_accepted_takes_nothing_away(self):
+        """A re-pin widens and never narrows: pinning the key of an app you
+        already accept node software from is not a decision to stop accepting
+        node software from it."""
+        pins = cr.TrustedPublishers()
+        one = CryptoIdentity()
+        pins.add(one.dsa_public_key, "them", auto=True)
+        pins.add(one.dsa_public_key, "their app", code=False)
+        assert pins.may_install_code(one.dsa_public_key) is True
 
 
 # ---------------------------------------------------------------------------

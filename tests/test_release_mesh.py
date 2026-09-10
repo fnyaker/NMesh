@@ -894,7 +894,7 @@ class TestPinsOnTheNode:
             await first.stop()
             again = _node(str(tmp_path))
             try:
-                assert again._publishers.trusts(bytes.fromhex(key))
+                assert again._publishers.pinned(bytes.fromhex(key))
                 assert again.release_overview()["publishers"][0]["auto"] is True
             finally:
                 await again.stop()
@@ -1499,5 +1499,63 @@ class TestWatchingAPackage:
             row = node.subscriptions()[0]
             assert row["package"]["id"] == record_id
             assert row["package"]["version"] == "9.9.9"
+        finally:
+            await node.stop()
+
+
+class TestPinningFromAnAppsPage:
+    """The same button on two kinds of record, and it must not mean the same
+    thing twice.
+
+    Installing an app by hand needs no pin — a person pressed it. The pin is for
+    the other half, a version landing on its own, and it is offered on an app's
+    card for exactly that. What it must never do is put the app's author on the
+    list of keys allowed to replace the program this node runs: that list is one
+    list, and an app author is not somebody an operator decided to take a
+    program from."""
+
+    async def _published_app(self):
+        node = _node()
+        await node.publish_store_app("Sketchpad", "1.0.0",
+                                     {"main.py": b"print(1)\n"})
+        return node, node.find_packages("sketch")[0]["id"]
+
+    async def test_the_key_is_pinned_but_not_for_this_node_s_code(self):
+        node, record_id = await self._published_app()
+        try:
+            signer = bytes.fromhex(node.package_entry(record_id)["signer"])
+            node.trust_package_signer(record_id)
+            assert node._publishers.pinned(signer) is True
+            assert node._publishers.may_install_code(signer) is False
+        finally:
+            await node.stop()
+
+    async def test_it_still_counts_as_the_party_a_quorum_asks_for(self):
+        """Which is what the button is for: with the author's key chosen, a
+        watched app may install a new version on its own."""
+        node, record_id = await self._published_app()
+        try:
+            node.subscribe_package(record_id, auto=True)
+            record = node._package_book.entry(bytes.fromhex(record_id))
+            assert node._package_agreement(record) == (0, 1)
+            node.trust_package_signer(record_id)
+            assert node._package_agreement(record) == (1, 1)
+        finally:
+            await node.stop()
+
+    async def test_a_release_signed_by_that_key_is_still_refused(self, tmp_path):
+        """The half that would be a vulnerability rather than a gap: the same
+        key signing node software gets nothing from having been pinned here."""
+        node, record_id = await self._published_app()
+        try:
+            node.trust_package_signer(record_id)
+            info = await node.publish_release(_tree(str(tmp_path)))
+            release = node._releases.get(info["release"])
+            # Published by this node's own identity — the very key just pinned
+            # from the app — and it is still not a key that may replace code.
+            assert release["publisher"] == node._identity.dsa_public_key
+            assert node._trusts_publisher(release["publisher"]) is False
+            with pytest.raises(cr.ReleaseError):
+                await node.install_release_entry(release)
         finally:
             await node.stop()
