@@ -63,7 +63,11 @@ const CHANNEL = {
   // single one is a mesh hop having a bad moment; a run of them is a machine
   // that has gone, and a page that keeps asking it forever looks alive and
   // shows nothing — which is what left people reloading the console by hand.
-  MISSES: 3,
+  //
+  // Two, not more: each of these costs the relay's full ceiling (25 s) before
+  // it comes back, so the count is also a stopwatch. The strip says "not
+  // answering" from the first one, which is the half an operator reads.
+  MISSES: 2,
   misses: 0,
 
   // What a refusal from *over there* means for the context we are in.

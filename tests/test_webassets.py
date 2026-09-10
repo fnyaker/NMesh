@@ -645,7 +645,7 @@ def test_a_managed_node_that_stops_answering_hands_the_context_back():
     source = webassets.channel.JS
     assert 'reply.code === "unauthorized" || reply.code === "conflict"' in source
     assert "CONTEXT.lost(" in source
-    assert "MISSES: 3" in source and "CONTEXT.trouble(true" in source
+    assert "MISSES: 2" in source and "CONTEXT.trouble(true" in source
     # And the strip has somewhere to say it.
     assert 'id="ctx-trouble"' in webassets.ui.CTX_BAR
     assert "lost(reason){" in webassets.ui.JS

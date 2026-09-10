@@ -281,6 +281,16 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (a node that went away)       — the relay's own
+│     failures, read back as codes: a node that never answered is `unavailable`
+│     (it came back as a 502, and calling that "failed" left a console pointed
+│     at a machine that had gone, looking alive and showing nothing), and a far
+│     node's session expiring is that node's, never this console's
+├── test_webassets.py (a switch of node)               — what a page drops and
+│     when: each shared view registers its own reset, the stream and the repaint
+│     restart once for every page *after* everybody has dropped, a stale reply is
+│     never painted as a failure, and a view on the cadence says when it could
+│     not read instead of keeping what it last held
 ├── test_control_plane.py (trust & network)             — the two modules an
 │     operator uses on a machine they are not in front of: a certificate that is
 │     hex before the node is asked to parse it, a toggle that takes a boolean
