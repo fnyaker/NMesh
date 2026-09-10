@@ -87,6 +87,13 @@ _STATUS_BY_CODE = {
 # another node, when what came back was not a frame at all (no session there, a
 # node that never answered) and has to be phrased as a refusal anyway.
 _CODE_BY_STATUS = {status: code for code, status in _STATUS_BY_CODE.items()}
+# The relay's own failures, which have no forward mapping because nothing here
+# ever *answers* a gateway status — it only ever reads one. A node that never
+# answered comes back as 502, and calling that `failed` told a page "something
+# went wrong over there" when what happened is that there is no over there:
+# a console driving a machine that has gone stayed pointed at it, looking alive
+# and showing nothing.
+_CODE_BY_STATUS.update({502: "unavailable", 504: "unavailable"})
 
 
 def _is_node_hex(value) -> bool:

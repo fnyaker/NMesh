@@ -975,6 +975,31 @@ class TestConsoleControlRoute:
             console.stop()
             await node.stop()
 
+    async def test_a_node_that_never_answered_is_unavailable(self, monkeypatch):
+        """The status the relay gives up with, read back as a code.
+
+        It comes back as a 502, and calling that `failed` told the page
+        "something went wrong over there" — when what happened is that there is
+        no over there. The console driving a machine that had gone stayed
+        pointed at it, looking alive and showing nothing."""
+        node, console = await _make_console()
+
+        class _Silent:
+            def remote_call(self, session, node_hex, method, path, body):
+                return 502, "application/json", json.dumps(
+                    {"error": "could not reach that node (TimeoutError)"}).encode()
+
+        try:
+            token = await _login(console)
+            _with_fleet(monkeypatch, _Silent())
+            channel = control.RemoteChannel(
+                "ab" * 20, console._control_relay(token))
+            reply = await asyncio.to_thread(channel.call, "node.state")
+            assert reply.ok is False and reply.code == "unavailable"
+        finally:
+            console.stop()
+            await node.stop()
+
     async def test_the_far_nodes_session_expiring_is_not_ours(self, monkeypatch):
         node, console = await _make_console()
 
