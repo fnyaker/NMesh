@@ -9923,19 +9923,16 @@ Hints come first (the ``have`` byte on an announce, from an
     def _package_view(self, entry: dict) -> dict:
         """One record as a page reads it — every decision already made here.
 
-        ``attesters`` is how many *distinct publishers* have signed a package
-        carrying the same code (documentation excluded). That is the number
-        "put X packages in competition" counts, and it is the only one an
-        attacker cannot get for free: mirroring bytes is cheap, a second
-        signature over the same source is a second party."""
-        agree = self._package_book.by_source(entry["src"])
-        # Counted in **signing keys**, never in nodes: a second node serving the
-        # same bytes is a mirror, and mirrors are free. A second signature over
-        # the same source is a second party, and that is what an attacker cannot
-        # get for nothing. A record with no proof of publication contributes
-        # nothing here, whoever is holding it.
-        attesters = {row["signer_id"] for row in agree
-                     if row["signer_id"] is not None}
+        Two numbers about the same code, and they are not the same number.
+        ``attesters`` is how many *distinct publishers* have signed this package
+        (documentation excluded, another name excluded) — the one an attacker
+        cannot get for free, since mirroring bytes is cheap and a second
+        signature over the same source is a second party. ``agreeing`` is how
+        many of those this operator chose, out of the ``needed`` their quorum
+        asks for, and it is the only one that decides anything. One word over
+        both is how a card reading "2" came to sit above a row reading
+        "0 of 1"."""
+        parties = self._package_parties(entry)
         agreeing, needed = self._package_agreement(entry)
         signer = entry["signer"]
         return {
@@ -9956,12 +9953,20 @@ Hints come first (the ``have`` byte on an announce, from an
             "ts": entry["ts"],
             "trusted": bool(signer) and self._trusts_publisher(signer),
             "mine": entry["node_id"] == self._id.raw,
-            "attesters": len(attesters),
+            "attesters": len(parties),
             # What this operator watches, and how far the code they watch
-            # agrees with itself. `attesters` counts everybody; `agreeing`
-            # counts only keys they chose, which is the number a quorum is
-            # allowed to rest on.
-            "subscription": self._subscriptions.get(entry["id"].hex()),
+            # agrees with itself. `attesters` counts every publisher of this
+            # code; `agreeing` counts only the keys this operator chose, which
+            # is the number a quorum is allowed to rest on.
+            #
+            # Asked of the **package**, which is what a subscription names —
+            # never of `entry["id"]`, which names one node's record of it. Under
+            # the record id the answer was always "not watched": the box never
+            # stayed ticked, and the two settings beside it — install without
+            # asking, and how many keys must agree — stayed disabled with no way
+            # to reach them.
+            "subscription": self._subscriptions.for_package(entry["kind"],
+                                                            entry["name"]),
             "agreeing": agreeing,
             "needed": needed,
             "equivocated": self._package_book.equivocated(
@@ -10106,14 +10111,24 @@ Hints come first (the ``have`` byte on an announce, from an
             raise ReleaseError("the package could not be fetched")
         if entry["kind"] == "core":
             result = await self.install_release_entry(release)
-            self._subscriptions.note_version(record_id_hex, entry["version"])
+            self._note_package_version(entry)
             return result
         installed = await self.install_app(described["app_id"])
         if installed is None:
             raise ReleaseError("the app could not be installed")
-        self._subscriptions.note_version(record_id_hex, entry["version"])
+        self._note_package_version(entry)
         self._offer_to_serve(entry)
         return installed
+
+    def _note_package_version(self, entry: dict) -> None:
+        """Remember that a watched package has been dealt with at this version.
+
+        Written under the **package**, like the subscription itself. Under the
+        record id it wrote nothing at all, so a version installed here went on
+        announcing itself as newly offered on every sweep."""
+        self._subscriptions.note_package_version(
+            _PKG_CORE if entry["kind"] == "core" else _PKG_APP,
+            entry["name"], entry["version"])
 
     def _offer_to_serve(self, entry: dict) -> None:
         """Say we hold what we just installed, so the next node can ask us.
@@ -10177,19 +10192,27 @@ Hints come first (the ``have`` byte on an announce, from an
         self._note_change("packages")
         return subscription
 
-    def unsubscribe_package(self, record_id_hex: str) -> bool:
-        entry = self._package_book.entry(bytes.fromhex(record_id_hex)) \
-            if _HEX_PKG.fullmatch(record_id_hex or "") else None
+    def unsubscribe_package(self, ident_hex: str) -> bool:
+        """Stop watching a package, named either way.
+
+        Two ids reach this, and nothing about twenty bytes of hex says which one
+        it is: the card holds the **record** the toggle sits on, the watching
+        table holds the **subscription** — which is all it has when this node
+        holds no record for it any more. Both name one package, so both are
+        accepted here rather than left for each caller to guess at."""
+        entry = self._package_book.entry(bytes.fromhex(ident_hex)) \
+            if _HEX_PKG.fullmatch(ident_hex or "") else None
         ident = _subscription_id(entry["kind"], entry["name"]) \
-            if entry is not None else record_id_hex
+            if entry is not None else ident_hex
         removed = self._subscriptions.remove(ident)
         if removed:
             self._note_change("packages")
         return removed
 
     def subscriptions(self) -> list[dict]:
-        """Every subscription, with the best record this node currently holds
-        for it — signed by anybody, served by anybody."""
+        """Every subscription, with the record this node would act on for it
+        (:meth:`_best_for_subscription`) — filed by any node, and preferring a
+        key this operator pinned over one they have never seen."""
         rows = []
         for subscription in self._subscriptions.list():
             entry = self._best_for_subscription(subscription)
@@ -10199,48 +10222,97 @@ Hints come first (the ``have`` byte on an announce, from an
         return rows
 
     def _best_for_subscription(self, subscription: dict) -> dict | None:
-        """The newest record we hold for a watched package.
+        """The record this node acts on and shows for a watched package.
 
         A subscription names a package, so this searches by kind and name rather
-        than by an id that carries whoever filed the record. Preferring a
-        published record over a held one is only about what a page can show —
-        the key that signed it — and never about what may be installed, which
-        the pins decide either way."""
+        than by an id that carries whoever filed the record. Ranked by what this
+        operator chose first — a key they pinned, then a published record over a
+        merely held one, then the newest.
+
+        The pin is first because a name is not owned: anybody may file a record
+        under any name, and *newest* alone hands the choice to whoever signs
+        last. A stranger publishing "NMesh" a second later would be the only
+        candidate an unattended install ever looked at (and the key the watching
+        row named), which costs nothing to do and stops a real update from
+        landing. Picking is still not authority: what may be installed is
+        decided by the pins and by :meth:`_package_agreement`, whichever record
+        comes back."""
         folded = _pseudo_fold(subscription["name"])
+
+        def rank(entry):
+            signer = entry["signer"]
+            return (signer is not None and self._trusts_publisher(signer),
+                    entry["published"], entry["ts"])
+
         best = None
         for entry in self._package_book.search(subscription["name"], limit=64):
             if entry["kind"] != subscription["kind"] or entry["folded"] != folded:
                 continue
-            if best is None or (entry["published"], entry["ts"]) > \
-                    (best["published"], best["ts"]):
+            if best is None or rank(entry) > rank(best):
                 best = entry
         return best
 
-    def _package_agreement(self, entry: dict) -> tuple[int, int]:
-        """How many **endorsed keys** have signed this exact code, and how many
-        this operator asked for.
+    def _package_parties(self, entry: dict) -> list[bytes]:
+        """The signing keys behind this exact code, one per key.
 
         Counted over the source digest, so two publishers whose release notes
-        differ still agree; over *signing keys*, because a node serving a copy
-        is a mirror and mirrors are free; and only over keys this operator
-        endorsed one at a time, because a signature from somebody nobody chose
-        is a party an attacker can mint. Same argument as the release quorum
-        next door, and now the same set of keys."""
+        differ still agree; in **signing keys**, never in nodes, because a node
+        serving a copy is a mirror and mirrors are free while a second signature
+        over the same source is a second party; and only over records carrying a
+        proof of publication, since holding somebody else's bytes says nothing
+        about them.
+
+        Same kind and same name, not merely the same bytes: a fork published
+        under another name is a different package, and the operator who wants it
+        counted subscribes to it. Loosening this would let one publisher's
+        second offering vouch for its first.
+
+        One list, because the number a page prints and the number a quorum
+        counts are one quantity read twice — and two expressions for it is two
+        chances to disagree, which they took: the card printed every publisher
+        of the code, forks included, under the same word the row beside it used
+        for the keys this operator had chosen."""
+        parties: dict[bytes, bytes] = {}
+        for row in self._package_book.by_source(entry["src"]):
+            if not row["published"] or row["signer"] is None:
+                continue
+            if row["kind"] != entry["kind"] or row["folded"] != entry["folded"]:
+                continue
+            parties.setdefault(row["signer_id"], row["signer"])
+        return list(parties.values())
+
+    def _package_agreement(self, entry: dict) -> tuple[int, int]:
+        """How many keys this operator counts have signed this exact code, and
+        how many they asked to agree.
+
+        Counted over :meth:`_package_parties`, and only over keys this operator
+        chose one at a time: a key they endorsed, or — for the release in front
+        of them — the key they pinned it under. A signature from somebody nobody
+        chose is a party an attacker can mint, which is the whole reason the
+        number means anything.
+
+        The pin is what makes a quorum of **one** mean what the page and the
+        guide both say it means, "install what it finds". Counting endorsements
+        alone left the default asking for a decision nobody is prompted to make:
+        the row read ``0 of 1`` for ever, and an install marked *without asking*
+        never happened. It widens nothing — a quorum only ever withholds, and a
+        core release still has to be signed by a key pinned for automatic
+        install before anything runs unattended (:meth:`may_auto_install`)."""
         subscription = self._subscriptions.for_package(entry["kind"],
                                                        entry["name"])
         needed = subscription["quorum"] if subscription else 1
-        # Same kind and same name, not merely the same bytes: a fork published
-        # under another name is a different package, and the operator who wants
-        # it counted subscribes to it. Loosening this would let one publisher's
-        # second offering vouch for its first.
-        signers = [row["signer"] for row in
-                   self._package_book.by_source(entry["src"])
-                   if row["published"] and row["kind"] == entry["kind"]
-                   and row["folded"] == entry["folded"]]
-        return len(self._publishers.endorsed_among(signers)), needed
+        parties = self._package_parties(entry)
+        counted = set(self._publishers.endorsed_among(parties))
+        # Counted among the parties, never beside them: a record carrying no
+        # source digest attests to nothing, whoever signed it and however
+        # firmly this operator pinned them.
+        signer = entry["signer"]
+        if signer in parties and self._trusts_publisher(signer):
+            counted.add(_core_publisher_id(signer).hex())
+        return len(counted), needed
 
     async def _subscription_pass(self) -> None:
-        """Ask the directory what each subscribed publisher offers now.
+        """Ask the directory what each watched package is offered at now.
 
         This is the half an announcement cannot cover: a release whose announce
         never reached us, or a node we met long after it filed its record.

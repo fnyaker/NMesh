@@ -97,15 +97,17 @@ node.package_entry(record_id_hex)      # one record, as a page reads it
 await node.install_package(record_id_hex)   # fetch + verify + install
 await node.fetch_package(record_id_hex)     # (entry, blob, filename) — the bytes, verified
 node.subscribe_package(record_id_hex, auto=False, quorum=1)
-node.unsubscribe_package(record_id_hex)
+node.unsubscribe_package(ident_hex)    # the record id, or the subscription's own
 
 node.installed_list()                  # apps installed locally
 node.uninstall_app(app_id_hex)         # drops the record + the files → bool
 ```
 
 **Every decision is made in Python**: a record arrives with its `trusted`,
-`attesters`, `agreeing` and `subscription` already worked out. The front end
-only **renders** that view.
+`attesters` (every publisher of this same code), `agreeing`/`needed` (of those,
+the keys this operator chose, and how many the quorum asks for) and
+`subscription` — the one watching this **package**, so every copy of it reads
+back as watched. The front end only **renders** that view.
 
 ## Console API (Bearer/cookie auth)
 

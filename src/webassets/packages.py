@@ -22,7 +22,10 @@ channel nobody can vouch for.
    any button.
 3. **What else agrees.** How many publishers have signed a package carrying the
    same *code* — documentation excluded, so different release notes do not
-   break agreement. This is the number a quorum counts.
+   break agreement. Every publisher of it, which is **not** the quorum's
+   number: that one counts only the keys this operator chose, and it is printed
+   beside the box that spends it. One word over both quantities is how the card
+   came to read "2" above a row reading "0 of 1".
 4. **What you can do.** Download it to open by hand, install it, watch it. In
    that order, because reading before running is the whole argument for showing
    a download button at all.
@@ -80,6 +83,10 @@ CSS = """
 .pkg-quorum{display:flex;align-items:center;gap:var(--s-2);
   font-size:var(--fs-sm);white-space:nowrap}
 .pkg-quorum input{width:5em}
+/* Every line under the controls takes the whole row. "1 of 2" is short enough
+   to sit in the gap beside the last checkbox, where it reads as that
+   checkbox's label rather than as the count it is. */
+.pkg-watch p{flex:1 0 100%;margin:0}
 """
 
 
@@ -96,8 +103,10 @@ JS = r"""
 
 const PACKAGES = {
   // The record last drawn, so the buttons know what they act on without
-  // re-reading the address bar.
+  // re-reading the address bar — and how it was mounted, so a repaint draws
+  // the same card rather than a fresh one with every button back on it.
   current: null,
+  opts: {},
 
   // Every call goes through here, and it **never throws**. A rejected fetch —
   // the console closing a connection, the network going — used to unwind out
@@ -183,7 +192,11 @@ const PACKAGES = {
         : '<span class="muted">not stated here</span>'],
       ["Held by", '<code class="inline">' + esc(shortId(row.node_id)) + "</code>"],
       ["Said", esc(fmtAgo(Date.now() / 1000 - row.ts))],
-      ["Agreeing keys", String(row.attesters)],
+      // Every publisher of this same code, forks under another name excluded.
+      // Not the quorum's number: that one counts only the keys this operator
+      // chose, it lives beside the box that spends it, and calling both of them
+      // "agreeing" is how this card came to read 2 above a row reading 0 of 1.
+      ["Publishers of this code", String(row.attesters)],
     ];
     return '<div class="pkg-card" data-pkg-id="' + esc(row.id) + '">' +
       '<div class="pkg-head">' +
@@ -241,10 +254,15 @@ const PACKAGES = {
     return '<div class="pkg-actions">' + buttons.join("") + "</div>";
   },
 
+  // The toggle, the two settings it governs, and how far this code already
+  // agrees with itself. The state is the node's: `row.subscription` is what it
+  // holds for this *package*, so the box is ticked on whichever copy of it an
+  // operator opens.
   watchHTML(row, opts){
     if(opts.hideWatch) return "";
     const sub = row.subscription || null;
     const quorum = sub ? sub.quorum : 1;
+    const enough = row.agreeing >= row.needed;
     return '<div class="pkg-watch">' +
       '<label class="check"><input type="checkbox" data-pkg-act="watch"' +
         (sub ? " checked" : "") + "><span>Watch for new versions</span></label>" +
@@ -254,11 +272,17 @@ const PACKAGES = {
       '<label class="pkg-quorum"><span>Signing keys that must agree</span>' +
         '<input type="number" min="1" max="8" data-pkg-act="quorum" value="' +
         esc(quorum) + '"' + (sub ? "" : " disabled") + "></label>" +
+      (sub ? '<p class="small' + (enough ? " muted" : "") + '">Keys you chose ' +
+        "that have signed this code: " +
+        esc(row.agreeing + " of " + row.needed) +
+        (enough ? "." : " — an install without asking waits for the rest.") +
+        "</p>" : "") +
       '<p class="muted small">Agreement is over the package’s code with its ' +
       "documentation left out, so two publishers whose release notes differ " +
-      "still agree. One means install whatever this publisher offers; more " +
-      "means hold back until that many publishers you watch have signed the " +
-      "same code.</p></div>";
+      "still agree, and it counts keys you chose one at a time: the key you " +
+      "pinned this release under, and any other you endorsed. One is that key " +
+      "on its own; more holds an install without asking back until that many " +
+      "have signed the same code.</p></div>";
   },
 
   // -- acting on a card ----------------------------------------------------
@@ -266,6 +290,10 @@ const PACKAGES = {
   async mount(container, id, options){
     const element = typeof container === "string" ? $(container) : container;
     if(!element) return;
+    // Kept, because every repaint after this one has to draw the same card:
+    // `repaint` took its own options and no caller had any to give, so one
+    // press on /package grew the button that opens /package.
+    this.opts = options || {};
     setHTML(element, skeletonHTML(3));
     const row = await this.read(id, true);
     if(!row){
@@ -275,17 +303,22 @@ const PACKAGES = {
       return;
     }
     this.current = row;
-    setHTML(element, this.cardHTML(row, options || {}));
-    element.addEventListener("click", (event) => this.onClick(event, element));
-    element.addEventListener("change", (event) => this.onChange(event, element));
+    setHTML(element, this.cardHTML(row, this.opts));
+    // Once per element, like the node view: this runs again on every
+    // hashchange, and a second pair of listeners is one press acting twice.
+    if(!element.dataset.pkgWired){
+      element.dataset.pkgWired = "1";
+      element.addEventListener("click", (event) => this.onClick(event, element));
+      element.addEventListener("change", (event) => this.onChange(event, element));
+    }
   },
 
-  async repaint(element, options){
+  async repaint(element){
     if(!this.current) return;
     const row = await this.read(this.current.id, false);
     if(!row) return;
     this.current = row;
-    setHTML(element, this.cardHTML(row, options || {}));
+    setHTML(element, this.cardHTML(row, this.opts));
   },
 
   async onClick(event, element){
@@ -308,15 +341,23 @@ const PACKAGES = {
     if(!row) return;
     const what = input.dataset.pkgAct;
     if(what === "watch" && !input.checked){
-      await this.ask("/api/packages/subscribe", "POST", {id:row.id, on:false});
+      // The subscription's own id when the node gave us one: it names the
+      // package, and the record this card sits on may not be the copy the row
+      // was filed from. The node takes either name.
+      const sub = row.subscription || null;
+      await this.ask("/api/packages/subscribe", "POST",
+                     {id:sub ? sub.id : row.id, on:false});
       toast("No longer watching " + row.name);
       await this.repaint(element);
       return;
     }
+    // Read defensively: a mount that hides the watch block has neither of
+    // these, and reading `.checked` off nothing throws inside a handler.
     const card = element.querySelector(".pkg-card");
-    const auto = !!(card && card.querySelector('[data-pkg-act="auto"]').checked);
-    const quorum = parseInt(
-      (card && card.querySelector('[data-pkg-act="quorum"]').value) || "1", 10) || 1;
+    const box = card && card.querySelector('[data-pkg-act="auto"]');
+    const field = card && card.querySelector('[data-pkg-act="quorum"]');
+    const auto = !!(box && box.checked);
+    const quorum = parseInt((field && field.value) || "1", 10) || 1;
     const {ok, data} = await this.ask("/api/packages/subscribe", "POST",
                                       {id:row.id, on:true, auto, quorum});
     if(!ok){ setMessage("pkg-status", data.error || "Could not save", true); return; }

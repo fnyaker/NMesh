@@ -1055,6 +1055,53 @@ def test_a_package_can_be_read_before_it_is_run():
     assert actions.index("/download") < actions.index('data-pkg-act="install"')
 
 
+def _package_view_js():
+    """The shared package card, on its own: three pages carry it, and
+    `nodeview` next to it declares a `mount` of the same shape."""
+    return webassets.APP_JS.split("const PACKAGES = {", 1)[1].split(
+        "\nfunction mountPackageSearch", 1)[0]
+
+
+def test_the_card_is_wired_to_its_element_once():
+    """`mount` runs again on every hashchange, and a second pair of listeners
+    means one press acting twice — a second install confirmation, a second
+    subscribe. Same guard as the node view, for the same reason."""
+    body = _package_view_js().split("async mount(container, id, options){", 1)[1]
+    assert "pkgWired" in body.split("\n  },", 1)[0]
+
+
+def test_a_repaint_draws_the_card_the_mount_asked_for():
+    """`repaint` took options of its own and every caller had none to give, so
+    one press on /package grew the button that opens /package — and the box the
+    press had just ticked survived only because the markup happened to differ."""
+    view = _package_view_js()
+    body = view.split("async repaint(element", 1)[1].split("\n  },", 1)[0]
+    assert "this.opts" in body and "options" not in body
+    assert "this.opts = options || {}" in view
+
+
+def test_the_card_says_how_far_the_code_it_watches_agrees():
+    """The number that decides an unattended install belongs beside the box that
+    turns one on — and under its own words. One label over two quantities is how
+    a card reading "2" sat above a row reading "0 of 1"."""
+    view = _package_view_js()
+    assert '["Publishers of this code"' in view
+    assert "Agreeing keys" not in view
+    assert 'row.agreeing + " of " + row.needed' in view
+
+
+def test_the_watching_table_opens_the_record_not_the_subscription():
+    """Both ids are forty hex characters and nothing about either says which it
+    is. The row carried the subscription id, so Open answered "package not
+    found" about a package this very node holds — while Stop, which removes a
+    subscription, is exactly where that id belongs."""
+    row = webassets.APP_JS.split("function watchRowHTML(row){", 1)[1].split(
+        "\nfunction ", 1)[0]
+    assert """data-watch-open="' + esc(pkg.id)""" in row
+    assert """data-watch-open="' + esc(row.id)""" not in row
+    assert """data-watch-drop="' + esc(row.id)""" in row
+
+
 def test_the_node_offers_its_own_publisher_key_to_copy():
     assert 'id="publish-key"' in webassets.INDEX_HTML
     assert 'data.publisher_key' in webassets.APP_JS

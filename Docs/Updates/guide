@@ -147,7 +147,12 @@ Opening a record shows a page of its own (`/package#<id>`):
   the only description anybody has before fetching, so it is shown before any
   button;
 - **what agrees with it** — how many publishers have signed a package carrying
-  the same *code*, documentation excluded;
+  the same *code*, documentation excluded (forks under another name excluded
+  too: another name is another package). Beside the watch toggle, and only once
+  something is watched, the other number: how many of the keys **this operator
+  chose** are among them, out of how many the quorum asks for. Two quantities,
+  two labels — one word over both is how the card came to read `2` above a row
+  reading `0 of 1`;
 - **what you can do** — download it to open by hand, install it, watch it. In
   that order, because reading before running is the whole argument for offering
   a download at all.
@@ -517,24 +522,54 @@ without anybody having subscribed to *them*. It carries two things:
 
 - **Install them without asking** — this subscription may install on its own,
   subject to every gate below;
-- **Signing keys that must agree** — the quorum. Ask for two and an automatic
-  install waits until two **endorsed** keys have signed the same `src`. Ask for
-  one, the default, and it installs what it finds.
+- **Signing keys that must agree** — the quorum. Ask for two and an install
+  without asking waits until two keys this operator chose have signed the same
+  `src`. Ask for one, the default, and the key the release is pinned under is
+  that one key: it installs what it finds.
 
-Counted in *signing keys*, and only over keys this operator endorsed one at a
-time. A second node serving the same bytes is a mirror, and mirrors are free; a
-second signature over the same source is a second party, and that is the one
-thing here an attacker cannot get for nothing. Same argument and now the same
-set of keys as the release quorum next door.
+Counted in *signing keys*, and only over keys chosen one at a time — a key the
+operator **endorsed**, or the **pin** the release in front of them sits under. A
+second node serving the same bytes is a mirror, and mirrors are free; a second
+signature over the same source is a second party, and that is the one thing here
+an attacker cannot get for nothing.
+
+The pin counts because it is the same act an endorsement is, and because it is
+the one this interface actually asks for: counting endorsements alone left the
+default asking for a decision nobody is prompted to make, so a subscription
+marked *install without asking* read `0 of 1` and held for ever
+(`MeshNode._package_agreement`).
+
+That pin is the **publisher pin** — the list that decides what may replace this
+node's code — so an **app** that is to install itself unattended needs its
+author's key in that list as well. No button offers to put it there from an
+app's record, and that is deliberate: a key in that list is a statement about
+node software. Watching an app and pressing **Install** yourself asks for
+nothing of the sort; only the unattended half does.
 
 A quorum only ever **withholds**. It cannot authorise an install the pins would
 refuse — a core release still needs the key that signed it pinned, still has to
 be strictly newer, and still has to verify byte for byte.
 
+**Watch** and **Stop** name one package between them and two ids reach the node:
+the card holds the directory **record** the toggle sits on, the watching table
+holds the **subscription** — which is all it has when this node holds no record
+for the package any more. `unsubscribe_package` takes either. What is *opened*
+is always a record (`row.package.id`): a page that reads records cannot answer
+for a subscription id, and being handed one is how **Open** came to say "package
+not found" about a package this node was holding.
+
 The sweep also asks the directory **by name** what is offered now
 (`_subscription_pass`), which is the half an announcement cannot cover: a
 release whose announce never reached us, or a node we met long after it filed
 its record.
+
+Of everything filed under that name, the record this node acts on and shows is
+picked by what the operator chose first — a key they pinned, then a publication
+over a copy merely held, then the newest (`_best_for_subscription`). **A name is
+not owned**: anybody may file a record under one, so picking the newest alone
+would hand every unattended install, and the key the watching row names, to
+whoever signed a second later. It costs an attacker one signature and stops a
+real update from ever landing.
 
 ## When this node goes looking
 
@@ -730,9 +765,10 @@ Three routes in, and they answer different questions:
   restart. Fast, and exactly as strong as that one key;
 - **a quorum of endorsed publishers** over the same `(version, sha256)` — for
   code from parties none of whom you would hand the machine to alone;
-- **a subscription marked "install without asking"**, once enough watched
-  publishers agree on the same `src`. The same idea as the quorum, over a set
-  the operator built one package at a time rather than one key at a time.
+- **a subscription marked "install without asking"**, once enough of the keys
+  the operator chose agree on the same `src`. The same idea as the quorum, over
+  a set built one package at a time rather than one key at a time — and it only
+  withholds: a core release still goes through the two routes above.
 
 A machine provisioned from *Fleet → Discover & deploy* is handed its operator's
 publishers with `auto` on ([`../Apps/fleet`](../Apps/fleet)) — a headless box has
@@ -799,7 +835,7 @@ count is what bounds it.
 | GET | `/api/packages/<id>/download` | the verified package, as an opaque `tar.gz` |
 | POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
 | POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried in the record's publication proof. **400** for a record from a node that only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
-| POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch **the package** that record names, or stop |
+| POST | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch **the package** that record names, or stop. Stopping also accepts the subscription's own id, which is all the watching table has when no record for it is held here |
 | GET | `/api/keys` | publisher keys held here, offers made from here, offers waiting for an answer |
 | POST | `/api/keys/create` | `{passphrase, label?}` → a fresh publisher key, encrypted under it |
 | POST | `/api/keys/import` | `{path, passphrase, label?}` → adopt an existing key file |
@@ -809,8 +845,10 @@ count is what bounds it.
 | POST | `/api/keys/forget` | `{key_id, confirm:true}` — remove the file from this node |
 
 Every route sits behind the console session, and every decision is made in the
-node: each row arrives with its `trusted`, `attesters`, `agreeing` and
-`subscription`, so the page never re-derives a rule that lives in Python.
+node: each row arrives with its `trusted`, `attesters` (every publisher of this
+code), `agreeing`/`needed` (the keys this operator chose, and the quorum) and
+`subscription` — the one watching **this package**, whichever copy of it the row
+describes — so the page never re-derives a rule that lives in Python.
 
 ## Bounds
 
@@ -842,7 +880,7 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
 | `_PKG_RATE_MAX` | 64 / 10 s | package records one link may push at us |
 | `_PKG_OWN_MAX` | 32 | records this node signs and keeps re-filing |
 | `MAX_SUBSCRIPTIONS` | 64 | packages this node watches |
-| `MAX_QUORUM` | 8 | endorsed signing keys a subscription may require to agree |
+| `MAX_QUORUM` | 8 | chosen signing keys a subscription may require to agree |
 | `_DIR_PUBLISH_MAX` | 24 | nodes one directory publish may reach across every key |
 | `_DIR_REPUBLISH` | 900 s | between directory sweeps |
 | `_DIR_LOOKUP_BUDGET` | 6 s | one directory lookup, whole round; it returns what it has |
@@ -914,6 +952,12 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
   node watches: a subscription is named by the package so two signers of one
   thing are one row, a row filed under a key its own kind and name do not
   produce is dropped, a corrupt file yields nothing, and a quorum is clamped.
+  What a *page* then reads back about it is in
+  [`tests/test_release_mesh.py`](../../tests/test_release_mesh.py)
+  (`TestWatchingAPackage`): every copy of a watched package says it is watched,
+  the row points at a record a page can open, stopping works under either name,
+  a quorum of one is met by the key the release is pinned under, and installing
+  marks the version as seen.
 - [`tests/test_key_share.py`](../../tests/test_key_share.py) — the handover:
   an offer signed by a key the sender does not hold, an offer replayed at a node
   it does not name, an acceptance whose node id does not match the key inside
