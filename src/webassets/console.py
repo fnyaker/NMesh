@@ -2152,7 +2152,11 @@ async function paintNodes(kind){
           : linkRowHTML(group.links[0], kind, false)).join(""), values);
     }
     paintPager(kind, kind + "-pager", () => paintNodes(kind));
-  }catch(_){
+  }catch(error){
+    // A reply from the node we just left is not this node failing: the switch
+    // has already asked for everything again, and painting an error over it
+    // would be the console reporting its own bookkeeping as a fault.
+    if(isStale(error)) return;
     setHTML(body, spanRow(6, errorHTML("Node list unavailable",
       "The console could not read the routing table just now.")));
     body.dataset.shape = "";
@@ -2820,7 +2824,8 @@ async function loadTransportOptions(){
     TRANSPORT_FORM = data.transports || [];
     persisted = data.persisted !== false;
     TRANSPORT_FORM.forEach((entry) => { declared[entry.scheme] = entry.options; });
-  }catch(_){
+  }catch(error){
+    if(isStale(error)) return;
     holder.innerHTML = errorHTML("Transports unavailable", "The node did not answer.");
     return;
   }
@@ -3001,7 +3006,8 @@ async function paintAppList(kind){
       PAGES[kind].query ? "Nothing matches that" : "No local package",
       "Find one under Apps → Find an app, and install it from its page."));
     paintPager(kind, kind + "-pager", () => paintAppList(kind));
-  }catch(_){
+  }catch(error){
+    if(isStale(error)) return;
     body.innerHTML = spanRow(4, errorHTML("App list unavailable",
       "The installed set could not be read just now."));
   }
@@ -3252,7 +3258,11 @@ async function refreshKeys(){
     setHTML("key-offers-in", KEYS.incoming.map(offerInHTML).join(""));
     setHTML("key-offers-out", KEYS.outgoing.map(offerOutHTML).join(""));
     paintKeyPickers();
-  }catch(_){}
+    setMessage("key-status", "");
+  }catch(error){
+    if(isStale(error)) return;
+    setMessage("key-status", "Could not read the keys held here.", true);
+  }
 }
 
 // Two pickers over one list. Rebuilt only when the set of keys changed, so a
@@ -3509,7 +3519,14 @@ async function refreshReleases(){
       : last && last.outcome === "installed"
         ? "Installed " + last.version + " — restart the node to run it."
         : "", blocked);
-  }catch(_){}
+  }catch(error){
+    // Silent used to mean "both tables keep whatever they last held, for
+    // ever, with nothing said" — which is the same failure as the missing
+    // field this function already defends against, arriving by another road.
+    if(isStale(error)) return;
+    setMessage("update-standing",
+               "Could not read what this node can update to.", true);
+  }
 }
 mountPackageSearch({input:"pkg-search", results:"pkg-results", wide:"pkg-wide"});
 
@@ -3654,7 +3671,10 @@ function paintConfig(data){
 }
 async function loadConfig(){
   try{ paintConfig(await CHANNEL.call("config.get")); }
-  catch(_){ setMessage("config-status", "Could not read the configuration.", true); }
+  catch(error){
+    if(isStale(error)) return;
+    setMessage("config-status", "Could not read the configuration.", true);
+  }
 }
 $("config-save").addEventListener("click", (event) => withBusy(event.target, async () => {
   const settings = {};
