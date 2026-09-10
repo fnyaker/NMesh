@@ -285,7 +285,7 @@ class WebConsole:
         self._control_context = control.Context(
             node=node, config_path=config_path, apps=self._apps,
             changes=self._changes, api=lambda: self._api,
-            host=lambda: self._app_host)
+            host=lambda: self._app_host, restart=self.restart)
         self._plane = control.build(self._control_context)
 
         # Sessions: token -> expiry monotonic deadline.
@@ -1504,42 +1504,20 @@ def _make_handler(console: WebConsole):
                 self._json(200, {"code": code})
                 return
             if path == "/api/trust":
-                data = _parse_json(body)
-                cert_hex = (data or {}).get("cert_hex", "")
-                ok = console._call(_wrap(console._node.console_add_root, cert_hex))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/revoke":
                 data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_revoke_member,
-                                         str(data.get("node", "")),
-                                         int(data.get("reason") or 0)))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
+                self._from_plane("trust.add", {"cert": data.get("cert_hex", "")})
                 return
-            if path == "/api/trust/accept-change":
+            if path.startswith("/api/trust/"):
                 data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_accept_change,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/forgive":
-                data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_forgive,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/witness":
-                data = _parse_json(body) or {}
-                call = (console._node.console_remove_witness
-                        if data.get("remove") else console._node.console_add_witness)
-                ok = console._call(_wrap(call, str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/untrust":
-                data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_remove_root,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
+                # One name per route, and the plane spells the middle one with
+                # an underscore like every other operation.
+                action = path.rsplit("/", 1)[1].replace("-", "_")
+                params = {"node": data.get("node", "")}
+                if action == "revoke":
+                    params["reason"] = _number(data.get("reason"))
+                if action == "witness":
+                    params["remove"] = bool(data.get("remove"))
+                self._from_plane("trust." + action, params)
                 return
             if path == "/api/ticket":
                 self._handle_ticket(_parse_json(body))
@@ -1577,11 +1555,7 @@ def _make_handler(console: WebConsole):
                 self._json(200, result)
                 return
             if path == "/api/reachability/probe":
-                try:
-                    sent = console._call(console._node.probe_reachability())
-                    self._json(200, {"ok": True, "sent": sent})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("network.probe")
                 return
             if path == "/api/ping":
                 self._from_plane("node.ping")
@@ -1603,26 +1577,13 @@ def _make_handler(console: WebConsole):
                 return
             if path == "/api/addressing/balance":
                 data = _parse_json(body) or {}
-                try:
-                    value = console._node.set_transport_balance(data.get("value"))
-                except ValueError as exc:
-                    self._json(400, {"error": str(exc)[:200]})
-                    return
-                console._persist_setting("transport_balance", value)
-                self._json(200, {"ok": True, "value": value,
-                                 "preference": console._node.transport_preference()})
+                self._from_plane("network.balance",
+                                 {"value": data.get("value")})
                 return
             if path == "/api/addressing/dynamic":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                try:
-                    console._node.set_dynamic_address(data["enabled"])
-                    console._persist_setting("dynamic_address", data["enabled"])
-                    self._json(200, {"ok": True, "enabled": data["enabled"]})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.dynamic",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/mlo":
                 # Two settings and two shapes on purpose: "always on" is a
@@ -1634,51 +1595,16 @@ def _make_handler(console: WebConsole):
                 if not isinstance(data, dict):
                     self._json(400, {"error": "object required"})
                     return
-                try:
-                    if isinstance(data.get("always"), bool):
-                        console._node.set_mlo_always(data["always"])
-                        console._persist_setting("mlo_always", data["always"])
-                    changed = {}
-                    if "skew_ms" in data:
-                        changed["skew_ms"] = int(data["skew_ms"])
-                    if "drop_percent" in data:
-                        changed["drop_percent"] = int(data["drop_percent"])
-                    if changed:
-                        applied = console._node.set_mlo_settings(**changed)
-                        for name, value in applied.items():
-                            console._persist_setting(f"mlo_{name}", value)
-                    # The four cadence bounds. Partial on purpose, like the
-                    # transports' own settings: one field typed wrong must not
-                    # throw away the three typed with it.
-                    bounds = {name: int(data[f"keepalive_{name}"])
-                              for name in ("fast_min", "fast_max",
-                                           "slow_min", "slow_max")
-                              if f"keepalive_{name}" in data}
-                    if bounds:
-                        applied = console._node.set_keepalive_bounds(
-                            **{f"{name}_ms": value
-                               for name, value in bounds.items()})
-                        for name, value in zip(("fast_min", "fast_max",
-                                                "slow_min", "slow_max"),
-                                               applied.as_tuple()):
-                            console._persist_setting(f"keepalive_{name}_ms", value)
-                    self._json(200, {"ok": True, "mlo": console._node.mlo_status()})
-                except (TypeError, ValueError) as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                self._from_plane("network.mlo", {
+                    name: data[name] for name in
+                    ("always", "skew_ms", "drop_percent", "keepalive_fast_min",
+                     "keepalive_fast_max", "keepalive_slow_min",
+                     "keepalive_slow_max") if name in data})
                 return
             if path == "/api/lan/discovery":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                try:
-                    if data["enabled"]:
-                        console._call(console._node.start_lan_discovery())
-                    else:
-                        console._call(console._node.stop_lan_discovery())
-                    self._json(200, {"ok": True, "enabled": data["enabled"]})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.discovery",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/relay/invite":
                 try:
@@ -1742,81 +1668,46 @@ def _make_handler(console: WebConsole):
                     self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return
             if path == "/api/punch":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                enabled = console._call(
-                    _wrap(console._node.console_set_punch_enabled, data["enabled"]))
-                self._json(200, {"ok": True, "enabled": enabled})
+                data = _parse_json(body) or {}
+                self._from_plane("network.punch",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/punch/keepalive":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                enabled = console._call(
-                    _wrap(console._node.console_set_punch_keepalive, data["enabled"]))
-                self._json(200, {"ok": True, "keepalive": enabled})
+                data = _parse_json(body) or {}
+                self._from_plane("network.punch_keepalive",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/punch/open":
                 data = _parse_json(body) or {}
-                host = data.get("host")
-                port = data.get("port")
-                # allow "ip:port" in a single field for convenience
+                host, port = data.get("host"), data.get("port")
+                # "ip:port" in a single field is accepted here, where the form
+                # that offers it lives — the operation takes the two it needs.
                 if port is None and isinstance(data.get("endpoint"), str):
                     from .ip_utils import split_host_port
-                    hp = split_host_port(data["endpoint"].strip())
-                    if hp is not None:
-                        host = hp[0]
-                        try:
-                            port = int(hp[1])
-                        except ValueError:
-                            port = None
-                try:
-                    result = console._call(
-                        _wrap(console._node.console_open_hole, host, port))
-                    self._json(200, {"ok": True, **result})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                    pair = split_host_port(data["endpoint"].strip())
+                    if pair is not None:
+                        host, port = pair[0], _number(pair[1])
+                self._from_plane("network.punch_open",
+                                 {"host": host if host is not None else "",
+                                  "port": port if port is not None else 0})
                 return
             if path == "/api/udp":
-                data = _parse_json(body)
-                action = (data or {}).get("action")
-                try:
-                    if action == "start":
-                        console._call(
-                            console._node.console_start_udp((data or {}).get("port")))
-                    elif action == "stop":
-                        console._call(console._node.console_stop_udp())
-                    else:
-                        self._json(400, {"error": "action must be start or stop"})
-                        return
-                    self._json(200, {"ok": True})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                params = {"action": data.get("action") or ""}
+                if data.get("port") is not None:
+                    params["port"] = data["port"]
+                self._from_plane("network.udp", params)
                 return
             if path == "/api/listen":
-                data = _parse_json(body)
-                try:
-                    console._call(
-                        console._node.console_add_listen((data or {}).get("uri", "")))
-                    self._json(200, {"ok": True})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.listen", {"uri": data.get("uri", "")})
                 return
             if path == "/api/unlisten":
-                data = _parse_json(body)
-                try:
-                    ok = console._call(
-                        console._node.console_remove_listen((data or {}).get("uri", "")))
-                    self._json(200 if ok else 404, {"ok": bool(ok)})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.unlisten", {"uri": data.get("uri", "")})
                 return
             if path == "/api/net/recheck":
-                ok = console._call(_wrap(console._node.console_recheck_net))
-                self._json(200, {"ok": bool(ok)})
+                self._from_plane("network.recheck")
                 return
             if path == "/api/app-call":
                 data = _parse_json(body) or {}
@@ -1848,7 +1739,9 @@ def _make_handler(console: WebConsole):
                 self._handle_update_apply(_parse_json(body))
                 return
             if path == "/api/restart":
-                self._handle_restart(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("node.restart",
+                                 {"confirm": data.get("confirm") is True})
                 return
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
@@ -2245,32 +2138,6 @@ def _make_handler(console: WebConsole):
                 self._json(500, {"error": f"release failed: {type(exc).__name__}"})
                 return
             self._json(404, {"error": "not found"})
-
-        def _handle_restart(self, data) -> None:
-            """Restart this node, if something will bring it back.
-
-            The gate is not the point of interest — the answer is. A console
-            that says "restarting" and leaves the operator with a stopped node
-            is worse than one that refuses, so the refusal is explicit and names
-            the reason it came back with.
-
-            Under a remote context this arrives at the *managed* node's console,
-            which is exactly right: the operator asked to restart that machine,
-            and it is that machine's service manager that answers for it."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            if data.get("confirm") is not True:
-                self._json(400, {"error": "confirmation required"})
-                return
-            can, why = updater.restart_possible()
-            if not can:
-                self._json(409, {
-                    "ok": False, "restarting": False,
-                    "error": "nothing would start this node again — " + why})
-                return
-            self._json(200, {"ok": True, "restarting": console.restart()})
 
         def _handle_update_apply(self, data) -> None:
             """Install a release — only ever the one the operator confirmed.

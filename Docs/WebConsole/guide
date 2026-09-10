@@ -553,19 +553,19 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) — `node.forget` |
 | POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses — `node.retry`, **local only**: one dial per address outlasts what the relay carries |
-| POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
-| POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
-| POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
+| POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node — `network.dynamic` |
+| POST    | `/api/addressing/balance` | `{value}` — 0..100, how priority and latency share the choice; returns the resulting order — `network.balance` |
+| POST    | `/api/mlo` | `network.mlo` — `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything, whether it may be driven from a remote console) — `apps.catalogue`, filtered by who is asking |
 | POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
 | POST    | `/api/invite`    | generates an invitation code                   |
 | POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
 | POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
 | GET     | `/api/rootcert`  | our root certificate (hex) to share — `node.rootcert` |
-| POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
-| POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
-| POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
-| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node |
+| POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert — `trust.add`, which checks it *is* hex before the node parses it |
+| POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh — `trust.revoke` |
+| POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id — `trust.untrust` |
+| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node — `trust.forgive` |
 | POST    | `/api/trust/accept-change` | `{node}` — "that was me": clears one entry of *Noticed, not judged* and the history behind it (the peer's profile, an issuer's admission rate, and the rule's charge) |
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
@@ -617,7 +617,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/keys/accept` / `refuse` | `{offer_id, …}` — accept (a passphrase of your own, `confirm:true`) and the secret is sealed to a fresh KEM key the acceptance carries, or refuse and it lapses |
 | GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
 | POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
-| POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible |
+| POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible — `node.restart`, and under a remote context it is the *managed* node that restarts |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
 | POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save` |
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |

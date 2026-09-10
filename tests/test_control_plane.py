@@ -580,6 +580,144 @@ class TestAppsOnTheChannel:
         assert remotes(FleetBridge) == {"relation"}
 
 
+class TestTrustAndNetwork:
+    """The two modules an operator uses on a machine that is not in front of
+    them: what this node vouches for, and how it is reachable."""
+
+    class _Node:
+        pseudo = ""
+
+        class _Id:
+            raw = bytes(range(20))
+
+        id = _Id()
+
+        def __init__(self):
+            self.trusted = []
+            self.punch = True
+            self.dynamic = None
+            self.balance = None
+            self.mlo = {}
+
+        def console_add_root(self, cert_hex):
+            # What the real one does with anything that is not a certificate.
+            if len(cert_hex) < 100:
+                return False
+            self.trusted.append(cert_hex)
+            return True
+
+        def console_remove_root(self, node):
+            return False
+
+        def console_set_punch_enabled(self, enabled):
+            self.punch = enabled
+            return enabled
+
+        def set_dynamic_address(self, enabled):
+            self.dynamic = enabled
+
+        def set_transport_balance(self, value):
+            if not 0 <= int(value) <= 100:
+                raise ValueError("balance must be between 0 and 100")
+            self.balance = int(value)
+            return self.balance
+
+        def transport_preference(self):
+            return [{"scheme": "tcp"}]
+
+        def set_mlo_always(self, enabled):
+            self.mlo["always"] = enabled
+            return enabled
+
+        def set_mlo_settings(self, **fields):
+            self.mlo.update(fields)
+            return dict(fields)
+
+        def mlo_status(self):
+            return dict(self.mlo)
+
+        async def console_remove_listen(self, uri):
+            return False
+
+    def _channel(self, node, origin=Origin.LOCAL):
+        context = control.Context(node=node, loop=asyncio.get_event_loop())
+        return control.LocalChannel(control.build(context), origin)
+
+    async def test_a_certificate_is_hex_before_the_node_is_asked(self):
+        node = self._Node()
+        chan = self._channel(node)
+        for bad in ("deadbeefz", "abc", 42, None, "de ad be ef"):
+            reply = await asyncio.to_thread(chan.call, "trust.add", {"cert": bad})
+            assert reply.ok is False and reply.code == "bad_request", bad
+        assert node.trusted == []
+        # And one the node itself refuses is the caller's mistake, not ours.
+        short = await asyncio.to_thread(chan.call, "trust.add", {"cert": "dead" * 4})
+        assert short.ok is False and short.code == "bad_request"
+        good = await asyncio.to_thread(chan.call, "trust.add", {"cert": "ab" * 200})
+        assert good.ok is True and node.trusted
+
+    async def test_an_anchor_this_node_does_not_hold_is_said_so(self):
+        reply = await asyncio.to_thread(
+            self._channel(self._Node()).call, "trust.untrust", {"node": "ab" * 20})
+        assert reply.ok is False and reply.code == "bad_request"
+
+    async def test_a_toggle_takes_a_boolean_and_nothing_else(self):
+        node = self._Node()
+        chan = self._channel(node)
+        for bad in ("yes", 1, "true", None, ""):
+            reply = await asyncio.to_thread(chan.call, "network.punch",
+                                            {"enabled": bad})
+            assert reply.ok is False and reply.code == "bad_request", bad
+        assert node.punch is True
+        assert (await asyncio.to_thread(chan.call, "network.punch",
+                                        {"enabled": False})).ok
+        assert node.punch is False
+
+    async def test_the_node_decides_what_a_value_may_be(self):
+        node = self._Node()
+        chan = self._channel(node)
+        refused = await asyncio.to_thread(chan.call, "network.balance",
+                                          {"value": 500})
+        assert refused.ok is False and "between 0 and 100" in refused.error
+        assert node.balance is None
+        ok = await asyncio.to_thread(chan.call, "network.balance", {"value": 40})
+        assert ok.result["value"] == 40 and ok.result["preference"]
+
+    async def test_a_partial_update_applies_what_it_was_given(self):
+        node = self._Node()
+        chan = self._channel(node)
+        reply = await asyncio.to_thread(chan.call, "network.mlo",
+                                        {"skew_ms": 250})
+        assert reply.ok is True
+        # One field typed must not rewrite the six that were not.
+        assert node.mlo == {"skew_ms": 250}
+        assert "always" not in node.mlo
+
+    async def test_starting_a_listener_with_no_port_is_refused_not_guessed(self):
+        chan = self._channel(self._Node())
+        reply = await asyncio.to_thread(chan.call, "network.udp",
+                                        {"action": "start"})
+        assert reply.ok is False and reply.code == "bad_request"
+
+    async def test_what_this_node_does_not_listen_on_is_not_found(self):
+        reply = await asyncio.to_thread(
+            self._channel(self._Node()).call, "network.unlisten",
+            {"uri": "tcp://127.0.0.1:9"})
+        assert reply.ok is False and reply.code == "not_found"
+
+    async def test_managing_a_node_reaches_all_of_this(self):
+        """The point of the two modules: an operator manages a machine they are
+        not in front of. Everything here is reachable from there — what is not
+        is named in the plane, and it is never one of these."""
+        plane = control.build(control.Context(node=self._Node()))
+        remote = {module["module"]: {row["name"] for row in module["operations"]}
+                  for module in plane.catalogue(Origin.REMOTE)}
+        assert remote["trust"] == {"add", "untrust", "revoke", "forgive",
+                                   "accept_change", "witness"}
+        assert "punch_open" in remote["network"] and "mlo" in remote["network"]
+        assert "restart" in remote["node"]
+
+
 # --------------------------------------------------------------------------
 # The console's door onto it.
 # --------------------------------------------------------------------------

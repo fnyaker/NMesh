@@ -41,7 +41,10 @@ API's ceiling, because then nothing downstream has an opinion to defer to.
 
 Every kind is a refusal, not a repair: a value that is not what was declared is
 refused with a sentence naming the field, never trimmed into something that
-looks valid. Truncating a path gives you a different file and tells nobody.
+looks valid. Truncating a path gives you a different file and tells nobody, and
+reading the string "no" as a yes would move links and bind sockets on the
+strength of a guess. ``text`` and ``flag`` are therefore narrower here than in
+the app API, whose callers are HTML forms where everything is a string.
 """
 from __future__ import annotations
 
@@ -165,6 +168,11 @@ def coerce(field: dict, raw):
             raise ControlError("bad_request", "expected a whole number") from None
         # Clamped, because whatever this bounds already decided the ceiling.
         return max(0, min(value, int(field["limit"])))
+    if kind == "flag" and raw is not None and not isinstance(raw, bool):
+        # Same reason as text below: a form sends "on", a frame sends `true`.
+        # A toggle that accepted the string "no" as a yes would be a repair
+        # with consequences — this one binds sockets and moves links.
+        raise ControlError("bad_request", "expected true or false")
     if kind == "text" and raw is not None and not isinstance(raw, str):
         # The app API coerces a number into its digits, and it is right to: its
         # callers are HTML forms, where every field is a string on the wire. A
