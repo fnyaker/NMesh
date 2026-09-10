@@ -214,7 +214,9 @@ What each of the pages used to solve on its own:
   number registers itself instead of waiting to be remembered;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
-  and `CTX_BAR`, the strip that says so on all three pages;
+  and `CTX_BAR`, the strip that says so on all three pages. `CONTEXT.trouble()`
+  marks a node that has gone quiet and `CONTEXT.lost()` hands the context back
+  when it is gone for good;
 - `OPEN` / `openLinked` — how a link into another app opens (a window, a tab, or
   by screen size), also per browser;
 - `ROUTER` — `#section/subsection`: linkable, bookmarkable, **Back** works;
@@ -222,6 +224,36 @@ What each of the pages used to solve on its own:
 - `MENU` — the shell's dropdowns; `MENU.onShow[id]` lets a page paint its
   contents when it is looked at, not on every poll;
 - `mountShell()` — wires all of that once per page.
+
+## A switch of node, and who resets what
+
+> A shared view drops what it holds **itself**. A page resets only what is its
+> own.
+
+This was the bug behind "I had to reload the page". Only the console page ever
+subscribed to a context change, so `/chat`, `/fleet` and `/node` kept painting
+the machine you had just left — and the console's own reset was a hand-written
+list of caches, which is a list somebody has to remember to extend.
+
+The order is now fixed and the same everywhere, inside `CONTEXT.set`:
+
+1. every subscriber drops what it holds — the page's caches, `CHANNEL`'s
+   catalogue (registered in `channel.JS`), the node view's card and apps
+   (registered in `nodeview.JS`);
+2. **then** the stream restarts (`EVENTS.start()` — a socket here, a pull over
+   there) and every registered view repaints at once (`REFRESH.run()`).
+
+Doing the repaint before step 1 would paint from what was about to be thrown
+away; leaving it to each view's next tick is what left the previous machine's
+numbers on screen with auto-refresh off.
+
+Two lists on the console page, and they are not the same list.
+`onRoute` is what a section reads **when you arrive on it** — a configuration
+file that can be edited by hand, a form that must not move under the pointer.
+`refreshLive` is what it re-reads **when the node says something moved**:
+everything whose truth is the node's rather than the operator's draft. The name
+changed from `/chat` used to sit unnoticed on the page that edits it until a
+reload.
 
 ## The channel (`channel.JS`)
 
@@ -236,7 +268,13 @@ What each of the pages used to solve on its own:
   answer is not drawn, rather than drawn and refused on the press;
 - `CHANGES` — the change topics, *pulled*, when there is no stream to listen to:
   driving another node, the relay carries one bounded call and its answer, so
-  the topics arrive on a cadence and land in the same handlers `EVENTS` feeds.
+  the topics arrive on a cadence and land in the same handlers `EVENTS` feeds;
+- `CHANNEL.judge` — what a refusal from *over there* means for being there at
+  all. A session that node dropped (`unauthorized`), or no session left to it
+  (`conflict`), ends the context immediately; silence (`unavailable`) is said in
+  the strip and ends it after three in a row. A page driving a node that has
+  gone answers nothing and looks alive, which is the other half of "I had to
+  reload".
 
 Three rules a caller can rely on, and should not re-implement: a refusal carries
 a **code** from a closed set (so "that node will not do this" and "that node did

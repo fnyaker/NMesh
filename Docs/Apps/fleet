@@ -168,6 +168,13 @@ keeps about **itself** rather than a rule about the shape of a URL. An operation
 that does not say so is refused there, with a code the page can act on, and
 nothing new becomes reachable by being added.
 
+The apps are on the same channel, with the same rule: an operator managing this
+node reaches an app operation only if the app declared that one as reachable
+from a distance (`remote=True`). Chat declares none, and fleet declares only
+`relation` — a read of this node's ledger. That closed a gap the denylist could
+not: `/api/chat/*` was refused, but the *app call* route was not, so chat's
+declared operations were reachable through it.
+
 Beside it, the routes that have not moved onto the plane yet are still relayed
 by path, and the denylist is what governs those:
 

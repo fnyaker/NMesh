@@ -1,10 +1,14 @@
 """
 What a control module is given, and deliberately nothing else.
 
-A module needs four things: the node, a way to run something on the node's
-event loop from whatever thread it is on, the configuration file this node was
-started from (if any), and the book of what has moved. It is handed exactly
-those.
+A module needs the node, a way to run something on the node's event loop from
+whatever thread it is on, the configuration file this node was started from (if
+any), the book of what has moved, and — for the module that speaks for the apps
+— the app surface and the host that starts and stops them. It is handed exactly
+those, each as a **callable** where the thing can come and go: an app enabled a
+second ago has to appear, and one stopped a second ago has to stop appearing,
+so a module that held a reference would be answering about a world that no
+longer exists.
 
 What it is **not** handed is the console, and that is the whole design. An
 operation that could see which channel carried its request would sooner or
@@ -41,12 +45,14 @@ class Context:
     """
 
     def __init__(self, *, node, loop=None, config_path=None, apps=None,
-                 changes=None) -> None:
+                 changes=None, api=None, host=None) -> None:
         self.node = node
         self._loop = loop
         self.config_path = config_path or ""
         self._apps = apps
         self.changes = changes
+        self._api = api
+        self._host = host
 
     def bind_loop(self, loop) -> None:
         """Point the bridge at the loop the node is actually running on.
@@ -99,6 +105,24 @@ class Context:
         except (NotRunning, concurrent.futures.TimeoutError,
                 asyncio.TimeoutError):
             raise ControlError("unavailable", "the node did not answer") from None
+
+    def api(self):
+        """The app API surface as it is *right now*, or ``None``."""
+        if self._api is None:
+            return None
+        try:
+            return self._api()
+        except Exception:
+            return None
+
+    def host(self):
+        """Whatever starts and stops the built-in apps, or ``None``."""
+        if self._host is None:
+            return None
+        try:
+            return self._host()
+        except Exception:
+            return None
 
     @staticmethod
     def _drop(coro) -> None:

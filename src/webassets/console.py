@@ -1272,6 +1272,19 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
+// What the section on screen re-reads when the node says something moved,
+// rather than only when you arrive on it. Its own list, and deliberately not
+// the one above: a configuration file can be edited by hand and is read on
+// entry, and a form repainted under the pointer throws away what was being
+// typed. Everything here is the node's own truth, so standing still until the
+// next visit was simply wrong — the name changed from chat did not appear on
+// the page that edits it until a reload.
+function refreshLive(){
+  const section = ROUTER.section, sub = ROUTER.sub;
+  if(section === "network" && sub === "peers") refreshPeers();
+  if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
+  if(section === "settings" && sub === "identity") refreshPseudo();
+}
 // One reader of `/api/state`, two reasons to call it.
 //
 //   * the **interval**, for the numbers that never stop moving — throughput,
@@ -1300,10 +1313,7 @@ async function tick(sample){
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
-    if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
-    if(ROUTER.section === "settings" && ROUTER.sub === "updates"){
-      refreshReleases(); refreshKeys();
-    }
+    refreshLive();
   }catch(error){
     if(!isStale(error)) railState("danger", "Console unreachable");
   }finally{ if(TICKING === epoch) TICKING = false; }
@@ -2930,11 +2940,13 @@ $("builtin-apps").addEventListener("click", async (event) => {
   }
   await withBusy(button, async () => {
     try{
-      const {ok, data} = await apiJson("/api/apps/" + action, "POST", {id});
-      if(ok && data.ok !== false){
+      const {ok, error, data} = await CHANNEL.ask("apps.set", {app:id, action});
+      if(ok){
         toast(id + " " + action + "d");
+        // The answer carries the list: asking a second question could come
+        // back disagreeing with the first.
         if(data.apps && STATE) STATE.apps = data.apps;
-      }else toast(data.error || (action + " failed"), "danger");
+      }else toast(error || (action + " failed"), "danger");
     }catch(_){ toast(action + " failed", "danger"); }
     finally{ if(STATE) paintApps(STATE); }
   });
@@ -4015,9 +4027,6 @@ CONTEXT.subscribe(() => {
   RATE_NOW = {inbound:0, outbound:0};
   MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
-  // What a node can offer is that node's answer, and the buttons drawn from it
-  // are the ones an operator is about to press.
-  NODEVIEW.apps = {};
   stopTracePolling();
   // A camera is not something to leave running behind a hidden panel.
   stopScan();
@@ -4031,11 +4040,11 @@ CONTEXT.subscribe(() => {
   // A node card describes a peer of the machine we just left.
   if($("node-dialog").open) $("node-dialog").close();
   $("ctx-node").value = CONTEXT.node;
-  // The stream belongs to the console serving this page, so driving another
-  // node closes it and coming back opens it again. `start` knows which of the
-  // two this is; the page only has to tell it that the answer moved.
-  EVENTS.start();
-  tick();
+  // The stream, the repaint and what the shared views hold are not this page's
+  // to remember any more: `CONTEXT.set` restarts the one and runs the other
+  // once everybody has dropped what they held, and each shared view drops its
+  // own (`ui.js`, `channel.js`, `nodeview.js`). What is left here is this
+  // page's: the section on screen, and who we could switch to next.
   onRoute(ROUTER.section, ROUTER.sub);
   loadTargets();
 });

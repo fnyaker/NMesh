@@ -258,7 +258,12 @@ tests/
 │     node). Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
-│     came from, and the addresses start folded away
+│     came from, and the addresses start folded away. And the wiring a switch of
+│     node depends on: each shared view drops what it holds *itself* (so a page
+│     that never heard of the context is still reset), the stream and the
+│     repaint restart once for every page after everybody has dropped, and a
+│     managed node that throws us out — or goes quiet three times running —
+│     hands the context back instead of leaving a page that answers nothing
 ├── test_transport_options.py                          — configuring a transport
 │     without knowing what a transport is: coercion and bounds for every kind
 │     (bool/int/float/text/choice/multi), partial application (one bad field does
@@ -271,6 +276,11 @@ tests/
 │     inferred from a single probe, a bounded history, per-address status (in use
 │     beats the log, "never tried" ≠ "broken"), a log bounded on both axes, and a
 │     transport that raises or returns nonsense not breaking the snapshot
+├── tests/integration/test_fleet.py (control frames)    — the same frame a page
+│     sends to its own console, crossing a **real mesh** to another node's real
+│     plane: answered by the node it was addressed to, refused there when that
+│     node keeps the operation to itself, and answered rather than dropped when
+│     what arrives is not a frame at all
 ├── test_control_plane.py                              — the management plane: an
 │     operation nobody declared does not exist (even when the method is there),
 │     an undeclared argument is refused, a frame that is not one is answered

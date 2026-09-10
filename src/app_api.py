@@ -41,6 +41,11 @@ node is still refused when the request arrives through here; the ledger is the
 authority, not the caller. What this adds is one door instead of five, with the
 lock in one place.
 
+**And no new reach.** An operation says whether it may be driven from another
+operator's console (``remote=True``), and the default is no. The flag is
+declared here and enforced by the control plane, which is the layer that knows
+where a call came from — an app must not have to ask.
+
 Parameters are deliberately a short, closed list. A generic type system was the
 other option and it would have been the wrong one: the values that actually
 cross this boundary are node identities, short strings, flags, counts and
@@ -82,19 +87,29 @@ def param(name: str, kind: str, *, required: bool = True, default=None,
             "default": default, "help": help}
 
 
-def operation(name: str, summary: str, params=(), *, changes: bool = False) -> dict:
+def operation(name: str, summary: str, params=(), *, changes: bool = False,
+              remote: bool = False) -> dict:
     """Declare one operation.
 
     ``changes`` marks an operation that alters state. It is not a permission —
     the app still decides — but it lets a caller present a confirmation, and it
-    keeps read-only calls distinguishable from the rest at a glance."""
+    keeps read-only calls distinguishable from the rest at a glance.
+
+    ``remote`` says an operator at **another** node's console may ask for this
+    one — the app's own answer to "may I be driven from a distance?", declared
+    beside the operation rather than guessed at by whoever routes the call. It
+    defaults to no, and the two built-in apps take that default deliberately:
+    somebody else's conversations were never part of managing their machine,
+    and a node one operator manages is not a way to reach the nodes *it*
+    manages. The flag is data here; the enforcement is one place, in the
+    control plane that knows who is asking (`src/control/modules/apps.py`)."""
     if not _NAME_RE.match(name):
         raise AppAPIError(f"bad operation name {name!r}")
     fields = list(params)
     if len(fields) > MAX_ARGS:
         raise AppAPIError("too many parameters")
     return {"name": name, "summary": summary, "params": fields,
-            "changes": bool(changes)}
+            "changes": bool(changes), "remote": bool(remote)}
 
 
 def coerce(field: dict, raw):

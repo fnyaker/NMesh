@@ -187,9 +187,30 @@ const NODEVIEW = {
     return CHANNEL.call(name, params, {local:this.here});
   },
 
+  // Everything this view is holding, dropped — and picked up again for
+  // whatever is still on screen. (`forget` further down is a different verb:
+  // it drops a *node* from the routing table.)
+  reset(){
+    this.apps = {};
+    const held = this.current;
+    this.current = null;
+    if(this.reread){ clearTimeout(this.reread); this.reread = null; }
+    this.lastRead = 0;
+    this.deep = false;
+    const element = held && held.element;
+    const dialog = element && element.closest && element.closest("dialog");
+    // A card inside a dialog nobody has open is not on screen, and re-reading
+    // it would be a call to the new machine for a panel nobody is looking at.
+    const shown = element && element.isConnected && !(dialog && !dialog.open);
+    if(shown) this.mount(element, held.id, held.options).catch(() => {});
+  },
+
   async catalogue(){
     try{
-      const {data} = await this.ask("/api/app-api");
+      // What the apps on the node being driven offer *this* caller: an app
+      // that is not running, or one whose author did not let an operation be
+      // driven from a distance, is simply not in the answer.
+      const data = await this.op("apps.catalogue");
       const out = {};
       (data.apps || []).forEach((entry) => { out[entry.app] = entry.operations; });
       this.apps = out;
@@ -207,8 +228,7 @@ const NODEVIEW = {
   },
 
   async call(app, op, args){
-    const {ok, data} = await this.ask("/api/app-call", "POST", {app, op, args});
-    if(!ok || !data.ok) throw new Error((data && data.error) || "refused");
+    const data = await this.op("apps.call", {app, op, args: args || {}});
     return data.result || {};
   },
 
@@ -1030,6 +1050,15 @@ const NODEVIEW = {
     }
   },
 };
+
+// This view is mounted by four pages, so it drops what it holds *itself* when
+// the node being driven changes — the alternative was four pages each
+// remembering to, and three of them did not: a card opened from chat kept
+// describing the machine you had just left until the page was reloaded.
+//
+// And it comes back rather than going blank: what is on screen is a question
+// ("tell me about this node"), and the answer now comes from another machine.
+CONTEXT.subscribe(() => NODEVIEW.reset());
 
 // A link that came up is the thing this view is about, so it does not wait for
 // a timer. The stream's frame already bounds how often that can happen, and a

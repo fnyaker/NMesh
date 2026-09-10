@@ -15,6 +15,7 @@ when pressed.
 from __future__ import annotations
 
 from ..plane import ControlPlane
+from .apps import AppsModule
 from .core import ControlModule
 from .node import NodeModule
 from .pseudo import PseudoModule
@@ -23,7 +24,7 @@ from .trace import TraceModule
 
 # The order is the order a catalogue is read in, and nothing else depends on it.
 BUILT_IN = (NodeModule, ConfigModule, TransportsModule, TraceModule,
-            PseudoModule)
+            PseudoModule, AppsModule)
 
 
 def install(plane: ControlPlane, context) -> ControlPlane:

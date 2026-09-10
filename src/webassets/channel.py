@@ -59,6 +59,35 @@ const CHANNEL = {
   // node reads it, so a counter is enough.
   seq: 0,
 
+  // Consecutive answers from the node being managed that never arrived. A
+  // single one is a mesh hop having a bad moment; a run of them is a machine
+  // that has gone, and a page that keeps asking it forever looks alive and
+  // shows nothing — which is what left people reloading the console by hand.
+  MISSES: 3,
+  misses: 0,
+
+  // What a refusal from *over there* means for the context we are in.
+  //   unauthorized — that node dropped our session; nothing here will work
+  //   conflict     — there is no session to that node any more (or no fleet
+  //                  app to carry one), which is the same dead end
+  //   unavailable  — it did not answer *this time*; said in the strip, and
+  //                  handed back only after `MISSES` in a row
+  judge(reply){
+    if(!CONTEXT.node) return;
+    if(reply.ok){ this.misses = 0; CONTEXT.trouble(false); return; }
+    if(reply.code === "unauthorized" || reply.code === "conflict"){
+      this.misses = 0;
+      CONTEXT.lost(reply.error || "");
+      return;
+    }
+    if(reply.code !== "unavailable"){ CONTEXT.trouble(false); return; }
+    this.misses += 1;
+    if(this.misses >= this.MISSES){
+      this.misses = 0;
+      CONTEXT.lost(reply.error || "");
+    }else CONTEXT.trouble(true, reply.error || "");
+  },
+
   // `options.local` forces one call to this node whatever is being driven. A
   // view mounted inside a local app needs it: "what is my link to this person"
   // is *this* node's question, and answering it from the machine being managed
@@ -86,6 +115,7 @@ const CHANNEL = {
     // A reply belongs to the node that was being driven when it was asked for,
     // and must not paint over the one that replaced it.
     if(!here && CONTEXT.epoch !== at) throw new StaleContext();
+    if(!here) this.judge(reply);
     return reply;
   },
 
@@ -118,6 +148,11 @@ const CHANNEL = {
   catalogue: null,
   catalogueAt: -1,
 
+  // What a node offers is that node's answer. Registered here rather than
+  // reset by whoever switches, so the module that holds it is the module that
+  // drops it.
+  forget(){ this.catalogue = null; this.catalogueAt = -1; this.misses = 0; },
+
   async operations(){
     if(this.catalogue && this.catalogueAt === CONTEXT.epoch) return this.catalogue;
     try{
@@ -137,6 +172,8 @@ const CHANNEL = {
     return (this.catalogue[module] || []).some((entry) => entry.name === name);
   },
 };
+
+CONTEXT.subscribe(() => CHANNEL.forget());
 
 // ---- change topics, when there is no stream to listen to -------------------
 // `EVENTS` holds a `text/event-stream` open, which only the console serving the

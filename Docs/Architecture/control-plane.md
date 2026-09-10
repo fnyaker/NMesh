@@ -252,6 +252,7 @@ keeps working, with one implementation behind it.
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
 | `pseudo` | `get` `search` `lookup`\* `save` | `/api/pseudo` (`?q=`, `?wide=1`) |
 | `control` | `catalogue` `changes` | — (new) |
+| `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 
 \* local only.
 
@@ -268,6 +269,36 @@ have not moved, and shrinks as they do. The rule to hold on to: **a route that
 moves onto the plane loses its prefix-based remote permission and gains a
 declared one.**
 
+## The apps are on it too, and they declare their own reach
+
+An app already declares its operations (`src/app_api.py`); `apps.call` puts that
+surface on this channel, so an app can be driven on a node somebody manages
+rather than only on the one serving the page. **Two gates, and they are not the
+same gate:**
+
+* the plane's own `remote` on `apps.call` — may a remote console reach the app
+  surface at all;
+* the app's per-operation `remote` — which of its operations that console may
+  then call.
+
+Both default to no. So an app added tomorrow is unreachable from a distance
+until its author writes down what may travel, and the enforcement is in one
+place: the plane, which is the layer that knows who is asking. An app never has
+to work that out for itself.
+
+The built-in apps declare almost nothing. Chat declares none — somebody else's
+conversations were never part of managing their machine. Fleet declares
+`relation` only: a read of this node's own ledger, which is what an operator
+managing it needs to see, while `enrol`, `request` and `invite` each *act*
+through this node's identity towards another, and a node one operator manages
+must not become a way to reach the nodes it manages.
+
+This closed a real gap rather than only tidying one. `/api/chat/*` was refused
+by the relay, but `/api/app-call` was not — so an operator managing a node could
+reach chat's declared operations on it (adding a contact to *their* address
+book) through a route the denylist did not name. The permission is now on the
+operation, where a new route cannot slip past it.
+
 ## Two changes to what the API answers
 
 * A refusal is one shape everywhere: `{"error": "…"}` plus whatever `detail`
@@ -276,6 +307,11 @@ declared one.**
   `{"error": …}` with the same 404, and a malformed id is a 400 rather than a
   404 (it is not a node identity at all, which is the caller's mistake rather
   than a node we have never heard of).
+* `/api/app-call` answers **404** for an operation that does not exist — an app
+  that is not running, or a name nobody declared — where it used to answer 400
+  for both that and a malformed call. Naming nothing at all is still 400: an
+  operator reading a 404 would go looking for a missing app rather than at what
+  their client sent.
 * `/api/pseudo?q=…&wide=1` maps to `pseudo.lookup`, `?q=…` alone to
   `pseudo.search`. They were one route with two costs, which meant one ceiling
   for both — the cheap question inherited the expensive one's timeout, and

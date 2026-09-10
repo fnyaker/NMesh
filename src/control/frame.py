@@ -42,11 +42,12 @@ VERSION = 1
 # One *request* on the wire. Deliberately far smaller than the console's body
 # cap: a management call carries names, identities and settings — never a file.
 # What does carry bytes (an upload, an avatar) has its own route and its own,
-# larger ceiling, and is not a control frame. Sized to fit inside what the
-# fleet relay will carry to another node (``fleet.CONSOLE_REQ_MAX``): a frame
-# this side accepts and the pipe then drops is a request that fails for a
-# reason the operator cannot see.
-MAX_FRAME = 16 * 1024
+# larger ceiling, and is not a control frame. Sized to exactly what the fleet
+# relay will carry to another node (``fleet.CONSOLE_REQ_MAX``): a frame this
+# side accepts and the pipe then drops is a request that fails for a reason the
+# operator cannot see. The largest real one is a certificate on its way to
+# being trusted — 14 kB of hex — which is why this is not smaller.
+MAX_FRAME = 24 * 1024
 # One *reply*. Larger, because a question is a sentence and an answer is a
 # table: the node's snapshot, a page of the trace, the whole catalogue. Sized to
 # what the fleet relay will reassemble (``fleet.CONSOLE_RESP_MAX``) so a reply

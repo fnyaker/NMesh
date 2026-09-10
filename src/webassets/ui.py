@@ -700,6 +700,10 @@ SHELL = """
 .ctx-bar .mono{font-weight:400}
 .ctx-bar .ctx-note{font-weight:500;color:var(--text-muted)}
 .ctx-bar .ctx-note:empty{display:none}
+/* A managed node that has stopped answering. Said here rather than as a toast
+   per failed call: one sentence that stays while it is true beats twenty that
+   scroll past, and it is the strip that claims we are managing that node. */
+.ctx-bar .ctx-trouble{font-weight:600;color:var(--danger)}
 .ctx-bar button{margin-left:auto}
 /* Standing: the one thing that makes every other page a lie when it is wrong.
    A node that is not a member authenticates to nobody, and every symptom of
@@ -846,6 +850,7 @@ CTX_BAR = """
       <span>Managing <b id="ctx-label"></b></span>
       <span id="ctx-id" class="mono tiny"></span>
       <span id="ctx-note" class="ctx-note"></span>
+      <span id="ctx-trouble" class="ctx-trouble" hidden>not answering</span>
       <button id="ctx-leave" class="sm">Back to this node</button>
     </div>
 """
@@ -1069,12 +1074,41 @@ const CONTEXT = {
     this.save();
     this.paint();
     this.listeners.forEach((fn) => { try{ fn(this); }catch(_){} });
+    // Everything anybody was holding has just been dropped, so this is the
+    // moment to start again — and it happens here, for every page, rather than
+    // in the one page that remembered to do it. The stream belongs to the
+    // console serving this page (so it closes going out and opens coming
+    // back), and every registered view repaints now instead of at its own next
+    // tick, which is what "I had to reload the page" was.
+    this.trouble(false);
+    EVENTS.start();
+    REFRESH.run();
   },
 
   // Called by anything that has to forget what it was holding. Registered
   // rather than called from one place, so a view added later cannot be the one
-  // nobody remembered to reset.
+  // nobody remembered to reset — and each *shared* view registers its own
+  // reset next to itself (`CHANNEL`, `NODEVIEW`, the stream below), so a page
+  // that never heard of the context is reset correctly all the same. That was
+  // the bug: only the console page reset anything, so `/chat`, `/fleet` and
+  // `/node` kept painting the machine you had just left until a full reload.
   subscribe(fn){ this.listeners.push(fn); },
+
+  // The node being managed has stopped answering, or has thrown us out. Said
+  // once, in the strip, and after enough of it we hand the context back rather
+  // than leaving a page that looks alive and answers nothing.
+  trouble(bad, detail){
+    const mark = $("ctx-trouble");
+    if(mark) mark.hidden = !this.node || !bad;
+    if(mark && bad && detail) mark.title = detail;
+  },
+
+  lost(reason){
+    if(!this.node) return;
+    const name = this.label || shortId(this.node);
+    this.set("", "");
+    toast(name + " is no longer reachable — back on this node", "warn", reason);
+  },
 
   // Hand the remote session back and return to this node. The local console
   // holds that session, so telling it to drop the session is what actually
