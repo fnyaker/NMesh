@@ -22,9 +22,11 @@ Three separate things, deliberately not merged:
     it over is needed.
   - **the descriptor** says *who* published *which* bytes, and when. Its
     signature is the only thing that makes "who" meaningful.
-  - **the pin** says whose signature this operator accepts. Nothing arriving
-    from the network can add one: a release from an unpinned publisher is
-    relayed and displayed, never installed.
+  - **the pin** says whose signature this operator accepts, and **for what**:
+    a key pinned from an app's record is a party to that app, not somebody who
+    may replace this program (``TrustedPublishers``, the ``code`` flag).
+    Nothing arriving from the network can add one: a release from a publisher
+    unpinned for code is relayed and displayed, never installed.
 
 Signing domain
 --------------
@@ -396,12 +398,19 @@ def parse_release(data: bytes, verify) -> dict:
 # ---------------------------------------------------------------------------
 
 class TrustedPublishers:
-    """The pinned publisher keys, persisted as plain JSON.
+    """The signing keys this operator accepts, persisted as plain JSON.
 
-    No secret lives here — public keys, a label, and two booleans — but it is
+    No secret lives here — public keys, a label, and three booleans — but it is
     the file that decides what may replace this node's code, so a corrupt one
     yields **no** trusted publisher rather than a guess. Failing closed here
-    costs an operator one re-pin; failing open costs them the machine."""
+    costs an operator one re-pin; failing open costs them the machine.
+
+    **Being in this list is not one permission.** ``code`` says whether this
+    key may sign *this node's own program*; a key pinned from an app's record
+    is a key an operator chose as a party to that app, and nothing more. One
+    list without that field would have made "pin the key that signed this app"
+    a way to hand the machine to whoever wrote an app — the same button, two
+    meanings, and only one of them on screen."""
 
     def __init__(self, path: str | None = None,
                  max_publishers: int = MAX_PUBLISHERS) -> None:
@@ -444,11 +453,20 @@ class TrustedPublishers:
         if not public or publisher_id(public).hex() != key:
             return None
         name = value.get("name")
+        # A row written before this field existed is a row written by the only
+        # thing that could write one: a core release's record. Reading it as
+        # anything else would quietly stop every node already running from
+        # updating itself, and would misreport what its operator decided.
+        code = value.get("code") is not False
         return {
             "id": key,
             "key": public.hex(),
             "name": (name if isinstance(name, str) else "")[:MAX_NAME_LEN],
-            "auto": value.get("auto") is True,
+            "code": code,
+            # Re-derived rather than read: "may replace my code without asking"
+            # cannot outlive "may replace my code", and a file saying both
+            # things at once is answered with the narrower one.
+            "auto": value.get("auto") is True and code,
             "endorsed": value.get("endorsed") is True,
             "added": int(value["added"]) if isinstance(value.get("added"), int)
                      and not isinstance(value.get("added"), bool) else 0,
@@ -469,18 +487,27 @@ class TrustedPublishers:
         os.replace(tmp, self._path)
 
     def add(self, public_key: bytes, name: str = "", auto: bool = False,
-            endorsed: bool = False) -> dict:
-        """Pin a publisher. Raises when the key is unusable or the list is full.
+            endorsed: bool = False, code: bool = True) -> dict:
+        """Pin a signing key. Raises when the key is unusable or the list is full.
 
         Re-pinning a key already held updates its label and flags rather than
         adding a second entry for the same identity.
 
-        The two flags are different statements and neither implies the other.
-        ``auto`` says "this key alone may replace my code without asking me".
-        ``endorsed`` says "this key's word counts towards a quorum" — much
-        weaker on its own, and it is the answer to somebody minting two hundred
-        publishers: a quorum made of keys a human chose one at a time cannot be
-        reached by creating identities, only by compromising chosen ones."""
+        The three flags are different statements and none implies another.
+        ``code`` says "releases of **this node's own program** signed by this
+        key may be installed here" — the strongest of them, and the one a key
+        pinned from an app's record does not get. ``auto`` says "this key alone
+        may replace my code without asking me", so it means nothing without
+        ``code`` and is stored as nothing. ``endorsed`` says "this key's word
+        counts towards a quorum" — much weaker on its own, and it is the answer
+        to somebody minting two hundred publishers: a quorum made of keys a
+        human chose one at a time cannot be reached by creating identities, only
+        by compromising chosen ones.
+
+        A re-pin **widens** ``code`` and never narrows it: pinning the key of an
+        app you already accept node software from is not a decision to stop
+        accepting node software from it, and silently making it one would take a
+        permission away in the middle of a sentence about something else."""
         if not isinstance(public_key, (bytes, bytearray)) or not public_key:
             raise ReleaseError("publisher key invalid")
         public_key = bytes(public_key)
@@ -488,11 +515,13 @@ class TrustedPublishers:
         if key_id not in self._entries and len(self._entries) >= self._max:
             raise ReleaseError("too many trusted publishers")
         existing = self._entries.get(key_id, {})
+        code = bool(code) or existing.get("code") is True
         self._entries[key_id] = {
             "id": key_id,
             "key": public_key.hex(),
             "name": str(name or existing.get("name", ""))[:MAX_NAME_LEN],
-            "auto": bool(auto),
+            "code": code,
+            "auto": bool(auto) and code,
             "endorsed": bool(endorsed),
             "added": existing.get("added") or int(time.time()),
         }
@@ -508,9 +537,13 @@ class TrustedPublishers:
 
     def set_auto(self, key_id_hex: str, auto: bool) -> bool:
         """Auto-install is a second decision, taken after the pin: trusting a
-        publisher is not the same as handing them a scheduled restart."""
+        publisher is not the same as handing them a scheduled restart.
+
+        Refused for a key that may not replace this node's code at all — there
+        is no unattended install for it to allow, and storing the flag anyway
+        would leave a ticked box promising something nothing honours."""
         entry = self._entries.get(key_id_hex)
-        if entry is None:
+        if entry is None or (auto and not entry["code"]):
             return False
         entry["auto"] = bool(auto)
         self._save()
@@ -547,12 +580,23 @@ class TrustedPublishers:
         found = self._entries.get(publisher_id(public_key).hex())
         return dict(found) if found else None
 
-    def trusts(self, public_key: bytes) -> bool:
+    def pinned(self, public_key: bytes) -> bool:
+        """Is this key in the list at all — a party this operator chose?
+
+        Not "may it replace this node's code": that is :meth:`may_install_code`
+        and it is a narrower question. One method answering both is how a button
+        on an app's page came close to handing out the machine."""
         return publisher_id(public_key).hex() in self._entries
+
+    def may_install_code(self, public_key: bytes) -> bool:
+        """May releases of **this node's own program** signed by this key be
+        installed here? The strongest thing this file says about a key."""
+        entry = self._entries.get(publisher_id(public_key).hex())
+        return bool(entry and entry["code"])
 
     def auto_for(self, public_key: bytes) -> bool:
         entry = self._entries.get(publisher_id(public_key).hex())
-        return bool(entry and entry["auto"])
+        return bool(entry and entry["auto"] and entry["code"])
 
     def list(self) -> list[dict]:
         return sorted((dict(e) for e in self._entries.values()),

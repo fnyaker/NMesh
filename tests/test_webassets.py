@@ -1023,9 +1023,49 @@ def test_a_package_card_renders_what_the_node_decided():
 
 
 def test_an_unpinned_publisher_gets_a_pin_button_not_an_install_one():
-    source = webassets.APP_JS
-    assert 'row.kind === "core" && !row.trusted' in source
-    assert 'data-pkg-act="trust"' in source and 'data-pkg-act="install"' in source
+    """For node software the pin *is* the button: nothing signed by an unpinned
+    key may replace this program, so an Install offered first would be an
+    Install that refuses."""
+    actions = webassets.APP_JS.split("actionsHTML(row, opts){", 1)[1].split(
+        "\n  },", 1)[0]
+    assert 'core && !row.trusted' in actions
+    assert 'data-pkg-act="trust"' in actions and 'data-pkg-act="install"' in actions
+    assert actions.index('data-pkg-act="trust"') < actions.index(
+        'data-pkg-act="install"')
+
+
+def test_an_app_offers_the_pin_beside_install_rather_than_instead_of_it():
+    """Installing an app by hand asks for no pin — a person pressed it. The pin
+    is for the other half: a version landing on its own."""
+    actions = webassets.APP_JS.split("actionsHTML(row, opts){", 1)[1].split(
+        "\n  },", 1)[0]
+    assert '!core && row.published && !row.trusted' in actions
+    # …and it is a secondary button: no `primary` on the app branch.
+    app_branch = actions.split('!core && row.published && !row.trusted', 1)[1]
+    assert "primary" not in app_branch.split(");", 1)[0]
+
+
+def test_the_pin_dialog_says_what_the_key_is_accepted_for():
+    """The same act on two kinds of record does not mean the same thing, and the
+    dialog that asked for one of them over both was asking for the machine on an
+    app's page. The automatic-install tick goes with the code half only."""
+    body = webassets.APP_JS.split("async trust(row, element){", 1)[1].split(
+        "\n  },", 1)[0]
+    assert "Accepted for" in body
+    assert "replaces this node’s" in body and "not accepted for this node’s" in body
+    assert 'id="pkg-pin-auto"' in body
+    assert body.index('id="pkg-pin-auto"') > body.index("Accepted for")
+
+
+def test_the_key_list_says_what_each_key_is_accepted_for():
+    html, source = webassets.INDEX_HTML, webassets.APP_JS
+    assert "<th>Accepted for</th>" in html
+    row = source.split("function publisherRowHTML(entry){", 1)[1].split(
+        "\n}", 1)[0]
+    assert "entry.code" in row
+    # No tickable box where there is nothing for it to allow.
+    assert row.index("entry.code") < row.index("data-auto")
+    assert "does not apply" in row
 
 
 def test_installing_a_package_asks_first():
