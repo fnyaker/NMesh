@@ -43,6 +43,14 @@ class ChatBridge:
 the app still decides — but it lets a caller present a confirmation, and it
 keeps read-only calls distinguishable at a glance.
 
+`remote=True` says an operator at **another node's console** may ask for this
+one. It defaults to no, and that default is the interesting half: an app added
+tomorrow is unreachable from a distance until its author decides, operation by
+operation, what may travel. The flag is declared here and enforced by the
+control plane — the layer that knows where a call came from — so an app never
+has to ask who is calling
+([`../Architecture/control-plane.md`](../Architecture/control-plane.md)).
+
 ### Parameter kinds
 
 A short, closed list. A general type system was the other option and it would
@@ -103,18 +111,33 @@ error to work around.
 **An app that throws keeps its internals.** The exception type is reported, the
 message is not.
 
+**Reach is declared, not inherited.** Everything here is reachable from the
+console serving the page. From a console *managing* this node, only what the
+operation itself declared with `remote=True` — and only through the control
+plane, which is the one door that knows the difference. An app is not asked to
+work out whether its caller is at the keyboard.
+
 ## What ships today
 
-| app | operation | changes | what it answers |
-|---|---|---|---|
-| `chat` | `peer` | no | pseudo, whether it is a contact, unread count, where the conversation lives |
-| `chat` | `contact` | yes | add a node to the address book (not a grant, and not a name — that is the node's own, signed) |
-| `fleet` | `relation` | no | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
-| `fleet` | `enrol` | yes | ask a node for the right to manage it |
-| `fleet` | `request` | yes | ask a node already managed for extra rights |
+| app | operation | changes | remote | what it answers |
+|---|---|---|---|---|
+| `chat` | `peer` | no | no | pseudo, whether it is a contact, unread count, where the conversation lives |
+| `chat` | `contact` | yes | no | add a node to the address book (not a grant, and not a name — that is the node's own, signed) |
+| `fleet` | `relation` | no | **yes** | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
+| `fleet` | `enrol` | yes | no | ask a node for the right to manage it |
+| `fleet` | `request` | yes | no | ask a node already managed for extra rights |
+| `fleet` | `invite` | yes | no | have a node we manage mint an invitation to its mesh |
 
-`tests/test_app_api.py` pins these: renaming one breaks a page, and *widening*
-one is a security change.
+`tests/test_app_api.py` and `tests/test_control_plane.py` pin these: renaming
+one breaks a page, and *widening* one — `changes` or `remote` — is a security
+change.
+
+Only one is reachable from a console managing this node, and the reasons for
+the rest are the same two the relay has always had: chat's operations are
+somebody's conversations, and fleet's three actions each *act* through this
+node's identity towards another — a node one operator manages must not become a
+way to reach the nodes it manages. `relation` is a read of this node's own
+ledger, which is exactly what somebody managing this machine needs to see.
 
 ## What it built
 
@@ -142,10 +165,13 @@ the theme: they are preferences about one screen, not properties of the node.
 ## Adding an operation
 
 1. Declare it in the bridge's `API`, with the narrowest parameter kinds that fit.
-2. Write `api_<name>` on the same bridge. Return a mapping.
-3. Add the pair to the table above.
-4. Test the refusals, not only the success: an undeclared argument, a value of
-   the wrong shape, the app not running.
+2. Decide whether it may be driven from a console managing this node
+   (`remote=True`), and say why in a comment if the answer is yes.
+3. Write `api_<name>` on the same bridge. Return a mapping.
+4. Add the row to the table above.
+5. Test the refusals, not only the success: an undeclared argument, a value of
+   the wrong shape, the app not running — and, if it travels, that it is
+   refused from a remote origin when it should not be.
 
 If an operation would need to carry arbitrary bytes, that is a decision to take
 on purpose — and to write down here — not something to slip in behind a `text`.

@@ -23,6 +23,12 @@ The management plane needs three more, and only three:
 ``choice``
     One name out of a closed list the operation itself writes down. Cheaper to
     read than a ``text`` the handler then compares three times.
+``hex``
+    Bytes written as hex, with a ``limit`` on how many characters. A
+    certificate is the case: 14 kB of it, which is neither a label nor a line,
+    and which the node must not be handed until it *is* hex — the check is one
+    regular expression here rather than an exception from a parser three
+    frames down.
 
 A ``count`` may also carry a ``limit``, and it is the one value in this module
 that is **clamped rather than refused**. The reason is ownership: the thing
@@ -52,8 +58,14 @@ MAX_KEY = 64             # length of one of its keys
 MAX_VALUE = 512          # length of one of its scalar values
 MAX_CHOICES = 32
 
-KINDS = app_api.KINDS + ("line", "document", "choice")
+KINDS = app_api.KINDS + ("line", "document", "choice", "hex")
 
+# The largest `hex` a declaration may allow. A self-signed certificate is about
+# 14 kB of hex; the ceiling leaves room for a longer key without ever
+# approaching what one frame carries (`frame.MAX_FRAME`).
+MAX_HEX = 20000
+
+_HEX_RE = re.compile(r"^[0-9a-f]*$")
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,%d}$" % (MAX_KEY - 1))
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
@@ -89,6 +101,10 @@ def param(name: str, kind: str, *, required: bool = True, default=None,
         if not allowed:
             raise ControlError("bad_request", f"{name}: a choice needs choices")
         field["choices"] = allowed
+    if kind == "hex":
+        if limit is None:
+            raise ControlError("bad_request", f"{name}: hex needs a limit")
+        field["limit"] = min(max(0, int(limit)), MAX_HEX)
     return field
 
 
@@ -178,6 +194,15 @@ def coerce(field: dict, raw):
         if text not in field.get("choices", ()):
             allowed = ", ".join(field.get("choices", ()))
             raise ControlError("bad_request", f"must be one of {allowed}")
+        return text
+    if kind == "hex":
+        if not isinstance(raw, str):
+            raise ControlError("bad_request", "must be hex text")
+        text = raw.strip().lower()
+        if len(text) > int(field.get("limit", MAX_HEX)):
+            raise ControlError("bad_request", "longer than this field allows")
+        if len(text) % 2 or not _HEX_RE.match(text or "00"):
+            raise ControlError("bad_request", "not hex")
         return text
     raise ControlError("bad_request", "unsupported parameter")
 

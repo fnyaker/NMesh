@@ -16,6 +16,7 @@ import tempfile
 
 import pytest
 
+from src import control
 from src import MeshNode
 from src.app_registry import FLEET_APP_ID
 from src.data_connector import ConnectorClient, DataConnector
@@ -28,6 +29,7 @@ from src.apps.fleet_state import FleetState
 from src.node_id import NodeID
 from src.tcp_transport import TCPTransport, TCPServer
 from src.transport_manager import TransportManager
+from src.webconsole import CONTROL_PATH
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -290,6 +292,104 @@ class TestRemoteConsoleOverRealMesh:
                 await operator.app.console_call(agent.id, "GET", "/api/state")
             assert "not authorised for manage" in str(failure.value)
             assert console.calls == []
+        finally:
+            await operator.close()
+            await agent.close()
+
+
+class TestControlFrameOverRealMesh:
+    """The management plane, pointed at another node across a real mesh.
+
+    The point of the whole exercise: the *same frame* a page sends to its own
+    console travels the relay, reaches the far node's plane as a **remote**
+    origin, and its refusals come back saying which kind they were. Nothing
+    here mocks the plane — the far side runs the real one over a real node.
+    """
+
+    class PlaneConsole:
+        """The far node's console, reduced to what matters here.
+
+        The real one does a great deal more; what this proves is the path, so
+        it does the one thing the real one does with a control frame — hand it
+        to its own plane as a call from somebody else's console."""
+
+        available = True
+
+        def __init__(self, plane):
+            self._channel = control.LocalChannel(plane, control.Origin.REMOTE)
+            self.paths = []
+
+        def call(self, method, path, body, token, timeout=None):
+            self.paths.append((method, path))
+            if path != CONTROL_PATH:
+                return 404, "application/json", b'{"error": "not found"}'
+            return 200, "application/json", self._channel.send(body)
+
+    async def _managed(self, port):
+        operator, agent = await _linked_pair(port)
+        await operator.app.request_enrolment(agent.id, caps=["manage"])
+        await agent.wait_for(EnrolRequested)
+        await agent.app.approve_enrolment(operator.hex)
+        async with asyncio.timeout(20.0):
+            while operator.app.state.managed_one(agent.hex) is None:
+                await asyncio.sleep(0.05)
+        context = control.Context(node=agent.node,
+                                  loop=asyncio.get_running_loop())
+        agent.app._local_console = self.PlaneConsole(control.build(context))
+        return operator, agent
+
+    def _channel(self, operator, agent, body=None):
+        """The operator's end: the same class the console builds for a page.
+
+        The loop is captured here, not looked up inside: the relay runs on a
+        worker thread, where `get_event_loop` is a *different* loop and the
+        coroutine handed to it would never run."""
+        loop = asyncio.get_running_loop()
+
+        def relay(node_hex, frame):
+            status, _ctype, payload = asyncio.run_coroutine_threadsafe(
+                operator.app.console_call(agent.id, "POST", CONTROL_PATH,
+                                          body if body is not None else frame,
+                                          token="a-remote-token"),
+                loop).result(timeout=25.0)
+            assert status == 200
+            return payload
+
+        return control.RemoteChannel(agent.hex, relay)
+
+    async def test_an_operation_is_answered_by_the_node_it_was_addressed_to(self):
+        operator, agent = await self._managed(19345)
+        try:
+            agent.node.set_pseudo("the far one")
+            channel = self._channel(operator, agent)
+            reply = await asyncio.to_thread(channel.call, "pseudo.get")
+            assert reply.ok is True
+            # The answer is *that* node's, which is the whole point.
+            assert reply.result["id"] == agent.hex
+            assert reply.result["pseudo"] == "the far one"
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_what_that_node_keeps_to_itself_is_refused_over_the_mesh(self):
+        operator, agent = await self._managed(19346)
+        try:
+            channel = self._channel(operator, agent)
+            reply = await asyncio.to_thread(
+                channel.call, "pseudo.lookup", {"query": "somebody"})
+            # Local-only there, so refused there — with a code this side can
+            # act on rather than a timeout it would have to guess about.
+            assert reply.ok is False and reply.code == "refused"
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_a_frame_that_is_not_one_is_answered_rather_than_dropped(self):
+        operator, agent = await self._managed(19347)
+        try:
+            channel = self._channel(operator, agent, body=b"{not a frame")
+            reply = await asyncio.to_thread(channel.call, "pseudo.get")
+            assert reply.ok is False and reply.code == "bad_request"
         finally:
             await operator.close()
             await agent.close()

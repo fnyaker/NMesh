@@ -284,7 +284,8 @@ class WebConsole:
         # rather than to answer one call (`src/control/plane.py`).
         self._control_context = control.Context(
             node=node, config_path=config_path, apps=self._apps,
-            changes=self._changes)
+            changes=self._changes, api=lambda: self._api,
+            host=lambda: self._app_host)
         self._plane = control.build(self._control_context)
 
         # Sessions: token -> expiry monotonic deadline.
@@ -1170,10 +1171,7 @@ def _make_handler(console: WebConsole):
                 # What a page may offer. Authenticated like everything else:
                 # the list of what an operator could do is itself worth
                 # knowing, and this console does not answer strangers.
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, {"apps": console._api.catalogue()})
+                self._from_plane("apps.catalogue")
                 return
             if path == "/api/chat/messages":
                 if console._chat is None:
@@ -1821,7 +1819,10 @@ def _make_handler(console: WebConsole):
                 self._json(200, {"ok": bool(ok)})
                 return
             if path == "/api/app-call":
-                self._handle_app_call(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("apps.call", {"app": data.get("app") or "",
+                                               "op": data.get("op") or "",
+                                               "args": data.get("args") or {}})
                 return
             if path.startswith("/api/chat/"):
                 if console._chat is None:
@@ -1836,7 +1837,12 @@ def _make_handler(console: WebConsole):
                 self._handle_fleet_post(path, _parse_json(body))
                 return
             if path.startswith("/api/apps/"):
-                self._handle_apps_post(path, _parse_json(body))
+                data = _parse_json(body) or {}
+                # ``id`` is the registry key; ``name`` is accepted as the older
+                # spelling so a caller written against either keeps working.
+                self._from_plane("apps.set",
+                                 {"app": data.get("id") or data.get("name") or "",
+                                  "action": path.rsplit("/", 1)[1]})
                 return
             if path == "/api/update/apply":
                 self._handle_update_apply(_parse_json(body))
@@ -2239,35 +2245,6 @@ def _make_handler(console: WebConsole):
                 self._json(500, {"error": f"release failed: {type(exc).__name__}"})
                 return
             self._json(404, {"error": "not found"})
-
-        def _handle_app_call(self, data) -> None:
-            """Invoke one declared operation on one running app.
-
-            The single door: no route per action, and nothing reachable that an
-            app did not write down. Authentication is the console's own — an
-            operator signed in here — and it buys no authority beyond that: an
-            operation that asks another node for rights still ends with a human
-            over there agreeing."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            app = data.get("app")
-            name = data.get("op")
-            if not isinstance(app, str) or not isinstance(name, str):
-                self._json(400, {"error": "app and op are required"})
-                return
-            args = data.get("args")
-            try:
-                result = console._api.call(app, name,
-                                           args if isinstance(args, dict) else {})
-            except app_api.AppAPIError as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            except Exception:
-                self._json(503, {"ok": False, "error": "the app is unavailable"})
-                return
-            self._json(200, {"ok": True, "result": result})
 
         def _handle_restart(self, data) -> None:
             """Restart this node, if something will bring it back.
@@ -2689,28 +2666,6 @@ def _make_handler(console: WebConsole):
                 self._json(200, {"results": fleet.provision_local(targets, **kwargs)})
 
         # -- built-in apps (install / enable) -----------------------------
-
-        def _handle_apps_post(self, path: str, data) -> None:
-            host = console._app_host
-            if host is None:
-                self._json(404, {"error": "not found"})
-                return
-            # ``id`` is the registry key; ``name`` is accepted as the older
-            # spelling so a caller written against either keeps working.
-            data = data or {}
-            name = data.get("id") or data.get("name")
-            action = path.rsplit("/", 1)[1]
-            if not isinstance(name, str) or action not in (
-                    "enable", "disable", "install", "uninstall"):
-                self._json(400, {"error": "bad request"})
-                return
-            try:
-                ok = console._call(getattr(host, action)(name), timeout=30.0)
-            except Exception as exc:
-                self._json(503, {"error": str(exc)[:200]})
-                return
-            self._json(200 if ok else 400, {"ok": bool(ok),
-                                            "apps": console._apps()})
 
         def _handle_chat_post(self, path: str, data) -> None:
             chat = console._chat

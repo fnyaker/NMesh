@@ -136,6 +136,15 @@ never get wrong.
   remote session back and returns here, and the context survives a page reload —
   checked against the console that holds the session before it is believed.
 
+- **A node that stops answering hands the context back.** A session it dropped,
+  or a relay with no session left to it, ends the context at once and says so;
+  silence is marked in the strip (*not answering*) and ends it after three tries
+  in a row. Before, a page driving a node that had gone answered nothing, looked
+  alive and had to be reloaded by hand. And each shared view — the channel's
+  catalogue, the node card — drops what it holds *itself* when the context
+  changes, so a switch on `/chat` or `/node` resets as thoroughly as one on the
+  console.
+
 - **What cannot be driven remotely says so, rather than failing.** A managed
   node refuses `/api/fleet/`, `/api/remote/` and `/api/chat/` by design (a
   managed node is not a jump host; the proxy must not drive the proxy; somebody
@@ -547,8 +556,8 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
 | POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
 | POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
-| GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
-| POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
+| GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything, whether it may be driven from a remote console) — `apps.catalogue`, filtered by who is asking |
+| POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
 | POST    | `/api/invite`    | generates an invitation code                   |
 | POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
 | POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
@@ -591,7 +600,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
-| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
+| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps; the answer carries the new list — `apps.set` |
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
 | POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
 | POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key |

@@ -19,6 +19,7 @@ import tempfile
 
 import pytest
 
+from src import app_api
 from src import control
 from src.apps import fleet as fleet_app
 from src.apps import fleet_console
@@ -482,6 +483,101 @@ class TestBuiltInModules:
         reply = await asyncio.to_thread(
             control.LocalChannel(plane).call, "pseudo.search", {"query": "a"})
         assert reply.ok is False and reply.code == "unavailable"
+
+
+class TestAppsOnTheChannel:
+    """An app is reached through the plane, and its reach is its own to declare."""
+
+    class _Bridge:
+        API = (
+            app_api.operation("look", "A read anybody may ask for",
+                              [app_api.param("node", "node")], remote=True),
+            app_api.operation("touch", "An action that stays at home",
+                              [app_api.param("node", "node")], changes=True),
+        )
+
+        def api_look(self, node):
+            return {"saw": node}
+
+        def api_touch(self, node):
+            return {"touched": node}
+
+    class _Host:
+        def __init__(self, bridges):
+            self._bridges = bridges
+
+        def running(self):
+            return list(self._bridges)
+
+        def bridge(self, name):
+            return self._bridges.get(name)
+
+    def _plane_over(self, bridges):
+        host = self._Host(bridges)
+        context = control.Context(node=_FakeNode(),
+                                  api=lambda: app_api.AppAPI(host))
+        return control.build(context)
+
+    def test_an_app_operation_is_reached_through_the_plane(self):
+        chan = control.LocalChannel(self._plane_over({"demo": self._Bridge()}))
+        reply = chan.call("apps.call", {"app": "demo", "op": "look",
+                                        "args": {"node": "ab" * 20}})
+        assert reply.result["result"] == {"saw": "ab" * 20}
+
+    def test_what_an_app_did_not_declare_remote_stays_at_home(self):
+        plane = self._plane_over({"demo": self._Bridge()})
+        here = control.LocalChannel(plane)
+        there = control.LocalChannel(plane, Origin.REMOTE)
+        assert here.call("apps.call", {"app": "demo", "op": "touch",
+                                       "args": {"node": "ab" * 20}}).ok
+        refused = there.call("apps.call", {"app": "demo", "op": "touch",
+                                           "args": {"node": "ab" * 20}})
+        assert refused.ok is False and refused.code == "refused"
+        # And the one that says so travels.
+        assert there.call("apps.call", {"app": "demo", "op": "look",
+                                        "args": {"node": "ab" * 20}}).ok
+
+    def test_the_catalogue_hides_what_that_console_cannot_call(self):
+        plane = self._plane_over({"demo": self._Bridge()})
+        here = control.LocalChannel(plane).call("apps.catalogue").result
+        there = control.LocalChannel(plane, Origin.REMOTE).call(
+            "apps.catalogue").result
+
+        def names(answer):
+            return {op["name"] for entry in answer["apps"]
+                    for op in entry["operations"]}
+
+        assert names(here) == {"look", "touch"}
+        assert names(there) == {"look"}
+
+    def test_an_app_that_is_not_running_does_not_exist(self):
+        chan = control.LocalChannel(self._plane_over({}))
+        gone = chan.call("apps.call", {"app": "demo", "op": "look",
+                                       "args": {"node": "ab" * 20}})
+        assert gone.ok is False and gone.code == "not_found"
+        # Naming nothing is a malformed call, not a missing one.
+        empty = chan.call("apps.call", {"app": "", "op": ""})
+        assert empty.ok is False and empty.code == "bad_request"
+
+    def test_an_undeclared_operation_is_not_reachable_by_its_method_name(self):
+        chan = control.LocalChannel(self._plane_over({"demo": self._Bridge()}))
+        for op in ("api_look", "__init__", "nope"):
+            reply = chan.call("apps.call", {"app": "demo", "op": op,
+                                            "args": {"node": "ab" * 20}})
+            assert reply.ok is False, op
+
+    def test_the_built_in_apps_declare_what_may_travel(self):
+        # Pinned, because widening it is a security change: chat's operations
+        # are somebody's conversations and fleet's actions would make a managed
+        # node a way to reach the nodes it manages.
+        from src.apps.chat_web import ChatBridge
+        from src.apps.fleet_web import FleetBridge
+
+        def remotes(bridge):
+            return {entry["name"] for entry in bridge.API if entry.get("remote")}
+
+        assert remotes(ChatBridge) == set()
+        assert remotes(FleetBridge) == {"relation"}
 
 
 # --------------------------------------------------------------------------
