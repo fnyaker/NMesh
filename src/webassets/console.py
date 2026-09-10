@@ -689,11 +689,12 @@ INDEX_HTML = """<!doctype html>
             </div>
             <p id="watch-empty" class="empty" hidden>Nothing is being watched. Open a package and
               turn on <em>Watch for new versions</em>.</p>
-            <p class="muted small">Watching several publishers of one package is the point:
-              <strong>Agreeing</strong> counts how many of the ones you watch have signed a package
-              carrying the same code, with its documentation left out of the comparison. Ask for
-              more than one and an automatic install waits until that many agree; ask for one and
-              it installs whatever that publisher offers.</p>
+            <p class="muted small">A subscription names the package, never a publisher, so a
+              new signer of one is found without anybody watching them. <strong>Agreeing</strong>
+              counts the keys you chose one at a time — the key a release is pinned under, and any
+              other you endorsed — that have signed a package carrying the same code, with its
+              documentation left out of the comparison. One is that key on its own; ask for more
+              and an install without asking waits until that many agree.</p>
             <p id="watch-status" class="msg"></p>
           </div>
         </article>
@@ -3100,19 +3101,33 @@ function watchRowHTML(row){
   const enough = row.agreeing >= row.quorum;
   return '<tr><td><strong>' + esc(row.name) + "</strong>" +
     (pkg.version ? '<div class="tiny muted">' + esc(pkg.version) + "</div>" : "") +
+    // Three states, not two: no record held here yet, a record from a node that
+    // only serves the bytes, or the key a publication proved. "Nobody yet"
+    // covered all three and was false for the middle one — somebody signed that
+    // release, the copy we hold simply does not say who.
     '</td><td>' + (pkg.signer_id
       ? "<code>" + esc(shortId(pkg.signer_id)) + "</code>"
-      : '<span class="muted small">nobody yet</span>') + "</td>" +
-    // The label and the number are one claim: "2 of 3" is how many endorsed
-    // keys have signed the same code, out of how many this operator asked to
-    // agree. A subscription watches a package, so there is no one publisher to
-    // name in the row — only whoever has signed the version it currently sees.
+      : '<span class="muted small">' +
+        (pkg.id ? "not stated on the copy held here" : "nothing held yet") +
+        "</span>") + "</td>" +
+    // The label and the number are one claim: "2 of 3" is how many keys this
+    // operator chose — endorsed, or the pin this release sits under — have
+    // signed the same code, out of how many they asked to agree. A subscription
+    // watches a package, so there is no one publisher to name in the row, only
+    // whoever has signed the version it currently sees.
     "<td>" + esc(row.agreeing + " of " + row.quorum) +
     (enough ? "" : ' <span class="badge warn">holding</span>') + "</td>" +
     "<td>" + (row.auto ? '<span class="badge ok">yes</span>'
                        : '<span class="muted small">no</span>') + "</td>" +
-    '<td class="tight"><button class="sm" data-watch-open="' + esc(row.id) +
-    '">Open</button> <button class="sm danger" data-watch-drop="' + esc(row.id) +
+    // Open takes the **record** id, Stop the **subscription** id, and both are
+    // forty hex characters with nothing about them saying which. Opening
+    // `row.id` asked /package for a subscription and got "package not found"
+    // about a package this node holds. With no record held there is nothing to
+    // open yet, so the button is not drawn.
+    '<td class="tight">' + (pkg.id
+      ? '<button class="sm" data-watch-open="' + esc(pkg.id) + '">Open</button> '
+      : "") +
+    '<button class="sm danger" data-watch-drop="' + esc(row.id) +
     '">Stop</button></td></tr>';
 }
 function publisherRowHTML(entry){

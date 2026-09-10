@@ -1320,3 +1320,184 @@ class TestPublishingItselfWhenAsked:
             assert len(tries) == 1
         finally:
             await node.stop()
+
+
+class TestWatchingAPackage:
+    """What a page reads back about a package it watches.
+
+    A subscription names a **package**; a directory record names **a node
+    holding one**. Both ids are twenty bytes of hex, so nothing about either
+    says which it is — and every bug below is one of the two being handed to
+    something that wanted the other. The card asked for its subscription under
+    the record id and was told there was none, so the box never stayed ticked
+    and the two settings beside it stayed disabled with no way to reach them.
+    The watching table then offered an **Open** button carrying the subscription
+    id, and the package page could only answer "package not found" about a
+    package this very node holds."""
+
+    async def _watched(self, tmp_path, **flags):
+        node = _node()
+        await node.publish_release(_tree(str(tmp_path / "tree")))
+        record_id = node.find_packages("nmesh")[0]["id"]
+        node.subscribe_package(record_id, **flags)
+        return node, record_id
+
+    async def test_the_record_it_was_pressed_on_says_it_is_watched(self, tmp_path):
+        node, record_id = await self._watched(tmp_path, auto=True, quorum=2)
+        try:
+            subscription = node.package_entry(record_id)["subscription"]
+            assert subscription is not None
+            assert subscription["auto"] is True and subscription["quorum"] == 2
+        finally:
+            await node.stop()
+
+    async def test_so_does_somebody_else_s_copy_of_the_same_package(self, tmp_path):
+        """The point of naming a package rather than a record: the toggle is on
+        whatever copy is open, and there is one answer for all of them."""
+        from src import pkg_dir
+        node, record_id = await self._watched(tmp_path)
+        try:
+            release = node._package_book.entry(bytes.fromhex(record_id))
+            raw, _their_id = _somebody_holds({"version": release["version"],
+                                              "key": release["release"]})
+            mirror = pkg_dir.parse_record(raw, node._identity.verify)
+            node._package_book.offer(mirror, raw)
+            other = pkg_dir.entry_key(mirror).hex()
+            assert other != record_id
+            assert node.package_entry(other)["subscription"] is not None
+        finally:
+            await node.stop()
+
+    async def test_the_row_points_at_a_record_a_page_can_open(self, tmp_path):
+        node, record_id = await self._watched(tmp_path)
+        try:
+            row = node.subscriptions()[0]
+            assert row["package"]["id"] == record_id
+            assert node.package_entry(row["package"]["id"]) is not None
+            # And the row's own id names the subscription, which the package
+            # directory knows nothing about. Handing it to a page that reads
+            # records is what printed "package not found".
+            assert row["id"] != record_id
+            assert node.package_entry(row["id"]) is None
+        finally:
+            await node.stop()
+
+    async def test_stopping_works_under_either_name(self, tmp_path):
+        node, record_id = await self._watched(tmp_path)
+        try:
+            assert node.unsubscribe_package(record_id) is True
+            node.subscribe_package(record_id)
+            assert node.unsubscribe_package(
+                node.subscriptions()[0]["id"]) is True
+            assert node.subscriptions() == []
+        finally:
+            await node.stop()
+
+    async def test_a_quorum_of_one_is_met_by_the_key_that_signed_it(self, tmp_path):
+        """One means *install what it finds*, and it can only mean that if the
+        offer in front of the operator counts. It is still an offer they pinned:
+        with no pin nothing is counted and the install is held."""
+        node, record_id = await self._watched(tmp_path, auto=True)
+        try:
+            record = node._package_book.entry(bytes.fromhex(record_id))
+            assert node._package_agreement(record) == (0, 1)
+            node.trust_package_signer(record_id, auto=True)
+            assert node._package_agreement(record) == (1, 1)
+        finally:
+            await node.stop()
+
+    async def test_a_quorum_of_two_still_waits_for_a_second_party(self, tmp_path):
+        node, record_id = await self._watched(tmp_path, auto=True, quorum=2)
+        try:
+            node.trust_package_signer(record_id, auto=True, endorsed=True)
+            record = node._package_book.entry(bytes.fromhex(record_id))
+            assert node._package_agreement(record) == (1, 2)
+            installs = []
+            node.install_release_entry = lambda *a, **k: installs.append(a)
+            await node._subscribed_install_pass()
+            assert installs == []
+        finally:
+            await node.stop()
+
+    async def test_the_card_counts_the_publishers_of_this_package(self, tmp_path):
+        """A fork published under another name is another package, and it must
+        not turn up in the number printed beside this one — the same rule the
+        quorum already followed, and now the same expression of it."""
+        from src.crypto import CryptoIdentity
+        from src import pkg_dir
+        node, record_id = await self._watched(tmp_path)
+        try:
+            mine = node._package_book.entry(bytes.fromhex(record_id))
+            stranger = CryptoIdentity()
+            raw = pkg_dir.build_record(
+                pkg_dir.KIND_CORE, "NMeshy", mine["version"], mine["release"],
+                mine["src"], stranger.dsa_public_key, stranger.sign,
+                signer_pub=stranger.dsa_public_key,
+                signer_sign=stranger.sign)
+            fork = pkg_dir.parse_record(raw, node._identity.verify)
+            node._package_book.offer(fork, raw)
+            assert node.package_entry(record_id)["attesters"] == 1
+        finally:
+            await node.stop()
+
+    async def test_installing_it_marks_the_version_as_seen(self, tmp_path,
+                                                           monkeypatch):
+        """Written under the package, like the subscription itself. Under the
+        record id it wrote nothing, so every sweep announced a version this
+        machine had already installed."""
+        node, record_id = await self._watched(tmp_path)
+        try:
+            node.trust_publisher(node._identity.dsa_public_key.hex(), "me")
+
+            async def fake_apply(files, version, **kwargs):
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", fake_apply)
+            await node.install_package(record_id)
+            assert node.subscriptions()[0]["version_seen"] == "9.9.9"
+        finally:
+            await node.stop()
+
+    def _stranger_publishes(self, node, name, version, src=None):
+        """Somebody nobody pinned, filing a record under a watched name a
+        moment later. Costs them one signature."""
+        from src.crypto import CryptoIdentity
+        from src import pkg_dir
+        stranger = CryptoIdentity()
+        raw = pkg_dir.build_record(
+            pkg_dir.KIND_CORE, name, version, os.urandom(20),
+            src if src is not None else os.urandom(32),
+            stranger.dsa_public_key, stranger.sign,
+            signer_pub=stranger.dsa_public_key, signer_sign=stranger.sign,
+            ts=int(time.time()) + 60)
+        record = pkg_dir.parse_record(raw, node._identity.verify)
+        node._package_book.offer(record, raw)
+        return record
+
+    async def test_a_record_that_read_nothing_agrees_with_nothing(self, tmp_path):
+        """A publication carrying no source digest says nothing about the code,
+        so pinning its key buys it no place in a quorum."""
+        from src import pkg_dir
+        node, record_id = await self._watched(tmp_path, auto=True)
+        try:
+            record = self._stranger_publishes(node, "NMesh", "9.9.10",
+                                              src=b"\x00" * 32)
+            node.trust_publisher(record["signer"].hex(), "them", auto=True)
+            held = node._package_book.entry(pkg_dir.entry_key(record))
+            assert node._package_agreement(held) == (0, 1)
+        finally:
+            await node.stop()
+
+    async def test_a_stranger_signing_last_does_not_take_the_row(self, tmp_path):
+        """A name is not owned: anybody may file a record under one. Ranking a
+        watched package by *newest* alone would hand every unattended install,
+        and the key the row names, to whoever signed a second later."""
+        node, record_id = await self._watched(tmp_path, auto=True)
+        try:
+            node.trust_package_signer(record_id, auto=True)
+            self._stranger_publishes(node, "NMesh", "9.9.10")
+            row = node.subscriptions()[0]
+            assert row["package"]["id"] == record_id
+            assert row["package"]["version"] == "9.9.9"
+        finally:
+            await node.stop()
