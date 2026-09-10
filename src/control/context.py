@@ -45,7 +45,7 @@ class Context:
     """
 
     def __init__(self, *, node, loop=None, config_path=None, apps=None,
-                 changes=None, api=None, host=None) -> None:
+                 changes=None, api=None, host=None, restart=None) -> None:
         self.node = node
         self._loop = loop
         self.config_path = config_path or ""
@@ -53,6 +53,7 @@ class Context:
         self.changes = changes
         self._api = api
         self._host = host
+        self._restart = restart
 
     def bind_loop(self, loop) -> None:
         """Point the bridge at the loop the node is actually running on.
@@ -123,6 +124,20 @@ class Context:
             return self._host()
         except Exception:
             return None
+
+    def restart(self) -> bool:
+        """Stop this node properly and come back. ``False`` if nothing can.
+
+        A callable rather than the console itself, for the same reason as the
+        rest: restarting is a thing this node does, and *how* it comes back —
+        a service manager, or re-execing itself — is not a control module's
+        business (`src/webconsole.py`, `updater.restart_plan`)."""
+        if self._restart is None:
+            return False
+        try:
+            return bool(self._restart())
+        except Exception:
+            return False
 
     @staticmethod
     def _drop(coro) -> None:

@@ -2319,7 +2319,7 @@ document.addEventListener("click", (event) => {
   const accepted = event.target.closest("[data-accepted]");
   if(accepted){
     withBusy(accepted, async () => {
-      await apiJson("/api/trust/accept-change", "POST",
+      await CHANNEL.ask("trust.accept_change",
         {node:accepted.dataset.accepted});
     });
     return;
@@ -2327,7 +2327,7 @@ document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-forgive]");
   if(!target) return;
   withBusy(target, async () => {
-    const {ok} = await apiJson("/api/trust/forgive", "POST",
+    const {ok} = await CHANNEL.ask("trust.forgive",
       {node:target.dataset.forgive});
     if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
   });
@@ -2462,6 +2462,21 @@ async function post(path, body, message){
     return true;
   }catch(_){ toast("Control action failed", "danger"); return false; }
 }
+// The same, over the control channel — an operation instead of a path, and the
+// node's own sentence when it refuses instead of "control action failed".
+async function run(op, params, message){
+  try{
+    await CHANNEL.call(op, params || {});
+    toast(message);
+    tick();
+    return true;
+  }catch(error){
+    if(isStale(error)) return false;
+    toast("Control action failed", "danger",
+          isRefused(error) ? error.message : "");
+    return false;
+  }
+}
 // The slider says how the two halves of a score are weighed; the line under it
 // is the answer, computed by the node and not re-derived here — one rule, one
 // implementation.
@@ -2543,7 +2558,8 @@ function paintMLO(state){
   setHTML("mlo-list", rows.join("") || spanRow(6, mloWaiting(mlo)));
 }
 $("mlo-always").addEventListener("click", () => STATE &&
-  post("/api/mlo", {always: !((STATE.mlo || {}).always)}, "Multi-link operation updated"));
+  run("network.mlo", {always: !((STATE.mlo || {}).always)},
+      "Multi-link operation updated"));
 for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
                           ["ka-fast-min", "keepalive_fast_min"],
                           ["ka-fast-max", "keepalive_fast_max"],
@@ -2552,8 +2568,8 @@ for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
   $(id).addEventListener("change", async (event) => {
     const value = Number(event.target.value);
     try{
-      const {ok, data} = await apiJson("/api/mlo", "POST", {[field]: value});
-      $("mlo-status").textContent = ok ? "" : (data.error || "Refused");
+      const {ok, error} = await CHANNEL.ask("network.mlo", {[field]: value});
+      $("mlo-status").textContent = ok ? "" : (error || "Refused");
       if(ok) toast("Multi-link operation updated", "ok");
     }catch(_){ toast("Could not save that", "danger"); }
     finally{ tick(); }
@@ -2571,19 +2587,20 @@ $("balance").addEventListener("input", (event) => {
 $("balance").addEventListener("change", async (event) => {
   const value = Number(event.target.value);
   try{
-    const {ok, data} = await apiJson("/api/addressing/balance", "POST", {value});
-    if(!ok){ toast(data.error || "Refused", "warn"); return; }
+    const {ok, error, data} = await CHANNEL.ask("network.balance", {value});
+    if(!ok){ toast(error || "Refused", "warn"); return; }
     toast("Address preference updated", "ok");
   }catch(_){ toast("Could not save the balance", "danger"); }
   finally{ BALANCE_HELD = false; tick(); }
 });
-$("net-recheck").addEventListener("click", () => post("/api/net/recheck", {}, "Network check requested"));
+$("net-recheck").addEventListener("click", () =>
+  run("network.recheck", {}, "Network check requested"));
 $("dyn-toggle").addEventListener("click", () => STATE &&
-  post("/api/addressing/dynamic", {enabled:!STATE.dynamic_address},
+  run("network.dynamic", {enabled:!STATE.dynamic_address},
        "Dynamic addressing updated"));
 $("reach-probe").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/reachability/probe", "POST");
+    const data = await CHANNEL.call("network.probe");
     toast(data.sent ? "Sent " + data.sent + " reachability probe(s)"
                     : "No connected node can probe us", data.sent ? "" : "warn");
   }catch(_){ toast("Probe failed", "danger"); }
@@ -2595,7 +2612,8 @@ $("transport-blocks").addEventListener("click", async (event) => {
 
   const remove = event.target.closest("[data-remove-listener]");
   if(remove){
-    await api("/api/unlisten", "POST", {uri:remove.dataset.removeListener}).catch(() => {});
+    await CHANNEL.call("network.unlisten",
+                       {uri:remove.dataset.removeListener}).catch(() => {});
     toast("Listener removed");
     tick();
     return;
@@ -2605,9 +2623,9 @@ $("transport-blocks").addEventListener("click", async (event) => {
     const uri = input.value.trim();
     if(!uri){ toast("Enter a listener URI", "warn"); return; }
     await withBusy(event.target, async () => {
-      const {ok, data} = await apiJson("/api/listen", "POST", {uri});
+      const {ok, error} = await CHANNEL.ask("network.listen", {uri});
       if(ok){ input.value = ""; toast("Listener added"); tick(); }
-      else toast(data.error || "Listener failed", "danger");
+      else toast(error || "Listener failed", "danger");
     });
     return;
   }
@@ -2616,7 +2634,7 @@ $("transport-blocks").addEventListener("click", async (event) => {
     const on = (STATE.transport_details || []).some((item) => item.hole_punch);
     const port = parseInt(block.querySelector("[data-udp-port]").value, 10);
     if(!on && !(port > 0 && port < 65536)){ toast("Enter a valid UDP port", "warn"); return; }
-    post("/api/udp", on ? {action:"stop"} : {action:"start", port},
+    run("network.udp", on ? {action:"stop"} : {action:"start", port},
          on ? "UDP stopped" : "UDP started");
     return;
   }
@@ -2632,12 +2650,12 @@ $("transport-blocks").addEventListener("click", async (event) => {
   }
   const flag = event.target.closest("[data-flag]");
   if(flag && STATE){
-    const paths = {punch:"/api/punch", keepalive:"/api/punch/keepalive",
-                   lan:"/api/lan/discovery"};
+    const ops = {punch:"network.punch", keepalive:"network.punch_keepalive",
+                 lan:"network.discovery"};
     const fields = {punch:"punch_enabled", keepalive:"punch_keepalive",
                     lan:"lan_discovery"};
     const name = flag.dataset.flag;
-    post(paths[name], {enabled:!STATE[fields[name]]}, "Setting updated");
+    run(ops[name], {enabled:!STATE[fields[name]]}, "Setting updated");
     return;
   }
   if(event.target.closest("[data-apply]")) await applyTransport(scheme, event.target);
@@ -3899,7 +3917,7 @@ $("show-cert").addEventListener("click", (event) => withBusy(event.target, async
 $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const cert_hex = $("trust-in").value.trim();
   if(!cert_hex){ setMessage("invite-status", "Paste a certificate.", true); return; }
-  const {ok} = await apiJson("/api/trust", "POST", {cert_hex});
+  const {ok} = await CHANNEL.ask("trust.add", {cert:cert_hex});
   setMessage("invite-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
@@ -3911,7 +3929,7 @@ $("revoke-btn").addEventListener("click", (event) => withBusy(event.target, asyn
         + 'holds here end now. Only an invitation can let it back in.</p>'
         + '<p class="mono small">' + esc(node) + "</p>",
       confirmLabel:"Revoke", danger:true})) return;
-  const {ok} = await apiJson("/api/trust/revoke", "POST",
+  const {ok} = await CHANNEL.ask("trust.revoke",
     {node, reason:Number($("revoke-reason").value)});
   setMessage("manage-status",
     ok ? "Membership revoked and announced."
@@ -3943,7 +3961,7 @@ document.addEventListener("click", (event) => {
           + 'you reach through it today. This node only; nothing is announced.</p>'
           + '<p class="mono small">' + esc(node) + "</p>",
         confirmLabel:"Stop trusting", danger:true})) return;
-    const {ok} = await apiJson("/api/trust/untrust", "POST", {node});
+    const {ok} = await CHANNEL.ask("trust.untrust", {node});
     setMessage("manage-status", ok ? "Anchor dropped." : "Not an anchor of this node.", !ok);
   });
 });
@@ -4173,9 +4191,9 @@ async function restartNode(){
         "node while that one is away.</p>" : ""),
   });
   if(!agreed) return;
-  const {ok, data} = await apiJson("/api/restart", "POST", {confirm:true});
+  const {ok, error, data} = await CHANNEL.ask("node.restart", {confirm:true});
   if(!ok || !data.restarting){
-    toast("Not restarting", "danger", (data && data.error) || "The node refused.");
+    toast("Not restarting", "danger", error || "The node refused.");
     return;
   }
   toast("Restarting " + who, "warn", "It should be back in a few seconds.");

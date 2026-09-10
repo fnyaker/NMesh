@@ -281,6 +281,12 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (trust & network)             — the two modules an
+│     operator uses on a machine they are not in front of: a certificate that is
+│     hex before the node is asked to parse it, a toggle that takes a boolean
+│     and nothing else, a value the *node* decides the range of, a partial
+│     update that leaves the six fields it did not mention alone, and a refusal
+│     per operation rather than one sentence for all of them
 ├── test_control_plane.py                              — the management plane: an
 │     operation nobody declared does not exist (even when the method is there),
 │     an undeclared argument is refused, a frame that is not one is answered

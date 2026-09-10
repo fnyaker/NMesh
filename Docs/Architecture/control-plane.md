@@ -246,7 +246,9 @@ keeps working, with one implementation behind it.
 
 | Module | Operations | Older route |
 |---|---|---|
-| `node` | `state` `ping` `ping_node` `forget` `rootcert` `retry`\* | `/api/state`, `/api/ping`, `/api/ping/node`, `/api/nodes/forget`, `/api/rootcert`, `/api/peers/retry` |
+| `node` | `state` `ping` `ping_node` `forget` `rootcert` `restart` `retry`\* | `/api/state`, `/api/ping`, `/api/ping/node`, `/api/nodes/forget`, `/api/rootcert`, `/api/restart`, `/api/peers/retry` |
+| `trust` | `add` `untrust` `revoke` `forgive` `accept_change` `witness` | `/api/trust`, `/api/trust/*` |
+| `network` | `probe` `recheck` `dynamic` `balance` `mlo` `punch` `punch_keepalive` `punch_open` `discovery` `udp` `listen` `unlisten` | `/api/reachability/probe`, `/api/net/recheck`, `/api/addressing/*`, `/api/mlo`, `/api/punch*`, `/api/lan/discovery`, `/api/udp`, `/api/listen`, `/api/unlisten` |
 | `config` | `get` `save` | `/api/config` |
 | `transports` | `options` `save` | `/api/transports` |
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
@@ -257,12 +259,14 @@ keeps working, with one implementation behind it.
 \* local only.
 
 Still routes of their own, and the ledger to work through: the node and package
-lists (`/api/nodes`, `/api/packages/…`), trust and certificates, invitations and
-tickets, releases and updates, publisher keys, the app store and app calls,
-addressing toggles and MLO, chat, fleet, login/logout. Two of those are not
-candidates at all: **login** is how a session begins, and **uploads** carry
-bytes rather than a sentence (a control frame is capped at 16 kB to fit
-`fleet.CONSOLE_REQ_MAX`).
+lists (`/api/nodes`, `/api/packages/…`), invitations, tickets and joining,
+releases and updates, publisher keys, the app store, chat and fleet's own
+surfaces, login/logout. Three of those are not candidates at all: **login** is
+how a session begins, **the console password** is that door's own key rather
+than the node's state, and **uploads** carry bytes rather than a sentence (a
+control frame is capped to fit `fleet.CONSOLE_REQ_MAX`). Chat and fleet keep
+their page APIs by design — a managed node is not a jump host — while what they
+choose to expose *as operations* travels on the plane like everything else.
 
 The path relay (`console_path_refusal`) therefore still governs the routes that
 have not moved, and shrinks as they do. The rule to hold on to: **a route that
@@ -326,6 +330,7 @@ operation, where a new route cannot slip past it.
 | `plane.REMOTE_BUDGET` | 15 s | `fleet_console.CALL_TIMEOUT` (20 s), `fleet.CONSOLE_TIMEOUT` (25 s) |
 | `plane.MAX_MODULES` / `MAX_OPERATIONS` / `MAX_PARAMS` | 32 / 32 / 12 | the declaration cannot itself be an attack |
 | `params.MAX_LINE` / `MAX_KEYS` / `MAX_VALUE` | 1024 / 64 / 512 | an argument cannot become a payload |
+| `params.MAX_HEX` | 20000 | a certificate (about 14 kB of hex) and no more |
 
 `tests/test_control_plane.py` asserts the first three pairs, and that **every**
 remotely-reachable operation's ceiling fits the budget. A comment would have

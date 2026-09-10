@@ -506,7 +506,9 @@ class TestManagement:
             _, token = await _login(console)
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/trust", token, {"cert_hex": "deadbeef"})
-            assert status == 400 and j["ok"] is False
+            # A refusal is one shape on this API now: the status says what kind
+            # it was, the sentence says why (`src/control/errors.py`).
+            assert status == 400 and j["error"]
         finally:
             console.stop(); await node.stop()
 
@@ -651,7 +653,9 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
                 {"endpoint": "90.54.169.91:9001"})
-            assert status == 400 and j["ok"] is False
+            # One shape for every refusal on this API: the status says what
+            # kind, the sentence says why (`src/control/errors.py`).
+            assert status == 400 and j["error"]
             await node.start_udp(0, "127.0.0.1")
             node._udp_server._sock.sendto = lambda *a: None  # no real traffic
             status, _, _, j = await asyncio.to_thread(
@@ -664,7 +668,7 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
                 {"endpoint": "garbage"})
-            assert status == 400 and j["ok"] is False
+            assert status == 400 and j["error"]
         finally:
             node._cancel_manual_holes()
             console.stop(); await node.stop()
@@ -1707,7 +1711,6 @@ class TestRestartingOnDemand:
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/restart", token, {"confirm": True})
             assert status == 409
-            assert body["restarting"] is False
             assert "no interpreter to start again" in body["error"]
             await asyncio.sleep(0.05)
             assert left == []

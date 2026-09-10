@@ -48,6 +48,9 @@ class NodeModule:
                   timeout=_READ),
         operation("rootcert", "This node's self-signed root certificate, hex",
                   remote=True, timeout=_READ),
+        operation("restart", "Stop this node properly and come back",
+                  [param("confirm", "flag")],
+                  changes=True, remote=True, timeout=_READ),
         operation("retry", "Dial a node's known addresses now",
                   [param("node", "node"),
                    param("uri", "line", required=False, default="")],
@@ -113,6 +116,25 @@ class NodeModule:
             # which is the state the caller was asking for.
             raise ControlError("not_found", "this node is not known here")
         return {"ok": True}
+
+    def op_restart(self, confirm: bool) -> dict:
+        """Restart this node, if something will bring it back.
+
+        The gate is not the point of interest — the answer is. A console that
+        says "restarting" and leaves the operator with a stopped node is worse
+        than one that refuses, so the refusal is explicit and names the reason
+        it came back with.
+
+        Driven from another console this arrives at the *managed* node, which
+        is exactly right: the operator asked to restart that machine, and it is
+        that machine's service manager that answers for it."""
+        if confirm is not True:
+            raise ControlError("bad_request", "confirmation required")
+        can, why = updater.restart_possible()
+        if not can:
+            raise ControlError("conflict",
+                               "nothing would start this node again — " + why)
+        return {"ok": True, "restarting": self._context.restart()}
 
     def op_retry(self, node: str, uri: str) -> dict:
         result = self._ask(
