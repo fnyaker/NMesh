@@ -1110,6 +1110,23 @@ before and after.
   installer is *working correctly* here. It is not a test helper. Anything that
   drives an install outside the suite stubs the swap first, or runs somewhere
   the swap is allowed to land.
+- **A handler that raises does not answer 500 — it answers nothing.** An
+  exception unwinds through `BaseHTTPRequestHandler.handle_one_request`, which
+  sends no status and closes the socket. The page that asked sees a dropped
+  connection, not an error, so whatever spinner it drew stays on screen. That is
+  how "the package page loads for ever" was reported, and the word "loads" is
+  the whole problem: it points at the page, and the fault was a `TypeError` in
+  the console two layers away. `_answering` now wraps both `do_GET` and
+  `do_POST` so every route ends in *something*, and `PACKAGES.ask` returns a
+  failure instead of throwing so a fetch that dies draws an error card. A
+  spinner with no timeout is a bug report that cannot be read.
+- **A value that is not JSON is a crash, not a wrong field.** `package_descriptor`
+  answers a page, and it had grown a second job: carrying the installer's entry,
+  which is raw bytes. `json.dumps` refused it, and the route died mid-response
+  (above). The two readers wanted two different things — text for a body, bytes
+  for code in this process — so they are two methods now (`package_descriptor`
+  and `package_release`) over one resolver. When one function serves a page and
+  a subsystem, the page is the one that finds out, in the worst way.
 - **An index by publisher is not a directory of packages.** Records were filed
   under a *publisher key*, which reads as fine because a node signing with its
   own identity publishes under its own node id. It stops being fine the moment

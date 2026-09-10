@@ -671,6 +671,13 @@ name in the directory, never gossiped at us, could not be held at all.
 Installing also **files a record saying this node now holds the release**
 (`_offer_to_serve`), so the next node has somewhere to ask.
 
+Two methods resolve a record, and they are deliberately not one:
+`package_descriptor` answers a **page** (text and numbers, bound for a JSON
+body) and `package_release` answers the **installer** (the descriptor's own
+entry, raw bytes). One object serving both put bytes in an HTTP response, and a
+`json.dumps` that raises inside a handler does not become a 500 — it closes the
+socket, and the page spins.
+
 Three gates, in this order — the cheap ones first:
 
 1. **the key that signed it is pinned** here — the signature, which is the only
@@ -914,4 +921,5 @@ node: each row arrives with its `trusted`, `attesters`, `agreeing` and
   secret does not match the offered public half, expiry, and the store that only
   ever keeps a file whose two halves agree.
 - [`tests/test_webconsole.py`](../../tests/test_webconsole.py) — the routes,
-  including the key endpoints and the confirmations they refuse without.
+  the key endpoints and the confirmations they refuse without, and that a route
+  which raises still answers rather than closing the socket on a page.

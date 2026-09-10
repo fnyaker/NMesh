@@ -99,8 +99,17 @@ const PACKAGES = {
   // re-reading the address bar.
   current: null,
 
+  // Every call goes through here, and it **never throws**. A rejected fetch —
+  // the console closing a connection, the network going — used to unwind out
+  // of `mount`, which had already drawn a skeleton and never drew anything
+  // else. "It loads for ever" is what a caller that can throw looks like from
+  // the outside.
   async ask(path, method, body){
-    return apiJson(path, method, body);
+    try{
+      return await apiJson(path, method, body);
+    }catch(_){
+      return {ok:false, data:{error:"The console did not answer."}};
+    }
   },
 
   async search(query, wide){
@@ -261,7 +270,8 @@ const PACKAGES = {
     const row = await this.read(id, true);
     if(!row){
       setHTML(element, errorHTML("Package not found",
-        "Nothing here holds a record with that id any more."));
+        "Nothing here holds a record with that id any more, or the console " +
+        "could not answer for it."));
       return;
     }
     this.current = row;

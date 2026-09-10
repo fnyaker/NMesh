@@ -2133,6 +2133,51 @@ class TestPublisherKeyEndpoints:
             console.stop(); await node.stop()
 
 
+class TestTheConsoleAlwaysAnswers:
+    """A route that raises must still send something.
+
+    An unhandled exception unwinds through `handle_one_request`, which sends
+    nothing and closes the socket. The page that asked sees a dropped
+    connection rather than an error, so whatever spinner it drew stays on
+    screen — and the bug reads as "it loads for ever", which says nothing about
+    where it is. That is exactly how a value that was not JSON-serialisable
+    reaching `_json` presented: the package page spun and said nothing."""
+
+    async def test_a_body_that_is_not_json_answers_500(self, monkeypatch):
+        """The shape of the original bug: bytes in a response body, on a route
+        whose own `try` does not cover the send."""
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            monkeypatch.setattr(node, "package_entry",
+                                lambda record_id: {"id": record_id,
+                                                   "release": b"\x00" * 20})
+            status, _, _, _ = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages/" + "aa" * 20, token)
+            assert status == 500
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_the_failure_is_not_described_to_whoever_asked(self,
+                                                                 monkeypatch):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+
+            def boom(record_id):
+                raise RuntimeError("a path on this machine")
+
+            monkeypatch.setattr(node, "package_entry", boom)
+            status, _, _, body = await asyncio.to_thread(
+                _request, console, "GET", "/api/packages/" + "aa" * 20, token)
+            # 503 from the route's own guard, or 500 from the floor — either is
+            # an answer. What matters is that it says nothing about us.
+            assert status in (500, 503)
+            assert "a path on this machine" not in json.dumps(body)
+        finally:
+            console.stop(); await node.stop()
+
+
 class TestPackageEndpoints:
     """Finding, reading, pinning, installing and watching a package.
 
