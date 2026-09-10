@@ -58,6 +58,17 @@ are called by the apps from the function that runs after signing in, which runs
 again after a session is lost and taken up again. They are idempotent, and
 anything that registers a listener from such a function has to be.
 
+> A reply from the node you just **left** is not the node you just entered
+> failing.
+
+`StaleContext` is thrown for exactly that, and a `catch` that draws an error
+region has to ask `isStale` before it draws — otherwise the console reports its
+own bookkeeping as a fault, and with auto-refresh off the message stays there.
+The other half of the same rule: a view that runs by itself must not fail
+*silently* either, or the table keeps whatever it last held with nothing said.
+Both are tested (`test_a_view_never_paints_a_stale_reply_as_a_failure`,
+`test_a_view_on_the_cadence_says_when_it_could_not_read`).
+
 What is allowed in a page's own CSS: what exists only there — the graph and the
 throughput canvas (console), the host list (fleet), the key row and the file
 list (terminal), the conversation bubbles (chat). If it starts to look reusable, it moves up into

@@ -651,6 +651,33 @@ def test_a_managed_node_that_stops_answering_hands_the_context_back():
     assert "lost(reason){" in webassets.ui.JS
 
 
+def test_a_view_never_paints_a_stale_reply_as_a_failure():
+    """A reply from the node you just left is not the node you just entered
+    failing. The switch has already asked for everything again, so painting an
+    error over it is the console reporting its own bookkeeping as a fault — and
+    it stays on screen until the next read, which with auto-refresh off is for
+    ever. Every catch that draws an error region has to ask first."""
+    from src.webassets import console as console_page, nodeview as node_view
+    for name, script in (("console", console_page.CONSOLE_PAGE_JS),
+                         ("nodeview", node_view.JS)):
+        for match in re.finditer(r"catch\s*\(([^)]*)\)\s*\{([^}]*)\}",
+                                 script, re.S):
+            body = match.group(2)
+            if "errorHTML" in body:
+                assert "isStale" in body, f"{name}: {body.strip()[:80]}"
+
+
+def test_a_view_on_the_cadence_says_when_it_could_not_read():
+    """A silent catch on a view that runs by itself is a table left painted
+    with whatever it last held, with nothing said — the same failure as a
+    missing field, arriving by another road."""
+    from src.webassets import console as console_page
+    for function in ("async function refreshKeys()",
+                     "async function refreshReleases()"):
+        body = console_page.CONSOLE_PAGE_JS.split(function)[1].split("\n}")[0]
+        assert "isStale" in body and "setMessage" in body.split("catch")[-1]
+
+
 def test_a_view_inside_a_local_app_asks_this_node():
     """Chat's panel and fleet's sheet ask "what is *my* link to this identity".
     Answering from the machine being managed is a different question with the
