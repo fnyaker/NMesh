@@ -8,7 +8,7 @@ to sign it, and a second signer of the same code was a second subscription.
 
 What a subscription asks for is a **quorum**:
 
-    install only when this many endorsed keys have signed the same code.
+    install only when this many keys I chose have signed the same code.
 
 "The same code" is :func:`src.pkg_dir.source_digest` — a digest over the
 package's files with its documentation left out — so two publishers who build
@@ -18,10 +18,12 @@ answer to "am I looking at the official version?", and it is answerable
 record.
 
 A quorum of one is "I do not care, install it" and is the default: an operator
-who wants corroboration asks for it. It is counted over keys the operator
-**endorsed** one at a time, which is what keeps "several parties agree" out of
-reach of somebody minting parties. A quorum only ever *withholds* an install,
-never authorises one the pins would refuse — see ``MeshNode.may_auto_install``.
+who wants corroboration asks for it. Counting is
+``MeshNode._package_agreement``, over keys chosen one at a time — a key the
+operator endorsed, or the pin the release in front of them was pinned under —
+which is what keeps "several parties agree" out of reach of somebody minting
+parties. A quorum only ever *withholds* an install, never authorises one the
+pins would refuse — see ``MeshNode.may_auto_install``.
 
 Three things this file is not
 -----------------------------
@@ -199,6 +201,14 @@ class Subscriptions:
             return
         entry["version_seen"] = str(version)[:MAX_VERSION]
         self._save()
+
+    def note_package_version(self, kind: int, name, version: str) -> None:
+        """:meth:`note_version` for callers holding a package rather than a row.
+
+        The install path has a directory record in hand, not a subscription, and
+        deriving the id there is what went wrong: it passed the **record** id,
+        which names no row, so the write silently did nothing."""
+        self.note_version(subscription_id(kind, name), version)
 
     # -- reading ----------------------------------------------------------
 
