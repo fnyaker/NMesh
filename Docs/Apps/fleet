@@ -316,8 +316,9 @@ Two details do all the work:
   manager's plan): nothing the node sends influences it, not a package name, not
   a flag, not a shell string.
 
-Granted with `./install.sh --allow-update`, removed by running it again without
-the flag — which **also rewrites the systemd unit**, because a unit hardened
+Granted by `./install.sh` (the default; `--allow-update` names it explicitly),
+removed by `./install.sh --no-allow-update` — which **also rewrites the systemd
+unit**, because a unit hardened
 with `NoNewPrivileges=yes` makes the kernel refuse `sudo` and renders the right
 unusable (see [`FAQ.md`](../../FAQ.md)). The node now detects that **before**
 running `sudo`: `can_update` is false and the refusal names the cause and the
