@@ -9237,11 +9237,31 @@ class MeshNode:
         # catches it, which is why this was denial rather than corruption: every
         # download of a given release could be made to fail, for ever, at one
         # packet per slice. Updates are a security mechanism.
-        key = (NodeID(packet.src_id), payload[:_RELEASE_ID_LEN].hex(),
+        source = NodeID(packet.src_id)
+        key = (source, payload[:_RELEASE_ID_LEN].hex(),
                int.from_bytes(payload[_RELEASE_ID_LEN:_RELEASE_ID_LEN + 4], "big"))
         future = self._pending_slices.get(key)
         if future is None:
-            self._charge_abuse(peer)   # answering a question we did not ask
+            # An answer we cannot match is only an accusation when we can say
+            # **whose** it is. `RELEASE_DATA` is routable, so the link it
+            # arrived on is usually a relay and `src_id` on a routed packet is
+            # not authenticated — charging the link charged whoever carried it.
+            #
+            # And the common unmatched answer is not an attack at all: a slice
+            # that arrives after `_pull_slice` timed out and popped its key.
+            # Over a slow multi-hop path — which is exactly the path a mesh
+            # update takes — a hundred-slice download therefore handed an
+            # honest relay a hundred protocol violations, enough to make it
+            # *suspect*, which drops its traffic and cuts its link. Two nodes
+            # could take each other off the mesh by updating from each other.
+            #
+            # So it is charged only where it can be attributed: a direct link
+            # from the node claiming to be the source, where `src_id` is
+            # checked against the link (`_DIRECT_TYPES`-style). Anywhere else
+            # it is dropped in silence, like every other answer to a question
+            # we did not ask.
+            if peer.authenticated_id == source and not peer.relay_only:
+                self._charge_abuse(peer)
             return
         if not future.done():
             future.set_result(payload[_RELEASE_ID_LEN + 4:])
