@@ -607,6 +607,16 @@ def validate(name: str, raw):
         raw = str(raw)
     if len(raw) > MAX_VALUE:
         raise ConfigError("value too long")
+    if "\n" in raw or "\r" in raw:
+        # The file is one `name = value` per line (`render`), so a newline in a
+        # value does not make a longer value — it makes a **second setting**,
+        # and `load` will read it. That is how a value for `spool`, which is
+        # editable here, wrote a `launch` line, which deliberately is not:
+        # "turning an authenticated web form into a way to choose what the node
+        # executes is a bigger step than editing settings". Refused here, at the
+        # one door every edit passes through, rather than in the parsers that
+        # happen to strip their ends.
+        raise ConfigError("a value cannot span two lines")
     return parser(raw)
 
 

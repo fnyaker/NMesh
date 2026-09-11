@@ -726,6 +726,31 @@ as a search that found nothing.
 > answer that was about to arrive, and the work carries on with nobody waiting
 > for it.
 
+## A value with a newline in it is not one value
+
+`nmesh.conf` is written one `name = value` per line, and read back the same
+way. So a newline inside a value does not make a longer value — it makes a
+**second setting**, and the loader reads it as one.
+
+`spool` is editable from the console. `launch` deliberately is not: it chooses
+what the node executes, and "turning an authenticated web form into a way to
+choose what the node executes is a bigger step than editing settings". But
+`spool = /tmp/s\nlaunch = /bin/sh -c …` renders as two lines, loads as two
+settings, and the launcher runs the second on the next start. Every layer did
+what it said: the path parser strips the *ends* of its value and checks for a
+null byte, `render` writes what it is given, `load` parses what it finds.
+
+> **Whoever owns the format owns the character that ends a record.** A value is
+> checked for a newline at the door every edit passes through
+> (`config.validate`), not in the parsers that happen to trim theirs — and the
+> field that declared it refuses one too (`control.params`, the `document`
+> kind), because a check in one layer is a check somebody can route around.
+
+The same trap with a different terminator is a header (`_safe_filename` was
+written for it), a log line, or a CSV cell. The question to ask of any value
+being written anywhere: **what character ends a record in this format, and can
+this value contain it?**
+
 ## Waiting on the loop you are running on
 
 `Context.call` is how a control operation reaches the node: it marshals a

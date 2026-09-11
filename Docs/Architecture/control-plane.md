@@ -84,7 +84,10 @@ reply     {"v": 1, "id": "7f3a", "ok": true,  "result": {…}}
   form is the case that matters: "some settings were refused" is not actionable,
   `{"rejected": ["console_port: …"]}` is.
 * Decoding is hostile-input first: a size cap **on the bytes** before parsing, a
-  type check on every field, a bound on every string, no recursion.
+  type check on every field, a bound on every string, and no recursion of our
+  own — the *parser* recurses, so a frame of nothing but brackets reaches the
+  interpreter's limit before any check runs, and that is caught and refused as
+  what it is: not a frame.
 
 ### There is no event frame
 
@@ -140,10 +143,21 @@ Reject by default, three times over:
 
 `src/control/params.py`. The kinds an app already declares (`src/app_api.py` —
 `node`, `text`, `flag`, `count`, `tokens`) are **reused, not restated**: the
-shape of a `NodeID` is checked in one place in this project. Three are added for
+shape of a `NodeID` is checked in one place in this project. Five are added for
 the management plane — `line` (a path or URI: longer than a label, still one
-line), `document` (a bounded mapping, two levels, scalars at the leaves) and
-`choice` (one of a closed list the operation writes down).
+line), `document` (a bounded mapping, two levels, scalars at the leaves),
+`choice` (one of a closed list the operation writes down), `hex` (bytes written
+as hex, with a limit: a certificate is 14 kB of it) and `secret` (a passphrase,
+and the only kind that is never trimmed — a space at the end of one *is* the
+passphrase).
+
+A `document`'s leaves may not contain a newline, and that is not a nicety.
+These values are written into a configuration file, one `name = value` per
+line, so a newline in a value makes a **second setting** rather than a longer
+one — which is how a value for `spool`, editable here, wrote a `launch` line,
+which deliberately is not (`gotchas.md`, "a value with a newline in it is not
+one value"). The file layer refuses it too: a check in one layer is a check
+somebody can route around.
 
 Two rules that are easy to get backwards:
 
@@ -196,6 +210,12 @@ top of it so a Python caller and a browser take the same path through the same
 validation.
 
 * `LocalChannel(plane, origin)` — the plane in this process.
+* `RefusedChannel(code, message)` — one that answers a refusal and nothing
+  else, for a request whose *target* is already wrong. A node id that is not one
+  used to fall through to "this node", which would have run a restart or a
+  configuration on the **wrong machine**; handing back a channel rather than
+  special-casing the caller keeps every path on the rule that something always
+  answers, and answers a frame.
 * `RemoteChannel(node_hex, relay)` — the same channel, pointed elsewhere. The
   relay is **injected, never imported**: this package knows nothing about the
   fleet app, about HTTP, or about how a frame reaches another node. Today it is

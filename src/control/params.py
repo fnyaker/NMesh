@@ -137,6 +137,14 @@ def _scalar(raw, where: str):
                 "bad_request", f"{where} is longer than {MAX_VALUE} characters")
         if "\x00" in raw:
             raise ControlError("bad_request", f"{where} contains a null byte")
+        if "\n" in raw or "\r" in raw:
+            # The same refusal `line` makes, and for the sharper version of the
+            # same reason: these values are written into a configuration file,
+            # one `name = value` per line, so a newline in one does not make a
+            # longer value — it makes a second *setting*. The file layer refuses
+            # it too (`config.validate`); this is the half that belongs to
+            # whoever declared the field.
+            raise ControlError("bad_request", f"{where} must be a single line")
         return raw
     if isinstance(raw, (list, tuple)):
         # A list of scalars is how a setting spelled as several values arrives

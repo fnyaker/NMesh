@@ -10,6 +10,9 @@ Two exist:
 :class:`LocalChannel`
     The plane in this process. The console's request handler decodes a frame,
     hands it here, and writes back what comes out.
+:class:`RefusedChannel`
+    One that answers a refusal and nothing else — for a request whose *target*
+    is already wrong, so that even then something answers a frame.
 :class:`RemoteChannel`
     **The same channel, pointed at another node.** The frame is handed to a
     relay that puts it on the mesh; the node at the other end feeds it to *its*
@@ -96,6 +99,22 @@ class LocalChannel(BaseChannel):
         # call the plane a hundred times a page and re-encoding their arguments
         # to immediately decode them would be work with no reader.
         return self._plane.dispatch(Request(str(op), params, ident), self._origin)
+
+
+class RefusedChannel(BaseChannel):
+    """A channel that answers one refusal, whatever it is asked.
+
+    For the door that knows the request cannot be carried *before* it knows
+    what the request says — a node id that is not one. Handing a channel back
+    rather than special-casing the caller keeps every path through this plane
+    on the one rule that matters: something always answers, and it answers a
+    frame."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self._refusal = ControlError(code, message)
+
+    def send(self, raw) -> bytes:
+        return encode(Reply.refusal(self._refusal).document())
 
 
 class RemoteChannel(BaseChannel):
