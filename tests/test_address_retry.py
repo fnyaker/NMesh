@@ -427,10 +427,17 @@ class TestPriorityAndBalance:
     single slider. One rule, in one place."""
 
     def test_the_shipped_priorities_are_the_ones_advertised(self):
+        """TCP is the default preference. UDP is what reaches a node no
+        listener can be opened to, which is worth having — but a datagram path
+        loses where a stream does not, and a link losing probes is a link
+        somebody ends up reconnecting by hand."""
         assert TCPTransport.setting("priority") == 0
-        assert UDPTransport.setting("priority") == 10
+        assert UDPTransport.setting("priority") == -10
         from src.spool_transport import SpoolTransport
         assert SpoolTransport.setting("priority") == -50
+        assert (SpoolTransport.setting("priority")
+                < UDPTransport.setting("priority")
+                < TCPTransport.setting("priority"))
 
     def test_a_priority_is_bounded_both_ways(self):
         field = next(f for f in TCPTransport.OPTIONS if f["name"] == "priority")
@@ -514,12 +521,12 @@ class TestPriorityAndBalance:
         manager.register("udp", U, UDPServer)
         node = MeshNode(transport_manager=manager)
         order = [entry["scheme"] for entry in node.transport_preference()]
-        assert order == ["udp", "tcp"]          # 10 contre 0
+        assert order == ["tcp", "udp"]          # 0 against -10
         try:
-            T.configure({"priority": 200})
-            assert [e["scheme"] for e in node.transport_preference()] == ["tcp", "udp"]
+            U.configure({"priority": 200})
+            assert [e["scheme"] for e in node.transport_preference()] == ["udp", "tcp"]
         finally:
-            T.SETTINGS = {}
+            U.SETTINGS = {}
 
     @pytest.mark.asyncio
     async def test_steering_prefers_a_better_medium_at_equal_latency(self):

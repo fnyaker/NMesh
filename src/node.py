@@ -37,7 +37,8 @@ from .features import MAX_RECORD as _FEATURES_MAX
 from .transport_manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
-from .ip_utils import local_ip_addresses, expand_listen_uri, split_host_port
+from .ip_utils import (local_ip_addresses, expand_listen_uri,
+                       split_host_port, is_global_ip)
 from .net_monitor import NetMonitor
 from .app_package import (
     build as _app_build, parse_manifest as _app_parse_manifest,
@@ -605,6 +606,40 @@ _RETRY_DIAL_TIMEOUT       = 8.0
 # `_pending_connections` makes a concurrent on-demand caller wait on its *own*
 # timeout, not on this one.
 _RECOVERY_TIMEOUT         = _RETRY_DIAL_TIMEOUT * _DIAL_LOG_ADDRESSES
+# Proving our own public address instead of guessing it.
+#
+# `_extra_addrs` holds IPs somebody reported seeing us at — an HTTPS probe, a
+# peer's `OBSERVED_ADDR`, a STUN reflexive address — and `advertised_uris`
+# paired each of them with the **local listener port**. That is not an address.
+# It is a claim that the NAT in front of this machine forwards that port, made
+# from no evidence at all, and the mesh carried it to everybody.
+#
+# Two nodes behind one household or office IP therefore announced the *same
+# URI*, and took turns being wrong about it: whoever the router forwards to
+# answers, so the other one's entry is struck off ("dropped an address of … —
+# it answers as somebody else"), and a node whose own router forwards back to
+# itself dials its own public address and refuses its own handshake ("the
+# challenge presents our own identity"). Both were read as bugs in the mesh.
+# Neither was: the mesh was doing exactly the right thing with a false claim.
+#
+# `public_endpoints()` — what a join ticket carries — already held the rule:
+# *we think this address is public* is not the same as *an inbound connection
+# arrived on it*. The gossip path simply never applied it. It does now, and
+# what counts as proof is one thing: somebody **out on the open internet**
+# opened this transport to us. A peer on our own LAN reaching our LAN address
+# proves the listener works and says nothing whatever about the NAT.
+#
+# That proof has to be *produced*, not waited for. AutoNAT existed and was
+# reachable from one console button and from nothing else (gotchas: "a feature
+# whose precondition nothing produces"), so a node with a correctly forwarded
+# port could sit for ever with no confirmation. It is asked for on a timer now,
+# backed off per failure, and only while there is somebody off our networks to
+# ask — a probe costs that peer a dial back, so it is not free to them either.
+_AUTONAT_FIRST            = 5.0    # after start, once there is somebody to ask
+_AUTONAT_RETRY_MIN        = 30.0   # …then backing off per round that proved nothing
+_AUTONAT_RETRY_MAX        = 900.0
+_AUTONAT_REFRESH          = 1800.0 # a confirmation is re-proved this often
+_AUTONAT_IDLE_MAX         = 300.0  # ceiling on a wait nothing is expected to end
 # Distinct refusal reasons remembered. The vocabulary is this file's own, so
 # the bound is a formality — it is here so that adding a reason can never turn
 # a counter into a leak.
@@ -1818,6 +1853,17 @@ class MeshNode:
         # Transports on which we have accepted an inbound authenticated
         # connection — passive, zero-cost proof of reachability (relay-capable).
         self._inbound_schemes: set[str] = set()
+        # …and the stricter set: schemes somebody reached us on **from off our
+        # own networks**. `_inbound_schemes` answers "does this listener work",
+        # which is what relay-capability turns on; this answers "is this
+        # listener reachable from the open internet", which is the only thing
+        # that can justify advertising a public IP with our own port on it.
+        self._public_schemes: set[str] = set()
+        self._autonat_task: asyncio.Task | None = None
+        self._autonat_wakeup = asyncio.Event()
+        self._autonat_next: float = 0.0
+        self._autonat_rounds: int = 0
+        self._autonat_at: float = 0.0
         # Relayed-invitation state (INVITE_SEEK). All bounded.
         self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
         self._seek_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer) -> (count, window)
@@ -2244,6 +2290,7 @@ class MeshNode:
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_link_rescue()
+        self._ensure_autonat()
         self._ensure_mlo_dial()
         self._ensure_release_watch()
         self._ensure_directory_publish()
@@ -2264,6 +2311,13 @@ class MeshNode:
                     and len(self._extra_addrs) < _MAX_EXTRA_ADDRS):
                 self._extra_addrs.append(new)
         self._announce_addresses_soon("network-change")
+        # Our addressing moved, so whatever was proved about it was proved
+        # about the old one. Re-ask rather than keep announcing a public
+        # endpoint that was confirmed against an address we no longer have.
+        self._public_schemes.clear()
+        self._autonat_rounds = 0
+        self._autonat_next = time.monotonic()
+        self._wake_autonat()
         self._note_change("reach")
 
     def _poke_net(self, reason: str, *, urgent: bool = False) -> None:
@@ -2555,8 +2609,21 @@ class MeshNode:
 
     def advertised_uris(self) -> list[str]:
         """Concrete, connectable URIs a peer can reach us at — each configured
-        listen URI expanded over the host's addresses (and any discovered
-        external address). Wildcards like 0.0.0.0 become one URI per address.
+        listen URI expanded over the host's addresses, and over a discovered
+        external address **only on a transport somebody has actually reached us
+        on from the open internet**. Wildcards like 0.0.0.0 become one URI per
+        address.
+
+        That condition is the whole of the fix described at `_AUTONAT_FIRST`: a
+        public IP paired with our own listener port is a claim about somebody
+        else's NAT, and two nodes behind one public IP used to make the same
+        claim and then tear each other's entry down over it. A local address
+        needs no such proof — it is an address of an interface on this machine,
+        and a peer that cannot reach it simply fails to.
+
+        An operator who knows their forwarding works has always had the way to
+        say so and still does: a **concrete** listen URI is returned unchanged,
+        wildcards are the only thing expanded here.
 
         Cached on exactly what it is derived from, and on nothing else. This is
         a pure function of three lists, and it was being recomputed on every
@@ -2571,13 +2638,16 @@ class MeshNode:
         this a shared mutable — a bug that would surface as addresses appearing
         or vanishing somewhere entirely unrelated."""
         key = (tuple(self._addresses), tuple(self._local_ips),
-               tuple(self._extra_addrs))
+               tuple(self._extra_addrs), tuple(sorted(self._public_schemes)))
         if key != self._advertised_key:
             out: list[str] = []
             seen: set[str] = set()
             for uri in self._addresses:
-                for u in expand_listen_uri(uri, self._local_ips,
-                                           self._extra_addrs):
+                result = _validate_uri(uri)
+                proved = result is not None and result[0] in self._public_schemes
+                for u in expand_listen_uri(
+                        uri, self._local_ips,
+                        self._extra_addrs if proved else ()):
                     if u not in seen:
                         seen.add(u)
                         out.append(u)
@@ -2766,6 +2836,7 @@ class MeshNode:
         await self._stop_address_retry()
         await self._stop_address_steering()
         await self._stop_link_rescue()
+        await self._stop_autonat()
         await self._stop_mlo_dial()
         await self._stop_release_watch()
         await self._stop_directory_publish()
@@ -2891,12 +2962,24 @@ class MeshNode:
                 pass
 
     def _announce_addresses_soon(self, reason: str) -> None:
-        """Fire-and-forget address announce for sync contexts (the network-change
-        callback). The task is tracked so stop() can cancel it — an untracked
-        announce awaiting a PING write would otherwise wedge teardown."""
+        """Fire-and-forget address announce for sync contexts (the
+        network-change callback, a handshake confirming what we are reachable
+        on). The task is tracked so stop() can cancel it — an untracked
+        announce awaiting a PING write would otherwise wedge teardown.
+
+        Never raises. It says "for sync contexts" and one of those contexts is
+        a receive loop's handshake handler: a helper that can throw from there
+        turns telling the mesh our address changed into a link that does not
+        come up. With no loop running there is nothing to schedule on, which is
+        a node that is not serving anybody either."""
         if not self._running:
             return
-        task = asyncio.ensure_future(self._announce_addresses(reason))
+        coro = self._announce_addresses(reason)
+        try:
+            task = asyncio.ensure_future(coro)
+        except RuntimeError:
+            coro.close()
+            return
         self._announce_tasks.add(task)
         task.add_done_callback(self._announce_tasks.discard)
 
@@ -5339,13 +5422,11 @@ class MeshNode:
                                     time.monotonic() - started)
                 elif found is not None and node_id is not None and found != node_id:
                     self._note_dial(node_hex, uri, "wrong node",
-                                    "this address is this node itself"
-                                    if found == self._id else
-                                    "answered as " + found.raw.hex(),
+                                    self._wrong_node_detail(uri, found),
                                     time.monotonic() - started)
                     self._activity.note(
                         "warn", "dropped an address of " + node_hex[:16]
-                        + " — it answers as somebody else")
+                        + " — " + self._wrong_node_detail(uri, found))
                     self._routing.note_wrong_address(node_id, uri, found)
                 else:
                     self._note_dial(node_hex, uri, "no-answer",
@@ -5366,6 +5447,29 @@ class MeshNode:
                 if peer in self._peers:
                     self._peers.remove(peer)
         return None
+
+    def _wrong_node_detail(self, uri: str, found: NodeID) -> str:
+        """Why this address answered as somebody else, in the words that name
+        the cause rather than the symptom.
+
+        "It answers as somebody else" is true and tells an operator nothing,
+        and the overwhelmingly common cause has one shape: the address is on
+        **our own public IP**, which means the node that advertised it and this
+        node are behind the same NAT and only one of them can own that port.
+        Saying so turns a recurring mystery into a sentence somebody can act
+        on — forward a second port, or give that node a concrete listen URI."""
+        if found == self._id:
+            return "this address is this node itself"
+        result = _validate_uri(uri)
+        host = None
+        if result is not None:
+            hp = split_host_port(result[1])
+            host = hp[0] if hp else None
+        if host and host in self._extra_addrs:
+            return ("it answers as " + found.raw.hex()[:16]
+                    + " — both nodes are behind " + host
+                    + ", and one port can only reach one of them")
+        return "answered as " + found.raw.hex()
 
     async def _connect_routing(self, node_id: NodeID,
                                deadline: float) -> _Peer | None:
@@ -5789,6 +5893,37 @@ class MeshNode:
             })
         return out
 
+    def _off_our_networks(self, peer: '_Peer') -> bool:
+        """Is this peer somewhere our LAN addresses could not have reached it?
+
+        A globally-routable source address, which is the only cheap test that
+        means it. Relayed links have no source address of their own and are
+        never evidence about a listener — nothing was opened to us.
+
+        Never raises: a transport that cannot say where its peer is has not
+        proved anything, which is the safe answer."""
+        try:
+            if isinstance(peer.transport, RelayedTransport):
+                return False
+            ip = peer.transport.remote_ip()
+        except Exception:
+            return False
+        return bool(ip) and is_global_ip(ip)
+
+    def _note_public_scheme(self, scheme: str | None) -> None:
+        """Somebody out on the open internet opened this transport to us.
+
+        The one thing that lets `advertised_uris` pair a discovered public IP
+        with this listener's port, because it is the one thing that says the
+        NAT in front of us forwards it."""
+        if not scheme or scheme in self._public_schemes:
+            return
+        self._public_schemes.add(scheme)
+        self._activity.note(
+            "reach", "reachable from the internet on " + scheme)
+        self._announce_addresses_soon("public-scheme-confirmed")
+        self._note_change("reach")
+
     def _reachability_ctx(self) -> dict:
         """Node-level facts a transport needs to classify its reachability:
         our host addresses, discovered public addresses, and the transports on
@@ -5796,7 +5931,13 @@ class MeshNode:
         return {
             "local_ips": list(self._local_ips),
             "public_addrs": list(self._extra_addrs),
+            # Two sets, because a `lan` descriptor and a `world` one are claims
+            # to two different audiences and are not proved by the same thing
+            # (see `ip_utils.ip_reachability`). The strict one is what
+            # `public_endpoints()` ends up handing to a join ticket, and what
+            # `advertised_uris` reads — one rule, in one place.
             "inbound_schemes": set(self._inbound_schemes),
+            "public_schemes": set(self._public_schemes),
         }
 
     def reachability(self) -> list[dict]:
@@ -7563,13 +7704,158 @@ class MeshNode:
     # AutoNAT — active reachability confirmation
     # -----------------------------------------------------------------------
 
+    # -- asking whether we are reachable, instead of assuming it --------------
+    #
+    # `probe_reachability` was written, documented and tested, and the only
+    # thing that ever called it was a button in the console. So a node with a
+    # correctly forwarded port could run for a week without one confirmation,
+    # and — before `advertised_uris` started requiring one — it did not matter,
+    # because the node announced its public address regardless. It matters now:
+    # the proof is what the announcement rests on, so something has to produce
+    # it. (gotchas: "a feature whose precondition nothing produces".)
+
+    def _autonat_peer(self) -> '_Peer | None':
+        """Somebody off our own networks, worth asking. ``None`` when there is
+        nobody — which is the normal state of a LAN-only mesh, and is why this
+        loop waits rather than polls."""
+        for peer in self._peers:
+            if peer.authenticated_id is None or peer.session is None:
+                continue
+            if peer.relay_only or peer.probation or peer.tarpit_until:
+                continue
+            if self._off_our_networks(peer):
+                return peer
+        return None
+
+    def _autonat_due(self) -> bool:
+        """Is there a question left worth asking?
+
+        Two: a scheme we listen on and have never had proved, and a proof old
+        enough to be worth re-establishing — an address moves, a router forgets
+        a forwarding rule, an ISP changes the CGNAT it puts us behind, and a
+        confirmation nobody ever re-checks is how a node goes on announcing an
+        address that stopped working months ago."""
+        try:
+            schemes = {result[0] for result in
+                       (_validate_uri(uri) for uri
+                        in self._transport_manager.listening_uris())
+                       if result is not None}
+        except Exception:
+            return False
+        if not schemes:
+            return False
+        return bool(schemes - self._public_schemes) or self._autonat_stale()
+
+    def _autonat_stale(self) -> bool:
+        return (bool(self._public_schemes)
+                and time.monotonic() - self._autonat_at >= _AUTONAT_REFRESH)
+
+    def _ensure_autonat(self) -> None:
+        if self._autonat_task is None or self._autonat_task.done():
+            self._autonat_task = asyncio.create_task(self._autonat_loop())
+
+    async def _stop_autonat(self) -> None:
+        task = self._autonat_task
+        self._autonat_task = None
+        self._autonat_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def _wake_autonat(self) -> None:
+        """A peer arrived, or our addressing moved: the answer may have
+        changed. Never awaits — one caller is a handshake handler."""
+        self._autonat_wakeup.set()
+
+    async def _autonat_loop(self) -> None:
+        """Ask, back off, and stop asking once there is nothing to learn.
+
+        Never raises: this loop dying takes the node's public address with it,
+        quietly, which is the worst shape a failure can have here.
+
+        A probe costs the peer a dial back, so the backoff is not politeness —
+        it is the bound that stops a node with no forwarding from asking every
+        peer it has, for ever, on a timer."""
+        job = self._activity.register(
+            "autonat",
+            "asks a peer off our own networks to dial us back, so a public"
+            " address is proved rather than assumed",
+            "a peer arrived, our addressing moved, or the backoff ran out")
+        self._autonat_next = time.monotonic() + _AUTONAT_FIRST
+        while self._running:
+            self._autonat_wakeup.clear()
+            job.ran()
+            wait = self._autonat_wait()
+            try:
+                async with asyncio.timeout(wait):
+                    await self._autonat_wakeup.wait()
+                # Woken early. A wake says the answer may have changed, never
+                # that the backoff stops applying: what wakes us is reachable
+                # from a peer connecting, and no loop a peer can drive may run
+                # flat out (gotchas).
+                if time.monotonic() < self._autonat_next:
+                    continue
+            except TimeoutError:
+                pass
+            try:
+                await self._autonat_round()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    def _autonat_wait(self) -> float:
+        """How long until the next round could be worth running.
+
+        `_AUTONAT_IDLE_MAX` when there is nothing to ask or nobody to ask —
+        a wake is what ends that, and the ceiling only means a wake we somehow
+        miss costs a delay rather than the feature."""
+        if not self._autonat_due() or self._autonat_peer() is None:
+            return _AUTONAT_IDLE_MAX
+        return max(0.5, min(_AUTONAT_IDLE_MAX,
+                            self._autonat_next - time.monotonic()))
+
+    async def _autonat_round(self) -> int:
+        """One round of probes. Returns how many went out.
+
+        The backoff is charged on a round that *proved nothing new*, not on one
+        that failed: an ACK saying "no, I could not reach you" is a complete,
+        useful answer, and asking again in thirty seconds would not change it.
+        """
+        if not self._autonat_due() or self._autonat_peer() is None:
+            return 0
+        before = set(self._public_schemes)
+        self._autonat_at = time.monotonic()
+        sent = await self.probe_reachability()
+        # The ACKs come back asynchronously; a round is judged on the next
+        # pass, which is what the backoff schedules.
+        if before == self._public_schemes:
+            self._autonat_rounds += 1
+        else:
+            self._autonat_rounds = 0
+        delay = min(_AUTONAT_RETRY_MAX,
+                    _AUTONAT_RETRY_MIN
+                    * (2 ** min(max(0, self._autonat_rounds - 1), 5)))
+        self._autonat_next = time.monotonic() + delay
+        return sent
+
     async def probe_reachability(self) -> int:
         """Ask an authenticated peer to dial each scheme we listen on and tell
         us whether it worked — proactive confirmation (beyond the passive
         'someone reached us' signal). Returns how many probes were sent."""
-        peer = next((p for p in self._peers
-                     if p.authenticated_id is not None and p.session is not None
-                     and not isinstance(p.transport, RelayedTransport)), None)
+        # Preferably somebody off our own networks: a peer on the LAN dials
+        # back the LAN address it observed us at, which proves the listener and
+        # nothing about the NAT in front of it (see `_note_public_scheme`). Any
+        # authenticated peer will still do when there is no such peer — the
+        # answer is worth having, it just cannot widen what we advertise.
+        peer = self._autonat_peer()
+        if peer is None:
+            peer = next((p for p in self._peers
+                         if p.authenticated_id is not None and p.session is not None
+                         and not isinstance(p.transport, RelayedTransport)), None)
         if peer is None:
             return 0
         sent = 0
@@ -7726,6 +8012,13 @@ class MeshNode:
             if scheme not in self._inbound_schemes:
                 self._inbound_schemes.add(scheme)   # confirmed reachable → relay-capable
                 self._poke_net("autonat-confirmed")
+            # The responder dials back the address it observed *us* at. Asked of
+            # a peer on our own LAN that is our LAN address, and the answer says
+            # nothing about the NAT — so only a peer off our networks can prove
+            # a public listener, and only that proof may widen what we
+            # advertise.
+            if self._off_our_networks(peer):
+                self._note_public_scheme(scheme)
 
     async def _handle_data(self, peer: _Peer, packet: Packet) -> None:
         src = NodeID(packet.src_id)
@@ -11383,8 +11676,16 @@ Hints come first (the ``have`` byte on an announce, from an
                 scheme = self._peer_scheme(peer)
                 if scheme is not None:
                     self._inbound_schemes.add(scheme)
+                    # …and separately, whether it came from off our networks,
+                    # which is a different and much stronger statement — see
+                    # `_note_public_scheme`.
+                    if self._off_our_networks(peer):
+                        self._note_public_scheme(scheme)
             except Exception:
                 pass
+        # Either way there may now be somebody worth asking, which is the one
+        # thing `_autonat_loop` cannot find out for itself without polling.
+        self._wake_autonat()
         self._persist_state()  # persist the newly-known peer for restart recovery
         # Tell the peer the source IP we saw — that's their public address.
         observed = peer.transport.remote_ip()

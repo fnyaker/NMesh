@@ -331,23 +331,45 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
     return out
 
 
-def _is_global_ip(ip: str) -> bool:
+def is_global_ip(ip: str) -> bool:
+    """Is this a globally-routable address?
+
+    The question two different callers ask for two different reasons: which of
+    our addresses a stranger could dial, and whether a peer that reached us
+    came from off our own networks (`node._off_our_networks`). One answer, so
+    "public" cannot mean two things one module apart."""
     try:
         return ipaddress.ip_address(ip).is_global
     except ValueError:
         return False
 
 
+# The private spelling the rest of this module already used.
+_is_global_ip = is_global_ip
+
+
 def ip_reachability(scheme: str, uri: str, local_ips: list[str],
-                    public_addrs: list[str], confirmed: bool) -> list[dict]:
+                    public_addrs: list[str], confirmed: bool,
+                    public_confirmed: bool | None = None) -> list[dict]:
     """Reachability descriptors for an IP-based listener (tcp/udp).
 
     Globally-routable addresses (a real public IP, or a discovered reflexive
     one) map to scope ``world``; RFC1918/link-local addresses map to scope
     ``lan`` anchored by our public IP — so *our* ``192.168.0.0/24`` is a
     different audience from the neighbour's identical range behind another
-    public IP. ``confirmed`` reflects positive evidence of reachability
-    (an accepted inbound authenticated connection on this transport)."""
+    public IP.
+
+    **Two audiences, two proofs.** ``confirmed`` is evidence the listener
+    works — an inbound authenticated connection arrived on this transport —
+    and that is what a ``lan`` descriptor needs. A ``world`` descriptor is a
+    claim about the NAT in front of the listener, and only a connection from
+    **off our own networks** can support it; that is ``public_confirmed``.
+    Stamping one proof onto both audiences is how a node behind a NAT, reached
+    once by the laptop next to it, came to announce itself as reachable by
+    everybody and became a black hole for whoever routed through it.
+
+    ``public_confirmed`` defaults to ``confirmed`` so a transport written
+    against the older signature behaves exactly as it did."""
     parsed = _validate_uri(uri)
     if parsed is None:
         return []
@@ -359,6 +381,8 @@ def ip_reachability(scheme: str, uri: str, local_ips: list[str],
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
+    public = confirmed if public_confirmed is None else public_confirmed
+
     def add(ip: str, scope: str, anc: str) -> None:
         key = (ip, scope)
         if key in seen:
@@ -369,7 +393,7 @@ def ip_reachability(scheme: str, uri: str, local_ips: list[str],
             "scope": scope,
             "anchor": anc,
             "address": f"{scheme}://{_fmt_host(ip)}:{port}",
-            "confirmed": confirmed,
+            "confirmed": public if scope == "world" else confirmed,
         })
 
     for ip in public_addrs:

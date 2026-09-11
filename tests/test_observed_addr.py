@@ -63,11 +63,19 @@ class TestObservedAddr:
         assert len(node._extra_addrs) == _MAX_EXTRA_ADDRS
         await node.stop()
 
-    async def test_feeds_advertised(self):
+    async def test_feeds_advertised_once_the_listener_is_proved(self):
+        """An observed IP is where somebody saw us *come from*. Pairing it with
+        our own listening port is a claim that the NAT forwards that port, and
+        until something proves it the address is not announced — two nodes
+        behind one public IP used to announce the same URI and strike each
+        other's entry off over it."""
         node, _ = await make_node()
         peer = await _authed(node)
         node._addresses = ["tcp://0.0.0.0:9000"]
         node._local_ips = []
         await node._handle_packet(peer, _observed(peer, b"198.51.100.7"))
+        assert "198.51.100.7" in node._extra_addrs      # learned…
+        assert node.advertised_uris() == []             # …but not claimed
+        node._note_public_scheme("tcp")
         assert "tcp://198.51.100.7:9000" in node.advertised_uris()
         await node.stop()
