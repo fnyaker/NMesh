@@ -447,6 +447,52 @@ ceilings). The same reading applies to a bounded book: sixteen identities at
 one dial per five minutes is what being ready for a node that vanished for an
 afternoon costs, and it does not grow with the network.
 
+## Two nodes, one public IP, one advertised URI
+
+The two reports were "dropped an address of 2df868… — it answers as somebody
+else", constantly, and "handshake refused: the challenge presents our own
+identity". They read as routing bugs. They are one line of arithmetic.
+
+`_extra_addrs` holds IPs somebody reported seeing us at. `advertised_uris()`
+paired each with the **local listener port**. `81.240.12.33` + `:9000` is not an
+address — it is a claim that this machine's NAT forwards 9000, made from no
+evidence — and every node behind that router makes the *same* claim. The router
+forwards to one of them. So:
+
+- a third node dials the URI in B's entry, reaches A, proves A's identity
+  against its own challenge, and strikes the address off B — **correctly**;
+- A dials the URI in B's entry, hairpins back to itself, and refuses its own
+  handshake — **correctly**.
+
+Every component behaved exactly as designed. The input was a lie, and nothing
+in the pipeline was in a position to notice, because the lie was manufactured
+locally by string concatenation and then gossiped as fact.
+
+> **Before trusting a value, ask what *produced* it, not what carries it.** An
+> address that arrived over the network has at least been asserted by somebody;
+> one this node assembled from two facts it holds has been asserted by nobody,
+> and it is the second kind that travels furthest before anyone doubts it.
+
+The tell that it was always known: `public_endpoints()`, four hundred lines
+away, already refused to put an unconfirmed address in a join ticket, and said
+why — *we think this address is public is not the same as an inbound connection
+arrived on it*. The rule existed; one caller applied it and the other did not.
+When you find a rule stated in one place, grep for the other places that need
+it before assuming it is local.
+
+Two smaller traps came out of the same fix:
+
+- **One proof, two audiences.** `ip_reachability` stamped a single `confirmed`
+  onto both the `lan` and the `world` descriptor, so the laptop next to us
+  reaching our LAN address made us announce ourselves as a relay for the
+  internet — the black hole `_note_reach_probe` was written to prevent, reached
+  by a different door.
+- **The responder dials back the address it observed.** Asking a peer on our own
+  LAN to confirm our reachability gets a truthful "yes" about our LAN address,
+  which is not the question. Only a peer off our networks can answer it, so
+  `probe_reachability` asks one of those by preference and only that answer may
+  widen what we advertise.
+
 ## A timeout named for one caller, spent by every caller
 
 `_ensure_route_to(target, timeout=_ON_DEMAND_TIMEOUT)`. Five seconds, and the

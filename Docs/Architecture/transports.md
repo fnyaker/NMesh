@@ -232,9 +232,15 @@ and this walk can no longer show one order and dial another.
 Two things decide, and they are not the same kind of thing.
 
 - **What the medium is worth** — `priority`, an option declared by every
-  transport, from −254 to 254. Shipped defaults: `udp` **10**, `tcp` **0**,
-  `spool` **−50**. The core has no opinion here: only the operator knows whether
-  their LoRa link is the precious one or the last resort.
+  transport, from −254 to 254. Shipped defaults: `tcp` **0**, `udp` **−10**,
+  `spool` **−50**. The core has no opinion about *your* media: only the
+  operator knows whether their LoRa link is the precious one or the last
+  resort. What it does have an opinion about is the two it ships — UDP used to
+  ship *above* TCP, and it is the wrong way round. UDP is what reaches a node
+  no listener can be opened to, which is worth a great deal; but a datagram
+  path loses where a stream does not, and a link losing probes is a link
+  somebody ends up reconnecting by hand. So UDP is the fallback it actually is,
+  and an operator who knows better raises it.
 - **What the address measures** — the last duration recorded for that URI in
   `_dial_log`.
 
@@ -628,11 +634,74 @@ site in the tree still using the executor asyncio joins at shutdown (gotchas §2
 **An AutoNAT answer is only believed if we asked the question.** `probe_reachability`
 records `(peer id, scheme)` with a short TTL (`_note_reach_probe`), and
 `_handle_reach_probe_ack` requires a match, consumes it, and ignores anything
-else. `_inbound_schemes` decides what the node advertises and whether it offers
-itself as a relay, so an unsolicited "yes" from one peer could make a NATted node
-announce itself as reachable — a black hole for everyone who then routes through
-it. Contrast the *passive* signal in `_handle_handshake`: an inbound connection
+else. What a node advertises and whether it offers itself as a relay rests on
+this, so an unsolicited "yes" from one peer could make a NATted node announce
+itself as reachable — a black hole for everyone who then routes through it.
+Contrast the *passive* signal in `_handle_handshake`: an inbound connection
 that authenticated is proof, not a claim.
+
+### Our own public address is proved, not guessed
+
+`_extra_addrs` holds IPs somebody reported seeing us at — the HTTPS probe,
+`OBSERVED_ADDR`, STUN. `advertised_uris()` paired each of them with the **local
+listener port** and announced the result. That is not an address. It is a claim
+that the NAT in front of this machine forwards that port, made from no evidence,
+and the mesh carried it to everybody.
+
+Two nodes behind one household or office IP therefore announced the **same
+URI**, and took turns being wrong about it: whoever the router forwards to
+answers, so the other one's entry is struck off (`note_wrong_address` — "it
+answers as somebody else"), and a node whose own router forwards back to itself
+dials its own public address and refuses its own handshake ("the challenge
+presents our own identity"). Both were read as bugs in the mesh. Neither was:
+the mesh was doing exactly the right thing with a false claim.
+
+`public_endpoints()` — what a join ticket carries — already held the rule:
+*we think this address is public* is not the same as *an inbound connection
+arrived on it*. The gossip path simply never applied it.
+
+- **Two audiences, two proofs** (`ip_utils.ip_reachability`). A `lan`
+  descriptor is confirmed by any inbound authenticated link: the listener
+  works. A `world` descriptor is a claim about the NAT, and only a connection
+  from **off our own networks** supports it — `node._off_our_networks`, which is
+  a globally-routable source address and nothing subtler. A relayed link is
+  never evidence about a listener: nothing was opened to us.
+- **`_inbound_schemes` and `_public_schemes`** are the two sets that follow
+  from that. The first still decides relay-*capability* in the LAN sense; the
+  second is what `advertised_uris()` requires before pairing a discovered public
+  IP with a listener's port, and what `relay_capable()` ends up resting on.
+- **Local addresses need no proof.** They are addresses of interfaces on this
+  machine; a peer that cannot reach one simply fails to.
+- **The operator's escape hatch already existed**: only *wildcard* listen URIs
+  are expanded, so somebody who knows their forwarding works states it as a
+  concrete `tcp://their.public.ip:9000` and nothing here applies.
+- **When a collision happens anyway, the cause is named.** "It answers as
+  somebody else" is true and useless; `_wrong_node_detail` says *both nodes are
+  behind 81.240.12.33, and one port can only reach one of them*.
+
+### …and the proof is produced rather than waited for
+
+`probe_reachability` was written, documented and tested, and the only thing
+that ever called it was a button in the console — the shape `gotchas.md` calls
+"a feature whose precondition nothing produces". That did not matter while the
+node announced its public address regardless. It matters now, because the
+announcement rests on it.
+
+`_autonat_loop` asks. It waits on an event and on nothing else, because a probe
+costs the peer a dial back:
+
+| bound | value | what it is for |
+|---|---|---|
+| `_AUTONAT_FIRST` | 5 s | after start, once there is somebody to ask |
+| `_AUTONAT_RETRY_MIN` … `_MAX` | 30 s → 900 s | per round that proved nothing new — an ACK saying "no" is a complete answer, and asking again in thirty seconds will not change it |
+| `_AUTONAT_REFRESH` | 1800 s | a confirmation nobody re-checks is how a node goes on announcing an address that stopped working months ago |
+| `_AUTONAT_IDLE_MAX` | 300 s | nothing to ask, or nobody to ask: a wake ends it, the ceiling only bounds a wake we miss |
+
+It asks a peer off our own networks by preference, because only that peer's
+dial-back can prove a public path — the responder dials the address it observed
+*us* at, and for a LAN peer that is our LAN address. Addressing moving clears
+`_public_schemes` outright: whatever was proved was proved about an address we
+no longer have.
 
 
 - `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it
@@ -909,11 +978,14 @@ of this did — left the peer we probe ten times a second first in line to be
 evicted while an id a stranger merely mentioned was promoted past it. See
 `gotchas.md`.
 
-**`advertised_uris()` is memoised on the three lists it derives from.** It was
-15 µs of regex and per-character work per call, recomputed on every probe,
-every `FIND_NODE` answer and every announce, to produce the same five strings.
-The key is the whole of the input, so there is no fourth thing to forget to
-invalidate — the failure a cache normally buys.
+**`advertised_uris()` is memoised on the lists it derives from** — the listen
+URIs, the local IPs, the discovered ones, and the set of schemes proved
+reachable from the internet. It was 15 µs of regex and per-character work per
+call, recomputed on every probe, every `FIND_NODE` answer and every announce, to
+produce the same five strings. The key is the whole of the input, so there is no
+further thing to forget to invalidate — the failure a cache normally buys. (It
+was three lists until the proof above became a fourth input; the key is written
+as "whatever it reads" for exactly that reason.)
 
 **`Packet.create` builds the packet once and draws its nonce in blocks.** It
 used to construct one `Packet` purely to ask it for its own id and then a

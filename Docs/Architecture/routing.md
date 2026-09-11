@@ -555,8 +555,13 @@ B↔C is Wi-Fi…").
 
 ### What exists today
 
-- `advertised_uris()` = every listening URI expanded over `_local_ips` +
-  `_extra_addrs` (the discovered public IP, observed addresses).
+- `advertised_uris()` = every listening URI expanded over `_local_ips`, and
+  over `_extra_addrs` (the discovered public IP, observed addresses) **only on a
+  transport somebody off our own networks has actually reached us on**. A public
+  IP paired with our own listener port is a claim about somebody else's NAT, and
+  two nodes behind one public IP used to make the same claim and then tear each
+  other's entry down over it — see
+  [`transports.md`](transports.md#our-own-public-address-is-proved-not-guessed).
 - The **PING carries `advertised_uris`**; `_handle_ping` does
   `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
   `_validate_uri` filters before adding ("reject by default").

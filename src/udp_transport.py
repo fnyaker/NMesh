@@ -357,10 +357,15 @@ class UDPTransport(BaseTransport):
                "Keep it well above the interval — three missed keepalives is "
                "the usual rule.",
                minimum=15.0, maximum=600.0, unit="s"),
-        option("priority", "int", 10,
+        option("priority", "int", -10,
                "How much this node prefers UDP over another medium, from "
                "-254 to 254. Weighed against measured latency; the balance "
-               "between the two is set once for the node, under Reachability.",
+               "between the two is set once for the node, under Reachability. "
+               "It ships below TCP: UDP is what reaches a node no listener "
+               "can be opened to, and that is worth having — but a datagram "
+               "path loses where a stream does not, and a link losing probes "
+               "is a link an operator ends up reconnecting by hand. Raise it "
+               "where UDP is the better medium and you know it.",
                minimum=-254, maximum=254),
         option("mlo", "bool", False,
                "Let this medium carry half of a peer's traffic beside another "
@@ -734,7 +739,8 @@ class UDPServer(BaseServer):
         from .ip_utils import ip_reachability
         return ip_reachability(
             "udp", uri, ctx.get("local_ips", []), ctx.get("public_addrs", []),
-            "udp" in ctx.get("inbound_schemes", ()))
+            "udp" in ctx.get("inbound_schemes", ()),
+            "udp" in ctx.get("public_schemes", ()))
 
     async def broadcast(self, data: bytes) -> bool:
         """Send a datagram to the LAN limited-broadcast address on our port."""
