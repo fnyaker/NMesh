@@ -955,6 +955,49 @@ dead link fails every waiter instead of leaving them parked.
 **Never add a second `await _read_frame(self._reader)` to that class.**
 Locked down by `TestOneReader` in `tests/test_data_connector.py`.
 
+## A safety net borrowed from the interpreter is not a bound
+
+`control.frame.decode_request`/`decode_reply` promise "no recursion of our
+own": `json` still recurses once per nesting level, so a frame of nothing but
+opening brackets was refused by *letting it* — the parser hit the
+interpreter's own recursion limit before any of this module's own checks ran,
+and the `RecursionError` was caught and turned into the `FrameError` the
+docstring promises. `tests/test_control_plane.py` proved it with 5 000
+brackets, comfortably under `MAX_FRAME` (24 kB).
+
+CI went red on a base-image bump to Python 3.13 with `Failed: DID NOT RAISE
+FrameError` — the same 5 000-bracket document that raised on 3.11 now parses
+clean. Reproduced directly: `json.loads` on nested arrays needs roughly *ten
+thousand* levels to hit `RecursionError` on 3.13, not the low thousands 3.11
+needed, even though `sys.getrecursionlimit()` reports the same `1000` on
+both — the C-accelerated decoder's own recursion check moved independently of
+the documented, Python-level limit. Ten thousand levels still fits inside
+`MAX_FRAME`, so the hole was in what protected a 24 kB frame from ever
+reaching the parser at all, not in the size cap.
+
+> **An implicit safety net inherited from the interpreter can move without
+> the code that relies on it changing at all.** `RecursionError` was never a
+> bound this module declared — it was a property of `json` and of
+> `sys.getrecursionlimit()`, neither owned here, and the interpreter is free
+> to change how generous it is between minor versions without breaking its
+> own contract. The same trap as `asyncio.Server.wait_closed()` widening its
+> own promise under §Hangs 1 above: a version bump changed behaviour nothing
+> in this codebase asked it to keep.
+
+The fix is `frame._shallow_enough`: an explicit, iterative bracket-depth scan
+over the raw bytes (`MAX_NESTING = 24`, comfortably above `control.catalogue`
+— the deepest legitimate reply, at nine levels — and nowhere near what an
+attack needs), run *before* `json.loads` rather than relying on how it fails.
+`RecursionError` is still caught afterwards, belt and braces, but the frame's
+own promise no longer depends on knowing where the interpreter's ceiling is
+this month.
+
+> **When "malformed input crashes the parser, and we catch that" is the
+> design, ask what decides *where* it crashes.** If the answer is anything
+> outside this codebase's own constants, the bound moves whenever that thing
+> does, silently, and the first sign is a hostile input that used to be
+> refused and is not any more.
+
 ## Routing: the "works at 3 nodes, not at 6" bugs
 
 ### 9. A `FOUND_NODE` that does not fit in a packet — Kademlia dies silently
