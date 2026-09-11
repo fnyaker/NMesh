@@ -3253,8 +3253,7 @@ function offerOutHTML(row){
 
 async function refreshKeys(){
   try{
-    const {ok, data} = await apiJson("/api/keys");
-    if(!ok) return;
+    const data = await CHANNEL.call("keys.overview");
     KEYS = {keys:data.keys || [], incoming:data.incoming || [],
             outgoing:data.outgoing || []};
     setHTML("key-rows", KEYS.keys.map(keyRowHTML).join(""));
@@ -3309,11 +3308,11 @@ $("key-create").addEventListener("click", (event) => withBusy(event.target, asyn
       "key is gone, which is exactly what makes a copy of the file useless to whoever took it.</p>"});
   if(!agreed) return;
   try{
-    const {ok, data} = await apiJson("/api/keys/create", "POST",
+    const {ok, error, data} = await CHANNEL.ask("keys.create",
       {passphrase, label:$("key-label").value});
     setMessage("key-status", ok
       ? "Made " + shortId(data.key.id) + ". Pin it on the nodes that should accept its releases."
-      : (data.error || "Could not make a key"), !ok);
+      : (error || "Could not make a key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; }
   }catch(_){ setMessage("key-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3325,10 +3324,10 @@ $("key-import").addEventListener("click", (event) => withBusy(event.target, asyn
   if(!path){ setMessage("key-status", "Give the path to the key file", true); return; }
   if(!passphrase){ setMessage("key-status", "Type its passphrase in the field above", true); return; }
   try{
-    const {ok, data} = await apiJson("/api/keys/import", "POST",
+    const {ok, error, data} = await CHANNEL.ask("keys.adopt",
       {path, passphrase, label:$("key-label").value});
     setMessage("key-status", ok ? "Took in " + shortId(data.key.id) + "."
-      : (data.error || "Could not read that key"), !ok);
+      : (error || "Could not read that key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; $("key-path").value = ""; }
   }catch(_){ setMessage("key-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3344,9 +3343,9 @@ $("key-rows").addEventListener("click", async (event) => {
       "still accept what those copies sign — forgetting a key is not revoking it.</p>"});
   if(!agreed) return;
   await withBusy(button, async () => {
-    const {ok, data} = await apiJson("/api/keys/forget", "POST",
-      {key_id:button.dataset.keyForget, confirm:true});
-    setMessage("key-status", ok ? "Forgotten." : (data.error || "Could not forget it"), !ok);
+    const {ok, error} = await CHANNEL.ask("keys.forget",
+      {key:button.dataset.keyForget, confirm:true});
+    setMessage("key-status", ok ? "Forgotten." : (error || "Could not forget it"), !ok);
     await refreshKeys();
   });
 });
@@ -3370,12 +3369,12 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
       "key unlocked, and forgets it when they answer or when the offer expires.</p>"});
   if(!agreed) return;
   try{
-    const {ok, data} = await apiJson("/api/keys/offer", "POST",
-      {node, key_id, passphrase, label:$("share-key").selectedOptions[0].textContent,
-       confirm:true});
+    const {ok, error} = await CHANNEL.ask("keys.offer",
+      {node, key:key_id, passphrase,
+       label:$("share-key").selectedOptions[0].textContent, confirm:true});
     setMessage("share-status", ok
       ? "Offered. It travels only once they accept."
-      : (data.error || "Could not offer that key"), !ok);
+      : (error || "Could not offer that key"), !ok);
     if(ok) $("share-pass").value = "";
   }catch(_){ setMessage("share-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3384,7 +3383,7 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
 $("key-offers-in").addEventListener("click", async (event) => {
   const refuse = event.target.closest("[data-key-refuse]");
   if(refuse){
-    await apiJson("/api/keys/refuse", "POST", {offer_id:refuse.dataset.keyRefuse});
+    await CHANNEL.ask("keys.refuse", {offer:refuse.dataset.keyRefuse});
     toast("Offer refused");
     await refreshKeys();
     return;
@@ -3402,11 +3401,11 @@ $("key-offers-in").addEventListener("click", async (event) => {
       "proves the sender holds the key, and nothing at all about who the sender is.</p>"});
   if(!agreed) return;
   await withBusy(accept, async () => {
-    const {ok, data} = await apiJson("/api/keys/accept", "POST",
-      {offer_id, passphrase, confirm:true});
+    const {ok, error} = await CHANNEL.ask("keys.accept",
+      {offer:offer_id, passphrase, confirm:true});
     setMessage("share-status", ok
       ? "Accepted — the key arrives in a moment, sealed to this node."
-      : (data.error || "Could not accept"), !ok);
+      : (error || "Could not accept"), !ok);
     if(field) field.value = "";
     await refreshKeys();
   });
@@ -3546,9 +3545,9 @@ $("watch-rows").addEventListener("click", async (event) => {
     confirmLabel:"Stop watching", danger:true});
   if(!agreed) return;
   await withBusy(drop, async () => {
-    const {ok, data} = await apiJson("/api/packages/subscribe", "POST",
-      {id:drop.dataset.watchDrop, on:false});
-    setMessage("watch-status", ok ? "" : (data.error || "Could not stop"), !ok);
+    const {ok, error} = await CHANNEL.ask("packages.subscribe",
+      {record:drop.dataset.watchDrop, on:false});
+    setMessage("watch-status", ok ? "" : (error || "Could not stop"), !ok);
     await refreshReleases();
   });
 });

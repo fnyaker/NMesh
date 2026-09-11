@@ -1242,14 +1242,7 @@ def _make_handler(console: WebConsole):
                     self._json(503, {"error": "node unavailable"})
                 return
             if path == "/api/keys":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.key_share_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("keys.overview")
                 return
             if path == "/api/packages":
                 self._handle_packages_get()
@@ -1266,32 +1259,23 @@ def _make_handler(console: WebConsole):
         # ask it a question — this name, or this node — and it answers.
 
         def _handle_packages_get(self) -> None:
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            """Ask the directory: by name, or about one node.
+
+            `wide` is a different question rather than a louder one — it costs a
+            Kademlia round plus a query to every target — so it is its own
+            operation with its own ceiling, and a keystroke never triggers it.
+            """
             node = self._query("node")
             query = self._query("q")
-            wide = self._query("wide") == "1"
-            try:
-                if node is not None:
-                    results = console._call(
-                        console._node.packages_of(node, wide=wide),
-                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
-                elif query:
-                    # Asking the network costs a round of queries, so it is a
-                    # button rather than something a keystroke triggers — the
-                    # same bargain the name search makes.
-                    results = console._call(
-                        console._node.search_packages(query)
-                        if wide else _wrap(console._node.find_packages, query),
-                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
-                else:
-                    self._json(400, {"error": "q or node required"})
-                    return
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            self._json(200, {"results": results})
+            if self._query("wide") == "1":
+                self._from_plane("packages.lookup",
+                                 {"query": query or "", "node": node or ""})
+            elif node is not None:
+                self._from_plane("packages.held", {"node": node})
+            elif query:
+                self._from_plane("packages.search", {"query": query})
+            else:
+                self._json(400, {"error": "q or node required"})
 
         def _handle_package_get(self, rest: str) -> None:
             if not self._authed():
@@ -1319,24 +1303,9 @@ def _make_handler(console: WebConsole):
                 _entry, blob, name = fetched
                 self._send_binary(blob, name)
                 return
-            try:
-                entry = console._call(
-                    _wrap(console._node.package_entry, record_id))
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            if entry is None:
-                self._json(404, {"error": "not found"})
-                return
-            described = None
-            if self._query("fetch") == "1":
-                try:
-                    described = console._call(
-                        console._node.package_descriptor(record_id),
-                        timeout=_APP_CALL_TIMEOUT)
-                except Exception:
-                    described = None
-            self._json(200, {**entry, "descriptor": described})
+            self._from_plane(
+                "packages.describe" if self._query("fetch") == "1"
+                else "packages.entry", {"record": record_id})
 
         def _handle_list_get(self, path: str) -> None:
             if not self._authed():
@@ -1823,158 +1792,83 @@ def _make_handler(console: WebConsole):
                 "nmesh-trace.json")
 
         def _handle_key_post(self, path: str, data) -> None:
-            """Offering, accepting and forgetting a publisher key.
+            """Making, offering, accepting and forgetting a publisher key.
 
-            A passphrase crosses this boundary — the sender's to unlock what it
-            is offering, the recipient's to keep what it accepts — so these
-            routes exist only over the console session, and nothing here writes
-            one down. The node holds the recipient's just long enough for the
-            grant to land, and drops it either way."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route. The rule the operations carry is the one
+            these had to repeat: a passphrase is typed at the machine that will
+            hold the key, so none of this is reachable from a console managing
+            this node — only the overview is
+            (`src/control/modules/keys.py`)."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            try:
-                if path == "/api/keys/create":
-                    passphrase = data.get("passphrase")
-                    if not isinstance(passphrase, str) or not passphrase:
-                        self._json(400, {"error": "passphrase required"})
-                        return
-                    label = data.get("label")
-                    row = console._call(_wrap(
-                        node.create_publisher_key, passphrase,
-                        label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "key": row})
-                    return
-                if path == "/api/keys/import":
-                    for name in ("path", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    label = data.get("label")
-                    row = console._call(_wrap(
-                        node.import_publisher_key, data["path"],
-                        data["passphrase"],
-                        label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "key": row})
-                    return
-                if path == "/api/keys/offer":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    for name in ("node", "key_id", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    key_path = console._call(
-                        _wrap(node.publisher_key_path, data["key_id"]))
-                    if key_path is None:
-                        self._json(404, {"error": "no such publisher key"})
-                        return
-                    label = data.get("label")
-                    offer = console._call(node.offer_publisher_key(
-                        data["node"], key_path, data["passphrase"],
-                        label=label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "offer": offer})
-                    return
-                if path == "/api/keys/accept":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    for name in ("offer_id", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    accepted = console._call(node.accept_publisher_key(
-                        data["offer_id"], data["passphrase"]),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, **accepted})
-                    return
-                if path == "/api/keys/refuse":
-                    offer_id = data.get("offer_id")
-                    if not isinstance(offer_id, str):
-                        self._json(400, {"error": "offer_id required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.refuse_publisher_key, offer_id))})
-                    return
-                if path == "/api/keys/forget":
-                    key_id = data.get("key_id")
-                    if not isinstance(key_id, str):
-                        self._json(400, {"error": "key_id required"})
-                        return
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.forget_publisher_key, key_id))})
-                    return
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            self._json(404, {"error": "not found"})
+            action = path.rsplit("/", 1)[1]
+            label = data.get("label")
+            label = label if isinstance(label, str) else ""
+
+            def secret(name):
+                """A passphrase passed through exactly as typed, or not at all:
+                the field is never trimmed, and a `null` is not an empty one."""
+                value = data.get(name)
+                return {name: value} if isinstance(value, str) else {}
+
+            if action == "create":
+                self._from_plane("keys.create",
+                                 {"label": label, **secret("passphrase")})
+            elif action == "import":
+                self._from_plane("keys.adopt",
+                                 {"path": data.get("path") or "",
+                                  "label": label, **secret("passphrase")})
+            elif action == "offer":
+                self._from_plane("keys.offer", {
+                    "node": data.get("node") or "",
+                    "key": data.get("key_id") or "",
+                    "confirm": data.get("confirm") is True,
+                    "label": label, **secret("passphrase")})
+            elif action == "accept":
+                self._from_plane("keys.accept", {
+                    "offer": data.get("offer_id") or "",
+                    "confirm": data.get("confirm") is True,
+                    **secret("passphrase")})
+            elif action == "refuse":
+                self._from_plane("keys.refuse",
+                                 {"offer": data.get("offer_id") or ""})
+            elif action == "forget":
+                self._from_plane("keys.forget",
+                                 {"key": data.get("key_id") or "",
+                                  "confirm": data.get("confirm") is True})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_package_post(self, path: str, data) -> None:
             """Installing, pinning and subscribing from a package record.
 
-            The console decides nothing here either. What is new is where the
-            publisher key comes from: it arrived *inside the record*, checked
-            against the signature it made, so pinning is a confirmation rather
-            than a hex string copied from a channel nobody could vouch for."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route. What the operations own — and what this
+            used to spell out three times — is that the publisher key comes from
+            *inside the record*, checked against the signature it made, so
+            pinning is a confirmation of a record rather than a hex string
+            copied from a channel nobody could vouch for."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            record_id = data.get("id")
-            if not isinstance(record_id, str):
-                self._json(400, {"error": "id required"})
-                return
-            try:
-                if path == "/api/packages/install":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    result = console._call(node.install_package(record_id),
-                                           timeout=400.0)
-                    # A core release only takes effect when the node comes back
-                    # on the tree just written; an app is live where it stands.
-                    restarting = (console.restart()
-                                  if result.get("restart_required") else False)
-                    self._json(200, {"ok": True, **result,
-                                     "restarting": restarting})
-                    return
-                if path == "/api/packages/trust":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    entry = console._call(_wrap(
-                        node.trust_package_signer, record_id,
-                        auto=data.get("auto") is True,
-                        endorsed=data.get("endorsed") is True))
-                    self._json(200, {"ok": True, "publisher": entry})
-                    return
-                if path == "/api/packages/subscribe":
-                    if data.get("on") is False:
-                        self._json(200, {"ok": console._call(
-                            _wrap(node.unsubscribe_package, record_id))})
-                        return
-                    quorum = data.get("quorum")
-                    entry = console._call(_wrap(
-                        node.subscribe_package, record_id,
-                        auto=data.get("auto") is True,
-                        quorum=quorum if isinstance(quorum, int)
-                        and not isinstance(quorum, bool) else 1))
-                    self._json(200, {"ok": True, "subscription": entry})
-                    return
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            self._json(404, {"error": "not found"})
+            record = data.get("id")
+            record = record if isinstance(record, str) else ""
+            action = path.rsplit("/", 1)[1]
+            if action == "install":
+                self._from_plane("packages.install",
+                                 {"record": record,
+                                  "confirm": data.get("confirm") is True})
+            elif action == "trust":
+                self._from_plane("packages.trust", {
+                    "record": record, "confirm": data.get("confirm") is True,
+                    "auto": data.get("auto") is True,
+                    "endorsed": data.get("endorsed") is True})
+            elif action == "subscribe":
+                quorum = data.get("quorum")
+                self._from_plane("packages.subscribe", {
+                    "record": record,
+                    "on": data.get("on") is not False,
+                    "auto": data.get("auto") is True,
+                    "quorum": quorum if isinstance(quorum, int)
+                    and not isinstance(quorum, bool) else 1})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_release_post(self, path: str, data) -> None:
             """Publishing, pinning and installing mesh-native releases.

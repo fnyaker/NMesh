@@ -76,6 +76,11 @@ MAX_HEX = 20000
 # A passphrase. Long enough for anything a person types or a manager generates,
 # short enough that it is an argument rather than a payload.
 MAX_SECRET = 512
+# An identifier written as hex — a record, an offer, a signing key's id. They
+# are hashes, so the real ones are 40 or 64 characters; the ceiling is well
+# above that because its job is to refuse a payload, not to police a length the
+# hash already decides.
+MAX_ID_HEX = 256
 
 _HEX_RE = re.compile(r"^[0-9a-f]*$")
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,%d}$" % (MAX_KEY - 1))

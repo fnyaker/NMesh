@@ -32,18 +32,17 @@ from ... import updater
 from ...core_release import ReleaseError
 from ..context import on_loop
 from ..errors import ControlError
-from ..params import param
+from ..params import MAX_ID_HEX, param
 from ..plane import operation
 
 _READ = 10.0
 _CHECK = 40.0            # asking GitHub: a network round trip we do not bound
 _PUBLISH = 300.0         # packing and signing the installed tree
 _INSTALL = 400.0         # fetching a release, verifying it, replacing the tree
-# A publisher's signing key as hex (ML-DSA-65: 1952 bytes), and the id derived
-# from it. Bounded well above both rather than exactly at them: a key size is
-# the crypto's business, and this only has to refuse a payload.
+# A publisher's signing key as hex (ML-DSA-65: 1952 bytes). Bounded well above
+# that rather than exactly at it: a key size is the crypto's business, and this
+# only has to refuse a payload. The id derived from it uses the shared bound.
 _KEY_HEX = 8192
-_ID_HEX = 256
 
 
 class ReleasesModule:
@@ -74,14 +73,14 @@ class ReleasesModule:
                    param("endorsed", "flag", required=False, default=False)],
                   changes=True, timeout=_READ),
         operation("untrust", "Take a pinned key back",
-                  [param("publisher", "hex", limit=_ID_HEX)],
+                  [param("publisher", "hex", limit=MAX_ID_HEX)],
                   changes=True, timeout=_READ),
         operation("auto", "Let one publisher's releases install themselves",
-                  [param("publisher", "hex", limit=_ID_HEX),
+                  [param("publisher", "hex", limit=MAX_ID_HEX),
                    param("auto", "flag")],
                   changes=True, timeout=_READ),
         operation("endorse", "Let one publisher's signature count in a quorum",
-                  [param("publisher", "hex", limit=_ID_HEX),
+                  [param("publisher", "hex", limit=MAX_ID_HEX),
                    param("endorsed", "flag")],
                   changes=True, timeout=_READ),
     )

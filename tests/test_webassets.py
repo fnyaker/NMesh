@@ -1140,7 +1140,7 @@ def test_installing_a_package_asks_first():
     source = webassets.APP_JS
     block = source.split("async install(row, element)", 1)[1]
     assert "confirmAction(" in block
-    assert '"/api/packages/install"' in source and "confirm:true" in source
+    assert '"packages.install"' in source and "confirm:true" in source
 
 
 def test_a_key_is_pinned_from_the_record_that_carries_it():
@@ -1149,7 +1149,7 @@ def test_a_key_is_pinned_from_the_record_that_carries_it():
     confirmation of that record."""
     html, source = webassets.INDEX_HTML, webassets.APP_JS
     assert 'id="pin-key"' not in html and 'id="pin-add"' not in html
-    assert '"/api/packages/trust"' in source
+    assert '"packages.trust"' in source
     # Trusting and auto-installing stay two decisions, not one.
     assert 'id="pkg-pin-auto"' in source and '"releases.auto"' in source
 
@@ -1222,8 +1222,8 @@ def test_no_release_action_can_end_mid_sentence():
     source = webassets.APP_JS
     # An operation where it has moved onto the control plane, a route where it
     # has not — the rule is about the *status line*, not about the door.
-    for name in ('"releases.publish"', '"/api/packages/install"',
-                 '"/api/packages/trust"'):
+    for name in ('"releases.publish"', '"packages.install"',
+                 '"packages.trust"'):
         call = source.index(name)
         window = source[call - 400:call + 700]
         assert "catch(" in window or "setMessage(" in window, name

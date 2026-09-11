@@ -281,6 +281,12 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (packages & keys)             — asking this node and
+│     asking the network are two operations with two ceilings (and only the
+│     cheap one travels), a lookup asks one question rather than two, installing
+│     and pinning are confirmed and local, and of the key operations only the
+│     overview travels — a passphrase is typed at the machine that will hold the
+│     key, and reaches the node exactly as typed
 ├── test_control_plane.py (releases)                    — the node's own code:
 │     only the read travels (what a node accepts for replacing its program is
 │     pinned by a human at that node, and the rest would not fit the relay

@@ -257,6 +257,8 @@ keeps working, with one implementation behind it.
 | `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 | `node` (lists) | `list` | `/api/nodes` |
 | `releases` | `overview` `check` `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
+| `packages` | `search` `held` `entry` `lookup`\* `describe`\* `install`\* `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
+| `keys` | `overview` `create`\* `adopt`\* `offer`\* `accept`\* `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
 
 \* local only.
 
@@ -284,9 +286,17 @@ What does travel is the one read — what this node holds, what it has pinned an
 what it is watching — because an operator managing a machine needs to see that
 without being able to change it.
 
-Still routes of their own, and the ledger to work through: the package
-directory (`/api/packages/…`) and the app store's lists, invitations, tickets
-and joining,
+`packages` and `keys` follow from the same sentence. Pinning the key inside a
+record, installing what a record names, and watching a package are the same
+decision as pinning a publisher, so they stay local; asking the *directory* is
+local because a Kademlia round does not fit the relay, while what this node
+already knows answers a remote console fine. And for `keys` it is simpler
+still: **a passphrase is typed at the machine that will hold the key**, so only
+the overview travels — which is the structural half of what
+:mod:`src.key_share` is for.
+
+Still routes of their own, and the ledger to work through: the app store's
+lists and its publish, invitations, tickets and joining,
 releases and updates, publisher keys, the app store, chat and fleet's own
 surfaces, login/logout. Three of those are not candidates at all: **login** is
 how a session begins, **the console password** is that door's own key rather

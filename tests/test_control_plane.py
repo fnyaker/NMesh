@@ -580,6 +580,130 @@ class TestAppsOnTheChannel:
         assert remotes(FleetBridge) == {"relation"}
 
 
+class TestPackagesAndKeys:
+    """The directory, and the keys this node can sign with."""
+
+    class _Node:
+        pseudo = ""
+
+        class _Id:
+            raw = bytes(range(20))
+
+        id = _Id()
+
+        def __init__(self):
+            self.asked = []
+            self.records = {"ab" * 20: {"id": "ab" * 20, "name": "thing"}}
+
+        def find_packages(self, query, limit=20):
+            self.asked.append(("local", query))
+            return [{"name": "thing"}] if query in "thing" else []
+
+        async def search_packages(self, query):
+            self.asked.append(("wide", query))
+            return [{"name": "thing", "from": "the network"}]
+
+        async def packages_of(self, node, wide=False):
+            self.asked.append(("of", node, wide))
+            return []
+
+        def package_entry(self, record):
+            return self.records.get(record)
+
+        def key_share_overview(self):
+            return {"keys": [], "incoming": [], "outgoing": []}
+
+        def create_publisher_key(self, passphrase, label=""):
+            self.asked.append(("create", passphrase, label))
+            return {"id": "cc" * 20, "label": label}
+
+        def forget_publisher_key(self, key):
+            return False
+
+        def refuse_publisher_key(self, offer):
+            return False
+
+    def _channel(self, node, origin=Origin.LOCAL):
+        return control.LocalChannel(control.build(control.Context(
+            node=node, loop=asyncio.get_event_loop())), origin)
+
+    async def test_asking_this_node_and_asking_the_network_are_two_operations(self):
+        node = self._Node()
+        channel = self._channel(node)
+        assert (await asyncio.to_thread(channel.call, "packages.search",
+                                        {"query": "thing"})).result["wide"] is False
+        assert (await asyncio.to_thread(channel.call, "packages.lookup",
+                                        {"query": "thing"})).result["wide"] is True
+        assert node.asked == [("local", "thing"), ("wide", "thing")]
+        # And a console managing this node gets the cheap one only: a Kademlia
+        # round does not fit what the relay carries.
+        there = self._channel(node, Origin.REMOTE)
+        assert (await asyncio.to_thread(there.call, "packages.search",
+                                        {"query": "thing"})).ok
+        refused = await asyncio.to_thread(there.call, "packages.lookup",
+                                          {"query": "thing"})
+        assert refused.ok is False and refused.code == "refused"
+
+    async def test_a_lookup_asks_one_question(self):
+        channel = self._channel(self._Node())
+        for params in ({}, {"query": "thing", "node": "ab" * 20}):
+            reply = await asyncio.to_thread(channel.call, "packages.lookup",
+                                            params)
+            assert reply.ok is False and reply.code == "bad_request", params
+
+    async def test_a_record_this_node_does_not_hold_is_not_found(self):
+        channel = self._channel(self._Node())
+        assert (await asyncio.to_thread(channel.call, "packages.entry",
+                                        {"record": "ab" * 20})).ok
+        missing = await asyncio.to_thread(channel.call, "packages.entry",
+                                          {"record": "cd" * 20})
+        assert missing.ok is False and missing.code == "not_found"
+
+    async def test_installing_and_pinning_are_confirmed_and_local(self):
+        node = self._Node()
+        here, there = self._channel(node), self._channel(node, Origin.REMOTE)
+        for op in ("install", "trust"):
+            unconfirmed = await asyncio.to_thread(
+                here.call, "packages." + op,
+                {"record": "ab" * 20, "confirm": False})
+            assert unconfirmed.ok is False and unconfirmed.code == "bad_request"
+            refused = await asyncio.to_thread(
+                there.call, "packages." + op,
+                {"record": "ab" * 20, "confirm": True})
+            assert refused.ok is False and refused.code == "refused", op
+
+    async def test_only_the_key_overview_travels(self):
+        node = self._Node()
+        plane = control.build(control.Context(node=node,
+                                              loop=asyncio.get_event_loop()))
+        remote = {row["name"] for module in plane.catalogue(Origin.REMOTE)
+                  for row in module["operations"] if module["module"] == "keys"}
+        # A passphrase is typed at the machine that will hold the key.
+        assert remote == {"overview"}
+        there = control.LocalChannel(plane, Origin.REMOTE)
+        for op, params in (("create", {"passphrase": "x"}),
+                           ("adopt", {"path": "/tmp/k", "passphrase": "x"}),
+                           ("forget", {"key": "ab" * 20, "confirm": True})):
+            reply = await asyncio.to_thread(there.call, "keys." + op, params)
+            assert reply.ok is False and reply.code == "refused", op
+
+    async def test_a_key_passphrase_reaches_the_node_as_typed(self):
+        node = self._Node()
+        channel = self._channel(node)
+        reply = await asyncio.to_thread(channel.call, "keys.create",
+                                        {"passphrase": " kept as typed ",
+                                         "label": "  a label  "})
+        assert reply.ok is True
+        assert node.asked[-1] == ("create", " kept as typed ", "a label")
+
+    async def test_what_this_node_does_not_hold_cannot_be_forgotten(self):
+        channel = self._channel(self._Node())
+        for op, params in (("forget", {"key": "ab" * 20, "confirm": True}),
+                           ("refuse", {"offer": "ab" * 20})):
+            reply = await asyncio.to_thread(channel.call, "keys." + op, params)
+            assert reply.ok is False and reply.code == "not_found", op
+
+
 class TestReleases:
     """The node's own code: what travels, what does not, and what a refusal
     says. The most sensitive surface on the plane, and the one where almost
