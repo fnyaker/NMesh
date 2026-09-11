@@ -525,3 +525,60 @@ class TestEscalation:
         text = INSTALL.read_text()
         assert 'run_owning "$DATA" "$PYTHON_BIN" "$SCRIPT"' in text
         assert 'run_priv "$PYTHON_BIN"' not in text
+
+
+class TestTheUpdateGrantIsTheDefault:
+    """A node that cannot take a security update is a worse outcome than one
+    that can, and what the grant covers is one fixed script the node cannot
+    rewrite. So `./install.sh` gives it, and `--no-allow-update` takes it back.
+
+    Both halves have to move together: the sudoers rule is useless under a unit
+    with `NoNewPrivileges=yes` (the kernel refuses every setuid binary, `sudo`
+    included), which is the confusing failure in `FAQ.md`.
+    """
+
+    def test_the_flag_defaults_on(self):
+        text = INSTALL.read_text()
+        assert "\nALLOW_UPDATE=true\n" in text
+        assert "--no-allow-update)" in text
+
+    def test_saying_no_is_still_expressible(self):
+        """The absence of a right has to be sayable, or it can only ever be
+        added — it is just no longer said by *omitting* a flag."""
+        text = INSTALL.read_text()
+        assert "--no-allow-update) ALLOW_UPDATE=false" in text
+
+    def test_the_unit_is_relaxed_for_a_node_holding_the_grant(self, tmp_path):
+        result = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nmesh "" multi-user.target true')
+        assert "NoNewPrivileges=no" in result.stdout
+        assert "ProtectSystem=no" in result.stdout
+
+    def test_and_hardened_for_one_that_refused_it(self, tmp_path):
+        result = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nmesh "" multi-user.target false')
+        assert "NoNewPrivileges=yes" in result.stdout
+        assert "ProtectSystem=full" in result.stdout
+
+    def test_the_relaxed_unit_names_the_way_back(self, tmp_path):
+        """An operator reading the unit must be able to find the flag that
+        undoes it without reading the installer."""
+        result = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nmesh "" multi-user.target true')
+        assert "--no-allow-update" in result.stdout
+
+    def test_a_default_install_does_not_warn_about_what_it_did_not_grant(self):
+        """Those messages are worth printing to somebody who asked for the
+        grant. On every install that merely took the default they are noise —
+        and one of them fires on every root-as-root install."""
+        text = INSTALL.read_text()
+        assert 'ALLOW_UPDATE_ASKED=false' in text
+        lines = text.splitlines()
+        for message in ("the node already runs as root, nothing to grant",
+                        "needs root to write a sudoers rule",
+                        "no package manager this node knows how to drive"):
+            where = next(i for i, line in enumerate(lines) if message in line)
+            assert 'ALLOW_UPDATE_ASKED' in lines[where - 1], message

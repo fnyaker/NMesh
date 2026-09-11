@@ -39,11 +39,14 @@ systemctl cat nmesh | grep -E 'NoNewPrivileges|ProtectSystem'
 #   ProtectSystem=no
 ```
 
-Since that fix, confinement **follows the grant**: hardened in full by default,
-relaxed only for a node whose operator explicitly asked for system updates.
-Running `./install.sh` again **without** `--allow-update` removes the sudoers
-rule *and* re-hardens the unit — the two choices can no longer be made
-separately.
+Since that fix, confinement **follows the grant**, and the grant is now the
+default: a plain `./install.sh` gives the node its one root command and writes
+the unit that lets it use it. `./install.sh --no-allow-update` removes the
+sudoers rule *and* re-hardens the unit — the two choices can no longer be made
+separately, whichever way round you want them.
+
+So the entry above is now a symptom of an **older install**, or of one someone
+deliberately locked down: re-running `./install.sh` at all is the fix.
 
 **Why three directives and not one.** `NoNewPrivileges=yes` blocks `sudo`;
 `ProtectSystem=full` mounts `/usr` read-only, so a package manager could write
@@ -68,8 +71,8 @@ refusal shown when you click Update. The three cases:
 | Message | Cause | Fix |
 |---|---|---|
 | `no package manager this node knows how to drive` | unrecognised distribution (or a minimal image with no `apt`/`dnf`/`apk`…) | update the machine some other way; NMesh does not guess a package manager |
-| `no sudo or doas on this machine, and the node is not root` | the node runs under an unprivileged account and nothing allows escalation | `sudo ./install.sh --allow-update` on the machine |
-| `NoNewPrivileges` | see the entry above | `sudo ./install.sh --allow-update` |
+| `no sudo or doas on this machine, and the node is not root` | the node runs under an unprivileged account and nothing allows escalation | `sudo ./install.sh` on the machine (the grant is the default; `--allow-update` names it explicitly) |
+| `NoNewPrivileges` | see the entry above | `sudo ./install.sh` |
 
 ### The node updates, then does not come back
 
