@@ -197,6 +197,46 @@ class TestRemoteIsRefusedByDefault:
 
 
 class TestFrames:
+    def test_a_frame_is_answered_however_hostile_and_says_nothing_extra(self):
+        """A sweep with the shapes an attacker actually sends.
+
+        The generated half is the point: a frame this suite never thought of
+        must still come back as a frame, with a code from the closed set and
+        nothing of this machine in it."""
+        import random
+        import string
+
+        chan = control.LocalChannel(_plane())
+        random.seed(11)
+        shapes = [
+            json.dumps({"v": 1, "op": "sample.named",
+                        "params": {"node": "../../etc/passwd"}}).encode(),
+            json.dumps({"v": 1, "op": "sample.named",
+                        "params": {"node": "ab" * 20, "label": "\x00"}}).encode(),
+            json.dumps({"v": 1, "op": "sample.read", "id": "i" * 200}).encode(),
+            json.dumps({"v": 1, "op": "sample.boom"}).encode(),
+        ]
+        for _ in range(60):
+            shapes.append(json.dumps({
+                "v": random.choice([1, 1, 1, 2, "1", None, []]),
+                "op": random.choice([
+                    "".join(random.choice(string.printable) for _ in range(10)),
+                    "sample.read", "sample." * 3, None, 7, ["sample.read"]]),
+                "params": random.choice([
+                    {}, {"node": "z" * 60}, {"extra": 1}, [], "s", None,
+                    {"node": {"deep": {"deeper": 1}}}]),
+            }).encode())
+
+        for raw in shapes:
+            answer = json.loads(chan.send(raw))
+            assert isinstance(answer, dict) and "ok" in answer, raw[:60]
+            if not answer["ok"]:
+                assert answer["code"] in control.CODES, raw[:60]
+            text = json.dumps(answer)
+            for internal in ("Traceback", "/home/", "site-packages",
+                             "a secret about this machine"):
+                assert internal not in text, (internal, raw[:60])
+
     def test_hostile_bytes_never_raise_and_never_pass(self):
         chan = control.LocalChannel(_plane())
         hostile = [
@@ -1286,6 +1326,46 @@ class TestConsoleControlRoute:
             status, body = await asyncio.to_thread(
                 _post, console, {"v": 1, "op": "pseudo.get"}, token, headers)
             assert status == 200 and body["ok"] is True
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_every_operation_answers_and_the_gate_holds_for_all_of_them(self):
+        """One sweep over the whole plane, through the real door.
+
+        Per-module tests check the operations somebody thought to write a test
+        for. This asks the node what it exposes and then asks for **every one
+        of them** with the marker a peer's relayed call carries: each must
+        answer with a frame, and each one that is not declared remote must come
+        back refused. A module added later is covered by construction, which is
+        the only way a gate like this stays true."""
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            replay = {fleet_console.REPLAY_HEADER: "1"}
+
+            def names(answer):
+                return {f"{module['module']}.{row['name']}"
+                        for module in answer[1]["result"]["modules"]
+                        for row in module["operations"]}
+
+            offered = names(await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "control.catalogue"}, token))
+            travels = names(await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "control.catalogue"}, token,
+                replay))
+            assert len(offered) > 60 and travels < offered
+
+            for op in sorted(offered):
+                status, body = await asyncio.to_thread(
+                    _post, console, {"v": 1, "op": op, "params": {}}, token,
+                    replay)
+                # Every operation answers a frame — including the ones whose
+                # arguments are missing, which is a refusal and not a silence.
+                assert isinstance(body, dict) and "ok" in body, op
+                if op not in travels:
+                    assert body["code"] == "refused", (op, body)
+                    assert status == 403, op
         finally:
             console.stop()
             await node.stop()
