@@ -281,6 +281,13 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (the whole plane at once)     — two sweeps rather than
+│     two examples: the node is asked what it exposes and then asked for **every
+│     operation** with the marker a relayed call carries — each answers a frame,
+│     each one not declared remote comes back refused — and a few dozen
+│     generated frames must each come back with a code from the closed set and
+│     nothing of this machine in them. A module added later is covered by
+│     construction, which is the only way a gate stays true
 ├── test_control_plane.py (store & joining)             — an app is not the
 │     node's own program, so installing one travels while pinning a signing key
 │     does not; a catalogue paged and sorted where the list is; minting an
