@@ -619,7 +619,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/update/apply` | `{version, confirm}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives — `releases.apply`, local only |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible — `node.restart`, and under a remote context it is the *managed* node that restarts |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
-| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save` |
+| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save`. A value may not span two lines: the file is one `name = value` per line, so a newline in one would write a *second setting* rather than a longer value |
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
 | GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |

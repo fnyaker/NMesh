@@ -281,6 +281,14 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (what the review found)       — the two findings from
+│     this feature's security review, each pinned in both layers: a value cannot
+│     smuggle a second setting into the configuration file (the field that
+│     declared it refuses a newline, and so does the file format that owns the
+│     constraint — `spool` wrote `launch`, which the console may never write),
+│     a frame of five thousand brackets is refused rather than raised out of a
+│     channel that says it never raises, and a node id that is not one runs
+│     **nowhere** instead of falling through to this machine
 ├── test_control_plane.py (the ledger is true)          — the table in
 │     `Docs/Architecture/control-plane.md` is read back and compared against the
 │     plane: every operation present, every "local only" star matching the
