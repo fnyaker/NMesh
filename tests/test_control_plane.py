@@ -288,6 +288,94 @@ class TestFrames:
         assert frame_mod.decode_reply(json.dumps(crowded).encode()).detail == {}
 
 
+class TestAValueCannotSmuggleASecondSetting:
+    """The one finding from this feature's security review that mattered.
+
+    A configuration file is one ``name = value`` per line, so a newline inside
+    a value does not make a longer value — it makes a **second setting**, and
+    the loader reads it. `spool` is editable from the console and `launch`
+    deliberately is not ("turning an authenticated web form into a way to
+    choose what the node executes is a bigger step than editing settings"), so
+    a newline in the first wrote the second, and the launcher ran it on the
+    next start. Reachable from `config.save`, which a peer holding the fleet's
+    `manage` right may call.
+
+    Both layers refuse it now, and both are tested: the field that declared the
+    value, and the file format that owns the constraint.
+    """
+
+    SMUGGLED = '/tmp/spool\nlaunch = /bin/sh -c "id > /tmp/pwned"'
+
+    def test_the_declared_field_refuses_a_value_that_spans_two_lines(self):
+        field = control.param("settings", "document")
+        with pytest.raises(ControlError):
+            control.coerce(field, {"spool": self.SMUGGLED})
+        # Including one level down, where a transport's fields live.
+        with pytest.raises(ControlError):
+            control.coerce(field, {"tcp": {"bind": self.SMUGGLED}})
+        # And in a list, which is how a setting spelled as several values
+        # arrives.
+        with pytest.raises(ControlError):
+            control.coerce(field, {"bootstrap": ["tcp://a:1", self.SMUGGLED]})
+
+    def test_the_file_refuses_it_too(self):
+        from src import config as node_config
+
+        merged, rejected = node_config.apply_edits(node_config.defaults(),
+                                                   {"spool": self.SMUGGLED})
+        assert rejected and "two lines" in rejected[0]
+        assert merged["spool"] is None
+
+    async def test_nothing_reaches_the_file_through_the_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "nmesh.conf")
+            context = control.Context(node=None, config_path=path)
+            channel = control.LocalChannel(control.build(context))
+            reply = channel.call("config.save",
+                                 {"settings": {"spool": self.SMUGGLED}})
+            assert reply.ok is False and reply.code == "bad_request"
+            assert not os.path.exists(path) or "launch" not in open(path).read()
+
+    async def test_a_setting_the_console_may_not_write_is_still_refused(self):
+        """The direct attempt, which always was refused — here so the pair of
+        them is visible: not by name, and not by smuggling either."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "nmesh.conf")
+            channel = control.LocalChannel(control.build(
+                control.Context(node=None, config_path=path)))
+            reply = channel.call("config.save",
+                                 {"settings": {"launch": "/bin/sh"}})
+            assert reply.ok is False and reply.code == "bad_request"
+
+
+class TestNothingEscapesTheChannel:
+    """The other review finding: the parser recurses, and the frame's own
+    docstring promised no recursion. Five thousand brackets fit inside a frame,
+    so `json` reached the interpreter's limit before any check ran, and the
+    `RecursionError` escaped a `send` that says it never raises."""
+
+    def test_a_frame_of_brackets_is_refused_rather_than_raised(self):
+        deep = (b'{"v":1,"op":"sample.read","params":{"x":'
+                + b"[" * 5000 + b"]" * 5000 + b"}}")
+        assert len(deep) < frame_mod.MAX_FRAME
+        with pytest.raises(control.FrameError):
+            frame_mod.decode_request(deep)
+        answer = json.loads(control.LocalChannel(_plane()).send(deep))
+        assert answer["ok"] is False and answer["code"] == "bad_request"
+        # The reply side reads documents a machine we do not run composed.
+        with pytest.raises(control.FrameError):
+            frame_mod.decode_reply(deep)
+
+    def test_a_channel_answers_even_when_the_target_is_wrong(self):
+        """A node id that is not one is known to be wrong before the frame is
+        read at all — and something still answers a frame."""
+        channel = control.RefusedChannel("bad_request", "bad node id")
+        reply = channel.call("node.state")
+        assert reply.ok is False and reply.code == "bad_request"
+        assert reply.error == "bad node id"
+        assert channel.target == ""
+
+
 class TestParams:
     def test_text_is_text_and_not_repaired(self):
         field = control.param("label", "text")
@@ -1395,6 +1483,35 @@ class TestConsoleControlRoute:
             status, body = await asyncio.to_thread(
                 _post, console, {"v": 1, "op": "pseudo.get"}, token, headers)
             assert status == 200 and body["ok"] is True
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_node_id_that_is_not_one_runs_nowhere(self):
+        """The worst outcome this channel could have: a frame aimed at another
+        machine, executed on **this** one because the address was malformed.
+
+        The older routes answer `400 bad node id` for that; `/api/control` is
+        routed before them, so it has to answer it itself."""
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            before = node.pseudo
+            # An *empty* header names nothing and means this node, which is
+            # what a page that never heard of contexts sends; these are the
+            # ones that name something and get it wrong.
+            for bad in ("not-hex", "ab", "ab" * 21, "AB" * 20 + "zz",
+                        "ab" * 19 + "zz"):
+                status, body = await asyncio.to_thread(
+                    _post, console,
+                    {"v": 1, "op": "pseudo.save",
+                     "params": {"pseudo": "ran on the wrong node"}},
+                    token, {"X-NMesh-Node": bad})
+                assert status == 400, bad
+                assert body["ok"] is False and body["code"] == "bad_request"
+                assert body["error"] == "bad node id"
+            # Nothing happened here, which is the point.
+            assert node.pseudo == before
         finally:
             console.stop()
             await node.stop()

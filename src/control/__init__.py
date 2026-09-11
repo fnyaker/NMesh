@@ -57,7 +57,8 @@ node's management surface, and a channel is how somebody reached it.
 """
 from __future__ import annotations
 
-from .channel import BaseChannel, LocalChannel, RemoteChannel
+from .channel import (BaseChannel, LocalChannel, RefusedChannel,
+                      RemoteChannel)
 from .context import Context, on_loop
 from .errors import CODES, ControlError, FrameError
 from .frame import (MAX_FRAME, MAX_REPLY, Reply, Request, decode_reply,
@@ -69,7 +70,8 @@ from .plane import ControlPlane, Origin, operation
 __all__ = [
     "BaseChannel", "CODES", "Context", "ControlError", "ControlPlane",
     "FrameError", "LocalChannel", "MAX_FRAME", "MAX_REPLY", "Origin",
-    "RemoteChannel", "Reply", "Request", "build", "coerce", "decode_reply",
+    "RefusedChannel", "RemoteChannel", "Reply", "Request", "build", "coerce",
+    "decode_reply",
     "decode_request", "encode", "install", "on_loop", "operation", "param",
 ]
 
