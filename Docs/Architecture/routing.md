@@ -494,6 +494,78 @@ the monitor.
 
 Locked down by `tests/test_reconnect.py`.
 
+## Routed paths: measured, not assumed (`routed.py`)
+
+A direct link is probed, scored and replaced when it stops working. A **routed**
+path — the same packet, addressed to the same id, handed to a different
+neighbour — had none of that. `_route_candidates` picked a first hop by
+`_route_hints` (whichever peer traffic from that id last happened to arrive
+through), then by XOR distance. Both are guesses about topology, and neither
+can see the failure that matters: a relay that accepts a packet and drops it is
+indistinguishable from one that delivers it, because `peer.send()` returns
+either way. Nothing noticed and nothing retried, so a node that had been
+reachable a minute ago simply stopped answering — and the fix in the field was
+to make a direct link by hand.
+
+So a path is an object (`routed.Path`), and the same three questions are asked
+of it as of a link: does it answer, how fast, how much does it lose.
+
+- **How it is probed.** An `ECHO_REQUEST` addressed to the target and *forced*
+  down one chosen first hop (`_probe_path` sends on that peer rather than
+  through `_route_outbound`, which would pick a hop for itself and then the
+  measurement would be about whatever it picked). The reply comes back by
+  whatever route the far end chooses, so the number is "reach this id through
+  this neighbour and hear back" — which is the question that decides whether to
+  send down it, and the same bargain a PONG strikes for a link.
+- **What gives up on one.** A **run** of `routed.DEAD_PROBES = 3` unanswered
+  probes, never a share: the lifetime share of a path that worked for an hour
+  and then broke cannot rise fast enough to notice, which is the whole of what
+  this has to notice. `LinkQuality.expire` charges the unanswered ones, exactly
+  as the keepalive does for links — without it the window only ever grows by
+  answers and a broken path reads as a quiet one.
+- **Giving up is remembered.** `SHUN_MIN = 60 s`, doubling to `SHUN_MAX`, per
+  (identity, first hop). Otherwise the pass that drops a dead path re-opens it
+  on the next one: what chose that hop has not changed and cannot, so giving up
+  has to be remembered or it is a loop rather than a decision. A probe that
+  answers forgives it.
+- **What the send path does with it.** A direct link to the target still leads.
+  Failing that, a first hop we have **measured** leads over one we guessed —
+  and the guesses stay in the list behind it, as fallbacks.
+- **Bounds.** The book is bounded on both axes (`MAX_TARGETS = 16`,
+  `MAX_PER_TARGET = 3`) and follows what the node is actually *talking to*
+  (`note_interest`, `INTEREST_TTL = 300 s`) rather than what it has heard of. A
+  pass costs `_PATH_PROBES_PER_PASS = 4` probes with a `_PATH_FLOOR` between
+  passes, and the loop waits on there being a warm identity at all.
+
+### MRLO and HMLO
+
+`mlo.Bundle` is written over opaque keys, and a path is as opaque as a link. So
+a bundle member is simply *a way to reach an identity*, of which there are two
+kinds, and the bundle never learns which is which: it reads `recent_ms`,
+`recent_loss` and `recent_probes` off both, and `node._member_peer` turns
+whichever it picked back into a link to send down.
+
+- **MRLO** — several measured routed paths to one identity carrying its traffic
+  together, with no direct link at all.
+- **HMLO** — the hybrid: a direct link and a routed path measured at the same
+  time. If they are within one skew of each other the bundle spreads traffic
+  over both; if they are not — usually, since a routed path crosses more hops —
+  the routed one stays measured and ready, and **losing the direct link costs a
+  turn of the send order rather than a reconnect**. That is the part that does
+  not need MLO enabled at all: `_route_candidates` already orders direct first,
+  then measured first hops, and `_send_to_candidates` walks the list.
+- **What a healthy direct link is owed** is exactly one warm standby, probed on
+  its own slower clock (`_PATH_STANDBY_INTERVAL = 60 s`) because nothing is
+  riding on it. A direct link that is *failing* (`_link_is_failing`) is on its
+  way out, and then the identity wants as many measured ways there as it can
+  have, at `_PATH_PROBE_INTERVAL`.
+- `_stripe` is keyed by the **target**. It used to read
+  `peers[0].authenticated_id`, which is the target only while the head is a
+  direct link to it — true of every bundle that could exist then, false of
+  every routed one.
+
+Locked down by `tests/test_routed_paths.py`.
+
 ## The size of a `FOUND_NODE` (a post-quantum constraint)
 
 An ML-DSA-65 certificate weighs **~7.3 kB** (subject key + issuer key +

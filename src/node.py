@@ -15,6 +15,7 @@ from collections import OrderedDict
 from .app_auth import AppAuth
 from .trace import Trace
 from .node_id import NodeID
+from . import routed
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
 from .packet import Packet
@@ -576,6 +577,35 @@ _LOSS_BURST_COOLDOWN      = 60.0
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
+# Measuring a routed path instead of assuming it (see `routed.py`).
+#
+# A direct link is probed and a routed one was not, so the send path could not
+# tell a relay that delivers from one that accepts and drops: `peer.send()`
+# returns either way. The first hop was whichever peer traffic last arrived
+# through, then XOR distance — two guesses about topology, neither of which can
+# notice a path that stopped working. A node that had been reachable a minute
+# ago simply stopped answering, and the fix was to make a direct link by hand.
+#
+# So a path is probed end to end, on the same terms as a link: an ECHO to the
+# target forced down one chosen neighbour, charged as lost when nothing comes
+# back. Bounded like everything a peer's behaviour can drive — the book is
+# bounded on both axes in `routed.py`, and this is what a pass may cost.
+# Echo probes in flight, across the console's reachability check and the path
+# prober below. Named because two callers share it, and a literal in one of
+# them is a bound the other can silently exceed.
+_PENDING_ECHO_MAX         = 128
+_PATH_PROBE_INTERVAL      = 10.0   # per path, at rest
+# …and the cadence of a path kept warm *behind a working direct link*. That is
+# the hybrid: one physical link and one routed path measured at the same time,
+# so losing the physical one costs a turn of the send order rather than a
+# reconnect. It has to cost a great deal less than the link it stands behind —
+# nothing is riding on it — so it gets its own, slower clock, and only one such
+# path is opened per identity.
+_PATH_STANDBY_INTERVAL    = 60.0
+_PATH_PROBE_TIMEOUT       = 6.0    # …and when a probe is charged as lost
+_PATH_PROBES_PER_PASS     = 4
+_PATH_FLOOR               = 1.0    # shortest gap between two passes
+_PATH_IDLE_MAX            = 300.0  # ceiling on a wait nothing is expected to end
 _DIAL_LOG_NODES           = 128    # nodes whose address outcomes we remember
 _DIAL_LOG_ADDRESSES       = 8      # addresses remembered per node
 # Re-dialling addresses that went quiet. The *interval* is a per-transport
@@ -2159,6 +2189,11 @@ class MeshNode:
         # path that provably carried a packet; no remote relay identities are
         # inferred from this local observation.
         self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
+        # …and what that guess is being replaced by: first hops we have
+        # actually probed end to end. See `routed.py`.
+        self._paths = routed.PathBook()
+        self._path_task: asyncio.Task | None = None
+        self._path_wakeup = asyncio.Event()
         # node hex -> {uri: {outcome, detail, at, ms}} — what each address did
         # last time it was dialled. Bounded on both axes.
         self._dial_log: OrderedDict[str, OrderedDict] = OrderedDict()
@@ -2290,6 +2325,7 @@ class MeshNode:
         self._ensure_address_retry()
         self._ensure_address_steering()
         self._ensure_link_rescue()
+        self._ensure_path_probe()
         self._ensure_autonat()
         self._ensure_mlo_dial()
         self._ensure_release_watch()
@@ -2836,6 +2872,7 @@ class MeshNode:
         await self._stop_address_retry()
         await self._stop_address_steering()
         await self._stop_link_rescue()
+        await self._stop_path_probe()
         await self._stop_autonat()
         await self._stop_mlo_dial()
         await self._stop_release_watch()
@@ -3083,7 +3120,7 @@ class MeshNode:
         with an ECHO_REPLY routed back. Returns the round-trip in ms, or None."""
         qid = os.urandom(_QID_LEN)
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        while len(self._pending_echo) >= 128:
+        while len(self._pending_echo) >= _PENDING_ECHO_MAX:
             _, (_, old) = self._pending_echo.popitem(last=False)
             if not old.done():
                 old.cancel()
@@ -3731,6 +3768,19 @@ class MeshNode:
                 peer.ka_wanted_ms = None
                 if self._mlo_ready_link(peer):
                     live.setdefault(peer.authenticated_id, []).append(peer)
+            # A routed path is a way to reach an identity too, so an identity
+            # we hold one of is an identity a bundle could exist for — even
+            # with no direct link at all (MRLO), and beside one (HMLO). The
+            # bundle does not have to be told which kind a member is: it reads
+            # three numbers off each and `_member_peer` turns whichever it
+            # picked back into a link to send down.
+            paths: dict[NodeID, list] = {}
+            for target in self._paths.targets():
+                usable = [path for path in self._paths.live(target)
+                          if self._link_to(path.via) is not None]
+                if usable:
+                    paths[target] = usable
+                    live.setdefault(target, [])
             for target in [t for t in self._bundles if t not in live]:
                 del self._bundles[target]
             if not self.mlo_active():
@@ -3739,13 +3789,17 @@ class MeshNode:
                 return
             now = time.monotonic()
             for target, links in live.items():
-                if len(links) < 2:
-                    # One link is not a bundle, and must not pay for one — but
-                    # it is what every bundle is made from, and nothing else in
-                    # this node will ever open the second one. Say so; asking
-                    # is `_mlo_dial_loop`'s, because it dials and this cannot.
+                members = list(links) + paths.get(target, [])
+                if len(members) < 2:
+                    # One way there is not a bundle, and must not pay for one —
+                    # but it is what every bundle is made from, and nothing
+                    # else in this node will ever open the second one. Say so;
+                    # asking is `_mlo_dial_loop`'s, because it dials and this
+                    # cannot. (A routed path is asked for elsewhere, by
+                    # `_path_due`, which is the loop that can open one.)
                     self._bundles.pop(target, None)
-                    self._want_second_link(target)
+                    if links:
+                        self._want_second_link(target)
                     continue
                 self._mlo_short.pop(target, None)
                 bundle = self._bundles.get(target)
@@ -3754,11 +3808,11 @@ class MeshNode:
                     while len(self._bundles) > _MAX_PEERS:
                         self._bundles.popitem(last=False)
                 bundle.update(
-                    mlo.Candidate(key=peer,
-                                  mean_ms=peer.quality.recent_ms(),
-                                  drop=peer.quality.recent_loss(),
-                                  probes=peer.quality.recent_probes())
-                    for peer in links)
+                    mlo.Candidate(key=member,
+                                  mean_ms=member.quality.recent_ms(),
+                                  drop=member.quality.recent_loss(),
+                                  probes=member.quality.recent_probes())
+                    for member in members)
                 for peer in links:
                     # Candidacy, not membership, is what buys the fast probe: a
                     # link only earns its place by being *measured* at that
@@ -3930,32 +3984,54 @@ class MeshNode:
             # buying one per sweep of this loop.
             await asyncio.sleep(_MLO_DIAL_FLOOR)
 
-    def _stripe(self, peers: list['_Peer'],
+    def _member_peer(self, member, exclude: '_Peer | None' = None) -> '_Peer | None':
+        """The link to actually send down for one bundle member.
+
+        A bundle member is a *way to reach an identity*, and there are two
+        kinds: a direct link, which is the link; and a routed path, which is a
+        first hop — the same packet, addressed to the same id, handed to a
+        different neighbour. Resolving the second one here is the whole of what
+        it takes for a bundle to be hybrid, because everything above this line
+        already deals in "whose turn is it"."""
+        if isinstance(member, routed.Path):
+            return self._link_to(member.via, exclude=exclude)
+        if member is exclude or member.session is None:
+            return None
+        return member
+
+    def _stripe(self, target: NodeID, peers: list['_Peer'],
                 exclude: '_Peer | None' = None) -> list['_Peer']:
         """Hand the lead to whichever bundle member's turn it is.
 
         Sits on the send path of every packet, so the cost when nothing is
         bundled — the normal case — is one truthiness test on an empty dict.
 
+        Keyed by the **target**, not by whatever happens to lead the list. It
+        used to read `peers[0].authenticated_id`, which is the target only
+        while the head is a direct link to it — true of every bundle that
+        existed then, and false of every routed one (`routed.py`), where the
+        head is a neighbour that is not the destination at all.
+
         Only the *head* is swapped. The rest of the list is what it always was:
         a fallback order, and the member that lost this turn is still in it.
 
-        ``exclude`` is not optional in spirit: a bundle knows which links go to
+        ``exclude`` is not optional in spirit: a bundle knows which ways lead to
         an identity and knows nothing about where the packet came from, so
         without it the turn could land on the very link a forward is excluding
         and send the packet straight back where it came from. The caller
         already filtered its list; this has to filter the one thing it adds."""
         if not self._bundles or not peers:
             return peers
-        head = peers[0]
-        bundle = self._bundles.get(head.authenticated_id)
+        bundle = self._bundles.get(target)
         if bundle is None or not bundle.active:
             return peers
         turn = bundle.next_key()
-        if (turn is None or turn is head or turn is exclude
-                or turn.session is None):
+        if turn is None:
             return peers
-        return [turn] + [peer for peer in peers if peer is not turn]
+        lead = self._member_peer(turn, exclude)
+        if lead is None or lead is peers[0]:
+            return peers
+        return [lead] + [peer for peer in peers if peer is not lead]
 
     def mlo_status(self) -> dict:
         """What multi-link operation is doing, for an operator.
@@ -5008,6 +5084,219 @@ class MeshNode:
             return None
         return self._link_to(via, exclude=exclude)
 
+    # -- routed paths: measured, not assumed --------------------------------
+    #
+    # See `routed.py` for why this exists. What lives here is the half that
+    # needs a mesh: sending the probe, charging the ones nobody answered, and
+    # handing the send path first hops it has evidence about.
+
+    def _note_path_interest(self, target: NodeID) -> None:
+        """Something addressed this id through the mesh. Never raises: this is
+        on the send path of every routed packet."""
+        try:
+            self._paths.note_interest(target)
+            if not self._paths.has(target):
+                self._path_wakeup.set()
+        except Exception:
+            pass
+
+    def _path_first_hops(self, target: NodeID) -> list[NodeID]:
+        """First hops worth *trying* for this id, best guess first.
+
+        The book holds what has been measured; this is where a new candidate
+        comes from, and it is deliberately the same two guesses the send path
+        used to rely on alone — the peer traffic from that id last arrived
+        through, then XOR proximity. A guess is a fine way to pick something to
+        measure. It was only ever a bad way to pick something to send down."""
+        out: list[NodeID] = []
+        hint = self._route_hints.get(target)
+        if hint is not None and time.monotonic() - hint[1] <= _ROUTE_HINT_TTL:
+            out.append(hint[0])
+        for peer in self._authenticated_peers():
+            node_id = peer.authenticated_id
+            if node_id is None or node_id == target or node_id in out:
+                continue
+            out.append(node_id)
+        # A hop we have already given up on for this id is not a candidate
+        # again yet. Without that, the pass that drops a dead path re-opens it
+        # on the next one — the thing that chose it has not changed and cannot,
+        # so giving up has to be remembered or it is a loop rather than a
+        # decision.
+        out = [node_id for node_id in out
+               if not self._paths.shunned(target, node_id)]
+        return sorted(out, key=target.distance)[:routed.MAX_PER_TARGET]
+
+    def _measured_first_hops(self, target: NodeID,
+                             exclude: '_Peer | None' = None) -> list['_Peer']:
+        """The peers to send down for this id, in the order the measurements
+        put them. Empty when nothing has been measured, which is the normal
+        state of an id nobody is routing to — and is why this costs one dict
+        lookup on the packet path."""
+        if not self._paths.has(target):
+            return []
+        out: list[_Peer] = []
+        for path in self._paths.live(target):
+            peer = self._link_to(path.via, exclude=exclude)
+            if peer is not None and peer not in out:
+                out.append(peer)
+        return out
+
+    async def _probe_path(self, path) -> bool:
+        """One ECHO to the target, forced down this path's first hop.
+
+        Forced: `_route_outbound` would pick a hop for itself, and then the
+        measurement would be about whatever it picked rather than about this
+        path. The reply comes back by whatever route the far end chooses — see
+        `routed.py` for why that is the question worth asking.
+
+        Never raises. Returns whether an answer came back in time; a probe that
+        did not is left pending and charged as lost by `_charge_lost_probes`,
+        which is how a link's window learns the same thing."""
+        peer = self._link_to(path.via)
+        if peer is None:
+            self._paths.drop(path.target, path.via)
+            return False
+        qid = os.urandom(_QID_LEN)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        while len(self._pending_echo) >= _PENDING_ECHO_MAX:
+            _, (_, old) = self._pending_echo.popitem(last=False)
+            if not old.done():
+                old.cancel()
+        self._pending_echo[qid] = (path.target, future)
+        path.sent(qid, time.monotonic())
+        try:
+            await peer.send(Packet.create(ECHO_REQUEST, self._id.raw,
+                                          path.target.raw, qid))
+            await asyncio.wait_for(asyncio.shield(future), _PATH_PROBE_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        finally:
+            self._pending_echo.pop(qid, None)
+            if not future.done():
+                future.cancel()
+        path.answered(qid, time.monotonic())
+        self._paths.forgive(path.target, path.via)
+        return True
+
+    def _charge_lost_probes(self, now: float) -> None:
+        """Charge every routed probe nobody answered in time.
+
+        Without it a path that answers nothing never *loses* anything — the
+        window only ever grows by answers, so a broken path reads as a quiet
+        one, which is precisely the confusion this whole mechanism exists to
+        end (the same trap `_link_keepalive_loop` fixed for links)."""
+        for target in self._paths.targets():
+            for path in self._paths.paths(target):
+                path.quality.expire(now, _PATH_PROBE_TIMEOUT)
+
+    def _path_due(self, now: float) -> list:
+        """The paths to probe this pass, and the ones to open first.
+
+        Opening comes first deliberately: an id we are routing to with no path
+        at all is the case that hurts, and a pass that spent its whole budget
+        re-probing three healthy paths would never get to it."""
+        due = []
+        for target in self._paths.warm(now=now):
+            held = [path for path in self._paths.paths(target)]
+            # A healthy direct link changes what this identity is owed, not
+            # whether it is owed anything: one warm standby, probed on the
+            # slower clock, is what makes losing that link instant instead of a
+            # reconnect. Everything else — no direct link, or one that is
+            # failing — wants as many measured ways there as it can have, as
+            # often as they can be had.
+            direct = self._link_to(target)
+            standby = direct is not None and not self._link_is_failing(direct)
+            wanted = 1 if standby else routed.MAX_PER_TARGET
+            interval = _PATH_STANDBY_INTERVAL if standby else _PATH_PROBE_INTERVAL
+            opened = None
+            if len(held) < wanted:
+                names = {path.via.raw for path in held}
+                for via in self._path_first_hops(target):
+                    if via.raw in names or self._link_to(via) is None:
+                        continue
+                    due.append(self._paths.ensure(target, via))
+                    opened = via.raw
+                    break       # one new path per identity per pass
+            for path in held:
+                if path.via.raw == opened:
+                    continue    # opened a line above, and queued there
+                if now - path.probed_at >= interval:
+                    due.append(path)
+        return due[:_PATH_PROBES_PER_PASS]
+
+    async def _path_pass(self) -> int:
+        """One bounded round: charge the silent, probe what is due, drop what
+        gave up. Returns how many probes went out."""
+        now = time.monotonic()
+        self._charge_lost_probes(now)
+        for target in self._paths.targets():
+            for path in self._paths.reap(target):
+                self._activity.note(
+                    "route", "gave up on reaching "
+                    + path.target.raw.hex()[:16] + " through "
+                    + path.via.raw.hex()[:16])
+        due = self._path_due(time.monotonic())
+        if not due:
+            return 0
+        # Concurrently: each probe is bounded by `_PATH_PROBE_TIMEOUT`, and
+        # four of them one after another is half a minute of a pass for a node
+        # whose paths are all broken — which is exactly when it must be quick.
+        await asyncio.gather(*(self._probe_path(path) for path in due),
+                             return_exceptions=True)
+        return len(due)
+
+    def _ensure_path_probe(self) -> None:
+        if self._path_task is None or self._path_task.done():
+            self._path_task = asyncio.create_task(self._path_loop())
+
+    async def _stop_path_probe(self) -> None:
+        task = self._path_task
+        self._path_task = None
+        self._path_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _path_loop(self) -> None:
+        """Keep the routed paths of the ids we are talking to measured.
+
+        Waits on there being any such id and on nothing else: a node whose
+        every conversation is a direct link never wakes here.
+
+        Never raises: this loop dying takes failover with it, silently, and
+        silently is how this whole class of failure presented in the first
+        place."""
+        job = self._activity.register(
+            "routed-paths",
+            "probes the ways through the mesh to the nodes this one is talking"
+            " to, so a relay that stops delivering is replaced rather than"
+            " trusted",
+            "a packet was routed to an id we hold no measured path to")
+        while self._running:
+            self._path_wakeup.clear()
+            job.ran()
+            if not self._paths.warm():
+                try:
+                    async with asyncio.timeout(_PATH_IDLE_MAX):
+                        await self._path_wakeup.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                await self._path_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            # A pass is driven by what this node is asked to route, so it needs
+            # the same floor every other such loop has (gotchas §12).
+            await asyncio.sleep(_PATH_FLOOR)
+
     def _route_candidates(self, target: NodeID,
                           exclude: _Peer | None = None) -> list[_Peer]:
         # nsmallest, not a full sort: this runs per forwarded packet, and the
@@ -5020,18 +5309,27 @@ class MeshNode:
                 target.distance(peer.authenticated_id),
             ))
         # A direct link to the target is the shortest path that exists and keeps
-        # the lead; otherwise observed traffic beats XOR proximity.
+        # the lead. Failing that, a first hop we have **measured** leads over
+        # one we guessed: `_route_hints` is where traffic happened to arrive
+        # from and XOR distance is a claim about topology, and neither can see
+        # a relay that accepts packets and drops them. See `routed.py`.
         if not peers or peers[0].authenticated_id != target:
-            hint = self._route_hint_peer(target, exclude=exclude)
-            if hint is not None:
-                peers = [hint] + [p for p in peers
-                                  if p.authenticated_id != hint.authenticated_id]
+            measured = self._measured_first_hops(target, exclude=exclude)
+            if measured:
+                chosen = {p.authenticated_id for p in measured}
+                peers = measured + [p for p in peers
+                                    if p.authenticated_id not in chosen]
+            else:
+                hint = self._route_hint_peer(target, exclude=exclude)
+                if hint is not None:
+                    peers = [hint] + [p for p in peers
+                                      if p.authenticated_id != hint.authenticated_id]
         # Whichever link leads, a bundle to that identity takes its turn. This
         # is the one place traffic is spread, so "which link do I send down" has
         # one answer whether the packet is ours or somebody else's — and
         # `_authenticated_peers` above has already reduced each identity to its
         # best link, which is exactly the list a bundle exists to widen again.
-        return self._stripe(peers[:_ROUTE_SEND_FANOUT], exclude)
+        return self._stripe(target, peers[:_ROUTE_SEND_FANOUT], exclude)
 
     def _drop_failed_peer(self, peer: _Peer) -> None:
         """A send to this peer failed: take it out of routing *now*, tear the
@@ -5047,6 +5345,8 @@ class MeshNode:
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
+        if peer.authenticated_id is not None:
+            self._paths.forget_via(peer.authenticated_id)
         self._note_node_lost(peer)
         self._wake_neighbor_maintenance()
         self._spawn_bounded(self._safe_stop_peer(peer))
@@ -5120,9 +5420,14 @@ class MeshNode:
             packet, self._route_candidates(target))
         if peer is not None:
             # Relayed path — try to upgrade to a direct link in the
-            # background (direct connect, then UDP hole punch).
+            # background (direct connect, then UDP hole punch)…
             if peer.authenticated_id != target:
                 self._maybe_upgrade_path(target)
+                # …and, whether or not that ever works, start measuring the
+                # ways through the mesh to it. An upgrade is an optimisation
+                # and may be impossible; a second *routed* path is what keeps
+                # this id reachable when this first hop stops delivering.
+                self._note_path_interest(target)
             return peer
         if not blocking:
             self._defer_route(packet)
@@ -5529,6 +5834,11 @@ class MeshNode:
         except Exception:
             pass
         self._forget_hints_via(peer.authenticated_id)
+        if peer.authenticated_id is not None:
+            # A first hop we no longer hold a link to is not a path. Left in,
+            # the send path would pick it once per packet and resolve it to
+            # nothing.
+            self._paths.forget_via(peer.authenticated_id)
         self._note_node_lost(peer)
         self._poke_net("peer-lost")
         self._note_change("links")
