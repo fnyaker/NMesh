@@ -125,10 +125,6 @@ _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
 # costs whoever sent them.
 _LOGIN_MAX_INFLIGHT = 4
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
-# Asking the directory is a Kademlia lookup plus a query to every target, and
-# the node bounds the whole round itself — this only has to be the larger of the
-# two, or the console would give up on an answer the node was about to hand it.
-_PKG_LOOKUP_TIMEOUT = 30.0
 # What a list may be asked for, from the one place that decides it
 # (`src/control/listing.py`) — this door parses a query string, it does not get
 # to have its own opinion about how long a query may be.
