@@ -580,6 +580,128 @@ class TestAppsOnTheChannel:
         assert remotes(FleetBridge) == {"relation"}
 
 
+class TestStoreAndJoining:
+    """Apps somebody else wrote, and the ways into a network."""
+
+    class _Node:
+        pseudo = ""
+
+        class _Id:
+            raw = bytes(range(20))
+
+        id = _Id()
+
+        def __init__(self):
+            self.did = []
+            self.ttl = None
+
+        def store_overview(self):
+            return {"catalog": [{"app_id": "aa", "name": "one", "ts": 2},
+                                {"app_id": "bb", "name": "two", "ts": 1}],
+                    "installed": []}
+
+        def installed_list(self):
+            return [{"app_id": "aa", "name": "one"}]
+
+        async def install_app(self, app_id):
+            self.did.append(("install", app_id))
+            return {"app_id": app_id} if app_id == "aa" else None
+
+        async def update_app(self, app_id):
+            return None
+
+        def uninstall_app(self, app_id):
+            return app_id == "aa"
+
+        def generate_invite(self):
+            return "a-code"
+
+        def console_invite_block(self):
+            return "a-block"
+
+        def issue_join_ticket(self, ttl):
+            self.ttl = ttl
+            return {"ticket": "TICKET", "ttl": ttl, "code": "secret"}
+
+        async def console_join(self, uri, code):
+            self.did.append(("join", uri, code))
+            return {"ok": False, "reason": "the invitation was refused",
+                    "detail": "it had been used"}
+
+    def _channel(self, node, origin=Origin.LOCAL):
+        return control.LocalChannel(control.build(control.Context(
+            node=node, loop=asyncio.get_event_loop())), origin)
+
+    async def test_an_app_is_managed_from_the_console_that_manages_the_node(self):
+        node = self._Node()
+        there = self._channel(node, Origin.REMOTE)
+        assert (await asyncio.to_thread(there.call, "store.install",
+                                        {"app": "aa"})).ok
+        assert node.did[-1] == ("install", "aa")
+        # An app is not the node's own program: installing one writes a
+        # directory beside it, and that is what managing a machine means.
+        assert (await asyncio.to_thread(there.call, "store.overview")).ok
+
+    async def test_an_app_nobody_offers_is_not_found_and_no_name_is_a_mistake(self):
+        channel = self._channel(self._Node())
+        missing = await asyncio.to_thread(channel.call, "store.install",
+                                          {"app": "zz"})
+        assert missing.ok is False and missing.code == "not_found"
+        empty = await asyncio.to_thread(channel.call, "store.install",
+                                        {"app": ""})
+        assert empty.ok is False and empty.code == "bad_request"
+
+    async def test_the_catalogue_is_paged_and_sorted_where_the_list_is(self):
+        page = (await asyncio.to_thread(self._channel(self._Node()).call,
+                                        "store.list",
+                                        {"scope": "catalog", "limit": 1})).result
+        assert page["total"] == 2 and len(page["items"]) == 1
+        # Newest first, by the node's own timestamp.
+        assert page["items"][0]["app_id"] == "aa"
+        bad = await asyncio.to_thread(self._channel(self._Node()).call,
+                                      "store.list", {"scope": "everything"})
+        assert bad.ok is False and bad.code == "bad_request"
+
+    async def test_minting_stays_here_and_joining_travels(self):
+        node = self._Node()
+        plane = control.build(control.Context(node=node,
+                                              loop=asyncio.get_event_loop()))
+        remote = {row["name"] for module in plane.catalogue(Origin.REMOTE)
+                  for row in module["operations"] if module["module"] == "join"}
+        # A code this node issues lets somebody into *its* network, and the
+        # fleet has a capability for asking a node you manage to mint one.
+        # Pointing a machine you manage at a network is provisioning it.
+        assert remote == {"network", "use_block"}
+
+    async def test_a_ticket_carries_both_or_you_send_both(self):
+        channel = self._channel(self._Node())
+        for params in ({}, {"uri": "tcp://host:9000"},
+                       {"ticket": "T", "code": "c"}):
+            reply = await asyncio.to_thread(channel.call, "join.network",
+                                            params)
+            assert reply.ok is False and reply.code == "bad_request", params
+
+    async def test_a_join_that_fails_says_which_way(self):
+        node = self._Node()
+        reply = await asyncio.to_thread(
+            self._channel(node).call, "join.network",
+            {"uri": "tcp://127.0.0.1:1", "code": "no"})
+        assert reply.ok is False and reply.code == "unavailable"
+        # The node names which of the five ways, and the detail travels beside
+        # it rather than being folded into the sentence.
+        assert reply.error == "the invitation was refused"
+        assert reply.detail["detail"] == "it had been used"
+
+    async def test_a_silly_ticket_lifetime_is_clamped_by_the_ticket(self):
+        from src import join_ticket
+        node = self._Node()
+        reply = await asyncio.to_thread(self._channel(node).call,
+                                        "join.ticket", {"ttl": 10 ** 9})
+        assert reply.ok is True and node.ttl == join_ticket.MAX_TTL
+        # And the code inside it is not repeated beside it.
+        assert "code" not in reply.result and reply.result["ticket"] == "TICKET"
+
+
 class TestPackagesAndKeys:
     """The directory, and the keys this node can sign with."""
 

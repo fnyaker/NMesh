@@ -281,6 +281,12 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (store & joining)             — an app is not the
+│     node's own program, so installing one travels while pinning a signing key
+│     does not; a catalogue paged and sorted where the list is; minting an
+│     invitation stays here and joining travels; a ticket carries both halves or
+│     you send both; a join that fails says which of the five ways, with the
+│     detail beside the sentence rather than folded into it
 ├── test_control_plane.py (packages & keys)             — asking this node and
 │     asking the network are two operations with two ceilings (and only the
 │     cheap one travels), a lookup asks one question rather than two, installing

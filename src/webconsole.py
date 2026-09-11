@@ -45,8 +45,6 @@ from .control import listing
 from . import updater
 from . import console_auth
 from .control.modules.settings import write_settings
-from . import join_ticket
-from . import qr
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
@@ -1232,14 +1230,7 @@ def _make_handler(console: WebConsole):
                 self._from_plane("node.rootcert")
                 return
             if path == "/api/store":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.store_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("store.overview")
                 return
             if path == "/api/keys":
                 self._from_plane("keys.overview")
@@ -1308,41 +1299,25 @@ def _make_handler(console: WebConsole):
                 else "packages.entry", {"record": record_id})
 
         def _handle_list_get(self, path: str) -> None:
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            """The older paged lists, in their query-string spelling.
+
+            The parsing is this door's — a query string is HTTP's idea, not the
+            plane's — and everything after it belongs to the operation that
+            answers: the sort, the filter, the page and the bounds
+            (`src/control/listing.py`)."""
             try:
                 scope, query, limit, offset = _parse_list_query(
                     self.path, nodes=path == "/api/nodes")
             except ValueError:
                 self._json(400, {"error": "invalid query"})
                 return
+            params = {"query": query, "limit": limit, "offset": offset}
             if path == "/api/nodes":
-                self._from_plane("node.list", {"scope": scope, "query": query,
-                                               "limit": limit, "offset": offset})
-                return
-            try:
-                if path == "/api/store/catalog":
-                    items = console._call(
-                        _wrap(console._node.store_overview))["catalog"]
-                    items.sort(key=lambda item: (-item["ts"], item["app_id"]))
-                else:
-                    items = console._call(
-                        _wrap(console._node.installed_list))
-                    items.sort(key=lambda item: (
-                        str(item.get("name", "")).casefold(),
-                        str(item.get("app_id", ""))))
-                matched = [item for item in items
-                           if listing.matches(item, query)]
-                rows, total = matched[offset:offset + limit], len(matched)
-                self._json(200, {
-                    "items": rows,
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                })
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.list", {"scope": scope, **params})
+            else:
+                self._from_plane("store.list", {
+                    "scope": "catalog" if path.endswith("/catalog")
+                    else "installed", **params})
 
         def do_HEAD(self) -> None:
             self.do_GET()
@@ -1409,8 +1384,7 @@ def _make_handler(console: WebConsole):
                            extra_headers=[_clear_cookie_header(console._use_tls)])
                 return
             if path == "/api/invite":
-                code = console._call(_wrap(console._node.generate_invite))
-                self._json(200, {"code": code})
+                self._from_plane("join.invite")
                 return
             if path == "/api/trust":
                 data = _parse_json(body) or {}
@@ -1429,39 +1403,17 @@ def _make_handler(console: WebConsole):
                 self._from_plane("trust." + action, params)
                 return
             if path == "/api/ticket":
-                self._handle_ticket(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("join.ticket", {"ttl": _number(data.get("ttl"))})
                 return
             if path == "/api/join":
                 data = _parse_json(body) or {}
                 # A ticket is the same join, with the address and the code
-                # travelling together instead of separately.
-                if data.get("ticket"):
-                    try:
-                        parsed = join_ticket.decode(data["ticket"])
-                    except join_ticket.TicketError as exc:
-                        self._json(400, {"error": str(exc)[:200]})
-                        return
-                    data = {"uri": parsed["uri"], "code": parsed["code"]}
-                if "uri" not in data or "code" not in data:
-                    self._json(400, {"error": "uri and code required"})
-                    return
-                # Waits for the session rather than for the socket: `join`
-                # returns as soon as the link is open, and reporting that as
-                # success told an operator "Joined" for a join that was about
-                # to be refused (see `console_join`).
-                try:
-                    result = console._call(
-                        console._node.console_join(data["uri"], data["code"]))
-                except Exception as exc:
-                    self._json(502, {"ok": False, "error": str(exc)[:200]})
-                    return
-                if not result.get("ok"):
-                    detail = result.get("detail") or ""
-                    self._json(502, {"ok": False,
-                                     "error": result.get("reason", "join failed"),
-                                     "detail": detail[:200]})
-                    return
-                self._json(200, result)
+                # travelling together; the operation decodes it.
+                self._from_plane("join.network", {
+                    "uri": data.get("uri") or "",
+                    "code": data.get("code") or "",
+                    "ticket": data.get("ticket") or ""})
                 return
             if path == "/api/reachability/probe":
                 self._from_plane("network.probe")
@@ -1560,21 +1512,12 @@ def _make_handler(console: WebConsole):
                     self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return
             if path == "/api/invite/block":
-                try:
-                    block = console._call(_wrap(console._node.console_invite_block))
-                    self._json(200, {"block": block})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("join.block")
                 return
             if path == "/api/join/block":
-                data = _parse_json(body)
-                block = (data or {}).get("block", "")
-                try:
-                    result = console._call(
-                        _wrap(console._node.console_join_block, block))
-                    self._json(200, {"ok": True, **result})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("join.use_block",
+                                 {"block": data.get("block") or ""})
                 return
             if path == "/api/punch":
                 data = _parse_json(body) or {}
@@ -1701,38 +1644,11 @@ def _make_handler(console: WebConsole):
                 return
             if path in ("/api/store/install", "/api/store/uninstall",
                         "/api/store/update"):
-                self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("store." + path.rsplit("/", 1)[1],
+                                 {"app": data.get("app_id") or ""})
                 return
             self._json(404, {"error": "not found"})
-
-        def _handle_ticket(self, data) -> None:
-            """Mint a compact join ticket, with its QR code.
-
-            The QR is rendered here, from the string we just made — there is no
-            endpoint that turns arbitrary text into a QR code, because nothing
-            would need one."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            ttl = join_ticket.clamp_ttl((data or {}).get("ttl"))
-            try:
-                ticket = console._call(_wrap(console._node.issue_join_ticket, ttl))
-            except ValueError as exc:
-                # Not reachable from the open internet: say why, rather than
-                # handing over a ticket that cannot work.
-                self._json(409, {"error": str(exc)[:300]})
-                return
-            except Exception:
-                self._json(500, {"error": "could not issue a ticket"})
-                return
-            # The code travels inside the ticket; repeating it in the response
-            # would only put the same secret in one more place.
-            ticket.pop("code", None)
-            try:
-                ticket["qr_svg"] = qr.svg_for(ticket["ticket"])
-            except qr.QRError:
-                ticket["qr_svg"] = ""
-            self._json(200, ticket)
 
         def _handle_password(self, data) -> None:
             """Change the console password.
@@ -2411,26 +2327,6 @@ def _make_handler(console: WebConsole):
                         notes=notes if isinstance(notes, str) else ""),
                     timeout=_APP_CALL_TIMEOUT)
                 self._json(200, {"ok": True, **info})
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-
-        def _handle_store_action(self, action: str, data) -> None:
-            app_id = (data or {}).get("app_id")
-            if not isinstance(app_id, str) or not app_id:
-                self._json(400, {"error": "app_id required"})
-                return
-            try:
-                if action == "install":
-                    result = console._call(console._node.install_app(app_id),
-                                           timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": result is not None, "app": result})
-                elif action == "update":
-                    result = console._call(console._node.update_app(app_id),
-                                           timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": result is not None, "app": result})
-                else:  # uninstall
-                    ok = console._call(_wrap(console._node.uninstall_app, app_id))
-                    self._json(200, {"ok": bool(ok)})
             except Exception as exc:
                 self._json(400, {"ok": False, "error": str(exc)[:200]})
 

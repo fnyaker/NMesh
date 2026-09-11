@@ -3030,10 +3030,10 @@ mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"})
     }
     await withBusy(button, async () => {
       try{
-        const {ok, data} = await apiJson("/api/store/" + action, "POST", {app_id:appId});
-        toast(ok && data.ok !== false
+        const {ok, error} = await CHANNEL.ask("store." + action, {app:appId});
+        toast(ok
           ? (action === "uninstall" ? "Local app deleted" : action + " complete")
-          : (data.error || action + " failed"), ok && data.ok !== false ? "" : "danger");
+          : (error || action + " failed"), ok ? "" : "danger");
       }catch(_){ toast(action + " failed", "danger"); }
       finally{ await refreshApps(); }
     });
@@ -3710,8 +3710,9 @@ $("tk-make").addEventListener("click", (event) => withBusy(event.target, async (
   setMessage("tk-status", "Creating…");
   $("tk-qr").innerHTML = ""; $("tk-out").hidden = true;
   try{
-    const {ok, data} = await apiJson("/api/ticket", "POST", {ttl:Number($("tk-ttl").value)});
-    if(!ok){ setMessage("tk-status", data.error || "Could not create a ticket", true); return; }
+    const {ok, error, data} = await CHANNEL.ask(
+      "join.ticket", {ttl:Number($("tk-ttl").value)});
+    if(!ok){ setMessage("tk-status", error || "Could not create a ticket", true); return; }
     $("tk-text").textContent = data.ticket;
     $("tk-out").hidden = false;
     // The SVG comes from the node, built from the ticket it just minted.
@@ -3739,10 +3740,11 @@ const JOIN_NEXT = {
   "this node refused the answer":
     "That ticket belongs to a different network than the one this node is in.",
 };
-function joinFailure(data){
-  const reason = data.error || "the join failed";
+function joinFailure(answer){
+  const reason = answer.error || "the join failed";
+  const detail = (answer.detail || {}).detail || "";
   const parts = [reason.charAt(0).toUpperCase() + reason.slice(1) + "."];
-  if(data.detail) parts.push("(" + data.detail + ")");
+  if(detail) parts.push("(" + detail + ")");
   if(JOIN_NEXT[reason]) parts.push(JOIN_NEXT[reason]);
   return parts.join(" ");
 }
@@ -3751,8 +3753,9 @@ $("tk-join").addEventListener("click", (event) => withBusy(event.target, async (
   if(!ticket){ setMessage("tk-scan-status", "Paste or scan a ticket first.", true); return; }
   setMessage("tk-scan-status", "Joining — the handshake is post-quantum, give it a moment…");
   try{
-    const {ok, data} = await apiJson("/api/join", "POST", {ticket});
-    if(!ok){ setMessage("tk-scan-status", joinFailure(data), true); return; }
+    const answer = await CHANNEL.ask("join.network", {ticket});
+    const {ok, data} = answer;
+    if(!ok){ setMessage("tk-scan-status", joinFailure(answer), true); return; }
     $("tk-in").value = "";
     setMessage("tk-scan-status",
       "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
@@ -3933,7 +3936,7 @@ $("rly-join").addEventListener("click", (event) => withBusy(event.target, async 
 }));
 $("gen-invite").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/invite", "POST");
+    const data = await CHANNEL.call("join.invite");
     $("invite-out").textContent = data.code;
     await copyText(data.code);
   }catch(_){ setMessage("invite-status", "Invite generation failed", true); }
@@ -3996,8 +3999,9 @@ document.addEventListener("click", (event) => {
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
   if(!uri || !code){ setMessage("invite-status", "An address and an invite code are required.", true); return; }
-  const {ok, data} = await apiJson("/api/join", "POST", {uri, code});
-  if(!ok){ setMessage("invite-status", joinFailure(data), true); return; }
+  const answer = await CHANNEL.ask("join.network", {uri, code});
+  const {ok, data} = answer;
+  if(!ok){ setMessage("invite-status", joinFailure(answer), true); return; }
   setMessage("invite-status",
     "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
   tick(false);
