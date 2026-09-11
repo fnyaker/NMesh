@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -356,6 +357,74 @@ class TestBoundsFitTheRelay:
 
     def test_every_code_a_refusal_can_carry_has_a_status(self):
         assert set(control.CODES) <= set(_STATUS_BY_CODE)
+
+
+class TestTheLedgerIsTrue:
+    """`Docs/Architecture/control-plane.md` carries a table of every module,
+    every operation, and a star on the ones that stay local. The charter's
+    rule is that documentation which lies is worse than none — so the table is
+    read back and compared against the plane itself, rather than trusted to
+    have been updated."""
+
+    LEDGER = Path(__file__).resolve().parent.parent / "Docs" / "Architecture" \
+        / "control-plane.md"
+
+    def _table(self) -> dict:
+        """``{module: {operation: travels}}`` as the document claims."""
+        rows, inside = {}, False
+        for line in self.LEDGER.read_text().splitlines():
+            if line.startswith("| Module | Operations |"):
+                inside = True
+                continue
+            if inside and not line.startswith("|"):
+                break
+            if not inside or line.startswith("|---"):
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            module = cells[0].split("`")[1]
+            operations = {}
+            for word in cells[1].split():
+                if not word.startswith("`"):
+                    continue
+                # The star marks local-only and sits *outside* the backticks,
+                # escaped for markdown: `` `retry`\* ``.
+                operations[word.replace("\\*", "").strip("`*")] = \
+                    not word.endswith("*")
+            rows.setdefault(module, {}).update(operations)
+        return rows
+
+    def test_every_operation_is_in_the_table_with_the_right_reach(self):
+        plane = control.build(control.Context(node=None))
+        claimed = self._table()
+        assert claimed, "the ledger's table could not be read"
+        real = {}
+        for module in plane.catalogue():
+            real.setdefault(module["module"], {}).update(
+                {row["name"]: row["remote"] for row in module["operations"]})
+        for name, operations in real.items():
+            assert name in claimed, f"{name} is not in the ledger"
+            for operation_name, travels in operations.items():
+                assert operation_name in claimed[name], \
+                    f"{name}.{operation_name} is not in the ledger"
+                assert claimed[name][operation_name] is travels, (
+                    f"{name}.{operation_name} travels={travels}, the ledger "
+                    f"says {claimed[name][operation_name]}")
+        for name in claimed:
+            assert name in real, f"the ledger names {name}, which does not exist"
+
+    def test_the_bounds_the_ledger_quotes_are_the_bounds(self):
+        quoted = self.LEDGER.read_text()
+        # The table quotes kilobytes, so the figures are read back in the same
+        # units the reader sees. This caught the first drift the moment it was
+        # written: the ledger still said 16 kB after a certificate made the
+        # frame 24.
+        assert f"| `frame.MAX_FRAME` | {frame_mod.MAX_FRAME // 1024} kB |" in quoted
+        assert f"| `frame.MAX_REPLY` | {frame_mod.MAX_REPLY // 1024} kB |" in quoted
+        assert f"| `plane.REMOTE_BUDGET` | {REMOTE_BUDGET:g} s |" in quoted
+        assert (f"| `params.MAX_HEX` | {params_mod.MAX_HEX} |") in quoted
+        assert (f"| `params.MAX_SECRET` | {params_mod.MAX_SECRET} |") in quoted
 
 
 class TestChannels:

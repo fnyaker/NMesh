@@ -281,6 +281,13 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (the ledger is true)          — the table in
+│     `Docs/Architecture/control-plane.md` is read back and compared against the
+│     plane: every operation present, every "local only" star matching the
+│     declaration, and the bounds quoted in kilobytes equal to the constants.
+│     It caught two lies the moment it was written (a frame that had grown to
+│     24 kB and an operation that had stopped travelling), which is the argument
+│     for it: a table maintained by hand is a table that drifts
 ├── test_control_plane.py (the whole plane at once)     — two sweeps rather than
 │     two examples: the node is asked what it exposes and then asked for **every
 │     operation** with the marker a relayed call carries — each answers a frame,
