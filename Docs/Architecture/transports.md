@@ -151,7 +151,9 @@ address. It never raises: a dial that fails is the normal case, not an error.
 
 ## Re-dialling an address
 
-Three mechanisms, one dial function (above).
+Four mechanisms, one dial function (above). Three of them run by themselves;
+the first exists so that an operator can *watch* one address, not so that they
+have to stand in for the others.
 
 **By hand** — `console_retry_addresses(node_hex, uri="")` replays one specific
 address, or all of them (stopping at the first that works: "give me back a
@@ -178,6 +180,52 @@ flood:
 
 A node already linked is never re-dialled, and the loop dies on nothing: a
 recovery loop that stops is a silent loss of recovery.
+
+**When a link dies** — the reconnect book (`_reconnect`, see
+[`routing.md`](routing.md#getting-back-a-node-whose-link-just-died-_reconnect)).
+This is the one that covers a stock node, since the loop above is off on every
+transport by default: an established link lost *involuntarily* enrols its
+identity and `_ensure_route_to` works down every address we hold for it and
+then tries a hole punch — hard for two minutes, patiently for as long as we
+want that node. A link **we** cut (tarpit, noise, a revocation enforced) never
+enrols: dialling it back undoes the cut and tells it what we noticed.
+
+**When a link stops working without dying** — `_rescue_loop`, below. Neither of
+the two above covers it: the link is up, so nothing died, and a node already
+linked is never re-dialled.
+
+### A recovery dial is not an on-demand dial
+
+`_ensure_route_to(target, timeout)` covers the whole acquisition — a Kademlia
+lookup if the id is unknown, then `_connect_routing` walking the addresses,
+then a hole punch — and `_connect_routing` splits what is left across **every**
+address. Both recovery loops passed the default, `_ON_DEMAND_TIMEOUT = 5 s`,
+which is the right number for its name: a packet is queued behind an on-demand
+dial and an app is waiting.
+
+A peer advertising four addresses therefore gave each of them **1.25 s** —
+less than opening a socket and finishing a ~21 kB post-quantum handshake takes
+on any real WAN link. The recovery loops dialled and failed *on time rather
+than on merit*; the operator then pressed **Retry every address**, where each
+address gets `_RETRY_DIAL_TIMEOUT = 8 s` to itself and no shared budget, and
+watched it connect first go. The button looked cleverer than the node. It was
+only more patient.
+
+So a dial nobody is waiting on says so: `_RECOVERY_TIMEOUT`
+(`_RETRY_DIAL_TIMEOUT × _DIAL_LOG_ADDRESSES`) is what `_reconnect_pass` and
+`_maintain_neighbors` pass, so a whole walk can give every address what the
+button gives it. Nothing is blocked meanwhile — `_pending_connections` makes a
+concurrent on-demand caller wait on its *own* timeout, not on this one.
+
+And `_connect_routing` gives each address the **smaller** of its fair share of
+what is left and one whole `_RETRY_DIAL_TIMEOUT`: the share is what stops a
+transport that accepts but never authenticates from hiding fresher URIs behind
+it, the cap is what stops one dead address from eating a whole recovery budget
+and leaving nothing for the punch. On an on-demand dial the share is the
+smaller of the two and nothing changes. It also walks `_known_addresses` rather
+than sorting `entry.addresses` a second time — "the addresses we hold for this
+node, in the order we would try them" is one claim, and the table, the button
+and this walk can no longer show one order and dial another.
 
 ## Choosing between a node's addresses: priority × latency
 
@@ -235,6 +283,17 @@ probe, and half the traffic went down it.
 _link_score(peer) = _address_score(uri, rtt) × (1 − loss) ** _LOSS_PENALTY_EXP
 ```
 
+**`loss` here is the recent window, not the lifetime share** (`_loss_factor`
+reads `recent_loss()` and falls back to `loss()` only while the window holds
+fewer than two outcomes). Every question this factor is asked is about *now* —
+which link do I send down, is this one worth replacing, did the candidate beat
+the incumbent — and the lifetime share answers none of them: a link that
+carried traffic for an hour and then died still shows a share near zero,
+because a thousand good probes outvote the dead ones. Read that way it was the
+better-behaved link on every screen and in every choice, right up to the point
+where nothing came back from it at all. The console shows both, named for what
+they are (`loss` and `recent_loss`).
+
 Multiplied, not shifted, because loss is not "a slower link" — it is a link that
 does not work. At `_LOSS_PENALTY_EXP = 4`, one probe in ten lost costs about a
 third of the score (0.9⁴ ≈ 0.66), which is more than any latency difference a
@@ -284,6 +343,63 @@ Three things keep it from cutting something that works:
 Cutting heals the link rather than losing the node: the identity, its addresses
 and the routes through it are untouched (`_safe_stop_peer`, not `_reap_peer`),
 maintenance is woken, and the next pass dials it again.
+
+## Replacing a link that is losing too much to be one (`_rescue_loop`)
+
+Scoring loss keeps a rotten link out of the traffic; `_reap_silent_links` cuts
+one that answers **nothing**. Between the two sits the link an operator
+actually complains about: it answers four probes in five, so it is never cut —
+and when it is the only link to that node, a score has nothing to prefer over
+it. Nothing in the node dialled anything, and getting a working link back meant
+pressing "retry every address" by hand, over and over.
+
+So the node presses it. The keepalive sweep names the identity and a bounded
+pass does exactly what the button does.
+
+1. **Naming it** (`_note_failing_links`, on the sweep, where every other
+   judgement of a link's probe history already lives). A link is *failing* when
+   `recent_loss(minimum = _LOSS_RESCUE_PROBES = 10) > _LOSS_RESCUE_SHARE`
+   (**20 %**). Only the recent window: the lifetime share of a link that worked
+   all afternoon and broke ten minutes ago is still near zero, which is the
+   whole complaint. Below ten outcomes the answer is `None` — *unknown*, never
+   a verdict — and a peer too old to echo a probe token records no outcomes at
+   all (see `ping`), so it can never be called failing on evidence we do not
+   have.
+2. **Only an identity every one of whose links is failing.** A node reached
+   over two media still has a working way there and `_link_score` already sends
+   the traffic down it; opening a third link to fix that is paying a handshake
+   to solve nothing. An identity that recovers is dropped from the book rather
+   than left to be spent later.
+3. **Dialling** (`_rescue_link`). Down that identity's addresses in preference
+   order, at most `_RESCUE_DIALS_PER_PASS = 4`, stopping at the first that
+   authenticates. **The address already in use is a candidate like any other**,
+   and is often the only one there is: a half-open TCP connection and a NAT
+   mapping that expired are both repaired by a *new* connection to the same
+   place, not by a different address. The dial is `probe=True`, so it is
+   `probation` before its handshake can finish and the duplicate reaper leaves
+   the pair alone (see `_collapse_redundant_links` below).
+4. **Keeping the better one.** Both links are measured with real probes
+   (`_measure_peer`) and compared on `_link_score` — the same rule that chooses
+   which link carries traffic and which address gets dialled, because those are
+   one question and a second rule here would contradict the first the day
+   either changes. One verdict differs from steering's: an incumbent that
+   answers **nothing** loses outright, since that silence is the entire reason
+   we dialled. The loser is closed either way.
+
+Every bound is one the MLO second-link dial already uses, because it is the
+same risk — a loop that a peer's behaviour can start:
+
+| bound | value | what it prevents |
+|---|---|---|
+| one identity per pass | — | a bad minute on the network costing a dial per node |
+| `_RESCUE_FLOOR` | 5 s | a link flapping around the threshold buying a handshake per sweep |
+| `_RESCUE_MIN` … `_RESCUE_MAX` | 60 s → 900 s | re-dialling a node whose every address is as bad as the link we hold |
+| `_RESCUE_TRACKED` | 16 | either book growing with the network |
+| `_RESCUE_IDLE_MAX` | 300 s | a wake somehow missed costing the feature rather than a delay |
+
+The loop waits on the book being filled and on nothing else: a node whose links
+all work never wakes it. It never raises — this one dying would be a silent
+loss of recovery, in the state an operator notices last.
 
 ## Steering an address on latency (`dynamic_address`, off by default)
 
@@ -533,6 +649,17 @@ that authenticated is proof, not a claim.
   changed local IP, a clock jump = suspend/resume, a `poke` from the node, a
   periodic refresh). Bounded probes, silent failure, **never blocks the loop**
   (`discover_public_ip` in a daemon thread, see `gotchas.md`).
+- **An urgent poke** — `poke(reason, urgent=True)`. An ordinary poke says our
+  addressing *might* have moved (a peer connected, an observed address
+  arrived), and is rate-limited to one network check per `_MIN_FULL_GAP = 30 s`
+  precisely because pokes are reachable from what a peer does. One caller has
+  evidence rather than a suspicion — links to several nodes lost at once, see
+  [`routing.md`](routing.md#several-nodes-lost-at-once-is-evidence-about-us) —
+  and for it the gap becomes `_MIN_URGENT_GAP = 10 s`. It **shortens** a bound,
+  it never lifts one: a peer flapping its link must not buy a STUN request and
+  an HTTPS fetch per flap. The flag is read and consumed at the top of the
+  pass, so an urgent poke landing mid-check arms the next one instead of being
+  swallowed by a check that had already decided what it was doing.
 
 ## Link keepalive (`_link_keepalive_loop`)
 

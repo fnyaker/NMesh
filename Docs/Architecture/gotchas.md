@@ -421,6 +421,87 @@ precondition looked like part of the world rather than part of the work.
 > If the answer is "something else, usually" — or if your own test has to arrange
 > it by hand — that arrangement is a piece of the feature you have not written.
 
+## A recovery phase that ends hands the work on — to nobody
+
+`_reconnect` chased a lost identity hard for `_RECONNECT_WINDOW = 120 s` and
+then dropped it, and the comment said what the handover was: *after that the
+ordinary machinery still holds the identity, its addresses and its on-demand
+path*. Every word of that is true and none of it dials. The "ordinary
+machinery" was the address-retry loop, which runs only on a medium that
+declared a `retry_interval` — `0` on every transport in the tree — and
+on-demand routing, which wakes when an app sends. A peer that came back four
+minutes later therefore stayed unreached until a person pressed **"retry every
+address"**, and pressed it again the next time, and the next.
+
+That is the tell. When a self-repairing system has a button an operator learns
+to press on a schedule, the repair is not slow — it is **not there**, and the
+operator is standing in for it. The phase did not hand the work on, it dropped
+it, because the thing it named was off by default.
+
+> **A phase that ends must name the thing that takes over, and that thing must
+> be running.** Follow the handover in the code — not in the comment — until
+> you reach something that actually dials, writes or sends on a stock node.
+
+The chase now slows instead of stopping (`_reconnect_delay`: one ladder, two
+ceilings). The same reading applies to a bounded book: sixteen identities at
+one dial per five minutes is what being ready for a node that vanished for an
+afternoon costs, and it does not grow with the network.
+
+## A timeout named for one caller, spent by every caller
+
+`_ensure_route_to(target, timeout=_ON_DEMAND_TIMEOUT)`. Five seconds, and the
+name says exactly who that is for: a packet is queued behind an on-demand dial.
+Both recovery loops — `_reconnect_pass` and `_maintain_neighbors` — took the
+default, because a default is what you take when you have no opinion, and
+neither of them had been asked to have one.
+
+Underneath, `_connect_routing` splits whatever it is given across **every**
+address of the node. So a peer advertising four addresses got 1.25 s each,
+which does not open a socket and finish a ~21 kB post-quantum handshake on any
+real WAN link. The dials failed **on time, not on merit** — and the retry log
+recorded `timeout` against every address, which reads like four bad addresses
+rather than one bad budget.
+
+What made it invisible for so long is that the workaround worked perfectly:
+the console's "retry every address" gives each address `_RETRY_DIAL_TIMEOUT`
+(8 s) to itself with no shared budget, so it connected first go, every time.
+The button looked cleverer than the node. It was only more patient, and its
+reliability is what kept the operator pressing it instead of reporting a bug.
+
+> **A constant named for a caller is a constant every other caller inherits by
+> accident.** When one is a default, read its name as a question to each call
+> site — *is a packet waiting on this one?* — and give the ones that answer no
+> a number of their own.
+
+`_RECOVERY_TIMEOUT` is that number, and `_connect_routing` now caps each
+address at one whole dial as well as sharing the remainder, so a large budget
+cannot be eaten by the first dead address.
+
+## A lifetime average cannot notice what it is being asked about
+
+`_loss_factor` — which decides which of a node's links carries traffic, whether
+a link is worth replacing, and whether a candidate beat the incumbent — read
+`LinkQuality.loss()`: probes lost over probes sent, for the life of the link.
+`LinkQuality`'s own docstring says why that cannot work ("a link that carried
+traffic for an hour and then died never shows a high lifetime share — a
+thousand good probes outvote the dead ones"), and the class had already grown
+the window that can (`recent_loss()`, the last fifty outcomes) for MLO. The
+choice function was simply never moved onto it.
+
+So a link that had been perfect all afternoon and broke ten minutes ago kept a
+loss factor of about zero. It stayed the *preferred* link of the pair, on every
+screen and in every routing decision, while nothing came back from it — and the
+only thing that could dislodge it was `_reap_silent_links`, which needs total
+silence and does not fire on a link that answers one probe in five.
+
+> **A number computed over "ever" cannot answer a question about "now".** When
+> a metric feeds a decision, read the decision's tense off the sentence it is
+> in, and check the metric has the same one.
+
+Both readings are kept and both are shown, named for what they are (`loss` and
+`recent_loss`): the lifetime share is what an operator wants when asking how
+good a link has *been*.
+
 ## A publish path that only the test suite ever called
 
 `publish_pseudo()` replicated this node's name claim into the keyed directory.
@@ -1402,8 +1483,15 @@ before and after.
   an app sends again, so a conversation stayed dead until somebody typed into
   it. The fix is a separate book (`_reconnect`, see
   [`routing.md`](routing.md)): an established link lost involuntarily is chased
-  from `0.5 s`, doubling, for two minutes. When you are looking at "it takes
-  ages to come back", look there and not at `_maintain_neighbors`.
+  from `0.5 s`, doubling, for two minutes — and then **patiently**, at
+  `_RECONNECT_PATIENT_MAX = 300 s`, for as long as we want that node, because
+  the two-minute version handed the work to a loop no stock node runs (see
+  "A recovery phase that ends hands the work on — to nobody" above). When you
+  are looking at "it takes ages to come back", look there and not at
+  `_maintain_neighbors`. When you are looking at "it came back and it is
+  terrible", look at `_rescue_loop` instead: a link that is *up* and losing a
+  fifth of its probes is neither dead nor lost, and neither of those books has
+  anything to say about it.
 - **A link *we* cut must never enter that book.** `_reap_peer` is the teardown
   path for a dead socket **and** for a tarpitted peer whose hold expired
   (`_reap_expired_tarpits`) — so `_note_node_lost` checks `peer.tarpit_until`

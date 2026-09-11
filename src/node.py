@@ -547,6 +547,31 @@ _RECONNECT_MAX_IN_FLIGHT  = 4      # dials this loop may hold open at once
 # A pass leaves whatever the in-flight cap did not reach still due, so the wait
 # it computes can be zero. The floor is what keeps that from spinning.
 _RECONNECT_MIN_TICK       = 0.25
+# …and what happens when that window runs out. It used to be: nothing. The
+# identity left the book, and the only thing left that could dial it was the
+# address-retry loop below — which no stock node runs, because `retry_interval`
+# ships at 0 on every transport. So a peer that came back four minutes later
+# stayed unreached until somebody pressed "retry every address" by hand, which
+# is not self-repair, it is an operator standing in for it.
+# The chase therefore does not end; it slows down. Same ladder, second ceiling:
+# hard for `_RECONNECT_WINDOW`, then patiently, for as long as we still hold an
+# address to dial. One dial per identity per five minutes, against a book of
+# sixteen, is a cost that does not move — and it is the difference between a
+# node that comes back on its own and one that waits for a human.
+_RECONNECT_PATIENT_MAX    = 300.0
+# Losing several nodes at once says something none of the losses says alone.
+# They cannot all have gone down together, so the thing that moved is *us*: a
+# DHCP lease renewed, a VPN dropped, a laptop resumed on another network, an
+# interface that changed under the process. Every address this node advertises
+# and every address it dials out of is then suspect, and the reconnect ladder
+# above is patiently dialling from a hole. So a burst re-verifies our own
+# addressing at once instead of waiting out the monitor's ordinary rate limit.
+# Bounded twice, because a peer flapping its link is what can trigger it: a
+# cooldown here, and a floor of its own inside `NetMonitor`.
+_LOSS_BURST_NODES         = 3      # distinct identities…
+_LOSS_BURST_WINDOW        = 20.0   # …lost within this of each other
+_LOSS_BURST_TRACKED       = 16
+_LOSS_BURST_COOLDOWN      = 60.0
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
 _ROUTE_HINT_TTL           = 120.0
@@ -563,6 +588,23 @@ _RETRY_MAX_PER_PASS       = 4
 _RETRY_NODES_SCANNED      = 64
 _RETRY_IDLE_MAX           = 300.0  # ceiling on a wait nothing is expected to end
 _RETRY_DIAL_TIMEOUT       = 8.0
+# What a dial **nobody is waiting on** may take, all addresses together.
+#
+# This is the difference the console's button had over every automatic path,
+# and it was not a better idea about which address to try. `_ON_DEMAND_TIMEOUT`
+# is five seconds because a packet is queued behind it — right for that — and
+# `_connect_routing` splits whatever it is given across *every* address of the
+# node. A peer advertising four of them therefore got 1.25 s each, which is
+# less than opening a socket and completing a post-quantum handshake takes on
+# any real WAN link: the recovery loops dialled, failed on time rather than on
+# merit, and the operator pressed "retry every address" — where each address
+# gets `_RETRY_DIAL_TIMEOUT` to itself — and watched it connect first go.
+#
+# Recovery is background work, so it is given what the button gives: a full
+# per-address budget for a whole walk. Nothing is blocked meanwhile —
+# `_pending_connections` makes a concurrent on-demand caller wait on its *own*
+# timeout, not on this one.
+_RECOVERY_TIMEOUT         = _RETRY_DIAL_TIMEOUT * _DIAL_LOG_ADDRESSES
 # Distinct refusal reasons remembered. The vocabulary is this file's own, so
 # the bound is a formality — it is here so that adding a reason can never turn
 # a counter into a leak.
@@ -584,6 +626,33 @@ _ADDR_STEER_MIN_GAIN      = 0.05   # below this, the difference is noise
 # else exists. It stays listed, and stays connected: probes lost is not proof
 # that data is, and an operator who can see "100% loss" can act on it.
 _LOSS_PENALTY_EXP         = 4.0
+# Replacing a link that is losing too much to still be one.
+#
+# The score above keeps a rotten link out of the traffic, and
+# `_reap_silent_links` cuts one that answers *nothing*. Between the two sits
+# the link an operator actually complains about: it answers four probes in
+# five, so it is never cut — and when it is the only link to that node, a score
+# has nothing to prefer over it. Nothing dialled anything, and getting a
+# working link back meant pressing "retry every address" by hand.
+#
+# So the keepalive sweep names it and a bounded pass does by itself what that
+# button does: work down that identity's addresses, open a link, and keep
+# whichever of the two `_link_score` prefers. Dialling the address already in
+# use is not a mistake here and is often the whole fix — a half-open TCP
+# connection and a NAT mapping that expired both need a *new* connection, not a
+# different address.
+#
+# Every bound is one the second-link dial already uses, because it is the same
+# risk: a loop a peer's behaviour can start. One identity per pass, a floor
+# between passes, a backoff per identity, a book that cannot grow.
+_LOSS_RESCUE_SHARE        = 0.20   # of the recent window, above which a link is failing
+_LOSS_RESCUE_PROBES       = 10     # …judged over at least this many outcomes
+_RESCUE_TRACKED           = 16     # identities remembered, in either book
+_RESCUE_MIN               = 60.0   # backoff after a rescue that changed nothing…
+_RESCUE_MAX               = 900.0  # …doubling to here
+_RESCUE_DIALS_PER_PASS    = 4      # addresses one rescue may try before giving up
+_RESCUE_FLOOR             = 5.0    # shortest gap between two passes
+_RESCUE_IDLE_MAX          = 300.0  # ceiling on a wait nothing is expected to end
 
 # Choosing between the addresses of one node. Two things matter and they are not
 # the same kind of thing: what the *medium* is worth (a priority the operator
@@ -1864,6 +1933,9 @@ class MeshNode:
         # Set when address steering is switched on: it is off by default, so
         # the loop should wait on the switch rather than on a clock.
         self._steer_wakeup = asyncio.Event()
+        # Set when the keepalive sweep names a link that is losing too much to
+        # still be a link, so the rescue pass does not wait out its ceiling.
+        self._rescue_wakeup = asyncio.Event()
         # Set when a link's probe cadence changes under the keepalive loop —
         # a link authenticated, an accord moved, a peer asked us to slow down.
         # Without it a link that just negotiated a hundred-millisecond cadence
@@ -2030,6 +2102,12 @@ class MeshNode:
         self._reconnect: OrderedDict[NodeID, tuple[int, float, float]] = OrderedDict()
         self._reconnect_task: asyncio.Task | None = None
         self._reconnect_wakeup = asyncio.Event()
+        # The identities lost recently, and when. Not a second copy of the book
+        # above: that one answers "what do we owe this node", this one answers
+        # the question no single loss can — "did several go at once", which is
+        # evidence about our own addressing rather than about any of them.
+        self._recent_losses: OrderedDict[NodeID, float] = OrderedDict()
+        self._last_loss_burst: float = 0.0
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -2080,6 +2158,13 @@ class MeshNode:
         # node hex -> {uri: measured at} — so a candidate that turned out no
         # better is not measured again on the next pass.
         self._steer_seen: OrderedDict[str, OrderedDict] = OrderedDict()
+        # Identities whose only usable link is losing too much to be one, and
+        # how the last rescue of each went. Filled by the keepalive sweep —
+        # which is the one place a link's probe history is judged — and spent
+        # by `_rescue_loop`.
+        self._rescue: OrderedDict[NodeID, None] = OrderedDict()
+        self._rescue_log: OrderedDict[NodeID, tuple] = OrderedDict()
+        self._rescue_task: asyncio.Task | None = None
         self._transport_balance: int = _BALANCE_DEFAULT
         # Background route acquisitions started from a receive loop (bounded).
         self._deferred_routes: set = set()
@@ -2158,6 +2243,7 @@ class MeshNode:
         self._ensure_reconnect()
         self._ensure_address_retry()
         self._ensure_address_steering()
+        self._ensure_link_rescue()
         self._ensure_mlo_dial()
         self._ensure_release_watch()
         self._ensure_directory_publish()
@@ -2180,9 +2266,16 @@ class MeshNode:
         self._announce_addresses_soon("network-change")
         self._note_change("reach")
 
-    def _poke_net(self, reason: str) -> None:
+    def _poke_net(self, reason: str, *, urgent: bool = False) -> None:
+        """Ask the monitor to re-check our addressing.
+
+        ``urgent`` says the ordinary rate limit is the wrong answer here: it is
+        for pokes that merely *might* mean something moved (a peer connected,
+        an observed address arrived), and one of the callers below has real
+        evidence that something did. It does not remove a bound, it swaps one
+        for a shorter one the monitor owns (see `net_monitor.py`)."""
         if self._net_monitor is not None:
-            self._net_monitor.poke(reason)
+            self._net_monitor.poke(reason, urgent=urgent)
 
     async def _probe_stun_if_udp(self) -> tuple[str, int] | None:
         """STUN only makes sense (and is only worth the observable traffic)
@@ -2672,6 +2765,7 @@ class MeshNode:
         await self._stop_reconnect()
         await self._stop_address_retry()
         await self._stop_address_steering()
+        await self._stop_link_rescue()
         await self._stop_mlo_dial()
         await self._stop_release_watch()
         await self._stop_directory_publish()
@@ -3020,6 +3114,11 @@ class MeshNode:
                 self._reap_silent_links()
                 self._reap_expired_tarpits()
                 self._update_bundles()
+                self._note_failing_links()
+                if self._rescue:
+                    # Here and not inside `_note_failing_links`: an asyncio
+                    # event belongs to the loop, and this sweep is on it.
+                    self._rescue_wakeup.set()
                 if self._mlo_short:
                     # Here rather than inside `_update_bundles`: that also runs
                     # from the console's thread, and an asyncio event is the
@@ -3883,11 +3982,23 @@ class MeshNode:
     def _loss_factor(self, peer: '_Peer') -> float:
         """What losing probes does to a link's score, 0..1.
 
-        ``None`` — fewer than two probes — is not "no loss" and not "all of
-        it": it is unknown, and an unproven link is neither rewarded nor
-        punished for being new."""
+        Read off the **recent window** while it holds anything, and off the
+        lifetime share only until then. Every question this factor is asked is
+        about now — which of these links do I send down, is this one worth
+        replacing, did the candidate beat the incumbent — and the lifetime
+        share cannot answer any of them: a link that carried traffic for an
+        hour and then died still shows a share near zero, because a thousand
+        good probes outvote the dead ones. It was the better-behaved link on
+        every screen and in every choice, right up to the point where nothing
+        came back from it at all.
+
+        ``None`` — fewer than two outcomes either way — is not "no loss" and
+        not "all of it": it is unknown, and an unproven link is neither
+        rewarded nor punished for being new."""
         try:
-            loss = peer.quality.loss()
+            loss = peer.quality.recent_loss()
+            if loss is None:
+                loss = peer.quality.loss()
         except Exception:
             return 1.0
         if loss is None:
@@ -4213,7 +4324,11 @@ class MeshNode:
             return
 
         results = await asyncio.gather(
-            *(self._ensure_route_to(node_id) for node_id in attempts),
+            # A maintenance dial is background work: nothing is queued behind
+            # it, so it gets the budget a dial actually needs rather than the
+            # one sized for a packet that is waiting (`_RECOVERY_TIMEOUT`).
+            *(self._ensure_route_to(node_id, _RECOVERY_TIMEOUT)
+              for node_id in attempts),
             return_exceptions=True,
         )
         now = time.monotonic()
@@ -4274,6 +4389,13 @@ class MeshNode:
             return                      # still reached — the node is not lost
         if self._reputation.direct_standing(node_id) != OK:
             return                      # what we saw ourselves says do not chase
+        # Every test above had to pass for this to be a node genuinely lost
+        # under us rather than a link we let go of, and that is exactly the
+        # population the burst below has to be counted over: a tarpit expiring
+        # and a revocation enforced are this node cutting links on purpose, and
+        # counting those as evidence about our own addressing would have a node
+        # re-probing STUN every time it cut an abuser.
+        self._note_loss_burst(node_id)
         now = time.monotonic()
         held = self._reconnect.get(node_id)
         if held is not None:
@@ -4284,6 +4406,47 @@ class MeshNode:
         while len(self._reconnect) > _RECONNECT_NODES_TRACKED:
             self._reconnect.popitem(last=False)
         self._reconnect_wakeup.set()
+
+    def _note_loss_burst(self, node_id: NodeID) -> None:
+        """Count one node lost, and re-verify our own addressing if several
+        just were. Never raises, never awaits: every caller is a teardown path
+        and one of them is a receive loop.
+
+        Losing one node says that node went away. Losing three inside twenty
+        seconds says something none of the three says alone — they cannot all
+        have gone down together, so what moved is **us**. A lease renewed, a
+        VPN dropped, a resume on another network: our local set is stale, the
+        addresses we advertise are wrong, and the reconnect ladder is about to
+        spend five minutes dialling patiently out of a hole.
+
+        The monitor answers that question already; what it will not do on its
+        own is answer it *now*, because an ordinary poke is rate-limited to one
+        network check every `_MIN_FULL_GAP` precisely so that a peer flapping
+        its link cannot make us hammer STUN. So this asks urgently, and pays
+        for the privilege with a cooldown of its own — two bounds, since the
+        thing that triggers it is still something a peer can do."""
+        now = time.monotonic()
+        self._recent_losses.pop(node_id, None)
+        self._recent_losses[node_id] = now
+        for lost, at in list(self._recent_losses.items()):
+            if now - at > _LOSS_BURST_WINDOW:
+                del self._recent_losses[lost]
+        while len(self._recent_losses) > _LOSS_BURST_TRACKED:
+            self._recent_losses.popitem(last=False)
+        if len(self._recent_losses) < _LOSS_BURST_NODES:
+            return
+        if now - self._last_loss_burst < _LOSS_BURST_COOLDOWN:
+            return
+        self._last_loss_burst = now
+        self._activity.note(
+            "link", "lost " + str(len(self._recent_losses))
+            + " nodes at once — re-checking our own addresses")
+        self._poke_net("links-lost-at-once", urgent=True)
+        # Whatever the check finds, the addresses we hold for those nodes are
+        # worth trying again from wherever we now are, and the reconnect book
+        # is what holds them. `_on_network_change` re-announces ours if they
+        # moved; it cannot know that theirs should be re-dialled.
+        self._wake_address_retry()
 
     def _stop_chasing(self, node_id: NodeID | None) -> None:
         """Drop an identity from the book — the link is back, or there is no
@@ -4333,20 +4496,53 @@ class MeshNode:
                 pass
 
     def _reconnect_wait(self) -> float:
-        """Seconds until the next attempt is due, never below the tick floor."""
+        """Seconds until the next attempt is due, never below the tick floor.
+
+        An empty book waits the longest gap the book can ever hold rather than
+        indefinitely: `_note_node_lost` wakes this loop, and the ceiling is
+        only so that a wake somehow missed costs a delay and not the feature."""
         if not self._reconnect:
-            return _RECONNECT_WINDOW
+            return _RECONNECT_PATIENT_MAX
         due = min(entry[1] for entry in self._reconnect.values())
         return max(_RECONNECT_MIN_TICK, due - time.monotonic())
+
+    def _reconnect_delay(self, attempts: int, urgent: bool) -> float:
+        """How long before the next attempt on an identity that did not answer.
+
+        A ladder, and then a heartbeat. Inside the window the gap doubles per
+        failure to `_RECONNECT_BACKOFF_MAX`, which is the shape of "it might be
+        back any second now". Past it the answer is one flat
+        `_RECONNECT_PATIENT_MAX`: two minutes of failed attempts have already
+        established that this node is not coming back in a hurry, and what is
+        owed to it after that is persistence, not urgency.
+
+        Flat, and deliberately not the same ladder continued. An attempt count
+        stands in for elapsed time only while attempts are cheap, and a dial is
+        not: on `_RECOVERY_TIMEOUT` a node whose every address times out buys
+        one attempt a minute, so the count at the end of the window says how
+        expensive the dials were and not how long we have been trying. A
+        cadence must not be read off a number that means something else."""
+        if not urgent:
+            return _RECONNECT_PATIENT_MAX
+        return min(_RECONNECT_BACKOFF_MAX,
+                   _RECONNECT_FIRST_DELAY * (2 ** min(attempts - 1, 10)))
 
     def _reconnect_due(self, now: float) -> list[NodeID]:
         """The identities to dial this pass — and the place the book is pruned.
 
-        An entry goes when its window runs out or when the node is reached
-        again by any other path (an app dialled it, or it dialled us)."""
+        An entry goes when the node is reached again by any other path (an app
+        dialled it, or it dialled us). The end of the window is **not** one of
+        those reasons, and used to be: the identity then left the book into the
+        care of a loop no stock node runs (see `_RECONNECT_PATIENT_MAX`). What
+        bounds the book instead is what always bounded it — `_stop_chasing`
+        (the link is back, the operator forgot the node, its membership was
+        taken back) and `_RECONNECT_NODES_TRACKED` entries, LRU. Sixteen
+        identities at one dial each per `_RECONNECT_PATIENT_MAX` is a cost that
+        does not grow, and it is the whole of what a node that vanished for an
+        afternoon costs us to be waiting for."""
         due: list[NodeID] = []
-        for node_id, (_, next_try, give_up_at) in list(self._reconnect.items()):
-            if now >= give_up_at or self._link_to(node_id) is not None:
+        for node_id, (_, next_try, _urgent_until) in list(self._reconnect.items()):
+            if self._link_to(node_id) is not None:
                 del self._reconnect[node_id]
                 continue
             if now >= next_try:
@@ -4359,7 +4555,8 @@ class MeshNode:
         if not due:
             return
         results = await asyncio.gather(
-            *(self._ensure_route_to(node_id) for node_id in due),
+            *(self._ensure_route_to(node_id, _RECOVERY_TIMEOUT)
+              for node_id in due),
             return_exceptions=True,
         )
         # Scheduled from *after* the dials: they take seconds, and a delay
@@ -4374,8 +4571,7 @@ class MeshNode:
             if held is None:
                 continue            # the link came back while we were dialling
             attempts = held[0] + 1
-            delay = min(_RECONNECT_BACKOFF_MAX,
-                        _RECONNECT_FIRST_DELAY * (2 ** min(attempts - 1, 8)))
+            delay = self._reconnect_delay(attempts, now < held[2])
             self._reconnect[node_id] = (attempts, now + delay, held[2])
 
     async def find_node(self, target: NodeID) -> None:
@@ -5173,18 +5369,30 @@ class MeshNode:
 
     async def _connect_routing(self, node_id: NodeID,
                                deadline: float) -> _Peer | None:
-        entry = self._routing.get(node_id)
-        if entry is None:
-            return None
-        uris = self._preferred(list(entry.addresses), node_id.raw.hex())
+        """Work down a node's addresses until one of them authenticates.
+
+        `_known_addresses` and not a second sort of `entry.addresses`: "the
+        addresses we hold for this node, in the order we would try them" is one
+        claim, and two expressions for it are two chances to disagree — the
+        console's table, the button and this walk now cannot show one order and
+        dial another.
+
+        Each address gets the **smaller** of its fair share of what is left and
+        one whole `_RETRY_DIAL_TIMEOUT`. The share is what stops a transport
+        that accepts but never authenticates from hiding fresher URIs behind
+        it; the cap is what stops a single dead address from eating a whole
+        recovery budget (`_RECOVERY_TIMEOUT`) and leaving nothing for the punch.
+        On an on-demand dial the share is the smaller of the two and nothing
+        changes."""
+        uris = self._known_addresses(node_id)
         for index, uri in enumerate(uris):
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 return None
-            # Reserve a fair share for every remaining endpoint. A transport
-            # that accepts but never authenticates cannot hide fresher URIs.
-            peer = await self._dial_uri(node_id, uri,
-                                        remaining / max(1, len(uris) - index))
+            peer = await self._dial_uri(
+                node_id, uri,
+                min(_RETRY_DIAL_TIMEOUT,
+                    remaining / max(1, len(uris) - index)))
             if peer is not None:
                 return peer
         return None
@@ -6143,6 +6351,204 @@ class MeshNode:
         if better:
             return "moved to " + uri
         return "kept the current address"
+
+
+    # -- replacing a link that is losing too much to be one -----------------
+    #
+    # See `_LOSS_RESCUE_SHARE` for why this exists at all: between "scored out
+    # of the traffic" and "cut for answering nothing" sits the link that
+    # answers four probes in five, and nothing in this node used to do anything
+    # about it. An operator did, by hand, with the button below.
+
+    def _link_is_failing(self, peer: '_Peer') -> bool:
+        """Is this link losing more of its probes than a link may lose?
+
+        Judged on the **recent window** and on nothing else. The lifetime share
+        of a link that worked all afternoon and broke ten minutes ago is still
+        near zero — a thousand good probes outvote the dead ones — so a node
+        reading that never notices, which is the whole complaint.
+
+        `None` below `_LOSS_RESCUE_PROBES` outcomes, and `None` is not a
+        verdict: a link with three probes behind it has proved nothing, and a
+        peer too old to echo a probe token records no outcomes at all (see
+        `ping`), so it can never be called failing on evidence we do not have.
+        """
+        try:
+            loss = peer.quality.recent_loss(minimum=_LOSS_RESCUE_PROBES)
+        except Exception:
+            return False
+        return loss is not None and loss > _LOSS_RESCUE_SHARE
+
+    def _note_failing_links(self) -> None:
+        """Name the identities whose way there is failing. Runs on the
+        keepalive sweep — the one place a link's probe history is judged —
+        never raises, never awaits.
+
+        Only an identity **every** one of whose links is failing. A node
+        reached over two media still has a working way there and `_link_score`
+        already sends the traffic down it; opening a third link to fix that is
+        paying a handshake to solve nothing.
+
+        An identity that recovered is dropped rather than left to be re-read by
+        the pass: a book that only ever grows entries is a book that dials for
+        reasons that stopped being true."""
+        live: dict[NodeID, list[_Peer]] = {}
+        for peer in self._peers:
+            target = peer.authenticated_id
+            if target is None or peer.session is None:
+                continue
+            if peer.relay_only or peer.probation or peer.tarpit_until:
+                continue
+            live.setdefault(target, []).append(peer)
+        for target, links in live.items():
+            if not all(self._link_is_failing(peer) for peer in links):
+                self._rescue.pop(target, None)
+                continue
+            if target in self._rescue:
+                continue
+            self._rescue[target] = None
+            while len(self._rescue) > _RESCUE_TRACKED:
+                self._rescue.popitem(last=False)
+
+    def _note_rescue(self, target: NodeID, replaced: bool) -> None:
+        """How the last rescue went, so an identity whose every address is as
+        bad as the link we hold is not re-dialled on every sweep for the life
+        of the node."""
+        if replaced:
+            self._rescue_log.pop(target, None)
+            return
+        failures = self._rescue_log.get(target, (0, 0.0))[0] + 1
+        delay = min(_RESCUE_MAX, _RESCUE_MIN * (2 ** min(failures - 1, 5)))
+        self._rescue_log[target] = (failures, time.monotonic() + delay)
+        self._rescue_log.move_to_end(target)
+        while len(self._rescue_log) > _RESCUE_TRACKED:
+            self._rescue_log.popitem(last=False)
+
+    def _ensure_link_rescue(self) -> None:
+        if self._rescue_task is None or self._rescue_task.done():
+            self._rescue_task = asyncio.create_task(self._rescue_loop())
+
+    async def _stop_link_rescue(self) -> None:
+        task = self._rescue_task
+        self._rescue_task = None
+        self._rescue_wakeup.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _rescue_loop(self) -> None:
+        """Replace the failing links the sweep named, one identity at a time.
+
+        Waits on the book being filled and on nothing else: a node whose links
+        all work never wakes here. The ceiling is only so that a wake somehow
+        missed costs a delay rather than the feature.
+
+        Never raises: this loop dying would be a silent loss of recovery, and
+        the state it recovers from is the one an operator notices last."""
+        job = self._activity.register(
+            "link-rescue",
+            "re-dials a node whose link is losing too many probes to be one,"
+            " and keeps whichever of the two links is better",
+            "a keepalive sweep found every link to a node above the loss share")
+        while self._running:
+            self._rescue_wakeup.clear()
+            job.ran()
+            if not self._rescue:
+                try:
+                    async with asyncio.timeout(_RESCUE_IDLE_MAX):
+                        await self._rescue_wakeup.wait()
+                except TimeoutError:
+                    pass
+                continue
+            try:
+                await self._rescue_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            # A rescue is a dial and a handshake, and what asks for one is how
+            # a peer's link behaves: the floor is what stops a link flapping
+            # around the threshold from buying one per sweep (gotchas §12).
+            await asyncio.sleep(_RESCUE_FLOOR)
+
+    async def _rescue_pass(self) -> int:
+        """One identity, at most. Returns how many links it replaced.
+
+        Every condition is re-read here rather than trusted from the sweep that
+        filled the book: the link may have recovered, it may have died outright
+        (the reconnect book has it then, and two loops dialling one node is one
+        too many), and the backoff may still be running."""
+        while self._rescue:
+            target, _ = self._rescue.popitem(last=False)
+            peer = self._link_to(target)
+            if peer is None or not self._link_is_failing(peer):
+                continue
+            if time.monotonic() < self._rescue_log.get(target, (0, 0.0))[1]:
+                continue
+            return 1 if await self._rescue_link(target, peer) else 0
+        return 0
+
+    async def _rescue_link(self, target: NodeID, peer: '_Peer') -> bool:
+        """Dial that identity's addresses, and keep the better of the two links.
+
+        This is what the console's "retry every address" does, decided by the
+        node instead of by a person — working down the addresses in preference
+        order and stopping at the first that authenticates.
+
+        **The address already in use is a candidate like any other**, and often
+        the only one there is. A half-open TCP connection and a NAT mapping
+        that expired are both repaired by a *new* connection to the same place,
+        not by a different address; the dial is marked `probe=True`, so the
+        duplicate reaper leaves the pair alone and this pass closes the loser
+        itself (see `_redundant_links`).
+
+        The comparison is `_link_score` on both sides — the same rule that
+        chooses which link carries traffic and which address gets dialled —
+        because "this medium is preferred", "this address is faster" and "this
+        link works" are one question, and a second rule here would contradict
+        the first the day either changes. One verdict differs from steering's:
+        an incumbent that answers **nothing** loses outright, since that
+        silence is the entire reason we dialled."""
+        candidate = None
+        for uri in self._known_addresses(target)[:_RESCUE_DIALS_PER_PASS]:
+            candidate = await self._dial_uri(target, uri, _RETRY_DIAL_TIMEOUT,
+                                             probe=True)
+            if candidate is not None:
+                break
+        if candidate is None:
+            self._note_rescue(target, False)
+            return False
+        if peer.session is None or peer not in self._peers:
+            # It died under us while we were dialling. Nothing left to compare
+            # against and nothing to close: the candidate is simply the link.
+            candidate.probation = False
+            self._note_rescue(target, True)
+            self._stop_chasing(target)
+            self._note_change("links")
+            return True
+        current = await self._measure_peer(peer)
+        measured = await self._measure_peer(candidate)
+        better = measured is not None and (
+            current is None
+            or self._link_score(candidate) - self._link_score(peer)
+            >= _ADDR_STEER_MIN_GAIN)
+        loser = peer if better else candidate
+        candidate.probation = False   # whichever survives is a link like any other
+        try:
+            await loser.stop()
+        except Exception:
+            pass
+        if loser in self._peers:
+            self._peers.remove(loser)
+        self._note_rescue(target, better)
+        if better:
+            self._activity.note(
+                "link", "replaced a failing link to " + target.raw.hex()[:16])
+            self._note_change("links")
+        return better
 
     def _address_status(self, node_hex: str, addresses, peer) -> list[dict]:
         """Every address we know for a node, and what happened at each.

@@ -407,12 +407,26 @@ book (`_reconnect`) that is chased hard and briefly:
   has lost nothing while one of them stands (`_link_to(node_id, exclude=peer)`),
   and one entry covers every way back there is: `_ensure_route_to` works down
   every address we hold and then tries a hole punch.
-- **The cadence.** First attempt `_RECONNECT_FIRST_DELAY = 0.5 s` after the
-  loss (a socket still closing is not dialled), then doubling per failure to a
-  `_RECONNECT_BACKOFF_MAX = 15 s` ceiling, and the chase stops after
-  `_RECONNECT_WINDOW = 120 s`. The delay is counted from **after** the dial
-  returns, not before it: a dial takes seconds, and a delay counted from before
-  would already have expired on arrival — a backoff that exists on paper only.
+- **The cadence: a ladder, then a heartbeat** (`_reconnect_delay`, the one
+  place both live). Inside `_RECONNECT_WINDOW = 120 s` the first attempt is
+  `_RECONNECT_FIRST_DELAY = 0.5 s` after the loss (a socket still closing is
+  not dialled) and the gap doubles per failure to
+  `_RECONNECT_BACKOFF_MAX = 15 s` — the shape of "it might be back any second
+  now". Past the window it is one flat `_RECONNECT_PATIENT_MAX = 300 s`: two
+  minutes of failed attempts have already established that this node is not
+  coming back in a hurry, and what it is owed after that is persistence, not
+  urgency. Flat, and deliberately **not the same ladder continued**: an attempt
+  count stands in for elapsed time only while attempts are cheap, and a dial on
+  `_RECOVERY_TIMEOUT` is not, so the count at the end of the window says how
+  expensive the dials were rather than how long we have been trying.
+  The delay is counted from **after** the dial returns, not before it: a dial
+  takes seconds, and a delay counted from before would already have expired on
+  arrival — a backoff that exists on paper only.
+- **The budget is the recovery one, not the on-demand one**
+  (`_RECOVERY_TIMEOUT`, see
+  [`transports.md`](transports.md#a-recovery-dial-is-not-an-on-demand-dial)).
+  This is the difference the console's button had over every automatic path,
+  and it was never a better idea about which address to try.
 - **Where a loss is noticed.** `_reap_peer` (the receive loop exited),
   `_drop_failed_peer` (a send failed) and `_reap_silent_links` (probes stopped
   coming back) all call `_note_node_lost`. The silent-link sweep removes every
@@ -441,14 +455,42 @@ book (`_reconnect`) that is chased hard and briefly:
   but never re-arms the backoff, or a peer that connects and drops would buy a
   dial per drop (gotchas §12 again — no loop driven by what a peer does may run
   flat out).
-- **When it ends.** `_stop_chasing` is the one way out of the book, and three
-  things ask for it: a handshake completing (the link is back, by our dial or
-  by theirs), the operator forgetting the node (`console_forget_node` — dialling
-  it back twice a second is not forgetting it), and a revocation being enforced
-  (`_enforce_revocation`, which drops the entry *before* tearing the links down,
-  since the teardown itself would otherwise enrol it). Otherwise the window
-  runs out. After that the ordinary machinery still holds the identity, its
-  addresses and its on-demand path — this book is the *urgent* phase only.
+- **When it ends — and it is not when the window does.** `_stop_chasing` is
+  the one way out of the book, and three things ask for it: a handshake
+  completing (the link is back, by our dial or by theirs), the operator
+  forgetting the node (`console_forget_node` — dialling it back twice a second
+  is not forgetting it), and a revocation being enforced (`_enforce_revocation`,
+  which drops the entry *before* tearing the links down, since the teardown
+  itself would otherwise enrol it). `_reconnect_due` also drops an identity the
+  moment any other path reaches it, and the book is `_RECONNECT_NODES_TRACKED`
+  entries, LRU.
+  The **end of the window used to be a fourth way out, and was a hole**: the
+  identity left the book into the care of a loop no stock node runs
+  (`retry_interval` is `0` on every transport), so a peer that came back four
+  minutes later stayed unreached until somebody pressed the console's "retry
+  every address" by hand. That is an operator standing in for self-repair. The
+  chase now slows down instead of stopping — sixteen identities at one dial per
+  five minutes is a cost that does not grow, and it is the whole price of being
+  ready for a node that vanished for an afternoon.
+
+### Several nodes lost at once is evidence about *us*
+
+Losing one node says that node went away. Losing `_LOSS_BURST_NODES = 3`
+distinct identities inside `_LOSS_BURST_WINDOW = 20 s` says something none of
+the three says alone: they cannot all have gone down together, so what moved is
+**this machine** — a lease renewed, a VPN dropped, a resume on another network,
+an interface that changed under the process. Every address we advertise is then
+wrong and the ladder above is patiently dialling out of a hole.
+
+`_note_loss_burst` counts it, and only over the population `_note_node_lost`
+has already filtered down to genuine involuntary losses: a tarpit expiring and
+a revocation enforced are this node cutting links **on purpose**, and counting
+those would have a node re-probing STUN every time it cut an abuser. On a burst
+it pokes the net monitor **urgently** (see
+[`transports.md`](transports.md#address-discovery--reachability)) and wakes the
+address-retry loop. Bounded twice, because a peer flapping its link is what can
+trigger it: `_LOSS_BURST_COOLDOWN = 60 s` here, and a floor of its own inside
+the monitor.
 
 Locked down by `tests/test_reconnect.py`.
 
