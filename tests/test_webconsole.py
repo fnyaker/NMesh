@@ -531,7 +531,8 @@ class TestManagement:
             for bad in ({"block": "not-base64!!!"}, {"block": ""}, {}):
                 status, _, _, j = await asyncio.to_thread(
                     _request, console, "POST", "/api/join/block", token, bad)
-                assert status == 400 and j["ok"] is False
+                # One shape for every refusal on this API (`control/errors.py`).
+                assert status == 400 and j["error"]
         finally:
             console.stop(); await node.stop()
 
@@ -1476,7 +1477,10 @@ class TestJoinTicket:
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/join", token,
                 {"uri": "tcp://127.0.0.1:1", "code": "no-such-code"})
-            assert status == 502
+            # A join that reaches nothing is `unavailable` — the node was
+            # asked, it tried, and the far end is not there. The sentence
+            # beside it names which of the five ways it failed.
+            assert status == 503
             assert body["error"] == "that address could not be reached"
         finally:
             console.stop(); await node.stop()

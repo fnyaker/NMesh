@@ -558,9 +558,9 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/mlo` | `network.mlo` — `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything, whether it may be driven from a remote console) — `apps.catalogue`, filtered by who is asking |
 | POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
-| POST    | `/api/invite`    | generates an invitation code                   |
-| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
-| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
+| POST    | `/api/invite`    | generates an invitation code — `join.invite`, **local only**: a code this node issues is a credential, and asking a node you manage for one is the fleet's `invite` capability |
+| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network — `join.network`, one of the two here a console *managing* this node may ask for: pointing a machine at a network is what provisioning one is. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **503** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
+| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address — `join.ticket`, local only, and a silly lifetime is clamped by the ticket format rather than refused |
 | GET     | `/api/rootcert`  | our root certificate (hex) to share — `node.rootcert` |
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert — `trust.add`, which checks it *is* hex before the node parses it |
 | POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh — `trust.revoke` |
@@ -570,9 +570,9 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
-| GET     | `/api/store`       | the local view: `{catalog, installed}` |
+| GET     | `/api/store`       | the local view: `{catalog, installed}` — `store.overview`, annotated by the node so a page renders rather than re-derives |
 | POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name |
-| POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
+| POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` — `store.*`, and these **do** travel: an app is not the node's own program, so managing a machine includes managing its apps |
 | GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing |
 | GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
 | GET     | `/api/chat/avatar` | `?id=…` → an avatar's bytes (`self` or a node id) |

@@ -259,6 +259,8 @@ keeps working, with one implementation behind it.
 | `releases` | `overview` `check` `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
 | `packages` | `search` `held` `entry` `lookup`\* `describe`\* `install`\* `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
 | `keys` | `overview` `create`\* `adopt`\* `offer`\* `accept`\* `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
+| `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install\|update\|uninstall` |
+| `join` | `network` `use_block` `invite`\* `ticket`\* `block`\* | `/api/join`, `/api/invite`, `/api/ticket`, `/api/invite/block`, `/api/join/block` |
 
 \* local only.
 
@@ -286,6 +288,20 @@ What does travel is the one read — what this node holds, what it has pinned an
 what it is watching — because an operator managing a machine needs to see that
 without being able to change it.
 
+`store` is the deliberate exception in that family, and the distinction is
+worth stating: installing a **node release** replaces the code this process is
+running, while installing an **app** writes a directory and starts something
+beside it. So an operator managing a machine may install, update and remove its
+apps — that is what managing a machine is — and may not change what its own
+program is allowed to become.
+
+`join` splits the same way. **Minting is local**: a code this node issues lets
+somebody into *its* network, which is a credential rather than a setting, and
+the fleet already has a capability for asking a node you manage to mint one
+(`invite`) — leaving `join.invite` local is what keeps `manage` from quietly
+including it. **Joining travels**, because pointing a machine you manage at a
+network is what provisioning one is.
+
 `packages` and `keys` follow from the same sentence. Pinning the key inside a
 record, installing what a record names, and watching a package are the same
 decision as pinning a publisher, so they stay local; asking the *directory* is
@@ -295,18 +311,17 @@ still: **a passphrase is typed at the machine that will hold the key**, so only
 the overview travels — which is the structural half of what
 :mod:`src.key_share` is for.
 
-Still routes of their own, and the ledger to work through: the app store's
-lists and its publish, invitations, tickets and joining,
-releases and updates, publisher keys, the app store, chat and fleet's own
-surfaces, login/logout. Three of those are not candidates at all: **login** is
-how a session begins, **the console password** is that door's own key rather
-than the node's state, and **uploads** carry bytes rather than a sentence (a
-control frame is capped to fit `fleet.CONSOLE_REQ_MAX` — which is also why the
-**relay and connect blocks** stay where they are: `_RELAY_BLOCK_MAX_LEN` is
-32 kB, larger than a frame, and a block is pasted into the console of the node
-you are sitting at anyway). Chat and fleet keep
-their page APIs by design — a managed node is not a jump host — while what they
-choose to expose *as operations* travels on the plane like everything else.
+Still routes of their own: chat and fleet's own page surfaces, and what carries
+bytes — publishing an app or a release's files, downloading a package, a chat
+file or avatar. Plus login/logout. Four things are not candidates at all: **login** is how a session begins, **the
+console password** is that door's own key rather than the node's state,
+**uploads and downloads** carry bytes rather than a sentence (a control frame is
+capped to fit `fleet.CONSOLE_REQ_MAX`), and the **relay and connect blocks** are
+32 kB by their own ceiling (`node._RELAY_BLOCK_MAX_LEN`) — larger than a frame,
+and pasted into the console of the machine you are sitting at anyway. Chat and
+fleet keep their page APIs by design — a managed node is not a jump host — while
+what they choose to expose *as operations* travels on the plane like everything
+else.
 
 The path relay (`console_path_refusal`) therefore still governs the routes that
 have not moved, and shrinks as they do. The rule to hold on to: **a route that
