@@ -85,9 +85,12 @@ reply     {"v": 1, "id": "7f3a", "ok": true,  "result": {…}}
   `{"rejected": ["console_port: …"]}` is.
 * Decoding is hostile-input first: a size cap **on the bytes** before parsing, a
   type check on every field, a bound on every string, and no recursion of our
-  own — the *parser* recurses, so a frame of nothing but brackets reaches the
-  interpreter's limit before any check runs, and that is caught and refused as
-  what it is: not a frame.
+  own — the *parser* recurses, so a frame of nothing but brackets is refused by
+  an explicit, non-recursive bracket-depth scan (`frame._shallow_enough`,
+  `MAX_NESTING`) before `json` ever sees it, rather than by leaning on the
+  interpreter's own recursion limit — a Python 3.13 change let a 5 000-bracket
+  frame that used to hit that limit parse clean instead
+  (`Docs/Architecture/gotchas.md`).
 
 ### There is no event frame
 
