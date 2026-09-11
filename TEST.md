@@ -281,6 +281,12 @@ tests/
 │     plane: answered by the node it was addressed to, refused there when that
 │     node keeps the operation to itself, and answered rather than dropped when
 │     what arrives is not a frame at all
+├── test_control_plane.py (releases)                    — the node's own code:
+│     only the read travels (what a node accepts for replacing its program is
+│     pinned by a human at that node, and the rest would not fit the relay
+│     anyway), a passphrase is the one field never trimmed, a key is hex before
+│     the node sees it, a version GitHub has moved past is refused rather than
+│     installed, and GitHub not answering comes back as the answer
 ├── test_control_plane.py (a node that went away)       — the relay's own
 │     failures, read back as codes: a node that never answered is `unavailable`
 │     (it came back as a 502, and calling that "failed" left a console pointed

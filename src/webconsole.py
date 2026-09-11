@@ -45,7 +45,6 @@ from .control import listing
 from . import updater
 from . import console_auth
 from .control.modules.settings import write_settings
-from .core_release import ReleaseError
 from . import join_ticket
 from . import qr
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
@@ -1198,36 +1197,10 @@ def _make_handler(console: WebConsole):
                 self._send_binary(data, "avatar")
                 return
             if path == "/api/update/check":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    result = console._call(
-                        updater.check(branch=console._update_branch()),
-                        timeout=40.0)
-                except updater.UpdateError as exc:
-                    self._json(200, {"error": str(exc)[:256],
-                                     "current": updater.__version__})
-                    return
-                except Exception:
-                    self._json(503, {"error": "update check failed"})
-                    return
-                ok, reason = updater.updatable()
-                result["can_apply"] = ok
-                result["blocked"] = reason
-                self._json(200, result)
+                self._from_plane("releases.check")
                 return
             if path == "/api/releases":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                # Marshalled onto the loop like every other node read: the
-                # node's state is never touched from an HTTP thread.
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.release_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("releases.overview")
                 return
             if path == "/api/pseudo":
                 # `q` searches; without it, this is "what am I called?". And
@@ -1703,7 +1676,10 @@ def _make_handler(console: WebConsole):
                                   "action": path.rsplit("/", 1)[1]})
                 return
             if path == "/api/update/apply":
-                self._handle_update_apply(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("releases.apply",
+                                 {"version": data.get("version") or "",
+                                  "confirm": data.get("confirm") is True})
                 return
             if path == "/api/restart":
                 data = _parse_json(body) or {}
@@ -1713,6 +1689,7 @@ def _make_handler(console: WebConsole):
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
+
             if path.startswith("/api/packages/"):
                 self._handle_package_post(path, _parse_json(body))
                 return
@@ -2002,162 +1979,46 @@ def _make_handler(console: WebConsole):
         def _handle_release_post(self, path: str, data) -> None:
             """Publishing, pinning and installing mesh-native releases.
 
-            The console decides nothing here: pinning a key, installing a
-            release and turning automatic installation on all end in the node,
-            which owns the gates. What this layer owns is that a signed-in
-            operator asked."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route and nothing else: these carried their own
+            validation, their own error mapping and their own idea of what a
+            publisher id is. The operations own all three now
+            (`src/control/modules/releases.py`); what is left here is the older
+            spelling of each argument."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            try:
-                if path == "/api/releases/publish":
-                    notes = data.get("notes")
-                    # Signing with a held publisher key rather than the node
-                    # identity: named by id, because a key this node was handed
-                    # has no path its operator ever chose.
-                    key_id = data.get("key_id")
-                    key_path = None
-                    if isinstance(key_id, str) and key_id:
-                        key_path = console._call(
-                            _wrap(node.publisher_key_path, key_id))
-                        if key_path is None:
-                            self._json(404, {"error": "no such publisher key"})
-                            return
-                    passphrase = data.get("passphrase")
-                    result = console._call(
-                        node.publish_release(
-                            notes=notes if isinstance(notes, str) else "",
-                            key_path=key_path,
-                            passphrase=passphrase
-                            if isinstance(passphrase, str) else None),
-                        timeout=300.0)
-                    self._json(200, {"ok": True, **result})
-                    return
-                if path == "/api/releases/install":
-                    release = data.get("release")
-                    if not isinstance(release, str):
-                        self._json(400, {"error": "release required"})
-                        return
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    result = console._call(node.install_release(release),
-                                           timeout=400.0)
-                    # An operator pressed Install and is watching, so the
-                    # restart is immediate. The unattended path restarts too,
-                    # but only after writing the attempt down: a release that
-                    # installs and never becomes the running version is given
-                    # up on rather than restarted into for ever (`node.py`,
-                    # `AutoInstallJournal`).
-                    restarting = console.restart()
-                    self._json(200, {"ok": True, **result,
-                                     "restarting": restarting})
-                    return
-                if path == "/api/releases/trust":
-                    key = data.get("key")
-                    if not isinstance(key, str):
-                        self._json(400, {"error": "key required"})
-                        return
-                    name = data.get("name")
-                    entry = console._call(_wrap(
-                        node.trust_publisher, key.strip(),
-                        name if isinstance(name, str) else "",
-                        data.get("auto") is True,
-                        data.get("endorsed") is True))
-                    self._json(200, {"ok": True, "publisher": entry})
-                    return
-                if path == "/api/releases/untrust":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.untrust_publisher, publisher))})
-                    return
-                if path == "/api/releases/auto":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    ok = console._call(_wrap(node.set_publisher_auto, publisher,
-                                             data.get("auto") is True))
-                    self._json(200 if ok else 404, {"ok": ok})
-                    return
-                if path == "/api/releases/endorse":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    ok = console._call(_wrap(node.set_publisher_endorsed,
-                                             publisher,
-                                             data.get("endorsed") is True))
-                    self._json(200 if ok else 404, {"ok": ok})
-                    return
-            except ReleaseError as exc:
-                self._json(400, {"error": str(exc)[:256]})
-                return
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception as exc:
-                self._json(500, {"error": f"release failed: {type(exc).__name__}"})
-                return
-            self._json(404, {"error": "not found"})
-
-        def _handle_update_apply(self, data) -> None:
-            """Install a release — only ever the one the operator confirmed.
-
-            The request must name the version. If GitHub has moved on since the
-            page was drawn, the mismatch is refused: a tab left open for an hour
-            must not install something nobody looked at. That holds for a branch
-            too — it is checked again here, and once more against the tree that
-            comes down, because a branch moves under its own name."""
-            data = data or {}
-            wanted = data.get("version")
-            if not isinstance(wanted, str) or not wanted:
-                self._json(400, {"error": "version required"})
-                return
-            if data.get("confirm") is not True:
-                self._json(400, {"error": "confirmation required"})
-                return
-            ok, reason = updater.updatable()
-            if not ok:
-                self._json(409, {"error": reason})
-                return
-            branch = console._update_branch()
-            try:
-                latest = console._call(updater.check(branch=branch),
-                                       timeout=40.0)
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception:
-                self._json(503, {"error": "update check failed"})
-                return
-            if latest.get("latest") != wanted:
-                self._json(409, {
-                    "error": f"the latest version is now {latest.get('latest')}, "
-                             f"not {wanted} — check again and re-confirm"})
-                return
-            if not latest.get("available"):
-                self._json(409, {"error": "already up to date"})
-                return
-            try:
-                result = console._call(updater.apply(wanted, branch=branch),
-                                       timeout=400.0)
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception as exc:
-                self._json(500, {"error": f"update failed: {type(exc).__name__}"})
-                return
-            # The files are in place; this process is still running the old
-            # ones. Answer first, then leave so the manager brings us back on
-            # the new code — otherwise the page's "restarting" is a lie.
-            restarting = console.restart()
-            self._json(200, {"ok": True, **result, "restarting": restarting})
+            action = path.rsplit("/", 1)[1]
+            if action == "publish":
+                params = {"notes": data.get("notes") or "",
+                          "key_id": data.get("key_id") or ""}
+                # Absent rather than null: naming a field is saying you meant
+                # to set it, so `{"passphrase": null}` is a value the field
+                # cannot take — while *not* sending one is "there is no
+                # passphrase", which is what an unlocked key means.
+                if data.get("passphrase") is not None:
+                    params["passphrase"] = data["passphrase"]
+                self._from_plane("releases.publish", params)
+            elif action == "install":
+                self._from_plane("releases.install", {
+                    "release": data.get("release") or "",
+                    "confirm": data.get("confirm") is True})
+            elif action == "trust":
+                self._from_plane("releases.trust", {
+                    "key": str(data.get("key") or "").strip(),
+                    "name": data.get("name") or "",
+                    "auto": data.get("auto") is True,
+                    "endorsed": data.get("endorsed") is True})
+            elif action == "untrust":
+                self._from_plane("releases.untrust",
+                                 {"publisher": data.get("publisher_id") or ""})
+            elif action == "auto":
+                self._from_plane("releases.auto", {
+                    "publisher": data.get("publisher_id") or "",
+                    "auto": data.get("auto") is True})
+            elif action == "endorse":
+                self._from_plane("releases.endorse", {
+                    "publisher": data.get("publisher_id") or "",
+                    "endorsed": data.get("endorsed") is True})
+            else:
+                self._json(404, {"error": "not found"})
 
         # -- fleet (remote management) ------------------------------------
         #

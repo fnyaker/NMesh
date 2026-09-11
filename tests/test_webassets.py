@@ -1151,7 +1151,7 @@ def test_a_key_is_pinned_from_the_record_that_carries_it():
     assert 'id="pin-key"' not in html and 'id="pin-add"' not in html
     assert '"/api/packages/trust"' in source
     # Trusting and auto-installing stay two decisions, not one.
-    assert 'id="pkg-pin-auto"' in source and '"/api/releases/auto"' in source
+    assert 'id="pkg-pin-auto"' in source and '"releases.auto"' in source
 
 
 def test_a_package_can_be_read_before_it_is_run():
@@ -1220,11 +1220,13 @@ def test_no_release_action_can_end_mid_sentence():
     the call itself fails — a restart cuts the connection mid-answer, so this is
     a path that really happens."""
     source = webassets.APP_JS
-    for route in ('"/api/releases/publish"', '"/api/packages/install"',
-                  '"/api/packages/trust"'):
-        call = source.index(route)
+    # An operation where it has moved onto the control plane, a route where it
+    # has not — the rule is about the *status line*, not about the door.
+    for name in ('"releases.publish"', '"/api/packages/install"',
+                 '"/api/packages/trust"'):
+        call = source.index(name)
         window = source[call - 400:call + 700]
-        assert "catch(" in window or "setMessage(" in window, route
+        assert "catch(" in window or "setMessage(" in window, name
 
 
 # ── what belongs to a transport lives in that transport ─────────────────────

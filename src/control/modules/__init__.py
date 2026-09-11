@@ -19,6 +19,7 @@ from .apps import AppsModule
 from .core import ControlModule
 from .node import NodeModule
 from .pseudo import PseudoModule
+from .releases import ReleasesModule
 from .network import NetworkModule
 from .settings import ConfigModule, TransportsModule
 from .trace import TraceModule
@@ -26,7 +27,8 @@ from .trust import TrustModule
 
 # The order is the order a catalogue is read in, and nothing else depends on it.
 BUILT_IN = (NodeModule, ConfigModule, TransportsModule, TraceModule,
-            PseudoModule, AppsModule, TrustModule, NetworkModule)
+            PseudoModule, AppsModule, TrustModule, NetworkModule,
+            ReleasesModule)
 
 
 def install(plane: ControlPlane, context) -> ControlPlane:

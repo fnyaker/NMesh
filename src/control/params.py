@@ -29,6 +29,12 @@ The management plane needs three more, and only three:
     and which the node must not be handed until it *is* hex — the check is one
     regular expression here rather than an exception from a parser three
     frames down.
+``secret``
+    A passphrase, and the one kind that is **not** trimmed. Every other text
+    field strips what surrounds it, which is right for a label and wrong here:
+    a space at the end of a passphrase *is* the passphrase, and quietly
+    removing it would unlock nothing and explain nothing. Bounded and checked
+    for a null byte, and that is the whole of what may be done to it.
 
 A ``count`` may also carry a ``limit``, and it is the one value in this module
 that is **clamped rather than refused**. The reason is ownership: the thing
@@ -61,12 +67,15 @@ MAX_KEY = 64             # length of one of its keys
 MAX_VALUE = 512          # length of one of its scalar values
 MAX_CHOICES = 32
 
-KINDS = app_api.KINDS + ("line", "document", "choice", "hex")
+KINDS = app_api.KINDS + ("line", "document", "choice", "hex", "secret")
 
 # The largest `hex` a declaration may allow. A self-signed certificate is about
 # 14 kB of hex; the ceiling leaves room for a longer key without ever
 # approaching what one frame carries (`frame.MAX_FRAME`).
 MAX_HEX = 20000
+# A passphrase. Long enough for anything a person types or a manager generates,
+# short enough that it is an argument rather than a payload.
+MAX_SECRET = 512
 
 _HEX_RE = re.compile(r"^[0-9a-f]*$")
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,%d}$" % (MAX_KEY - 1))
@@ -203,13 +212,24 @@ def coerce(field: dict, raw):
             allowed = ", ".join(field.get("choices", ()))
             raise ControlError("bad_request", f"must be one of {allowed}")
         return text
+    if kind == "secret":
+        if not isinstance(raw, str):
+            raise ControlError("bad_request", "must be text")
+        if len(raw) > MAX_SECRET:
+            raise ControlError("bad_request",
+                               f"longer than {MAX_SECRET} characters")
+        if "\x00" in raw:
+            raise ControlError("bad_request", "contains a null byte")
+        return raw            # not stripped, deliberately
     if kind == "hex":
         if not isinstance(raw, str):
             raise ControlError("bad_request", "must be hex text")
         text = raw.strip().lower()
         if len(text) > int(field.get("limit", MAX_HEX)):
             raise ControlError("bad_request", "longer than this field allows")
-        if len(text) % 2 or not _HEX_RE.match(text or "00"):
+        # Empty is not a value: a field declared as bytes means *these* bytes,
+        # and an empty one reaches the node as a key nobody has.
+        if not text or len(text) % 2 or not _HEX_RE.match(text):
             raise ControlError("bad_request", "not hex")
         return text
     raise ControlError("bad_request", "unsupported parameter")

@@ -3079,7 +3079,11 @@ async function checkForUpdates(event){
     status.textContent = "Asking GitHub…";
     $("update-apply").hidden = true; notes.hidden = true; UPDATE_OFFER = null;
     try{
-      const {data} = await apiJson("/api/update/check");
+      const {ok, error, data} = await CHANNEL.ask("releases.check");
+      // Two different failures, and the page has to say which: GitHub not
+      // answering comes back *as the answer* (with the version that is
+      // running), while a refusal is this node saying it will not look.
+      if(!ok){ status.textContent = error || "Could not check."; return; }
       if(data.error){ status.textContent = data.error; return; }
       // Which of the two answered is worth saying every time: "up to date"
       // means something different against a branch than against a release.
@@ -3122,9 +3126,9 @@ async function applyUpdate(event){
     const status = $("update-status");
     status.textContent = "Downloading and installing " + UPDATE_OFFER + "…";
     try{
-      const {ok, data} = await apiJson("/api/update/apply", "POST",
-        {version:UPDATE_OFFER, confirm:true});
-      if(!ok){ status.textContent = data.error || "Update failed."; return; }
+      const {ok, error, data} = await CHANNEL.ask(
+        "releases.apply", {version:UPDATE_OFFER, confirm:true});
+      if(!ok){ status.textContent = error || "Update failed."; return; }
       // What it says is what the node reported doing, not what we hope: a node
       // nothing would bring back does not restart itself, and says so.
       status.textContent = data.restarting
@@ -3486,8 +3490,7 @@ $("pseudo-results").addEventListener("click", (event) => {
 
 async function refreshReleases(){
   try{
-    const {ok, data} = await apiJson("/api/releases");
-    if(!ok) return;
+    const data = await CHANNEL.call("releases.overview");
     // Every field defaulted: one missing key used to throw inside this try,
     // and the catch below is silent — so a single absent field left both tables
     // painted with whatever they last held, for ever, with nothing said.
@@ -3557,14 +3560,14 @@ $("publisher-rows").addEventListener("click", async (event) => {
     body:'<p class="muted small">Their releases stay visible, but this node stops accepting ' +
       "code from them.</p>", confirmLabel:"Unpin", danger:true});
   if(!agreed) return;
-  await apiJson("/api/releases/untrust", "POST", {publisher_id:unpin.dataset.unpin});
+  await CHANNEL.ask("releases.untrust", {publisher:unpin.dataset.unpin});
   await refreshReleases();
 });
 $("publisher-rows").addEventListener("change", async (event) => {
   const box = event.target.closest("[data-auto]");
   if(box){
-    const {ok} = await apiJson("/api/releases/auto", "POST",
-      {publisher_id:box.dataset.auto, auto:box.checked});
+    const {ok} = await CHANNEL.ask("releases.auto",
+      {publisher:box.dataset.auto, auto:box.checked});
     if(!ok) box.checked = !box.checked;
     else toast(box.checked ? "Their releases will install automatically"
                            : "Automatic installs off for this publisher");
@@ -3572,8 +3575,8 @@ $("publisher-rows").addEventListener("change", async (event) => {
   }
   const endorse = event.target.closest("[data-endorse]");
   if(!endorse) return;
-  const {ok} = await apiJson("/api/releases/endorse", "POST",
-    {publisher_id:endorse.dataset.endorse, endorsed:endorse.checked});
+  const {ok} = await CHANNEL.ask("releases.endorse",
+    {publisher:endorse.dataset.endorse, endorsed:endorse.checked});
   if(!ok) endorse.checked = !endorse.checked;
   else toast(endorse.checked ? "Their signature now counts towards a quorum"
                              : "Their signature no longer counts towards a quorum");
@@ -3591,14 +3594,14 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
   setMessage("publish-status", "Reading, hashing and signing — this can take a "
     + "moment on a busy mesh…");
   try{
-    const {ok, data} = await apiJson("/api/releases/publish", "POST",
+    const {ok, error, data} = await CHANNEL.ask("releases.publish",
       {notes:$("publish-notes").value,
        key_id:$("publish-signer").value,
        passphrase:$("publish-pass").value});
     setMessage("publish-status", ok
       ? "Published " + data.version + " — " + data.files + " files, "
         + fmtBytes(data.package_bytes) + " to send when someone asks."
-      : (data.error || "Publish failed"), !ok);
+      : (error || "Publish failed"), !ok);
     if(ok){ $("publish-pass").value = ""; await refreshReleases(); }
   }catch(_){
     setMessage("publish-status", "Publishing did not finish — the node may still "

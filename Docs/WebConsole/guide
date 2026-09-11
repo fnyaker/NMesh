@@ -601,10 +601,10 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps; the answer carries the new list — `apps.set` |
-| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
-| POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
-| POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key |
-| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum |
+| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key — `releases.overview`, the one operation here a console *managing* this node may read |
+| POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory — `releases.publish`, local only, and the passphrase is the one field never trimmed |
+| POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key — `releases.install`, local only |
+| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum. `releases.*`, **local only**: what a node accepts for replacing its own program is pinned by a human at that node |
 | GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node holds and serves, `&wide=1` also asks the network. Nothing is listed: it answers questions |
 | GET     | `/api/packages/<id>` | one signed record, as a page reads it; `?fetch=1` also pulls the descriptor it points at |
 | GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
@@ -615,8 +615,8 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
 | POST    | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` — offer the key to another node. Signed by the key itself; **nothing secret travels yet** |
 | POST    | `/api/keys/accept` / `refuse` | `{offer_id, …}` — accept (a passphrase of your own, `confirm:true`) and the secret is sealed to a fresh KEM key the acceptance carries, or refuse and it lapses |
-| GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
-| POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
+| GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) — `releases.check`; GitHub not answering comes back *as the answer*, beside the version that is running |
+| POST    | `/api/update/apply` | `{version, confirm}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives — `releases.apply`, local only |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible — `node.restart`, and under a remote context it is the *managed* node that restarts |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
 | POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save` |
