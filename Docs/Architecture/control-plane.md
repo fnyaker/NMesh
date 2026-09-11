@@ -256,7 +256,7 @@ keeps working, with one implementation behind it.
 | `control` | `catalogue` `changes` | — (new) |
 | `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 | `node` (lists) | `list` | `/api/nodes` |
-| `releases` | `overview` `check` `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
+| `releases` | `overview` `check`\* `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
 | `packages` | `search` `held` `entry` `lookup`\* `describe`\* `install`\* `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
 | `keys` | `overview` `create`\* `adopt`\* `offer`\* `accept`\* `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
 | `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install\|update\|uninstall` |
@@ -380,7 +380,7 @@ operation, where a new route cannot slip past it.
 
 | Bound | Value | Held against |
 |---|---|---|
-| `frame.MAX_FRAME` | 16 kB | `fleet.CONSOLE_REQ_MAX` (24 kB) |
+| `frame.MAX_FRAME` | 24 kB | `fleet.CONSOLE_REQ_MAX` — exactly it, because the largest real request is a certificate on its way to being trusted |
 | `frame.MAX_REPLY` | 512 kB | `fleet.CONSOLE_RESP_MAX`, `fleet_console.READ_MAX` |
 | `plane.REMOTE_BUDGET` | 15 s | `fleet_console.CALL_TIMEOUT` (20 s), `fleet.CONSOLE_TIMEOUT` (25 s) |
 | `plane.MAX_MODULES` / `MAX_OPERATIONS` / `MAX_PARAMS` | 32 / 32 / 12 | the declaration cannot itself be an attack |
