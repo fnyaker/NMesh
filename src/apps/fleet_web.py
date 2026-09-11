@@ -391,9 +391,15 @@ class FleetBridge:
     # yes. What this removes is the walk to the fleet page to ask.
 
     API = (
+        # The one fleet operation an operator at another console may ask for.
+        # It reads this node's ledger about a third node and changes nothing —
+        # which is what somebody managing this machine needs to see. The three
+        # below are refused from there on purpose: each *acts* through this
+        # node's identity towards another, and a node one operator manages must
+        # not become a way to reach the nodes it manages (`Docs/Apps/fleet`).
         app_api.operation(
             "relation", "How this node and that one stand: rights held, rights given",
-            [app_api.param("node", "node")]),
+            [app_api.param("node", "node")], remote=True),
         app_api.operation(
             "enrol", "Ask a node for the right to manage it",
             [app_api.param("node", "node"),

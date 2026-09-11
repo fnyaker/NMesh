@@ -1272,6 +1272,19 @@ function onRoute(section, sub){
   if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
+// What the section on screen re-reads when the node says something moved,
+// rather than only when you arrive on it. Its own list, and deliberately not
+// the one above: a configuration file can be edited by hand and is read on
+// entry, and a form repainted under the pointer throws away what was being
+// typed. Everything here is the node's own truth, so standing still until the
+// next visit was simply wrong — the name changed from chat did not appear on
+// the page that edits it until a reload.
+function refreshLive(){
+  const section = ROUTER.section, sub = ROUTER.sub;
+  if(section === "network" && sub === "peers") refreshPeers();
+  if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
+  if(section === "settings" && sub === "identity") refreshPseudo();
+}
 // One reader of `/api/state`, two reasons to call it.
 //
 //   * the **interval**, for the numbers that never stop moving — throughput,
@@ -1293,19 +1306,14 @@ async function tick(sample){
   if(TICKING === epoch) return;
   TICKING = epoch;
   try{
-    const response = await api("/api/state");
-    if(!response.ok) return;
-    STATE = await response.json();
+    STATE = await CHANNEL.call("node.state");
     if(sample === false) STATE._rates = RATE_NOW;
     else trackRates(STATE);
     paintHeader(STATE); paintMetrics(STATE); paintFirstRun(STATE);
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
-    if(ROUTER.section === "network" && ROUTER.sub === "peers") refreshPeers();
-    if(ROUTER.section === "settings" && ROUTER.sub === "updates"){
-      refreshReleases(); refreshKeys();
-    }
+    refreshLive();
   }catch(error){
     if(!isStale(error)) railState("danger", "Console unreachable");
   }finally{ if(TICKING === epoch) TICKING = false; }
@@ -1949,14 +1957,20 @@ const PAGES = {
 const PAGE_URL = {installed:"/api/store/installed"};
 async function fetchPage(kind){
   const page = PAGES[kind];
-  const params = new URLSearchParams({q:page.query, limit:String(page.limit),
-                                      offset:String(page.offset)});
-  if(page.scope) params.set("scope", page.scope);
-  const response = await api((PAGE_URL[kind] || "/api/nodes") + "?" + params.toString());
-  if(!response.ok) throw new Error("list failed");
-  const data = await response.json();
+  // The node tables are an operation; the installed list is still a route.
+  const data = page.scope
+    ? await CHANNEL.call("node.list", {scope:page.scope, query:page.query,
+                                       limit:page.limit, offset:page.offset})
+    : await legacyPage(kind, page);
   page.total = data.total;
   return data.items || [];
+}
+async function legacyPage(kind, page){
+  const params = new URLSearchParams({q:page.query, limit:String(page.limit),
+                                      offset:String(page.offset)});
+  const response = await api(PAGE_URL[kind] + "?" + params.toString());
+  if(!response.ok) throw new Error("list failed");
+  return response.json();
 }
 function paintPager(kind, id, redraw){
   const page = PAGES[kind], element = $(id);
@@ -2138,7 +2152,11 @@ async function paintNodes(kind){
           : linkRowHTML(group.links[0], kind, false)).join(""), values);
     }
     paintPager(kind, kind + "-pager", () => paintNodes(kind));
-  }catch(_){
+  }catch(error){
+    // A reply from the node we just left is not this node failing: the switch
+    // has already asked for everything again, and painting an error over it
+    // would be the console reporting its own bookkeeping as a fault.
+    if(isStale(error)) return;
     setHTML(body, spanRow(6, errorHTML("Node list unavailable",
       "The console could not read the routing table just now.")));
     body.dataset.shape = "";
@@ -2169,7 +2187,7 @@ $("known-limit").addEventListener("change", () => {
 });
 $("ping-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/ping", "POST");
+    const data = await CHANNEL.call("node.ping");
     toast("Sent " + (data.sent || 0) + " probe(s)");
     setTimeout(tick, 800);
   }catch(_){ toast("Ping failed", "danger"); }
@@ -2311,7 +2329,7 @@ document.addEventListener("click", (event) => {
   const accepted = event.target.closest("[data-accepted]");
   if(accepted){
     withBusy(accepted, async () => {
-      await apiJson("/api/trust/accept-change", "POST",
+      await CHANNEL.ask("trust.accept_change",
         {node:accepted.dataset.accepted});
     });
     return;
@@ -2319,7 +2337,7 @@ document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-forgive]");
   if(!target) return;
   withBusy(target, async () => {
-    const {ok} = await apiJson("/api/trust/forgive", "POST",
+    const {ok} = await CHANNEL.ask("trust.forgive",
       {node:target.dataset.forgive});
     if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
   });
@@ -2454,6 +2472,21 @@ async function post(path, body, message){
     return true;
   }catch(_){ toast("Control action failed", "danger"); return false; }
 }
+// The same, over the control channel — an operation instead of a path, and the
+// node's own sentence when it refuses instead of "control action failed".
+async function run(op, params, message){
+  try{
+    await CHANNEL.call(op, params || {});
+    toast(message);
+    tick();
+    return true;
+  }catch(error){
+    if(isStale(error)) return false;
+    toast("Control action failed", "danger",
+          isRefused(error) ? error.message : "");
+    return false;
+  }
+}
 // The slider says how the two halves of a score are weighed; the line under it
 // is the answer, computed by the node and not re-derived here — one rule, one
 // implementation.
@@ -2535,7 +2568,8 @@ function paintMLO(state){
   setHTML("mlo-list", rows.join("") || spanRow(6, mloWaiting(mlo)));
 }
 $("mlo-always").addEventListener("click", () => STATE &&
-  post("/api/mlo", {always: !((STATE.mlo || {}).always)}, "Multi-link operation updated"));
+  run("network.mlo", {always: !((STATE.mlo || {}).always)},
+      "Multi-link operation updated"));
 for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
                           ["ka-fast-min", "keepalive_fast_min"],
                           ["ka-fast-max", "keepalive_fast_max"],
@@ -2544,8 +2578,8 @@ for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
   $(id).addEventListener("change", async (event) => {
     const value = Number(event.target.value);
     try{
-      const {ok, data} = await apiJson("/api/mlo", "POST", {[field]: value});
-      $("mlo-status").textContent = ok ? "" : (data.error || "Refused");
+      const {ok, error} = await CHANNEL.ask("network.mlo", {[field]: value});
+      $("mlo-status").textContent = ok ? "" : (error || "Refused");
       if(ok) toast("Multi-link operation updated", "ok");
     }catch(_){ toast("Could not save that", "danger"); }
     finally{ tick(); }
@@ -2563,19 +2597,20 @@ $("balance").addEventListener("input", (event) => {
 $("balance").addEventListener("change", async (event) => {
   const value = Number(event.target.value);
   try{
-    const {ok, data} = await apiJson("/api/addressing/balance", "POST", {value});
-    if(!ok){ toast(data.error || "Refused", "warn"); return; }
+    const {ok, error, data} = await CHANNEL.ask("network.balance", {value});
+    if(!ok){ toast(error || "Refused", "warn"); return; }
     toast("Address preference updated", "ok");
   }catch(_){ toast("Could not save the balance", "danger"); }
   finally{ BALANCE_HELD = false; tick(); }
 });
-$("net-recheck").addEventListener("click", () => post("/api/net/recheck", {}, "Network check requested"));
+$("net-recheck").addEventListener("click", () =>
+  run("network.recheck", {}, "Network check requested"));
 $("dyn-toggle").addEventListener("click", () => STATE &&
-  post("/api/addressing/dynamic", {enabled:!STATE.dynamic_address},
+  run("network.dynamic", {enabled:!STATE.dynamic_address},
        "Dynamic addressing updated"));
 $("reach-probe").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/reachability/probe", "POST");
+    const data = await CHANNEL.call("network.probe");
     toast(data.sent ? "Sent " + data.sent + " reachability probe(s)"
                     : "No connected node can probe us", data.sent ? "" : "warn");
   }catch(_){ toast("Probe failed", "danger"); }
@@ -2587,7 +2622,8 @@ $("transport-blocks").addEventListener("click", async (event) => {
 
   const remove = event.target.closest("[data-remove-listener]");
   if(remove){
-    await api("/api/unlisten", "POST", {uri:remove.dataset.removeListener}).catch(() => {});
+    await CHANNEL.call("network.unlisten",
+                       {uri:remove.dataset.removeListener}).catch(() => {});
     toast("Listener removed");
     tick();
     return;
@@ -2597,9 +2633,9 @@ $("transport-blocks").addEventListener("click", async (event) => {
     const uri = input.value.trim();
     if(!uri){ toast("Enter a listener URI", "warn"); return; }
     await withBusy(event.target, async () => {
-      const {ok, data} = await apiJson("/api/listen", "POST", {uri});
+      const {ok, error} = await CHANNEL.ask("network.listen", {uri});
       if(ok){ input.value = ""; toast("Listener added"); tick(); }
-      else toast(data.error || "Listener failed", "danger");
+      else toast(error || "Listener failed", "danger");
     });
     return;
   }
@@ -2608,7 +2644,7 @@ $("transport-blocks").addEventListener("click", async (event) => {
     const on = (STATE.transport_details || []).some((item) => item.hole_punch);
     const port = parseInt(block.querySelector("[data-udp-port]").value, 10);
     if(!on && !(port > 0 && port < 65536)){ toast("Enter a valid UDP port", "warn"); return; }
-    post("/api/udp", on ? {action:"stop"} : {action:"start", port},
+    run("network.udp", on ? {action:"stop"} : {action:"start", port},
          on ? "UDP stopped" : "UDP started");
     return;
   }
@@ -2624,12 +2660,12 @@ $("transport-blocks").addEventListener("click", async (event) => {
   }
   const flag = event.target.closest("[data-flag]");
   if(flag && STATE){
-    const paths = {punch:"/api/punch", keepalive:"/api/punch/keepalive",
-                   lan:"/api/lan/discovery"};
+    const ops = {punch:"network.punch", keepalive:"network.punch_keepalive",
+                 lan:"network.discovery"};
     const fields = {punch:"punch_enabled", keepalive:"punch_keepalive",
                     lan:"lan_discovery"};
     const name = flag.dataset.flag;
-    post(paths[name], {enabled:!STATE[fields[name]]}, "Setting updated");
+    run(ops[name], {enabled:!STATE[fields[name]]}, "Setting updated");
     return;
   }
   if(event.target.closest("[data-apply]")) await applyTransport(scheme, event.target);
@@ -2784,11 +2820,12 @@ async function loadTransportOptions(){
   const declared = {};
   let persisted = true;
   try{
-    const {data} = await apiJson("/api/transports");
+    const data = await CHANNEL.call("transports.options");
     TRANSPORT_FORM = data.transports || [];
     persisted = data.persisted !== false;
     TRANSPORT_FORM.forEach((entry) => { declared[entry.scheme] = entry.options; });
-  }catch(_){
+  }catch(error){
+    if(isStale(error)) return;
     holder.innerHTML = errorHTML("Transports unavailable", "The node did not answer.");
     return;
   }
@@ -2870,14 +2907,14 @@ async function applyTransport(scheme, button){
     if(value !== null && value === value) values[field.name] = value;
   }
   await withBusy(button, async () => {
-    const {ok, data} = await apiJson("/api/transports", "POST", {scheme, values});
+    const {ok, error, data} = await CHANNEL.ask("transports.save", {scheme, values});
     const refused = Object.entries(data.rejected || {});
     if(!ok || refused.length){
       // Deliberately no redraw: what was typed stays on screen next to the
       // reason it was refused, which is the only way to fix it.
       setMessage("opt-msg-" + scheme,
         refused.map(([name, why]) => name + ": " + why).join(" · ") ||
-        (data.error || "refused"), true);
+        (error || "refused"), true);
       return;
     }
     await loadTransportOptions();
@@ -2932,11 +2969,13 @@ $("builtin-apps").addEventListener("click", async (event) => {
   }
   await withBusy(button, async () => {
     try{
-      const {ok, data} = await apiJson("/api/apps/" + action, "POST", {id});
-      if(ok && data.ok !== false){
+      const {ok, error, data} = await CHANNEL.ask("apps.set", {app:id, action});
+      if(ok){
         toast(id + " " + action + "d");
+        // The answer carries the list: asking a second question could come
+        // back disagreeing with the first.
         if(data.apps && STATE) STATE.apps = data.apps;
-      }else toast(data.error || (action + " failed"), "danger");
+      }else toast(error || (action + " failed"), "danger");
     }catch(_){ toast(action + " failed", "danger"); }
     finally{ if(STATE) paintApps(STATE); }
   });
@@ -2967,7 +3006,8 @@ async function paintAppList(kind){
       PAGES[kind].query ? "Nothing matches that" : "No local package",
       "Find one under Apps → Find an app, and install it from its page."));
     paintPager(kind, kind + "-pager", () => paintAppList(kind));
-  }catch(_){
+  }catch(error){
+    if(isStale(error)) return;
     body.innerHTML = spanRow(4, errorHTML("App list unavailable",
       "The installed set could not be read just now."));
   }
@@ -2990,10 +3030,10 @@ mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"})
     }
     await withBusy(button, async () => {
       try{
-        const {ok, data} = await apiJson("/api/store/" + action, "POST", {app_id:appId});
-        toast(ok && data.ok !== false
+        const {ok, error} = await CHANNEL.ask("store." + action, {app:appId});
+        toast(ok
           ? (action === "uninstall" ? "Local app deleted" : action + " complete")
-          : (data.error || action + " failed"), ok && data.ok !== false ? "" : "danger");
+          : (error || action + " failed"), ok ? "" : "danger");
       }catch(_){ toast(action + " failed", "danger"); }
       finally{ await refreshApps(); }
     });
@@ -3039,7 +3079,11 @@ async function checkForUpdates(event){
     status.textContent = "Asking GitHub…";
     $("update-apply").hidden = true; notes.hidden = true; UPDATE_OFFER = null;
     try{
-      const {data} = await apiJson("/api/update/check");
+      const {ok, error, data} = await CHANNEL.ask("releases.check");
+      // Two different failures, and the page has to say which: GitHub not
+      // answering comes back *as the answer* (with the version that is
+      // running), while a refusal is this node saying it will not look.
+      if(!ok){ status.textContent = error || "Could not check."; return; }
       if(data.error){ status.textContent = data.error; return; }
       // Which of the two answered is worth saying every time: "up to date"
       // means something different against a branch than against a release.
@@ -3082,9 +3126,9 @@ async function applyUpdate(event){
     const status = $("update-status");
     status.textContent = "Downloading and installing " + UPDATE_OFFER + "…";
     try{
-      const {ok, data} = await apiJson("/api/update/apply", "POST",
-        {version:UPDATE_OFFER, confirm:true});
-      if(!ok){ status.textContent = data.error || "Update failed."; return; }
+      const {ok, error, data} = await CHANNEL.ask(
+        "releases.apply", {version:UPDATE_OFFER, confirm:true});
+      if(!ok){ status.textContent = error || "Update failed."; return; }
       // What it says is what the node reported doing, not what we hope: a node
       // nothing would bring back does not restart itself, and says so.
       status.textContent = data.restarting
@@ -3209,8 +3253,7 @@ function offerOutHTML(row){
 
 async function refreshKeys(){
   try{
-    const {ok, data} = await apiJson("/api/keys");
-    if(!ok) return;
+    const data = await CHANNEL.call("keys.overview");
     KEYS = {keys:data.keys || [], incoming:data.incoming || [],
             outgoing:data.outgoing || []};
     setHTML("key-rows", KEYS.keys.map(keyRowHTML).join(""));
@@ -3218,7 +3261,11 @@ async function refreshKeys(){
     setHTML("key-offers-in", KEYS.incoming.map(offerInHTML).join(""));
     setHTML("key-offers-out", KEYS.outgoing.map(offerOutHTML).join(""));
     paintKeyPickers();
-  }catch(_){}
+    setMessage("key-status", "");
+  }catch(error){
+    if(isStale(error)) return;
+    setMessage("key-status", "Could not read the keys held here.", true);
+  }
 }
 
 // Two pickers over one list. Rebuilt only when the set of keys changed, so a
@@ -3261,11 +3308,11 @@ $("key-create").addEventListener("click", (event) => withBusy(event.target, asyn
       "key is gone, which is exactly what makes a copy of the file useless to whoever took it.</p>"});
   if(!agreed) return;
   try{
-    const {ok, data} = await apiJson("/api/keys/create", "POST",
+    const {ok, error, data} = await CHANNEL.ask("keys.create",
       {passphrase, label:$("key-label").value});
     setMessage("key-status", ok
       ? "Made " + shortId(data.key.id) + ". Pin it on the nodes that should accept its releases."
-      : (data.error || "Could not make a key"), !ok);
+      : (error || "Could not make a key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; }
   }catch(_){ setMessage("key-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3277,10 +3324,10 @@ $("key-import").addEventListener("click", (event) => withBusy(event.target, asyn
   if(!path){ setMessage("key-status", "Give the path to the key file", true); return; }
   if(!passphrase){ setMessage("key-status", "Type its passphrase in the field above", true); return; }
   try{
-    const {ok, data} = await apiJson("/api/keys/import", "POST",
+    const {ok, error, data} = await CHANNEL.ask("keys.adopt",
       {path, passphrase, label:$("key-label").value});
     setMessage("key-status", ok ? "Took in " + shortId(data.key.id) + "."
-      : (data.error || "Could not read that key"), !ok);
+      : (error || "Could not read that key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; $("key-path").value = ""; }
   }catch(_){ setMessage("key-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3296,9 +3343,9 @@ $("key-rows").addEventListener("click", async (event) => {
       "still accept what those copies sign — forgetting a key is not revoking it.</p>"});
   if(!agreed) return;
   await withBusy(button, async () => {
-    const {ok, data} = await apiJson("/api/keys/forget", "POST",
-      {key_id:button.dataset.keyForget, confirm:true});
-    setMessage("key-status", ok ? "Forgotten." : (data.error || "Could not forget it"), !ok);
+    const {ok, error} = await CHANNEL.ask("keys.forget",
+      {key:button.dataset.keyForget, confirm:true});
+    setMessage("key-status", ok ? "Forgotten." : (error || "Could not forget it"), !ok);
     await refreshKeys();
   });
 });
@@ -3322,12 +3369,12 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
       "key unlocked, and forgets it when they answer or when the offer expires.</p>"});
   if(!agreed) return;
   try{
-    const {ok, data} = await apiJson("/api/keys/offer", "POST",
-      {node, key_id, passphrase, label:$("share-key").selectedOptions[0].textContent,
-       confirm:true});
+    const {ok, error} = await CHANNEL.ask("keys.offer",
+      {node, key:key_id, passphrase,
+       label:$("share-key").selectedOptions[0].textContent, confirm:true});
     setMessage("share-status", ok
       ? "Offered. It travels only once they accept."
-      : (data.error || "Could not offer that key"), !ok);
+      : (error || "Could not offer that key"), !ok);
     if(ok) $("share-pass").value = "";
   }catch(_){ setMessage("share-status", "The node did not answer.", true); }
   await refreshKeys();
@@ -3336,7 +3383,7 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
 $("key-offers-in").addEventListener("click", async (event) => {
   const refuse = event.target.closest("[data-key-refuse]");
   if(refuse){
-    await apiJson("/api/keys/refuse", "POST", {offer_id:refuse.dataset.keyRefuse});
+    await CHANNEL.ask("keys.refuse", {offer:refuse.dataset.keyRefuse});
     toast("Offer refused");
     await refreshKeys();
     return;
@@ -3354,11 +3401,11 @@ $("key-offers-in").addEventListener("click", async (event) => {
       "proves the sender holds the key, and nothing at all about who the sender is.</p>"});
   if(!agreed) return;
   await withBusy(accept, async () => {
-    const {ok, data} = await apiJson("/api/keys/accept", "POST",
-      {offer_id, passphrase, confirm:true});
+    const {ok, error} = await CHANNEL.ask("keys.accept",
+      {offer:offer_id, passphrase, confirm:true});
     setMessage("share-status", ok
       ? "Accepted — the key arrives in a moment, sealed to this node."
-      : (data.error || "Could not accept"), !ok);
+      : (error || "Could not accept"), !ok);
     if(field) field.value = "";
     await refreshKeys();
   });
@@ -3367,8 +3414,7 @@ $("key-offers-in").addEventListener("click", async (event) => {
 // ---- the node's own name ---------------------------------------------------
 async function refreshPseudo(){
   try{
-    const {ok, data} = await apiJson("/api/pseudo");
-    if(!ok) return;
+    const data = await CHANNEL.call("pseudo.get");
     // Never overwrite a name being typed: this also runs on every tab entry.
     if(document.activeElement !== $("pseudo-input")) $("pseudo-input").value = data.pseudo || "";
     $("pseudo-id").value = data.id || "";
@@ -3377,9 +3423,9 @@ async function refreshPseudo(){
 }
 
 async function savePseudo(wanted){
-  const {ok, data} = await apiJson("/api/pseudo", "POST", {pseudo:wanted});
+  const {ok, error, data} = await CHANNEL.ask("pseudo.save", {pseudo:wanted});
   if(!ok){
-    setMessage("pseudo-status", data.error || "The node refused that name.", true);
+    setMessage("pseudo-status", error || "The node refused that name.", true);
     return;
   }
   $("pseudo-input").value = data.pseudo || "";
@@ -3424,11 +3470,10 @@ async function searchPseudo(wide){
     return;
   }
   try{
-    const {ok, data} = await apiJson("/api/pseudo?q=" + encodeURIComponent(query) +
-                                     (wide ? "&wide=1" : ""));
-    if(!ok) return;
-    setHTML("pseudo-results", data.results.map(pseudoRowHTML).join(""));
-    setMessage("pseudo-search-status", data.results.length ? "" :
+    const data = await CHANNEL.call(wide ? "pseudo.lookup" : "pseudo.search",
+                                    {query});
+    setHTML("pseudo-results", (data.results || []).map(pseudoRowHTML).join(""));
+    setMessage("pseudo-search-status", (data.results || []).length ? "" :
       (wide ? "Nobody on this mesh answers to that."
             : "Nothing here by that name — try asking the network."));
   }catch(_){}
@@ -3444,8 +3489,7 @@ $("pseudo-results").addEventListener("click", (event) => {
 
 async function refreshReleases(){
   try{
-    const {ok, data} = await apiJson("/api/releases");
-    if(!ok) return;
+    const data = await CHANNEL.call("releases.overview");
     // Every field defaulted: one missing key used to throw inside this try,
     // and the catch below is silent — so a single absent field left both tables
     // painted with whatever they last held, for ever, with nothing said.
@@ -3477,7 +3521,14 @@ async function refreshReleases(){
       : last && last.outcome === "installed"
         ? "Installed " + last.version + " — restart the node to run it."
         : "", blocked);
-  }catch(_){}
+  }catch(error){
+    // Silent used to mean "both tables keep whatever they last held, for
+    // ever, with nothing said" — which is the same failure as the missing
+    // field this function already defends against, arriving by another road.
+    if(isStale(error)) return;
+    setMessage("update-standing",
+               "Could not read what this node can update to.", true);
+  }
 }
 mountPackageSearch({input:"pkg-search", results:"pkg-results", wide:"pkg-wide"});
 
@@ -3494,9 +3545,9 @@ $("watch-rows").addEventListener("click", async (event) => {
     confirmLabel:"Stop watching", danger:true});
   if(!agreed) return;
   await withBusy(drop, async () => {
-    const {ok, data} = await apiJson("/api/packages/subscribe", "POST",
-      {id:drop.dataset.watchDrop, on:false});
-    setMessage("watch-status", ok ? "" : (data.error || "Could not stop"), !ok);
+    const {ok, error} = await CHANNEL.ask("packages.subscribe",
+      {record:drop.dataset.watchDrop, on:false});
+    setMessage("watch-status", ok ? "" : (error || "Could not stop"), !ok);
     await refreshReleases();
   });
 });
@@ -3508,14 +3559,14 @@ $("publisher-rows").addEventListener("click", async (event) => {
     body:'<p class="muted small">Their releases stay visible, but this node stops accepting ' +
       "code from them.</p>", confirmLabel:"Unpin", danger:true});
   if(!agreed) return;
-  await apiJson("/api/releases/untrust", "POST", {publisher_id:unpin.dataset.unpin});
+  await CHANNEL.ask("releases.untrust", {publisher:unpin.dataset.unpin});
   await refreshReleases();
 });
 $("publisher-rows").addEventListener("change", async (event) => {
   const box = event.target.closest("[data-auto]");
   if(box){
-    const {ok} = await apiJson("/api/releases/auto", "POST",
-      {publisher_id:box.dataset.auto, auto:box.checked});
+    const {ok} = await CHANNEL.ask("releases.auto",
+      {publisher:box.dataset.auto, auto:box.checked});
     if(!ok) box.checked = !box.checked;
     else toast(box.checked ? "Their releases will install automatically"
                            : "Automatic installs off for this publisher");
@@ -3523,8 +3574,8 @@ $("publisher-rows").addEventListener("change", async (event) => {
   }
   const endorse = event.target.closest("[data-endorse]");
   if(!endorse) return;
-  const {ok} = await apiJson("/api/releases/endorse", "POST",
-    {publisher_id:endorse.dataset.endorse, endorsed:endorse.checked});
+  const {ok} = await CHANNEL.ask("releases.endorse",
+    {publisher:endorse.dataset.endorse, endorsed:endorse.checked});
   if(!ok) endorse.checked = !endorse.checked;
   else toast(endorse.checked ? "Their signature now counts towards a quorum"
                              : "Their signature no longer counts towards a quorum");
@@ -3542,14 +3593,14 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
   setMessage("publish-status", "Reading, hashing and signing — this can take a "
     + "moment on a busy mesh…");
   try{
-    const {ok, data} = await apiJson("/api/releases/publish", "POST",
+    const {ok, error, data} = await CHANNEL.ask("releases.publish",
       {notes:$("publish-notes").value,
        key_id:$("publish-signer").value,
        passphrase:$("publish-pass").value});
     setMessage("publish-status", ok
       ? "Published " + data.version + " — " + data.files + " files, "
         + fmtBytes(data.package_bytes) + " to send when someone asks."
-      : (data.error || "Publish failed"), !ok);
+      : (error || "Publish failed"), !ok);
     if(ok){ $("publish-pass").value = ""; await refreshReleases(); }
   }catch(_){
     setMessage("publish-status", "Publishing did not finish — the node may still "
@@ -3621,8 +3672,11 @@ function paintConfig(data){
   }
 }
 async function loadConfig(){
-  try{ paintConfig((await apiJson("/api/config")).data); }
-  catch(_){ setMessage("config-status", "Could not read the configuration.", true); }
+  try{ paintConfig(await CHANNEL.call("config.get")); }
+  catch(error){
+    if(isStale(error)) return;
+    setMessage("config-status", "Could not read the configuration.", true);
+  }
 }
 $("config-save").addEventListener("click", (event) => withBusy(event.target, async () => {
   const settings = {};
@@ -3634,10 +3688,12 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
   }
   setMessage("config-status", "Saving…");
   try{
-    const {ok, data} = await apiJson("/api/config", "POST", {settings});
+    const {ok, error, detail, data} = await CHANNEL.ask("config.save", {settings});
     if(!ok){
-      setMessage("config-status", (data.error || "Save failed") +
-        (data.rejected ? ": " + data.rejected.join(" · ") : ""), true);
+      // The sentence and the fields: a refusal names which settings were
+      // refused so the rest of what was typed can stay on screen.
+      setMessage("config-status", (error || "Save failed") +
+        (detail.rejected ? ": " + detail.rejected.join(" · ") : ""), true);
       return;
     }
     setMessage("config-status", data.can_restart
@@ -3654,8 +3710,9 @@ $("tk-make").addEventListener("click", (event) => withBusy(event.target, async (
   setMessage("tk-status", "Creating…");
   $("tk-qr").innerHTML = ""; $("tk-out").hidden = true;
   try{
-    const {ok, data} = await apiJson("/api/ticket", "POST", {ttl:Number($("tk-ttl").value)});
-    if(!ok){ setMessage("tk-status", data.error || "Could not create a ticket", true); return; }
+    const {ok, error, data} = await CHANNEL.ask(
+      "join.ticket", {ttl:Number($("tk-ttl").value)});
+    if(!ok){ setMessage("tk-status", error || "Could not create a ticket", true); return; }
     $("tk-text").textContent = data.ticket;
     $("tk-out").hidden = false;
     // The SVG comes from the node, built from the ticket it just minted.
@@ -3683,10 +3740,11 @@ const JOIN_NEXT = {
   "this node refused the answer":
     "That ticket belongs to a different network than the one this node is in.",
 };
-function joinFailure(data){
-  const reason = data.error || "the join failed";
+function joinFailure(answer){
+  const reason = answer.error || "the join failed";
+  const detail = (answer.detail || {}).detail || "";
   const parts = [reason.charAt(0).toUpperCase() + reason.slice(1) + "."];
-  if(data.detail) parts.push("(" + data.detail + ")");
+  if(detail) parts.push("(" + detail + ")");
   if(JOIN_NEXT[reason]) parts.push(JOIN_NEXT[reason]);
   return parts.join(" ");
 }
@@ -3695,8 +3753,9 @@ $("tk-join").addEventListener("click", (event) => withBusy(event.target, async (
   if(!ticket){ setMessage("tk-scan-status", "Paste or scan a ticket first.", true); return; }
   setMessage("tk-scan-status", "Joining — the handshake is post-quantum, give it a moment…");
   try{
-    const {ok, data} = await apiJson("/api/join", "POST", {ticket});
-    if(!ok){ setMessage("tk-scan-status", joinFailure(data), true); return; }
+    const answer = await CHANNEL.ask("join.network", {ticket});
+    const {ok, data} = answer;
+    if(!ok){ setMessage("tk-scan-status", joinFailure(answer), true); return; }
     $("tk-in").value = "";
     setMessage("tk-scan-status",
       "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
@@ -3808,7 +3867,7 @@ function paintTrace(data){
 }
 async function loadTrace(){
   try{
-    const {data} = await apiJson("/api/trace");
+    const data = await CHANNEL.call("trace.status");
     paintTrace(data);
     if(!data.status || !data.status.running) stopTracePolling();
   }catch(_){ stopTracePolling(); }
@@ -3816,8 +3875,8 @@ async function loadTrace(){
 function stopTracePolling(){ if(TRACE_POLL){ clearInterval(TRACE_POLL); TRACE_POLL = null; } }
 async function traceAction(action, extra){
   try{
-    const {ok, data} = await apiJson("/api/trace", "POST", Object.assign({action}, extra || {}));
-    if(!ok){ setMessage("trace-status", data.error || "Trace command failed", true); return; }
+    const {ok, error} = await CHANNEL.ask("trace.set", Object.assign({action}, extra || {}));
+    if(!ok){ setMessage("trace-status", error || "Trace command failed", true); return; }
     await loadTrace();
     if(action === "start" && !TRACE_POLL) TRACE_POLL = setInterval(loadTrace, 2000);
     if(action !== "start") stopTracePolling();
@@ -3877,19 +3936,19 @@ $("rly-join").addEventListener("click", (event) => withBusy(event.target, async 
 }));
 $("gen-invite").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
-    const {data} = await apiJson("/api/invite", "POST");
+    const data = await CHANNEL.call("join.invite");
     $("invite-out").textContent = data.code;
     await copyText(data.code);
   }catch(_){ setMessage("invite-status", "Invite generation failed", true); }
 }));
 $("show-cert").addEventListener("click", (event) => withBusy(event.target, async () => {
-  try{ $("cert-out").value = (await apiJson("/api/rootcert")).data.cert_hex; }
+  try{ $("cert-out").value = (await CHANNEL.call("node.rootcert")).cert_hex; }
   catch(_){ setMessage("invite-status", "Certificate unavailable", true); }
 }));
 $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const cert_hex = $("trust-in").value.trim();
   if(!cert_hex){ setMessage("invite-status", "Paste a certificate.", true); return; }
-  const {ok} = await apiJson("/api/trust", "POST", {cert_hex});
+  const {ok} = await CHANNEL.ask("trust.add", {cert:cert_hex});
   setMessage("invite-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
@@ -3901,7 +3960,7 @@ $("revoke-btn").addEventListener("click", (event) => withBusy(event.target, asyn
         + 'holds here end now. Only an invitation can let it back in.</p>'
         + '<p class="mono small">' + esc(node) + "</p>",
       confirmLabel:"Revoke", danger:true})) return;
-  const {ok} = await apiJson("/api/trust/revoke", "POST",
+  const {ok} = await CHANNEL.ask("trust.revoke",
     {node, reason:Number($("revoke-reason").value)});
   setMessage("manage-status",
     ok ? "Membership revoked and announced."
@@ -3933,15 +3992,16 @@ document.addEventListener("click", (event) => {
           + 'you reach through it today. This node only; nothing is announced.</p>'
           + '<p class="mono small">' + esc(node) + "</p>",
         confirmLabel:"Stop trusting", danger:true})) return;
-    const {ok} = await apiJson("/api/trust/untrust", "POST", {node});
+    const {ok} = await CHANNEL.ask("trust.untrust", {node});
     setMessage("manage-status", ok ? "Anchor dropped." : "Not an anchor of this node.", !ok);
   });
 });
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
   if(!uri || !code){ setMessage("invite-status", "An address and an invite code are required.", true); return; }
-  const {ok, data} = await apiJson("/api/join", "POST", {uri, code});
-  if(!ok){ setMessage("invite-status", joinFailure(data), true); return; }
+  const answer = await CHANNEL.ask("join.network", {uri, code});
+  const {ok, data} = answer;
+  if(!ok){ setMessage("invite-status", joinFailure(answer), true); return; }
   setMessage("invite-status",
     "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
   tick(false);
@@ -4017,9 +4077,6 @@ CONTEXT.subscribe(() => {
   RATE_NOW = {inbound:0, outbound:0};
   MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
-  // What a node can offer is that node's answer, and the buttons drawn from it
-  // are the ones an operator is about to press.
-  NODEVIEW.apps = {};
   stopTracePolling();
   // A camera is not something to leave running behind a hidden panel.
   stopScan();
@@ -4033,11 +4090,11 @@ CONTEXT.subscribe(() => {
   // A node card describes a peer of the machine we just left.
   if($("node-dialog").open) $("node-dialog").close();
   $("ctx-node").value = CONTEXT.node;
-  // The stream belongs to the console serving this page, so driving another
-  // node closes it and coming back opens it again. `start` knows which of the
-  // two this is; the page only has to tell it that the answer moved.
-  EVENTS.start();
-  tick();
+  // The stream, the repaint and what the shared views hold are not this page's
+  // to remember any more: `CONTEXT.set` restarts the one and runs the other
+  // once everybody has dropped what they held, and each shared view drops its
+  // own (`ui.js`, `channel.js`, `nodeview.js`). What is left here is this
+  // page's: the section on screen, and who we could switch to next.
   onRoute(ROUTER.section, ROUTER.sub);
   loadTargets();
 });
@@ -4166,9 +4223,9 @@ async function restartNode(){
         "node while that one is away.</p>" : ""),
   });
   if(!agreed) return;
-  const {ok, data} = await apiJson("/api/restart", "POST", {confirm:true});
+  const {ok, error, data} = await CHANNEL.ask("node.restart", {confirm:true});
   if(!ok || !data.restarting){
-    toast("Not restarting", "danger", (data && data.error) || "The node refused.");
+    toast("Not restarting", "danger", error || "The node refused.");
     return;
   }
   toast("Restarting " + who, "warn", "It should be back in a few seconds.");
@@ -4189,7 +4246,11 @@ mountShell();
 // password; anything else drops to the gate.
 (async function resume(){
   try{
-    const response = await fetch("/api/state");
+    // Cookie-only on purpose: this asks whether the browser still holds a
+    // session, before any token is loaded. One frame, like everything else.
+    const response = await fetch(CONTROL_PATH, {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({v:1, id:"resume", op:"node.state", params:{}})});
     if(response.ok){ enterConsole(); return; }
   }catch(_){}
   showGate();

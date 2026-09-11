@@ -108,11 +108,11 @@ const PACKAGES = {
   current: null,
   opts: {},
 
-  // Every call goes through here, and it **never throws**. A rejected fetch —
-  // the console closing a connection, the network going — used to unwind out
-  // of `mount`, which had already drawn a skeleton and never drew anything
-  // else. "It loads for ever" is what a caller that can throw looks like from
-  // the outside.
+  // Every call goes through one of these two, and **neither throws**. A
+  // rejected fetch — the console closing a connection, the network going —
+  // used to unwind out of `mount`, which had already drawn a skeleton and
+  // never drew anything else. "It loads for ever" is what a caller that can
+  // throw looks like from the outside.
   async ask(path, method, body){
     try{
       return await apiJson(path, method, body);
@@ -121,23 +121,35 @@ const PACKAGES = {
     }
   },
 
+  // The control plane, with the same promise.
+  async op(name, params){
+    try{
+      const answer = await CHANNEL.ask(name, params);
+      return {ok:answer.ok, data:answer.data,
+              error:answer.error || (answer.ok ? "" : "Refused.")};
+    }catch(_){
+      return {ok:false, data:{}, error:"The console did not answer."};
+    }
+  },
+
+  // Asking what this node already knows and asking the *network* are two
+  // operations, not one flag: the second costs a Kademlia round plus a query
+  // to every target it finds, and the node gives them different ceilings.
   async search(query, wide){
-    const params = new URLSearchParams({q:query});
-    if(wide) params.set("wide", "1");
-    const {ok, data} = await this.ask("/api/packages?" + params.toString());
+    const {ok, data} = await this.op(wide ? "packages.lookup" : "packages.search",
+                                     {query});
     return ok ? (data.results || []) : [];
   },
 
   async forNode(id, wide){
-    const params = new URLSearchParams({node:id});
-    if(wide) params.set("wide", "1");
-    const {ok, data} = await this.ask("/api/packages?" + params.toString());
+    const {ok, data} = await this.op(wide ? "packages.lookup" : "packages.held",
+                                     {node:id});
     return ok ? (data.results || []) : [];
   },
 
   async read(id, fetchDescriptor){
-    const suffix = fetchDescriptor ? "?fetch=1" : "";
-    const {ok, data} = await this.ask("/api/packages/" + encodeURIComponent(id) + suffix);
+    const {ok, data} = await this.op(
+      fetchDescriptor ? "packages.describe" : "packages.entry", {record:id});
     return ok ? data : null;
   },
 
@@ -360,8 +372,8 @@ const PACKAGES = {
       // package, and the record this card sits on may not be the copy the row
       // was filed from. The node takes either name.
       const sub = row.subscription || null;
-      await this.ask("/api/packages/subscribe", "POST",
-                     {id:sub ? sub.id : row.id, on:false});
+      await this.op("packages.subscribe",
+                    {record:sub ? sub.id : row.id, on:false});
       toast("No longer watching " + row.name);
       await this.repaint(element);
       return;
@@ -373,9 +385,9 @@ const PACKAGES = {
     const field = card && card.querySelector('[data-pkg-act="quorum"]');
     const auto = !!(box && box.checked);
     const quorum = parseInt((field && field.value) || "1", 10) || 1;
-    const {ok, data} = await this.ask("/api/packages/subscribe", "POST",
-                                      {id:row.id, on:true, auto, quorum});
-    if(!ok){ setMessage("pkg-status", data.error || "Could not save", true); return; }
+    const {ok, error} = await this.op("packages.subscribe",
+                                      {record:row.id, on:true, auto, quorum});
+    if(!ok){ setMessage("pkg-status", error || "Could not save", true); return; }
     toast("Watching " + row.name);
     await this.repaint(element);
   },
@@ -413,9 +425,9 @@ const PACKAGES = {
     });
     if(!agreed) return;
     const auto = !!($("pkg-pin-auto") || {}).checked;
-    const {ok, data} = await this.ask("/api/packages/trust", "POST",
-                                      {id:row.id, confirm:true, auto});
-    if(!ok){ setMessage("pkg-status", data.error || "Could not pin", true); return; }
+    const {ok, error} = await this.op("packages.trust",
+                                      {record:row.id, confirm:true, auto});
+    if(!ok){ setMessage("pkg-status", error || "Could not pin", true); return; }
     toast("Pinned " + shortId(row.signer_id), "ok");
     await this.repaint(element);
   },
@@ -442,10 +454,10 @@ const PACKAGES = {
     });
     if(!agreed) return;
     setMessage("pkg-status", "Fetching and verifying…");
-    const {ok, data} = await this.ask("/api/packages/install", "POST",
-                                      {id:row.id, confirm:true});
+    const {ok, error, data} = await this.op("packages.install",
+                                            {record:row.id, confirm:true});
     if(!ok){
-      setMessage("pkg-status", data.error || "Install failed", true);
+      setMessage("pkg-status", error || "Install failed", true);
       return;
     }
     setMessage("pkg-status", data.restarting
@@ -605,8 +617,8 @@ async function boot(){
 
   SESSION.load();
   try{
-    const response = await api("/api/state");
-    if(response.ok){ enter(); return; }
+    const {ok} = await CHANNEL.ask("node.state");
+    if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();
   $("login").classList.remove("hidden");

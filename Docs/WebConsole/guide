@@ -101,10 +101,19 @@ and printed to a log on a box with no screen. Taking it back on that node ends
 the session immediately. See [`Docs/Apps/fleet`](../Apps/fleet).
 
 Technically the page adds an `X-NMesh-Node: <id>` header to every call; the
-console relays the call over the mesh, and the target node **replays it against
-its own console** over loopback. Nothing is reimplemented: same routes, same
+console relays it over the mesh, and the target node **replays it against its
+own console** over loopback. Nothing is reimplemented: same operations, same
 caps, same lockout. Full detail, bounds and refused paths:
 [`Docs/Apps/fleet`](../Apps/fleet).
+
+What travels is a **control frame** — one request, one answer, over the channel
+described in [`../Architecture/control-plane.md`](../Architecture/control-plane.md).
+So what an operator may do to a node they manage is a list that node keeps about
+itself, one `remote=True` per operation, rather than a denylist of URL prefixes
+that every new route joined by default. Two operations stay local for a reason
+that is a ceiling rather than a secret: dialling a node's addresses back and
+asking the directory for a name both take longer than the relay carries, and a
+refusal that says so beats a wait that says nothing.
 
 ### What makes the switch reliable
 
@@ -127,12 +136,24 @@ never get wrong.
   remote session back and returns here, and the context survives a page reload —
   checked against the console that holds the session before it is believed.
 
+- **A node that stops answering hands the context back.** A session it dropped,
+  or a relay with no session left to it, ends the context at once and says so;
+  silence is marked in the strip (*not answering*) and ends it after three tries
+  in a row. Before, a page driving a node that had gone answered nothing, looked
+  alive and had to be reloaded by hand. And each shared view — the channel's
+  catalogue, the node card — drops what it holds *itself* when the context
+  changes, so a switch on `/chat` or `/node` resets as thoroughly as one on the
+  console.
+
 - **What cannot be driven remotely says so, rather than failing.** A managed
   node refuses `/api/fleet/`, `/api/remote/` and `/api/chat/` by design (a
   managed node is not a jump host; the proxy must not drive the proxy; somebody
   else's conversations were never part of managing their machine). The page
   knows the same list, so those calls are never *addressed* to it — and the
-  strip on `/chat` and `/fleet` says in words that the app runs here. A view
+  strip on `/chat` and `/fleet` says in words that the app runs here. For
+  everything on the control plane the page does not need a list at all: it reads
+  the far node's catalogue (`control.catalogue`, filtered by who is asking) and
+  draws the buttons that node will actually answer. A view
   mounted inside one of those apps asks this node too: *"what is my link to this
   person"* is a different question depending on who "my" is, and answering it
   from the machine being managed would be a confidently wrong answer rather than
@@ -144,6 +165,12 @@ The console used to read the node on a timer. At two seconds a link that came
 up was invisible for two seconds; at a tenth of a second it was two hundred
 questions a minute answered "nothing". `GET /api/events` inverts it: the node
 says when something moved, and the page reads only then.
+
+Driving another node, the same information arrives by asking rather than by
+listening: the relay carries one bounded call and its answer, never a socket
+held open, so the page asks `control.changes` on its cadence and repaints on
+what moved. Same topics, same handlers — where it used to be told nothing at all
+and fall back to a timer.
 
 **Only that something moved** — never what. The frame names topics
 (`links`, `nodes`, `names`, `reach`) and the page reads the state it already
@@ -504,35 +531,48 @@ works on a machine with no internet.
 
 ## API (all JSON, Bearer or cookie auth except login)
 
+Two doors, and one of them is the future: **`POST /api/control`** carries the
+management plane — one frame naming an operation, one frame back — and the rest
+of the table is what has not moved onto it yet. A route that *has* moved is a
+thin adapter over the same operation rather than a second implementation, so
+both stay true at once. The ledger of what is where, and what a refusal means:
+[`../Architecture/control-plane.md`](../Architecture/control-plane.md).
+
+A refusal is one shape everywhere: the status from a code out of a closed set,
+`{"error": "…"}`, and whatever structure the operation attached (the settings
+form gets its `rejected` list). Where a route used to answer `{"ok": false}`, it
+now answers `{"error": …}` with the same status.
+
 | Method | Route            | Role                                           |
 |---------|------------------|------------------------------------------------|
+| POST    | `/api/control`   | the control channel: `{v:1, id, op, params}` → `{v:1, id, ok, result}` or `{ok:false, code, error, detail?}`. With `X-NMesh-Node` the **same frame** is relayed to that node and its answer handed back — the status then describes this console (200: it answered) and the frame describes that node |
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) |
+| GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state` |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
-| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes |
-| POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) |
-| POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses |
-| POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node |
-| POST    | `/api/addressing/balance` | `{balance}` — 0..100, how priority and latency share the choice; returns the resulting order |
-| POST    | `/api/mlo` | `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
-| GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything) |
-| POST    | `/api/app-call`  | `{app, name, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded |
-| POST    | `/api/invite`    | generates an invitation code                   |
-| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **502** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
-| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address |
-| GET     | `/api/rootcert`  | our root certificate (hex) to share            |
-| POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert              |
-| POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh |
-| POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id |
-| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node |
+| GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes — `node.list`, which pages the **active** scope by node so one node's links never straddle a page |
+| POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) — `node.forget` |
+| POST    | `/api/peers/retry` | `{id, uri?}` — redials one address of that node, or all of its known addresses — `node.retry`, **local only**: one dial per address outlasts what the relay carries |
+| POST    | `/api/addressing/dynamic` | `{enabled}` — moves a live link to a better-scoring address of the same node — `network.dynamic` |
+| POST    | `/api/addressing/balance` | `{value}` — 0..100, how priority and latency share the choice; returns the resulting order — `network.balance` |
+| POST    | `/api/mlo` | `network.mlo` — `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
+| GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything, whether it may be driven from a remote console) — `apps.catalogue`, filtered by who is asking |
+| POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
+| POST    | `/api/invite`    | generates an invitation code — `join.invite`, **local only**: a code this node issues is a credential, and asking a node you manage for one is the fleet's `invite` capability |
+| POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network — `join.network`, one of the two here a console *managing* this node may ask for: pointing a machine at a network is what provisioning one is. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **503** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
+| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address — `join.ticket`, local only, and a silly lifetime is clamped by the ticket format rather than refused |
+| GET     | `/api/rootcert`  | our root certificate (hex) to share — `node.rootcert` |
+| POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert — `trust.add`, which checks it *is* hex before the node parses it |
+| POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh — `trust.revoke` |
+| POST    | `/api/trust/untrust` | `{node}` — stops trusting an anchor. Local only, and never our own id — `trust.untrust` |
+| POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node — `trust.forgive` |
 | POST    | `/api/trust/accept-change` | `{node}` — "that was me": clears one entry of *Noticed, not judged* and the history behind it (the peer's profile, an issuer's admission rate, and the rule's charge) |
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
 | POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
-| GET     | `/api/store`       | the local view: `{catalog, installed}` |
+| GET     | `/api/store`       | the local view: `{catalog, installed}` — `store.overview`, annotated by the node so a page renders rather than re-derives |
 | POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name |
-| POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` |
+| POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` — `store.*`, and these **do** travel: an app is not the node's own program, so managing a machine includes managing its apps |
 | GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing |
 | GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
 | GET     | `/api/chat/avatar` | `?id=…` → an avatar's bytes (`self` or a node id) |
@@ -545,12 +585,12 @@ works on a machine with no internet.
 | POST    | `/api/chat/contact`| `{op:add\|remove, id}`                          |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
 | POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
-| GET     | `/api/pseudo`      | this node's name, id and the length limit; `?q=…` searches names instead (`&wide=1` also asks the network) |
+| GET     | `/api/pseudo`      | this node's name, id and the length limit (`pseudo.get`); `?q=…` searches the names this node holds (`pseudo.search`), `&wide=1` asks the directory instead (`pseudo.lookup`, **local only** — a Kademlia round does not fit the relay) |
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
-| GET     | `/api/transports` | what each transport declares it takes, with the values in force |
-| POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` |
+| GET     | `/api/transports` | what each transport declares it takes, with the values in force — `transports.options` |
+| POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` — `transports.save` |
 | GET     | `/api/fleet/keys`  | available SSH keys (disk + imported) — **metadata only** |
 | POST    | `/api/fleet/keys` / `keys-remove` | imports / removes a private key (encrypted drawer) |
 | POST    | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
@@ -560,29 +600,29 @@ works on a machine with no internet.
 | POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
 | POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
-| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps |
-| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key |
-| POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory |
-| POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key |
-| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum |
-| GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name, `?node=<id>` asks what one node holds and serves, `&wide=1` also asks the network. Nothing is listed: it answers questions |
-| GET     | `/api/packages/<id>` | one signed record, as a page reads it; `?fetch=1` also pulls the descriptor it points at |
+| POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps; the answer carries the new list — `apps.set` |
+| GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key — `releases.overview`, the one operation here a console *managing* this node may read |
+| POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory — `releases.publish`, local only, and the passphrase is the one field never trimmed |
+| POST    | `/api/releases/install` | `{release, confirm}` — fetches, verifies and installs one release, named by its descriptor's content key — `releases.install`, local only |
+| POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum. `releases.*`, **local only**: what a node accepts for replacing its own program is pinned by a human at that node |
+| GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name (`packages.search`), `?node=<id>` asks what one node holds and serves (`packages.held`), `&wide=1` asks the *network* instead, which is its own operation with its own ceiling (`packages.lookup`, local only). Nothing is listed: it answers questions |
+| GET     | `/api/packages/<id>` | one signed record, as a page reads it (`packages.entry`); `?fetch=1` also pulls the descriptor it points at (`packages.describe`, local only — it fetches from whoever serves it) |
 | GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
 | POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. What it is accepted for follows the record: node software pins a key that may replace this program, an app pins a party to that app. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
 | POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many of the signing keys this operator chose must agree on the code first. Stopping also accepts the subscription's own id: it is all the watching table has when this node holds no record for the package |
-| GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer |
-| POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) |
+| GET     | `/api/keys`      | publisher keys held here, offers made from here and still standing, offers waiting for an answer — `keys.overview`, and the **only** key operation a console managing this node may reach: a passphrase is typed at the machine that will hold the key |
+| POST    | `/api/keys/create` / `import` / `forget` | make a key under a passphrase, adopt an existing file by path, or drop one from this node (`forget` needs `confirm:true`) — `keys.create` / `keys.adopt` / `keys.forget`, all local only |
 | POST    | `/api/keys/offer` | `{node, key_id, passphrase, confirm:true, label?}` — offer the key to another node. Signed by the key itself; **nothing secret travels yet** |
 | POST    | `/api/keys/accept` / `refuse` | `{offer_id, …}` — accept (a passphrase of your own, `confirm:true`) and the secret is sealed to a fresh KEM key the acceptance carries, or refuse and it lapses |
-| GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) |
-| POST    | `/api/update/apply` | `{version}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives |
-| POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible |
-| GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file |
-| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing** |
-| GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) |
-| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed |
-| GET     | `/api/trace/export` | the whole trace as JSON (download)          |
+| GET     | `/api/update/check` | asks GitHub → `{current, latest, available, notes, source, branch, can_apply, blocked}`. `source` is `release` (the published releases) or `branch` (`src/version.py` at the branch `update_branch` names) — `releases.check`; GitHub not answering comes back *as the answer*, beside the version that is running |
+| POST    | `/api/update/apply` | `{version, confirm}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives — `releases.apply`, local only |
+| POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible — `node.restart`, and under a remote context it is the *managed* node that restarts |
+| GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
+| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save` |
+| GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
+| POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
+| GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |
 | POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
 The **Expert — addressing & transports** section shows every concrete URI

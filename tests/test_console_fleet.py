@@ -850,7 +850,11 @@ class TestAppApiOverHttp:
             status, _, _, body = await _post(console, "/api/app-call", token,
                                              {"app": "fleet", "op": "relation",
                                               "args": {"node": "ab" * 20}})
-            assert status == 400 and body["ok"] is False
+            # An app that is not running exposes nothing, so the operation does
+            # not exist here — which is what the control plane calls a 404
+            # (`src/control/modules/apps.py`), and what the catalogue above
+            # already said.
+            assert status == 404 and body["error"]
         finally:
             console.stop(); await host.stop_all(); await node.stop()
 
@@ -873,13 +877,16 @@ class TestAppApiOverHttp:
         node, console, host, _ = await _make(enabled=True)
         try:
             _status, token = await _login(console)
+            # Undeclared is *not there*: the method may exist on the bridge and
+            # it is still not an operation, so the answer is that there is no
+            # such thing rather than that the arguments were wrong.
             for op in ("revoke", "open_shell", "snapshot", "api_relation",
                        "__init__"):
                 status, _, _, body = await _post(
                     console, "/api/app-call", token,
                     {"app": "fleet", "op": op, "args": {"node": "ab" * 20}})
-                assert status == 400, op
-                assert body["ok"] is False
+                assert status == 404, op
+                assert body["error"]
         finally:
             console.stop(); await host.stop_all(); await node.stop()
 
