@@ -109,7 +109,13 @@ class TestNodeReachability:
         finally:
             await node.stop()
 
-    async def test_passive_inbound_marks_confirmed_and_relay_capable(self):
+    async def test_a_lan_inbound_does_not_make_us_a_relay_for_the_world(self):
+        """Two audiences, two proofs. An inbound link says the listener works,
+        which is what a `lan` descriptor claims. A `world` descriptor claims
+        the NAT in front of it forwards — and only a connection from off our
+        own networks can say that. Stamping one proof onto both is how a NATted
+        node announced itself reachable by everybody and became a black hole
+        for whoever routed through it."""
         from src.transport_manager import TransportManager
         from src.tcp_transport import TCPTransport, TCPServer
         m = TransportManager()
@@ -117,11 +123,17 @@ class TestNodeReachability:
         node = MeshNode(transport_manager=m)
         await node.start(["tcp://127.0.0.1:0"])
         try:
-            node._local_ips = []
+            node._local_ips = ["192.168.1.5"]
             node._extra_addrs = ["1.1.1.1"]
             assert node.relay_capable() is False  # not yet confirmed
-            # simulate an accepted inbound authenticated connection on tcp
-            node._inbound_schemes.add("tcp")
+            node._inbound_schemes.add("tcp")      # …the laptop next to us
+            assert node.relay_capable() is False
+            lan = [d for d in node.reachability() if d["scope"] == "lan"]
+            assert lan and all(d["confirmed"] for d in lan)
+            world = [d for d in node.reachability() if d["scope"] == "world"]
+            assert world and not any(d["confirmed"] for d in world)
+
+            node._note_public_scheme("tcp")       # …somebody on the internet
             assert node.relay_capable() is True
             world = [d for d in node.reachability() if d["scope"] == "world"]
             assert world and all(d["confirmed"] for d in world)

@@ -236,7 +236,8 @@ class TCPServer(BaseServer):
         from .ip_utils import ip_reachability
         return ip_reachability(
             "tcp", uri, ctx.get("local_ips", []), ctx.get("public_addrs", []),
-            "tcp" in ctx.get("inbound_schemes", ()))
+            "tcp" in ctx.get("inbound_schemes", ()),
+            "tcp" in ctx.get("public_schemes", ()))
 
     async def close(self) -> None:
         if self._server:

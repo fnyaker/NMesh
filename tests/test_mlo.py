@@ -1184,6 +1184,7 @@ class TestTheAdvertisedSetIsCachedOnItsWholeInput:
         node._addresses = ["tcp://0.0.0.0:9000"]
         node._local_ips = ["192.168.1.20"]
         node._extra_addrs = []
+        node._public_schemes = {"tcp"}
         first = node.advertised_uris()
         node._local_ips = ["192.168.1.20", "10.0.0.5"]
         second = node.advertised_uris()
@@ -1191,6 +1192,13 @@ class TestTheAdvertisedSetIsCachedOnItsWholeInput:
         node._extra_addrs = ["81.240.12.33"]
         third = node.advertised_uris()
         assert third != second
+        # The fourth input: whether anybody off our networks has proved they
+        # can reach that listener. Without it the public address above is a
+        # claim about somebody else's NAT and is not announced.
+        node._public_schemes = set()
+        fourth = node.advertised_uris()
+        assert fourth != third and "tcp://81.240.12.33:9000" not in fourth
+        node._public_schemes = {"tcp"}
         node._addresses = ["udp://0.0.0.0:9001"]
         assert node.advertised_uris() != third
 
