@@ -11,7 +11,10 @@ changed:
 - the local IP set changed (interface up/down, new network),
 - a wall-clock jump versus the monotonic clock (suspend/resume),
 - an explicit poke from the node (peer connected/lost, a peer observed us at
-  an unknown address, a listener was added),
+  an unknown address, a listener was added) — and an **urgent** one, for the
+  caller that does not merely suspect our addressing moved but has evidence of
+  it (links to several nodes lost at once): it swaps the ordinary rate limit
+  for a shorter floor of its own rather than removing one,
 - or a periodic full refresh as a fallback.
 
 All probe functions are injected so the monitor is testable without touching
@@ -28,6 +31,11 @@ from collections.abc import Awaitable, Callable
 _CHECK_INTERVAL = 15.0       # cheap local checks (no network traffic)
 _FULL_INTERVAL = 300.0       # unconditional full refresh fallback
 _MIN_FULL_GAP = 30.0         # rate limit between two full (network) checks
+# The same limit for a poke that carries evidence. Shorter, never absent: what
+# triggers an urgent poke is still something a peer can cause (see
+# `node._note_loss_burst`), so removing the bound would hand a peer flapping
+# its link a STUN request and an HTTPS fetch per flap.
+_MIN_URGENT_GAP = 10.0
 _CLOCK_JUMP = 5.0            # wall-vs-monotonic drift treated as suspend/resume
 _MAX_REASONS = 8             # last trigger reasons kept for the console
 
@@ -43,7 +51,8 @@ class NetMonitor:
                  *,
                  check_interval: float = _CHECK_INTERVAL,
                  full_interval: float = _FULL_INTERVAL,
-                 min_full_gap: float = _MIN_FULL_GAP) -> None:
+                 min_full_gap: float = _MIN_FULL_GAP,
+                 min_urgent_gap: float = _MIN_URGENT_GAP) -> None:
         self._probe_local_ips = probe_local_ips
         self._probe_public_ip = probe_public_ip
         self._probe_stun = probe_stun
@@ -51,6 +60,7 @@ class NetMonitor:
         self._check_interval = check_interval
         self._full_interval = full_interval
         self._min_full_gap = min_full_gap
+        self._min_urgent_gap = min(min_urgent_gap, min_full_gap)
 
         self.local_ips: list[str] = []
         self.public_ip: str | None = None
@@ -63,6 +73,7 @@ class NetMonitor:
         self.reasons: list[tuple[float, str]] = []  # (wall time, reason)
 
         self._poke = asyncio.Event()
+        self._urgent = False
         self._task: asyncio.Task | None = None
         self._closed = False
         self._last_full_mono: float = 0.0
@@ -87,9 +98,17 @@ class NetMonitor:
 
     # -- triggers -----------------------------------------------------------
 
-    def poke(self, reason: str) -> None:
-        """Ask for a re-check soon. Coalesced and rate-limited internally."""
+    def poke(self, reason: str, *, urgent: bool = False) -> None:
+        """Ask for a re-check soon. Coalesced and rate-limited internally.
+
+        ``urgent`` is for a caller with evidence rather than a suspicion: the
+        network probes then run against `_MIN_URGENT_GAP` instead of
+        `_MIN_FULL_GAP`. It shortens a bound, it never lifts one — the whole
+        reason the ordinary gap exists is that pokes are reachable from what a
+        peer does."""
         self._note_reason(reason)
+        if urgent:
+            self._urgent = True
         self._poke.set()
 
     def _note_reason(self, reason: str) -> None:
@@ -113,6 +132,11 @@ class NetMonitor:
 
     async def _check(self) -> None:
         self._poke.clear()
+        # Read and consume before anything can await: an urgent poke that lands
+        # during this pass must arm the *next* one rather than be swallowed by
+        # a check that had already decided what it was doing.
+        urgent = self._urgent
+        self._urgent = False
         now_mono = time.monotonic()
         self.checks += 1
         self.last_check = time.time()
@@ -143,10 +167,13 @@ class NetMonitor:
 
         if self.reasons and self._poke_pending_since_full():
             reasons.append("poked")
+        if urgent:
+            reasons.append("urgent")
 
         due = (self.last_full_check is None
                or now_mono - self._last_full_mono >= self._full_interval)
-        allowed = now_mono - self._last_full_mono >= self._min_full_gap
+        gap = self._min_urgent_gap if urgent else self._min_full_gap
+        allowed = now_mono - self._last_full_mono >= gap
         if due or (reasons and allowed):
             await self._full_check(changes)
 
