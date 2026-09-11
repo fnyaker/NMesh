@@ -223,6 +223,22 @@ A picks the relays on deterministic criteria:
 3. Bounded (5, say, configurable). Sorted by how fresh the confirmation is.
 4. Never `broadcast`/`none`.
 
+**What was implemented, and what it did instead.** `_select_relays` took the
+`remote_addr` of the links *we* had dialled, on the reasoning "we reached them,
+so a joiner likely can too". For a peer on our own LAN that address is
+`192.168.x.y`, and the block is handed to somebody who is not on our LAN — so
+the joiner worked down a list of addresses that could not connect, reported
+"no relay found", and the operator went and joined directly against a node with
+a public IP instead. It also skipped every peer that had dialled *us*, which is
+the half of the mesh most likely to be publicly reachable.
+
+It now follows the rule above: every authenticated peer, by the addresses **it
+advertises** — what it says a stranger can reach it at, and (since
+`advertised_uris` requires proof, see
+[`transports.md`](../Architecture/transports.md#our-own-public-address-is-proved-not-guessed))
+a claim it has had to earn — world-reachable first, the rest after, because a
+LAN joiner still wants the LAN ones and an ordered list costs nothing.
+
 ### 2.6 On the invitee's side, after the join
 
 B **keeps the list of relays used** (to communicate at first), then **fleshes

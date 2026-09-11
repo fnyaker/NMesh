@@ -62,6 +62,130 @@ class TestBlockGeneration:
         assert node._select_relays() == []
 
 
+class TestWhichRelaysAJoinerIsGiven:
+    """The old rule was `remote_addr` off the links *we* dialled, on the
+    reasoning "we reached them, so a joiner likely can too". For a peer on our
+    own LAN that address is `192.168.x.y`, and the block goes to somebody who
+    is not on our LAN — so the joiner worked down a list that could not connect,
+    said "no relay found", and the operator went and joined directly against a
+    node with a public IP instead."""
+
+    def _peer(self, node, node_id, *, addr=None, advertises=(), client=True):
+        from src.node import _Peer
+        peer = _Peer(FakeTransport(), is_client_side=client)
+        peer.authenticated_id = node_id
+        peer.session = SessionKey(b"\x00" * 32)
+        peer.remote_addr = addr
+        node._peers.append(peer)
+        if advertises:
+            node._routing.add(node_id, list(advertises))
+        return peer
+
+    async def test_a_world_address_comes_before_a_lan_one(self):
+        node = MeshNode(transport_manager=make_manager())
+        self._peer(node, NodeID(b"\x02" * 20), addr="tcp://192.168.1.7:9000")
+        self._peer(node, NodeID(b"\x03" * 20), addr="tcp://81.240.12.33:9000")
+        assert node._select_relays()[0] == "tcp://81.240.12.33:9000"
+
+    async def test_a_lan_address_is_still_offered_last(self):
+        """A joiner on that LAN can use it, and an ordered list costs
+        nothing."""
+        node = MeshNode(transport_manager=make_manager())
+        self._peer(node, NodeID(b"\x02" * 20), addr="tcp://192.168.1.7:9000")
+        assert node._select_relays() == ["tcp://192.168.1.7:9000"]
+
+    async def test_what_the_peer_advertises_beats_how_we_reached_it(self):
+        """What it advertises is what it says a stranger can reach it at — and
+        since `advertised_uris` requires proof, a claim it has had to earn."""
+        node = MeshNode(transport_manager=make_manager())
+        self._peer(node, NodeID(b"\x02" * 20), addr="tcp://192.168.1.7:9000",
+                   advertises=["tcp://81.240.12.33:9000"])
+        assert node._select_relays()[0] == "tcp://81.240.12.33:9000"
+
+    async def test_a_peer_that_dialled_us_is_a_relay_too(self):
+        """It is the half of the mesh most likely to be publicly reachable, and
+        it was skipped outright."""
+        node = MeshNode(transport_manager=make_manager())
+        self._peer(node, NodeID(b"\x02" * 20), client=False,
+                   advertises=["tcp://81.240.12.33:9000"])
+        assert node._select_relays() == ["tcp://81.240.12.33:9000"]
+
+    async def test_the_list_is_bounded(self):
+        node = MeshNode(transport_manager=make_manager())
+        for index in range(12):
+            self._peer(node, NodeID(bytes([index + 2]) * 20),
+                       addr="tcp://81.240.12.%d:9000" % (index + 1))
+        assert len(node._select_relays()) == 5
+
+    def test_what_counts_as_world_reachable(self):
+        node = MeshNode(transport_manager=make_manager())
+        for uri in ("tcp://81.240.12.33:9000", "tcp://example.org:9000",
+                    "fake://relay:1"):
+            assert node._is_world_address(uri), uri
+        for uri in ("tcp://192.168.1.7:9000", "tcp://10.0.0.4:1",
+                    "tcp://127.0.0.1:1", "", "://", "no-scheme"):
+            assert not node._is_world_address(uri), uri
+
+
+class TestASeekGetsMoreThanOneChance:
+    """Greedy XOR to a single neighbour fails precisely when that neighbour has
+    no path to the inviter — and a seek has no reply, no retry and no second
+    attempt: it either arrives or the join does not happen."""
+
+    def _mesh(self, count: int):
+        from src.node import _Peer
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        sent: list = []
+        peers = []
+        for index in range(count):
+            peer = _Peer(FakeTransport(), is_client_side=True)
+            peer.authenticated_id = NodeID(bytes([index + 2]) * 20)
+            peer.session = SessionKey(b"\x00" * 32)
+            async def _send(packet, _p=peer):
+                sent.append((_p, packet))
+
+            peer.send = _send
+            node._peers.append(peer)
+            peers.append(peer)
+        return node, peers, sent
+
+    async def test_two_neighbours_carry_it(self):
+        from src.node import _SEEK_FANOUT, _encode_seek, _h_code, INVITE_SEEK
+        from src.packet import Packet
+        node, peers, sent = self._mesh(4)
+        inviter = NodeID(b"\xfe" * 20)
+        packet = Packet.create(INVITE_SEEK, b"\x09" * 20, inviter.raw,
+                               _encode_seek(0, _h_code("x"), b"k", b"t"), ttl=6)
+        await node._forward_seek(peers[0], packet)
+        assert len({p for p, _ in sent}) == _SEEK_FANOUT
+
+    async def test_one_full_buffer_does_not_decide_the_join(self):
+        from src.node import _encode_seek, _h_code, INVITE_SEEK
+        from src.packet import Packet
+        node, peers, sent = self._mesh(4)
+
+        async def _boom(packet):
+            raise OSError("buffer full")
+
+        node._peers[1].send = _boom
+        inviter = NodeID(b"\xfe" * 20)
+        packet = Packet.create(INVITE_SEEK, b"\x09" * 20, inviter.raw,
+                               _encode_seek(0, _h_code("x"), b"k", b"t"), ttl=6)
+        await node._forward_seek(peers[0], packet)
+        assert sent          # somebody still carried it
+
+    async def test_a_direct_link_to_the_inviter_ends_it_in_one_hop(self):
+        from src.node import _encode_seek, _h_code, INVITE_SEEK
+        from src.packet import Packet
+        node, peers, sent = self._mesh(3)
+        inviter = peers[1].authenticated_id
+        packet = Packet.create(INVITE_SEEK, b"\x09" * 20, inviter.raw,
+                               _encode_seek(0, _h_code("x"), b"k", b"t"), ttl=6)
+        await node._forward_seek(peers[0], packet)
+        assert [p for p, _ in sent] == [peers[1]]
+
+
 class TestJoinValidation:
     async def test_rejects_garbage(self):
         node = MeshNode(transport_manager=make_manager())
