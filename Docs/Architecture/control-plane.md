@@ -256,8 +256,33 @@ keeps working, with one implementation behind it.
 | `control` | `catalogue` `changes` | — (new) |
 | `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 | `node` (lists) | `list` | `/api/nodes` |
+| `releases` | `overview` `check` `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
 
 \* local only.
+
+### The releases module is almost entirely local, and on purpose
+
+Two reasons that look like one and are not.
+
+**What a node accepts is pinned by a human at that node.**
+`MeshNode.trust_publisher` says it in its own docstring — *the only way a key
+enters this list is here, an operator acting locally, never a packet*. A console
+reached over the mesh is not a packet, but it is not somebody at that machine
+either: the fleet's `manage` right is "drive that node's console", not "decide
+what may replace its program". Updating a node somebody manages has its own
+capability and its own path (`update`, in `Docs/Apps/fleet`), which reports
+progress instead of holding a call open. So pinning, unpinning, endorsing and
+arming automatic installs are local — a **tightening** against the old path
+relay, which allowed all of them to anybody holding `manage`.
+
+**And the rest would not fit anyway.** Publishing signs a whole tree (300 s),
+installing fetches and replaces it (400 s), asking GitHub is 40 s. The relay
+carries 15. An operation that declares more than `REMOTE_BUDGET` *and* `remote`
+is refused at declaration, so this half is not a rule anybody has to remember.
+
+What does travel is the one read — what this node holds, what it has pinned and
+what it is watching — because an operator managing a machine needs to see that
+without being able to change it.
 
 Still routes of their own, and the ledger to work through: the package
 directory (`/api/packages/…`) and the app store's lists, invitations, tickets
@@ -336,6 +361,7 @@ operation, where a new route cannot slip past it.
 | `plane.MAX_MODULES` / `MAX_OPERATIONS` / `MAX_PARAMS` | 32 / 32 / 12 | the declaration cannot itself be an attack |
 | `params.MAX_LINE` / `MAX_KEYS` / `MAX_VALUE` | 1024 / 64 / 512 | an argument cannot become a payload |
 | `params.MAX_HEX` | 20000 | a certificate (about 14 kB of hex) and no more |
+| `params.MAX_SECRET` | 512 | a passphrase, which is the one field never trimmed |
 
 `tests/test_control_plane.py` asserts the first three pairs, and that **every**
 remotely-reachable operation's ceiling fits the budget. A comment would have

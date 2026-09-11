@@ -580,6 +580,140 @@ class TestAppsOnTheChannel:
         assert remotes(FleetBridge) == {"relation"}
 
 
+class TestReleases:
+    """The node's own code: what travels, what does not, and what a refusal
+    says. The most sensitive surface on the plane, and the one where almost
+    nothing is reachable from another operator's console."""
+
+    class _Node:
+        pseudo = ""
+
+        class _Id:
+            raw = bytes(range(20))
+
+        id = _Id()
+
+        def __init__(self):
+            self.pinned = {}
+            self.published = None
+
+        def release_overview(self):
+            return {"releases": [], "publishers": list(self.pinned)}
+
+        def trust_publisher(self, key_hex, name="", auto=False, endorsed=False):
+            self.pinned[key_hex] = {"name": name, "auto": auto,
+                                     "endorsed": endorsed}
+            return {"id": key_hex[:40], "name": name}
+
+        def untrust_publisher(self, publisher):
+            return self.pinned.pop(publisher, None) is not None
+
+        def set_publisher_auto(self, publisher, auto):
+            return False
+
+        def set_publisher_endorsed(self, publisher, endorsed):
+            return False
+
+        def publisher_key_path(self, key_id):
+            return None
+
+        async def publish_release(self, *, notes, key_path, passphrase):
+            self.published = {"notes": notes, "passphrase": passphrase}
+            return {"version": "9.9.9", "files": 3, "package_bytes": 10}
+
+    def _plane(self, node):
+        return control.build(control.Context(
+            node=node, loop=asyncio.get_event_loop(), restart=lambda: False))
+
+    async def test_only_the_read_travels(self):
+        plane = self._plane(self._Node())
+        remote = {row["name"] for module in plane.catalogue(Origin.REMOTE)
+                  for row in module["operations"]
+                  if module["module"] == "releases"}
+        # What a node accepts for replacing its own program is pinned by a
+        # human *at that node* (`MeshNode.trust_publisher`), and updating a
+        # managed node has its own capability and its own path.
+        assert remote == {"overview"}
+        channel = control.LocalChannel(plane, Origin.REMOTE)
+        for op in ("trust", "untrust", "auto", "endorse", "publish", "install",
+                   "check", "apply"):
+            reply = await asyncio.to_thread(channel.call, "releases." + op, {})
+            assert reply.ok is False and reply.code == "refused", op
+        assert (await asyncio.to_thread(channel.call, "releases.overview")).ok
+
+    async def test_a_passphrase_is_not_trimmed(self):
+        node = self._Node()
+        channel = control.LocalChannel(self._plane(node))
+        reply = await asyncio.to_thread(
+            channel.call, "releases.publish",
+            {"notes": "  a note  ", "passphrase": "  spaces matter  "})
+        assert reply.ok is True
+        # The note is a label and is trimmed; the passphrase is the passphrase.
+        assert node.published == {"notes": "a note",
+                                  "passphrase": "  spaces matter  "}
+
+    async def test_a_key_is_hex_before_the_node_sees_it(self):
+        node = self._Node()
+        channel = control.LocalChannel(self._plane(node))
+        for bad in ("zz", "abc", 7, None, ""):
+            reply = await asyncio.to_thread(channel.call, "releases.trust",
+                                            {"key": bad})
+            assert reply.ok is False and reply.code == "bad_request", bad
+        assert node.pinned == {}
+        good = await asyncio.to_thread(channel.call, "releases.trust",
+                                       {"key": "ab" * 32, "name": "me"})
+        assert good.ok and node.pinned["ab" * 32]["name"] == "me"
+
+    async def test_what_is_not_pinned_cannot_be_unpinned_or_armed(self):
+        channel = control.LocalChannel(self._plane(self._Node()))
+        for op, params in (("untrust", {"publisher": "ab" * 20}),
+                           ("auto", {"publisher": "ab" * 20, "auto": True}),
+                           ("endorse", {"publisher": "ab" * 20,
+                                        "endorsed": True})):
+            reply = await asyncio.to_thread(channel.call, "releases." + op,
+                                            params)
+            assert reply.ok is False and reply.code == "not_found", op
+
+    async def test_installing_needs_the_confirmation_and_the_name(self):
+        channel = control.LocalChannel(self._plane(self._Node()))
+        for params in ({"release": "", "confirm": True},
+                       {"release": "abc", "confirm": False}):
+            reply = await asyncio.to_thread(channel.call, "releases.install",
+                                            params)
+            assert reply.ok is False and reply.code == "bad_request", params
+
+    async def test_a_version_nobody_offers_any_more_is_refused(self, monkeypatch):
+        from src import updater
+        channel = control.LocalChannel(self._plane(self._Node()))
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+
+        async def moved_on(branch=None):
+            return {"latest": "2.0.0", "available": True}
+
+        monkeypatch.setattr(updater, "check", moved_on)
+        reply = await asyncio.to_thread(channel.call, "releases.apply",
+                                        {"version": "1.0.0", "confirm": True})
+        # A tab left open for an hour must not install something nobody looked
+        # at, so the mismatch is a conflict rather than a silent upgrade.
+        assert reply.ok is False and reply.code == "conflict"
+        assert "2.0.0" in reply.error
+
+    async def test_github_not_answering_is_an_answer(self, monkeypatch):
+        from src import updater
+        channel = control.LocalChannel(self._plane(self._Node()))
+
+        async def unreachable(branch=None):
+            raise updater.UpdateError("github is not answering")
+
+        monkeypatch.setattr(updater, "check", unreachable)
+        reply = await asyncio.to_thread(channel.call, "releases.check")
+        # The page has to show it next to the version that is running, so it
+        # comes back as a result rather than as a refusal.
+        assert reply.ok is True
+        assert "not answering" in reply.result["error"]
+        assert reply.result["current"] == updater.__version__
+
+
 class TestTheNodeTable:
     """The list every page reads, and the two things it has to get right."""
 
