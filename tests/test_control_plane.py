@@ -352,7 +352,14 @@ class TestNothingEscapesTheChannel:
     """The other review finding: the parser recurses, and the frame's own
     docstring promised no recursion. Five thousand brackets fit inside a frame,
     so `json` reached the interpreter's limit before any check ran, and the
-    `RecursionError` escaped a `send` that says it never raises."""
+    `RecursionError` escaped a `send` that says it never raises.
+
+    That fix relied on the interpreter's own recursion limit, and Python 3.13
+    quietly raised how many bracket levels it tolerates within one frame — the
+    same 5 000-bracket document below started parsing clean, unrefused
+    (`Docs/Architecture/gotchas.md`). The guard is now an explicit,
+    non-recursive bracket-depth scan (`frame._shallow_enough`) that owes
+    nothing to what any interpreter happens to tolerate."""
 
     def test_a_frame_of_brackets_is_refused_rather_than_raised(self):
         deep = (b'{"v":1,"op":"sample.read","params":{"x":'
@@ -365,6 +372,23 @@ class TestNothingEscapesTheChannel:
         # The reply side reads documents a machine we do not run composed.
         with pytest.raises(control.FrameError):
             frame_mod.decode_reply(deep)
+
+    def test_the_depth_scan_draws_its_own_line(self):
+        """Not incidental to the interpreter's limit any more: the scan has a
+        boundary of its own, one bracket either side of it."""
+        just_over = b"[" * (frame_mod.MAX_NESTING + 1) + b"]" * (frame_mod.MAX_NESTING + 1)
+        assert frame_mod._shallow_enough(just_over) is False
+        at_the_limit = b"[" * frame_mod.MAX_NESTING + b"1" + b"]" * frame_mod.MAX_NESTING
+        assert frame_mod._shallow_enough(at_the_limit) is True
+
+    def test_brackets_inside_a_string_do_not_count_as_nesting(self):
+        """The scan tracks quotes, not only brackets — a value is free to
+        contain the characters that would otherwise look like structure."""
+        frame = json.dumps({"v": 1, "op": "sample.read",
+                            "params": {"x": "{[" * (frame_mod.MAX_NESTING + 5)}}
+                            ).encode()
+        assert frame_mod.decode_request(frame).params == {
+            "x": "{[" * (frame_mod.MAX_NESTING + 5)}
 
     def test_a_channel_answers_even_when_the_target_is_wrong(self):
         """A node id that is not one is known to be wrong before the frame is

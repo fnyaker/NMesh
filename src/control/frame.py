@@ -23,9 +23,11 @@ which the threat model says is an adversary. So: a size cap before parsing, a
 type check on every field, a bound on every string, and no recursion of our own
 — a frame is exactly two levels deep, and ``params`` is validated by the
 operation that declared them (:mod:`src.control.params`), never trusted for
-having arrived. The parser *does* recurse, and a frame of nothing but brackets
-reaches the interpreter's limit before any check here runs, so that is caught
-too and refused as what it is: not a frame.
+having arrived. The parser *does* recurse, so a frame of nothing but brackets
+is counted, not parsed (``_shallow_enough``), and refused before ``json`` ever
+sees it — depending on the interpreter to refuse it by exhausting its own
+recursion limit stopped being reliable the day Python 3.13 raised how deep
+that tolerates within one frame (``Docs/Architecture/gotchas.md``).
 
 There is no event frame. Events travel as an ordinary operation
 (``control.changes``, "what has moved since sequence N"), because a channel that
@@ -60,6 +62,15 @@ MAX_REPLY = 512 * 1024
 MAX_OP = 64          # "module.operation", both halves bounded by params.py
 MAX_ID = 64          # the caller's correlation id, echoed and never read
 MAX_PARAMS = 24      # keys in one request, before the operation is consulted
+# How deep `{`/`[` may nest before a document is refused unparsed. A request
+# nests at most a handful of levels (`params` → a `document` kind's own one
+# permitted level, `control.params.MAX_KEYS`-many keys wide rather than deep).
+# The deepest legitimate *reply* is `control.catalogue` — every module, every
+# operation, every declared param, down to a `choice` param's own list of
+# names — nine levels from the envelope down. `MAX_NESTING` leaves that room
+# to grow and is still nowhere near what an attack needs — see `decode_request`
+# for why it exists at all.
+MAX_NESTING = 24
 
 
 def _text(value, limit: int, what: str) -> str:
@@ -68,6 +79,43 @@ def _text(value, limit: int, what: str) -> str:
     if len(value) > limit:
         raise FrameError(f"{what} is too long")
     return value
+
+
+def _shallow_enough(raw: bytes) -> bool:
+    """A bracket count over the *bytes*, never a parse: no recursion of our own.
+
+    `json` recurses once per nesting level, so a frame of nothing but opening
+    brackets used to be refused as a side effect of it hitting the
+    interpreter's own recursion limit — until Python 3.13 raised how many
+    levels the C decoder tolerates well past what fits in a frame, and the
+    same 5 000-bracket document that used to raise `RecursionError` before any
+    check here ran instead parsed clean (`Docs/Architecture/gotchas.md`). A
+    limit this function enforces itself cannot move out from under it again.
+
+    Structural characters only count outside a string, so a label or a value
+    that happens to contain ``{`` does not; nothing here needs to know what a
+    string *means*, only where one ends, which needs no recursion either."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:            # \
+                escaped = True
+            elif byte == 0x22:            # "
+                in_string = False
+            continue
+        if byte == 0x22:                  # "
+            in_string = True
+        elif byte == 0x7B or byte == 0x5B:  # { [
+            depth += 1
+            if depth > MAX_NESTING:
+                return False
+        elif byte == 0x7D or byte == 0x5D:  # } ]
+            depth -= 1
+    return True
 
 
 class Request:
@@ -146,17 +194,16 @@ def decode_request(raw) -> Request:
         raise FrameError("empty frame")
     if len(raw) > MAX_FRAME:
         raise FrameError("frame too large")
+    if not _shallow_enough(raw):
+        raise FrameError("not a frame")
     try:
         document = json.loads(bytes(raw).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise FrameError("not a frame") from None
-    except RecursionError:
-        # Five thousand opening brackets fit in a frame, and `json` recurses
-        # per level — so the parser hits the interpreter's limit before any of
-        # the checks below run. It is refused like any other thing that is not
-        # a frame: this function's promise is that it raises `FrameError` and
-        # nothing else, and the channel above it promises never to raise at all
-        # (`Docs/Architecture/gotchas.md`).
+    except RecursionError:                # pragma: no cover - belt and braces
+        # `_shallow_enough` is the real guard; this is what stood alone before
+        # Python 3.13 moved the interpreter's own limit out of reach of a
+        # frame (`Docs/Architecture/gotchas.md`) and stays as a second layer.
         raise FrameError("not a frame") from None
     if not isinstance(document, dict):
         raise FrameError("not a frame")
@@ -192,11 +239,13 @@ def decode_reply(raw) -> Reply:
         raise FrameError("no reply")
     if len(raw) > MAX_REPLY:
         raise FrameError("reply too large")
+    if not _shallow_enough(raw):
+        raise FrameError("not a reply")
     try:
         document = json.loads(bytes(raw).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise FrameError("not a reply") from None
-    except RecursionError:
+    except RecursionError:                # pragma: no cover - belt and braces
         raise FrameError("not a reply") from None
     if not isinstance(document, dict):
         raise FrameError("not a reply")
