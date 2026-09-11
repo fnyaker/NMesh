@@ -447,6 +447,38 @@ ceilings). The same reading applies to a bounded book: sixteen identities at
 one dial per five minutes is what being ready for a node that vanished for an
 afternoon costs, and it does not grow with the network.
 
+## An accusation needs somebody to accuse
+
+`RELEASE_DATA` carries one slice of a release, and an unmatched one was charged
+as a protocol violation against the link it arrived on. The comment above it
+explained a real attack — any peer racing the real answer with rubbish can make
+every download of a release fail for ever, one packet per slice — so the charge
+looked like the defence against it.
+
+It was not, twice over.
+
+- The message is **routable**. The link it arrives on is usually a relay, and
+  `src_id` on a routed packet is not authenticated, so the charge landed on
+  whoever *carried* it. The attacker it describes sets `src_id` to the real
+  source anyway, so the charge never reached them.
+- The common unmatched answer is not an attack at all. It is a slice that
+  arrives after `_pull_slice` timed out and popped its key — which over a slow
+  multi-hop path, exactly the path a mesh update takes, happens once per slice.
+  A hundred-slice download handed an honest relay a hundred violations, past
+  the *suspect* threshold, whereupon its traffic is dropped, its link is cut,
+  and the reconnect book refuses to chase it. **Two nodes could take each other
+  off the mesh by updating from each other.**
+
+> **Before charging abuse, ask who the counter names.** On a routed plane the
+> link and the sender are different parties, and a rule that cannot tell them
+> apart punishes the one doing the work.
+
+It is charged only where the attribution holds — a direct link from the node
+claiming to be the source — and dropped in silence everywhere else, which is
+what every other "an answer to a question we did not ask" handler in the node
+already did. The neighbouring key-share handlers had the right version the
+whole time, three hundred lines away.
+
 ## The address that works for us is not the address to hand out
 
 A relay-invite block carries "relays the joiner can reach us through", and
