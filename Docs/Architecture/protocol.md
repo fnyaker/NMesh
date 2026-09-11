@@ -142,6 +142,14 @@ Built-in apps each occupy their own section: `builtin_id("chat")`,
 The exact order applied to every packet received:
 
 1. `INVITE_SEEK` → dedicated pre-auth handler (rate-limited per link, bounded).
+   Forwarded to `_SEEK_FANOUT = 2` neighbours per hop, not one: greedy XOR to a
+   single neighbour fails precisely when that neighbour has no path to the
+   inviter, and a seek has no reply, no retry and no second attempt — it either
+   arrives or the join does not happen. It does not become a flood, because a
+   node forwards any given seek at most once (node-wide dedup on `msg_id`), so
+   the width is a factor on what a join costs and never an exponent; the TTL is
+   already cut for a pre-auth ingress (`_SEEK_TTL_PREAUTH`) and `_seek_allowed`
+   bounds how many seeks one link may inject at all.
    Return.
 2. `RELAY_CARRY` → dedicated handler. Return.
 
