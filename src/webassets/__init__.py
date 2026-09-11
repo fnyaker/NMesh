@@ -11,6 +11,11 @@ Layout, and the rule that keeps it from drifting:
 
 * :mod:`.ui` is the **design system** — tokens, base, components, app shell,
   and the JS every page shares. Nothing page-specific goes in it.
+* :mod:`.channel` is the browser's half of the control plane
+  (:mod:`src.control`): one frame, one route, and the node being driven is a
+  target rather than a second set of paths. It ships with every page, right
+  after ``ui.JS``, because a page that could not reach the plane could not read
+  the node at all.
 * :mod:`.console`, :mod:`.chat`, :mod:`.fleet` and :mod:`.nodeview` hold one
   page each: markup, the page's own JS, and only the CSS that genuinely belongs
   to that page.
@@ -34,6 +39,7 @@ Each page's stylesheet is ``ui.CSS`` plus its own, and each page's script is
 page cannot quietly grow a second button style: there is one to reach for.
 """
 from . import ui
+from . import channel
 from .chat import CHAT_HTML, CHAT_PAGE_CSS, CHAT_PAGE_JS
 from .console import INDEX_HTML, CONSOLE_PAGE_CSS, CONSOLE_PAGE_JS
 from .fleet import FLEET_HTML, FLEET_PAGE_CSS, FLEET_PAGE_JS
@@ -46,31 +52,32 @@ from .terminal import PAGE_HTML as TERM_HTML
 # The node view and the package view ride along with the console page: both are
 # mounted there — the node dialog, and the Updates and Apps pages.
 STYLE_CSS = ui.CSS + packages.CSS + nodeview.CSS + CONSOLE_PAGE_CSS
-APP_JS = ui.JS + packages.JS + nodeview.JS + CONSOLE_PAGE_JS
+APP_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + CONSOLE_PAGE_JS
 
 # Chat and fleet mount the same view in place rather than framing the page:
 # same code, same document, nothing to let through a frame.
 CHAT_CSS = ui.CSS + packages.CSS + nodeview.CSS + CHAT_PAGE_CSS
-CHAT_JS = ui.JS + packages.JS + nodeview.JS + CHAT_PAGE_JS
+CHAT_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + CHAT_PAGE_JS
 
 FLEET_CSS = ui.CSS + packages.CSS + nodeview.CSS + terminal.CSS + FLEET_PAGE_CSS
-FLEET_JS = ui.JS + packages.JS + nodeview.JS + terminal.JS + FLEET_PAGE_JS
+FLEET_JS = (ui.JS + channel.JS + packages.JS + nodeview.JS + terminal.JS
+            + FLEET_PAGE_JS)
 
 # The terminal, given the whole screen. Same emulator and same session driver as
 # the panel on /fleet — mounted here with the page that is built around them.
 TERM_CSS = ui.CSS + terminal.CSS + terminal.PAGE_CSS
-TERM_JS = ui.JS + terminal.JS + terminal.PAGE_JS
+TERM_JS = ui.JS + channel.JS + terminal.JS + terminal.PAGE_JS
 
 # The node view names what a node publishes, so it mounts the package view too.
 NODE_CSS = ui.CSS + packages.CSS + _NODE_PAGE_CSS
-NODE_JS = ui.JS + packages.JS + nodeview.JS + _NODE_PAGE_JS
+NODE_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + _NODE_PAGE_JS
 
 PKG_CSS = ui.CSS + packages.CSS + packages.PAGE_CSS
-PKG_JS = ui.JS + packages.JS + packages.PAGE_JS
+PKG_JS = ui.JS + channel.JS + packages.JS + packages.PAGE_JS
 
 __all__ = ["INDEX_HTML", "STYLE_CSS", "APP_JS",
            "CHAT_HTML", "CHAT_CSS", "CHAT_JS",
            "FLEET_HTML", "FLEET_CSS", "FLEET_JS",
            "TERM_HTML", "TERM_CSS", "TERM_JS",
            "NODE_HTML", "NODE_CSS", "NODE_JS",
-           "PKG_HTML", "PKG_CSS", "PKG_JS", "ui"]
+           "PKG_HTML", "PKG_CSS", "PKG_JS", "channel", "ui"]

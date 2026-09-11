@@ -258,7 +258,12 @@ tests/
 │     node). Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
-│     came from, and the addresses start folded away
+│     came from, and the addresses start folded away. And the wiring a switch of
+│     node depends on: each shared view drops what it holds *itself* (so a page
+│     that never heard of the context is still reset), the stream and the
+│     repaint restart once for every page after everybody has dropped, and a
+│     managed node that throws us out — or goes quiet three times running —
+│     hands the context back instead of leaving a page that answers nothing
 ├── test_transport_options.py                          — configuring a transport
 │     without knowing what a transport is: coercion and bounds for every kind
 │     (bool/int/float/text/choice/multi), partial application (one bad field does
@@ -271,6 +276,68 @@ tests/
 │     inferred from a single probe, a bounded history, per-address status (in use
 │     beats the log, "never tried" ≠ "broken"), a log bounded on both axes, and a
 │     transport that raises or returns nonsense not breaking the snapshot
+├── tests/integration/test_fleet.py (control frames)    — the same frame a page
+│     sends to its own console, crossing a **real mesh** to another node's real
+│     plane: answered by the node it was addressed to, refused there when that
+│     node keeps the operation to itself, and answered rather than dropped when
+│     what arrives is not a frame at all
+├── test_control_plane.py (the ledger is true)          — the table in
+│     `Docs/Architecture/control-plane.md` is read back and compared against the
+│     plane: every operation present, every "local only" star matching the
+│     declaration, and the bounds quoted in kilobytes equal to the constants.
+│     It caught two lies the moment it was written (a frame that had grown to
+│     24 kB and an operation that had stopped travelling), which is the argument
+│     for it: a table maintained by hand is a table that drifts
+├── test_control_plane.py (the whole plane at once)     — two sweeps rather than
+│     two examples: the node is asked what it exposes and then asked for **every
+│     operation** with the marker a relayed call carries — each answers a frame,
+│     each one not declared remote comes back refused — and a few dozen
+│     generated frames must each come back with a code from the closed set and
+│     nothing of this machine in them. A module added later is covered by
+│     construction, which is the only way a gate stays true
+├── test_control_plane.py (store & joining)             — an app is not the
+│     node's own program, so installing one travels while pinning a signing key
+│     does not; a catalogue paged and sorted where the list is; minting an
+│     invitation stays here and joining travels; a ticket carries both halves or
+│     you send both; a join that fails says which of the five ways, with the
+│     detail beside the sentence rather than folded into it
+├── test_control_plane.py (packages & keys)             — asking this node and
+│     asking the network are two operations with two ceilings (and only the
+│     cheap one travels), a lookup asks one question rather than two, installing
+│     and pinning are confirmed and local, and of the key operations only the
+│     overview travels — a passphrase is typed at the machine that will hold the
+│     key, and reaches the node exactly as typed
+├── test_control_plane.py (releases)                    — the node's own code:
+│     only the read travels (what a node accepts for replacing its program is
+│     pinned by a human at that node, and the rest would not fit the relay
+│     anyway), a passphrase is the one field never trimmed, a key is hex before
+│     the node sees it, a version GitHub has moved past is refused rather than
+│     installed, and GitHub not answering comes back as the answer
+├── test_control_plane.py (a node that went away)       — the relay's own
+│     failures, read back as codes: a node that never answered is `unavailable`
+│     (it came back as a 502, and calling that "failed" left a console pointed
+│     at a machine that had gone, looking alive and showing nothing), and a far
+│     node's session expiring is that node's, never this console's
+├── test_webassets.py (a switch of node)               — what a page drops and
+│     when: each shared view registers its own reset, the stream and the repaint
+│     restart once for every page *after* everybody has dropped, a stale reply is
+│     never painted as a failure, and a view on the cadence says when it could
+│     not read instead of keeping what it last held
+├── test_control_plane.py (trust & network)             — the two modules an
+│     operator uses on a machine they are not in front of: a certificate that is
+│     hex before the node is asked to parse it, a toggle that takes a boolean
+│     and nothing else, a value the *node* decides the range of, a partial
+│     update that leaves the six fields it did not mention alone, and a refusal
+│     per operation rather than one sentence for all of them
+├── test_control_plane.py                              — the management plane: an
+│     operation nobody declared does not exist (even when the method is there),
+│     an undeclared argument is refused, a frame that is not one is answered
+│     anyway, a local-only operation is refused from a remote console and the
+│     catalogue a remote console reads is the narrow one, a module that throws
+│     says nothing about this machine — plus the bounds held against the relay's
+│     (a frame that fits `CONSOLE_REQ_MAX`, every remote operation's ceiling
+│     inside `REMOTE_BUDGET`), and that a far node's session expiring is not read
+│     as ours
 ├── test_app_api.py                                    — the app API surface: an
 │     operation that is not declared does not exist (even when the method is
 │     there), an undeclared argument is refused and not ignored, every value is

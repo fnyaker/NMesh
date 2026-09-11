@@ -507,6 +507,41 @@ as a search that found nothing.
 > answer that was about to arrive, and the work carries on with nobody waiting
 > for it.
 
+## Waiting on the loop you are running on
+
+`Context.call` is how a control operation reaches the node: it marshals a
+coroutine onto the loop with `run_coroutine_threadsafe` and blocks on the
+future. That is correct from the console's server threads, which is where every
+real call comes from — and a **freeze** from the loop itself, because the thread
+that would run the coroutine is the thread now waiting for it. Nothing runs
+until the ceiling expires, and what the operator sees is a console that took ten
+seconds to answer and then said the node was unavailable.
+
+The first test written against the plane did exactly this, which is the point:
+the trap is invisible until the caller happens to be on the loop, and by then it
+reads as slowness rather than as a deadlock.
+
+> **A bridge that blocks must refuse to be crossed from the far side.**
+> `Context.call` compares the running loop with the node's and raises
+> immediately — naming the fix — rather than waiting for a ceiling it can never
+> reach. A hang that names itself is a bug report; a hang that does not is a
+> week.
+
+## Two layers with different opinions about "too much"
+
+The trace clamps: ask for a week-long recording of a million packets and you get
+the largest one the node is willing to hold (`MAX_SECONDS`, `MAX_EVENTS`). The
+control plane bounds its arguments, and its generic `count` refuses anything
+over a million. Put them together naively and the same field behaves two ways —
+clamped just above the trace's ceiling, refused higher up — with nothing on
+screen to explain either.
+
+> **When something downstream owns a bound, defer to it and say so.** A `count`
+> declared with `limit=trace.MAX_SECONDS` is clamped, from *the same constant*
+> the trace uses; a `count` with no limit is refused, because then nothing
+> downstream has an opinion to defer to. Re-deriving the ceiling in the outer
+> layer is how the two come to disagree.
+
 ## A socket the process opened for itself is not a user
 
 MLO only runs while somebody is using the node, and the data connector answered

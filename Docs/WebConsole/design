@@ -21,16 +21,24 @@ full-screen page they are served as at `/term`).
 > A page adds nothing to it and redefines nothing from it.
 
 ```
-STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS   APP_JS   = ui.JS + nodeview.JS + CONSOLE_PAGE_JS
-CHAT_CSS  = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS      CHAT_JS  = ui.JS + nodeview.JS + CHAT_PAGE_JS
-FLEET_CSS = ui.CSS + nodeview.CSS + terminal.CSS      FLEET_JS = ui.JS + nodeview.JS + terminal.JS
+STYLE_CSS = ui.CSS + nodeview.CSS + CONSOLE_PAGE_CSS   APP_JS   = ui.JS + channel.JS + nodeview.JS + CONSOLE_PAGE_JS
+CHAT_CSS  = ui.CSS + nodeview.CSS + CHAT_PAGE_CSS      CHAT_JS  = ui.JS + channel.JS + nodeview.JS + CHAT_PAGE_JS
+FLEET_CSS = ui.CSS + nodeview.CSS + terminal.CSS      FLEET_JS = ui.JS + channel.JS + nodeview.JS + terminal.JS
           + FLEET_PAGE_CSS                                      + FLEET_PAGE_JS
-NODE_CSS  = ui.CSS + nodeview.CSS + NODE_PAGE_CSS      NODE_JS  = ui.JS + nodeview.JS + NODE_PAGE_JS
-TERM_CSS  = ui.CSS + terminal.CSS + terminal.PAGE_CSS  TERM_JS  = ui.JS + terminal.JS + terminal.PAGE_JS
+NODE_CSS  = ui.CSS + nodeview.CSS + NODE_PAGE_CSS      NODE_JS  = ui.JS + channel.JS + nodeview.JS + NODE_PAGE_JS
+TERM_CSS  = ui.CSS + terminal.CSS + terminal.PAGE_CSS  TERM_JS  = ui.JS + channel.JS + terminal.JS + terminal.PAGE_JS
 ```
 
 A token changed once changes every page. A page cannot quietly grow a second
 button style: there is one within reach.
+
+`channel.JS` sits next to `ui.JS` in every bundle and is the other half of the
+rule: **one way to reach the node**. It is not part of the design system — it is
+the browser's end of the control plane
+([`../Architecture/control-plane.md`](../Architecture/control-plane.md)) — but it
+ships everywhere for the same reason the tokens do. A page that reached the node
+its own way would be a page whose refusals, whose staleness rule and whose idea
+of "which machine am I on" drift from the other four.
 
 ## Repainting
 
@@ -49,6 +57,17 @@ The same rule covers wiring: `mountShell`, `REFRESH.mount` and `ROUTER.start`
 are called by the apps from the function that runs after signing in, which runs
 again after a session is lost and taken up again. They are idempotent, and
 anything that registers a listener from such a function has to be.
+
+> A reply from the node you just **left** is not the node you just entered
+> failing.
+
+`StaleContext` is thrown for exactly that, and a `catch` that draws an error
+region has to ask `isStale` before it draws — otherwise the console reports its
+own bookkeeping as a fault, and with auto-refresh off the message stays there.
+The other half of the same rule: a view that runs by itself must not fail
+*silently* either, or the table keeps whatever it last held with nothing said.
+Both are tested (`test_a_view_never_paints_a_stale_reply_as_a_failure`,
+`test_a_view_on_the_cadence_says_when_it_could_not_read`).
 
 What is allowed in a page's own CSS: what exists only there — the graph and the
 throughput canvas (console), the host list (fleet), the key row and the file
@@ -183,7 +202,8 @@ What each of the pages used to solve on its own:
 
 - `$`, `$$`, `esc`, `shortId`, `debounce`;
 - `api` / `apiJson` — the token in `sessionStorage`, a 401 sends you back to the
-  gate;
+  gate. For the routes that have **not** moved onto the control plane: uploads,
+  chat, fleet, the store, trust. Everything else goes through `CHANNEL` below;
 - formatting: `fmtBytes`, `fmtRate`, `fmtDuration`, `fmtAgo`, `fmtNum`;
 - feedback: `toast` (polite, `aria-live`), `setMessage` (next to the control),
   `withBusy` (the label stays put during the request);
@@ -205,7 +225,9 @@ What each of the pages used to solve on its own:
   number registers itself instead of waiting to be remembered;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
-  and `CTX_BAR`, the strip that says so on all three pages;
+  and `CTX_BAR`, the strip that says so on all three pages. `CONTEXT.trouble()`
+  marks a node that has gone quiet and `CONTEXT.lost()` hands the context back
+  when it is gone for good;
 - `OPEN` / `openLinked` — how a link into another app opens (a window, a tab, or
   by screen size), also per browser;
 - `ROUTER` — `#section/subsection`: linkable, bookmarkable, **Back** works;
@@ -213,6 +235,64 @@ What each of the pages used to solve on its own:
 - `MENU` — the shell's dropdowns; `MENU.onShow[id]` lets a page paint its
   contents when it is looked at, not on every poll;
 - `mountShell()` — wires all of that once per page.
+
+## A switch of node, and who resets what
+
+> A shared view drops what it holds **itself**. A page resets only what is its
+> own.
+
+This was the bug behind "I had to reload the page". Only the console page ever
+subscribed to a context change, so `/chat`, `/fleet` and `/node` kept painting
+the machine you had just left — and the console's own reset was a hand-written
+list of caches, which is a list somebody has to remember to extend.
+
+The order is now fixed and the same everywhere, inside `CONTEXT.set`:
+
+1. every subscriber drops what it holds — the page's caches, `CHANNEL`'s
+   catalogue (registered in `channel.JS`), the node view's card and apps
+   (registered in `nodeview.JS`);
+2. **then** the stream restarts (`EVENTS.start()` — a socket here, a pull over
+   there) and every registered view repaints at once (`REFRESH.run()`).
+
+Doing the repaint before step 1 would paint from what was about to be thrown
+away; leaving it to each view's next tick is what left the previous machine's
+numbers on screen with auto-refresh off.
+
+Two lists on the console page, and they are not the same list.
+`onRoute` is what a section reads **when you arrive on it** — a configuration
+file that can be edited by hand, a form that must not move under the pointer.
+`refreshLive` is what it re-reads **when the node says something moved**:
+everything whose truth is the node's rather than the operator's draft. The name
+changed from `/chat` used to sit unnoticed on the page that edits it until a
+reload.
+
+## The channel (`channel.JS`)
+
+- `CHANNEL.call(op, params)` — the answer, or a throw. `CHANNEL.ask(op, params)`
+  returns `{ok, code, error, detail, data}` for a caller that paints the refusal
+  in place rather than as a toast;
+- `{local: true}` on either — force this node whatever is being driven. A view
+  mounted inside a local app needs it: *"what is my link to this person"* is
+  **this** node's question;
+- `CHANNEL.operations()` / `CHANNEL.has(op)` — the catalogue of the node being
+  driven, read once per context. A button for something that node will not
+  answer is not drawn, rather than drawn and refused on the press;
+- `CHANGES` — the change topics, *pulled*, when there is no stream to listen to:
+  driving another node, the relay carries one bounded call and its answer, so
+  the topics arrive on a cadence and land in the same handlers `EVENTS` feeds;
+- `CHANNEL.judge` — what a refusal from *over there* means for being there at
+  all. A session that node dropped (`unauthorized`), or no session left to it
+  (`conflict`), ends the context immediately; silence (`unavailable`) is said in
+  the strip and ends it after three in a row. A page driving a node that has
+  gone answers nothing and looks alive, which is the other half of "I had to
+  reload".
+
+Three rules a caller can rely on, and should not re-implement: a refusal carries
+a **code** from a closed set (so "that node will not do this" and "that node did
+not answer" are distinguishable without reading English), a reply from a context
+that has since changed is thrown as `StaleContext` rather than painted, and an
+HTTP 401 means *this* console's session — a managed node's expiring arrives as a
+refusal, not as a sign-out.
 
 ## Constraints you cannot see
 

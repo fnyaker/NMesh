@@ -157,7 +157,26 @@ already written and already tested. The app is a pipe, not an authority. The
 console's self-signed certificate is **pinned** by fingerprint: a process
 squatting the port cannot answer in its place.
 
-### What does not go through the relay
+### What the relay carries, and what decides
+
+Most of what an operator does now travels as a **control frame** to one route,
+`POST /api/control`: one request naming an operation, one answer
+([`../Architecture/control-plane.md`](../Architecture/control-plane.md)). What
+that frame may ask for is decided by the far node's own declaration —
+`remote=True`, one operation at a time — so the permission is a list that node
+keeps about **itself** rather than a rule about the shape of a URL. An operation
+that does not say so is refused there, with a code the page can act on, and
+nothing new becomes reachable by being added.
+
+The apps are on the same channel, with the same rule: an operator managing this
+node reaches an app operation only if the app declared that one as reachable
+from a distance (`remote=True`). Chat declares none, and fleet declares only
+`relation` — a read of this node's ledger. That closed a gap the denylist could
+not: `/api/chat/*` was refused, but the *app call* route was not, so chat's
+declared operations were reachable through it.
+
+Beside it, the routes that have not moved onto the plane yet are still relayed
+by path, and the denylist is what governs those:
 
 | Refused | Why |
 |---|---|
@@ -167,6 +186,14 @@ squatting the port cannot answer in its place.
 | anything that is not `/api/` | the page is already served locally; there is nothing to fetch over there |
 
 Methods: `GET` and `POST` only.
+
+Two operations on the plane are **local only**, and the reason is a ceiling
+rather than a secret: dialling every address of a node (`node.retry`, up to a
+minute) and asking the directory for a name (`pseudo.lookup`, a Kademlia round)
+both take longer than the 25 s a relayed call has. They used to be relayed and
+would simply run out somewhere in the middle. The plane refuses at *declaration*
+anything that claims to be reachable remotely and does not fit
+(`REMOTE_BUDGET`), so this cannot be got wrong by adding an operation.
 
 ### Bounds
 
@@ -873,7 +900,7 @@ All behind the console session (Bearer or cookie). Details:
 | POST | `/api/fleet/caps-request` / `caps-drop` | ask for / hand back a right on a managed node |
 | GET | `/api/remote/targets` | nodes that granted `manage`, and whether a session is open |
 | POST | `/api/remote/connect` / `disconnect` | opens / closes a session on a managed node's console. `{node, password}`, or `{node}` alone when that node granted `passwordless` |
-| *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here |
+| *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here — for a control frame, the same frame goes down the relay and that node's plane decides |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |

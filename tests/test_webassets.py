@@ -430,9 +430,13 @@ def test_one_node_view_mounted_twice_and_never_copied():
 
 def test_the_view_only_offers_what_an_app_declares():
     """A button calling an app that is not there must not be drawn: the view
-    reads the catalogue before deciding what to offer."""
+    reads the catalogue before deciding what to offer.
+
+    Through the control channel, so the answer is what the node *being driven*
+    offers this caller — an app that is not running, or an operation its author
+    did not let travel, is not in it (`src/control/modules/apps.py`)."""
     source = webassets.NODE_JS
-    assert '"/api/app-api"' in source
+    assert '"apps.catalogue"' in source and '"apps.call"' in source
     assert 'this.has("chat", "peer")' in source
     assert 'this.has("fleet", "relation")' in source
 
@@ -604,11 +608,74 @@ def test_a_reply_from_the_node_we_left_cannot_paint_over_the_one_we_entered():
 def test_everything_the_console_holds_is_dropped_on_a_switch():
     """A cache nobody cleared is a value from the previous machine wearing the
     new machine's name."""
-    body = webassets.APP_JS.split("CONTEXT.subscribe(")[1].split("});")[0]
+    body = webassets.CONSOLE_PAGE_JS.split("CONTEXT.subscribe(")[1].split("});")[0]
     for held in ("STATE", "PREVIOUS", "RATES", "MAP_NAMES", "UPDATE_OFFER",
-                 "TRANSPORT_FORM", "CONFIG_FIELDS", "NODEVIEW.apps",
-                 "stopTracePolling", "TICKING"):
+                 "TRANSPORT_FORM", "CONFIG_FIELDS", "stopTracePolling",
+                 "TICKING"):
         assert held in body, held
+
+
+def test_a_shared_view_drops_what_it_holds_itself():
+    """Only the console page used to reset anything on a switch, so `/chat`,
+    `/fleet` and `/node` kept painting the machine you had just left until the
+    whole page was reloaded. Each shared view now registers its own reset, so a
+    page that never heard of the context is reset correctly all the same."""
+    assert "CONTEXT.subscribe(() => CHANNEL.forget())" in webassets.channel.JS
+    assert "CONTEXT.subscribe(() => NODEVIEW.reset())" in webassets.nodeview.JS
+    for script in (webassets.CHAT_JS, webassets.FLEET_JS, webassets.NODE_JS):
+        assert "NODEVIEW.reset()" in script
+
+
+def test_a_switch_restarts_the_stream_and_repaints_once_for_every_page():
+    """The stream belongs to the console serving the page, and a view that only
+    repaints on its own next tick is a view showing the previous machine until
+    then. Both happen in `CONTEXT.set`, after everybody has dropped what they
+    held — not in the one page that remembered to do it."""
+    body = webassets.ui.JS.split("  set(node, label){")[1].split("\n  },")[0]
+    assert "EVENTS.start();" in body and "REFRESH.run();" in body
+    assert "this.listeners.forEach" in body
+    assert body.index("this.listeners.forEach") < body.index("REFRESH.run();")
+
+
+def test_a_managed_node_that_stops_answering_hands_the_context_back():
+    """A page driving a node that has gone answers nothing and looks alive —
+    which is what left people reloading the console by hand. A session dropped
+    over there ends the context at once; silence ends it after a few tries, and
+    says so in the strip meanwhile."""
+    source = webassets.channel.JS
+    assert 'reply.code === "unauthorized" || reply.code === "conflict"' in source
+    assert "CONTEXT.lost(" in source
+    assert "MISSES: 2" in source and "CONTEXT.trouble(true" in source
+    # And the strip has somewhere to say it.
+    assert 'id="ctx-trouble"' in webassets.ui.CTX_BAR
+    assert "lost(reason){" in webassets.ui.JS
+
+
+def test_a_view_never_paints_a_stale_reply_as_a_failure():
+    """A reply from the node you just left is not the node you just entered
+    failing. The switch has already asked for everything again, so painting an
+    error over it is the console reporting its own bookkeeping as a fault — and
+    it stays on screen until the next read, which with auto-refresh off is for
+    ever. Every catch that draws an error region has to ask first."""
+    from src.webassets import console as console_page, nodeview as node_view
+    for name, script in (("console", console_page.CONSOLE_PAGE_JS),
+                         ("nodeview", node_view.JS)):
+        for match in re.finditer(r"catch\s*\(([^)]*)\)\s*\{([^}]*)\}",
+                                 script, re.S):
+            body = match.group(2)
+            if "errorHTML" in body:
+                assert "isStale" in body, f"{name}: {body.strip()[:80]}"
+
+
+def test_a_view_on_the_cadence_says_when_it_could_not_read():
+    """A silent catch on a view that runs by itself is a table left painted
+    with whatever it last held, with nothing said — the same failure as a
+    missing field, arriving by another road."""
+    from src.webassets import console as console_page
+    for function in ("async function refreshKeys()",
+                     "async function refreshReleases()"):
+        body = console_page.CONSOLE_PAGE_JS.split(function)[1].split("\n}")[0]
+        assert "isStale" in body and "setMessage" in body.split("catch")[-1]
 
 
 def test_a_view_inside_a_local_app_asks_this_node():
@@ -1073,7 +1140,7 @@ def test_installing_a_package_asks_first():
     source = webassets.APP_JS
     block = source.split("async install(row, element)", 1)[1]
     assert "confirmAction(" in block
-    assert '"/api/packages/install"' in source and "confirm:true" in source
+    assert '"packages.install"' in source and "confirm:true" in source
 
 
 def test_a_key_is_pinned_from_the_record_that_carries_it():
@@ -1082,9 +1149,9 @@ def test_a_key_is_pinned_from_the_record_that_carries_it():
     confirmation of that record."""
     html, source = webassets.INDEX_HTML, webassets.APP_JS
     assert 'id="pin-key"' not in html and 'id="pin-add"' not in html
-    assert '"/api/packages/trust"' in source
+    assert '"packages.trust"' in source
     # Trusting and auto-installing stay two decisions, not one.
-    assert 'id="pkg-pin-auto"' in source and '"/api/releases/auto"' in source
+    assert 'id="pkg-pin-auto"' in source and '"releases.auto"' in source
 
 
 def test_a_package_can_be_read_before_it_is_run():
@@ -1153,11 +1220,13 @@ def test_no_release_action_can_end_mid_sentence():
     the call itself fails — a restart cuts the connection mid-answer, so this is
     a path that really happens."""
     source = webassets.APP_JS
-    for route in ('"/api/releases/publish"', '"/api/packages/install"',
-                  '"/api/packages/trust"'):
-        call = source.index(route)
+    # An operation where it has moved onto the control plane, a route where it
+    # has not — the rule is about the *status line*, not about the door.
+    for name in ('"releases.publish"', '"packages.install"',
+                 '"packages.trust"'):
+        call = source.index(name)
         window = source[call - 400:call + 700]
-        assert "catch(" in window or "setMessage(" in window, route
+        assert "catch(" in window or "setMessage(" in window, name
 
 
 # ── what belongs to a transport lives in that transport ─────────────────────

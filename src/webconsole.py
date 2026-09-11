@@ -40,14 +40,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 from . import app_api
+from . import control
+from .control import listing
 from . import updater
-from . import config as node_config
 from . import console_auth
-from .core_release import ReleaseError
-from . import join_ticket
-from . import qr
-from .node import MESSAGE_NAMES
-from .pseudo import MAX_PSEUDO, PseudoError
+from .control.modules.settings import write_settings
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
@@ -57,19 +54,43 @@ from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_console import REPLAY_HEADER
-from . import transport as transport_option
 
 # The page names the node it is driving with this header. Absent (or naming us)
 # means "this node", which is what a page that has never heard of contexts does.
 _REMOTE_HEADER = "X-NMesh-Node"
 
+# The control channel's one route. Everything the management plane carries goes
+# through here as a frame (`src/control/frame.py`), whichever node it is for:
+# the header above decides whether this console answers it or relays it, and
+# that is the only difference between managing this machine and managing
+# another. The routes beside it are what has not moved onto the plane yet —
+# `Docs/Architecture/control-plane.md` keeps the ledger.
+CONTROL_PATH = "/api/control"
 
-def _field(manager, scheme: str, name: str) -> dict:
-    """The declaration of one field, for writing its value back as text."""
-    for entry in manager.options().get(scheme, []):
-        if entry["name"] == name:
-            return entry
-    return {"kind": "text"}
+# A refusal's code, in HTTP. The plane speaks codes because it is reached over
+# more than one channel (a page here, a peer through the fleet relay), and a
+# status number is this channel's word for what happened — so the translation
+# lives at this door and nowhere else.
+_STATUS_BY_CODE = {
+    "bad_request": 400,
+    "unauthorized": 401,
+    "refused": 403,
+    "not_found": 404,
+    "conflict": 409,
+    "unavailable": 503,
+    "failed": 500,
+}
+# And back, for the one caller that has a status and needs a code: the relay to
+# another node, when what came back was not a frame at all (no session there, a
+# node that never answered) and has to be phrased as a refusal anyway.
+_CODE_BY_STATUS = {status: code for code, status in _STATUS_BY_CODE.items()}
+# The relay's own failures, which have no forward mapping because nothing here
+# ever *answers* a gateway status — it only ever reads one. A node that never
+# answered comes back as 502, and calling that `failed` told a page "something
+# went wrong over there" when what happened is that there is no over there:
+# a console driving a machine that has gone stayed pointed at it, looking alive
+# and showing nothing.
+_CODE_BY_STATUS.update({502: "unavailable", 504: "unavailable"})
 
 
 def _is_node_hex(value) -> bool:
@@ -104,13 +125,12 @@ _LOGIN_LOCKOUT = 60.0          # seconds locked after too many failures
 # costs whoever sent them.
 _LOGIN_MAX_INFLIGHT = 4
 _CALL_TIMEOUT = 10.0          # max seconds to wait on a loop-marshalled call
-# Asking the directory is a Kademlia lookup plus a query to every target, and
-# the node bounds the whole round itself — this only has to be the larger of the
-# two, or the console would give up on an answer the node was about to hand it.
-_PKG_LOOKUP_TIMEOUT = 30.0
-_LIST_DEFAULT_LIMIT = 20
-_LIST_MAX_LIMIT = 100
-_LIST_MAX_QUERY = 128
+# What a list may be asked for, from the one place that decides it
+# (`src/control/listing.py`) — this door parses a query string, it does not get
+# to have its own opinion about how long a query may be.
+_LIST_DEFAULT_LIMIT = listing.DEFAULT_LIMIT
+_LIST_MAX_LIMIT = listing.MAX_LIMIT
+_LIST_MAX_QUERY = listing.MAX_QUERY
 # serve_forever() only notices a shutdown() between polls; the stdlib default is
 # 0.5s, which makes every stop() block that long. Poll tighter so teardown is
 # near-instant (idle cost is one cheap select wakeup per interval).
@@ -260,6 +280,17 @@ class WebConsole:
         self._changes = _Changes()
         self._streams = 0
         self._streams_lock = threading.Lock()
+
+        # The management plane, and the context the modules on it act through.
+        # Built here rather than at the first request: what this node can be
+        # asked to do must not depend on whether anybody has asked yet, and a
+        # module whose declaration is wrong should fail to *start* the console
+        # rather than to answer one call (`src/control/plane.py`).
+        self._control_context = control.Context(
+            node=node, config_path=config_path, apps=self._apps,
+            changes=self._changes, api=lambda: self._api,
+            host=lambda: self._app_host, restart=self.restart)
+        self._plane = control.build(self._control_context)
 
         # Sessions: token -> expiry monotonic deadline.
         self._tokens: dict[str, float] = {}
@@ -523,37 +554,6 @@ class WebConsole:
                          "description": ""})
         return apps
 
-    def _pseudo_state(self) -> dict:
-        """This node's name and id, for the field that edits it."""
-        return {"pseudo": self._node.pseudo,
-                "id": self._node.id.raw.hex(),
-                "max": MAX_PSEUDO}
-
-    def _persist_pseudo(self, pseudo: str):
-        """Record the adopted pseudo in the configuration file.
-
-        The name already survives a restart on its own: the node signed a claim
-        and its name store keeps it (see :class:`src.session_store.PseudoStore`).
-        What the file adds is that the *declared* value agrees — a configuration
-        still naming the old one wins at startup, so leaving it stale is how a
-        rename comes undone on the next boot.
-
-        Returns ``(saved, problem)`` — never raises: the rename already happened
-        on the node, and this is only about the file."""
-        if not self._config_path:
-            return False, None   # nothing declares a name here; the store keeps it
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            merged["pseudo"] = pseudo
-            node_config.save(self._config_path, merged)
-        except OSError as exc:
-            return False, f"could not write the configuration: {exc.strerror or 'error'}"
-        except Exception as exc:
-            return False, str(exc)[:200]
-        return True, None
-
     def _update_branch(self) -> str:
         """Which branch *this* node follows for updates, or "" for releases.
 
@@ -561,26 +561,6 @@ class WebConsole:
         wherever the default would be: a node started with ``--config``
         elsewhere must not be told what some other file says."""
         return updater.update_branch(self._config_path)
-
-    def _config_snapshot(self) -> dict:
-        """The configuration as the settings page needs it: current values,
-        which of them may be edited from here, and anything wrong with the file.
-
-        Read from disk on every request rather than cached: the file can be
-        edited by hand, and a page showing what the node was started with rather
-        than what the file now says would be actively misleading."""
-        if not self._config_path:
-            return {"available": False,
-                    "reason": "this node was not started from a configuration file"}
-        values, problems = node_config.load(self._config_path)
-        merged = node_config.defaults()
-        merged.update(values)
-        return {"available": True,
-                "path": self._config_path,
-                "settings": node_config.public(merged),
-                "problems": problems[:16],
-                "restart_required": False,
-                "can_restart": updater.restart_possible()[0]}
 
     @property
     def _api(self) -> "app_api.AppAPI":
@@ -593,60 +573,15 @@ class WebConsole:
     def _persist_setting(self, name: str, value) -> bool:
         """Remember one live toggle in the configuration file.
 
-        Best effort, exactly like the transport settings: a node with no file
-        still applies the change to the running process, it just will not
-        remember it. The toggle itself never depends on this working."""
-        if not self._config_path:
-            return False
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            merged[name] = value
-            node_config.save(self._config_path, merged)
-            return True
-        except (OSError, ValueError, KeyError):
-            return False
-
-    def _transport_options(self) -> dict:
-        """What every registered transport says it takes.
-
-        The console renders this without knowing a single transport: a medium
-        added tomorrow gets a form for free, and one that declares nothing
-        simply does not appear."""
-        manager = self._node._transport_manager
-        try:
-            declared = manager.options()
-        except Exception:
-            declared = {}
-        return {"transports": [{"scheme": scheme, "options": fields}
-                               for scheme, fields in declared.items()],
-                "persisted": bool(self._config_path)}
-
-    def _persist_transports(self) -> tuple:
-        """Write what is not at its default into the configuration file.
-
-        Best effort by design: a node with no file still applies the change to
-        the running process, it just will not remember it."""
-        if not self._config_path:
-            return False, "not stored — this node has no configuration file"
-        try:
-            values, _problems = node_config.load(self._config_path)
-            merged = node_config.defaults()
-            merged.update(values)
-            manager = self._node._transport_manager
-            merged["transports"] = {
-                scheme: {name: transport_option.as_text(
-                    _field(manager, scheme, name), value)
-                    for name, value in fields.items()}
-                for scheme, fields in manager.settings().items()}
-            node_config.save(self._config_path, merged)
-        except Exception as exc:
-            return False, f"could not write the file: {type(exc).__name__}"
-        return True, ""
+        Best effort: a node with no file still applies the change to the
+        running process, it just will not remember it — the toggle never
+        depends on this working. The write itself is the config module's, so
+        this file has one fewer copy of "load, merge, save"."""
+        return write_settings(self._config_path, {name: value})[0]
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
+        self._control_context.bind_loop(self._loop)
         # A page holding the change stream open is somebody here for as long as
         # it holds it — the *state* half of what the node's awake book takes,
         # the requests below being the moments. See `MeshNode.hold_awake`.
@@ -670,6 +605,52 @@ class WebConsole:
             target=lambda: self._server.serve_forever(poll_interval=_SHUTDOWN_POLL),
             name="nmesh-console", daemon=True)
         self._thread.start()
+
+    # -- the control channel ----------------------------------------------
+    #
+    # Two channels, one plane, and the choice between them is the whole of what
+    # "managing another node" means here. Nothing above this decides anything:
+    # a page asks for `node.state`, and which machine answers is which channel
+    # carried the frame (`Docs/Architecture/control-plane.md`).
+
+    def local_channel(self, origin: str = control.Origin.LOCAL):
+        """This node's plane. ``origin`` is never the caller's to choose — the
+        request handler knows where the frame came from and says so."""
+        return control.LocalChannel(self._plane, origin)
+
+    def remote_channel(self, session: str, node_hex: str):
+        """The same channel, pointed at a node this operator manages."""
+        return control.RemoteChannel(node_hex, self._control_relay(session))
+
+    def _control_relay(self, session: str):
+        """How a frame reaches another node: the fleet's ``manage`` capability,
+        replaying it against that node's console exactly as a browser there
+        would (:mod:`src.apps.fleet_console`).
+
+        The relay is a pipe and translates only failures *of the pipe*: an
+        answer that came back is the far node's plane speaking for itself, and
+        is handed on untouched."""
+        def relay(node_hex: str, frame: bytes) -> bytes:
+            fleet = self._fleet
+            if fleet is None:
+                raise control.ControlError("conflict",
+                                           "the fleet app is not running")
+            status, _ctype, payload = fleet.remote_call(
+                session, node_hex, "POST", CONTROL_PATH, frame)
+            if 200 <= int(status) < 300:
+                return payload
+            # Not a frame: the relay itself refused (no session on that node,
+            # a node that never answered). Phrased as one, with the code the
+            # status meant, so a page reads one shape of answer whatever went
+            # wrong. `unauthorized` here is *that* node's session, never ours —
+            # which is why this never travels as an HTTP 401 to the page.
+            note = _parse_json(payload) or {}
+            message = note.get("error") if isinstance(note.get("error"), str) else ""
+            return control.encode({
+                "v": 1, "id": "", "ok": False,
+                "code": _CODE_BY_STATUS.get(int(status), "failed"),
+                "error": message or "that node could not be reached"})
+        return relay
 
     # -- restarting --------------------------------------------------------
     #
@@ -898,35 +879,6 @@ def _number(raw, default: int = 0) -> int:
         return default
 
 
-def _page_by_node(links: list, offset: int, limit: int) -> tuple:
-    """One page of *nodes*, carrying every link each of them holds.
-
-    Returns ``(links_on_this_page, node_total)``. The node order is the order
-    the links arrived in, so the caller's sort still decides it."""
-    order, by_node = [], {}
-    for link in links:
-        bucket = by_node.get(link["id"])
-        if bucket is None:
-            bucket = by_node[link["id"]] = []
-            order.append(link["id"])
-        bucket.append(link)
-    page = order[offset:offset + limit]
-    return [link for node_id in page for link in by_node[node_id]], len(order)
-
-
-def _matches_list_query(item: dict, query: str) -> bool:
-    if not query:
-        return True
-    for value in item.values():
-        if isinstance(value, str) and query in value.casefold():
-            return True
-        if isinstance(value, (list, tuple)):
-            if any(isinstance(part, str) and query in part.casefold()
-                   for part in value):
-                return True
-    return False
-
-
 def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1049,6 +1001,67 @@ def _make_handler(console: WebConsole):
                 self._session_token() or "", node_hex, self.command, path, body)
             self._send(status, str(ctype)[:128], payload)
 
+        # -- the control channel -------------------------------------------
+        #
+        # One route for the whole management plane, and one decision in it:
+        # which channel the frame goes down. Everything else — what the
+        # operation is, what it may be given, whether a remote console may ask
+        # for it at all — belongs to the plane, declared next to the module
+        # that answers it (`Docs/Architecture/control-plane.md`).
+
+        def _control_channel(self):
+            """The channel this request is for, and the origin it speaks as."""
+            remote = self._remote_node()
+            if remote:
+                return console.remote_channel(self._session_token() or "", remote)
+            # A call a peer is replaying through the fleet's `manage` right is a
+            # page on *their* machine, so it reaches the plane as a remote
+            # origin — which is what turns "what may the network ask of this
+            # node?" into one `remote=True` per operation, in a list this node
+            # keeps about itself (`fleet_console.REPLAY_HEADER`).
+            origin = (control.Origin.REMOTE if self.headers.get(REPLAY_HEADER)
+                      else control.Origin.LOCAL)
+            return console.local_channel(origin)
+
+        def _handle_control(self, body) -> None:
+            """One frame in, one frame out.
+
+            **The status describes the console you asked; the frame describes
+            the node you asked about.** So a refusal from a *managed* node comes
+            back as a 200 carrying a refusal: that node's session expiring must
+            not read to this page as its own session expiring, which is what an
+            HTTP 401 means to every client we have — and what used to sign an
+            operator out of their own console when a remote one dropped them."""
+            channel = self._control_channel()
+            answer = channel.send(body or b"")
+            if channel.target:
+                self._send(200, "application/json; charset=utf-8", answer)
+                return
+            reply = control.decode_reply(answer)
+            self._send(200 if reply.ok
+                       else _STATUS_BY_CODE.get(reply.code, 500),
+                       "application/json; charset=utf-8", answer)
+
+        def _from_plane(self, op: str, params=None) -> None:
+            """Answer one of the older routes from the plane.
+
+            The route stays because things call it — a page nobody has
+            rewritten, a script, a `curl` in a runbook — but it is not a second
+            implementation: it asks the plane exactly what a frame would and
+            unwraps the answer into the shape that route always had."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            reply = self._control_channel().call(op, params or {})
+            if reply.ok:
+                self._json(200, reply.result)
+                return
+            # A refusal's structured half travels under the keys the module
+            # chose, beside the sentence — which is the shape these routes
+            # always had (`{"error": …, "rejected": […]}`).
+            self._json(_STATUS_BY_CODE.get(reply.code, 500),
+                       {"error": reply.error, **reply.detail})
+
         # -- routing --
 
         def do_GET(self) -> None:
@@ -1127,33 +1140,13 @@ def _make_handler(console: WebConsole):
                 self._handle_list_get(path)
                 return
             if path == "/api/state":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    snap = console._call(console._node.console_snapshot())
-                    snap["server_time"] = time.time()
-                    snap["apps"] = console._apps()
-                    snap["version"] = updater.__version__
-                    # Whether a restart would come back. The page needs it to
-                    # decide between offering the action and saying why not —
-                    # so it is that question, asked of `restart_plan`, not the
-                    # narrower "is a service manager watching?" it used to be.
-                    can, why = updater.restart_possible()
-                    snap["can_restart"] = can
-                    snap["restart_blocked"] = why
-                    self._json(200, snap)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.state")
                 return
             if path == "/api/app-api":
                 # What a page may offer. Authenticated like everything else:
                 # the list of what an operator could do is itself worth
                 # knowing, and this console does not answer strangers.
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, {"apps": console._api.catalogue()})
+                self._from_plane("apps.catalogue")
                 return
             if path == "/api/chat/messages":
                 if console._chat is None:
@@ -1198,124 +1191,45 @@ def _make_handler(console: WebConsole):
                 self._send_binary(data, "avatar")
                 return
             if path == "/api/update/check":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    result = console._call(
-                        updater.check(branch=console._update_branch()),
-                        timeout=40.0)
-                except updater.UpdateError as exc:
-                    self._json(200, {"error": str(exc)[:256],
-                                     "current": updater.__version__})
-                    return
-                except Exception:
-                    self._json(503, {"error": "update check failed"})
-                    return
-                ok, reason = updater.updatable()
-                result["can_apply"] = ok
-                result["blocked"] = reason
-                self._json(200, result)
+                self._from_plane("releases.check")
                 return
             if path == "/api/releases":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                # Marshalled onto the loop like every other node read: the
-                # node's state is never touched from an HTTP thread.
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.release_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("releases.overview")
                 return
             if path == "/api/pseudo":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                # `q` searches; without it, this is "what am I called?".
+                # `q` searches; without it, this is "what am I called?". And
+                # `wide` is a different question rather than a louder one — it
+                # asks the directory, which costs a Kademlia round, so it is a
+                # named operation with its own ceiling (`pseudo.lookup`).
                 query = self._query("q")
-                try:
-                    if query is None:
-                        self._json(200, console._call(_wrap(console._pseudo_state)))
-                    else:
-                        # `wide` also asks the network, which costs a round of
-                        # queries — so it is opt-in, not what typing triggers,
-                        # and it is given longer than a local call: the node
-                        # bounds that round itself, and giving up here at ten
-                        # seconds turned a slow answer into "node unavailable".
-                        wide = self._query("wide") == "1"
-                        self._json(200, {"results": console._call(
-                            console._node.search_pseudo(query) if wide
-                            else _wrap(console._node.find_pseudo, query),
-                            timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                if query is None:
+                    self._from_plane("pseudo.get")
+                elif self._query("wide") == "1":
+                    self._from_plane("pseudo.lookup", {"query": query})
+                else:
+                    self._from_plane("pseudo.search", {"query": query})
                 return
             if path == "/api/config":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, console._config_snapshot())
+                self._from_plane("config.get")
                 return
             if path == "/api/transports":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                self._json(200, console._transport_options())
+                self._from_plane("transports.options")
                 return
             if path == "/api/trace":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                trace = console._node.trace
-                payload = {"status": trace.status(), "summary": trace.summary()}
-                from urllib.parse import parse_qs
-                query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                if query.get("events", ["0"])[0] == "1":
-                    payload["events"] = trace.events(limit=400)
-                self._json(200, payload)
+                self._from_plane("trace.status",
+                                 {"events": self._query("events") == "1"})
                 return
             if path == "/api/trace/export":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                import json as _json_mod
-                # Served as an opaque download: a trace is routing metadata and
-                # has no business being rendered inline by the browser.
-                self._send_binary(
-                    _json_mod.dumps(console._node.trace.export(), indent=1).encode(),
-                    "nmesh-trace.json")
+                self._handle_trace_export()
                 return
             if path == "/api/rootcert":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    hexcert = console._call(_wrap(console._node.console_root_cert_hex))
-                    self._json(200, {"cert_hex": hexcert})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.rootcert")
                 return
             if path == "/api/store":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.store_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("store.overview")
                 return
             if path == "/api/keys":
-                if not self._authed():
-                    self._json(401, {"error": "unauthorized"})
-                    return
-                try:
-                    self._json(200, console._call(
-                        _wrap(console._node.key_share_overview)))
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("keys.overview")
                 return
             if path == "/api/packages":
                 self._handle_packages_get()
@@ -1332,32 +1246,23 @@ def _make_handler(console: WebConsole):
         # ask it a question — this name, or this node — and it answers.
 
         def _handle_packages_get(self) -> None:
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            """Ask the directory: by name, or about one node.
+
+            `wide` is a different question rather than a louder one — it costs a
+            Kademlia round plus a query to every target — so it is its own
+            operation with its own ceiling, and a keystroke never triggers it.
+            """
             node = self._query("node")
             query = self._query("q")
-            wide = self._query("wide") == "1"
-            try:
-                if node is not None:
-                    results = console._call(
-                        console._node.packages_of(node, wide=wide),
-                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
-                elif query:
-                    # Asking the network costs a round of queries, so it is a
-                    # button rather than something a keystroke triggers — the
-                    # same bargain the name search makes.
-                    results = console._call(
-                        console._node.search_packages(query)
-                        if wide else _wrap(console._node.find_packages, query),
-                        timeout=_PKG_LOOKUP_TIMEOUT if wide else _CALL_TIMEOUT)
-                else:
-                    self._json(400, {"error": "q or node required"})
-                    return
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            self._json(200, {"results": results})
+            if self._query("wide") == "1":
+                self._from_plane("packages.lookup",
+                                 {"query": query or "", "node": node or ""})
+            elif node is not None:
+                self._from_plane("packages.held", {"node": node})
+            elif query:
+                self._from_plane("packages.search", {"query": query})
+            else:
+                self._json(400, {"error": "q or node required"})
 
         def _handle_package_get(self, rest: str) -> None:
             if not self._authed():
@@ -1385,76 +1290,30 @@ def _make_handler(console: WebConsole):
                 _entry, blob, name = fetched
                 self._send_binary(blob, name)
                 return
-            try:
-                entry = console._call(
-                    _wrap(console._node.package_entry, record_id))
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            if entry is None:
-                self._json(404, {"error": "not found"})
-                return
-            described = None
-            if self._query("fetch") == "1":
-                try:
-                    described = console._call(
-                        console._node.package_descriptor(record_id),
-                        timeout=_APP_CALL_TIMEOUT)
-                except Exception:
-                    described = None
-            self._json(200, {**entry, "descriptor": described})
+            self._from_plane(
+                "packages.describe" if self._query("fetch") == "1"
+                else "packages.entry", {"record": record_id})
 
         def _handle_list_get(self, path: str) -> None:
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            """The older paged lists, in their query-string spelling.
+
+            The parsing is this door's — a query string is HTTP's idea, not the
+            plane's — and everything after it belongs to the operation that
+            answers: the sort, the filter, the page and the bounds
+            (`src/control/listing.py`)."""
             try:
                 scope, query, limit, offset = _parse_list_query(
                     self.path, nodes=path == "/api/nodes")
             except ValueError:
                 self._json(400, {"error": "invalid query"})
                 return
-            try:
-                if path == "/api/nodes":
-                    items = console._call(
-                        _wrap(console._node.console_nodes, scope))
-                    if scope == "known":
-                        items.sort(key=lambda item: (
-                            item["seen_ago"], item["id"]))
-                    else:
-                        items.sort(key=lambda item: (
-                            item["id"], item.get("transport") or "",
-                            item.get("is_client_side", False),
-                            tuple(item.get("addresses", ()))))
-                elif path == "/api/store/catalog":
-                    items = console._call(
-                        _wrap(console._node.store_overview))["catalog"]
-                    items.sort(key=lambda item: (-item["ts"], item["app_id"]))
-                else:
-                    items = console._call(
-                        _wrap(console._node.installed_list))
-                    items.sort(key=lambda item: (
-                        str(item.get("name", "")).casefold(),
-                        str(item.get("app_id", ""))))
-                matched = [item for item in items
-                           if _matches_list_query(item, query)]
-                # The active table shows one row per *node*, unfolding onto that
-                # node's links, so it has to be paged by node: paging by link
-                # would let one node's links straddle a page boundary and show
-                # the node twice, once with each half — and would count links
-                # under a heading that says nodes.
-                if path == "/api/nodes" and scope == "active":
-                    rows, total = _page_by_node(matched, offset, limit)
-                else:
-                    rows, total = matched[offset:offset + limit], len(matched)
-                self._json(200, {
-                    "items": rows,
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                })
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
+            params = {"query": query, "limit": limit, "offset": offset}
+            if path == "/api/nodes":
+                self._from_plane("node.list", {"scope": scope, **params})
+            else:
+                self._from_plane("store.list", {
+                    "scope": "catalog" if path.endswith("/catalog")
+                    else "installed", **params})
 
         def do_HEAD(self) -> None:
             self.do_GET()
@@ -1492,6 +1351,14 @@ def _make_handler(console: WebConsole):
             if path == "/api/login" and remote is None:
                 self._handle_login(body)
                 return
+            if path == CONTROL_PATH:
+                # Before the relay below, deliberately: a control frame is not
+                # proxied *by path* like the older routes — the channel itself
+                # decides whether it answers here or travels, which is what
+                # makes remote management one decision instead of a denylist of
+                # prefixes.
+                self._handle_control(body)
+                return
             if remote is not None:
                 if not remote:
                     self._json(400, {"error": "bad node id"})
@@ -1513,165 +1380,67 @@ def _make_handler(console: WebConsole):
                            extra_headers=[_clear_cookie_header(console._use_tls)])
                 return
             if path == "/api/invite":
-                code = console._call(_wrap(console._node.generate_invite))
-                self._json(200, {"code": code})
+                self._from_plane("join.invite")
                 return
             if path == "/api/trust":
-                data = _parse_json(body)
-                cert_hex = (data or {}).get("cert_hex", "")
-                ok = console._call(_wrap(console._node.console_add_root, cert_hex))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/revoke":
                 data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_revoke_member,
-                                         str(data.get("node", "")),
-                                         int(data.get("reason") or 0)))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
+                self._from_plane("trust.add", {"cert": data.get("cert_hex", "")})
                 return
-            if path == "/api/trust/accept-change":
+            if path.startswith("/api/trust/"):
                 data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_accept_change,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/forgive":
-                data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_forgive,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/witness":
-                data = _parse_json(body) or {}
-                call = (console._node.console_remove_witness
-                        if data.get("remove") else console._node.console_add_witness)
-                ok = console._call(_wrap(call, str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
-                return
-            if path == "/api/trust/untrust":
-                data = _parse_json(body) or {}
-                ok = console._call(_wrap(console._node.console_remove_root,
-                                         str(data.get("node", ""))))
-                self._json(200 if ok else 400, {"ok": bool(ok)})
+                # One name per route, and the plane spells the middle one with
+                # an underscore like every other operation.
+                action = path.rsplit("/", 1)[1].replace("-", "_")
+                params = {"node": data.get("node", "")}
+                if action == "revoke":
+                    params["reason"] = _number(data.get("reason"))
+                if action == "witness":
+                    params["remove"] = bool(data.get("remove"))
+                self._from_plane("trust." + action, params)
                 return
             if path == "/api/ticket":
-                self._handle_ticket(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("join.ticket", {"ttl": _number(data.get("ttl"))})
                 return
             if path == "/api/join":
                 data = _parse_json(body) or {}
                 # A ticket is the same join, with the address and the code
-                # travelling together instead of separately.
-                if data.get("ticket"):
-                    try:
-                        parsed = join_ticket.decode(data["ticket"])
-                    except join_ticket.TicketError as exc:
-                        self._json(400, {"error": str(exc)[:200]})
-                        return
-                    data = {"uri": parsed["uri"], "code": parsed["code"]}
-                if "uri" not in data or "code" not in data:
-                    self._json(400, {"error": "uri and code required"})
-                    return
-                # Waits for the session rather than for the socket: `join`
-                # returns as soon as the link is open, and reporting that as
-                # success told an operator "Joined" for a join that was about
-                # to be refused (see `console_join`).
-                try:
-                    result = console._call(
-                        console._node.console_join(data["uri"], data["code"]))
-                except Exception as exc:
-                    self._json(502, {"ok": False, "error": str(exc)[:200]})
-                    return
-                if not result.get("ok"):
-                    detail = result.get("detail") or ""
-                    self._json(502, {"ok": False,
-                                     "error": result.get("reason", "join failed"),
-                                     "detail": detail[:200]})
-                    return
-                self._json(200, result)
+                # travelling together; the operation decodes it.
+                self._from_plane("join.network", {
+                    "uri": data.get("uri") or "",
+                    "code": data.get("code") or "",
+                    "ticket": data.get("ticket") or ""})
                 return
             if path == "/api/reachability/probe":
-                try:
-                    sent = console._call(console._node.probe_reachability())
-                    self._json(200, {"ok": True, "sent": sent})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("network.probe")
                 return
             if path == "/api/ping":
-                try:
-                    result = console._call(console._node.console_ping_peers())
-                    self._json(200, {"ok": True, **result})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.ping")
                 return
             if path == "/api/ping/node":
-                data = _parse_json(body)
-                node_id = (data or {}).get("id", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                try:
-                    result = console._call(
-                        console._node.console_ping_node(node_id), timeout=15.0)
-                    self._json(200, result)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                # These routes name the node `id`; the plane calls it what it
+                # is everywhere else. One translation, at the door.
+                self._from_plane("node.ping_node",
+                                 {"node": (_parse_json(body) or {}).get("id", "")})
                 return
             if path == "/api/nodes/forget":
-                data = _parse_json(body)
-                node_id = (data or {}).get("id", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                try:
-                    ok = console._call(console._node.console_forget_node(node_id))
-                    self._json(200 if ok else 404, {"ok": bool(ok)})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                self._from_plane("node.forget",
+                                 {"node": (_parse_json(body) or {}).get("id", "")})
                 return
             if path == "/api/peers/retry":
                 data = _parse_json(body) or {}
-                node_id = data.get("id", "")
-                uri = data.get("uri", "")
-                if not isinstance(node_id, str) or not node_id:
-                    self._json(400, {"error": "id required"})
-                    return
-                if not isinstance(uri, str):
-                    self._json(400, {"error": "uri must be a string"})
-                    return
-                try:
-                    # A dial per address, each bounded by the node — the whole
-                    # walk can outlast the default call timeout on a node with
-                    # several dead addresses, which is precisely the case the
-                    # button is pressed in.
-                    result = console._call(
-                        console._node.console_retry_addresses(node_id, uri),
-                        timeout=60.0)
-                    self._json(200 if result.get("ok") else 400, result)
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("node.retry", {"node": data.get("id", ""),
+                                                "uri": data.get("uri", "")})
                 return
             if path == "/api/addressing/balance":
                 data = _parse_json(body) or {}
-                try:
-                    value = console._node.set_transport_balance(data.get("value"))
-                except ValueError as exc:
-                    self._json(400, {"error": str(exc)[:200]})
-                    return
-                console._persist_setting("transport_balance", value)
-                self._json(200, {"ok": True, "value": value,
-                                 "preference": console._node.transport_preference()})
+                self._from_plane("network.balance",
+                                 {"value": data.get("value")})
                 return
             if path == "/api/addressing/dynamic":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                try:
-                    console._node.set_dynamic_address(data["enabled"])
-                    console._persist_setting("dynamic_address", data["enabled"])
-                    self._json(200, {"ok": True, "enabled": data["enabled"]})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.dynamic",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/mlo":
                 # Two settings and two shapes on purpose: "always on" is a
@@ -1683,51 +1452,16 @@ def _make_handler(console: WebConsole):
                 if not isinstance(data, dict):
                     self._json(400, {"error": "object required"})
                     return
-                try:
-                    if isinstance(data.get("always"), bool):
-                        console._node.set_mlo_always(data["always"])
-                        console._persist_setting("mlo_always", data["always"])
-                    changed = {}
-                    if "skew_ms" in data:
-                        changed["skew_ms"] = int(data["skew_ms"])
-                    if "drop_percent" in data:
-                        changed["drop_percent"] = int(data["drop_percent"])
-                    if changed:
-                        applied = console._node.set_mlo_settings(**changed)
-                        for name, value in applied.items():
-                            console._persist_setting(f"mlo_{name}", value)
-                    # The four cadence bounds. Partial on purpose, like the
-                    # transports' own settings: one field typed wrong must not
-                    # throw away the three typed with it.
-                    bounds = {name: int(data[f"keepalive_{name}"])
-                              for name in ("fast_min", "fast_max",
-                                           "slow_min", "slow_max")
-                              if f"keepalive_{name}" in data}
-                    if bounds:
-                        applied = console._node.set_keepalive_bounds(
-                            **{f"{name}_ms": value
-                               for name, value in bounds.items()})
-                        for name, value in zip(("fast_min", "fast_max",
-                                                "slow_min", "slow_max"),
-                                               applied.as_tuple()):
-                            console._persist_setting(f"keepalive_{name}_ms", value)
-                    self._json(200, {"ok": True, "mlo": console._node.mlo_status()})
-                except (TypeError, ValueError) as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                self._from_plane("network.mlo", {
+                    name: data[name] for name in
+                    ("always", "skew_ms", "drop_percent", "keepalive_fast_min",
+                     "keepalive_fast_max", "keepalive_slow_min",
+                     "keepalive_slow_max") if name in data})
                 return
             if path == "/api/lan/discovery":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                try:
-                    if data["enabled"]:
-                        console._call(console._node.start_lan_discovery())
-                    else:
-                        console._call(console._node.stop_lan_discovery())
-                    self._json(200, {"ok": True, "enabled": data["enabled"]})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.discovery",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/relay/invite":
                 try:
@@ -1774,101 +1508,60 @@ def _make_handler(console: WebConsole):
                     self._json(400, {"ok": False, "error": str(exc)[:200]})
                 return
             if path == "/api/invite/block":
-                try:
-                    block = console._call(_wrap(console._node.console_invite_block))
-                    self._json(200, {"block": block})
-                except Exception:
-                    self._json(503, {"error": "node unavailable"})
+                self._from_plane("join.block")
                 return
             if path == "/api/join/block":
-                data = _parse_json(body)
-                block = (data or {}).get("block", "")
-                try:
-                    result = console._call(
-                        _wrap(console._node.console_join_block, block))
-                    self._json(200, {"ok": True, **result})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("join.use_block",
+                                 {"block": data.get("block") or ""})
                 return
             if path == "/api/punch":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                enabled = console._call(
-                    _wrap(console._node.console_set_punch_enabled, data["enabled"]))
-                self._json(200, {"ok": True, "enabled": enabled})
+                data = _parse_json(body) or {}
+                self._from_plane("network.punch",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/punch/keepalive":
-                data = _parse_json(body)
-                if not data or not isinstance(data.get("enabled"), bool):
-                    self._json(400, {"error": "enabled (bool) required"})
-                    return
-                enabled = console._call(
-                    _wrap(console._node.console_set_punch_keepalive, data["enabled"]))
-                self._json(200, {"ok": True, "keepalive": enabled})
+                data = _parse_json(body) or {}
+                self._from_plane("network.punch_keepalive",
+                                 {"enabled": data.get("enabled")})
                 return
             if path == "/api/punch/open":
                 data = _parse_json(body) or {}
-                host = data.get("host")
-                port = data.get("port")
-                # allow "ip:port" in a single field for convenience
+                host, port = data.get("host"), data.get("port")
+                # "ip:port" in a single field is accepted here, where the form
+                # that offers it lives — the operation takes the two it needs.
                 if port is None and isinstance(data.get("endpoint"), str):
                     from .ip_utils import split_host_port
-                    hp = split_host_port(data["endpoint"].strip())
-                    if hp is not None:
-                        host = hp[0]
-                        try:
-                            port = int(hp[1])
-                        except ValueError:
-                            port = None
-                try:
-                    result = console._call(
-                        _wrap(console._node.console_open_hole, host, port))
-                    self._json(200, {"ok": True, **result})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                    pair = split_host_port(data["endpoint"].strip())
+                    if pair is not None:
+                        host, port = pair[0], _number(pair[1])
+                self._from_plane("network.punch_open",
+                                 {"host": host if host is not None else "",
+                                  "port": port if port is not None else 0})
                 return
             if path == "/api/udp":
-                data = _parse_json(body)
-                action = (data or {}).get("action")
-                try:
-                    if action == "start":
-                        console._call(
-                            console._node.console_start_udp((data or {}).get("port")))
-                    elif action == "stop":
-                        console._call(console._node.console_stop_udp())
-                    else:
-                        self._json(400, {"error": "action must be start or stop"})
-                        return
-                    self._json(200, {"ok": True})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                params = {"action": data.get("action") or ""}
+                if data.get("port") is not None:
+                    params["port"] = data["port"]
+                self._from_plane("network.udp", params)
                 return
             if path == "/api/listen":
-                data = _parse_json(body)
-                try:
-                    console._call(
-                        console._node.console_add_listen((data or {}).get("uri", "")))
-                    self._json(200, {"ok": True})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.listen", {"uri": data.get("uri", "")})
                 return
             if path == "/api/unlisten":
-                data = _parse_json(body)
-                try:
-                    ok = console._call(
-                        console._node.console_remove_listen((data or {}).get("uri", "")))
-                    self._json(200 if ok else 404, {"ok": bool(ok)})
-                except Exception as exc:
-                    self._json(400, {"ok": False, "error": str(exc)[:200]})
+                data = _parse_json(body) or {}
+                self._from_plane("network.unlisten", {"uri": data.get("uri", "")})
                 return
             if path == "/api/net/recheck":
-                ok = console._call(_wrap(console._node.console_recheck_net))
-                self._json(200, {"ok": bool(ok)})
+                self._from_plane("network.recheck")
                 return
             if path == "/api/app-call":
-                self._handle_app_call(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("apps.call", {"app": data.get("app") or "",
+                                               "op": data.get("op") or "",
+                                               "args": data.get("args") or {}})
                 return
             if path.startswith("/api/chat/"):
                 if console._chat is None:
@@ -1883,17 +1576,28 @@ def _make_handler(console: WebConsole):
                 self._handle_fleet_post(path, _parse_json(body))
                 return
             if path.startswith("/api/apps/"):
-                self._handle_apps_post(path, _parse_json(body))
+                data = _parse_json(body) or {}
+                # ``id`` is the registry key; ``name`` is accepted as the older
+                # spelling so a caller written against either keeps working.
+                self._from_plane("apps.set",
+                                 {"app": data.get("id") or data.get("name") or "",
+                                  "action": path.rsplit("/", 1)[1]})
                 return
             if path == "/api/update/apply":
-                self._handle_update_apply(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("releases.apply",
+                                 {"version": data.get("version") or "",
+                                  "confirm": data.get("confirm") is True})
                 return
             if path == "/api/restart":
-                self._handle_restart(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("node.restart",
+                                 {"confirm": data.get("confirm") is True})
                 return
             if path.startswith("/api/releases/"):
                 self._handle_release_post(path, _parse_json(body))
                 return
+
             if path.startswith("/api/packages/"):
                 self._handle_package_post(path, _parse_json(body))
                 return
@@ -1901,16 +1605,26 @@ def _make_handler(console: WebConsole):
                 self._handle_key_post(path, _parse_json(body))
                 return
             if path == "/api/pseudo":
-                self._handle_pseudo_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("pseudo.save", {"pseudo": data.get("pseudo", "")})
                 return
             if path == "/api/config":
-                self._handle_config_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("config.save",
+                                 {"settings": data.get("settings") or {}})
                 return
             if path == "/api/transports":
-                self._handle_transport_save(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("transports.save",
+                                 {"scheme": data.get("scheme") or "",
+                                  "values": data.get("values") or {}})
                 return
             if path == "/api/trace":
-                self._handle_trace(_parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("trace.set", {
+                    "action": data.get("action") or "",
+                    "seconds": _number(data.get("seconds")),
+                    "events": _number(data.get("events"))})
                 return
             if path == "/api/password":
                 self._handle_password(_parse_json(body))
@@ -1926,38 +1640,11 @@ def _make_handler(console: WebConsole):
                 return
             if path in ("/api/store/install", "/api/store/uninstall",
                         "/api/store/update"):
-                self._handle_store_action(path.rsplit("/", 1)[1], _parse_json(body))
+                data = _parse_json(body) or {}
+                self._from_plane("store." + path.rsplit("/", 1)[1],
+                                 {"app": data.get("app_id") or ""})
                 return
             self._json(404, {"error": "not found"})
-
-        def _handle_ticket(self, data) -> None:
-            """Mint a compact join ticket, with its QR code.
-
-            The QR is rendered here, from the string we just made — there is no
-            endpoint that turns arbitrary text into a QR code, because nothing
-            would need one."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            ttl = join_ticket.clamp_ttl((data or {}).get("ttl"))
-            try:
-                ticket = console._call(_wrap(console._node.issue_join_ticket, ttl))
-            except ValueError as exc:
-                # Not reachable from the open internet: say why, rather than
-                # handing over a ticket that cannot work.
-                self._json(409, {"error": str(exc)[:300]})
-                return
-            except Exception:
-                self._json(500, {"error": "could not issue a ticket"})
-                return
-            # The code travels inside the ticket; repeating it in the response
-            # would only put the same secret in one more place.
-            ticket.pop("code", None)
-            try:
-                ticket["qr_svg"] = qr.svg_for(ticket["ticket"])
-            except qr.QRError:
-                ticket["qr_svg"] = ""
-            self._json(200, ticket)
 
         def _handle_password(self, data) -> None:
             """Change the console password.
@@ -1997,463 +1684,147 @@ def _make_handler(console: WebConsole):
             revoked = console._revoke_all_tokens_except(self._session_token())
             self._json(200, {"changed": True, "sessions_revoked": revoked})
 
-        def _handle_trace(self, data) -> None:
-            """Start or stop the protocol trace.
+        def _handle_trace_export(self) -> None:
+            """The trace as a file.
 
-            Bounded on the way in as well as inside: an operator asking for a
-            week-long trace of a million packets gets the largest one the node
-            is willing to hold, not the one they typed."""
+            The one migrated route that is not a plain unwrap: the *answer* is
+            the same document the plane returns, but it is served as an opaque
+            download rather than as JSON a page reads — a trace is routing
+            metadata and has no business being rendered inline by the browser."""
             if not self._authed():
                 self._json(401, {"error": "unauthorized"})
                 return
-            data = data or {}
-            action = data.get("action")
-            trace = console._node.trace
-            if action == "start":
-                self._json(200, trace.start(seconds=_number(data.get("seconds")),
-                                            events=_number(data.get("events")),
-                                            names=MESSAGE_NAMES))
+            reply = self._control_channel().call("trace.export")
+            if not reply.ok:
+                self._json(_STATUS_BY_CODE.get(reply.code, 500),
+                           {"error": reply.error})
                 return
-            if action == "stop":
-                self._json(200, trace.stop())
-                return
-            if action == "clear":
-                trace.clear()
-                self._json(200, trace.status())
-                return
-            self._json(400, {"error": "action must be start, stop or clear"})
-
-        def _handle_pseudo_save(self, data) -> None:
-            """Rename this node.
-
-            Two writes, deliberately: the node signs a fresh claim and announces
-            it now, and the configuration file records it so a restart keeps the
-            name. If the file cannot be written the rename still stands for this
-            run and the problem is reported — losing the name on restart is
-            worth saying, not worth refusing the rename over."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            wanted = data.get("pseudo", "")
-            if not isinstance(wanted, str):
-                self._json(400, {"error": "pseudo must be text"})
-                return
-            try:
-                adopted = console._call(_wrap(console._node.set_pseudo, wanted))
-            except PseudoError as exc:
-                self._json(400, {"error": str(exc)})
-                return
-            except Exception:
-                self._json(503, {"error": "node unavailable"})
-                return
-            saved, problem = console._persist_pseudo(adopted)
-            self._json(200, {"ok": True, "pseudo": adopted,
-                             "saved": saved, "error": problem})
+            self._send_binary(
+                json.dumps(reply.result, indent=1).encode("utf-8"),
+                "nmesh-trace.json")
 
         def _handle_key_post(self, path: str, data) -> None:
-            """Offering, accepting and forgetting a publisher key.
+            """Making, offering, accepting and forgetting a publisher key.
 
-            A passphrase crosses this boundary — the sender's to unlock what it
-            is offering, the recipient's to keep what it accepts — so these
-            routes exist only over the console session, and nothing here writes
-            one down. The node holds the recipient's just long enough for the
-            grant to land, and drops it either way."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route. The rule the operations carry is the one
+            these had to repeat: a passphrase is typed at the machine that will
+            hold the key, so none of this is reachable from a console managing
+            this node — only the overview is
+            (`src/control/modules/keys.py`)."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            try:
-                if path == "/api/keys/create":
-                    passphrase = data.get("passphrase")
-                    if not isinstance(passphrase, str) or not passphrase:
-                        self._json(400, {"error": "passphrase required"})
-                        return
-                    label = data.get("label")
-                    row = console._call(_wrap(
-                        node.create_publisher_key, passphrase,
-                        label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "key": row})
-                    return
-                if path == "/api/keys/import":
-                    for name in ("path", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    label = data.get("label")
-                    row = console._call(_wrap(
-                        node.import_publisher_key, data["path"],
-                        data["passphrase"],
-                        label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "key": row})
-                    return
-                if path == "/api/keys/offer":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    for name in ("node", "key_id", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    key_path = console._call(
-                        _wrap(node.publisher_key_path, data["key_id"]))
-                    if key_path is None:
-                        self._json(404, {"error": "no such publisher key"})
-                        return
-                    label = data.get("label")
-                    offer = console._call(node.offer_publisher_key(
-                        data["node"], key_path, data["passphrase"],
-                        label=label if isinstance(label, str) else ""),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, "offer": offer})
-                    return
-                if path == "/api/keys/accept":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    for name in ("offer_id", "passphrase"):
-                        if not isinstance(data.get(name), str) or not data[name]:
-                            self._json(400, {"error": f"{name} required"})
-                            return
-                    accepted = console._call(node.accept_publisher_key(
-                        data["offer_id"], data["passphrase"]),
-                        timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": True, **accepted})
-                    return
-                if path == "/api/keys/refuse":
-                    offer_id = data.get("offer_id")
-                    if not isinstance(offer_id, str):
-                        self._json(400, {"error": "offer_id required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.refuse_publisher_key, offer_id))})
-                    return
-                if path == "/api/keys/forget":
-                    key_id = data.get("key_id")
-                    if not isinstance(key_id, str):
-                        self._json(400, {"error": "key_id required"})
-                        return
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.forget_publisher_key, key_id))})
-                    return
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            self._json(404, {"error": "not found"})
+            action = path.rsplit("/", 1)[1]
+            label = data.get("label")
+            label = label if isinstance(label, str) else ""
+
+            def secret(name):
+                """A passphrase passed through exactly as typed, or not at all:
+                the field is never trimmed, and a `null` is not an empty one."""
+                value = data.get(name)
+                return {name: value} if isinstance(value, str) else {}
+
+            if action == "create":
+                self._from_plane("keys.create",
+                                 {"label": label, **secret("passphrase")})
+            elif action == "import":
+                self._from_plane("keys.adopt",
+                                 {"path": data.get("path") or "",
+                                  "label": label, **secret("passphrase")})
+            elif action == "offer":
+                self._from_plane("keys.offer", {
+                    "node": data.get("node") or "",
+                    "key": data.get("key_id") or "",
+                    "confirm": data.get("confirm") is True,
+                    "label": label, **secret("passphrase")})
+            elif action == "accept":
+                self._from_plane("keys.accept", {
+                    "offer": data.get("offer_id") or "",
+                    "confirm": data.get("confirm") is True,
+                    **secret("passphrase")})
+            elif action == "refuse":
+                self._from_plane("keys.refuse",
+                                 {"offer": data.get("offer_id") or ""})
+            elif action == "forget":
+                self._from_plane("keys.forget",
+                                 {"key": data.get("key_id") or "",
+                                  "confirm": data.get("confirm") is True})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_package_post(self, path: str, data) -> None:
             """Installing, pinning and subscribing from a package record.
 
-            The console decides nothing here either. What is new is where the
-            publisher key comes from: it arrived *inside the record*, checked
-            against the signature it made, so pinning is a confirmation rather
-            than a hex string copied from a channel nobody could vouch for."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route. What the operations own — and what this
+            used to spell out three times — is that the publisher key comes from
+            *inside the record*, checked against the signature it made, so
+            pinning is a confirmation of a record rather than a hex string
+            copied from a channel nobody could vouch for."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            record_id = data.get("id")
-            if not isinstance(record_id, str):
-                self._json(400, {"error": "id required"})
-                return
-            try:
-                if path == "/api/packages/install":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    result = console._call(node.install_package(record_id),
-                                           timeout=400.0)
-                    # A core release only takes effect when the node comes back
-                    # on the tree just written; an app is live where it stands.
-                    restarting = (console.restart()
-                                  if result.get("restart_required") else False)
-                    self._json(200, {"ok": True, **result,
-                                     "restarting": restarting})
-                    return
-                if path == "/api/packages/trust":
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    entry = console._call(_wrap(
-                        node.trust_package_signer, record_id,
-                        auto=data.get("auto") is True,
-                        endorsed=data.get("endorsed") is True))
-                    self._json(200, {"ok": True, "publisher": entry})
-                    return
-                if path == "/api/packages/subscribe":
-                    if data.get("on") is False:
-                        self._json(200, {"ok": console._call(
-                            _wrap(node.unsubscribe_package, record_id))})
-                        return
-                    quorum = data.get("quorum")
-                    entry = console._call(_wrap(
-                        node.subscribe_package, record_id,
-                        auto=data.get("auto") is True,
-                        quorum=quorum if isinstance(quorum, int)
-                        and not isinstance(quorum, bool) else 1))
-                    self._json(200, {"ok": True, "subscription": entry})
-                    return
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            self._json(404, {"error": "not found"})
+            record = data.get("id")
+            record = record if isinstance(record, str) else ""
+            action = path.rsplit("/", 1)[1]
+            if action == "install":
+                self._from_plane("packages.install",
+                                 {"record": record,
+                                  "confirm": data.get("confirm") is True})
+            elif action == "trust":
+                self._from_plane("packages.trust", {
+                    "record": record, "confirm": data.get("confirm") is True,
+                    "auto": data.get("auto") is True,
+                    "endorsed": data.get("endorsed") is True})
+            elif action == "subscribe":
+                quorum = data.get("quorum")
+                self._from_plane("packages.subscribe", {
+                    "record": record,
+                    "on": data.get("on") is not False,
+                    "auto": data.get("auto") is True,
+                    "quorum": quorum if isinstance(quorum, int)
+                    and not isinstance(quorum, bool) else 1})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_release_post(self, path: str, data) -> None:
             """Publishing, pinning and installing mesh-native releases.
 
-            The console decides nothing here: pinning a key, installing a
-            release and turning automatic installation on all end in the node,
-            which owns the gates. What this layer owns is that a signed-in
-            operator asked."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
+            One translation per route and nothing else: these carried their own
+            validation, their own error mapping and their own idea of what a
+            publisher id is. The operations own all three now
+            (`src/control/modules/releases.py`); what is left here is the older
+            spelling of each argument."""
             data = data if isinstance(data, dict) else {}
-            node = console._node
-            try:
-                if path == "/api/releases/publish":
-                    notes = data.get("notes")
-                    # Signing with a held publisher key rather than the node
-                    # identity: named by id, because a key this node was handed
-                    # has no path its operator ever chose.
-                    key_id = data.get("key_id")
-                    key_path = None
-                    if isinstance(key_id, str) and key_id:
-                        key_path = console._call(
-                            _wrap(node.publisher_key_path, key_id))
-                        if key_path is None:
-                            self._json(404, {"error": "no such publisher key"})
-                            return
-                    passphrase = data.get("passphrase")
-                    result = console._call(
-                        node.publish_release(
-                            notes=notes if isinstance(notes, str) else "",
-                            key_path=key_path,
-                            passphrase=passphrase
-                            if isinstance(passphrase, str) else None),
-                        timeout=300.0)
-                    self._json(200, {"ok": True, **result})
-                    return
-                if path == "/api/releases/install":
-                    release = data.get("release")
-                    if not isinstance(release, str):
-                        self._json(400, {"error": "release required"})
-                        return
-                    if data.get("confirm") is not True:
-                        self._json(400, {"error": "confirmation required"})
-                        return
-                    result = console._call(node.install_release(release),
-                                           timeout=400.0)
-                    # An operator pressed Install and is watching, so the
-                    # restart is immediate. The unattended path restarts too,
-                    # but only after writing the attempt down: a release that
-                    # installs and never becomes the running version is given
-                    # up on rather than restarted into for ever (`node.py`,
-                    # `AutoInstallJournal`).
-                    restarting = console.restart()
-                    self._json(200, {"ok": True, **result,
-                                     "restarting": restarting})
-                    return
-                if path == "/api/releases/trust":
-                    key = data.get("key")
-                    if not isinstance(key, str):
-                        self._json(400, {"error": "key required"})
-                        return
-                    name = data.get("name")
-                    entry = console._call(_wrap(
-                        node.trust_publisher, key.strip(),
-                        name if isinstance(name, str) else "",
-                        data.get("auto") is True,
-                        data.get("endorsed") is True))
-                    self._json(200, {"ok": True, "publisher": entry})
-                    return
-                if path == "/api/releases/untrust":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    self._json(200, {"ok": console._call(
-                        _wrap(node.untrust_publisher, publisher))})
-                    return
-                if path == "/api/releases/auto":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    ok = console._call(_wrap(node.set_publisher_auto, publisher,
-                                             data.get("auto") is True))
-                    self._json(200 if ok else 404, {"ok": ok})
-                    return
-                if path == "/api/releases/endorse":
-                    publisher = data.get("publisher_id")
-                    if not isinstance(publisher, str):
-                        self._json(400, {"error": "publisher_id required"})
-                        return
-                    ok = console._call(_wrap(node.set_publisher_endorsed,
-                                             publisher,
-                                             data.get("endorsed") is True))
-                    self._json(200 if ok else 404, {"ok": ok})
-                    return
-            except ReleaseError as exc:
-                self._json(400, {"error": str(exc)[:256]})
-                return
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception as exc:
-                self._json(500, {"error": f"release failed: {type(exc).__name__}"})
-                return
-            self._json(404, {"error": "not found"})
-
-        def _handle_app_call(self, data) -> None:
-            """Invoke one declared operation on one running app.
-
-            The single door: no route per action, and nothing reachable that an
-            app did not write down. Authentication is the console's own — an
-            operator signed in here — and it buys no authority beyond that: an
-            operation that asks another node for rights still ends with a human
-            over there agreeing."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            app = data.get("app")
-            name = data.get("op")
-            if not isinstance(app, str) or not isinstance(name, str):
-                self._json(400, {"error": "app and op are required"})
-                return
-            args = data.get("args")
-            try:
-                result = console._api.call(app, name,
-                                           args if isinstance(args, dict) else {})
-            except app_api.AppAPIError as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-                return
-            except Exception:
-                self._json(503, {"ok": False, "error": "the app is unavailable"})
-                return
-            self._json(200, {"ok": True, "result": result})
-
-        def _handle_config_save(self, data) -> None:
-            """Write the node's configuration file.
-
-            Every field is validated before anything is written: a rejected
-            value leaves the stored one alone, so one bad entry in a form can
-            never produce a file the node would refuse to start on. Nothing is
-            applied live — the node reads this at startup, and the answer says
-            so rather than letting the page imply otherwise."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            if not console._config_path:
-                self._json(409, {"error": "this node was not started from a "
-                                          "configuration file"})
-                return
-            current, _problems = node_config.load(console._config_path)
-            merged = node_config.defaults()
-            merged.update(current)
-            merged, rejected = node_config.apply_edits(
-                merged, (data or {}).get("settings"))
-            if rejected:
-                self._json(400, {"error": "some settings were refused",
-                                 "rejected": rejected[:16]})
-                return
-            try:
-                node_config.save(console._config_path, merged)
-            except OSError as exc:
-                self._json(500, {"error": f"could not write the configuration: "
-                                          f"{exc.strerror or 'error'}"})
-                return
-            self._json(200, {"saved": True,
-                             "path": console._config_path,
-                             "restart_required": True,
-                             "can_restart": updater.restart_possible()[0]})
-
-        def _handle_restart(self, data) -> None:
-            """Restart this node, if something will bring it back.
-
-            The gate is not the point of interest — the answer is. A console
-            that says "restarting" and leaves the operator with a stopped node
-            is worse than one that refuses, so the refusal is explicit and names
-            the reason it came back with.
-
-            Under a remote context this arrives at the *managed* node's console,
-            which is exactly right: the operator asked to restart that machine,
-            and it is that machine's service manager that answers for it."""
-            if not self._authed():
-                self._json(401, {"error": "unauthorized"})
-                return
-            data = data if isinstance(data, dict) else {}
-            if data.get("confirm") is not True:
-                self._json(400, {"error": "confirmation required"})
-                return
-            can, why = updater.restart_possible()
-            if not can:
-                self._json(409, {
-                    "ok": False, "restarting": False,
-                    "error": "nothing would start this node again — " + why})
-                return
-            self._json(200, {"ok": True, "restarting": console.restart()})
-
-        def _handle_update_apply(self, data) -> None:
-            """Install a release — only ever the one the operator confirmed.
-
-            The request must name the version. If GitHub has moved on since the
-            page was drawn, the mismatch is refused: a tab left open for an hour
-            must not install something nobody looked at. That holds for a branch
-            too — it is checked again here, and once more against the tree that
-            comes down, because a branch moves under its own name."""
-            data = data or {}
-            wanted = data.get("version")
-            if not isinstance(wanted, str) or not wanted:
-                self._json(400, {"error": "version required"})
-                return
-            if data.get("confirm") is not True:
-                self._json(400, {"error": "confirmation required"})
-                return
-            ok, reason = updater.updatable()
-            if not ok:
-                self._json(409, {"error": reason})
-                return
-            branch = console._update_branch()
-            try:
-                latest = console._call(updater.check(branch=branch),
-                                       timeout=40.0)
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception:
-                self._json(503, {"error": "update check failed"})
-                return
-            if latest.get("latest") != wanted:
-                self._json(409, {
-                    "error": f"the latest version is now {latest.get('latest')}, "
-                             f"not {wanted} — check again and re-confirm"})
-                return
-            if not latest.get("available"):
-                self._json(409, {"error": "already up to date"})
-                return
-            try:
-                result = console._call(updater.apply(wanted, branch=branch),
-                                       timeout=400.0)
-            except updater.UpdateError as exc:
-                self._json(502, {"error": str(exc)[:256]})
-                return
-            except Exception as exc:
-                self._json(500, {"error": f"update failed: {type(exc).__name__}"})
-                return
-            # The files are in place; this process is still running the old
-            # ones. Answer first, then leave so the manager brings us back on
-            # the new code — otherwise the page's "restarting" is a lie.
-            restarting = console.restart()
-            self._json(200, {"ok": True, **result, "restarting": restarting})
+            action = path.rsplit("/", 1)[1]
+            if action == "publish":
+                params = {"notes": data.get("notes") or "",
+                          "key_id": data.get("key_id") or ""}
+                # Absent rather than null: naming a field is saying you meant
+                # to set it, so `{"passphrase": null}` is a value the field
+                # cannot take — while *not* sending one is "there is no
+                # passphrase", which is what an unlocked key means.
+                if data.get("passphrase") is not None:
+                    params["passphrase"] = data["passphrase"]
+                self._from_plane("releases.publish", params)
+            elif action == "install":
+                self._from_plane("releases.install", {
+                    "release": data.get("release") or "",
+                    "confirm": data.get("confirm") is True})
+            elif action == "trust":
+                self._from_plane("releases.trust", {
+                    "key": str(data.get("key") or "").strip(),
+                    "name": data.get("name") or "",
+                    "auto": data.get("auto") is True,
+                    "endorsed": data.get("endorsed") is True})
+            elif action == "untrust":
+                self._from_plane("releases.untrust",
+                                 {"publisher": data.get("publisher_id") or ""})
+            elif action == "auto":
+                self._from_plane("releases.auto", {
+                    "publisher": data.get("publisher_id") or "",
+                    "auto": data.get("auto") is True})
+            elif action == "endorse":
+                self._from_plane("releases.endorse", {
+                    "publisher": data.get("publisher_id") or "",
+                    "endorsed": data.get("endorsed") is True})
+            else:
+                self._json(404, {"error": "not found"})
 
         # -- fleet (remote management) ------------------------------------
         #
@@ -2528,31 +1899,6 @@ def _make_handler(console: WebConsole):
                  "attachment; filename=\"%s\"" % _safe_filename(name))])
 
         # -- remote consoles ---------------------------------------------
-
-        def _handle_transport_save(self, data) -> None:
-            """Apply one transport's settings, then write them to the file.
-
-            Applied first, stored second: a value the transport refuses must
-            never reach the file, or the next start would refuse it too — with
-            nobody at the keyboard to read why."""
-            data = data or {}
-            scheme = str(data.get("scheme") or "")[:32]
-            values = data.get("values")
-            if not isinstance(values, dict):
-                self._json(400, {"error": "no settings given"})
-                return
-            manager = console._node._transport_manager
-            try:
-                result = console._call(_wrap(manager.configure, scheme, values))
-            except Exception as exc:
-                self._json(400, {"error": str(exc)[:200]})
-                return
-            saved, note = console._persist_transports()
-            self._json(200, {"ok": not result["rejected"],
-                             "applied": {name: value for name, value
-                                         in result["applied"].items()},
-                             "rejected": result["rejected"],
-                             "persisted": saved, "note": note})
 
         # -- the change stream ---------------------------------------------
         #
@@ -2822,28 +2168,6 @@ def _make_handler(console: WebConsole):
 
         # -- built-in apps (install / enable) -----------------------------
 
-        def _handle_apps_post(self, path: str, data) -> None:
-            host = console._app_host
-            if host is None:
-                self._json(404, {"error": "not found"})
-                return
-            # ``id`` is the registry key; ``name`` is accepted as the older
-            # spelling so a caller written against either keeps working.
-            data = data or {}
-            name = data.get("id") or data.get("name")
-            action = path.rsplit("/", 1)[1]
-            if not isinstance(name, str) or action not in (
-                    "enable", "disable", "install", "uninstall"):
-                self._json(400, {"error": "bad request"})
-                return
-            try:
-                ok = console._call(getattr(host, action)(name), timeout=30.0)
-            except Exception as exc:
-                self._json(503, {"error": str(exc)[:200]})
-                return
-            self._json(200 if ok else 400, {"ok": bool(ok),
-                                            "apps": console._apps()})
-
         def _handle_chat_post(self, path: str, data) -> None:
             chat = console._chat
             data = data or {}
@@ -3002,26 +2326,6 @@ def _make_handler(console: WebConsole):
             except Exception as exc:
                 self._json(400, {"ok": False, "error": str(exc)[:200]})
 
-        def _handle_store_action(self, action: str, data) -> None:
-            app_id = (data or {}).get("app_id")
-            if not isinstance(app_id, str) or not app_id:
-                self._json(400, {"error": "app_id required"})
-                return
-            try:
-                if action == "install":
-                    result = console._call(console._node.install_app(app_id),
-                                           timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": result is not None, "app": result})
-                elif action == "update":
-                    result = console._call(console._node.update_app(app_id),
-                                           timeout=_APP_CALL_TIMEOUT)
-                    self._json(200, {"ok": result is not None, "app": result})
-                else:  # uninstall
-                    ok = console._call(_wrap(console._node.uninstall_app, app_id))
-                    self._json(200, {"ok": bool(ok)})
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)[:200]})
-
         def _handle_login(self, body: bytes) -> None:
             if not console._begin_login():
                 self._json(429, {"error": "too many attempts, locked out"})
@@ -3094,6 +2398,7 @@ def _parse_json(body: bytes):
         return None
 
 
-async def _wrap(fn, *args, **kwargs):
-    """Adapt a sync node method into an awaitable run on the loop thread."""
-    return fn(*args, **kwargs)
+# Adapting a sync node method into an awaitable run on the loop thread. The
+# plane's modules need exactly this and defined it first, so this is that one
+# rather than a second spelling of it (`src/control/context.py`).
+_wrap = control.on_loop

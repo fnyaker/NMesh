@@ -506,7 +506,9 @@ class TestManagement:
             _, token = await _login(console)
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/trust", token, {"cert_hex": "deadbeef"})
-            assert status == 400 and j["ok"] is False
+            # A refusal is one shape on this API now: the status says what kind
+            # it was, the sentence says why (`src/control/errors.py`).
+            assert status == 400 and j["error"]
         finally:
             console.stop(); await node.stop()
 
@@ -529,7 +531,8 @@ class TestManagement:
             for bad in ({"block": "not-base64!!!"}, {"block": ""}, {}):
                 status, _, _, j = await asyncio.to_thread(
                     _request, console, "POST", "/api/join/block", token, bad)
-                assert status == 400 and j["ok"] is False
+                # One shape for every refusal on this API (`control/errors.py`).
+                assert status == 400 and j["error"]
         finally:
             console.stop(); await node.stop()
 
@@ -651,7 +654,9 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
                 {"endpoint": "90.54.169.91:9001"})
-            assert status == 400 and j["ok"] is False
+            # One shape for every refusal on this API: the status says what
+            # kind, the sentence says why (`src/control/errors.py`).
+            assert status == 400 and j["error"]
             await node.start_udp(0, "127.0.0.1")
             node._udp_server._sock.sendto = lambda *a: None  # no real traffic
             status, _, _, j = await asyncio.to_thread(
@@ -664,7 +669,7 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
                 {"endpoint": "garbage"})
-            assert status == 400 and j["ok"] is False
+            assert status == 400 and j["error"]
         finally:
             node._cancel_manual_holes()
             console.stop(); await node.stop()
@@ -779,6 +784,11 @@ class TestManagement:
             assert node._routing.contains(known_id)
 
             _, token = await _login(console)
+            # A refusal from the control plane is one shape wherever it comes
+            # from: the code says what kind it was, the sentence says why
+            # (`src/control/errors.py`). So these check the status and that
+            # something was said, rather than a per-route flag.
+            #
             # Missing id → 400.
             status, _, _, _ = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token, {})
@@ -788,19 +798,20 @@ class TestManagement:
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": "aa" * 20})
-            assert status == 404 and j["ok"] is False
+            assert status == 404 and j["error"]
 
-            # Malformed hex → 404, no crash.
+            # Malformed hex → 400: not a node identity at all, which is the
+            # caller's mistake rather than a node we have never heard of.
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": "not-hex"})
-            assert status == 404 and j["ok"] is False
+            assert status == 400 and j["error"]
 
             # Own id → refused, no crash.
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/nodes/forget", token,
                 {"id": node._id.raw.hex()})
-            assert status == 404 and j["ok"] is False
+            assert status == 404 and j["error"]
 
             # Known id → removed from the routing table.
             status, _, _, j = await asyncio.to_thread(
@@ -1466,7 +1477,10 @@ class TestJoinTicket:
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/join", token,
                 {"uri": "tcp://127.0.0.1:1", "code": "no-such-code"})
-            assert status == 502
+            # A join that reaches nothing is `unavailable` — the node was
+            # asked, it tried, and the far end is not there. The sentence
+            # beside it names which of the five ways it failed.
+            assert status == 503
             assert body["error"] == "that address could not be reached"
         finally:
             console.stop(); await node.stop()
@@ -1701,7 +1715,6 @@ class TestRestartingOnDemand:
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/restart", token, {"confirm": True})
             assert status == 409
-            assert body["restarting"] is False
             assert "no interpreter to start again" in body["error"]
             await asyncio.sleep(0.05)
             assert left == []

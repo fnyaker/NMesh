@@ -175,19 +175,51 @@ const NODEVIEW = {
   // Set when the next repaint has to re-ask the apps as well as the node.
   deep: false,
 
-  // Every call this view makes goes through here, so a mount cannot half
-  // follow the context.
+  // Every call this view makes goes through one of these two, so a mount
+  // cannot half follow the context. `op` is the control plane — what this view
+  // asks of a node — and `ask` is the routes that have not moved onto it yet
+  // (`Docs/Architecture/control-plane.md`).
   ask(path, method, body){
     return apiJson(path, method, body, {local:this.here});
   },
 
+  op(name, params){
+    return CHANNEL.call(name, params, {local:this.here});
+  },
+
+  // Everything this view is holding, dropped — and picked up again for
+  // whatever is still on screen. (`forget` further down is a different verb:
+  // it drops a *node* from the routing table.)
+  reset(){
+    this.apps = {};
+    const held = this.current;
+    this.current = null;
+    if(this.reread){ clearTimeout(this.reread); this.reread = null; }
+    this.lastRead = 0;
+    this.deep = false;
+    const element = held && held.element;
+    const dialog = element && element.closest && element.closest("dialog");
+    // A card inside a dialog nobody has open is not on screen, and re-reading
+    // it would be a call to the new machine for a panel nobody is looking at.
+    const shown = element && element.isConnected && !(dialog && !dialog.open);
+    if(shown) this.mount(element, held.id, held.options).catch(() => {});
+  },
+
   async catalogue(){
     try{
-      const {data} = await this.ask("/api/app-api");
+      // What the apps on the node being driven offer *this* caller: an app
+      // that is not running, or one whose author did not let an operation be
+      // driven from a distance, is simply not in the answer.
+      const data = await this.op("apps.catalogue");
       const out = {};
       (data.apps || []).forEach((entry) => { out[entry.app] = entry.operations; });
       this.apps = out;
     }catch(_){ this.apps = {}; }
+    // And what the node itself exposes to whoever is driving it. Not every
+    // operation reaches a remote console — dialling a node's addresses back
+    // takes longer than the relay carries — so the buttons for those are not
+    // drawn rather than drawn and refused (`src/control/plane.py`).
+    if(!this.here) await CHANNEL.operations();
     return this.apps;
   },
 
@@ -196,8 +228,7 @@ const NODEVIEW = {
   },
 
   async call(app, op, args){
-    const {ok, data} = await this.ask("/api/app-call", "POST", {app, op, args});
-    if(!ok || !data.ok) throw new Error((data && data.error) || "refused");
+    const data = await this.op("apps.call", {app, op, args: args || {}});
     return data.result || {};
   },
 
@@ -206,15 +237,19 @@ const NODEVIEW = {
   // this console has never heard of still renders: the identity is real, the
   // rest is simply empty.
   //
-  // `/api/nodes?scope=active` answers one row **per link**, and a node may hold
-  // several. Taking the first and calling it "the link" is what made a node
-  // reached over tcp *and* udp look like a node reached over tcp.
+  // `node.list` with scope "active" answers one row **per link**, and a node
+  // may hold several. Taking the first and calling it "the link" is what made a
+  // node reached over tcp *and* udp look like a node reached over tcp.
   async facts(id, selfId, seed, keep){
     const rows = async (scope) => {
-      const params = new URLSearchParams({scope, q:id, limit:"20", offset:"0"});
-      const {ok, data} = await this.ask("/api/nodes?" + params.toString());
-      if(!ok) return [];
-      return (data.items || []).filter((item) => item.id === id);
+      try{
+        const data = await this.op("node.list",
+                                   {scope, query:id, limit:20, offset:0});
+        return (data.items || []).filter((item) => item.id === id);
+      }catch(error){
+        if(isStale(error)) throw error;
+        return [];
+      }
     };
     // `keep` is the previous read's routing-table row, handed back on the
     // cadence. Every number that moves — latency, jitter, loss, what the link
@@ -246,7 +281,7 @@ const NODEVIEW = {
 
   async ownAddresses(){
     try{
-      const {data} = await this.ask("/api/state");
+      const data = await this.op("node.state");
       return (data.advertised || []).map((uri) => ({uri, outcome:"advertised"}));
     }catch(_){ return []; }
   },
@@ -682,7 +717,8 @@ const NODEVIEW = {
     // A node advertising four addresses of which one works is the normal case;
     // "try that one again, now" is the question an operator has while looking
     // at this table, so the button is in the table.
-    const action = view.self ? "" : '<th class="tight"></th>';
+    const offered = !view.self && (this.here || CHANNEL.has("node.retry"));
+    const action = offered ? '<th class="tight"></th>' : "";
     return '<div class="table-wrap"><table><thead><tr>' +
       '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
       "</tr></thead><tbody>" +
@@ -692,9 +728,9 @@ const NODEVIEW = {
         ' <span class="tiny muted" data-v="' +
         esc("addr:" + row.uri + ":detail") + '"></span>' +
         '</td><td class="num" data-v="' + esc("addr:" + row.uri + ":tried") + '">' +
-        "</td>" + (view.self ? "" :
+        "</td>" + (offered ?
           '<td class="tight"><button class="sm" data-nv-retry="' +
-          esc(row.uri) + '">Retry</button></td>') +
+          esc(row.uri) + '">Retry</button></td>' : "") +
         "</tr>").join("") + "</tbody></table></div>";
   },
 
@@ -762,8 +798,7 @@ const NODEVIEW = {
     let selfId = options.selfId || null;
     if(selfId == null){
       try{
-        const {data} = await this.ask("/api/state");
-        selfId = data.id;
+        selfId = (await this.op("node.state")).id;
       }catch(_){ selfId = null; }
     }
     if(!element.dataset.nvWired){
@@ -892,7 +927,7 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, "Pinging through the mesh…");
       try{
-        const {data} = await this.ask("/api/ping/node", "POST", {id});
+        const data = await this.op("node.ping_node", {node:id});
         this.say(element, data.reachable
           ? "Reachable in " + (data.rtt_ms == null ? "an unknown time" : data.rtt_ms + " ms") +
             " via " + (data.via || "the mesh")
@@ -906,8 +941,9 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, uri ? "Dialling " + uri + "…" : "Dialling every address…");
       try{
-        const {ok, data} = await this.ask("/api/peers/retry", "POST", {id, uri:uri || ""});
-        if(!ok){ this.say(element, data.error || "Retry refused", true); return; }
+        const {ok, error, data} = await CHANNEL.ask(
+          "node.retry", {node:id, uri:uri || ""}, {local:this.here});
+        if(!ok){ this.say(element, error || "Retry refused", true); return; }
         this.say(element, (data.results || []).map((row) =>
           row.uri + ": " + row.outcome + (row.detail ? " (" + row.detail + ")" : ""))
           .join(" · ") || "Nothing to dial", !data.connected);
@@ -1009,7 +1045,7 @@ const NODEVIEW = {
     });
     if(!agreed) return;
     try{
-      await this.ask("/api/nodes/forget", "POST", {id});
+      await this.op("node.forget", {node:id});
       toast("Node forgotten");
       this.current = null;
       if(options.onGone) options.onGone();
@@ -1018,6 +1054,15 @@ const NODEVIEW = {
     }
   },
 };
+
+// This view is mounted by four pages, so it drops what it holds *itself* when
+// the node being driven changes — the alternative was four pages each
+// remembering to, and three of them did not: a card opened from chat kept
+// describing the machine you had just left until the page was reloaded.
+//
+// And it comes back rather than going blank: what is on screen is a question
+// ("tell me about this node"), and the answer now comes from another machine.
+CONTEXT.subscribe(() => NODEVIEW.reset());
 
 // A link that came up is the thing this view is about, so it does not wait for
 // a timer. The stream's frame already bounds how often that can happen, and a
@@ -1190,8 +1235,8 @@ async function boot(){
   // the same test every other page in this product makes.
   SESSION.load();
   try{
-    const response = await api("/api/state");
-    if(response.ok){ enter(); return; }
+    const {ok} = await CHANNEL.ask("node.state");
+    if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();
   $("login").classList.remove("hidden");
