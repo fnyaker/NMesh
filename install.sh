@@ -12,7 +12,7 @@
 #   ./install.sh --fleet                # …and enable the fleet app
 #   ./install.sh --prefix /srv/nmesh    # choose where it lives
 #   ./install.sh --no-start             # install and enable, don't start now
-#   ./install.sh --allow-update         # let the node run system updates as root
+#   ./install.sh --no-allow-update      # keep the node out of system updates
 #   ./install.sh --reset-password       # set a new console password, print it
 #   ./install.sh --uninstall            # remove the service and the files
 #   ./install.sh --uninstall --purge    # …and the node's identity + state
@@ -316,15 +316,17 @@ systemd_unit() {
     #   write even if sudo worked, and PrivateDevices hides the devices some
     #   post-install scripts need.
     #
-    # So the confinement follows the grant: full hardening by default, relaxed
-    # only for a node whose operator explicitly asked for system updates. The
-    # two must never be chosen independently, or one silently defeats the other.
+    # So the confinement follows the grant, whichever way round the default is:
+    # a node holding the grant gets the three directives relaxed, and
+    # `--no-allow-update` gets the fully hardened unit back along with the
+    # sudoers rule removed. The two must never be chosen independently, or one
+    # silently defeats the other.
     local confinement
     if [ "$updates" = true ]; then
-        confinement="# Relaxed because this node holds the update grant
-# (install.sh --allow-update): sudo cannot elevate under NoNewPrivileges, and a
-# package manager cannot write under ProtectSystem=full. Re-run install.sh
-# without --allow-update to get the hardened unit back.
+        confinement="# Relaxed because this node holds the update grant (the
+# default; install.sh --no-allow-update removes it): sudo cannot elevate under
+# NoNewPrivileges, and a package manager cannot write under ProtectSystem=full.
+# Re-run install.sh --no-allow-update to get the hardened unit back.
 NoNewPrivileges=no
 PrivateTmp=yes
 ProtectSystem=no"
@@ -478,7 +480,16 @@ DO_START=true
 UNINSTALL=false
 PURGE=false
 RESET_PASSWORD=false
-ALLOW_UPDATE=false
+# The node may run system updates unless told otherwise. It is one root command
+# — a fixed script, no arguments, which the node cannot rewrite (see the grant
+# below) — and a node that cannot take a security update is a worse outcome than
+# a node that can. `--no-allow-update` is the way to say no, and re-running with
+# it takes the grant back.
+ALLOW_UPDATE=true
+# …and whether a human said either word. The messages about a grant that could
+# not be made are worth printing to somebody who asked for it, and are noise on
+# every install that merely took the default.
+ALLOW_UPDATE_ASKED=false
 UPDATE_GRANTED=false
 NODE_ARGS=()
 
@@ -491,8 +502,8 @@ while [ $# -gt 0 ]; do
         --no-start)   DO_START=false; shift;;
         --uninstall)  UNINSTALL=true; shift;;
         --reset-password) RESET_PASSWORD=true; shift;;
-        --allow-update)   ALLOW_UPDATE=true; shift;;
-        --no-allow-update) ALLOW_UPDATE=false; shift;;
+        --allow-update)   ALLOW_UPDATE=true;  ALLOW_UPDATE_ASKED=true; shift;;
+        --no-allow-update) ALLOW_UPDATE=false; ALLOW_UPDATE_ASKED=true; shift;;
         --purge)      PURGE=true; shift;;
         -h|--help)    sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
         *)            NODE_ARGS+=("$1"); shift;;
@@ -786,9 +797,13 @@ fi
 # is allowed to run as root.
 if [ "$ALLOW_UPDATE" = true ]; then
     if [ -z "$RUN_USER" ]; then
-        warn "--allow-update: the node already runs as root, nothing to grant"
+        if [ "$ALLOW_UPDATE_ASKED" = true ]; then
+            warn "--allow-update: the node already runs as root, nothing to grant"
+        fi
     elif [ "$SUDO" = none ] && ! is_root; then
-        warn "--allow-update needs root to write a sudoers rule — skipped"
+        if [ "$ALLOW_UPDATE_ASKED" = true ]; then
+            warn "--allow-update needs root to write a sudoers rule — skipped"
+        fi
     else
         info "Granting $RUN_USER one root command (system updates)"
         WRAPPER="$("$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/nmesh_sudoers.py" --path 2>/dev/null)" || WRAPPER=""
@@ -812,16 +827,19 @@ if [ "$ALLOW_UPDATE" = true ]; then
                 ok "$RUN_USER may run $WRAPPER as root — and nothing else"
             fi
         else
-            warn "no package manager this node knows how to drive — update not granted"
+            if [ "$ALLOW_UPDATE_ASKED" = true ]; then
+                warn "no package manager this node knows how to drive — update not granted"
+            fi
         fi
         rm -f "$TMP_WRAP" "$TMP_RULE"
     fi
 else
-    # Re-running without the flag takes the grant away: the absence of a right
-    # has to be expressible, or it can only ever be added.
+    # `--no-allow-update` takes the grant away: the absence of a right has to be
+    # expressible, or it can only ever be added. It is the flag and no longer
+    # the *omission* of one, because the omission is now the grant.
     if [ -f /etc/sudoers.d/nmesh ]; then
         run_priv rm -f /etc/sudoers.d/nmesh
-        info "Removed the update grant (pass --allow-update to keep it)"
+        info "Removed the update grant (--no-allow-update)"
     fi
 fi
 

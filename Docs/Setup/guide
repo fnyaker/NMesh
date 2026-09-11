@@ -70,11 +70,16 @@ The generated systemd unit adds `NoNewPrivileges`, `PrivateTmp`,
 process and its children — so `sudo`, so the update wrapper, with a message that
 talks about a kernel flag and suggests nothing to do about it. And
 `ProtectSystem=full` mounts `/usr` read-only, where a package manager can write
-nothing. A node installed with `--allow-update` therefore gets a unit relaxed on
-those three directives (`PrivateTmp` stays), with a comment in the unit
-explaining why. Reinstalling without the flag removes the sudoers rule **and**
-restores the hardened unit: the two cannot be chosen separately, or one would
-silently undo the other.
+nothing. A node holding the update grant therefore gets a unit relaxed on those
+three directives (`PrivateTmp` stays), with a comment in the unit explaining
+why.
+
+**The grant is the default**, so that is the unit a plain `./install.sh`
+writes. A node that cannot take a security update is a worse outcome than a
+node that can, and what is granted is one fixed script and nothing else (below).
+`--no-allow-update` is how to say no: it removes the sudoers rule **and**
+restores the hardened unit, because the two cannot be chosen separately or one
+would silently undo the other.
 
 The symptom and the fix: [`FAQ.md`](../../FAQ.md).
 
@@ -233,9 +238,15 @@ one panel per transport, rendered from what the transport declares. See
 ### Letting the node run system updates
 
 ```bash
-./install.sh --allow-update          # grants the right
-./install.sh                         # running it again without the flag removes it
+./install.sh                         # grants the right (the default)
+./install.sh --no-allow-update       # takes it back, and re-hardens the unit
 ```
+
+The right is granted unless refused. The reasoning is the one that applies to
+every other default in this project: the failure it prevents — a node that
+cannot take a security update and needs a human on the machine to get one — is
+more likely, and worse, than the one it risks. What it risks is bounded to a
+single script, which is the point of the next paragraph.
 
 The fleet app's `update` capability needs root **with no human in front**. The
 right granted is not a general sudo rule — that would make any bug in the node a
