@@ -799,6 +799,12 @@ _SEEK_TTL          = 16        # max hops a seek travels
 # somebody who had not joined it; a joiner needs enough hops to find an inviter,
 # not the diameter of the network.
 _SEEK_TTL_PREAUTH  = 6
+# Neighbours one seek is handed to at each hop. One was greedy XOR, which fails
+# precisely when that neighbour has no path — and a seek has no reply, no retry
+# and no second attempt. Two, because a node forwards a given seek at most once
+# (node-wide dedup), so this is a factor on the packets a join costs and never
+# an exponent.
+_SEEK_FANOUT       = 2
 _RDV_MAX           = 512       # bounded reverse-path (rendezvous) table
 _RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
 _SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
@@ -7304,22 +7310,70 @@ class MeshNode:
 
     # -- relayed invitation (single block, no direct link needed) -----------
 
+    def _is_world_address(self, uri: str) -> bool:
+        """Could somebody on the open internet dial this?
+
+        A globally-routable IP, or a name — a hostname is *meant* to resolve to
+        somewhere reachable, and refusing to believe one would rule out every
+        node behind a DNS entry. A private or link-local address is reachable
+        only from the network it belongs to, and that is the whole distinction
+        this answers."""
+        result = _validate_uri(uri)
+        if result is None:
+            return False
+        hp = split_host_port(result[1])
+        if hp is None:
+            return False
+        host = hp[0]
+        if _is_ip_address(host):
+            return is_global_ip(host)
+        return bool(host)
+
     def _select_relays(self, limit: int = 5) -> list[str]:
-        """Addresses of nodes that can bridge an invitation to us. We pick the
-        reachable peers we dialled (we reached them, so a joiner likely can
-        too), preferring the freshest. Bounded."""
-        out: list[str] = []
+        """Addresses at which a joiner can reach a node that will bridge to us.
+
+        Three things were wrong with the old rule — the `remote_addr` of the
+        links *we* dialled, "we reached them so a joiner likely can too".
+
+        - **It is the address we used.** For a peer on our own LAN that is
+          `192.168.x.y`, and this block is being handed to somebody who is not
+          on our LAN. The joiner then works down a list of addresses that
+          cannot possibly connect, reports "no relay found", and the operator
+          goes and finds a node with a public IP to join against directly —
+          which is exactly what happened.
+        - **"We reached them" is not "a stranger can".** That is testable and
+          was not tested: a globally-routable address says it, a private one
+          says the opposite.
+        - **It skipped every peer that dialled us**, which is the half of the
+          mesh most likely to be publicly reachable in the first place.
+
+        So: every authenticated peer, by the addresses **it advertises** —
+        which is what it says a stranger can reach it at, and which (since
+        `advertised_uris` requires proof) is a claim it has had to earn.
+        World-reachable first, then the rest, because a LAN joiner still wants
+        the LAN ones and a list that is merely *ordered* costs nothing."""
+        world: list[str] = []
+        local: list[str] = []
         seen: set[str] = set()
-        for p in self._peers:
-            if (p.authenticated_id is not None and p.session is not None
-                    and p.is_client_side and p.remote_addr
-                    and _validate_uri(p.remote_addr) is not None
-                    and p.remote_addr not in seen):
-                seen.add(p.remote_addr)
-                out.append(p.remote_addr)
-            if len(out) >= limit:
-                break
-        return out
+        for peer in self._authenticated_peers():
+            node_id = peer.authenticated_id
+            if node_id is None:
+                continue
+            uris = list(self._known_addresses(node_id))
+            if peer.remote_addr and peer.remote_addr not in uris:
+                # An address we reached it at that it does not advertise. Last
+                # in its own group: it works for us, which is evidence, and it
+                # is not what the node says about itself, which is better.
+                uris.append(peer.remote_addr)
+            for uri in uris:
+                if uri in seen or _validate_uri(uri) is None:
+                    continue
+                seen.add(uri)
+                if self._is_world_address(uri):
+                    world.append(uri)
+                else:
+                    local.append(uri)
+        return (world + local)[:limit]
 
     def console_relay_invite(self) -> str:
         """Generate a single invite block for a node we want to bring in, even
@@ -8005,10 +8059,26 @@ class MeshNode:
             if p is not from_peer and p.authenticated_id is not None
             and p.session is not None
         ]
-        if candidates:
-            best = min(candidates,
-                       key=lambda p: target.distance(p.authenticated_id))
-            await best.send(packet.with_decremented_ttl())
+        # More than one, and that is not greed. Greedy XOR to a single
+        # neighbour is the routing that fails exactly when that neighbour has
+        # no path to the inviter — and a seek has no reply, no retry and no
+        # second attempt: it either arrives or the join does not happen, and
+        # the person holding the block is told "no session" with nothing to
+        # act on.
+        #
+        # It does not become a flood. A node forwards any given seek at most
+        # once (`_is_seen` above this call), so the width costs a factor and
+        # never an exponent; the TTL is already cut for a pre-auth ingress, and
+        # `_seek_allowed` bounds how many seeks one link may inject at all.
+        outgoing = packet.with_decremented_ttl()
+        for peer in sorted(candidates,
+                           key=lambda p: target.distance(p.authenticated_id)
+                           )[:_SEEK_FANOUT]:
+            try:
+                await peer.send(outgoing)
+            except Exception:
+                # One neighbour with a full buffer must not decide the join.
+                continue
 
     # -----------------------------------------------------------------------
     # AutoNAT — active reachability confirmation

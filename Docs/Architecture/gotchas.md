@@ -447,6 +447,30 @@ ceilings). The same reading applies to a bounded book: sixteen identities at
 one dial per five minutes is what being ready for a node that vanished for an
 afternoon costs, and it does not grow with the network.
 
+## The address that works for us is not the address to hand out
+
+A relay-invite block carries "relays the joiner can reach us through", and
+`_select_relays` filled it with the `remote_addr` of the links *this* node had
+dialled — commented "we reached them, so a joiner likely can too". On a mesh
+whose peers are mostly on the same LAN, that is a list of `192.168.x.y`, posted
+to somebody on a different network. The joiner tried each one, could not
+connect to any, and reported "no relay found"; the operator went and joined
+directly against a node with a public IP, and relayed join was written off as
+broken.
+
+The design document for the feature had already said what to do — *candidates =
+nodes with a `confirmed`, scope `world` descriptor* — two sections above where
+it describes the block. The code did something else, and nothing compared them.
+
+> **An address is relative to who is holding it.** Before putting one in
+> something that travels, ask which network the reader will be on. "It worked
+> from here" is evidence about here.
+
+Same reading as the public-IP entry below: the rule existed, one caller applied
+it and another did not. When a feature has a design note, diff it against the
+function that implements it — that is a cheaper review than reading the
+function twice.
+
 ## A send that returns is not a delivery
 
 `_send_to_candidates` tried up to five first hops and looked like failover. It
