@@ -447,6 +447,42 @@ ceilings). The same reading applies to a bounded book: sixteen identities at
 one dial per five minutes is what being ready for a node that vanished for an
 afternoon costs, and it does not grow with the network.
 
+## A send that returns is not a delivery
+
+`_send_to_candidates` tried up to five first hops and looked like failover. It
+was not. The only thing that made it move to the next candidate was
+`peer.send()` *raising* — a local write failing — and the failure that actually
+happens on a mesh is the one where the write succeeds: the relay accepts the
+packet and then drops it, or its own next hop is dead, or it forwards into a
+partition. From here those are identical to delivery.
+
+So a routed path had no liveness of its own at all. The first hop was picked by
+`_route_hints` (wherever traffic last arrived from) and then by XOR distance,
+both of which are guesses about topology and neither of which can be *wrong* in
+a way this node can observe. A direct link had a probe, a window, a run of
+silence, and a reaper. A path through one hop had none of it, and "the node I
+was talking to stopped answering" had no mechanism anywhere that could notice.
+
+> **A send path whose only failure signal is a local exception cannot fail
+> over.** Ask what the medium does when the far end is broken but the near end
+> is fine — if the answer is "returns normally", the retry above it is
+> decoration.
+
+`routed.py` gives a path the same three questions a link answers, and the send
+path then prefers what it has measured over what it guessed. Two things fell
+out of writing it that are worth keeping:
+
+- **Giving up has to be remembered.** The first version dropped a dead path and
+  the very next pass re-opened it, because the thing that had chosen that hop —
+  a hint, XOR proximity — had not changed and could not. A decision that the
+  next pass reverses is a loop, not a decision (`PathBook.shunned`).
+- **A key that is "the target" only sometimes.** `_stripe` looked the bundle up
+  by `peers[0].authenticated_id`, which is the destination only while the head
+  is a direct link to it. That was true of every bundle that could exist at the
+  time and silently false of every routed one, where the head is a neighbour
+  that is not the destination at all. It is keyed by the target now — the thing
+  it was always meant to be keyed by, spelled as itself.
+
 ## Two nodes, one public IP, one advertised URI
 
 The two reports were "dropped an address of 2df868… — it answers as somebody
