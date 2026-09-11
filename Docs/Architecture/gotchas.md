@@ -421,6 +421,225 @@ precondition looked like part of the world rather than part of the work.
 > If the answer is "something else, usually" — or if your own test has to arrange
 > it by hand — that arrangement is a piece of the feature you have not written.
 
+## A recovery phase that ends hands the work on — to nobody
+
+`_reconnect` chased a lost identity hard for `_RECONNECT_WINDOW = 120 s` and
+then dropped it, and the comment said what the handover was: *after that the
+ordinary machinery still holds the identity, its addresses and its on-demand
+path*. Every word of that is true and none of it dials. The "ordinary
+machinery" was the address-retry loop, which runs only on a medium that
+declared a `retry_interval` — `0` on every transport in the tree — and
+on-demand routing, which wakes when an app sends. A peer that came back four
+minutes later therefore stayed unreached until a person pressed **"retry every
+address"**, and pressed it again the next time, and the next.
+
+That is the tell. When a self-repairing system has a button an operator learns
+to press on a schedule, the repair is not slow — it is **not there**, and the
+operator is standing in for it. The phase did not hand the work on, it dropped
+it, because the thing it named was off by default.
+
+> **A phase that ends must name the thing that takes over, and that thing must
+> be running.** Follow the handover in the code — not in the comment — until
+> you reach something that actually dials, writes or sends on a stock node.
+
+The chase now slows instead of stopping (`_reconnect_delay`: one ladder, two
+ceilings). The same reading applies to a bounded book: sixteen identities at
+one dial per five minutes is what being ready for a node that vanished for an
+afternoon costs, and it does not grow with the network.
+
+## An accusation needs somebody to accuse
+
+`RELEASE_DATA` carries one slice of a release, and an unmatched one was charged
+as a protocol violation against the link it arrived on. The comment above it
+explained a real attack — any peer racing the real answer with rubbish can make
+every download of a release fail for ever, one packet per slice — so the charge
+looked like the defence against it.
+
+It was not, twice over.
+
+- The message is **routable**. The link it arrives on is usually a relay, and
+  `src_id` on a routed packet is not authenticated, so the charge landed on
+  whoever *carried* it. The attacker it describes sets `src_id` to the real
+  source anyway, so the charge never reached them.
+- The common unmatched answer is not an attack at all. It is a slice that
+  arrives after `_pull_slice` timed out and popped its key — which over a slow
+  multi-hop path, exactly the path a mesh update takes, happens once per slice.
+  A hundred-slice download handed an honest relay a hundred violations, past
+  the *suspect* threshold, whereupon its traffic is dropped, its link is cut,
+  and the reconnect book refuses to chase it. **Two nodes could take each other
+  off the mesh by updating from each other.**
+
+> **Before charging abuse, ask who the counter names.** On a routed plane the
+> link and the sender are different parties, and a rule that cannot tell them
+> apart punishes the one doing the work.
+
+It is charged only where the attribution holds — a direct link from the node
+claiming to be the source — and dropped in silence everywhere else, which is
+what every other "an answer to a question we did not ask" handler in the node
+already did. The neighbouring key-share handlers had the right version the
+whole time, three hundred lines away.
+
+## The address that works for us is not the address to hand out
+
+A relay-invite block carries "relays the joiner can reach us through", and
+`_select_relays` filled it with the `remote_addr` of the links *this* node had
+dialled — commented "we reached them, so a joiner likely can too". On a mesh
+whose peers are mostly on the same LAN, that is a list of `192.168.x.y`, posted
+to somebody on a different network. The joiner tried each one, could not
+connect to any, and reported "no relay found"; the operator went and joined
+directly against a node with a public IP, and relayed join was written off as
+broken.
+
+The design document for the feature had already said what to do — *candidates =
+nodes with a `confirmed`, scope `world` descriptor* — two sections above where
+it describes the block. The code did something else, and nothing compared them.
+
+> **An address is relative to who is holding it.** Before putting one in
+> something that travels, ask which network the reader will be on. "It worked
+> from here" is evidence about here.
+
+Same reading as the public-IP entry below: the rule existed, one caller applied
+it and another did not. When a feature has a design note, diff it against the
+function that implements it — that is a cheaper review than reading the
+function twice.
+
+## A send that returns is not a delivery
+
+`_send_to_candidates` tried up to five first hops and looked like failover. It
+was not. The only thing that made it move to the next candidate was
+`peer.send()` *raising* — a local write failing — and the failure that actually
+happens on a mesh is the one where the write succeeds: the relay accepts the
+packet and then drops it, or its own next hop is dead, or it forwards into a
+partition. From here those are identical to delivery.
+
+So a routed path had no liveness of its own at all. The first hop was picked by
+`_route_hints` (wherever traffic last arrived from) and then by XOR distance,
+both of which are guesses about topology and neither of which can be *wrong* in
+a way this node can observe. A direct link had a probe, a window, a run of
+silence, and a reaper. A path through one hop had none of it, and "the node I
+was talking to stopped answering" had no mechanism anywhere that could notice.
+
+> **A send path whose only failure signal is a local exception cannot fail
+> over.** Ask what the medium does when the far end is broken but the near end
+> is fine — if the answer is "returns normally", the retry above it is
+> decoration.
+
+`routed.py` gives a path the same three questions a link answers, and the send
+path then prefers what it has measured over what it guessed. Two things fell
+out of writing it that are worth keeping:
+
+- **Giving up has to be remembered.** The first version dropped a dead path and
+  the very next pass re-opened it, because the thing that had chosen that hop —
+  a hint, XOR proximity — had not changed and could not. A decision that the
+  next pass reverses is a loop, not a decision (`PathBook.shunned`).
+- **A key that is "the target" only sometimes.** `_stripe` looked the bundle up
+  by `peers[0].authenticated_id`, which is the destination only while the head
+  is a direct link to it. That was true of every bundle that could exist at the
+  time and silently false of every routed one, where the head is a neighbour
+  that is not the destination at all. It is keyed by the target now — the thing
+  it was always meant to be keyed by, spelled as itself.
+
+## Two nodes, one public IP, one advertised URI
+
+The two reports were "dropped an address of 2df868… — it answers as somebody
+else", constantly, and "handshake refused: the challenge presents our own
+identity". They read as routing bugs. They are one line of arithmetic.
+
+`_extra_addrs` holds IPs somebody reported seeing us at. `advertised_uris()`
+paired each with the **local listener port**. `81.240.12.33` + `:9000` is not an
+address — it is a claim that this machine's NAT forwards 9000, made from no
+evidence — and every node behind that router makes the *same* claim. The router
+forwards to one of them. So:
+
+- a third node dials the URI in B's entry, reaches A, proves A's identity
+  against its own challenge, and strikes the address off B — **correctly**;
+- A dials the URI in B's entry, hairpins back to itself, and refuses its own
+  handshake — **correctly**.
+
+Every component behaved exactly as designed. The input was a lie, and nothing
+in the pipeline was in a position to notice, because the lie was manufactured
+locally by string concatenation and then gossiped as fact.
+
+> **Before trusting a value, ask what *produced* it, not what carries it.** An
+> address that arrived over the network has at least been asserted by somebody;
+> one this node assembled from two facts it holds has been asserted by nobody,
+> and it is the second kind that travels furthest before anyone doubts it.
+
+The tell that it was always known: `public_endpoints()`, four hundred lines
+away, already refused to put an unconfirmed address in a join ticket, and said
+why — *we think this address is public is not the same as an inbound connection
+arrived on it*. The rule existed; one caller applied it and the other did not.
+When you find a rule stated in one place, grep for the other places that need
+it before assuming it is local.
+
+Two smaller traps came out of the same fix:
+
+- **One proof, two audiences.** `ip_reachability` stamped a single `confirmed`
+  onto both the `lan` and the `world` descriptor, so the laptop next to us
+  reaching our LAN address made us announce ourselves as a relay for the
+  internet — the black hole `_note_reach_probe` was written to prevent, reached
+  by a different door.
+- **The responder dials back the address it observed.** Asking a peer on our own
+  LAN to confirm our reachability gets a truthful "yes" about our LAN address,
+  which is not the question. Only a peer off our networks can answer it, so
+  `probe_reachability` asks one of those by preference and only that answer may
+  widen what we advertise.
+
+## A timeout named for one caller, spent by every caller
+
+`_ensure_route_to(target, timeout=_ON_DEMAND_TIMEOUT)`. Five seconds, and the
+name says exactly who that is for: a packet is queued behind an on-demand dial.
+Both recovery loops — `_reconnect_pass` and `_maintain_neighbors` — took the
+default, because a default is what you take when you have no opinion, and
+neither of them had been asked to have one.
+
+Underneath, `_connect_routing` splits whatever it is given across **every**
+address of the node. So a peer advertising four addresses got 1.25 s each,
+which does not open a socket and finish a ~21 kB post-quantum handshake on any
+real WAN link. The dials failed **on time, not on merit** — and the retry log
+recorded `timeout` against every address, which reads like four bad addresses
+rather than one bad budget.
+
+What made it invisible for so long is that the workaround worked perfectly:
+the console's "retry every address" gives each address `_RETRY_DIAL_TIMEOUT`
+(8 s) to itself with no shared budget, so it connected first go, every time.
+The button looked cleverer than the node. It was only more patient, and its
+reliability is what kept the operator pressing it instead of reporting a bug.
+
+> **A constant named for a caller is a constant every other caller inherits by
+> accident.** When one is a default, read its name as a question to each call
+> site — *is a packet waiting on this one?* — and give the ones that answer no
+> a number of their own.
+
+`_RECOVERY_TIMEOUT` is that number, and `_connect_routing` now caps each
+address at one whole dial as well as sharing the remainder, so a large budget
+cannot be eaten by the first dead address.
+
+## A lifetime average cannot notice what it is being asked about
+
+`_loss_factor` — which decides which of a node's links carries traffic, whether
+a link is worth replacing, and whether a candidate beat the incumbent — read
+`LinkQuality.loss()`: probes lost over probes sent, for the life of the link.
+`LinkQuality`'s own docstring says why that cannot work ("a link that carried
+traffic for an hour and then died never shows a high lifetime share — a
+thousand good probes outvote the dead ones"), and the class had already grown
+the window that can (`recent_loss()`, the last fifty outcomes) for MLO. The
+choice function was simply never moved onto it.
+
+So a link that had been perfect all afternoon and broke ten minutes ago kept a
+loss factor of about zero. It stayed the *preferred* link of the pair, on every
+screen and in every routing decision, while nothing came back from it — and the
+only thing that could dislodge it was `_reap_silent_links`, which needs total
+silence and does not fire on a link that answers one probe in five.
+
+> **A number computed over "ever" cannot answer a question about "now".** When
+> a metric feeds a decision, read the decision's tense off the sentence it is
+> in, and check the metric has the same one.
+
+Both readings are kept and both are shown, named for what they are (`loss` and
+`recent_loss`): the lifetime share is what an operator wants when asking how
+good a link has *been*.
+
 ## A publish path that only the test suite ever called
 
 `publish_pseudo()` replicated this node's name claim into the keyed directory.
@@ -1402,8 +1621,15 @@ before and after.
   an app sends again, so a conversation stayed dead until somebody typed into
   it. The fix is a separate book (`_reconnect`, see
   [`routing.md`](routing.md)): an established link lost involuntarily is chased
-  from `0.5 s`, doubling, for two minutes. When you are looking at "it takes
-  ages to come back", look there and not at `_maintain_neighbors`.
+  from `0.5 s`, doubling, for two minutes — and then **patiently**, at
+  `_RECONNECT_PATIENT_MAX = 300 s`, for as long as we want that node, because
+  the two-minute version handed the work to a loop no stock node runs (see
+  "A recovery phase that ends hands the work on — to nobody" above). When you
+  are looking at "it takes ages to come back", look there and not at
+  `_maintain_neighbors`. When you are looking at "it came back and it is
+  terrible", look at `_rescue_loop` instead: a link that is *up* and losing a
+  fifth of its probes is neither dead nor lost, and neither of those books has
+  anything to say about it.
 - **A link *we* cut must never enter that book.** `_reap_peer` is the teardown
   path for a dead socket **and** for a tarpitted peer whose hold expired
   (`_reap_expired_tarpits`) — so `_note_node_lost` checks `peer.tarpit_until`

@@ -407,12 +407,26 @@ book (`_reconnect`) that is chased hard and briefly:
   has lost nothing while one of them stands (`_link_to(node_id, exclude=peer)`),
   and one entry covers every way back there is: `_ensure_route_to` works down
   every address we hold and then tries a hole punch.
-- **The cadence.** First attempt `_RECONNECT_FIRST_DELAY = 0.5 s` after the
-  loss (a socket still closing is not dialled), then doubling per failure to a
-  `_RECONNECT_BACKOFF_MAX = 15 s` ceiling, and the chase stops after
-  `_RECONNECT_WINDOW = 120 s`. The delay is counted from **after** the dial
-  returns, not before it: a dial takes seconds, and a delay counted from before
-  would already have expired on arrival — a backoff that exists on paper only.
+- **The cadence: a ladder, then a heartbeat** (`_reconnect_delay`, the one
+  place both live). Inside `_RECONNECT_WINDOW = 120 s` the first attempt is
+  `_RECONNECT_FIRST_DELAY = 0.5 s` after the loss (a socket still closing is
+  not dialled) and the gap doubles per failure to
+  `_RECONNECT_BACKOFF_MAX = 15 s` — the shape of "it might be back any second
+  now". Past the window it is one flat `_RECONNECT_PATIENT_MAX = 300 s`: two
+  minutes of failed attempts have already established that this node is not
+  coming back in a hurry, and what it is owed after that is persistence, not
+  urgency. Flat, and deliberately **not the same ladder continued**: an attempt
+  count stands in for elapsed time only while attempts are cheap, and a dial on
+  `_RECOVERY_TIMEOUT` is not, so the count at the end of the window says how
+  expensive the dials were rather than how long we have been trying.
+  The delay is counted from **after** the dial returns, not before it: a dial
+  takes seconds, and a delay counted from before would already have expired on
+  arrival — a backoff that exists on paper only.
+- **The budget is the recovery one, not the on-demand one**
+  (`_RECOVERY_TIMEOUT`, see
+  [`transports.md`](transports.md#a-recovery-dial-is-not-an-on-demand-dial)).
+  This is the difference the console's button had over every automatic path,
+  and it was never a better idea about which address to try.
 - **Where a loss is noticed.** `_reap_peer` (the receive loop exited),
   `_drop_failed_peer` (a send failed) and `_reap_silent_links` (probes stopped
   coming back) all call `_note_node_lost`. The silent-link sweep removes every
@@ -441,16 +455,116 @@ book (`_reconnect`) that is chased hard and briefly:
   but never re-arms the backoff, or a peer that connects and drops would buy a
   dial per drop (gotchas §12 again — no loop driven by what a peer does may run
   flat out).
-- **When it ends.** `_stop_chasing` is the one way out of the book, and three
-  things ask for it: a handshake completing (the link is back, by our dial or
-  by theirs), the operator forgetting the node (`console_forget_node` — dialling
-  it back twice a second is not forgetting it), and a revocation being enforced
-  (`_enforce_revocation`, which drops the entry *before* tearing the links down,
-  since the teardown itself would otherwise enrol it). Otherwise the window
-  runs out. After that the ordinary machinery still holds the identity, its
-  addresses and its on-demand path — this book is the *urgent* phase only.
+- **When it ends — and it is not when the window does.** `_stop_chasing` is
+  the one way out of the book, and three things ask for it: a handshake
+  completing (the link is back, by our dial or by theirs), the operator
+  forgetting the node (`console_forget_node` — dialling it back twice a second
+  is not forgetting it), and a revocation being enforced (`_enforce_revocation`,
+  which drops the entry *before* tearing the links down, since the teardown
+  itself would otherwise enrol it). `_reconnect_due` also drops an identity the
+  moment any other path reaches it, and the book is `_RECONNECT_NODES_TRACKED`
+  entries, LRU.
+  The **end of the window used to be a fourth way out, and was a hole**: the
+  identity left the book into the care of a loop no stock node runs
+  (`retry_interval` is `0` on every transport), so a peer that came back four
+  minutes later stayed unreached until somebody pressed the console's "retry
+  every address" by hand. That is an operator standing in for self-repair. The
+  chase now slows down instead of stopping — sixteen identities at one dial per
+  five minutes is a cost that does not grow, and it is the whole price of being
+  ready for a node that vanished for an afternoon.
+
+### Several nodes lost at once is evidence about *us*
+
+Losing one node says that node went away. Losing `_LOSS_BURST_NODES = 3`
+distinct identities inside `_LOSS_BURST_WINDOW = 20 s` says something none of
+the three says alone: they cannot all have gone down together, so what moved is
+**this machine** — a lease renewed, a VPN dropped, a resume on another network,
+an interface that changed under the process. Every address we advertise is then
+wrong and the ladder above is patiently dialling out of a hole.
+
+`_note_loss_burst` counts it, and only over the population `_note_node_lost`
+has already filtered down to genuine involuntary losses: a tarpit expiring and
+a revocation enforced are this node cutting links **on purpose**, and counting
+those would have a node re-probing STUN every time it cut an abuser. On a burst
+it pokes the net monitor **urgently** (see
+[`transports.md`](transports.md#address-discovery--reachability)) and wakes the
+address-retry loop. Bounded twice, because a peer flapping its link is what can
+trigger it: `_LOSS_BURST_COOLDOWN = 60 s` here, and a floor of its own inside
+the monitor.
 
 Locked down by `tests/test_reconnect.py`.
+
+## Routed paths: measured, not assumed (`routed.py`)
+
+A direct link is probed, scored and replaced when it stops working. A **routed**
+path — the same packet, addressed to the same id, handed to a different
+neighbour — had none of that. `_route_candidates` picked a first hop by
+`_route_hints` (whichever peer traffic from that id last happened to arrive
+through), then by XOR distance. Both are guesses about topology, and neither
+can see the failure that matters: a relay that accepts a packet and drops it is
+indistinguishable from one that delivers it, because `peer.send()` returns
+either way. Nothing noticed and nothing retried, so a node that had been
+reachable a minute ago simply stopped answering — and the fix in the field was
+to make a direct link by hand.
+
+So a path is an object (`routed.Path`), and the same three questions are asked
+of it as of a link: does it answer, how fast, how much does it lose.
+
+- **How it is probed.** An `ECHO_REQUEST` addressed to the target and *forced*
+  down one chosen first hop (`_probe_path` sends on that peer rather than
+  through `_route_outbound`, which would pick a hop for itself and then the
+  measurement would be about whatever it picked). The reply comes back by
+  whatever route the far end chooses, so the number is "reach this id through
+  this neighbour and hear back" — which is the question that decides whether to
+  send down it, and the same bargain a PONG strikes for a link.
+- **What gives up on one.** A **run** of `routed.DEAD_PROBES = 3` unanswered
+  probes, never a share: the lifetime share of a path that worked for an hour
+  and then broke cannot rise fast enough to notice, which is the whole of what
+  this has to notice. `LinkQuality.expire` charges the unanswered ones, exactly
+  as the keepalive does for links — without it the window only ever grows by
+  answers and a broken path reads as a quiet one.
+- **Giving up is remembered.** `SHUN_MIN = 60 s`, doubling to `SHUN_MAX`, per
+  (identity, first hop). Otherwise the pass that drops a dead path re-opens it
+  on the next one: what chose that hop has not changed and cannot, so giving up
+  has to be remembered or it is a loop rather than a decision. A probe that
+  answers forgives it.
+- **What the send path does with it.** A direct link to the target still leads.
+  Failing that, a first hop we have **measured** leads over one we guessed —
+  and the guesses stay in the list behind it, as fallbacks.
+- **Bounds.** The book is bounded on both axes (`MAX_TARGETS = 16`,
+  `MAX_PER_TARGET = 3`) and follows what the node is actually *talking to*
+  (`note_interest`, `INTEREST_TTL = 300 s`) rather than what it has heard of. A
+  pass costs `_PATH_PROBES_PER_PASS = 4` probes with a `_PATH_FLOOR` between
+  passes, and the loop waits on there being a warm identity at all.
+
+### MRLO and HMLO
+
+`mlo.Bundle` is written over opaque keys, and a path is as opaque as a link. So
+a bundle member is simply *a way to reach an identity*, of which there are two
+kinds, and the bundle never learns which is which: it reads `recent_ms`,
+`recent_loss` and `recent_probes` off both, and `node._member_peer` turns
+whichever it picked back into a link to send down.
+
+- **MRLO** — several measured routed paths to one identity carrying its traffic
+  together, with no direct link at all.
+- **HMLO** — the hybrid: a direct link and a routed path measured at the same
+  time. If they are within one skew of each other the bundle spreads traffic
+  over both; if they are not — usually, since a routed path crosses more hops —
+  the routed one stays measured and ready, and **losing the direct link costs a
+  turn of the send order rather than a reconnect**. That is the part that does
+  not need MLO enabled at all: `_route_candidates` already orders direct first,
+  then measured first hops, and `_send_to_candidates` walks the list.
+- **What a healthy direct link is owed** is exactly one warm standby, probed on
+  its own slower clock (`_PATH_STANDBY_INTERVAL = 60 s`) because nothing is
+  riding on it. A direct link that is *failing* (`_link_is_failing`) is on its
+  way out, and then the identity wants as many measured ways there as it can
+  have, at `_PATH_PROBE_INTERVAL`.
+- `_stripe` is keyed by the **target**. It used to read
+  `peers[0].authenticated_id`, which is the target only while the head is a
+  direct link to it — true of every bundle that could exist then, false of
+  every routed one.
+
+Locked down by `tests/test_routed_paths.py`.
 
 ## The size of a `FOUND_NODE` (a post-quantum constraint)
 
@@ -513,8 +627,13 @@ B↔C is Wi-Fi…").
 
 ### What exists today
 
-- `advertised_uris()` = every listening URI expanded over `_local_ips` +
-  `_extra_addrs` (the discovered public IP, observed addresses).
+- `advertised_uris()` = every listening URI expanded over `_local_ips`, and
+  over `_extra_addrs` (the discovered public IP, observed addresses) **only on a
+  transport somebody off our own networks has actually reached us on**. A public
+  IP paired with our own listener port is a claim about somebody else's NAT, and
+  two nodes behind one public IP used to make the same claim and then tear each
+  other's entry down over it — see
+  [`transports.md`](transports.md#our-own-public-address-is-proved-not-guessed).
 - The **PING carries `advertised_uris`**; `_handle_ping` does
   `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
   `_validate_uri` filters before adding ("reject by default").

@@ -151,7 +151,9 @@ address. It never raises: a dial that fails is the normal case, not an error.
 
 ## Re-dialling an address
 
-Three mechanisms, one dial function (above).
+Four mechanisms, one dial function (above). Three of them run by themselves;
+the first exists so that an operator can *watch* one address, not so that they
+have to stand in for the others.
 
 **By hand** — `console_retry_addresses(node_hex, uri="")` replays one specific
 address, or all of them (stopping at the first that works: "give me back a
@@ -179,14 +181,66 @@ flood:
 A node already linked is never re-dialled, and the loop dies on nothing: a
 recovery loop that stops is a silent loss of recovery.
 
+**When a link dies** — the reconnect book (`_reconnect`, see
+[`routing.md`](routing.md#getting-back-a-node-whose-link-just-died-_reconnect)).
+This is the one that covers a stock node, since the loop above is off on every
+transport by default: an established link lost *involuntarily* enrols its
+identity and `_ensure_route_to` works down every address we hold for it and
+then tries a hole punch — hard for two minutes, patiently for as long as we
+want that node. A link **we** cut (tarpit, noise, a revocation enforced) never
+enrols: dialling it back undoes the cut and tells it what we noticed.
+
+**When a link stops working without dying** — `_rescue_loop`, below. Neither of
+the two above covers it: the link is up, so nothing died, and a node already
+linked is never re-dialled.
+
+### A recovery dial is not an on-demand dial
+
+`_ensure_route_to(target, timeout)` covers the whole acquisition — a Kademlia
+lookup if the id is unknown, then `_connect_routing` walking the addresses,
+then a hole punch — and `_connect_routing` splits what is left across **every**
+address. Both recovery loops passed the default, `_ON_DEMAND_TIMEOUT = 5 s`,
+which is the right number for its name: a packet is queued behind an on-demand
+dial and an app is waiting.
+
+A peer advertising four addresses therefore gave each of them **1.25 s** —
+less than opening a socket and finishing a ~21 kB post-quantum handshake takes
+on any real WAN link. The recovery loops dialled and failed *on time rather
+than on merit*; the operator then pressed **Retry every address**, where each
+address gets `_RETRY_DIAL_TIMEOUT = 8 s` to itself and no shared budget, and
+watched it connect first go. The button looked cleverer than the node. It was
+only more patient.
+
+So a dial nobody is waiting on says so: `_RECOVERY_TIMEOUT`
+(`_RETRY_DIAL_TIMEOUT × _DIAL_LOG_ADDRESSES`) is what `_reconnect_pass` and
+`_maintain_neighbors` pass, so a whole walk can give every address what the
+button gives it. Nothing is blocked meanwhile — `_pending_connections` makes a
+concurrent on-demand caller wait on its *own* timeout, not on this one.
+
+And `_connect_routing` gives each address the **smaller** of its fair share of
+what is left and one whole `_RETRY_DIAL_TIMEOUT`: the share is what stops a
+transport that accepts but never authenticates from hiding fresher URIs behind
+it, the cap is what stops one dead address from eating a whole recovery budget
+and leaving nothing for the punch. On an on-demand dial the share is the
+smaller of the two and nothing changes. It also walks `_known_addresses` rather
+than sorting `entry.addresses` a second time — "the addresses we hold for this
+node, in the order we would try them" is one claim, and the table, the button
+and this walk can no longer show one order and dial another.
+
 ## Choosing between a node's addresses: priority × latency
 
 Two things decide, and they are not the same kind of thing.
 
 - **What the medium is worth** — `priority`, an option declared by every
-  transport, from −254 to 254. Shipped defaults: `udp` **10**, `tcp` **0**,
-  `spool` **−50**. The core has no opinion here: only the operator knows whether
-  their LoRa link is the precious one or the last resort.
+  transport, from −254 to 254. Shipped defaults: `tcp` **0**, `udp` **−10**,
+  `spool` **−50**. The core has no opinion about *your* media: only the
+  operator knows whether their LoRa link is the precious one or the last
+  resort. What it does have an opinion about is the two it ships — UDP used to
+  ship *above* TCP, and it is the wrong way round. UDP is what reaches a node
+  no listener can be opened to, which is worth a great deal; but a datagram
+  path loses where a stream does not, and a link losing probes is a link
+  somebody ends up reconnecting by hand. So UDP is the fallback it actually is,
+  and an operator who knows better raises it.
 - **What the address measures** — the last duration recorded for that URI in
   `_dial_log`.
 
@@ -234,6 +288,17 @@ probe, and half the traffic went down it.
 ```
 _link_score(peer) = _address_score(uri, rtt) × (1 − loss) ** _LOSS_PENALTY_EXP
 ```
+
+**`loss` here is the recent window, not the lifetime share** (`_loss_factor`
+reads `recent_loss()` and falls back to `loss()` only while the window holds
+fewer than two outcomes). Every question this factor is asked is about *now* —
+which link do I send down, is this one worth replacing, did the candidate beat
+the incumbent — and the lifetime share answers none of them: a link that
+carried traffic for an hour and then died still shows a share near zero,
+because a thousand good probes outvote the dead ones. Read that way it was the
+better-behaved link on every screen and in every choice, right up to the point
+where nothing came back from it at all. The console shows both, named for what
+they are (`loss` and `recent_loss`).
 
 Multiplied, not shifted, because loss is not "a slower link" — it is a link that
 does not work. At `_LOSS_PENALTY_EXP = 4`, one probe in ten lost costs about a
@@ -284,6 +349,63 @@ Three things keep it from cutting something that works:
 Cutting heals the link rather than losing the node: the identity, its addresses
 and the routes through it are untouched (`_safe_stop_peer`, not `_reap_peer`),
 maintenance is woken, and the next pass dials it again.
+
+## Replacing a link that is losing too much to be one (`_rescue_loop`)
+
+Scoring loss keeps a rotten link out of the traffic; `_reap_silent_links` cuts
+one that answers **nothing**. Between the two sits the link an operator
+actually complains about: it answers four probes in five, so it is never cut —
+and when it is the only link to that node, a score has nothing to prefer over
+it. Nothing in the node dialled anything, and getting a working link back meant
+pressing "retry every address" by hand, over and over.
+
+So the node presses it. The keepalive sweep names the identity and a bounded
+pass does exactly what the button does.
+
+1. **Naming it** (`_note_failing_links`, on the sweep, where every other
+   judgement of a link's probe history already lives). A link is *failing* when
+   `recent_loss(minimum = _LOSS_RESCUE_PROBES = 10) > _LOSS_RESCUE_SHARE`
+   (**20 %**). Only the recent window: the lifetime share of a link that worked
+   all afternoon and broke ten minutes ago is still near zero, which is the
+   whole complaint. Below ten outcomes the answer is `None` — *unknown*, never
+   a verdict — and a peer too old to echo a probe token records no outcomes at
+   all (see `ping`), so it can never be called failing on evidence we do not
+   have.
+2. **Only an identity every one of whose links is failing.** A node reached
+   over two media still has a working way there and `_link_score` already sends
+   the traffic down it; opening a third link to fix that is paying a handshake
+   to solve nothing. An identity that recovers is dropped from the book rather
+   than left to be spent later.
+3. **Dialling** (`_rescue_link`). Down that identity's addresses in preference
+   order, at most `_RESCUE_DIALS_PER_PASS = 4`, stopping at the first that
+   authenticates. **The address already in use is a candidate like any other**,
+   and is often the only one there is: a half-open TCP connection and a NAT
+   mapping that expired are both repaired by a *new* connection to the same
+   place, not by a different address. The dial is `probe=True`, so it is
+   `probation` before its handshake can finish and the duplicate reaper leaves
+   the pair alone (see `_collapse_redundant_links` below).
+4. **Keeping the better one.** Both links are measured with real probes
+   (`_measure_peer`) and compared on `_link_score` — the same rule that chooses
+   which link carries traffic and which address gets dialled, because those are
+   one question and a second rule here would contradict the first the day
+   either changes. One verdict differs from steering's: an incumbent that
+   answers **nothing** loses outright, since that silence is the entire reason
+   we dialled. The loser is closed either way.
+
+Every bound is one the MLO second-link dial already uses, because it is the
+same risk — a loop that a peer's behaviour can start:
+
+| bound | value | what it prevents |
+|---|---|---|
+| one identity per pass | — | a bad minute on the network costing a dial per node |
+| `_RESCUE_FLOOR` | 5 s | a link flapping around the threshold buying a handshake per sweep |
+| `_RESCUE_MIN` … `_RESCUE_MAX` | 60 s → 900 s | re-dialling a node whose every address is as bad as the link we hold |
+| `_RESCUE_TRACKED` | 16 | either book growing with the network |
+| `_RESCUE_IDLE_MAX` | 300 s | a wake somehow missed costing the feature rather than a delay |
+
+The loop waits on the book being filled and on nothing else: a node whose links
+all work never wakes it. It never raises — this one dying would be a silent
+loss of recovery, in the state an operator notices last.
 
 ## Steering an address on latency (`dynamic_address`, off by default)
 
@@ -512,11 +634,74 @@ site in the tree still using the executor asyncio joins at shutdown (gotchas §2
 **An AutoNAT answer is only believed if we asked the question.** `probe_reachability`
 records `(peer id, scheme)` with a short TTL (`_note_reach_probe`), and
 `_handle_reach_probe_ack` requires a match, consumes it, and ignores anything
-else. `_inbound_schemes` decides what the node advertises and whether it offers
-itself as a relay, so an unsolicited "yes" from one peer could make a NATted node
-announce itself as reachable — a black hole for everyone who then routes through
-it. Contrast the *passive* signal in `_handle_handshake`: an inbound connection
+else. What a node advertises and whether it offers itself as a relay rests on
+this, so an unsolicited "yes" from one peer could make a NATted node announce
+itself as reachable — a black hole for everyone who then routes through it.
+Contrast the *passive* signal in `_handle_handshake`: an inbound connection
 that authenticated is proof, not a claim.
+
+### Our own public address is proved, not guessed
+
+`_extra_addrs` holds IPs somebody reported seeing us at — the HTTPS probe,
+`OBSERVED_ADDR`, STUN. `advertised_uris()` paired each of them with the **local
+listener port** and announced the result. That is not an address. It is a claim
+that the NAT in front of this machine forwards that port, made from no evidence,
+and the mesh carried it to everybody.
+
+Two nodes behind one household or office IP therefore announced the **same
+URI**, and took turns being wrong about it: whoever the router forwards to
+answers, so the other one's entry is struck off (`note_wrong_address` — "it
+answers as somebody else"), and a node whose own router forwards back to itself
+dials its own public address and refuses its own handshake ("the challenge
+presents our own identity"). Both were read as bugs in the mesh. Neither was:
+the mesh was doing exactly the right thing with a false claim.
+
+`public_endpoints()` — what a join ticket carries — already held the rule:
+*we think this address is public* is not the same as *an inbound connection
+arrived on it*. The gossip path simply never applied it.
+
+- **Two audiences, two proofs** (`ip_utils.ip_reachability`). A `lan`
+  descriptor is confirmed by any inbound authenticated link: the listener
+  works. A `world` descriptor is a claim about the NAT, and only a connection
+  from **off our own networks** supports it — `node._off_our_networks`, which is
+  a globally-routable source address and nothing subtler. A relayed link is
+  never evidence about a listener: nothing was opened to us.
+- **`_inbound_schemes` and `_public_schemes`** are the two sets that follow
+  from that. The first still decides relay-*capability* in the LAN sense; the
+  second is what `advertised_uris()` requires before pairing a discovered public
+  IP with a listener's port, and what `relay_capable()` ends up resting on.
+- **Local addresses need no proof.** They are addresses of interfaces on this
+  machine; a peer that cannot reach one simply fails to.
+- **The operator's escape hatch already existed**: only *wildcard* listen URIs
+  are expanded, so somebody who knows their forwarding works states it as a
+  concrete `tcp://their.public.ip:9000` and nothing here applies.
+- **When a collision happens anyway, the cause is named.** "It answers as
+  somebody else" is true and useless; `_wrong_node_detail` says *both nodes are
+  behind 81.240.12.33, and one port can only reach one of them*.
+
+### …and the proof is produced rather than waited for
+
+`probe_reachability` was written, documented and tested, and the only thing
+that ever called it was a button in the console — the shape `gotchas.md` calls
+"a feature whose precondition nothing produces". That did not matter while the
+node announced its public address regardless. It matters now, because the
+announcement rests on it.
+
+`_autonat_loop` asks. It waits on an event and on nothing else, because a probe
+costs the peer a dial back:
+
+| bound | value | what it is for |
+|---|---|---|
+| `_AUTONAT_FIRST` | 5 s | after start, once there is somebody to ask |
+| `_AUTONAT_RETRY_MIN` … `_MAX` | 30 s → 900 s | per round that proved nothing new — an ACK saying "no" is a complete answer, and asking again in thirty seconds will not change it |
+| `_AUTONAT_REFRESH` | 1800 s | a confirmation nobody re-checks is how a node goes on announcing an address that stopped working months ago |
+| `_AUTONAT_IDLE_MAX` | 300 s | nothing to ask, or nobody to ask: a wake ends it, the ceiling only bounds a wake we miss |
+
+It asks a peer off our own networks by preference, because only that peer's
+dial-back can prove a public path — the responder dials the address it observed
+*us* at, and for a LAN peer that is our LAN address. Addressing moving clears
+`_public_schemes` outright: whatever was proved was proved about an address we
+no longer have.
 
 
 - `OBSERVED_ADDR`: a peer accepting our connection sends back the source IP it
@@ -533,6 +718,17 @@ that authenticated is proof, not a claim.
   changed local IP, a clock jump = suspend/resume, a `poke` from the node, a
   periodic refresh). Bounded probes, silent failure, **never blocks the loop**
   (`discover_public_ip` in a daemon thread, see `gotchas.md`).
+- **An urgent poke** — `poke(reason, urgent=True)`. An ordinary poke says our
+  addressing *might* have moved (a peer connected, an observed address
+  arrived), and is rate-limited to one network check per `_MIN_FULL_GAP = 30 s`
+  precisely because pokes are reachable from what a peer does. One caller has
+  evidence rather than a suspicion — links to several nodes lost at once, see
+  [`routing.md`](routing.md#several-nodes-lost-at-once-is-evidence-about-us) —
+  and for it the gap becomes `_MIN_URGENT_GAP = 10 s`. It **shortens** a bound,
+  it never lifts one: a peer flapping its link must not buy a STUN request and
+  an HTTPS fetch per flap. The flag is read and consumed at the top of the
+  pass, so an urgent poke landing mid-check arms the next one instead of being
+  swallowed by a check that had already decided what it was doing.
 
 ## Link keepalive (`_link_keepalive_loop`)
 
@@ -782,11 +978,14 @@ of this did — left the peer we probe ten times a second first in line to be
 evicted while an id a stranger merely mentioned was promoted past it. See
 `gotchas.md`.
 
-**`advertised_uris()` is memoised on the three lists it derives from.** It was
-15 µs of regex and per-character work per call, recomputed on every probe,
-every `FIND_NODE` answer and every announce, to produce the same five strings.
-The key is the whole of the input, so there is no fourth thing to forget to
-invalidate — the failure a cache normally buys.
+**`advertised_uris()` is memoised on the lists it derives from** — the listen
+URIs, the local IPs, the discovered ones, and the set of schemes proved
+reachable from the internet. It was 15 µs of regex and per-character work per
+call, recomputed on every probe, every `FIND_NODE` answer and every announce, to
+produce the same five strings. The key is the whole of the input, so there is no
+further thing to forget to invalidate — the failure a cache normally buys. (It
+was three lists until the proof above became a fourth input; the key is written
+as "whatever it reads" for exactly that reason.)
 
 **`Packet.create` builds the packet once and draws its nonce in blocks.** It
 used to construct one `Packet` purely to ask it for its own id and then a

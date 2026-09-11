@@ -9,10 +9,13 @@ is off by default, and on-demand routing only wakes when an app sends again.
 A conversation therefore stayed dead until somebody typed into it.
 
 What is proved here: an established link lost *under us* puts its identity in
-a book that is chased hard and briefly; a link we cut ourselves never enters
-it; losing one of two media to a node is not losing the node; and every bound
-holds — the book, the dials in flight, the backoff, and the wait between
-passes.
+a book that is chased hard and then patiently — never abandoned, because the
+"ordinary machinery" it used to be handed to does not dial on a stock node; a
+link we cut ourselves never enters it; losing one of two media to a node is not
+losing the node; losing several nodes at once is evidence about *our own*
+addressing and re-verifies it; and every bound holds — the book, the dials in
+flight, the backoff, the wait between passes, and the cooldown on that
+re-verification.
 """
 import asyncio
 import time
@@ -22,10 +25,13 @@ import pytest
 from src import revocation
 from src.crypto import CryptoIdentity
 from src.node import (MeshNode, _Peer, _MAX_MALFORMED, _DEAD_LINK_PROBES,
-                      _DEAD_LINK_SILENCE,
+                      _DEAD_LINK_SILENCE, _LOSS_BURST_COOLDOWN,
+                      _LOSS_BURST_NODES, _LOSS_BURST_TRACKED,
+                      _LOSS_BURST_WINDOW,
                       _RECONNECT_BACKOFF_MAX, _RECONNECT_FIRST_DELAY,
                       _RECONNECT_MAX_IN_FLIGHT, _RECONNECT_MIN_TICK,
-                      _RECONNECT_NODES_TRACKED, _RECONNECT_WINDOW)
+                      _RECONNECT_NODES_TRACKED, _RECONNECT_PATIENT_MAX,
+                      _RECONNECT_WINDOW)
 from src.node_id import NodeID
 from src.reputation import MAX_WEIGHT, OK
 from tests.conftest import FakeTransport, make_manager
@@ -221,8 +227,11 @@ class TestTheBoundsHold:
         assert node._reconnect_wait() >= _RECONNECT_MIN_TICK
 
     def test_an_empty_book_waits_instead_of_ticking(self):
+        """The longest gap the book can hold, not for ever: `_note_node_lost`
+        wakes the loop, and the ceiling only means a missed wake costs a delay
+        rather than the feature."""
         node = _node()
-        assert node._reconnect_wait() == _RECONNECT_WINDOW
+        assert node._reconnect_wait() == _RECONNECT_PATIENT_MAX
 
     async def test_a_pass_dials_no_more_than_the_cap(self):
         node = _node()
@@ -276,16 +285,47 @@ class TestTheSchedule:
         await node._reconnect_pass()
         assert TARGET not in node._reconnect and seen == []
 
-    async def test_the_chase_gives_up_at_the_end_of_the_window(self):
-        """After it, the ordinary machinery still has the identity, its
-        addresses and its on-demand path — this is the *urgent* phase only."""
+    async def test_the_chase_slows_down_rather_than_stopping(self):
+        """It used to stop, and handed the identity to "the ordinary
+        machinery" — the address-retry loop, which runs on no stock node
+        (`retry_interval` is 0 on every transport), and on-demand routing,
+        which wakes when an app sends. So a peer that came back four minutes
+        later stayed unreached until somebody pressed "retry every address"."""
         node = _node()
         _lose(node, _link(node, TARGET))
         node._reconnect[TARGET] = (3, time.monotonic() - 1.0,
                                    time.monotonic() - 0.01)
         seen = _dials(node)
         await node._reconnect_pass()
-        assert TARGET not in node._reconnect and seen == []
+        assert seen == [TARGET]
+        assert TARGET in node._reconnect
+        gap = node._reconnect[TARGET][1] - time.monotonic()
+        assert gap == pytest.approx(_RECONNECT_PATIENT_MAX, abs=0.5)
+
+    def test_the_patient_cadence_is_flat_and_not_the_ladder_continued(self):
+        """An attempt count stands in for elapsed time only while attempts are
+        cheap, and a dial on `_RECOVERY_TIMEOUT` is not: the count at the end
+        of the window says how expensive the dials were, not how long we have
+        been trying."""
+        node = _node()
+        urgent = [node._reconnect_delay(n, True) for n in range(1, 20)]
+        patient = [node._reconnect_delay(n, False) for n in range(1, 20)]
+        assert urgent[0] == _RECONNECT_FIRST_DELAY
+        assert max(urgent) == _RECONNECT_BACKOFF_MAX
+        assert set(patient) == {_RECONNECT_PATIENT_MAX}
+
+    async def test_a_node_still_out_after_an_hour_is_still_being_dialled(self):
+        """The whole point of the patient phase, at the cost it is bounded
+        to: one dial per identity per `_RECONNECT_PATIENT_MAX`."""
+        node = _node()
+        _lose(node, _link(node, TARGET))
+        seen = _dials(node)
+        for _ in range(20):
+            node._reconnect[TARGET] = (node._reconnect[TARGET][0],
+                                       time.monotonic() - 1.0,
+                                       time.monotonic() - 3600.0)
+            await node._reconnect_pass()
+        assert len(seen) == 20 and TARGET in node._reconnect
 
     def test_a_handshake_completing_clears_the_chase(self):
         node = _node()
@@ -293,6 +333,88 @@ class TestTheSchedule:
         node._stop_chasing(TARGET)
         assert TARGET not in node._reconnect
         node._stop_chasing(None)            # a link with no identity: no crash
+
+
+class TestSeveralNodesLostAtOnce:
+    """Losing one node says that node went away. Losing three inside twenty
+    seconds says what none of the three says alone: they cannot all have gone
+    down together, so the thing that moved is *us* — and every address we
+    advertise, and every address we dial out of, is suspect."""
+
+    def _pokes(self, node: MeshNode) -> list[tuple]:
+        seen: list[tuple] = []
+        node._poke_net = lambda reason, urgent=False: seen.append((reason, urgent))
+        return seen
+
+    def _lose_many(self, node: MeshNode, count: int) -> None:
+        for index in range(count):
+            node._peers.clear()
+            _lose(node, _link(node, NodeID(bytes([index + 1]) * 20)))
+
+    def test_one_node_is_not_a_burst(self):
+        node = _node()
+        seen = self._pokes(node)
+        self._lose_many(node, _LOSS_BURST_NODES - 1)
+        assert seen == []
+
+    def test_enough_of_them_re_verifies_our_own_addresses(self):
+        node = _node()
+        seen = self._pokes(node)
+        self._lose_many(node, _LOSS_BURST_NODES)
+        assert seen and seen[-1][1] is True
+
+    def test_the_same_node_flapping_is_one_node(self):
+        """Otherwise a single peer reconnecting and dropping would be enough
+        to claim our whole addressing moved."""
+        node = _node()
+        seen = self._pokes(node)
+        for _ in range(_LOSS_BURST_NODES + 3):
+            node._peers.clear()
+            _lose(node, _link(node, TARGET))
+        assert seen == []
+
+    def test_losses_spread_out_are_not_simultaneous(self):
+        node = _node()
+        seen = self._pokes(node)
+        self._lose_many(node, _LOSS_BURST_NODES - 1)
+        for lost in list(node._recent_losses):
+            node._recent_losses[lost] = time.monotonic() - _LOSS_BURST_WINDOW - 1
+        node._peers.clear()
+        _lose(node, _link(node, OTHER))
+        assert seen == []
+
+    def test_a_peer_flapping_cannot_buy_a_probe_per_flap(self):
+        """The poke is urgent, which is a shorter bound and not the absence of
+        one; this is the second of the two."""
+        node = _node()
+        seen = self._pokes(node)
+        for round_ in range(6):
+            node._recent_losses.clear()
+            self._lose_many(node, _LOSS_BURST_NODES)
+        assert len(seen) == 1
+        node._last_loss_burst = time.monotonic() - _LOSS_BURST_COOLDOWN - 1
+        node._recent_losses.clear()
+        self._lose_many(node, _LOSS_BURST_NODES)
+        assert len(seen) == 2
+
+    def test_the_count_is_bounded(self):
+        node = _node()
+        self._pokes(node)
+        self._lose_many(node, _LOSS_BURST_TRACKED + 10)
+        assert len(node._recent_losses) <= _LOSS_BURST_TRACKED
+
+    def test_a_link_we_cut_is_not_evidence_about_us(self):
+        """`_note_node_lost` filters to genuine involuntary losses before
+        counting: a node re-probing STUN every time it cuts an abuser is a
+        lever, not a diagnosis."""
+        node = _node()
+        seen = self._pokes(node)
+        for index in range(_LOSS_BURST_NODES + 2):
+            node._peers.clear()
+            peer = _link(node, NodeID(bytes([index + 1]) * 20))
+            peer.tarpit_until = time.monotonic() + 60.0
+            _lose(node, peer)
+        assert seen == [] and not node._recent_losses
 
 
 class TestEveryWayALinkDies:
