@@ -1014,6 +1014,14 @@ def _make_handler(console: WebConsole):
             remote = self._remote_node()
             if remote:
                 return console.remote_channel(self._session_token() or "", remote)
+            if remote == "":
+                # The header was there and was not a node id. Answering it here
+                # as "this node" would run the frame on the **wrong machine** —
+                # a restart, a configuration, an app removed — which is the one
+                # mistake this whole channel exists to make impossible. The
+                # older routes refuse it too (`_get`, `_post`); a frame gets the
+                # refusal as a frame.
+                return control.RefusedChannel("bad_request", "bad node id")
             # A call a peer is replaying through the fleet's `manage` right is a
             # page on *their* machine, so it reaches the plane as a remote
             # origin — which is what turns "what may the network ask of this

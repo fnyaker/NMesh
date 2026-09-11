@@ -20,9 +20,12 @@ identifier a caller chooses must not become a key into our state.
 **Decoding is hostile-input first.** These bytes reach us from a browser this
 node authenticated *and* from a peer replaying a frame through the fleet relay,
 which the threat model says is an adversary. So: a size cap before parsing, a
-type check on every field, a bound on every string, and no recursion — a frame
-is exactly two levels deep, and ``params`` is validated by the operation that
-declared them (:mod:`src.control.params`), never trusted for having arrived.
+type check on every field, a bound on every string, and no recursion of our own
+— a frame is exactly two levels deep, and ``params`` is validated by the
+operation that declared them (:mod:`src.control.params`), never trusted for
+having arrived. The parser *does* recurse, and a frame of nothing but brackets
+reaches the interpreter's limit before any check here runs, so that is caught
+too and refused as what it is: not a frame.
 
 There is no event frame. Events travel as an ordinary operation
 (``control.changes``, "what has moved since sequence N"), because a channel that
@@ -147,6 +150,14 @@ def decode_request(raw) -> Request:
         document = json.loads(bytes(raw).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise FrameError("not a frame") from None
+    except RecursionError:
+        # Five thousand opening brackets fit in a frame, and `json` recurses
+        # per level — so the parser hits the interpreter's limit before any of
+        # the checks below run. It is refused like any other thing that is not
+        # a frame: this function's promise is that it raises `FrameError` and
+        # nothing else, and the channel above it promises never to raise at all
+        # (`Docs/Architecture/gotchas.md`).
+        raise FrameError("not a frame") from None
     if not isinstance(document, dict):
         raise FrameError("not a frame")
     version = document.get("v", VERSION)
@@ -184,6 +195,8 @@ def decode_reply(raw) -> Reply:
     try:
         document = json.loads(bytes(raw).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
+        raise FrameError("not a reply") from None
+    except RecursionError:
         raise FrameError("not a reply") from None
     if not isinstance(document, dict):
         raise FrameError("not a reply")
