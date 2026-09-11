@@ -287,7 +287,8 @@ class TestMultiPort:
 
 # ---------------------------------------------------------------------------
 # Mesh-native public-IP discovery: a joining node learns the source IP a peer
-# observed for it, and advertises itself there.
+# observed for it — and advertises itself there only once something has proved
+# that address reaches its listener.
 # ---------------------------------------------------------------------------
 
 class TestObservedAddress:
@@ -307,6 +308,17 @@ class TestObservedAddress:
         while loop.time() < deadline and "127.0.0.1" not in guest._extra_addrs:
             await asyncio.sleep(0.05)
         assert "127.0.0.1" in guest._extra_addrs
+
+        # Learned is not announced. An observed IP is where somebody saw us
+        # *come from*; pairing it with our own listening port is a claim that
+        # whatever sits in front of us forwards that port, and until something
+        # proves it the address is not gossiped — two nodes behind one public
+        # address used to announce the same URI and strike each other's entry
+        # off over it (see Docs/Architecture/transports.md).
+        assert "tcp://127.0.0.1:19211" not in guest.advertised_uris()
+
+        # …and once it is proved, it is announced, on that transport only.
+        guest._note_public_scheme("tcp")
         assert "tcp://127.0.0.1:19211" in guest.advertised_uris()
 
         await guest.stop()
