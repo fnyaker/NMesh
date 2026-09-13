@@ -20,6 +20,8 @@ Contrast is not a matter of taste: ``tests/test_ui_contrast.py`` computes the
 WCAG ratio of every text/background pair in both themes and fails below 4.5.
 """
 
+from ..version import __version__
+
 # ---------------------------------------------------------------------------
 # Tokens
 # ---------------------------------------------------------------------------
@@ -1188,6 +1190,73 @@ async function apiJson(path, method, body, options){
   return {ok: response.ok, status: response.status, data};
 }
 
+// ---- reading a feed --------------------------------------------------------
+// What a page holds, and how it stays in step with the node holding the truth.
+// Three things go wrong without it, and all three look the same on screen — a
+// page that suddenly has nothing on it:
+//
+//   * **An error is not a state.** `apiJson` answers a 502 with a body, and a
+//     page that assigns it over what it holds has just replaced every list with
+//     nothing. That is the bug this exists for.
+//   * **Everything, every time.** A ledger of forty machines re-sent because
+//     one job finished is most of what a console costs.
+//   * **No version between them.** A node that updates itself replaces the
+//     assets under an open page, which then asks questions the new node no
+//     longer answers — and empties.
+//
+// So a read merges *sections* into what is held, keeps what it holds when an
+// answer is unusable, and says when the node answering is no longer the node
+// that served the page. See `src/console_feed.py` for the other end.
+const BUILD = "__NMESH_BUILD__";
+const FEED = {
+  held: {},
+  reloading: false,
+
+  // A node whose build changed under an open page. Reloaded once, and only
+  // once: a reload loop is worse than a stale page, and this is the one place
+  // that can start one.
+  agrees(data){
+    if(this.reloading) return false;
+    if(!data.build || !BUILD || data.build === BUILD) return true;
+    this.reloading = true;
+    toast("This node was updated — reloading", "warn");
+    setTimeout(() => location.reload(), 400);
+    return false;
+  },
+
+  async read(path, params){
+    const hold = this.held[path] || (this.held[path] = {revs:{}, state:null});
+    const query = new URLSearchParams(params || {});
+    query.set("proto", "2");
+    const have = Object.keys(hold.revs).map((name) => name + ":" + hold.revs[name]);
+    // Only claim to hold something when there is something held: a page that
+    // lost its state has to be able to ask for all of it again.
+    if(have.length && hold.state) query.set("have", have.join(","));
+    const answer = await apiJson(path + "?" + query.toString());
+    if(!answer.ok || !answer.data || typeof answer.data !== "object") return null;
+    const data = answer.data;
+    if(!this.agrees(data)) return null;
+    if(data.proto !== 2 || !data.sections){
+      // A node that does not speak this shape answered the flat one. Keep
+      // working against it — that is the whole point of a version number.
+      hold.revs = {}; hold.state = data;
+      return data;
+    }
+    const state = Object.assign({}, hold.state || {}, data.sections);
+    for(const key in data){
+      if(key !== "sections" && key !== "revs") state[key] = data[key];
+    }
+    hold.revs = data.revs || {};
+    hold.state = state;
+    return state;
+  },
+
+  // A switch of context, a sign-out: what was held describes a machine that is
+  // no longer the one on screen.
+  forget(){ this.held = {}; },
+};
+CONTEXT.subscribe(() => FEED.forget());
+
 // ---- feedback --------------------------------------------------------------
 // Toasts are for what just happened somewhere else on the page; inline messages
 // stay next to the control they belong to. Announced politely, never as an
@@ -1606,7 +1675,16 @@ const EVENTS = {
     try{ source = new EventSource("/api/events"); }
     catch(_){ this.say(false); return; }
     this.source = source;
-    source.addEventListener("ready", () => this.say(true));
+    source.addEventListener("ready", (event) => {
+      this.say(true);
+      // The node names the build answering. A page served by one build and
+      // answered by another is a page whose assets were replaced under it —
+      // the stream is the first place that shows, because it reconnects on its
+      // own after the restart an update ends in.
+      let hello = {};
+      try{ hello = JSON.parse(event.data) || {}; }catch(_){}
+      FEED.agrees(hello);
+    });
     source.addEventListener("change", (event) => {
       let topics = [];
       try{ topics = (JSON.parse(event.data) || {}).topics || []; }catch(_){}
@@ -1925,3 +2003,8 @@ function mountShell(){
   if(leave) leave.addEventListener("click", () => CONTEXT.leave());
 }
 """
+
+# The build that served this page, so a page can tell when the node answering it
+# is no longer the node it came from — an updated node replaces the assets under
+# an open tab, and the page then asks questions the new one no longer answers.
+JS = JS.replace("__NMESH_BUILD__", __version__)

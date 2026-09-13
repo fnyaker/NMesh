@@ -92,6 +92,46 @@ nothing more, because an operator who can open a shell there can already read
 and write those files by typing. Detail:
 [`Docs/Apps/fleet`](../Apps/fleet).
 
+## What a page holds, and how it stays in step
+
+A page used to ask for its whole world on every read and replace what it held
+with whatever came back. Three things were wrong with that, and all three show
+up as the same symptom — **a page that suddenly has nothing on it**:
+
+| What went wrong | What it looks like | What answers it |
+|---|---|---|
+| an error body assigned over held state (`apiJson` answers a 502 with a body too, and its body has no machines in it) | every list empties | a read hands back **nothing** when the answer is not one, and the page keeps what it had |
+| the whole ledger re-sent because one job finished | slow, and on a relay most of what a console costs | named **sections**, sent only when their content moved |
+| the node updating itself under an open page | questions the new node no longer answers, then an empty page | every answer names the **build**; a mismatch reloads the page once |
+
+The revision of a section is a **checksum of the section itself**, not a counter
+bumped at every mutation. A counter has to be bumped from every place that
+writes, and the one place that forgets is a section that silently stops
+updating — the worst failure, because everything still appears to work.
+
+`GET /api/fleet/state?proto=2&have=managed:1a2b3c4d,jobs:00ff00ff` answers
+`{proto, build, full, revs, sections, log, log_seq}`. A page that sends no
+`proto` gets the flat snapshot it has always got, with `proto` and `build` added
+beside it — **two versions at once**, which is the case a version number exists
+for. A claim that cannot be read is answered in full: always correct, only ever
+slower, which is the right way round for something a browser sends.
+
+The rail says *Not answering* while reads are failing. That is a different and
+much smaller claim than an empty list, and it is the true one.
+
+### The change stream resumes
+
+`/api/events` gives every change an `id:`. The browser reconnects on its own and
+sends the last id back in `Last-Event-ID`; without honouring it, everything that
+moved while the connection was down is simply dropped — and a page that missed a
+change is a page showing yesterday. An id from another run of the console (one
+naming a sequence this one has never reached) is clamped rather than obeyed: a
+stream told to start ahead of the truth never speaks again.
+
+The `ready` event carries the build and the protocol version, which is where a
+page most often first notices that the node restarted into a new version — the
+stream reconnects by itself after exactly that.
+
 ## Managing another node from this console
 
 When the fleet app is running and at least one node has granted the `manage`
@@ -603,7 +643,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
 | GET     | `/api/pseudo`      | this node's name, id and the length limit (`pseudo.get`); `?q=…` searches the names this node holds (`pseudo.search`), `&wide=1` asks the directory instead (`pseudo.lookup`, **local only** — a Kademlia round does not fit the relay) |
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
-| GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
+| GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only what moved (`src/console_feed.py`); without `proto` it is the flat snapshot it has always been |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64); `&wait=1` holds the answer until there are some (bounded in time, and in how many are parked at once) |
 | POST    | `/api/fleet/docker` | `{node, op, …}` → one docker operation on a managed node (`docker` right). Reads are waited on; the ones that pull images hand back a `rid` watched in the job list |
 | POST    | `/api/fleet/stacks` | `{node, stacks[]}` → which of that node's docker stacks *Update* also brings up |

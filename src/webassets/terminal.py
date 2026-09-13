@@ -1581,9 +1581,11 @@ async function loadNodes(){
   let data;
   // A high `since` because this page wants the node list, not the activity log:
   // asking for everything and dropping most of it is the ledger's whole weight
-  // over the wire on every open.
-  try{ data = (await apiJson("/api/fleet/state?since=2000000000")).data; }
-  catch(_){ return; }
+  // over the wire on every open. Through `FEED`, so an answer that is not one
+  // leaves the picker alone instead of emptying it.
+  try{ data = await FEED.read("/api/fleet/state", {since: 2000000000}); }
+  catch(_){ data = null; }
+  if(!data) return;
   NODES = (data.managed || []).filter((entry) => (entry.caps || []).includes("shell"));
   const select = $("node");
   const wanted = new URLSearchParams(location.search).get("node") || select.value;

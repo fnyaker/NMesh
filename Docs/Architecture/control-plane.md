@@ -5,6 +5,14 @@ modules), `src/webconsole.py` (the one HTTP route onto it),
 `src/webassets/channel.py` (the browser's half), `src/apps/fleet_console.py`
 (the pipe to another node).
 
+The plane carries **operations** — a question and its answer. What a page *holds*
+between them, and how it stays in step with the node holding the truth, is the
+other half and is `src/console_feed.py`: the protocol version and the build on
+every answer, the named sections sent only when their content moved, and the
+rule that an answer which is not one never replaces what a page has. The two
+meet at the routes that have not moved onto the plane yet — the fleet state feed
+is the big one.
+
 > **Read this before adding an operation to the console, before changing what a
 > remote operator may do, and before touching `_from_plane`.**
 

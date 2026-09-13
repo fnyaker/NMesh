@@ -261,6 +261,13 @@ tests/
 │     raise nothing but TicketError, a hostname refused; for the QR, structure and
 │     bounds, plus — if the optional tooling is installed — module-by-module
 │     equality with an independent encoder and a real decode of the rendered SVG
+├── test_console_feed.py                               — what the console sends
+│     a page: the revision is the content and not a counter (so it cannot drift
+│     from what it describes), key order is not content, a claim that cannot be
+│     read is answered in full rather than interpreted, only the section that
+│     moved comes back, what is not a section always travels, every answer names
+│     the build that gave it — and a page that says nothing still gets the flat
+│     shape it always got, which is the case a version number exists for
 ├── test_console_auth.py                               — console credential:
 │     the password never stored, a salt per credential, a corrupt file or an
 │     unknown algorithm refused, an outsized input rejected before hashing,
