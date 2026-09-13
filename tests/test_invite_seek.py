@@ -14,9 +14,10 @@ import time
 import pytest
 
 from src.node import (
-    MeshNode, INVITE_SEEK, _make_invite_seek, _encode_seek, _decode_seek,
-    _h_code, _seek_signed_blob, _SEEK_RATE_MAX, _RDV_MAX, _SEEK_MAX_PAYLOAD,
-    _SEEK_TTL, _SEEK_TTL_PREAUTH,
+    MeshNode, INVITE_OFFER, INVITE_SEEK, _make_invite_seek, _encode_seek,
+    _decode_seek, _h_code, _seek_signed_blob, _SEEK_RATE_MAX, _RDV_MAX,
+    _SEEK_MAX_PAYLOAD, _SEEK_TTL, _SEEK_TTL_PREAUTH, _OFFER_MAX,
+    _OFFER_RATE_MAX, _SHORT_SEEK_LEN, _SHORT_SEEK_GAP,
 )
 from src.node_id import NodeID
 from src.crypto import SessionKey, CryptoIdentity
@@ -304,3 +305,198 @@ class TestPreAuthOrdering:
             await node._handle_relay_carry(peer, packet)
         assert len(node._seen_msgs) <= _CARRY_RATE_MAX
         await node.stop()
+
+
+# ---------------------------------------------------------------------------
+# The rendezvous: a short seek, and the offer that makes it mean anything
+# ---------------------------------------------------------------------------
+#
+# This is what lets an invitation reach a node with no address of its own out of
+# a string short enough to put in a QR code. The heavy part of a relayed
+# invitation — an ML-DSA key and a signature, five kilobytes of it — stays with
+# the relay; the ticket carries an identity and a seed.
+#
+# The whole security of it is in one sentence: a short seek is honoured **only**
+# where the inviter itself left a rendezvous under that code hash, over an
+# authenticated link, naming the very identity the packet is addressed to. The
+# offer is the authorisation; the short seek is a pointer at one.
+
+import struct
+
+
+def _offer_from(inviter: CryptoIdentity, code: str, exp: int) -> Packet:
+    h = _h_code(code)
+    token = inviter.sign(_seek_signed_blob(h, exp))
+    return Packet.create(
+        INVITE_OFFER, NodeID.from_public_key(inviter.dsa_public_key).raw,
+        b"\x01" * 20, _encode_seek(exp, h, inviter.dsa_public_key, token))
+
+
+def _short_seek(seeker: bytes, inviter: NodeID, code: str, exp: int) -> Packet:
+    return Packet.create(INVITE_SEEK, seeker, inviter.raw,
+                         struct.pack("!Q", exp) + _h_code(code), ttl=_SEEK_TTL)
+
+
+class TestRendezvousOffer:
+    async def test_an_offer_is_only_ever_about_its_own_sender(self):
+        """The key in it has to hash to the sender's id and to have signed the
+        token — the same pair of checks a full seek goes through. So holding one
+        is holding a statement the sender could have made to anybody, never an
+        authority over a third node."""
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        link = await _authed_peer_to(
+            relay, NodeID.from_public_key(inviter.dsa_public_key))
+        relay._handle_invite_offer(link, _offer_from(inviter, "abc1234567", _exp()))
+        assert _h_code("abc1234567") in relay._offers
+
+    async def test_an_offer_from_an_unauthenticated_link_is_dropped(self):
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        relay._handle_invite_offer(await _ingress(relay),
+                                   _offer_from(inviter, "abc1234567", _exp()))
+        assert relay._offers == {}
+
+    async def test_an_offer_naming_somebody_elses_key_is_dropped(self):
+        """Otherwise a peer could aim a rendezvous at a node it has nothing to
+        do with, and every seek for that code would be routed on its say-so."""
+        relay, _ = await make_node()
+        inviter, stranger = CryptoIdentity(), CryptoIdentity()
+        link = await _authed_peer_to(
+            relay, NodeID.from_public_key(stranger.dsa_public_key))
+        relay._handle_invite_offer(link, _offer_from(inviter, "abc1234567", _exp()))
+        assert relay._offers == {}
+
+    async def test_a_forged_token_is_dropped(self):
+        relay, _ = await make_node()
+        inviter, other = CryptoIdentity(), CryptoIdentity()
+        inviter_id = NodeID.from_public_key(inviter.dsa_public_key)
+        link = await _authed_peer_to(relay, inviter_id)
+        h = _h_code("abc1234567")
+        exp = _exp()
+        packet = Packet.create(
+            INVITE_OFFER, inviter_id.raw, b"\x01" * 20,
+            _encode_seek(exp, h, inviter.dsa_public_key,
+                         other.sign(_seek_signed_blob(h, exp))))
+        relay._handle_invite_offer(link, packet)
+        assert relay._offers == {}
+
+    async def test_an_expired_offer_is_not_taken(self):
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        link = await _authed_peer_to(
+            relay, NodeID.from_public_key(inviter.dsa_public_key))
+        relay._handle_invite_offer(link, _offer_from(inviter, "abc1234567", _exp(-10)))
+        assert relay._offers == {}
+
+    async def test_offers_are_bounded_and_rate_limited(self):
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        link = await _authed_peer_to(
+            relay, NodeID.from_public_key(inviter.dsa_public_key))
+        for index in range(_OFFER_RATE_MAX + 5):
+            relay._handle_invite_offer(
+                link, _offer_from(inviter, f"code{index:06d}", _exp()))
+        assert len(relay._offers) <= _OFFER_RATE_MAX
+        assert len(relay._offers) <= _OFFER_MAX
+
+
+class TestShortSeek:
+    async def _relay_holding(self, code="abc1234567", exp=None):
+        relay, _ = await make_node()
+        inviter = CryptoIdentity()
+        inviter_id = NodeID.from_public_key(inviter.dsa_public_key)
+        link = await _authed_peer_to(relay, inviter_id)
+        relay._handle_invite_offer(link, _offer_from(inviter, code,
+                                                     exp or _exp()))
+        return relay, inviter_id, link
+
+    async def test_it_becomes_a_real_seek_where_the_offer_is(self):
+        relay, inviter_id, link = await self._relay_holding()
+        ingress = await _ingress(relay)
+        await relay._handle_invite_seek(
+            ingress, _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp()))
+        forwarded = [p for p in link.transport.sent if p.type == INVITE_SEEK]
+        assert len(forwarded) == 1
+        # What leaves is an ordinary signed seek: every node past this one
+        # verifies it exactly as it always did.
+        decoded = _decode_seek(forwarded[0].payload)
+        assert decoded is not None and decoded[1] == _h_code("abc1234567")
+        assert forwarded[0].dst_id == inviter_id.raw
+        assert forwarded[0].src_id == b"\x09" * 20
+        # And the way back is remembered, or the inviter's answer has nowhere
+        # to go.
+        assert relay._rdv_lookup(b"\x09" * 20) is ingress
+
+    async def test_a_node_holding_no_offer_says_nothing(self):
+        """Silence rather than a refusal: an answer would be a way to ask
+        whether a code exists."""
+        relay, _ = await make_node()
+        inviter_id = NodeID(b"\x07" * 20)
+        link = await _authed_peer_to(relay, inviter_id)
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp()))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_it_cannot_be_aimed_at_a_node_the_offer_does_not_name(self):
+        relay, _inviter_id, link = await self._relay_holding()
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(b"\x09" * 20, NodeID(b"\x05" * 20), "abc1234567", _exp()))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_a_code_nobody_offered_forwards_nothing(self):
+        relay, inviter_id, link = await self._relay_holding()
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(b"\x09" * 20, inviter_id, "zzzzzzzzzz", _exp()))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_an_expired_one_is_dropped_and_forgotten(self):
+        relay, inviter_id, link = await self._relay_holding()
+        relay._offers[_h_code("abc1234567")]["exp"] = int(time.time()) - 5
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp()))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+        assert relay._offers == {}
+
+    async def test_an_expired_seek_is_dropped(self):
+        relay, inviter_id, link = await self._relay_holding()
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp(-10)))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_a_seeker_cannot_be_the_inviter(self):
+        relay, inviter_id, link = await self._relay_holding()
+        await relay._handle_invite_seek(
+            await _ingress(relay),
+            _short_seek(inviter_id.raw, inviter_id, "abc1234567", _exp()))
+        assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_one_forward_per_rendezvous_per_gap(self):
+        """Forty bytes in becomes five kilobytes out — the key and signature the
+        offer holds. Without a gap, somebody holding a ticket could vary the
+        expiry, mint a fresh msg_id past dedup, and spend the inviter's link at
+        the seek limit's full width."""
+        relay, inviter_id, link = await self._relay_holding()
+        ingress = await _ingress(relay)
+        for step in range(6):
+            await relay._handle_invite_seek(
+                ingress,
+                _short_seek(b"\x09" * 20, inviter_id, "abc1234567",
+                            _exp(300 + step)))
+        assert len([p for p in link.transport.sent if p.type == INVITE_SEEK]) == 1
+        # …and it opens again once the gap has passed.
+        relay._offers[_h_code("abc1234567")]["last"] -= _SHORT_SEEK_GAP + 1
+        await relay._handle_invite_seek(
+            ingress, _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp(999)))
+        assert len([p for p in link.transport.sent if p.type == INVITE_SEEK]) == 2
+
+    def test_the_short_form_is_told_apart_by_its_length_alone(self):
+        """40 bytes exactly, which is one byte under what the full decoder will
+        even look at — so there is no shape that is both."""
+        assert _SHORT_SEEK_LEN == 40
+        assert _decode_seek(b"\x00" * _SHORT_SEEK_LEN) is None

@@ -65,8 +65,10 @@ from ..app_auth import ctx_hash
 from ..app_guard import AppGuard, Limit
 from ..app_channel import builtin_id
 from ..node_id import NodeID
-from . import fleet_console, fleet_files, fleet_host, fleet_provision, fleet_ssh
-from .fleet_state import CAPABILITIES, FleetState, clean_caps, clean_label
+from . import (fleet_console, fleet_docker, fleet_files, fleet_host,
+               fleet_portainer, fleet_provision, fleet_ssh)
+from .fleet_state import (CAPABILITIES, FleetState, clean_caps, clean_label,
+                          clean_stack_names)
 
 FLEET_APP_ID = builtin_id("fleet")
 
@@ -107,6 +109,12 @@ FILE_REQUEST = 0x70
 FILE_REPLY = 0x71
 FILE_DATA = 0x72
 
+# Docker: one request type carrying a named operation, one reply. A message
+# type per container verb would be twenty entries in the dispatch table for one
+# capability — and the capability is the gate, not the verb.
+DOCKER_REQUEST = 0x80
+DOCKER_REPLY = 0x81
+
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
 PROVISION_REQUEST = 0x42
@@ -137,6 +145,10 @@ MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
 SHELL_CHUNK = 8192
 SHELL_INPUT_MAX = 8192
+# What a pty may have produced and not yet been sent. A full-screen program
+# redraws faster than a slow path drains, so this is the one buffer on the
+# terminal path that can grow — and therefore the one that needs a ceiling.
+SHELL_OUT_MAX = 512 * 1024
 MAX_INFLIGHT = 64                 # requests we track as an operator
 UPDATE_TIMEOUT = 1800.0
 UPDATE_CHUNK = 4096
@@ -147,6 +159,16 @@ SCAN_TIMEOUT = 300.0
 INVITE_TTL_DEFAULT = 300.0
 INVITE_TTL_MAX = 6 * 3600.0
 MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
+# Docker. The engine calls are quick; the ones that pull images are minutes, and
+# they are named here rather than guessed at the call site.
+DOCKER_TIMEOUT = 60.0
+DOCKER_SLOW_TIMEOUT = 1800.0      # a pull, a `compose up`, a Portainer redeploy
+MAX_DOCKER_CALLS = 2              # docker operations we host at once, per peer
+# Lines of a stack's own output forwarded while an update runs. A `compose pull`
+# is a wall of progress bars; what an operator needs is that it is moving, and
+# every frame past that is a task queued against `MAX_INFLIGHT` for nothing.
+_STACK_OUTPUT_LINES = 200
+_PORTAINER_KEY = "portainer"      # drawer key holding this node's Portainer
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 FILE_TIMEOUT = 30.0               # one file operation, mesh round trip included
 MAX_FILE_CALLS = 8                # file operations we host at once, per peer
@@ -256,6 +278,15 @@ class InviteIssued:
 
 
 @dataclass
+class DockerReport:
+    """An answer to one docker operation, for the console that asked."""
+    src: NodeID
+    rid: str
+    op: str
+    data: dict
+
+
+@dataclass
 class ScanReceived:
     src: NodeID
     rid: str
@@ -323,7 +354,8 @@ def _make_controlling_tty(slave_fd: int):
 class _Shell:
     """One interactive shell bound to one operator, on a pty."""
 
-    __slots__ = ("sid", "owner", "proc", "master_fd", "stop_reader", "last_active")
+    __slots__ = ("sid", "owner", "proc", "master_fd", "stop_reader", "last_active",
+                 "out", "sender")
 
     def __init__(self, sid: bytes, owner: NodeID, proc, master_fd: int) -> None:
         self.sid = sid
@@ -332,8 +364,28 @@ class _Shell:
         self.master_fd = master_fd
         self.stop_reader = None
         self.last_active = time.monotonic()
+        # What the pty has produced and one task is draining, in order. A task
+        # per chunk would be two sends racing each other over the mesh, and a
+        # terminal stream delivered out of order is not slow output, it is
+        # garbage on the screen.
+        self.out = bytearray()
+        self.sender = None
+
+    def feed(self, chunk: bytes) -> None:
+        """Hold what the pty produced until the sender gets to it.
+
+        Bounded: a program that outruns the link would otherwise grow this
+        without end. The tail is what survives — a screen repaints, and the
+        oldest bytes are the ones already superseded on it."""
+        self.out += chunk
+        if len(self.out) > SHELL_OUT_MAX:
+            del self.out[:len(self.out) - SHELL_OUT_MAX]
 
     def close(self) -> None:
+        if self.sender is not None:
+            self.sender.cancel()
+            self.sender = None
+        self.out.clear()
         if self.stop_reader is not None:
             try:
                 self.stop_reader()
@@ -387,13 +439,18 @@ class FleetApp:
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None, mesh_invite=None,
-                 release_publishers=None,
+                 release_publishers=None, state_dir: str | None = None,
                  auto_status: bool = True, local_console=None) -> None:
         self._client = client
         self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
         self.node_id = auth.node_id
         self.state = state or FleetState()
         self._repo_root = repo_root
+        # Where a compose file this node deploys is written. The node's own data
+        # directory when it has one: a file that decides what runs on this
+        # machine belongs with its identity and its session store, backed up and
+        # wiped with them.
+        self._state_dir = state_dir or ""
         self._mesh_invite = mesh_invite
         self._release_publishers = release_publishers
         self._auto_status = auto_status
@@ -405,6 +462,7 @@ class FleetApp:
         self._reaper: asyncio.Task | None = None
         self._shells: dict[bytes, _Shell] = {}          # agent side
         self._open_shells: dict[bytes, NodeID] = {}     # operator side
+        self._docker_calls: dict[bytes, int] = {}       # agent side, per peer
         self._inflight: dict[str, tuple[NodeID, str, float]] = {}
         self._jobs: set[asyncio.Task] = set()
         # Remote console. Agent side: the loopback client that replays a call
@@ -1266,11 +1324,20 @@ class FleetApp:
         if self._mesh_invite is None:
             self._fail(src, rid, "this node cannot issue invitations")
             return
+        self._spawn(self._issue_invitation(src, rid, document))
+
+    async def _issue_invitation(self, src: NodeID, rid: str,
+                                document: dict) -> None:
+        """Mint on the operator's behalf, off the receive loop.
+
+        Off it because minting a scannable invitation leaves a rendezvous with a
+        relay first — a round trip over the mesh — and the receive loop is not
+        somewhere to wait for one."""
         # The operator asked for a window; this node decides what it is worth.
         ttl = _invite_ttl(document.get("ttl"))
         want_ticket = document.get("ticket") is True
         try:
-            invitation = self._mesh_invite(ttl=ttl, ticket=want_ticket)
+            invitation = await self._mesh_invite(ttl=ttl, ticket=want_ticket)
         except Exception:                       # noqa: BLE001 — never crash here
             invitation = None
         if not isinstance(invitation, dict) or not invitation.get("code"):
@@ -1307,36 +1374,60 @@ class FleetApp:
     # Update
     # ======================================================================
 
-    async def request_update(self, target: NodeID) -> str:
+    async def request_update(self, target: NodeID, stacks=None) -> str:
+        """Bring that machine up to date — its packages, and the docker stacks
+        this console chose for it.
+
+        The stack list rides the same signed request rather than a second one,
+        so "update this machine" stays one act with one proof over its own
+        bytes. It is honoured only if that node also granted ``docker``:
+        recreating containers is a different power from running a package
+        manager, and holding one is not holding the other."""
         rid = self._new_rid(target, "update")
+        document = {"rid": rid}
+        chosen = clean_stack_names(stacks)
+        if chosen:
+            document["stacks"] = chosen
         await self._send(target, self._signed_frame(
-            UPDATE_REQUEST, target, PURPOSE_BY_CAP["update"], {"rid": rid}))
+            UPDATE_REQUEST, target, PURPOSE_BY_CAP["update"], document))
         return rid
 
     def _on_update_request(self, src: NodeID, principal, document: dict) -> None:
         rid = _rid(document)
         if not self._authorised(src, "update", rid):
             return
+        # The second grant, checked separately. An `update` signature carries
+        # the stack list in its own bytes, so it cannot be redirected — but the
+        # act it asks for is one this node may never have agreed to.
+        stacks = clean_stack_names(document.get("stacks"))
+        if stacks and not self.state.allows(src.raw.hex(), "docker"):
+            stacks = []
         commands = fleet_host.update_plan(self.facts)
-        if commands is None:
+        if commands is None and not stacks:
             # The machine's own explanation, not a guess: "sudo said something
             # about a kernel flag" is not something an operator can act on.
             self._fail(src, rid, self.facts.update_blocked
                        or "no package manager, or no path to root")
             return
-        self._spawn(self._run_update(src, rid, commands))
+        self._spawn(self._run_update(src, rid, commands or [], stacks))
 
     async def _run_update(self, src: NodeID, rid: str,
-                          commands: list[list[str]]) -> None:
-        """Run the host's own upgrade commands, streaming output back.
+                          commands: list[list[str]],
+                          stacks: list[str] | None = None) -> None:
+        """Run the host's own upgrade commands, then the chosen stacks,
+        streaming output back.
 
         Each command is an argv list built by :mod:`src.apps.fleet_host` from a
         fixed table — nothing the operator sent reaches it, so there is no
-        command string to inject into."""
+        command string to inject into. A stack name did come from the operator,
+        and is charset-checked and bounded before it reaches one."""
+        stacks = stacks or []
         ok = True
         status = 0
         started = time.monotonic()
-        total = len(commands)
+        total = len(commands) + len(stacks)
+        done: list[str] = []
+        failed = ""
         for index, command in enumerate(commands, start=1):
             # Announced before it runs, not after: an update is minutes long and
             # a progress line that only appears once a step is over is not
@@ -1351,8 +1442,30 @@ class FleetApp:
             if status != 0:
                 ok = False
                 break
+        if ok:
+            for offset, name in enumerate(stacks):
+                index = len(commands) + offset + 1
+                self._reply(src, UPDATE_OUTPUT, {
+                    "rid": rid, "kind": "update", "text": "",
+                    "step": {"index": index, "total": total,
+                             "name": f"stack {name}",
+                             "elapsed": round(time.monotonic() - started, 1)}})
+                try:
+                    await self._update_one_stack(name, src, rid, kind="update")
+                    done.append(name)
+                except fleet_docker.DockerError as exc:
+                    ok, status, failed = False, -1, f"{name}: {exc}"[:200]
+                    self._reply(src, UPDATE_OUTPUT,
+                                {"rid": rid, "kind": "update",
+                                 "text": f"stack {failed}"})
+                    break
+                except Exception as exc:     # noqa: BLE001 — never crash a job
+                    ok, status = False, -1
+                    failed = f"{name}: that failed ({type(exc).__name__})"
+                    break
         self._reply(src, UPDATE_RESULT, {
             "rid": rid, "ok": ok, "status": status,
+            "stacks": done, "stack_error": failed,
             "elapsed": round(time.monotonic() - started, 1)})
 
     async def _stream_command(self, src: NodeID, rid: str, argv: list[str],
@@ -1412,11 +1525,295 @@ class FleetApp:
     def _on_update_result(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "update"):
             return
+        stacks = document.get("stacks")
         self._emit(CommandResult(src, _rid(document), "update",
                                  bool(document.get("ok")),
-                                 {"status": document.get("status")}))
+                                 {"status": document.get("status"),
+                                  "stacks": clean_stack_names(stacks),
+                                  "stack_error": str(
+                                      document.get("stack_error") or "")[:200]}))
         if self._auto_status:
             self._spawn(self.request_status(src))
+
+    # ======================================================================
+    # Docker
+    # ======================================================================
+    #
+    # One request type carrying a named operation. The gate is the `docker`
+    # capability, checked once, in front of every one of them — and it is worth
+    # saying again what that capability is: a process that can talk to the
+    # docker socket can start a privileged container bind-mounting `/`. Granting
+    # it is granting root, which is why it is not folded into `update` or
+    # `shell` and why an operator has to tick it deliberately.
+    #
+    # Each operation's arguments are validated in `fleet_docker` /
+    # `fleet_portainer` before anything reaches a socket or an argv. Nothing
+    # here builds a command string; nothing here forwards a dictionary an
+    # operator wrote to the daemon.
+
+    async def request_docker(self, target: NodeID, op: str,
+                             **arguments) -> str:
+        rid = self._new_rid(target, "docker")
+        document = {"rid": rid, "op": str(op)[:32]}
+        document.update(arguments)
+        await self._send(target, self._signed_frame(
+            DOCKER_REQUEST, target, PURPOSE_BY_CAP["docker"], document))
+        return rid
+
+    def _on_docker_request(self, src: NodeID, principal, document: dict) -> None:
+        rid = _rid(document)
+        if not self._authorised(src, "docker", rid):
+            return
+        op = document.get("op")
+        if not isinstance(op, str) or op not in _DOCKER_OPS:
+            self._fail(src, rid, "that is not a docker operation")
+            return
+        # Bounded per peer, like the console relay and the file plane: a pull is
+        # minutes of somebody else's disk and network, and "several at once" is
+        # not something an operator ever wanted.
+        held = self._docker_calls.get(src.raw, 0)
+        if held >= MAX_DOCKER_CALLS:
+            self._fail(src, rid, "too many docker operations already running")
+            return
+        self._docker_calls[src.raw] = held + 1
+        self._spawn(self._run_docker(src, rid, op, document))
+
+    async def _run_docker(self, src: NodeID, rid: str, op: str,
+                          document: dict) -> None:
+        try:
+            data = await _DOCKER_OPS[op](self, src, rid, document)
+        except fleet_docker.DockerError as exc:
+            self._fail(src, rid, str(exc)[:256])
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:            # noqa: BLE001 — never crash a handler
+            self._fail(src, rid, f"that failed ({type(exc).__name__})")
+            return
+        finally:
+            held = self._docker_calls.get(src.raw, 1) - 1
+            if held > 0:
+                self._docker_calls[src.raw] = held
+            else:
+                self._docker_calls.pop(src.raw, None)
+        if data is None:
+            return                          # the handler answered for itself
+        reply = {"rid": rid, "op": op}
+        reply.update(data)
+        # `items` is a list and `text` is a log: both are the part of an answer
+        # worth losing before the answer itself is.
+        self._reply(src, DOCKER_REPLY, reply, "items", "text")
+
+    def _on_docker_reply(self, src: NodeID, document: dict) -> None:
+        if not self._claim_inflight(src, document, "docker"):
+            return
+        op = document.get("op")
+        self._emit(DockerReport(src, _rid(document),
+                                op if isinstance(op, str) else "",
+                                {key: value for key, value in document.items()
+                                 if key not in ("rid", "op")}))
+
+    # -- the operations ---------------------------------------------------
+
+    async def _docker_overview(self, _src, _rid, _document) -> dict:
+        if not fleet_docker.available():
+            raise fleet_docker.DockerError("this machine runs no docker")
+        info = await fleet_docker.overview()
+        info["portainer"] = bool(self._portainer_config())
+        return {"info": info}
+
+    async def _docker_containers(self, _src, _rid, _document) -> dict:
+        return {"items": await fleet_docker.containers(True)}
+
+    async def _docker_container(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_docker.inspect(document.get("id"))}
+
+    async def _docker_logs(self, _src, _rid, document) -> dict:
+        return {"text": await fleet_docker.logs(document.get("id"),
+                                                document.get("tail") or 200)}
+
+    async def _docker_act(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_docker.act(document.get("id"),
+                                               str(document.get("action"))[:16])}
+
+    async def _docker_images(self, _src, _rid, _document) -> dict:
+        return {"items": await fleet_docker.images()}
+
+    async def _docker_pull(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_docker.pull(document.get("image"))}
+
+    async def _docker_deploy(self, _src, _rid, document) -> dict:
+        spec = document.get("spec")
+        return {"info": await fleet_docker.create(spec if isinstance(spec, dict) else {})}
+
+    async def _docker_stacks(self, _src, _rid, _document) -> dict:
+        items = await fleet_docker.stacks()
+        # A stack Portainer owns is updated through Portainer, so the list says
+        # which ones those are — an operator choosing "update" on one of them is
+        # choosing between two different acts, and has to be able to see that.
+        portainer = self._portainer()
+        managed: dict = {}
+        if portainer is not None:
+            try:
+                for entry in await portainer.stacks():
+                    managed[entry["name"]] = entry
+            except fleet_docker.DockerError:
+                managed = {}                # unreachable is not fatal here
+        for stack in items:
+            match = managed.get(stack["name"]) or managed.get(stack.get("portainer") or "")
+            if match:
+                stack["portainer_id"] = match["id"]
+                stack["portainer_endpoint"] = match["endpoint"]
+                stack["git"] = match["git"]
+        return {"items": items, "info": {"compose": fleet_docker.compose_available(),
+                                         "portainer": portainer is not None}}
+
+    async def _docker_stack(self, src, rid, document) -> dict:
+        name = clean_stack_names([document.get("stack")])
+        if not name:
+            raise fleet_docker.DockerError("that is not a stack")
+        action = str(document.get("action"))[:16]
+        if action == "update":
+            return {"info": await self._update_one_stack(name[0], src, rid)}
+        found = await self._stack_record(name[0])
+        return {"info": await fleet_docker.stack_act(
+            name[0], fleet_docker.compose_files(found.get("files", "")), action,
+            found.get("workdir", ""))}
+
+    async def _docker_deploy_stack(self, _src, _rid, document) -> dict:
+        name = clean_stack_names([document.get("stack")])
+        if not name:
+            raise fleet_docker.DockerError("that is not a stack name")
+        return {"info": await fleet_docker.deploy_stack(
+            name[0], document.get("compose"), root=self._state_dir)}
+
+    async def _docker_portainer_set(self, _src, rid, document) -> dict:
+        """Record (or forget) where this machine's Portainer is.
+
+        Write-only from the outside: what comes back says whether one is
+        configured and where, never the token. A credential that could be read
+        back would make this capability a way of *stealing* the Portainer rather
+        than of using it."""
+        if document.get("clear") is True:
+            self._store_portainer(None)
+            return {"info": {"configured": False}}
+        config = {
+            "url": fleet_portainer.clean_url(document.get("url")),
+            "token": fleet_portainer.clean_token(document.get("token")),
+            "fingerprint": fleet_portainer.clean_fingerprint(
+                document.get("fingerprint")),
+        }
+        if not config["url"] or not config["token"]:
+            raise fleet_docker.DockerError(
+                "a Portainer needs an https address and an access token")
+        portainer = fleet_portainer.Portainer(
+            config["url"], config["token"], fingerprint=config["fingerprint"])
+        # Proved before it is stored: a configuration that has never worked is
+        # a button that fails later, somewhere an operator is not looking.
+        endpoints = await portainer.endpoints()
+        self._store_portainer(config)
+        return {"info": {"configured": True, "url": config["url"],
+                         "pinned": bool(config["fingerprint"])},
+                "items": endpoints}
+
+    async def _docker_portainer_stacks(self, _src, _rid, _document) -> dict:
+        portainer = self._require_portainer()
+        return {"items": await portainer.stacks(),
+                "info": {"url": self._portainer_config().get("url", "")}}
+
+    async def _docker_portainer_stack(self, _src, _rid, document) -> dict:
+        portainer = self._require_portainer()
+        action = str(document.get("action"))[:16]
+        wanted = document.get("id")
+        found = None
+        for entry in await portainer.stacks():
+            if entry["id"] == wanted:
+                found = entry
+                break
+        if found is None:
+            raise fleet_docker.DockerError("Portainer has no such stack")
+        if action == "redeploy":
+            return {"info": await portainer.redeploy(found)}
+        return {"info": await portainer.act(found["id"], found["endpoint"], action)}
+
+    async def _docker_portainer_deploy(self, _src, _rid, document) -> dict:
+        portainer = self._require_portainer()
+        name = document.get("stack")
+        return {"info": await portainer.deploy(
+            name if isinstance(name, str) else "",
+            document.get("compose"),
+            document.get("endpoint"))}
+
+    # -- Portainer configuration (this node's own) -------------------------
+
+    def _portainer_config(self) -> dict:
+        raw = self.state.read_secret(_PORTAINER_KEY)
+        return raw if isinstance(raw, dict) and raw.get("url") else {}
+
+    def _store_portainer(self, config: dict | None) -> None:
+        self.state.write_secret(_PORTAINER_KEY, config)
+
+    def _portainer(self):
+        config = self._portainer_config()
+        if not config:
+            return None
+        try:
+            return fleet_portainer.Portainer(
+                config.get("url", ""), config.get("token", ""),
+                fingerprint=config.get("fingerprint", ""))
+        except fleet_docker.DockerError:
+            return None
+
+    def _require_portainer(self):
+        portainer = self._portainer()
+        if portainer is None:
+            raise fleet_docker.DockerError("no Portainer is configured here")
+        return portainer
+
+    # -- bringing one stack up to date ------------------------------------
+
+    async def _stack_record(self, name: str) -> dict:
+        for stack in await fleet_docker.stacks():
+            if stack["name"] == name:
+                return stack
+        raise fleet_docker.DockerError("no stack of that name runs here")
+
+    async def _update_one_stack(self, name: str, src: NodeID, rid: str,
+                                *, kind: str = "docker") -> dict:
+        """Update a stack the way whoever owns it would.
+
+        Portainer first, when Portainer owns it: running `compose up` behind its
+        back leaves its record stale and the next thing it does undoes the
+        update. Otherwise compose, with the file the project was deployed from —
+        pulling images under a project and restarting it is *not* this act and
+        quietly does less, because a container keeps running the image it was
+        created from until it is recreated."""
+        found = await self._stack_record(name)
+        portainer = self._portainer()
+        if portainer is not None:
+            for entry in await portainer.stacks():
+                if entry["name"] == name:
+                    done = await portainer.redeploy(entry)
+                    done["through"] = "portainer"
+                    return done
+        # Streamed only where there is a stream to carry it. On the docker
+        # plane a reply *is* the answer — `_on_docker_reply` claims the request
+        # id and forgets it — so a progress frame there would consume the very
+        # rid the result has to come back under.
+        sent = [0]
+
+        def say(line: str) -> None:
+            if kind != "update" or sent[0] >= _STACK_OUTPUT_LINES:
+                return
+            sent[0] += 1
+            self._reply(src, UPDATE_OUTPUT,
+                        {"rid": rid, "kind": kind, "text": line[:UPDATE_CHUNK]})
+
+        done = await fleet_docker.stack_up(
+            name, fleet_docker.compose_files(found.get("files", "")),
+            found.get("workdir", ""), on_output=say)
+        done["through"] = "compose"
+        return done
 
     # ======================================================================
     # Shell
@@ -1467,17 +1864,36 @@ class FleetApp:
         """Stream the pty back to its operator until it closes.
 
         Reader-based, never a thread: a blocking read on a pty is joined at
-        asyncio shutdown and wedges it (``gotchas.md`` §2)."""
+        asyncio shutdown and wedges it (``gotchas.md`` §2). And drained by one
+        task rather than one per chunk, because order is the whole contract
+        here — two sends in flight arrive in whichever order they finish."""
         def on_chunk(chunk: bytes) -> None:
             shell.last_active = time.monotonic()
-            self._spawn(self._send(shell.owner,
-                                   bytes([SHELL_OUTPUT]) + shell.sid + chunk))
+            shell.feed(chunk)
+            self._wake_sender(shell)
 
         def on_eof() -> None:
             status = shell.proc.returncode
             self._close_shell(shell.sid, status=status if status is not None else 0)
 
         shell.stop_reader = fleet_ssh.watch_pty(shell.master_fd, on_chunk, on_eof)
+
+    def _wake_sender(self, shell: _Shell) -> None:
+        """One draining task per shell, started only when there is none."""
+        if shell.sender is None or shell.sender.done():
+            shell.sender = asyncio.create_task(self._drain_shell(shell))
+
+    async def _drain_shell(self, shell: _Shell) -> None:
+        """Send what the pty produced, in order, coalesced.
+
+        Coalesced because a redraw arrives as a burst of 4 kB reads and one
+        frame carries far more than that: the burst costs one packet rather
+        than a dozen, and the screen is repainted once."""
+        header = bytes([SHELL_OUTPUT]) + shell.sid
+        while shell.out and self._shells.get(shell.sid) is shell:
+            chunk = bytes(shell.out[:SHELL_CHUNK])
+            del shell.out[:len(chunk)]
+            await self._send(shell.owner, header + chunk)
 
     def _close_shell(self, sid: bytes, *, status: int = 0,
                      notify: bool = True) -> None:
@@ -1970,7 +2386,7 @@ class FleetApp:
         # handshake anchors the newcomer to the network. The operator is a
         # separate matter: it is who the machine will *obey*, carried by the
         # pre-authorisation, and it need not be reachable at first boot.
-        uris, code = self._fresh_invitation(join_uris, join_code)
+        uris, code = await self._fresh_invitation(join_uris, join_code)
         preauth, token = fleet_provision.make_preauth(
             src.raw, self._operator_key(src), capabilities=caps,
             join_uris=uris, join_code=code,
@@ -1995,8 +2411,8 @@ class FleetApp:
         result["joins"] = bool(uris and code)
         return result
 
-    def _fresh_invitation(self, fallback_uris: list[str],
-                          fallback_code: str) -> tuple[list[str], str]:
+    async def _fresh_invitation(self, fallback_uris: list[str],
+                                fallback_code: str) -> tuple[list[str], str]:
         """One single-use mesh invitation for one machine.
 
         Minted per target, never shared: an invitation is single-use by design,
@@ -2010,7 +2426,7 @@ class FleetApp:
         if self._mesh_invite is None:
             return fallback_uris, fallback_code
         try:
-            invitation = self._mesh_invite()
+            invitation = await self._mesh_invite()
         except Exception:
             return fallback_uris, fallback_code
         if not isinstance(invitation, dict):
@@ -2136,8 +2552,8 @@ class FleetApp:
         results = []
         try:
             for target in targets:
-                uris, code = self._fresh_invitation(join_uris or [],
-                                                    join_code or "")
+                uris, code = await self._fresh_invitation(join_uris or [],
+                                                          join_code or "")
                 preauth, token = fleet_provision.make_preauth(
                     self.node_id.raw, self._auth.public_key,
                     capabilities=caps, join_uris=uris, join_code=code,
@@ -2270,13 +2686,30 @@ def _dump_json(document: dict, *trim_keys: str) -> bytes:
     and therefore drops in silence — the worst possible failure for a reply the
     operator is waiting on. So we drop **entries**, never bytes: the named list
     keys are shortened until the frame fits, and ``truncated`` says how many
-    went. A short answer beats an answer that never arrives."""
+    went. A short answer beats an answer that never arrives.
+
+    A named key holding **text** is cut at a character instead, from the front:
+    a log or a command's output is read from its end, and the alternative is a
+    guess at how much a terminal's escape bytes will grow under JSON escaping —
+    where one ``ESC`` becomes six characters, so no fixed ceiling on the text is
+    both safe and useful."""
     blob = _encode(document)
     if len(blob) <= MAX_BODY:
         return blob
     document = dict(document)
     dropped = 0
     for key in trim_keys:
+        text = document.get(key)
+        if isinstance(text, str) and text:
+            keep = len(text)
+            while keep > 0:
+                keep = keep * 3 // 4 if keep > 64 else 0
+                document[key] = text[len(text) - keep:]
+                blob = _encode(document)
+                if len(blob) <= MAX_BODY:
+                    return blob
+            document[key] = ""
+            continue
         items = document.get(key)
         if not isinstance(items, list) or not items:
             continue
@@ -2486,6 +2919,28 @@ def _shell_env() -> dict:
     return env
 
 
+# The docker operations, named once. A message type per container verb would be
+# twenty entries in the dispatch table for one capability, and the capability is
+# the gate — so the verb is a field, and an unknown one is refused here.
+_DOCKER_OPS = {
+    "overview": FleetApp._docker_overview,
+    "containers": FleetApp._docker_containers,
+    "container": FleetApp._docker_container,
+    "logs": FleetApp._docker_logs,
+    "act": FleetApp._docker_act,
+    "images": FleetApp._docker_images,
+    "pull": FleetApp._docker_pull,
+    "deploy": FleetApp._docker_deploy,
+    "stacks": FleetApp._docker_stacks,
+    "stack": FleetApp._docker_stack,
+    "deploy_stack": FleetApp._docker_deploy_stack,
+    "portainer": FleetApp._docker_portainer_set,
+    "portainer_stacks": FleetApp._docker_portainer_stacks,
+    "portainer_stack": FleetApp._docker_portainer_stack,
+    "portainer_deploy": FleetApp._docker_portainer_deploy,
+}
+
+
 # Dispatch tables, built once. Keeping them beside the handlers makes the set of
 # accepted message types explicit: anything not listed here is dropped.
 _SIGNED_INBOUND = {
@@ -2501,6 +2956,7 @@ _SIGNED_INBOUND = {
     STATUS_REQUEST: FleetApp._on_status_request,
     INVITE_REQUEST: FleetApp._on_invite_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
+    DOCKER_REQUEST: FleetApp._on_docker_request,
     SHELL_OPEN: FleetApp._on_shell_open,
     SCAN_REQUEST: FleetApp._on_scan_request,
     PROVISION_REQUEST: FleetApp._on_provision_request,
@@ -2519,6 +2975,7 @@ _PURPOSE_FOR = {
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],
+    DOCKER_REQUEST: PURPOSE_BY_CAP["docker"],
     SHELL_OPEN: PURPOSE_BY_CAP["shell"],
     SCAN_REQUEST: PURPOSE_BY_CAP["scan"],
     PROVISION_REQUEST: PURPOSE_BY_CAP["provision"],
@@ -2529,6 +2986,7 @@ _REPLY_INBOUND = {
     INVITE_ISSUED: FleetApp._on_invite_issued,
     UPDATE_OUTPUT: FleetApp._on_update_output,
     UPDATE_RESULT: FleetApp._on_update_result,
+    DOCKER_REPLY: FleetApp._on_docker_reply,
     SHELL_OPENED: FleetApp._on_shell_opened,
     SCAN_RESULT: FleetApp._on_scan_result,
     PROVISION_PROGRESS: FleetApp._on_provision_progress,

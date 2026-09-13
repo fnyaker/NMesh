@@ -363,38 +363,19 @@ INDEX_HTML = """<!doctype html>
       </div>
 
       <div data-sub="join" class="stack" hidden>
+        <p class="eyebrow">One invitation, both ways round</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Which way in?</h2>
-            <div class="sub">Four routes. Which one to try depends only on what can reach
-              what</div></div></div>
+          <div class="card-head"><div class="grow"><h2>Invite a node</h2>
+            <div class="sub">One short string: where to connect, a way through somebody else
+              when that fails, and a single-use code</div></div></div>
           <div class="card-body">
-            <ol class="steps">
-              <li><strong>A join ticket</strong> — the usual way, and the only one with nothing to
-                type. One node makes it, the other pastes or scans it. It needs the inviting node
-                to have a confirmed public address; if it has none, this page will say so rather
-                than mint a ticket nobody can use.</li>
-              <li><strong>By hand</strong> — when neither node can reach the other yet. Three
-                blocks of text, moved over whatever channel you already trust. No address has to
-                work first, which is what makes it the fallback that always exists.</li>
-              <li><strong>Through a relay</strong> — when the joining node can reach some member of
-                the mesh, but not the one doing the inviting.</li>
-              <li><strong>An address and an invite code</strong> — the primitives the other three
-                are built on, for when you already know exactly what to dial.</li>
-            </ol>
-          </div>
-        </article>
-
-        <p class="eyebrow">The usual way</p>
-        <article class="card">
-          <div class="card-head"><div class="grow"><h2>Quick join</h2>
-            <div class="sub">One short string carrying the address and a single-use code</div></div></div>
-          <div class="card-body">
-            <div class="notice warn"><span>The ticket <b>is</b> the secret. Anyone who can read it
-              can join this mesh until it expires or is used once. Only a node with a confirmed
-              public address can issue one — a scanner has nothing else to go on.</span></div>
+            <div class="notice warn"><span>The invitation <b>is</b> the secret. Anyone who can
+              read it can join this mesh until it expires or is used once.</span></div>
             <div class="split">
               <div class="stack">
-                <h3>Invite someone</h3>
+                <h3>Create one</h3>
+                <label class="field"><span>Into which node's network</span>
+                  <select id="inv-from"><option value="">This node</option></select></label>
                 <label class="field"><span>Valid for</span>
                   <select id="tk-ttl">
                     <option value="60">1 minute</option>
@@ -403,30 +384,33 @@ INDEX_HTML = """<!doctype html>
                     <option value="3600">1 hour</option>
                     <option value="21600">6 hours (maximum)</option>
                   </select></label>
-                <button id="tk-make" class="primary">Create join ticket</button>
+                <button id="tk-make" class="primary">Create invitation</button>
                 <div id="tk-qr" class="qr-holder"></div>
                 <div id="tk-out" class="copyable" hidden>
                   <code id="tk-text" class="mono"></code>
                   <button id="tk-copy" class="sm">Copy</button>
                 </div>
+                <p id="tk-routes" class="muted small"></p>
                 <p id="tk-status" class="msg"></p>
               </div>
               <div class="stack">
-                <h3>Use a ticket</h3>
-                <label class="field"><span>Ticket</span>
-                  <textarea id="tk-in" class="mono" rows="3" placeholder="Paste or scan a join ticket…" spellcheck="false"></textarea></label>
+                <h3>Use one</h3>
+                <label class="field"><span>Invitation</span>
+                  <textarea id="tk-in" class="mono" rows="3" placeholder="Paste or scan an invitation…" spellcheck="false"></textarea></label>
                 <div class="btn-row">
                   <button id="tk-join" class="primary">Join</button>
                   <button id="tk-scan">Scan with camera</button>
                   <button id="tk-scan-stop" hidden>Stop camera</button>
                 </div>
                 <video id="tk-video" class="qr-video" hidden muted playsinline></video>
+                <p class="muted small">This field takes any of them — an invitation, or a block
+                  pasted from an older node. There is nothing to choose between.</p>
                 <p id="tk-scan-status" class="msg"></p>
               </div>
             </div>
           </div>
         </article>
-        <p class="eyebrow">When the two cannot reach each other</p>
+        <p class="eyebrow">When neither node can reach the other</p>
         <details class="card"><summary>Connect two nodes by hand</summary>
           <div class="card-body">
             <p class="muted small">For nodes that cannot see each other yet: three blocks of text,
@@ -446,14 +430,6 @@ INDEX_HTML = """<!doctype html>
             </div>
             <p id="connect-status" class="msg"></p>
           </div>
-        </details>
-        <details class="card"><summary>Invite through a relay</summary>
-          <div class="card-body"><div class="split">
-            <div class="stack"><button id="rly-invite">Generate relay invite</button>
-              <textarea id="rly-invite-out" class="mono" rows="3" readonly></textarea></div>
-            <div class="stack"><textarea id="rly-join-in" class="mono" rows="3" placeholder="Paste a relay invite"></textarea>
-              <button id="rly-join" class="primary">Join via relay</button></div>
-          </div><p id="relay-status" class="msg"></p></div>
         </details>
         <p class="eyebrow">The primitives</p>
         <details class="card"><summary>Invite codes and certificates</summary>
@@ -1261,6 +1237,9 @@ function onRoute(section, sub){
   // behind a hidden section is a light on somebody's phone with nothing on
   // screen to explain it.
   if(section !== "network" || sub !== "join") stopScan();
+  // Who else can let somebody in. Read on entry rather than on a timer: the
+  // grants behind it change when a human accepts one, not second by second.
+  if(section === "network" && sub === "join") loadIssuers();
   if(section === "network" && sub === "peers") refreshPeers();
   if(section === "network" && sub === "reach") loadTransportOptions();
   if(section === "settings" && sub === "appearance") paintPrefs();
@@ -3705,23 +3684,74 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
 }));
 $("config-reload").addEventListener("click", loadConfig);
 
-// ---- quick join: tickets and QR codes --------------------------------------
+// ---- invitations -----------------------------------------------------------
+// One artifact, whichever way round the two machines are: a direct endpoint when
+// this node has one, a relay to reach it through when it does not, and the same
+// single-use code either way. That is what removes the second exchange — there
+// used to be a ticket for the reachable case and a block of base64 for the
+// other, and an operator had to know which situation they were in first.
+
+// …and it need not be *this* node's network. The `invite` capability exists
+// because the node that will honour a code is the node that mints it, so a mesh
+// reached through another machine is invited into by asking that machine.
+async function loadIssuers(){
+  let data;
+  try{ data = (await apiJson("/api/invite/issuers")).data; }catch(_){ return; }
+  const select = $("inv-from");
+  const keep = select.value;
+  const rows = [["", "This node"]].concat((data.issuers || []).map((entry) =>
+    [entry.id, (entry.label || entry.pseudo || shortId(entry.id)) +
+               " — that node's network"]));
+  const wanted = rows.map((pair) =>
+    '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
+  if(select.innerHTML !== wanted) select.innerHTML = wanted;
+  if(rows.some((pair) => pair[0] === keep)) select.value = keep;
+}
+
+function ticketRoutes(data){
+  const routes = [];
+  if(data.uri) routes.push(data.scope === "lan"
+    ? "directly, on this network only" : "directly, from anywhere");
+  if(data.relay_uri) routes.push("through another node, when that fails");
+  if(!routes.length) return "";
+  return "It works " + routes.join(", and ") + ".";
+}
+
 $("tk-make").addEventListener("click", (event) => withBusy(event.target, async () => {
   setMessage("tk-status", "Creating…");
-  $("tk-qr").innerHTML = ""; $("tk-out").hidden = true;
+  $("tk-qr").innerHTML = ""; $("tk-out").hidden = true; $("tk-routes").textContent = "";
+  const issuer = $("inv-from").value;
   try{
-    const {ok, error, data} = await CHANNEL.ask(
-      "join.ticket", {ttl:Number($("tk-ttl").value)});
-    if(!ok){ setMessage("tk-status", error || "Could not create a ticket", true); return; }
-    $("tk-text").textContent = data.ticket;
-    $("tk-out").hidden = false;
-    // The SVG comes from the node, built from the ticket it just minted.
+    // Locally through the plane; on another node through the fleet app, which
+    // is the one that carries the `invite` capability.
+    let data, ok, error;
+    if(issuer){
+      const answer = await apiJson("/api/fleet/invite", "POST",
+        {node:issuer, ttl:Number($("tk-ttl").value), ticket:true});
+      ok = answer.ok && !answer.data.error;
+      data = answer.data || {};
+      error = data.error;
+    }else{
+      const answer = await CHANNEL.ask("join.ticket", {ttl:Number($("tk-ttl").value)});
+      ok = answer.ok; data = answer.data || {}; error = answer.error;
+    }
+    if(!ok){ setMessage("tk-status", error || "Could not create an invitation", true); return; }
+    // A node minting on our behalf answers with the code and, when it can, the
+    // scannable form. Either is the whole secret; neither is worth showing twice.
+    const text = data.ticket || data.code || "";
+    $("tk-text").textContent = text;
+    $("tk-out").hidden = !text;
+    // The SVG comes from the node, built from the string it just minted.
     $("tk-qr").innerHTML = data.qr_svg || "";
+    $("tk-routes").textContent = data.ticket ? ticketRoutes(data)
+      : ((data.uris || []).length
+         ? "A code for " + (data.uris || []).join(", ") + "."
+         : "A code. That node had no address to put beside it.");
     const minutes = Math.round((data.ttl || 0) / 60);
     setMessage("tk-status", "Valid for " +
       (minutes >= 60 ? (minutes / 60) + " hour(s)" : minutes + " minute(s)") +
       ". Single use — treat it like a password.");
-  }catch(_){ setMessage("tk-status", "Could not create a ticket", true); }
+  }catch(_){ setMessage("tk-status", "Could not create an invitation", true); }
 }));
 $("tk-copy").addEventListener("click", () => copyText($("tk-text").textContent));
 // A join fails in a handful of ways and every one of them used to reach the
@@ -3748,23 +3778,48 @@ function joinFailure(answer){
   if(JOIN_NEXT[reason]) parts.push(JOIN_NEXT[reason]);
   return parts.join(" ");
 }
+// One field, and the page works out what was pasted into it. An invitation is
+// base32 and short; a block is base64 and long. Making somebody choose between
+// two buttons is making them classify a string before they can use it.
+function looksLikeTicket(text){
+  return /^[A-Za-z2-7 \t\n-]+$/.test(text) && text.replace(/[\s-]/g, "").length <= 128;
+}
 $("tk-join").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const ticket = $("tk-in").value.trim();
-  if(!ticket){ setMessage("tk-scan-status", "Paste or scan a ticket first.", true); return; }
+  const text = $("tk-in").value.trim();
+  if(!text){ setMessage("tk-scan-status", "Paste or scan an invitation first.", true); return; }
   setMessage("tk-scan-status", "Joining — the handshake is post-quantum, give it a moment…");
   try{
-    const answer = await CHANNEL.ask("join.network", {ticket});
+    const answer = looksLikeTicket(text)
+      ? await CHANNEL.ask("join.network", {ticket:text})
+      : await CHANNEL.ask("join.use_block", {block:text});
     const {ok, data} = answer;
-    if(!ok){ setMessage("tk-scan-status", joinFailure(answer), true); return; }
+    if(!ok){
+      // A block this node does not recognise as one of ours may still be a
+      // relay block, which the node ingests on a route of its own.
+      if(!looksLikeTicket(text) && await joinThroughRelay(text)) return;
+      setMessage("tk-scan-status", joinFailure(answer), true);
+      return;
+    }
     $("tk-in").value = "";
-    setMessage("tk-scan-status",
-      "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
+    setMessage("tk-scan-status", data.through === "relay"
+      ? "Joined through a relay."
+      : "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
     toast("Joined the network");
     tick(false);
   }catch(_){ setMessage("tk-scan-status",
     "The console stopped answering while joining. Check Network → Peers before "
     + "trying again — the join may have gone through.", true); }
 }));
+async function joinThroughRelay(block){
+  try{
+    const {ok} = await apiJson("/api/relay/join", "POST", {block});
+    if(!ok) return false;
+    $("tk-in").value = "";
+    setMessage("tk-scan-status",
+      "Looking for a relay that can reach them — watch Network → Peers.");
+    return true;
+  }catch(_){ return false; }
+}
 
 // Scanning uses the browser's own BarcodeDetector — no library, consistent with
 // a project that takes a dependency only when there is no alternative. Where it
@@ -3916,23 +3971,6 @@ $("cx-complete").addEventListener("click", (event) => withBusy(event.target, asy
     setMessage("connect-status", ok ? "Trying " + data.candidates + " candidate address(es)…"
       : (data.error || "Connect failed"), !ok);
   }catch(_){ setMessage("connect-status", "Connect failed", true); }
-}));
-$("rly-invite").addEventListener("click", (event) => withBusy(event.target, async () => {
-  try{
-    const {data} = await apiJson("/api/relay/invite", "POST");
-    $("rly-invite-out").value = data.block;
-    await copyText(data.block);
-    setMessage("relay-status", "Relay invite ready.");
-  }catch(_){ setMessage("relay-status", "Invite failed", true); }
-}));
-$("rly-join").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const block = $("rly-join-in").value.trim();
-  if(!block){ setMessage("relay-status", "Paste a relay invite.", true); return; }
-  try{
-    const {ok, data} = await apiJson("/api/relay/join", "POST", {block});
-    setMessage("relay-status", ok ? "Joining through " + data.relays + " relay(s)…"
-      : (data.error || "Join failed"), !ok);
-  }catch(_){ setMessage("relay-status", "Join failed", true); }
 }));
 $("gen-invite").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{

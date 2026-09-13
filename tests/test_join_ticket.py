@@ -147,3 +147,128 @@ class TestTtlBounds:
 
     def test_a_sensible_lifetime_is_kept(self):
         assert jt.clamp_ttl(600) == 600.0
+
+
+# ---------------------------------------------------------------------------
+# Both routes in one string
+# ---------------------------------------------------------------------------
+#
+# An invitation used to be either a ticket (direct only, useless if the inviter
+# had no public address) or a block of base64 pasted between two consoles — and
+# an operator had to know which situation they were in before they could invite
+# anybody. One string carrying both removes that question, and the second
+# exchange with it.
+
+NODE = bytes(range(20))
+
+
+class TestBothRoutes:
+    def test_it_carries_a_direct_endpoint_and_a_relay(self):
+        text = jt.encode("203.0.113.7", 9000, SEED, time.time() + 600,
+                         relay=("198.51.100.4", 9100), node_id=NODE)
+        parsed = jt.decode(text)
+        assert parsed["uri"] == "tcp://203.0.113.7:9000"
+        assert parsed["relay_uri"] == "tcp://198.51.100.4:9100"
+        assert parsed["node"] == NODE.hex()
+        assert parsed["code"] == jt.code_from_seed(SEED)
+
+    def test_and_still_fits_somewhere_scannable(self):
+        text = jt.encode("203.0.113.7", 9000, SEED, time.time() + 600,
+                         relay=("198.51.100.4", 9100), node_id=NODE)
+        assert len(text) <= 80, text
+
+    def test_a_relay_only_ticket_has_no_direct_endpoint(self):
+        """The case the whole thing exists for: an inviter with no address of
+        its own."""
+        text = jt.encode("", 0, SEED, time.time() + 600,
+                         relay=("198.51.100.4", 9100), node_id=NODE)
+        parsed = jt.decode(text)
+        assert parsed["uri"] == "" and parsed["host"] == ""
+        assert parsed["relay_uri"] == "tcp://198.51.100.4:9100"
+        assert parsed["node"] == NODE.hex()
+
+    def test_a_direct_only_ticket_names_no_relay(self):
+        parsed = jt.decode(jt.encode("203.0.113.7", 9000, SEED,
+                                     time.time() + 600))
+        assert parsed["relay_uri"] == "" and parsed["node"] == ""
+
+    def test_ipv6_on_either_side(self):
+        text = jt.encode("2001:db8::1", 9000, SEED, time.time() + 600,
+                         relay=("2001:db8::2", 9100), node_id=NODE)
+        parsed = jt.decode(text)
+        assert parsed["uri"] == "tcp://[2001:db8::1]:9000"
+        assert parsed["relay_uri"] == "tcp://[2001:db8::2]:9100"
+        mixed = jt.decode(jt.encode("203.0.113.7", 9000, SEED,
+                                    time.time() + 600,
+                                    relay=("2001:db8::2", 9100), node_id=NODE))
+        assert mixed["host"] == "203.0.113.7"
+        assert mixed["relay_host"] == "2001:db8::2"
+
+    def test_a_relay_needs_the_inviters_identity(self):
+        """A relayed invitation is routed to an identity, so the identity has to
+        be in the string — there is nothing else to address it to."""
+        for bad in (b"", b"\x00" * 19, b"\x00" * 21):
+            with pytest.raises(jt.TicketError):
+                jt.encode("203.0.113.7", 9000, SEED, time.time() + 600,
+                          relay=("198.51.100.4", 9100), node_id=bad)
+
+    def test_a_ticket_that_points_nowhere_is_refused(self):
+        with pytest.raises(jt.TicketError):
+            jt.encode("", 0, SEED, time.time() + 600)
+
+    def test_a_flipped_character_is_still_caught(self):
+        text = jt.encode("203.0.113.7", 9000, SEED, time.time() + 600,
+                         relay=("198.51.100.4", 9100), node_id=NODE)
+        for index in (1, len(text) // 2, len(text) - 3):
+            broken = list(text)
+            broken[index] = "A" if broken[index] != "A" else "B"
+            with pytest.raises(jt.TicketError):
+                jt.decode("".join(broken))
+
+    def test_a_truncated_one_is_refused(self):
+        text = jt.encode("203.0.113.7", 9000, SEED, time.time() + 600,
+                         relay=("198.51.100.4", 9100), node_id=NODE)
+        for cut in range(1, 12):
+            with pytest.raises(jt.TicketError):
+                jt.decode(text[:-cut])
+
+    def test_random_bytes_never_raise_anything_else(self):
+        import base64
+        import random
+        rng = random.Random(7)
+        for _ in range(400):
+            size = rng.randrange(14, 60)
+            blob = bytes(rng.randrange(256) for _ in range(size))
+            # Give it a valid checksum, so the parsing past it is what is tested
+            # rather than the checksum catching everything first.
+            blob = blob[:-2] + jt._checksum(blob[:-2])
+            text = base64.b32encode(blob).decode().rstrip("=")
+            try:
+                jt.decode(text)
+            except jt.TicketError:
+                pass
+
+
+class TestTheOldTicketStillReads:
+    """Refusing to read a version 1 ticket would strand invitations already in
+    somebody's hands."""
+
+    def _v1(self, host="203.0.113.7", port=9000):
+        import base64
+        import ipaddress
+        import struct
+        address = ipaddress.ip_address(host)
+        family = 4 if address.version == 4 else 6
+        body = (bytes([(1 << 4) | family]) + address.packed
+                + struct.pack("!H", port) + SEED
+                + struct.pack("!I", int((time.time() + 600) // 60)))
+        return base64.b32encode(body + jt._checksum(body)).decode().rstrip("=")
+
+    def test_it_decodes_as_the_direct_only_case(self):
+        parsed = jt.decode(self._v1())
+        assert parsed["uri"] == "tcp://203.0.113.7:9000"
+        assert parsed["relay_uri"] == "" and parsed["node"] == ""
+        assert parsed["code"] == jt.code_from_seed(SEED)
+
+    def test_ipv6_too(self):
+        assert jt.decode(self._v1("2001:db8::1"))["uri"] == "tcp://[2001:db8::1]:9000"

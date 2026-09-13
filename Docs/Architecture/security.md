@@ -672,7 +672,16 @@ Joining = proving knowledge of a code **without sending it in the clear**.
 ## Join ticket (`join_ticket.py`)
 
 The same invitation, carried differently: a single short string carrying the
-address **and** the code, for a QR code or for reading aloud.
+code **and both ways of reaching the node that issued it** — its own address
+when it has one, and a relay to reach it through when it does not.
+
+**One artifact, so there is no second exchange.** An invitation used to be
+either a ticket (direct only, and useless if the inviter had no public address)
+or a block of base64 pasted between two consoles — and an operator had to work
+out which situation they were in before they could invite anybody. Carrying both
+routes removes the question: the joiner dials the inviter if it can, and
+otherwise reaches it through the relay named in the string, with the same
+single-use code either way.
 
 - `generate_seeded_code(ttl)` issues an ordinary code — single use, same
   lockout, never transmitted in the clear — but derived from 8 random bytes, so
@@ -681,16 +690,37 @@ address **and** the code, for a QR code or for reading aloud.
 - **The ticket is the secret.** It is worth exactly the code inside it: whoever
   reads it can join until it expires or is used once. 64 bits of entropy behind
   a single-use code and a lockout at three failures.
-- **Issued only from a confirmed `world` address** (`public_endpoints`): not "we
-  believe this address is public", but "an authenticated inbound connection
-  arrived on it". A ticket pointing at an unreachable address would fail after
-  it had already been shared.
+- **The direct endpoint is a confirmed address**, not a hoped-for one: a
+  `world` one (`public_endpoints` — "an authenticated inbound connection arrived
+  on it", never "we believe this is public"), or failing that a `lan` one, which
+  is a different audience proved by a different thing and is the whole of what a
+  local deployment has. What comes back says which, so a page can tell somebody
+  "this only works on your own network" rather than let them find out after
+  sharing it.
+- **One forward per rendezvous per gap.** Forty bytes in becomes five kilobytes
+  out — the key and signature the offer holds — so without a gap somebody
+  holding a ticket could vary the expiry, mint a fresh `msg_id` past dedup, and
+  spend the inviter's link at the seek rate limit's full width. A joiner
+  retrying is well inside it.
+- **The relay half is a rendezvous, not a copy of the invitation.** A relayed
+  invitation needs the inviter's ML-DSA public key and a signature over the
+  code — five kilobytes, far past what any QR code carries. So the inviter
+  leaves that with the relay (`INVITE_OFFER`, over an authenticated link, and
+  only ever about itself), and the ticket carries the relay's address plus the
+  inviter's 20-byte node id. What the joiner then sends is 40 bytes: an expiry
+  and the code's hash. That short seek means nothing anywhere else — a node
+  holding no matching rendezvous drops it in silence, which is also what stops
+  it being a way to ask whether a code exists.
+- A ticket that names neither route is refused at minting: an invitation nobody
+  can act on is worse than none, because it fails after it has been shared.
 - The expiry written into the ticket is a **hint** for the reader, never an
   authority: only the issuing node decides whether the code still works.
 - The checksum (2 bytes) catches a typo before anything is dialled. It is **not**
   integrity against an attacker — they would recompute it.
 - A ticket carries a **numeric address**, never a hostname: a name would need a
   resolver on the scanner's side and could point somewhere else later.
+- Version 1 tickets (direct only) still decode. Refusing to read one would
+  strand invitations already in somebody's hands.
 - Decoding is treated as hostile input: bounded length, every field validated
   before use, and nothing but a `TicketError` can come out.
 

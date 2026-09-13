@@ -15,21 +15,33 @@ terminal is two copies of every bug in one. What lives here:
   terminal with nothing around it, a key row for the keys a phone does not
   have, and the files of the machine it is talking to.
 
-Why a page of its own, and why it is built for a phone
-------------------------------------------------------
-A terminal in a panel is a terminal in a box: 62% of the viewport, a rail beside
-it, and on a phone a keyboard covering what is left. The full-screen page is the
-same session seen properly — and it is opened in a **tab**, never a pop-up
-window, because a 700px window is exactly the thing being escaped.
+What the emulator implements, and why that much
+-----------------------------------------------
+A log pane shows what a shell *printed*. A terminal shows what a program
+*drew*, and the two only coincide for programs that draw nothing. ``btop``,
+``htop``, ``vim`` and ``less`` all do the same four things a line-oriented
+emulator cannot: they take the **alternate screen** so the scrollback is not
+destroyed, they set a **scroll region** and move lines inside it instead of
+repainting, they paint **backgrounds** (256-colour and 24-bit), and they ask
+the terminal to **report the mouse**. Any one of those missing makes the screen
+garbage, so all four are here.
 
-On Android nothing about a terminal is automatic. The soft keyboard only appears
-for a focused editable element, so there is a real one behind the screen and a
-tap on the terminal focuses it. It reports no usable ``keydown`` (an IME sends
-``229``), so what is typed is read from ``input`` events instead. It has no
-Escape, no Tab, no Ctrl and no arrows, so those are a row of keys under the
-screen — the arrangement Termux settled on, for the same reasons. And it resizes
-the viewport instead of scrolling the page, so the layout follows
-``visualViewport`` rather than guessing.
+Two of them are also why a terminal has to be told its size. A pty carries
+``TIOCSWINSZ``; a full-screen program reads it once and lays its whole screen
+out on the answer. Resize the pane without telling the pty and every box is
+drawn to the old width — which is the same picture as a broken emulator, and
+was for a long time the same bug. So the pane is measured, the size is pushed
+to the pty, the emulator's own grid is resized with the content kept, and the
+program is signalled.
+
+Why the output is streamed rather than polled
+---------------------------------------------
+Output used to be fetched on a timer. A timer is a floor on latency — half the
+interval on average, all of it at worst — and it is paid on every keystroke,
+because what a person sees after typing is the echo coming back. The read is
+now a **held request**: the console answers as soon as there are bytes, and the
+page asks again straight away. Idle costs one parked request instead of a
+question every fraction of a second, and a keystroke costs one round trip.
 """
 
 CSS = """
@@ -39,12 +51,30 @@ CSS = """
 .term{--page-term-bg:#0a0f16;--page-term-fg:#cfe0f7;
   margin:0;padding:var(--s-4);min-height:440px;max-height:62vh;overflow:auto;
   background:var(--page-term-bg);color:var(--page-term-fg);
-  font:13px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;
+  font:13px/1.25 var(--mono);white-space:pre;overflow-wrap:normal;
   border-bottom:1px solid var(--border)}
 .term:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+/* One element per line. `pre` keeps the spaces; the rows exist so a repaint
+   touches the lines that changed instead of the whole screen. */
+.term .t-row{min-height:1.25em}
+/* While a program is reporting the mouse, dragging must not select text — the
+   drag *is* the message being sent. */
+.term.t-mouse{user-select:none;-webkit-user-select:none}
+.t-b{font-weight:700}.t-d{opacity:.62}.t-i{font-style:italic}
+.t-u{text-decoration:underline}.t-s{text-decoration:line-through}
+.t-u.t-s{text-decoration:underline line-through}
+.t-h{visibility:hidden}
+.t-cur{background:#cfe0f7;color:#0a0f16}
 .t-c0{color:#5b6b80}.t-c1{color:#ff8079}.t-c2{color:#5fd39a}.t-c3{color:#f2c261}
 .t-c4{color:#79b0ff}.t-c5{color:#d79bff}.t-c6{color:#5fd9d0}.t-c7{color:#e8eef5}
-.t-b{font-weight:700}.t-cur{background:#cfe0f7;color:#0a0f16}
+.t-c8{color:#7d8ea6}.t-c9{color:#ff9d97}.t-c10{color:#86e3b6}.t-c11{color:#ffd684}
+.t-c12{color:#9cc6ff}.t-c13{color:#e4b8ff}.t-c14{color:#8fe9e2}.t-c15{color:#ffffff}
+.t-g0{background:#0a0f16}.t-g1{background:#ff8079}.t-g2{background:#5fd39a}
+.t-g3{background:#f2c261}.t-g4{background:#79b0ff}.t-g5{background:#d79bff}
+.t-g6{background:#5fd9d0}.t-g7{background:#e8eef5}.t-g8{background:#3a475a}
+.t-g9{background:#ff9d97}.t-g10{background:#86e3b6}.t-g11{background:#ffd684}
+.t-g12{background:#9cc6ff}.t-g13{background:#e4b8ff}.t-g14{background:#8fe9e2}
+.t-g15{background:#ffffff}
 """
 
 
@@ -54,169 +84,796 @@ JS = r"""
 // terminal, not a log pane, and pulling in an emulator library for it would
 // cost a name in the supply chain this project keeps deliberately short.
 //
-// What it implements is what a shell session actually uses: printable text,
-// CR/LF/BS/TAB/BEL, cursor movement, the two erase commands, and SGR colours.
-// Anything else is consumed and ignored rather than printed — an unknown escape
-// must never end up on screen as garbage.
-function Term(cols,rows){
-  this.cols=cols; this.rows=rows;
-  this.x=0; this.y=0; this.sgr=""; this.scrollback=[];
-  this.grid=[]; for(let i=0;i<rows;i++)this.grid.push(this.blankRow());
-  this.pending="";
+// What it implements is what a full-screen program actually uses: the printable
+// text and the control bytes, cursor movement, the erase and edit commands, a
+// scroll region, the alternate screen, insert/delete of lines and characters,
+// SGR from the eight colours up to 24-bit, the DEC private modes a TUI sets on
+// the way in, mouse reporting, and the few reports a program asks for and then
+// waits on. Anything else is consumed and ignored rather than printed — an
+// unknown escape must never end up on screen as garbage.
+
+// Attribute bits. Kept as a mask rather than booleans because every cell on the
+// screen carries one, and a screen is a few thousand cells repainted many times
+// a second.
+const T_BOLD = 1, T_DIM = 2, T_ITALIC = 4, T_UNDER = 8;
+const T_INVERSE = 16, T_HIDDEN = 32, T_STRIKE = 64;
+
+// The 256-colour cube, for the indices that have no class of their own. 0..15
+// are the palette in the stylesheet, so they never come through here.
+function t256(index){
+  if(index < 16) return null;
+  if(index < 232){
+    const n = index - 16;
+    const step = (value) => (value ? 55 + value * 40 : 0);
+    return [step(Math.floor(n / 36) % 6), step(Math.floor(n / 6) % 6), step(n % 6)];
+  }
+  const grey = 8 + (index - 232) * 10;
+  return [grey, grey, grey];
 }
-Term.prototype.blankRow=function(){
-  const row=[]; for(let i=0;i<this.cols;i++)row.push({ch:" ",cls:""});
+function t_rgb(colour){
+  return "rgb(" + colour[0] + "," + colour[1] + "," + colour[2] + ")";
+}
+function t_colourKey(colour){
+  return colour === null ? "-" : (typeof colour === "number" ? String(colour)
+                                                             : colour.join(","));
+}
+
+// Styles are interned: a screen has thousands of cells and a handful of
+// distinct looks, so cells share one object and a repaint compares references
+// instead of strings.
+const T_STYLES = new Map();
+const T_DEF_BG = "#0a0f16", T_DEF_FG = "#cfe0f7";
+
+// The sixteen palette colours have classes in the stylesheet. Everything past
+// them — the 256-colour cube, 24-bit — gets a class **minted at runtime**,
+// because the console's CSP has no `unsafe-inline` and a `style=` attribute is
+// therefore ignored by the browser without an error. A rule inserted through
+// the CSSOM is not inline, and is the one way to colour a cell here.
+const T_COLOURS = new Map();          // declaration -> class name
+const T_MAX_COLOURS = 1024;           // bounded, like everything a peer can grow
+let T_SHEET;
+
+function t_sheet(){
+  if(T_SHEET !== undefined) return T_SHEET;
+  T_SHEET = null;
+  if(typeof document === "undefined") return T_SHEET;
+  try{
+    const sheet = new CSSStyleSheet();
+    document.adoptedStyleSheets = document.adoptedStyleSheets.concat([sheet]);
+    T_SHEET = sheet;
+  }catch(_){
+    // Older engines: use a sheet the page already served rather than adding a
+    // `<style>` element, which the policy would refuse.
+    try{ T_SHEET = document.styleSheets[0] || null; }catch(_e){ T_SHEET = null; }
+  }
+  return T_SHEET;
+}
+function t_class(declaration){
+  let name = T_COLOURS.get(declaration);
+  if(name !== undefined) return name;
+  if(T_COLOURS.size >= T_MAX_COLOURS) return "";
+  name = "t-x" + T_COLOURS.size;
+  T_COLOURS.set(declaration, name);
+  const sheet = t_sheet();
+  if(sheet){
+    try{ sheet.insertRule("." + name + "{" + declaration + "}", sheet.cssRules.length); }
+    catch(_){}
+  }
+  return name;
+}
+function t_colour(value){
+  if(typeof value === "number") return t_rgb(t256(value));
+  return Array.isArray(value) ? t_rgb(value) : value;
+}
+
+function termStyle(fg, bg, flags){
+  const key = t_colourKey(fg) + "|" + t_colourKey(bg) + "|" + flags;
+  let style = T_STYLES.get(key);
+  if(style) return style;
+  // Inverse is resolved here rather than at paint time: it is a swap, and doing
+  // it once per distinct look beats doing it once per cell per frame.
+  let front = fg, back = bg;
+  if(flags & T_INVERSE){
+    front = bg; back = fg;
+    if(front === null) front = T_DEF_BG;
+    if(back === null) back = T_DEF_FG;
+  }
+  const classes = [];
+  const add = (declaration) => {
+    const name = t_class(declaration);
+    if(name) classes.push(name);
+  };
+  if(typeof front === "number" && front < 16) classes.push("t-c" + front);
+  else if(front !== null) add("color:" + t_colour(front));
+  if(typeof back === "number" && back < 16) classes.push("t-g" + back);
+  else if(back !== null) add("background:" + t_colour(back));
+  if(flags & T_BOLD) classes.push("t-b");
+  if(flags & T_DIM) classes.push("t-d");
+  if(flags & T_ITALIC) classes.push("t-i");
+  if(flags & T_UNDER) classes.push("t-u");
+  if(flags & T_STRIKE) classes.push("t-s");
+  if(flags & T_HIDDEN) classes.push("t-h");
+  style = {key:key, fg:fg, bg:bg, flags:flags,
+           cls:classes.join(" "), plain:!classes.length};
+  if(T_STYLES.size < 4096) T_STYLES.set(key, style);
+  return style;
+}
+const T_PLAIN = termStyle(null, null, 0);
+
+// How many columns one code point takes. Full-width forms take two, combining
+// marks take none and are hung on the cell before them; everything else is one.
+// A width that is wrong here is a line that drifts sideways, which is what a
+// box-drawing program looks like when it breaks.
+function termWidth(code){
+  if(code < 0x0300) return 1;
+  if((code >= 0x0300 && code <= 0x036f) || (code >= 0x1ab0 && code <= 0x1aff) ||
+     (code >= 0x1dc0 && code <= 0x1dff) || (code >= 0x20d0 && code <= 0x20f0) ||
+     (code >= 0xfe00 && code <= 0xfe0f) || (code >= 0xfe20 && code <= 0xfe2f) ||
+     code === 0x200b || code === 0x200d) return 0;
+  if((code >= 0x1100 && code <= 0x115f) ||
+     (code >= 0x2e80 && code <= 0x303e) || (code >= 0x3041 && code <= 0x33ff) ||
+     (code >= 0x3400 && code <= 0x4dbf) || (code >= 0x4e00 && code <= 0xa4cf) ||
+     (code >= 0xa960 && code <= 0xa97f) || (code >= 0xac00 && code <= 0xd7a3) ||
+     (code >= 0xf900 && code <= 0xfaff) || (code >= 0xfe10 && code <= 0xfe19) ||
+     (code >= 0xfe30 && code <= 0xfe6f) || (code >= 0xff00 && code <= 0xff60) ||
+     (code >= 0xffe0 && code <= 0xffe6) ||
+     (code >= 0x1f300 && code <= 0x1f64f) || (code >= 0x1f900 && code <= 0x1f9ff) ||
+     (code >= 0x20000 && code <= 0x3fffd)) return 2;
+  return 1;
+}
+
+// The DEC special graphics set (`ESC ( 0`): the line-drawing characters older
+// programs still use instead of the Unicode ones.
+const T_DEC_GRAPHICS = {
+  "j":"┘", "k":"┐", "l":"┌", "m":"└", "n":"┼",
+  "q":"─", "t":"├", "u":"┤", "v":"┴", "w":"┬",
+  "x":"│", "a":"▒", "`":"◆", "f":"°", "g":"±",
+  "o":"⎺", "p":"⎻", "r":"⎼", "s":"⎽", "0":"█",
+  "~":"·", "y":"≤", "z":"≥", "{":"π", "|":"≠",
+  "}":"£", ".":"▼", ",":"◀", "+":"▶", "-":"▲",
+  "h":"▒", "i":"▒",
+};
+
+const T_SCROLLBACK = 2000;      // lines kept above the screen
+const T_PENDING_MAX = 4096;     // an unterminated escape is dropped, never grown
+
+function Term(cols, rows){
+  this.cols = Math.max(2, cols | 0); this.rows = Math.max(1, rows | 0);
+  this.scrollback = [];         // rendered lines, oldest first
+  this.sbTotal = 0;             // lines ever pushed (so a painter can catch up)
+  this.onReply = null;          // where a program's requested report is sent
+  this.onBell = null;
+  this.reset();
+}
+Term.prototype.reset = function(){
+  this.grid = this.blankGrid(this.rows);
+  this.altGrid = null;
+  this.x = 0; this.y = 0; this.wrapNext = false;
+  this.fg = null; this.bg = null; this.flags = 0; this.style = T_PLAIN;
+  this.top = 0; this.bot = this.rows - 1;
+  this.saved = null; this.savedAlt = null;
+  this.autowrap = true; this.insert = false; this.origin = false;
+  this.cursorVisible = true; this.appCursor = false; this.appKeypad = false;
+  this.bracketed = false; this.mouse = 0; this.mouseSgr = false;
+  this.graphics = false; this.title = "";
+  this.pending = ""; this.dirty = true;
+  this.tabs = {};
+};
+Term.prototype.blankRow = function(){
+  const row = new Array(this.cols);
+  for(let i = 0; i < this.cols; i++) row[i] = {c:" ", s:T_PLAIN, w:1};
   return row;
 };
-Term.prototype.newline=function(){
-  this.y++;
-  if(this.y>=this.rows){
-    this.scrollback.push(this.grid.shift());
-    if(this.scrollback.length>2000)this.scrollback.shift();
-    this.grid.push(this.blankRow());
-    this.y=this.rows-1;
+// Erasing paints the *current* background, which is how a full-screen program
+// fills a panel: it sets a background and erases. Without this every painted
+// area comes back the colour of the page.
+Term.prototype.eraseCell = function(){
+  const style = (this.bg === null && !(this.flags & T_INVERSE))
+    ? T_PLAIN : termStyle(null, this.bg, this.flags & T_INVERSE);
+  return {c:" ", s:style, w:1};
+};
+Term.prototype.eraseRow = function(){
+  const row = new Array(this.cols), cell = this.eraseCell();
+  for(let i = 0; i < this.cols; i++) row[i] = {c:cell.c, s:cell.s, w:1};
+  return row;
+};
+Term.prototype.blankGrid = function(rows){
+  const grid = [];
+  for(let i = 0; i < rows; i++) grid.push(this.blankRow());
+  return grid;
+};
+Term.prototype.alt = function(){ return this.altGrid !== null; };
+
+// Resizing keeps the content. A pty is told its new size and a full-screen
+// program redraws from scratch, but a shell at a prompt is not told anything
+// and never repaints — so what is already on the screen has to survive.
+Term.prototype.resize = function(cols, rows){
+  cols = Math.max(2, cols | 0); rows = Math.max(1, rows | 0);
+  if(cols === this.cols && rows === this.rows) return false;
+  const oldCols = this.cols;
+  this.cols = cols;
+  const blankRow = (row) => row.every((cell) => cell.c === " " && cell.s.plain);
+  const fit = (grid, keep) => {
+    for(const row of grid){
+      if(cols < oldCols) row.length = cols;
+      else for(let i = oldCols; i < cols; i++) row[i] = {c:" ", s:T_PLAIN, w:1};
+    }
+    while(grid.length > rows){
+      // Empty rows below the cursor go first, and only then does the top
+      // scroll away: dropping from the top while the screen is mostly blank
+      // would take the prompt off with it.
+      if(grid.length - 1 > this.y && blankRow(grid[grid.length - 1])){
+        grid.pop();
+        continue;
+      }
+      const gone = grid.shift();
+      if(keep) this.pushScrollback(gone);
+      this.y = Math.max(0, this.y - 1);
+    }
+    while(grid.length < rows) grid.push(this.blankRow());
+  };
+  fit(this.grid, !this.alt());
+  if(this.altGrid) fit(this.altGrid, false);
+  this.rows = rows;
+  this.top = 0; this.bot = rows - 1;
+  this.x = Math.min(this.x, cols - 1);
+  this.y = Math.min(this.y, rows - 1);
+  this.wrapNext = false;
+  this.dirty = true;
+  return true;
+};
+Term.prototype.pushScrollback = function(row){
+  this.scrollback.push(this.rowHtml(row, -1));
+  this.sbTotal++;
+  if(this.scrollback.length > T_SCROLLBACK) this.scrollback.shift();
+};
+// Scrolling happens inside the region, never over the whole screen: that is the
+// difference between a pane a program can animate and one that jumps.
+Term.prototype.scrollUp = function(count){
+  const grid = this.alt() ? this.altGrid : this.grid;
+  for(let n = 0; n < count; n++){
+    const gone = grid.splice(this.top, 1)[0];
+    if(!this.alt() && this.top === 0) this.pushScrollback(gone);
+    grid.splice(this.bot, 0, this.eraseRow());
   }
+  this.dirty = true;
 };
-Term.prototype.put=function(ch){
-  if(this.x>=this.cols){this.x=0;this.newline();}
-  this.grid[this.y][this.x]={ch:ch,cls:this.sgr};
-  this.x++;
+Term.prototype.scrollDown = function(count){
+  const grid = this.alt() ? this.altGrid : this.grid;
+  for(let n = 0; n < count; n++){
+    grid.splice(this.bot, 1);
+    grid.splice(this.top, 0, this.eraseRow());
+  }
+  this.dirty = true;
 };
-Term.prototype.eraseLine=function(mode){
-  const row=this.grid[this.y];
-  const from=mode===1?0:(mode===2?0:this.x);
-  const to=mode===0?this.cols:(mode===1?this.x+1:this.cols);
-  for(let i=from;i<to&&i<this.cols;i++)row[i]={ch:" ",cls:""};
+Term.prototype.screen = function(){ return this.alt() ? this.altGrid : this.grid; };
+Term.prototype.newline = function(){
+  if(this.y === this.bot) this.scrollUp(1);
+  else if(this.y < this.rows - 1) this.y++;
 };
-Term.prototype.eraseDisplay=function(mode){
-  if(mode===2||mode===3){
-    for(let y=0;y<this.rows;y++)this.grid[y]=this.blankRow();
-    if(mode===2){this.x=0;this.y=0;}
+Term.prototype.reverseNewline = function(){
+  if(this.y === this.top) this.scrollDown(1);
+  else if(this.y > 0) this.y--;
+};
+Term.prototype.put = function(ch, width){
+  const row = this.screen()[this.y];
+  if(width === 0){                       // a combining mark joins the cell before
+    const at = this.x > 0 ? this.x - 1 : 0;
+    if(row[at] && row[at].c) row[at] = {c:row[at].c + ch, s:row[at].s, w:row[at].w};
     return;
   }
-  this.eraseLine(mode===1?1:0);
-  if(mode===0)for(let y=this.y+1;y<this.rows;y++)this.grid[y]=this.blankRow();
-  else for(let y=0;y<this.y;y++)this.grid[y]=this.blankRow();
-};
-Term.prototype.sgrClass=function(params){
-  // Only the attributes that make output readable: reset, bold, and the eight
-  // foreground colours (plus their bright forms).
-  let cls=this.sgr;
-  for(const raw of params){
-    const n=raw===""?0:parseInt(raw,10);
-    if(n===0)cls="";
-    else if(n===1)cls=(cls+" t-b").trim();
-    else if(n>=30&&n<=37)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-30);
-    else if(n>=90&&n<=97)cls=cls.replace(/t-c\d/g,"").trim()+" t-c"+(n-90)+" t-b";
-    else if(n===39)cls=cls.replace(/t-c\d/g,"").trim();
+  if(this.wrapNext || this.x + width > this.cols){
+    if(this.autowrap){ this.x = 0; this.newline(); }
+    else this.x = this.cols - width;
+    this.wrapNext = false;
   }
-  return cls.replace(/\s+/g," ").trim();
+  if(this.insert){
+    const row2 = this.screen()[this.y];
+    for(let n = 0; n < width; n++){ row2.splice(this.cols - 1, 1); row2.splice(this.x, 0, this.eraseCell()); }
+  }
+  const line = this.screen()[this.y];
+  line[this.x] = {c:ch, s:this.style, w:width};
+  for(let n = 1; n < width; n++){
+    if(this.x + n < this.cols) line[this.x + n] = {c:"", s:this.style, w:0};
+  }
+  this.x += width;
+  if(this.x >= this.cols){ this.x = this.cols - 1; this.wrapNext = true; }
 };
-Term.prototype.write=function(text){
-  let data=this.pending+text; this.pending="";
-  for(let i=0;i<data.length;i++){
-    const ch=data[i];
-    if(ch==="\x1b"){
-      // An escape may be split across two chunks: keep the tail and retry.
-      const rest=data.slice(i);
-      const csi=/^\x1b\[([0-9;?]*)([ -\/]*)([@-~])/.exec(rest);
-      if(csi){ this.csi(csi[1],csi[3]); i+=csi[0].length-1; continue; }
-      const osc=/^\x1b\][^\x07\x1b]*(\x07|\x1b\\)/.exec(rest);
-      if(osc){ i+=osc[0].length-1; continue; }        // window title and friends
-      const two=/^\x1b[=>()#][0-9A-Za-z]?/.exec(rest);
-      if(two){ i+=two[0].length-1; continue; }
-      if(rest.length<8){ this.pending=rest; return; }  // incomplete, wait
-      continue;                                        // unknown: drop it
+Term.prototype.eraseLine = function(mode){
+  const row = this.screen()[this.y];
+  const from = mode === 0 ? this.x : 0;
+  const to = mode === 1 ? this.x + 1 : this.cols;
+  for(let i = from; i < to && i < this.cols; i++) row[i] = this.eraseCell();
+};
+Term.prototype.eraseDisplay = function(mode){
+  const grid = this.screen();
+  if(mode === 2 || mode === 3){
+    for(let y = 0; y < this.rows; y++) grid[y] = this.eraseRow();
+    if(mode === 3){ this.scrollback.length = 0; this.sbTotal = 0; }
+    return;
+  }
+  this.eraseLine(mode === 1 ? 1 : 0);
+  if(mode === 0) for(let y = this.y + 1; y < this.rows; y++) grid[y] = this.eraseRow();
+  else for(let y = 0; y < this.y; y++) grid[y] = this.eraseRow();
+};
+Term.prototype.eraseChars = function(count){
+  const row = this.screen()[this.y];
+  for(let i = this.x; i < Math.min(this.cols, this.x + count); i++) row[i] = this.eraseCell();
+};
+Term.prototype.deleteChars = function(count){
+  const row = this.screen()[this.y];
+  for(let n = 0; n < count && this.x < this.cols; n++){
+    row.splice(this.x, 1); row.push(this.eraseCell());
+  }
+};
+Term.prototype.insertChars = function(count){
+  const row = this.screen()[this.y];
+  for(let n = 0; n < count; n++){ row.splice(this.cols - 1, 1); row.splice(this.x, 0, this.eraseCell()); }
+};
+Term.prototype.insertLines = function(count){
+  if(this.y < this.top || this.y > this.bot) return;
+  const grid = this.screen();
+  for(let n = 0; n < count; n++){
+    grid.splice(this.bot, 1);
+    grid.splice(this.y, 0, this.eraseRow());
+  }
+};
+Term.prototype.deleteLines = function(count){
+  if(this.y < this.top || this.y > this.bot) return;
+  const grid = this.screen();
+  for(let n = 0; n < count; n++){
+    grid.splice(this.y, 1);
+    grid.splice(this.bot, 0, this.eraseRow());
+  }
+};
+Term.prototype.setAttrs = function(params){
+  // Only the attributes a program can actually be seen to use. Anything else is
+  // consumed: an unhandled SGR must change nothing, never print.
+  for(let i = 0; i < params.length; i++){
+    const n = params[i] === "" ? 0 : parseInt(params[i], 10);
+    if(!isFinite(n)) continue;
+    if(n === 0){ this.fg = null; this.bg = null; this.flags = 0; }
+    else if(n === 1) this.flags |= T_BOLD;
+    else if(n === 2) this.flags |= T_DIM;
+    else if(n === 3) this.flags |= T_ITALIC;
+    else if(n === 4) this.flags |= T_UNDER;
+    else if(n === 7) this.flags |= T_INVERSE;
+    else if(n === 8) this.flags |= T_HIDDEN;
+    else if(n === 9) this.flags |= T_STRIKE;
+    else if(n === 21 || n === 22) this.flags &= ~(T_BOLD | T_DIM);
+    else if(n === 23) this.flags &= ~T_ITALIC;
+    else if(n === 24) this.flags &= ~T_UNDER;
+    else if(n === 27) this.flags &= ~T_INVERSE;
+    else if(n === 28) this.flags &= ~T_HIDDEN;
+    else if(n === 29) this.flags &= ~T_STRIKE;
+    else if(n >= 30 && n <= 37) this.fg = n - 30;
+    else if(n === 38 || n === 48){
+      const mode = parseInt(params[i + 1] || "", 10);
+      let colour = null;
+      if(mode === 5){ colour = parseInt(params[i + 2] || "", 10) & 255; i += 2; }
+      else if(mode === 2){
+        colour = [parseInt(params[i + 2] || "0", 10) & 255,
+                  parseInt(params[i + 3] || "0", 10) & 255,
+                  parseInt(params[i + 4] || "0", 10) & 255];
+        i += 4;
+      }else{ i += 1; }
+      if(n === 38) this.fg = colour; else this.bg = colour;
     }
-    if(ch==="\n"){ this.newline(); continue; }
-    if(ch==="\r"){ this.x=0; continue; }
-    if(ch==="\b"){ if(this.x>0)this.x--; continue; }
-    if(ch==="\t"){ const next=(Math.floor(this.x/8)+1)*8;
-                   while(this.x<next&&this.x<this.cols)this.put(" ");
-                   continue; }
-    if(ch==="\x07")continue;                          // bell
-    if(ch<" ")continue;                                // other control bytes
-    this.put(ch);
+    else if(n === 39) this.fg = null;
+    else if(n >= 40 && n <= 47) this.bg = n - 40;
+    else if(n === 49) this.bg = null;
+    else if(n >= 90 && n <= 97) this.fg = n - 90 + 8;
+    else if(n >= 100 && n <= 107) this.bg = n - 100 + 8;
+  }
+  this.style = termStyle(this.fg, this.bg, this.flags);
+};
+Term.prototype.reply = function(text){
+  if(this.onReply) try{ this.onReply(text); }catch(_){}
+};
+Term.prototype.setMode = function(params, on, priv){
+  for(const raw of params){
+    const n = parseInt(raw, 10);
+    if(!isFinite(n)) continue;
+    if(!priv){
+      if(n === 4) this.insert = on;
+      continue;
+    }
+    switch(n){
+      case 1: this.appCursor = on; break;
+      case 6: this.origin = on;
+              this.x = 0; this.y = on ? this.top : 0; this.wrapNext = false; break;
+      case 7: this.autowrap = on; break;
+      case 25: this.cursorVisible = on; break;
+      case 9: this.mouse = on ? 9 : 0; break;
+      case 1000: this.mouse = on ? 1000 : 0; break;
+      case 1001: case 1002: this.mouse = on ? 1002 : 0; break;
+      case 1003: this.mouse = on ? 1003 : 0; break;
+      case 1005: break;                       // UTF-8 mouse: SGR is preferred
+      case 1006: case 1015: this.mouseSgr = on; break;
+      case 2004: this.bracketed = on; break;
+      case 47: case 1047: case 1049:
+        this.useAlt(on, n === 1049);
+        break;
+      default: break;                         // consumed, never printed
+    }
+  }
+  this.dirty = true;
+};
+// The alternate screen is what keeps `btop` from eating the scrollback: the
+// program gets a blank grid of its own and the shell's screen comes back
+// untouched when it exits.
+Term.prototype.useAlt = function(on, withCursor){
+  if(on){
+    if(this.alt()) return;
+    if(withCursor) this.savedAlt = this.cursorState();
+    this.altGrid = this.blankGrid(this.rows);
+    this.x = 0; this.y = 0; this.wrapNext = false;
+    this.top = 0; this.bot = this.rows - 1;
+  }else{
+    if(!this.alt()) return;
+    this.altGrid = null;
+    this.top = 0; this.bot = this.rows - 1;
+    if(withCursor && this.savedAlt) this.restoreCursor(this.savedAlt);
+    this.savedAlt = null;
   }
 };
-Term.prototype.csi=function(paramText,final){
-  const params=paramText.replace("?","").split(";");
-  const n=Math.max(1,parseInt(params[0]||"1",10)||1);
+Term.prototype.cursorState = function(){
+  return {x:this.x, y:this.y, fg:this.fg, bg:this.bg, flags:this.flags,
+          graphics:this.graphics, origin:this.origin};
+};
+Term.prototype.restoreCursor = function(state){
+  if(!state) return;
+  this.x = Math.min(state.x, this.cols - 1);
+  this.y = Math.min(state.y, this.rows - 1);
+  this.fg = state.fg; this.bg = state.bg; this.flags = state.flags;
+  this.graphics = state.graphics; this.origin = state.origin;
+  this.style = termStyle(this.fg, this.bg, this.flags);
+  this.wrapNext = false;
+};
+Term.prototype.goto = function(row, col){
+  const base = this.origin ? this.top : 0;
+  const limit = this.origin ? this.bot : this.rows - 1;
+  this.y = Math.max(0, Math.min(limit, base + row));
+  this.x = Math.max(0, Math.min(this.cols - 1, col));
+  this.wrapNext = false;
+};
+Term.prototype.nextTab = function(count){
+  for(let n = 0; n < count; n++){
+    let at = this.x + 1;
+    while(at < this.cols - 1 && !(this.tabs[at] || at % 8 === 0)) at++;
+    this.x = Math.min(this.cols - 1, at);
+  }
+  this.wrapNext = false;
+};
+Term.prototype.prevTab = function(count){
+  for(let n = 0; n < count; n++){
+    let at = this.x - 1;
+    while(at > 0 && !(this.tabs[at] || at % 8 === 0)) at--;
+    this.x = Math.max(0, at);
+  }
+};
+
+const T_CSI = /^\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])/;
+const T_OSC = /^\x1b\](\d*);?([^\x07\x1b]*)(\x07|\x1b\\)/;
+const T_STR = /^\x1b[P^_X][\s\S]*?(\x1b\\|\x07)/;
+const T_ESC2 = /^\x1b([()*+%#])([0-9A-Za-z@])/;
+// A CSI that has not finished yet: parameter and intermediate bytes and then
+// the end of what arrived. Told apart from a malformed one, which is dropped
+// rather than waited on for ever.
+const T_CSI_PART = /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*$/;
+
+Term.prototype.write = function(text){
+  let data = this.pending + text; this.pending = "";
+  const length = data.length;
+  for(let i = 0; i < length; i++){
+    const ch = data[i];
+    if(ch === "\x1b"){
+      const rest = data.slice(i);
+      const csi = T_CSI.exec(rest);
+      if(csi){ this.csi(csi[1], csi[2], csi[3]); i += csi[0].length - 1; continue; }
+      const osc = T_OSC.exec(rest);
+      if(osc){
+        if(osc[1] === "0" || osc[1] === "2") this.title = osc[2].slice(0, 200);
+        i += osc[0].length - 1; continue;
+      }
+      const str = T_STR.exec(rest);
+      if(str){ i += str[0].length - 1; continue; }
+      const two = T_ESC2.exec(rest);
+      if(two){
+        if(two[1] === "(") this.graphics = two[2] === "0";
+        i += two[0].length - 1; continue;
+      }
+      // `rest` runs to the end of what has arrived, so a sequence that did
+      // not match above is either split across two reads — kept and retried
+      // when the rest comes — or malformed, and dropped.
+      if(T_CSI_PART.test(rest)){
+        if(rest.length < T_PENDING_MAX) this.pending = rest;
+        return;
+      }
+      if(rest.length >= 2){
+        const next = rest[1];
+        if(next === "7"){ this.saved = this.cursorState(); i++; continue; }
+        if(next === "8"){ this.restoreCursor(this.saved); i++; continue; }
+        if(next === "D"){ this.newline(); i++; continue; }
+        if(next === "E"){ this.x = 0; this.newline(); i++; continue; }
+        if(next === "M"){ this.reverseNewline(); i++; continue; }
+        if(next === "H"){ this.tabs[this.x] = true; i++; continue; }
+        if(next === "c"){ this.reset(); i++; continue; }
+        if(next === "=" || next === ">"){ this.appKeypad = next === "="; i++; continue; }
+        if(next === "\\"){ i++; continue; }
+        if(next === "]" || next === "P" || next === "^" || next === "_" || next === "X"){
+          // A string sequence whose terminator has not arrived yet.
+          if(rest.length < T_PENDING_MAX){ this.pending = rest; return; }
+          continue;
+        }
+        i++; continue;                       // unknown two-byte escape: dropped
+      }
+      this.pending = rest; return;           // incomplete, wait for more
+    }
+    if(ch === "\n" || ch === "\x0b" || ch === "\x0c"){ this.newline(); this.wrapNext = false; continue; }
+    if(ch === "\r"){ this.x = 0; this.wrapNext = false; continue; }
+    if(ch === "\b"){ if(this.x > 0) this.x--; this.wrapNext = false; continue; }
+    if(ch === "\t"){ this.nextTab(1); continue; }
+    if(ch === "\x07"){ if(this.onBell) try{ this.onBell(); }catch(_){} continue; }
+    if(ch === "\x0e"){ this.graphics = true; continue; }
+    if(ch === "\x0f"){ this.graphics = false; continue; }
+    if(ch < " " || ch === "\x7f") continue;  // other control bytes
+    let glyph = ch, code = ch.charCodeAt(0);
+    if(code >= 0xd800 && code <= 0xdbff && i + 1 < length){
+      glyph = ch + data[i + 1]; code = glyph.codePointAt(0); i++;
+    }
+    if(this.graphics && T_DEC_GRAPHICS[glyph]) glyph = T_DEC_GRAPHICS[glyph];
+    this.put(glyph, termWidth(code));
+  }
+  this.dirty = true;
+};
+Term.prototype.csi = function(paramText, intermediate, final){
+  const priv = paramText.charCodeAt(0) === 0x3f;      // `?` — a DEC private mode
+  const params = (priv ? paramText.slice(1) : paramText).split(";");
+  const first = Math.max(1, parseInt(params[0] || "1", 10) || 1);
+  const raw0 = parseInt(params[0] || "0", 10) || 0;
   switch(final){
-    case "A": this.y=Math.max(0,this.y-n); break;
-    case "B": this.y=Math.min(this.rows-1,this.y+n); break;
-    case "C": this.x=Math.min(this.cols-1,this.x+n); break;
-    case "D": this.x=Math.max(0,this.x-n); break;
-    case "G": this.x=Math.min(this.cols-1,Math.max(0,n-1)); break;
+    case "A": this.y = Math.max(this.origin ? this.top : 0, this.y - first); this.wrapNext = false; break;
+    case "B": this.y = Math.min(this.origin ? this.bot : this.rows - 1, this.y + first); this.wrapNext = false; break;
+    case "C": this.x = Math.min(this.cols - 1, this.x + first); this.wrapNext = false; break;
+    case "D": this.x = Math.max(0, this.x - first); this.wrapNext = false; break;
+    case "E": this.x = 0; this.y = Math.min(this.rows - 1, this.y + first); break;
+    case "F": this.x = 0; this.y = Math.max(0, this.y - first); break;
+    case "G": case "`": this.x = Math.min(this.cols - 1, Math.max(0, first - 1)); this.wrapNext = false; break;
+    case "d": this.y = Math.min(this.rows - 1, Math.max(0, first - 1)); this.wrapNext = false; break;
     case "H": case "f": {
-      const row=Math.max(1,parseInt(params[0]||"1",10)||1);
-      const col=Math.max(1,parseInt(params[1]||"1",10)||1);
-      this.y=Math.min(this.rows-1,row-1); this.x=Math.min(this.cols-1,col-1);
+      const row = Math.max(1, parseInt(params[0] || "1", 10) || 1);
+      const col = Math.max(1, parseInt(params[1] || "1", 10) || 1);
+      this.goto(row - 1, col - 1);
       break;
     }
-    case "J": this.eraseDisplay(parseInt(params[0]||"0",10)||0); break;
-    case "K": this.eraseLine(parseInt(params[0]||"0",10)||0); break;
-    case "m": this.sgr=this.sgrClass(params); break;
-    default: break;                                    // consumed, never printed
-  }
-};
-Term.prototype.render=function(showCursor){
-  const rows=this.scrollback.slice(-800).concat(this.grid);
-  // Where the cursor is, in the concatenated view. Drawn because a terminal you
-  // type into without one is disorienting — and because on a password prompt
-  // the cursor not moving is the visible sign that echo is off.
-  const cursorRow=showCursor===false?-1:this.scrollback.slice(-800).length+this.y;
-  const out=[];
-  for(let index=0;index<rows.length;index++){
-    const row=rows[index];
-    let line="",cls=null,run="";
-    const flush=()=>{
-      if(!run)return;
-      line+=cls?('<span class="'+cls+'">'+escHtml(run)+"</span>"):escHtml(run);
-      run="";
-    };
-    for(let column=0;column<row.length;column++){
-      const cell=row[column];
-      const isCursor=index===cursorRow&&column===this.x;
-      const cellCls=isCursor?(cell.cls+" t-cur").trim():cell.cls;
-      if(cellCls!==cls){flush();cls=cellCls;}
-      run+=cell.ch;
+    case "I": this.nextTab(first); break;
+    case "Z": this.prevTab(first); break;
+    case "J": this.eraseDisplay(raw0); break;
+    case "K": this.eraseLine(raw0); break;
+    case "L": this.insertLines(first); break;
+    case "M": this.deleteLines(first); break;
+    case "P": this.deleteChars(first); break;
+    case "@": this.insertChars(first); break;
+    case "X": this.eraseChars(first); break;
+    case "S": this.scrollUp(first); break;
+    case "T": this.scrollDown(first); break;
+    case "h": this.setMode(params, true, priv); break;
+    case "l": this.setMode(params, false, priv); break;
+    case "m": if(!priv) this.setAttrs(params); break;
+    case "r": {
+      const top = Math.max(1, parseInt(params[0] || "1", 10) || 1);
+      const bot = Math.max(top, parseInt(params[1] || String(this.rows), 10) || this.rows);
+      this.top = Math.min(this.rows - 1, top - 1);
+      this.bot = Math.min(this.rows - 1, bot - 1);
+      this.goto(0, 0);
+      break;
     }
-    flush();
-    // Trailing blanks are trimmed: a row is `cols` cells wide, and padding
-    // every line to the full width would make the pane scroll sideways for
-    // nothing. The cursor cell survives because it carries a class.
-    out.push(line.replace(/(\s|&nbsp;)+$/,""));
+    case "s": this.saved = this.cursorState(); break;
+    case "u": this.restoreCursor(this.saved); break;
+    case "n":
+      // A program that asks where the cursor is *waits* for the answer. Silence
+      // here is a hang, not a missing feature.
+      if(raw0 === 6) this.reply("\x1b[" + (this.y + 1) + ";" + (this.x + 1) + "R");
+      else if(raw0 === 5) this.reply("\x1b[0n");
+      break;
+    case "c": this.reply("\x1b[?1;2c"); break;         // "a VT100 with options"
+    case "t": if(raw0 === 18) this.reply("\x1b[8;" + this.rows + ";" + this.cols + "t"); break;
+    case "g": if(raw0 === 3) this.tabs = {}; else delete this.tabs[this.x]; break;
+    default: break;                                     // consumed, never printed
   }
-  return out.join("\n");
+  this.dirty = true;
 };
+
+// ---- drawing ----------------------------------------------------------------
+
 function escHtml(text){
   return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
+function t_span(style, cursor){
+  if(style.plain && !cursor) return null;
+  const cls = cursor ? (style.cls ? style.cls + " t-cur" : "t-cur") : style.cls;
+  return '<span class="' + cls + '">';
+}
+Term.prototype.rowHtml = function(row, cursorX){
+  // Trailing blanks are dropped: a row is `cols` cells wide and padding every
+  // line to the full width would make the pane scroll sideways for nothing. A
+  // blank carrying a background is not blank — a painted panel ends there.
+  let end = row.length;
+  while(end > 0 && row[end - 1].c === " " && row[end - 1].s.plain) end--;
+  if(cursorX >= 0) end = Math.max(end, cursorX + 1);
+  let html = "", run = "", open = null;
+  const flush = () => {
+    if(!run) return;
+    html += open ? open + escHtml(run) + "</span>" : escHtml(run);
+    run = "";
+  };
+  for(let i = 0; i < end; i++){
+    const cell = row[i] || {c:" ", s:T_PLAIN, w:1};
+    if(cell.w === 0) continue;
+    const span = t_span(cell.s, i === cursorX);
+    if(span !== open){ flush(); open = span; }
+    run += cell.c || " ";
+  }
+  flush();
+  return html;
+};
+Term.prototype.render = function(showCursor){
+  const cursorY = (showCursor === false || !this.cursorVisible) ? -1 : this.y;
+  const grid = this.screen();
+  const out = this.alt() ? [] : this.scrollback.slice();
+  for(let y = 0; y < grid.length; y++){
+    out.push(this.rowHtml(grid[y], y === cursorY ? this.x : -1));
+  }
+  return out.join("\n");
+};
+// Repainting is per line. The whole screen as one `innerHTML` is a few thousand
+// cells rebuilt for a cursor that moved one column — and it drops the selection
+// somebody was in the middle of making.
+Term.prototype.paint = function(box, showCursor){
+  let back = box.firstElementChild;
+  if(!back || back.className !== "t-sb"){
+    box.textContent = "";
+    back = document.createElement("div"); back.className = "t-sb";
+    const front = document.createElement("div"); front.className = "t-gr";
+    box.appendChild(back); box.appendChild(front);
+    box._sbTotal = 0; box._rows = [];
+  }
+  const front = back.nextElementSibling;
+  back.hidden = this.alt();
+  if(box._sbTotal !== this.sbTotal){
+    const fresh = Math.min(this.sbTotal - box._sbTotal, this.scrollback.length);
+    for(let i = this.scrollback.length - fresh; i < this.scrollback.length; i++){
+      const line = document.createElement("div");
+      line.className = "t-row";
+      line.innerHTML = this.scrollback[i];
+      back.appendChild(line);
+    }
+    while(back.childElementCount > this.scrollback.length) back.removeChild(back.firstChild);
+    box._sbTotal = this.sbTotal;
+  }
+  const grid = this.screen();
+  const cursorY = (showCursor === false || !this.cursorVisible) ? -1 : this.y;
+  while(front.childElementCount > grid.length){
+    front.removeChild(front.lastChild); box._rows.pop();
+  }
+  while(front.childElementCount < grid.length){
+    const line = document.createElement("div");
+    line.className = "t-row";
+    front.appendChild(line); box._rows.push(null);
+  }
+  for(let y = 0; y < grid.length; y++){
+    const html = this.rowHtml(grid[y], y === cursorY ? this.x : -1);
+    if(box._rows[y] === html) continue;
+    box._rows[y] = html;
+    front.children[y].innerHTML = html;
+  }
+  this.dirty = false;
+};
+Term.prototype.text = function(){
+  // What a copy takes: the screen as characters, no markup, no trailing blanks.
+  const lines = this.alt() ? [] : this.scrollback.map(
+    (html) => html.replace(/<[^>]*>/g, ""));
+  const grid = this.screen();
+  for(let y = 0; y < grid.length; y++) lines.push(this.rowHtml(grid[y], -1).replace(/<[^>]*>/g, ""));
+  return lines.join("\n").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+};
+
+// What a mouse event looks like on the wire, for a program that asked to see
+// it. SGR (`?1006`) is used wherever it was enabled: the older encoding cannot
+// express a column past 223, which is a real width on a wide screen.
+Term.prototype.mouseReport = function(button, col, row, release){
+  if(!this.mouse) return null;
+  const x = Math.min(this.cols, Math.max(1, col)), y = Math.min(this.rows, Math.max(1, row));
+  if(this.mouseSgr){
+    return "\x1b[<" + button + ";" + x + ";" + y + (release ? "m" : "M");
+  }
+  if(x > 223 || y > 223) return null;
+  const code = release ? 3 : button;
+  return "\x1b[M" + String.fromCharCode(32 + code, 32 + x, 32 + y);
+};
+
+// What a key sends. Nothing is echoed locally: the remote pty decides what
+// comes back, which is exactly why a password prompt stays invisible — the pty
+// turns echo off and there is nothing on this side to show it anyway.
+//
+// The cursor keys have two forms and the program chooses: `ESC [ A` normally,
+// `ESC O A` once it has set DECCKM. Sending the wrong one is why an arrow key
+// prints a letter inside a full-screen program.
+const T_FKEYS = {
+  F1:"\x1bOP", F2:"\x1bOQ", F3:"\x1bOR", F4:"\x1bOS",
+  F5:"\x1b[15~", F6:"\x1b[17~", F7:"\x1b[18~", F8:"\x1b[19~",
+  F9:"\x1b[20~", F10:"\x1b[21~", F11:"\x1b[23~", F12:"\x1b[24~",
+};
+function keyBytes(event, term){
+  if(event.ctrlKey && !event.altKey && event.key.length === 1){
+    const code = event.key.toUpperCase().charCodeAt(0);
+    if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
+    if(event.key === "?") return "\x7f";
+    if(event.key === " ") return "\x00";
+  }
+  const app = term && term.appCursor;
+  const arrow = (letter) => (app ? "\x1bO" : "\x1b[") + letter;
+  switch(event.key){
+    case "Enter": return "\r";
+    case "Backspace": return "\x7f";
+    case "Tab": return event.shiftKey ? "\x1b[Z" : "\t";
+    case "Escape": return "\x1b";
+    case "ArrowUp": return arrow("A");
+    case "ArrowDown": return arrow("B");
+    case "ArrowRight": return arrow("C");
+    case "ArrowLeft": return arrow("D");
+    case "Home": return app ? "\x1bOH" : "\x1b[H";
+    case "End": return app ? "\x1bOF" : "\x1b[F";
+    case "Insert": return "\x1b[2~";
+    case "Delete": return "\x1b[3~";
+    case "PageUp": return "\x1b[5~";
+    case "PageDown": return "\x1b[6~";
+    default: break;
+  }
+  if(T_FKEYS[event.key]) return T_FKEYS[event.key];
+  if(event.key.length === 1 && !event.ctrlKey && !event.metaKey){
+    return event.altKey ? "\x1b" + event.key : event.key;
+  }
+  return null;
+}
 
 // ---- one shell session -----------------------------------------------------
-// Both pages drive a session through this. It owns the terminal, the polling
-// cadence and the sid; the page owns the chrome around it and says what to do
-// when it opens or closes.
+// Both pages drive a session through this. It owns the terminal, the reading
+// loop and the sid; the page owns the chrome around it and says what to do when
+// it opens or closes.
 //
-// The cadence is its own, faster than any ledger poll and running only while a
-// session is live, so the refresh interval in a top bar can be set to zero
-// without freezing somebody's shell.
-const SHELL_TICK = 600;
+// The read is a *held* request: the console answers the moment the pty produces
+// bytes, and the loop asks again straight away. So an idle shell costs one
+// parked request rather than a question several times a second, and what a
+// person sees after a keystroke costs one round trip instead of one round trip
+// plus half a polling interval.
+const SHELL_RETRY = 700;        // after a failed read, before trying again
+const SHELL_MISSES = 20;        // …and how many in a row before giving up
+const SHELL_FRAME = 1000 / 30;  // repaints are coalesced to a frame
 
-function termSize(box){
-  // Measured from the pane rather than assumed: the remote pty is told these
-  // dimensions, and a shell that thinks it has a different width redraws wrong.
-  const probe = document.createElement("span");
-  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+// Measured from the pane rather than assumed: the remote pty is told these
+// dimensions, and a program that thinks it has a different width draws every
+// box to the wrong place.
+function termMetrics(box){
+  const probe = document.createElement("div");
+  probe.className = "t-row";
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;left:0;top:0";
   probe.textContent = "0".repeat(80);
   box.appendChild(probe);
-  const charWidth = (probe.getBoundingClientRect().width / 80) || 8;
-  const lineHeight = parseFloat(getComputedStyle(box).lineHeight) || 16;
+  const rect = probe.getBoundingClientRect();
+  const charWidth = (rect.width / 80) || 8;
+  const lineHeight = rect.height || 16;
   box.removeChild(probe);
+  const style = getComputedStyle(box);
+  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
   return {
-    cols: Math.max(20, Math.min(200, Math.floor((box.clientWidth - 24) / charWidth))),
-    rows: Math.max(10, Math.min(60, Math.floor((box.clientHeight - 24) / lineHeight))),
+    cw: charWidth, lh: lineHeight,
+    padLeft: parseFloat(style.paddingLeft) || 0,
+    padTop: parseFloat(style.paddingTop) || 0,
+    cols: Math.max(20, Math.min(400, Math.floor((box.clientWidth - padX) / charWidth))),
+    rows: Math.max(6, Math.min(200, Math.floor((box.clientHeight - padY) / lineHeight))),
   };
 }
 
@@ -224,68 +881,124 @@ function ShellSession(box, handlers){
   this.box = box;
   this.on = handlers || {};
   this.node = null; this.sid = null; this.off = 0; this.term = null;
-  this.timer = null; this.size = {cols:80, rows:24};
-  this.pending = ""; this.sending = null;
+  this.size = {cols:80, rows:24}; this.metrics = null;
+  this.reading = false; this.stopped = true; this.retry = null;
+  this.pending = ""; this.sending = null; this.frame = null;
+  this.decoder = null; this.lastCell = null; this.misses = 0;
 }
 ShellSession.prototype.say = function(text){
   this.box.textContent = text;
 };
+ShellSession.prototype.newTerm = function(){
+  this.metrics = termMetrics(this.box);
+  this.size = {cols:this.metrics.cols, rows:this.metrics.rows};
+  this.term = new Term(this.size.cols, this.size.rows);
+  // A program that asks the terminal a question waits for the answer, so the
+  // reply goes back up the same pipe the keystrokes do.
+  this.term.onReply = (text) => { this.send(text); };
+  this.decoder = new TextDecoder();
+  this.box.textContent = "";
+  this.box._rows = null;
+};
 ShellSession.prototype.open = async function(node){
   await this.stop();
-  this.node = node; this.sid = null; this.off = 0;
-  this.size = termSize(this.box);
-  this.term = new Term(this.size.cols, this.size.rows);
-  this.box.textContent = "";
+  this.node = node; this.sid = null; this.off = 0; this.stopped = false;
+  this.misses = 0;
+  this.newTerm();
   try{
     await api("/api/fleet/shell", "POST",
               {node, cols:this.size.cols, rows:this.size.rows});
   }catch(_){
-    this.node = null;
+    this.node = null; this.stopped = true;
     this.say("Could not open a shell on that node.");
     return false;
   }
-  this.timer = setInterval(() => this.poll(), SHELL_TICK);
+  this.loop();
   if(this.on.opened) this.on.opened();
   return true;
 };
 // Attaching rather than opening: a shell this console already holds — one this
 // tab did not start — is picked back up instead of a second one being spawned.
 ShellSession.prototype.attach = function(node){
-  this.node = node; this.sid = null; this.off = 0;
-  this.size = termSize(this.box);
-  this.term = new Term(this.size.cols, this.size.rows);
-  this.box.textContent = "";
-  if(!this.timer) this.timer = setInterval(() => this.poll(), SHELL_TICK);
+  this.node = node; this.sid = null; this.off = 0; this.stopped = false;
+  this.misses = 0;
+  this.newTerm();
+  this.loop();
 };
-ShellSession.prototype.poll = async function(){
+ShellSession.prototype.loop = function(){
+  if(this.reading || this.stopped) return;
+  this.reading = true;
+  this.read().finally(() => {
+    this.reading = false;
+    if(this.stopped || !this.node) return;
+    this.loop();
+  });
+};
+ShellSession.prototype.read = async function(){
   if(!this.node) return;
   const where = this.sid ? "sid=" + encodeURIComponent(this.sid)
                          : "node=" + encodeURIComponent(this.node);
   let answer;
-  try{ answer = await apiJson("/api/fleet/shell?" + where + "&offset=" + this.off); }
-  catch(_){ return; }
-  if(!answer.ok || !answer.data) return;       // not open yet, or already gone
+  try{
+    answer = await apiJson("/api/fleet/shell?" + where + "&offset=" + this.off + "&wait=1");
+  }catch(_){ return this.miss(); }
+  if(!answer.ok || !answer.data) return this.miss();   // not open yet, or gone
+  this.misses = 0;
   const data = answer.data;
   if(!this.sid){ this.sid = data.sid; this.off = 0; }
   if(data.data){
     const raw = atob(data.data);
+    const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
     let text;
-    try{ text = new TextDecoder().decode(Uint8Array.from(raw, (c) => c.charCodeAt(0))); }
+    // Streaming: a multi-byte character split across two reads has to survive
+    // the join, or a box-drawing screen fills with replacement glyphs.
+    try{ text = this.decoder.decode(bytes, {stream:true}); }
     catch(_){ text = raw; }
-    const atEnd = this.box.scrollTop + this.box.clientHeight >= this.box.scrollHeight - 40;
-    if(!this.term) this.term = new Term(80, 24);
+    if(!this.term) this.newTerm();
     this.term.write(text);
-    this.box.innerHTML = this.term.render();
-    if(atEnd) this.box.scrollTop = this.box.scrollHeight;
+    this.schedule();
   }
   this.off = data.seq;
   if(!data.open){
-    this.box.innerHTML = (this.term ? this.term.render(false) : "") +
-      "\n[session closed]\n";
-    this.node = null; this.sid = null;
-    this.halt();
+    this.schedule(true);
+    this.node = null; this.sid = null; this.stopped = true;
     if(this.on.closed) this.on.closed();
   }
+};
+// A read that answered nothing. Retried, but not for ever: a session the
+// console has forgotten answers 404 as readily as one that is merely slow to
+// open, and a loop that cannot tell them apart is a tab asking a question
+// nobody will ever answer.
+ShellSession.prototype.miss = function(){
+  this.misses += 1;
+  if(this.misses < SHELL_MISSES){
+    return new Promise((resolve) => { this.retry = setTimeout(resolve, SHELL_RETRY); });
+  }
+  this.node = null; this.sid = null; this.stopped = true;
+  this.say("That session is gone.");
+  if(this.on.closed) this.on.closed();
+  return Promise.resolve();
+};
+// Repaints are coalesced to one a frame: a program redrawing a whole screen
+// sends it in several chunks, and painting each one is the same picture three
+// times.
+ShellSession.prototype.schedule = function(closed){
+  if(closed){
+    if(this.frame){ clearTimeout(this.frame); this.frame = null; }
+    this.draw(false);
+    this.box.appendChild(document.createTextNode("\n[session closed]\n"));
+    return;
+  }
+  if(this.frame) return;
+  this.frame = setTimeout(() => { this.frame = null; this.draw(true); }, SHELL_FRAME);
+};
+ShellSession.prototype.draw = function(showCursor){
+  if(!this.term) return;
+  const box = this.box;
+  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  this.term.paint(box, showCursor);
+  box.classList.toggle("t-mouse", !!this.term.mouse);
+  if(atEnd || this.term.alt()) box.scrollTop = box.scrollHeight;
 };
 // Keystrokes are queued, never fired in parallel. One request per key looks
 // fine and is not: two POSTs in flight reach a threaded server in whichever
@@ -308,25 +1021,79 @@ ShellSession.prototype.drain = async function(){
       try{
         await api("/api/fleet/input", "POST",
                   {node:this.node, sid:this.sid, data:btoa(binary)});
-      }catch(_){}                               // the poll will show it went
+      }catch(_){}                               // the read will show it went
     }
   }finally{ this.sending = null; }
 };
-// The pty is told the size it actually has: a shell that thinks it is 80 wide
-// on a 40-column phone redraws every prompt wrong.
+// The pty is told the size it actually has, and the emulator's own grid follows
+// it. Telling one and not the other is the bug that makes every full-screen
+// program look broken: the program lays out to one width and the screen holds
+// another.
 ShellSession.prototype.fit = async function(){
-  if(!this.sid || !this.term) return;
-  const size = termSize(this.box);
-  if(size.cols === this.size.cols && size.rows === this.size.rows) return;
-  this.size = size;
-  this.term.cols = size.cols; this.term.rows = size.rows;
+  if(!this.term) return;
+  const metrics = termMetrics(this.box);
+  this.metrics = metrics;
+  if(metrics.cols === this.size.cols && metrics.rows === this.size.rows) return;
+  this.size = {cols:metrics.cols, rows:metrics.rows};
+  this.term.resize(metrics.cols, metrics.rows);
+  this.box._rows = null;                        // the grid changed shape
+  this.draw(true);
+  if(!this.sid) return;
   try{
     await api("/api/fleet/resize", "POST",
-              {node:this.node, sid:this.sid, cols:size.cols, rows:size.rows});
+              {node:this.node, sid:this.sid, cols:metrics.cols, rows:metrics.rows});
   }catch(_){}
 };
+// Where a pointer event landed, in cells. One-based, because that is what the
+// report carries.
+ShellSession.prototype.cellAt = function(event){
+  if(!this.metrics) this.metrics = termMetrics(this.box);
+  const rect = this.box.getBoundingClientRect();
+  const x = event.clientX - rect.left - this.metrics.padLeft + this.box.scrollLeft;
+  const y = event.clientY - rect.top - this.metrics.padTop + this.box.scrollTop;
+  // The screen starts below whatever scrollback is drawn above it, so a click
+  // is measured from there rather than from the top of the pane.
+  const above = (this.term && !this.term.alt() && this.box.firstElementChild)
+    ? this.box.firstElementChild.offsetHeight : 0;
+  return {col: Math.floor(x / this.metrics.cw) + 1,
+          row: Math.floor((y - above) / this.metrics.lh) + 1};
+};
+// A program that turned mouse reporting on is *waiting* for these: without them
+// a pointer does nothing in `btop`, `htop` or `less`, and a click that does
+// nothing reads as a broken terminal rather than a missing feature.
+ShellSession.prototype.mouse = function(event, kind){
+  const term = this.term;
+  if(!term || !term.mouse || !this.sid) return false;
+  const at = this.cellAt(event);
+  if(at.row < 1 || at.row > term.rows) return false;
+  let button;
+  if(kind === "wheel") button = event.deltaY < 0 ? 64 : 65;
+  else button = event.button === 1 ? 1 : (event.button === 2 ? 2 : 0);
+  if(kind === "move"){
+    if(term.mouse < 1002) return false;
+    if(term.mouse === 1002 && event.buttons === 0) return false;
+    const key = at.col + ":" + at.row;
+    if(this.lastCell === key) return true;      // one report per cell, not per pixel
+    this.lastCell = key;
+    button = (event.buttons === 0 ? 3 : button) + 32;
+  }
+  if(event.shiftKey) button += 4;
+  if(event.altKey) button += 8;
+  if(event.ctrlKey) button += 16;
+  const report = term.mouseReport(button, at.col, at.row,
+                                 kind === "up" && term.mouseSgr);
+  if(report === null) return false;
+  if(kind === "up" && !term.mouseSgr){
+    this.send(term.mouseReport(3, at.col, at.row, false));
+    return true;
+  }
+  this.send(report);
+  return true;
+};
 ShellSession.prototype.halt = function(){
-  if(this.timer){ clearInterval(this.timer); this.timer = null; }
+  this.stopped = true;
+  if(this.retry){ clearTimeout(this.retry); this.retry = null; }
+  if(this.frame){ clearTimeout(this.frame); this.frame = null; }
 };
 ShellSession.prototype.stop = async function(){
   this.halt();
@@ -336,35 +1103,19 @@ ShellSession.prototype.stop = async function(){
   try{ await api("/api/fleet/close", "POST", {node, sid}); }catch(_){}
 };
 ShellSession.prototype.live = function(){ return !!this.sid; };
+ShellSession.prototype.copyText = function(){
+  const selected = String(window.getSelection() || "");
+  return selected || (this.term ? this.term.text() : this.box.innerText);
+};
+// Bracketed paste: a program that asked for it wants to know the text arrived
+// as a paste rather than as typing — which is what stops an editor
+// auto-indenting every line of it.
+ShellSession.prototype.paste = function(text){
+  if(!text) return Promise.resolve();
+  if(this.term && this.term.bracketed) text = "\x1b[200~" + text + "\x1b[201~";
+  return this.send(text);
+};
 
-// What a key sends. Nothing is echoed locally: the remote pty decides what
-// comes back, which is exactly why a password prompt stays invisible — the pty
-// turns echo off and there is nothing on this side to show it anyway.
-function keyBytes(event){
-  if(event.ctrlKey && !event.altKey && event.key.length === 1){
-    const code = event.key.toUpperCase().charCodeAt(0);
-    if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
-    if(event.key === "?") return "\x7f";
-  }
-  switch(event.key){
-    case "Enter": return "\r";
-    case "Backspace": return "\x7f";
-    case "Tab": return "\t";
-    case "Escape": return "\x1b";
-    case "ArrowUp": return "\x1b[A";
-    case "ArrowDown": return "\x1b[B";
-    case "ArrowRight": return "\x1b[C";
-    case "ArrowLeft": return "\x1b[D";
-    case "Home": return "\x1b[H";
-    case "End": return "\x1b[F";
-    case "Delete": return "\x1b[3~";
-    case "PageUp": return "\x1b[5~";
-    case "PageDown": return "\x1b[6~";
-    default: break;
-  }
-  if(event.key.length === 1 && !event.ctrlKey && !event.metaKey) return event.key;
-  return null;
-}
 """
 
 
@@ -605,7 +1356,7 @@ $("term").addEventListener("keydown", async (event) => {
   if((event.ctrlKey || event.metaKey) && ["c", "C"].includes(event.key) &&
      String(window.getSelection() || "")) return;         // let a copy through
   if((event.ctrlKey || event.metaKey) && ["v", "V"].includes(event.key)) return;
-  const bytes = keyBytes(event);
+  const bytes = keyBytes(event, TERM_SESSION.term);
   if(bytes === null) return;
   event.preventDefault();
   // A modifier already held on a real keyboard is in `bytes`; the sticky ones
@@ -636,18 +1387,38 @@ $("tin").addEventListener("keydown", async (event) => {
   // A phone with a hardware keyboard attached, or the arrows some soft keyboards
   // do send: handled here so the field never has to hold them.
   if(["Enter", "Backspace"].includes(event.key)) return;   // the input path has these
-  const bytes = keyBytes(event);
+  const bytes = keyBytes(event, TERM_SESSION ? TERM_SESSION.term : null);
   if(bytes === null || bytes === event.key) return;        // plain text: let it type
   event.preventDefault();
   await typeIn(bytes);
 });
 $("tin").addEventListener("paste", async (event) => {
   event.preventDefault();
-  await TERM_SESSION.send((event.clipboardData || window.clipboardData).getData("text"));
+  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
 });
 $("term").addEventListener("paste", async (event) => {
   event.preventDefault();
-  await TERM_SESSION.send((event.clipboardData || window.clipboardData).getData("text"));
+  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
+});
+
+// ---- the pointer ------------------------------------------------------------
+// Only while a program has asked for it. Nothing is invented on this side: with
+// mouse reporting off, a drag stays an ordinary text selection.
+
+$("term").addEventListener("mousedown", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "down")) event.preventDefault();
+});
+$("term").addEventListener("mouseup", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "up")) event.preventDefault();
+});
+$("term").addEventListener("mousemove", (event) => {
+  if(TERM_SESSION) TERM_SESSION.mouse(event, "move");
+});
+$("term").addEventListener("wheel", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "wheel")) event.preventDefault();
+}, {passive:false});
+$("term").addEventListener("contextmenu", (event) => {
+  if(TERM_SESSION && TERM_SESSION.term && TERM_SESSION.term.mouse) event.preventDefault();
 });
 
 // 3. The key row. `pointerdown` is where the default is stopped: without it the
@@ -691,8 +1462,7 @@ $("kbd").addEventListener("click", () => {
 // ---- clipboard --------------------------------------------------------------
 
 $("copy").addEventListener("click", async () => {
-  const selected = String(window.getSelection() || "");
-  const text = selected || $("term").innerText;
+  const text = TERM_SESSION ? TERM_SESSION.copyText() : $("term").innerText;
   if(!text.trim()){ toast("Nothing to copy", "warn"); return; }
   await copyText(text);
 });
@@ -701,7 +1471,7 @@ async function pasteIn(){
   let text = "";
   try{ text = await navigator.clipboard.readText(); }
   catch(_){ text = ""; }
-  if(text){ await TERM_SESSION.send(text); return; }
+  if(text){ await TERM_SESSION.paste(text); return; }
   // Firefox and most of Android refuse a silent clipboard read. A field the
   // person pastes into themselves is the one path that always works.
   $("paste-text").value = "";
@@ -714,7 +1484,7 @@ $("paste-send").addEventListener("click", async (event) => {
   const text = $("paste-text").value;
   $("paste-text").value = "";
   $("paste-dialog").close();
-  await TERM_SESSION.send(text);
+  await TERM_SESSION.paste(text);
   focusInput();
 });
 
@@ -754,6 +1524,15 @@ if(window.visualViewport){
 }
 window.addEventListener("resize", debounce(fitViewport, 200));
 window.addEventListener("orientationchange", () => setTimeout(fitViewport, 300));
+// The window is not the only thing that resizes the pane: a key row appearing,
+// a font loading or a panel opening all change it while the window stands
+// still. Watching the element catches every one of them.
+if(window.ResizeObserver){
+  const watch = new ResizeObserver(debounce(() => {
+    if(TERM_SESSION) TERM_SESSION.fit();
+  }, 120));
+  watch.observe($("term"));
+}
 
 // ---- files ------------------------------------------------------------------
 // The same right as the shell, so it is the same node and needs no second grant.

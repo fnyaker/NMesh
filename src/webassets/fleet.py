@@ -47,6 +47,7 @@ FLEET_HTML = """<!doctype html>
     <nav id="nav" class="nav" role="tablist" aria-label="Fleet sections">
       <button role="tab" data-tab="nodes" data-label="Nodes" aria-selected="true"><span class="lbl">Nodes</span><span id="nav-managed" class="tail"></span></button>
       <button role="tab" data-tab="access" data-label="Access" aria-selected="false"><span class="lbl">Who controls this node</span><span id="nav-pending" class="tail"></span></button>
+      <button role="tab" data-tab="docker" data-label="Docker" aria-selected="false"><span class="lbl">Docker</span><span id="nav-docker" class="tail"></span></button>
       <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false"><span class="lbl">Discover &amp; deploy</span></button>
       <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false"><span class="lbl">Shell</span></button>
       <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false"><span class="lbl">Activity</span></button>
@@ -111,8 +112,13 @@ FLEET_HTML = """<!doctype html>
         <div class="grow"><p class="eyebrow">Managed</p><h1>Nodes you control</h1>
           <p class="lede">Each of these accepted a request from this node, and granted exactly the
             capabilities shown. Nothing here was taken; all of it was given.</p></div>
-        <div class="actions"><button id="add-open" class="primary">Request access to a node</button></div>
+        <div class="actions"><button id="group-new" class="ghost">New group</button>
+          <button id="add-open" class="primary">Request access to a node</button></div>
       </div>
+      <!-- Groups: this console's own names for sets of machines. They say
+           nothing to any node in them — they are a way of pointing at several
+           at once from here. -->
+      <div id="groups" class="stack"></div>
       <div id="nodes" class="cards"></div>
     </section>
 
@@ -125,6 +131,76 @@ FLEET_HTML = """<!doctype html>
       </div>
       <div id="inbox" class="stack"></div>
       <div id="operators" class="cards"></div>
+    </section>
+
+    <!-- ── Docker ───────────────────────────────────────────────────────── -->
+    <section id="panel-docker" class="content panel" role="tabpanel" data-panel="docker" hidden>
+      <div class="page-head">
+        <div class="grow"><p class="eyebrow">Containers</p><h1>Docker</h1>
+          <p class="lede">What a node runs in containers, and the stacks on top of them —
+            including the ones Portainer owns. The <code class="inline">docker</code> right is
+            root on that machine: the socket is.</p></div>
+        <div class="actions">
+          <label class="field"><span class="sr-only">Node</span><select id="dk-node"></select></label>
+          <button id="dk-refresh" class="primary">Refresh</button>
+        </div>
+      </div>
+      <div id="dk-overview" class="stats"></div>
+      <p id="dk-msg" class="msg"></p>
+
+      <article class="card">
+        <div class="card-head"><div class="grow"><h2>Stacks</h2>
+          <div class="sub">A stack is a compose project. Ticking one adds it to what
+            <b>Update</b> brings up on that node.</div></div>
+          <button id="dk-stack-new" class="ghost sm">Deploy a stack</button></div>
+        <div class="card-body tight"><div id="dk-stacks" class="stack"></div></div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><div class="grow"><h2>Containers</h2>
+          <div class="sub">Everything on that machine, in a stack or not</div></div>
+          <button id="dk-container-new" class="ghost sm">Run a container</button></div>
+        <div class="card-body tight"><div id="dk-containers" class="stack"></div></div>
+      </article>
+
+      <details class="card"><summary>Images</summary>
+        <div class="card-body">
+          <form id="dk-pull-form" class="toolbar">
+            <label class="field grow"><span class="sr-only">Image</span>
+              <input id="dk-pull" class="mono" placeholder="ghcr.io/owner/image:tag"
+                     autocomplete="off" spellcheck="false"></label>
+            <button type="submit" class="primary">Pull</button>
+          </form>
+          <div id="dk-images" class="stack"></div>
+        </div>
+      </details>
+
+      <details class="card"><summary>Portainer</summary>
+        <div class="card-body">
+          <p class="muted small">A stack Portainer owns is updated <b>through</b> Portainer —
+            running compose behind its back leaves its record stale and the next thing it does
+            undoes the update. The token is written to that node's encrypted drawer and never
+            read back over the mesh.</p>
+          <div class="split">
+            <div class="stack">
+              <label class="field"><span>Address</span>
+                <input id="pt-url" class="mono" placeholder="https://portainer.lan:9443"
+                       autocomplete="off" spellcheck="false"></label>
+              <label class="field"><span>Access token</span>
+                <input id="pt-token" type="password" autocomplete="new-password"
+                       placeholder="ptr_…"></label>
+              <label class="field"><span>Certificate fingerprint (optional)</span>
+                <input id="pt-fp" class="mono" placeholder="sha256, 64 hex characters"
+                       autocomplete="off" spellcheck="false"></label>
+              <div class="btn-row"><button id="pt-save" class="primary">Save</button>
+                <button id="pt-forget" class="danger">Forget</button></div>
+              <p id="pt-msg" class="msg"></p>
+            </div>
+            <div class="stack"><h3>Its stacks</h3>
+              <div id="pt-stacks" class="stack"></div></div>
+          </div>
+        </div>
+      </details>
     </section>
 
     <!-- ── Discover & deploy ────────────────────────────────────────────── -->
@@ -372,7 +448,8 @@ async function poll(){
     // whoever deployed it cannot reach the console it just started.
     capBoxes($("deploy-caps"), ["status", "update", "manage", "passwordless"]);
   }
-  paintInbox(); paintNodes(); paintOperators(); paintPickers(); paintLog(); paintJobs();
+  paintInbox(); paintGroups(); paintNodes(); paintOperators(); paintPickers();
+  paintDocker(); paintLog(); paintJobs();
   if(first) paintHosts(null);
   // A scan asked of a remote node answers asynchronously: its result lands in
   // ST.scans on a later poll, so the deploy tab has to redraw here.
@@ -484,6 +561,23 @@ function updateHTML(nodeId){
   return '<p class="small muted">Last update: ' +
     (run.ok ? badge("done" + took, "ok") : badge("failed at step " + position, "danger")) + "</p>";
 }
+// Which groups a node is in, derived from the one membership list rather than
+// stored a second time on the node — two places saying it is two chances for
+// them to disagree.
+function groupChips(nodeId){
+  const names = groupsOf(nodeId);
+  if(!names.length) return "";
+  return '<div class="chips">' + names.map(
+    (name) => '<span class="chip">' + esc(name) + "</span>").join("") + "</div>";
+}
+// What Update will also bring up there. Said on the card, because "Update" not
+// saying which stacks it touches is the same button meaning two things.
+function stacksLine(node){
+  const stacks = node.update_stacks || [];
+  if(!stacks.length) return "";
+  return '<p class="small muted">Update also brings up ' +
+    esc(stacks.join(", ")) + "</p>";
+}
 function paintNodes(){
   const managed = ST.managed || [], waiting = ST.pending_out || [];
   $("nav-managed").textContent = managed.length || "";
@@ -501,6 +595,7 @@ function paintNodes(){
       esc(node.id) + "</div></div>" + badge("managed", "ok") + "</div>" +
       '<div class="card-body">' +
       '<div class="caps">' + capsList(caps) + "</div>" +
+      groupChips(node.id) + stacksLine(node) +
       updateHTML(node.id) + statusHTML(node.status) +
       '<div class="btn-row">' +
       (can("status") ? '<button data-status="' + esc(node.id) + '">Refresh</button>' : "") +
@@ -508,6 +603,8 @@ function paintNodes(){
       (can("update") ? '<button data-update="' + esc(node.id) + '">Update</button>' : "") +
       (can("shell") ? '<button data-shell="' + esc(node.id) + '">Shell</button>' : "") +
       (can("scan") ? '<button data-scan="' + esc(node.id) + '">Scan LAN</button>' : "") +
+      (can("docker") ? '<button data-docker="' + esc(node.id) + '">Docker</button>' : "") +
+      '<button data-groups="' + esc(node.id) + '">Groups</button>' +
       '<button data-rights="' + esc(node.id) + '">Rights</button>' +
       '<button data-details="' + esc(node.id) + '">Details</button>' +
       '<button class="danger" data-revoke="' + esc(node.id) + '">Revoke</button>' +
@@ -609,6 +706,10 @@ function paintPickers(){
   const managed = ST.managed || [];
   fill($("shell-node"), managed.filter((node) => (node.caps || []).includes("shell"))
        .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)]));
+  const dockerAble = dockerNodes();
+  fill($("dk-node"), dockerAble.map(
+    (node) => [node.id, node.label || node.pseudo || shortId(node.id)]));
+  if(!DK.node && dockerAble.length){ DK.node = dockerAble[0].id; $("dk-node").value = DK.node; }
   fill($("scan-from"), [[ST.me, "This node (local LAN)"]].concat(
     managed.filter((node) => (node.caps || []).includes("scan"))
            .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)])));
@@ -902,6 +1003,341 @@ async function deploy(event){
   });
 }
 
+// ---- groups ----------------------------------------------------------------
+// This console's own names for sets of machines. A group says nothing to any
+// node in it — it is a way of pointing at several at once from here, which is
+// why the whole of it lives in our ledger and none of it travels.
+
+function groupsOf(nodeId){
+  return (ST.groups || []).filter((group) => (group.nodes || []).includes(nodeId))
+                          .map((group) => group.name);
+}
+function paintGroups(){
+  const groups = ST.groups || [];
+  const managed = new Set((ST.managed || []).map((node) => node.id));
+  setHTML("groups", groups.length ? '<div class="chips">' + groups.map((group) => {
+    const live = (group.nodes || []).filter((id) => managed.has(id));
+    return '<span class="chip"><b>' + esc(group.name) + "</b>" +
+      '<span class="muted">' + plural(live.length, "node") + "</span>" +
+      '<button class="sm" data-group-update="' + esc(group.name) + '"' +
+      (live.length ? "" : " disabled") + ">Update group</button>" +
+      '<button class="sm ghost" data-group-edit="' + esc(group.name) + '">Edit</button>' +
+      "</span>";
+  }).join("") + "</div>" : "");
+}
+function groupDialog(name){
+  const existing = (ST.groups || []).find((group) => group.name === name);
+  const members = new Set(existing ? existing.nodes || [] : []);
+  $("modal-title").textContent = existing ? "Group " + name : "New group";
+  $("modal-body").innerHTML =
+    '<p class="muted small">A group is local to this console. Nothing is sent to the nodes in ' +
+    "it, and being in one grants nobody anything.</p>" +
+    '<label class="field"><span>Name</span><input id="gp-name" value="' +
+    esc(name || "") + '" placeholder="production, homelab, edge…"></label>' +
+    '<div class="field"><span>Nodes</span><div id="gp-nodes" class="cap-pick"></div></div>' +
+    '<div class="btn-row"><button id="gp-ok" class="primary">Save</button>' +
+    (existing ? '<button id="gp-del" class="danger">Delete group</button>' : "") +
+    '<button id="gp-no">Cancel</button></div><p id="gp-msg" class="msg"></p>';
+  $("gp-nodes").innerHTML = (ST.managed || []).map((node) =>
+    '<label class="check card-like"><input type="checkbox" value="' + esc(node.id) + '"' +
+    (members.has(node.id) ? " checked" : "") + "><span><b>" +
+    esc(node.label || node.pseudo || shortId(node.id)) + "</b><br>" +
+    esc(shortId(node.id)) + "</span></label>").join("")
+    || emptyHTML("No node yet", "Ask a node to let you manage it first.");
+  $("gp-ok").addEventListener("click", (event) => withBusy(event.target, async () => {
+    const wanted = $("gp-name").value.trim();
+    if(!wanted){ setMessage("gp-msg", "A group needs a name.", true); return; }
+    const nodes = $$("#gp-nodes input:checked").map((box) => box.value);
+    // Renaming is a delete and a create: the name *is* the key, so there is no
+    // second identity to keep in step with it.
+    if(existing && wanted !== name){
+      await api("/api/fleet/groups", "POST", {op:"remove", group:name});
+    }
+    const {ok} = await apiJson("/api/fleet/groups", "POST",
+                               {op:"set", group:wanted, nodes});
+    if(!ok){ setMessage("gp-msg", "That group name was refused.", true); return; }
+    $("modal").close(); toast("Group saved", "ok"); poll();
+  }));
+  if(existing){
+    $("gp-del").addEventListener("click", (event) => withBusy(event.target, async () => {
+      await api("/api/fleet/groups", "POST", {op:"remove", group:name});
+      $("modal").close(); toast("Group deleted"); poll();
+    }));
+  }
+  $("gp-no").addEventListener("click", () => $("modal").close());
+  $("modal").showModal();
+  $("gp-name").focus();
+}
+function nodeGroupsDialog(id){
+  const held = new Set(groupsOf(id));
+  $("modal-title").textContent = "Groups for " + shortId(id);
+  $("modal-body").innerHTML =
+    '<p class="muted small">A node can be in several. Ticking one here is the same edit as ' +
+    "adding it from the group's own row — there is one membership list, not two.</p>" +
+    '<div id="ng-list" class="cap-pick"></div>' +
+    '<label class="field"><span>Or a new group</span><input id="ng-new" ' +
+    'placeholder="name it"></label>' +
+    '<div class="btn-row"><button id="ng-ok" class="primary">Apply</button>' +
+    '<button id="ng-no">Cancel</button></div>';
+  $("ng-list").innerHTML = (ST.groups || []).map((group) =>
+    '<label class="check card-like"><input type="checkbox" value="' + esc(group.name) + '"' +
+    (held.has(group.name) ? " checked" : "") + "><span><b>" + esc(group.name) +
+    "</b><br>" + plural((group.nodes || []).length, "node") + "</span></label>").join("")
+    || '<p class="muted small">No group yet — name one below.</p>';
+  $("ng-ok").addEventListener("click", (event) => withBusy(event.target, async () => {
+    const groups = $$("#ng-list input:checked").map((box) => box.value);
+    const fresh = $("ng-new").value.trim();
+    if(fresh && !groups.includes(fresh)) groups.push(fresh);
+    await api("/api/fleet/groups", "POST", {op:"node", node:id, groups});
+    $("modal").close(); toast("Groups updated", "ok"); poll();
+  }));
+  $("ng-no").addEventListener("click", () => $("modal").close());
+  $("modal").showModal();
+}
+
+// ---- docker ----------------------------------------------------------------
+// One node at a time, because everything here is about one machine. The reads
+// are waited on by the console; the ones that pull images are started and
+// watched through the job list, since a browser will not hold a request open
+// for minutes and an operation that says nothing until it ends is one nobody
+// can tell from a hang.
+
+const DK = {node:"", overview:null, stacks:[], containers:[], images:[],
+            portainer:[], busy:false};
+
+function dockerNodes(){
+  return (ST.managed || []).filter((node) => (node.caps || []).includes("docker"));
+}
+async function dockerCall(op, extra){
+  if(!DK.node) throw new Error("pick a node first");
+  const answer = await apiJson("/api/fleet/docker", "POST",
+                               Object.assign({node:DK.node, op}, extra || {}));
+  if(!answer.ok) throw new Error((answer.data && answer.data.error) || "that was refused");
+  return answer.data;
+}
+async function dockerLoad(){
+  if(!DK.node || DK.busy) return;
+  DK.busy = true;
+  setMessage("dk-msg", "Reading that machine…");
+  try{
+    const overview = await dockerCall("overview");
+    const stacks = await dockerCall("stacks");
+    const containers = await dockerCall("containers");
+    DK.overview = overview.info || {};
+    DK.stacks = stacks.items || [];
+    DK.containers = containers.items || [];
+    setMessage("dk-msg", "");
+  }catch(error){
+    DK.overview = null; DK.stacks = []; DK.containers = [];
+    setMessage("dk-msg", String(error.message || error), true);
+  }finally{ DK.busy = false; }
+  paintDocker();
+}
+// Which stacks *Update* also brings up on that node. Read from the ledger, not
+// from the checkbox: it is a choice this console remembers about a machine, and
+// the node card's Update button reads the same one.
+function dockerChosen(){
+  const node = (ST.managed || []).find((entry) => entry.id === DK.node);
+  return new Set((node && node.update_stacks) || []);
+}
+function stat(value, key, tone){
+  return '<div class="stat' + (tone ? " " + tone : "") + '"><span class="v">' +
+    esc(String(value)) + '</span><span class="k">' + esc(key) + "</span></div>";
+}
+function paintDockerOverview(){
+  const info = DK.overview;
+  if(!info){ setHTML("dk-overview", ""); return; }
+  setHTML("dk-overview",
+    stat(info.running + "/" + info.containers, "containers running", "accent") +
+    stat(DK.stacks.length, "stacks") +
+    stat(info.images || 0, "images") +
+    stat(info.version || "—", "engine") +
+    stat(info.compose ? "yes" : "no", "docker compose") +
+    stat(info.portainer ? "configured" : "none", "portainer"));
+}
+function stackRow(stack){
+  const chosen = dockerChosen().has(stack.name);
+  const owner = stack.portainer_id ? "portainer" : (stack.files ? "compose" : "unmanaged");
+  return '<div class="row wrap">' +
+    '<label class="check" title="Include this stack in Update on that node">' +
+    '<input type="checkbox" data-stack-pick="' + esc(stack.name) + '"' +
+    (chosen ? " checked" : "") + '><span class="tiny">update</span></label>' +
+    '<b class="grow truncate">' + esc(stack.name) + "</b>" +
+    badge(stack.running + "/" + stack.total + " up",
+          stack.running === stack.total ? "ok" : (stack.running ? "warn" : "")) +
+    badge(owner, owner === "portainer" ? "accent" : "") +
+    '<span class="btn-row">' +
+    '<button class="sm" data-stack-act="start" data-stack="' + esc(stack.name) + '">Start</button>' +
+    '<button class="sm" data-stack-act="stop" data-stack="' + esc(stack.name) + '">Stop</button>' +
+    '<button class="sm" data-stack-act="restart" data-stack="' + esc(stack.name) + '">Restart</button>' +
+    '<button class="sm primary" data-stack-act="update" data-stack="' + esc(stack.name) + '">Update</button>' +
+    "</span></div>";
+}
+function containerRow(entry){
+  const running = entry.state === "running";
+  return '<div class="row wrap">' +
+    '<b class="grow truncate">' + esc(entry.name || shortId(entry.id)) + "</b>" +
+    '<span class="muted small truncate">' + esc(entry.image) + "</span>" +
+    (entry.project ? badge(entry.project) : "") +
+    badge(entry.state || "?", running ? "ok" : "warn") +
+    (entry.ports.length ? '<span class="mono tiny muted">' +
+      esc(entry.ports.join(" ")) + "</span>" : "") +
+    '<span class="btn-row">' +
+    '<button class="sm" data-ct-act="' + (running ? "stop" : "start") + '" data-ct="' +
+      esc(entry.id) + '">' + (running ? "Stop" : "Start") + "</button>" +
+    '<button class="sm" data-ct-act="restart" data-ct="' + esc(entry.id) + '">Restart</button>' +
+    '<button class="sm ghost" data-ct-logs="' + esc(entry.id) + '">Logs</button>' +
+    '<button class="sm danger" data-ct-act="remove" data-ct="' + esc(entry.id) + '">Remove</button>' +
+    "</span></div>";
+}
+function portainerRow(stack){
+  return '<div class="row wrap"><b class="grow truncate">' + esc(stack.name) + "</b>" +
+    badge(stack.active ? "active" : "stopped", stack.active ? "ok" : "") +
+    (stack.git ? badge("git") : "") +
+    '<span class="btn-row">' +
+    '<button class="sm" data-pt-act="' + (stack.active ? "stop" : "start") +
+      '" data-pt="' + stack.id + '">' + (stack.active ? "Stop" : "Start") + "</button>" +
+    '<button class="sm primary" data-pt-act="redeploy" data-pt="' + stack.id +
+      '">Redeploy</button></span></div>';
+}
+function paintDocker(){
+  $("nav-docker").textContent = dockerNodes().length || "";
+  paintDockerOverview();
+  // Nothing read yet is not the same as nothing there, and a panel that says
+  // "no stack" before it has looked is a panel that lies once a second.
+  const waiting = DK.overview === null;
+  setHTML("dk-stacks", DK.stacks.map(stackRow).join("") ||
+    (waiting ? emptyHTML("Not read yet", "Pick a node, then Refresh.")
+             : emptyHTML("No stack here",
+                 "A stack is a compose project. Deploy one, or run plain containers.")));
+  setHTML("dk-containers", DK.containers.map(containerRow).join("") ||
+    (waiting ? "" : emptyHTML("Nothing is running", "No container on that machine.")));
+  setHTML("dk-images", DK.images.map((image) =>
+    '<div class="row"><b class="grow truncate mono">' +
+    esc((image.tags[0] || image.id).slice(0, 80)) + "</b>" +
+    '<span class="muted small">' + fmtBytes(image.size) + "</span></div>").join("") ||
+    '<p class="muted small">Nothing read yet.</p>');
+  setHTML("pt-stacks", DK.portainer.map(portainerRow).join("") ||
+    '<p class="muted small">Nothing read from Portainer yet.</p>');
+}
+
+// A long job — a pull, a deploy, a stack coming up — is started and then
+// watched in the job list. Reporting only at the end is indistinguishable from
+// a hang, and this is minutes of somebody else's machine.
+async function dockerJob(label, op, extra){
+  let answer;
+  try{ answer = await dockerCall(op, extra); }
+  catch(error){ toast(String(error.message || error), "danger"); return; }
+  if(!answer.rid){ toast(label + " done", "ok"); await dockerLoad(); return; }
+  toast(label + " started — it shows in Activity");
+  const rid = answer.rid;
+  for(let tries = 0; tries < 600; tries++){
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const job = (ST.jobs || []).find((entry) => entry.rid === rid);
+    if(job && job.state !== "running"){
+      toast(label + (job.state === "ok" ? " done" : " failed: " + (job.detail || "")),
+            job.state === "ok" ? "ok" : "danger");
+      break;
+    }
+  }
+  await dockerLoad();
+}
+
+async function dockerLogs(id){
+  $("modal-title").textContent = "Logs";
+  $("modal-body").innerHTML = '<pre class="term" id="dk-log">Reading…</pre>';
+  $("modal").showModal();
+  try{
+    const answer = await dockerCall("logs", {id, tail:400});
+    // Written as text, never as markup: these are bytes a container chose.
+    $("dk-log").textContent = answer.text || "(nothing)";
+  }catch(error){ $("dk-log").textContent = String(error.message || error); }
+}
+
+function runDialog(){
+  $("modal-title").textContent = "Run a container";
+  $("modal-body").innerHTML =
+    '<p class="muted small">Built field by field on the far side — a container body passed ' +
+    "through whole would be every field that node does not know about.</p>" +
+    '<label class="field"><span>Name</span><input id="rn-name" class="mono" ' +
+    'placeholder="my-service" autocomplete="off" spellcheck="false"></label>' +
+    '<label class="field"><span>Image</span><input id="rn-image" class="mono" ' +
+    'placeholder="ghcr.io/owner/image:tag" autocomplete="off" spellcheck="false"></label>' +
+    '<label class="field"><span>Ports (host:container, one per line)</span>' +
+    '<textarea id="rn-ports" class="mono" rows="2" placeholder="8080:80"></textarea></label>' +
+    '<label class="field"><span>Volumes (host:container[:ro], one per line)</span>' +
+    '<textarea id="rn-vols" class="mono" rows="2" placeholder="/srv/data:/data"></textarea></label>' +
+    '<label class="field"><span>Environment (KEY=value, one per line)</span>' +
+    '<textarea id="rn-env" class="mono" rows="3" placeholder="TZ=Europe/Paris"></textarea></label>' +
+    '<label class="field"><span>Restart policy</span><select id="rn-restart">' +
+    '<option value="unless-stopped">unless-stopped</option><option value="always">always</option>' +
+    '<option value="on-failure">on-failure</option><option value="no">no</option></select></label>' +
+    '<div class="btn-row"><button id="rn-go" class="primary">Run</button>' +
+    '<button id="rn-no">Cancel</button></div><p id="rn-msg" class="msg"></p>';
+  $("rn-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+    const image = $("rn-image").value.trim();
+    if(!image){ setMessage("rn-msg", "An image is required.", true); return; }
+    const lines = (id) => $(id).value.split("\n").map((line) => line.trim()).filter(Boolean);
+    const ports = lines("rn-ports").map((line) => {
+      const [host, container, proto] = line.split(":");
+      return {host:parseInt(host, 10), container:parseInt(container, 10),
+              proto:proto === "udp" ? "udp" : "tcp"};
+    });
+    const volumes = lines("rn-vols").map((line) => {
+      const parts = line.split(":");
+      return {host:parts[0], container:parts[1], ro:parts[2] === "ro"};
+    });
+    const env = {};
+    lines("rn-env").forEach((line) => {
+      const at = line.indexOf("=");
+      if(at > 0) env[line.slice(0, at)] = line.slice(at + 1);
+    });
+    $("modal").close();
+    await dockerJob("Container", "deploy", {spec:{
+      name:$("rn-name").value.trim(), image, ports, volumes, env,
+      restart:$("rn-restart").value}});
+  }));
+  $("rn-no").addEventListener("click", () => $("modal").close());
+  $("modal").showModal();
+  $("rn-name").focus();
+}
+
+function stackDialog(){
+  const viaPortainer = !!(DK.overview && DK.overview.portainer);
+  $("modal-title").textContent = "Deploy a stack";
+  $("modal-body").innerHTML =
+    '<p class="muted small">A compose file, kept on that machine under this node\'s own state ' +
+    "so a redeploy later finds it where compose recorded it.</p>" +
+    '<label class="field"><span>Name</span><input id="sk-name" class="mono" ' +
+    'placeholder="my-stack" autocomplete="off" spellcheck="false"></label>' +
+    (viaPortainer ? '<label class="check"><input id="sk-pt" type="checkbox">' +
+      "<span>Deploy through Portainer, so it owns and can redeploy it</span></label>" +
+      '<label class="field"><span>Portainer environment id</span>' +
+      '<input id="sk-endpoint" class="mono" value="1"></label>' : "") +
+    '<label class="field"><span>docker-compose.yml</span>' +
+    '<textarea id="sk-body" class="mono" rows="12" spellcheck="false" ' +
+    'placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea></label>' +
+    '<div class="btn-row"><button id="sk-go" class="primary">Deploy</button>' +
+    '<button id="sk-no">Cancel</button></div><p id="sk-msg" class="msg"></p>';
+  $("sk-go").addEventListener("click", (event) => withBusy(event.target, async () => {
+    const name = $("sk-name").value.trim();
+    const compose = $("sk-body").value;
+    if(!name || !compose.trim()){
+      setMessage("sk-msg", "A name and a compose file are required.", true); return;
+    }
+    const through = viaPortainer && $("sk-pt").checked;
+    $("modal").close();
+    await dockerJob("Stack " + name,
+                    through ? "portainer_deploy" : "deploy_stack",
+                    through ? {stack:name, compose,
+                               endpoint:parseInt($("sk-endpoint").value, 10) || 1}
+                            : {stack:name, compose});
+  }));
+  $("sk-no").addEventListener("click", () => $("modal").close());
+  $("modal").showModal();
+  $("sk-name").focus();
+}
+
 // ---- shell -----------------------------------------------------------------
 // The emulator, the session driver and the key mapping are shared with the
 // full-screen page (`webassets/terminal.py`): one terminal, drawn in two
@@ -958,9 +1394,14 @@ document.body.addEventListener("click", async (event) => {
   if(data.invite) return inviteDialog(data.invite);
   if(data.status){ await api("/api/fleet/status", "POST", {node:data.status}); return; }
   if(data.update){
-    const agreed = await confirmAction({title:"Run the package upgrade there?",
+    const node = (ST.managed || []).find((entry) => entry.id === data.update);
+    const stacks = (node && node.update_stacks) || [];
+    const agreed = await confirmAction({title:"Bring that machine up to date?",
       body:'<p class="muted small">The node runs its own package manager as root, through the one ' +
-        "command it is allowed to run. It can take several minutes and may restart services.</p>",
+        "command it is allowed to run. It can take several minutes and may restart services.</p>" +
+        (stacks.length ? '<p class="muted small">It will also bring up ' +
+          esc(stacks.join(", ")) + " — pulled and recreated, through Portainer where " +
+          "Portainer owns the stack.</p>" : ""),
       confirmLabel:"Update"});
     if(!agreed) return;
     await api("/api/fleet/update", "POST", {node:data.update});
@@ -976,6 +1417,71 @@ document.body.addEventListener("click", async (event) => {
     $("shell-node").value = data.shell;
     ROUTER.go("shell");
     return openShell();
+  }
+  if(data.docker){
+    DK.node = data.docker;
+    $("dk-node").value = data.docker;
+    ROUTER.go("docker");
+    return dockerLoad();
+  }
+  if(data.groups) return nodeGroupsDialog(data.groups);
+  if(data.groupEdit) return groupDialog(data.groupEdit);
+  if(data.groupUpdate){
+    const group = (ST.groups || []).find((entry) => entry.name === data.groupUpdate);
+    const count = group ? (group.nodes || []).length : 0;
+    const agreed = await confirmAction({title:"Update " + plural(count, "node") + "?",
+      body:'<p class="muted small">Each one runs its own package manager, and brings up the ' +
+        "docker stacks chosen for it. It takes minutes and may restart services.</p>",
+      confirmLabel:"Update group"});
+    if(!agreed) return;
+    const answer = await apiJson("/api/fleet/update-group", "POST",
+                                 {group:data.groupUpdate});
+    const started = (answer.data && answer.data.started) || [];
+    toast("Update started on " + plural(started.length, "node"),
+          started.length ? "ok" : "warn");
+    return poll();
+  }
+  if(data.stackAct){
+    const name = data.stack;
+    if(data.stackAct === "update"){
+      return dockerJob("Stack " + name, "stack", {stack:name, action:"update"});
+    }
+    return withBusy(button, async () => {
+      try{
+        await dockerCall("stack", {stack:name, action:data.stackAct});
+        toast("Stack " + name + " " + data.stackAct + "ed", "ok");
+      }catch(error){ toast(String(error.message || error), "danger"); }
+      await dockerLoad();
+    });
+  }
+  if(data.ctLogs) return dockerLogs(data.ctLogs);
+  if(data.ctAct){
+    if(data.ctAct === "remove"){
+      const agreed = await confirmAction({title:"Remove this container?",
+        body:'<p class="muted small">It is stopped and deleted. Anything it wrote outside a ' +
+          "volume goes with it.</p>", confirmLabel:"Remove", danger:true});
+      if(!agreed) return;
+    }
+    return withBusy(button, async () => {
+      try{
+        await dockerCall("act", {id:data.ct, action:data.ctAct});
+      }catch(error){ toast(String(error.message || error), "danger"); }
+      await dockerLoad();
+    });
+  }
+  if(data.ptAct){
+    if(data.ptAct === "redeploy"){
+      return dockerJob("Portainer redeploy", "portainer_stack",
+                       {id:parseInt(data.pt, 10), action:"redeploy"});
+    }
+    return withBusy(button, async () => {
+      try{
+        await dockerCall("portainer_stack",
+                         {id:parseInt(data.pt, 10), action:data.ptAct});
+        DK.portainer = (await dockerCall("portainer_stacks")).items || [];
+        paintDocker();
+      }catch(error){ toast(String(error.message || error), "danger"); }
+    });
   }
 });
 // ---- an invitation minted by somebody else ---------------------------------
@@ -999,9 +1505,6 @@ function inviteDialog(id){
     '<label class="field"><span>Stays live for</span><select id="inv-ttl">' +
     INVITE_WINDOWS.map((pair) => '<option value="' + pair[0] + '">' + pair[1] +
       "</option>").join("") + "</select></label>" +
-    '<label class="check"><input id="inv-ticket" type="checkbox" checked>' +
-    "<span>Also make it scannable — needs a confirmed public address on that node, " +
-    "and it is left out rather than refused when there is none</span></label>" +
     '<div class="btn-row"><button id="inv-go" class="primary">Create</button>' +
     '<button id="inv-no">Cancel</button></div>' +
     '<p id="inv-msg" class="msg"></p><div id="inv-out"></div>';
@@ -1009,9 +1512,11 @@ function inviteDialog(id){
   $("inv-no").addEventListener("click", () => $("modal").close());
   $("inv-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     setMessage("inv-msg", "Asking " + who + "…");
+    // Always scannable when that node can manage it: one invitation carries
+    // both routes in, and a node with neither answers with the code alone
+    // rather than refusing.
     const {ok, data} = await apiJson("/api/fleet/invite", "POST",
-      {node:id, ttl:parseInt($("inv-ttl").value, 10) || 300,
-       ticket:$("inv-ticket").checked});
+      {node:id, ttl:parseInt($("inv-ttl").value, 10) || 300, ticket:true});
     if(!ok || data.error){
       setMessage("inv-msg", data.error || "That node refused.", true);
       return;
@@ -1030,7 +1535,7 @@ function inviteHTML(invite){
     '</code><button class="sm" data-copy="' + esc(invite.code) + '">Copy code</button></div>' +
     (invite.ticket ? '<div class="copyable"><code class="mono">' + esc(invite.ticket) +
       '</code><button class="sm" data-copy="' + esc(invite.ticket) +
-      '">Copy ticket</button></div>' : "") +
+      '">Copy invitation</button></div>' : "") +
     (invite.qr_svg ? '<div class="qr-holder">' + invite.qr_svg + "</div>" : "") +
     (uris ? '<p class="small muted">Reachable at</p>' + uris : "");
 }
@@ -1062,6 +1567,83 @@ $("key-file").addEventListener("change", (event) => {
 });
 $("key-del").addEventListener("click", removeKey);
 $("ssh-key").addEventListener("change", paintKeys);
+// ---- docker & groups wiring -------------------------------------------------
+
+$("group-new").addEventListener("click", () => groupDialog(""));
+$("dk-node").addEventListener("change", () => {
+  DK.node = $("dk-node").value;
+  DK.images = []; DK.portainer = [];
+  dockerLoad();
+});
+$("dk-refresh").addEventListener("click", (event) => withBusy(event.target, async () => {
+  await dockerLoad();
+  // The two lists nothing else needs: read on demand rather than on every
+  // refresh of the panel.
+  try{ DK.images = (await dockerCall("images")).items || []; }catch(_){ DK.images = []; }
+  if(DK.overview && DK.overview.portainer){
+    try{ DK.portainer = (await dockerCall("portainer_stacks")).items || []; }
+    catch(_){ DK.portainer = []; }
+  }
+  paintDocker();
+}));
+// Read when the panel is opened, not on every poll: this is a round trip to
+// somebody else's machine, and a tab nobody is looking at should cost nothing.
+ROUTER.onChange = (section) => {
+  if(section === "docker" && DK.node && DK.overview === null) dockerLoad();
+};
+$("dk-stack-new").addEventListener("click", () => stackDialog());
+$("dk-container-new").addEventListener("click", () => runDialog());
+$("dk-pull-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const image = $("dk-pull").value.trim();
+  if(!image) return;
+  $("dk-pull").value = "";
+  await dockerJob("Pull of " + image, "pull", {image});
+});
+$("pt-save").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const url = $("pt-url").value.trim();
+  const token = $("pt-token").value;
+  if(!url || !token){
+    setMessage("pt-msg", "An address and a token are required.", true); return;
+  }
+  try{
+    const answer = await dockerCall("portainer",
+      {url, token, fingerprint:$("pt-fp").value.trim()});
+    // Never echoed back: the field is cleared here because the token now lives
+    // in that node's drawer and nothing reads it out again.
+    $("pt-token").value = "";
+    const items = answer.items || [];
+    setMessage("pt-msg", "Saved" + (answer.info && answer.info.pinned ? ", pinned" : "") +
+      " — " + plural(items.length, "environment") + " visible.");
+    DK.portainer = (await dockerCall("portainer_stacks")).items || [];
+    paintDocker();
+  }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
+}));
+$("pt-forget").addEventListener("click", (event) => withBusy(event.target, async () => {
+  const agreed = await confirmAction({title:"Forget that Portainer?",
+    body:'<p class="muted small">The address and token are deleted from that node\'s drawer. ' +
+      "Its stacks keep running; this console just stops being able to redeploy them.</p>",
+    confirmLabel:"Forget", danger:true});
+  if(!agreed) return;
+  try{
+    await dockerCall("portainer", {clear:true});
+    DK.portainer = [];
+    setMessage("pt-msg", "Forgotten.");
+    await dockerLoad();
+  }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
+}));
+// The tick that decides what Update also brings up. Written the moment it
+// changes, because a preference that needs a second button to save it is one
+// that is routinely lost.
+$("dk-stacks").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-stack-pick]");
+  if(!box) return;
+  const chosen = $$("#dk-stacks [data-stack-pick]")
+    .filter((entry) => entry.checked).map((entry) => entry.dataset.stackPick);
+  await api("/api/fleet/stacks", "POST", {node:DK.node, stacks:chosen});
+  poll();
+});
+
 $("ssh-sudo").addEventListener("change", syncSudoFields);
 $("deploy-btn").addEventListener("click", deploy);
 $("shell-open").addEventListener("click", openShell);
@@ -1087,7 +1669,7 @@ $("term").addEventListener("keydown", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
   if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
      window.getSelection().toString()) return;          // let copy/paste through
-  const bytes = keyBytes(event);
+  const bytes = keyBytes(event, TERM_SESSION.term);
   if(bytes === null) return;
   event.preventDefault();
   await TERM_SESSION.send(bytes);
@@ -1095,8 +1677,33 @@ $("term").addEventListener("keydown", async (event) => {
 $("term").addEventListener("paste", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
   event.preventDefault();
-  await TERM_SESSION.send((event.clipboardData || window.clipboardData).getData("text"));
+  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
 });
+// The pointer, only while a program has asked to see it. With reporting off a
+// drag stays an ordinary selection, which is what a shell session wants.
+$("term").addEventListener("mousedown", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "down")) event.preventDefault();
+});
+$("term").addEventListener("mouseup", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "up")) event.preventDefault();
+});
+$("term").addEventListener("mousemove", (event) => {
+  if(TERM_SESSION) TERM_SESSION.mouse(event, "move");
+});
+$("term").addEventListener("wheel", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "wheel")) event.preventDefault();
+}, {passive:false});
+$("term").addEventListener("contextmenu", (event) => {
+  if(TERM_SESSION && TERM_SESSION.term && TERM_SESSION.term.mouse) event.preventDefault();
+});
+// The panel changes size without the window moving — a tab switch, a rail
+// folding away — and a pty told the old size draws every box to the wrong
+// place. So the element is watched, not the window.
+if(window.ResizeObserver){
+  new ResizeObserver(debounce(() => {
+    if(TERM_SESSION) TERM_SESSION.fit();
+  }, 150)).observe($("term"));
+}
 
 [["Nodes you control", "nodes"], ["Who controls this node", "access"],
  ["Discover & deploy", "deploy"], ["Shell", "shell"], ["Activity", "activity"],
