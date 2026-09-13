@@ -206,11 +206,28 @@ tests/
 │     closed, and the `manage` console relay: refused paths (fleet, remote, chat,
 │     outside the API), splitting and reassembling a reply, an over-large reply
 │     explained rather than truncated, a reply forged by a third party ignored,
-│     bounded calls. Plus the terminal path: output leaves the pty in the order
+│     bounded calls. The `docker` plane: its own grant, an operation that is not
+│     one refused by name, a signature for it that still cannot open a shell, and
+│     a ceiling on how many run at once; `Update` carrying stack names, which are
+│     dropped without the second grant and cleaned before they could reach an
+│     argv; groups, where membership lives in one place and a revoked node leaves
+│     them. Plus the terminal path: output leaves the pty in the order
 │     it was produced (one drain, never a task per chunk) and its buffer keeps
 │     the tail when a program outruns the link, and a held read answers on the
 │     byte, returns at once when there is backlog, gives up rather than parking
 │     for ever, and does not wait at all for a session nobody opened
+├── test_fleet_docker.py                               — docker and Portainer: what
+│     may reach a socket or an argv (a name that is not a name is refused, never
+│     escaped; a container is *built* from a validated shape rather than
+│     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute
+│     paths or a volume name; a command is split, never handed to a shell), the
+│     stacks recovered from compose's own labels, the multiplexed log header
+│     taken off rather than printed, and the wire itself driven against a socket
+│     that answers like a daemon — both framings, the daemon's own message
+│     surfaced, a failed pull *inside* a 200 still a failure, an oversized answer
+│     refused. For Portainer: an address that is a host and nothing else, a token
+│     that cannot become a second header, a fingerprint pin, and a git stack
+│     redeployed through git rather than handed the file it already had
 ├── test_fleet_deploy.py                               — remote deployment and the
 │     right to update: the authorised script is not inside the node's prefix, the
 │     rule names one path with no wildcard, the wrapper refuses every argument,

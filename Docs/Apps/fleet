@@ -63,6 +63,7 @@ From the most harmless to total. One never implies another.
 | `scan` | scanning this machine's LAN for SSH hosts |
 | `provision` | installing NMesh on machines of that LAN |
 | `shell` | opening an interactive shell as the node's user — **and browsing, downloading and uploading its files**, which is the same authority through a different door |
+| `docker` | driving that machine's docker: containers, images, compose stacks, and the Portainer in front of them. **Equivalent to root** — the docker socket is |
 | `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
 | `passwordless` | opening this node's console **without** its password: the grant is the second key. Needs `manage` to be of any use |
 
@@ -510,10 +511,123 @@ inside fleet.
   `SHELL_IDLE_TIMEOUT` (15 min) → reaped, input capped, SIGHUP then kill on
   close. The shell's environment is **cleaned**: the connector token living in
   `os.environ` is never passed to a child.
+- **Docker** — containers, images and stacks on that machine, and the Portainer
+  that may own them. Below.
 - **LAN scan** / **Provisioning** — below.
 
 Machine facts are detected **when the app is installed** (first start) and
 cached; `refresh_facts()` runs it again.
+
+## `docker`: a capability that is root, and says so
+
+A process that can talk to `/var/run/docker.sock` can start a privileged
+container bind-mounting `/`. That is the machine. So this is **not** "manage
+containers": it is "be root here", the capability description says exactly that,
+and it is separate from `update` and from `shell` so that an operator has to tick
+it deliberately rather than receive it folded into something smaller.
+
+Three ways in, deliberately not interchangeable
+([`src/apps/fleet_docker.py`](../../src/apps/fleet_docker.py),
+[`src/apps/fleet_portainer.py`](../../src/apps/fleet_portainer.py)):
+
+| Route | What it is for | Why not one of the others |
+|---|---|---|
+| the **Engine API**, over the machine's own socket | everything that reads or moves a container: list, inspect, logs, start/stop, pull, create | no CLI, no shell, no quoting surface — and it works on a machine with no `docker` binary on `PATH` |
+| **`docker compose`** | bringing a stack up to date, and deploying one | a stack *is* a compose file; pulling images under a project and restarting it is not the same act, and quietly does less |
+| **Portainer's API** | stacks Portainer owns | Portainer holds the file (or the git reference) and its own record of the stack; `compose up` behind its back leaves that record stale and the next thing it does undoes the update |
+
+### A stack is a compose project
+
+No second source of truth: compose labels everything it creates
+(`com.docker.compose.project`, `.service`, `.project.config_files`), so the
+stacks on a machine are recovered from the containers that are running. Portainer
+deploys through compose too, so its stacks appear in the same list with no
+special case — what tells them apart is the label it adds, and that is what
+decides **who** is allowed to update them.
+
+A stack deployed from here has its compose file written under the node's own
+state directory, named for the project, so a redeploy later finds it exactly
+where compose recorded it — and so nothing this deploys can be made to overwrite
+a path chosen by whoever sent the file.
+
+### Update, and the stacks it also brings up
+
+**Which stacks `Update` touches is a choice made here**, on this console, about
+that machine — ticked in the Docker panel, kept in our own ledger beside the
+grant, and shown on the node's card so the button never means two things at
+once. It rides the same signed `UPDATE_REQUEST` rather than a second one,
+because "bring this machine up to date" is one act with one proof over its own
+bytes.
+
+It is honoured only if that node **also** granted `docker`. The signature's
+purpose names `update` and it commits to the exact body, so it cannot be
+redirected — but the act it asks for is one the node may never have agreed to,
+and the ledger is what says so. A machine with no package manager and a dozen
+stacks still updates its stacks: refusing the whole thing because half of it does
+not apply would be refusing the half that does.
+
+Each name is charset-checked and bounded before it reaches an argv. What is not a
+name is **dropped, never escaped** — there is no escaping here to get wrong.
+
+### Portainer: one endpoint, one token, write-only
+
+Configured per node, from this console, and stored in that node's **encrypted
+drawer** — not in the ledger blob the console reads on every poll, because a
+token has no business travelling that path. What comes back says whether one is
+configured and where; **nothing ever reads the token back over the mesh.** A
+credential that could be read back would make this capability a way of *stealing*
+the Portainer rather than of using it.
+
+TLS is verified. A Portainer on a private network very often has a self-signed
+certificate, so there is a second way to accept one: **pin its fingerprint**
+(sha256). That is an anchor an operator chose, which is the only kind of trust
+this project has — "just don't check" is not offered, because a pin is strictly
+more information than an unchecked connection and costs the same click.
+
+The configuration is **proved before it is stored**: saving it lists the
+environments first. A configuration that has never worked is a button that fails
+later, somewhere nobody is looking.
+
+### What is validated, and where
+
+Everything an operator sends is hostile input, and each value is checked against
+a charset and a bound before it reaches a socket or an argv:
+
+| Value | Rule |
+|---|---|
+| container / image / volume / network name | `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` |
+| image reference | `[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}` |
+| a container to create | **built field by field** from a validated shape. A body forwarded to the daemon would be every field this module does not know about, `Privileged` among them |
+| a bind mount | two absolute paths with no colon, or a volume name — the string reaches the daemon as one field, and a colon in the wrong place changes what is mounted where |
+| a command | `shlex`-split into an argv, never handed to a shell |
+| an environment variable | a name, and a value with no newline — one that carried one would be a second variable |
+| a compose file | text, bounded, never parsed here (compose is what understands compose; a half-implemented YAML reader deciding what is safe would be a worse gate than the capability in front of it) |
+| a Portainer address | `scheme://host[:port]` and nothing else — no path, no name to resolve later and point anywhere |
+| a Portainer token | printable ASCII only: it rides an HTTP header, and a control byte in it would be a second header |
+
+And the answers coming *back* are hostile too — large, deep, written by something
+this node does not control. Every shape handed on is built field by field and
+bounded, and one thing is deliberately left out: a container's **environment
+values**. Those routinely hold its secrets, so only the names travel. Somebody
+who needs a value has a shell.
+
+## Groups: pointing at several machines at once
+
+A group is **this console's own name** for a set of machines. It says nothing to
+any node in it, grants nobody anything, and never leaves this node — which is
+why the whole of it lives in our ledger.
+
+- A node can be in **several** groups.
+- Membership lives in **one** place, the group's own list. "Which groups is this
+  node in?" is derived from it rather than stored a second time and allowed to
+  disagree — and editing from the node's side is the same edit as editing from
+  the group's.
+- A group only ever names nodes this console still manages: a membership
+  pointing at a node whose grant is gone is a row that looks like a machine and
+  is not one, so revoking removes it.
+- **Update group** runs the same act as *Update* on each node in turn, each with
+  its own chosen stacks. A node that never granted `update` is skipped and said
+  so, rather than sent a request that can only come back denied.
 
 ## LAN discovery and provisioning
 
@@ -860,6 +974,12 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 | `CONSOLE_REQUEST` / `_REPLY` | 0x50 / 0x51 | → / ← | the request only (`fleet.manage`) |
 | `CONSOLE_SESSION` / `_ISSUED` | 0x52 / 0x53 | → / ← | the request only (`fleet.passwordless`) |
 | `FILE_REQUEST` / `_REPLY` / `_DATA` | 0x70–0x72 | → / ← / ← | the request only (`fleet.shell`) |
+| `DOCKER_REQUEST` / `_REPLY` | 0x80 / 0x81 | → / ← | the request only (`fleet.docker`) |
+
+`DOCKER_REQUEST` carries a **named operation** rather than having a message type
+per container verb: that would be twenty entries in the dispatch table for one
+capability, and the capability is the gate. An operation that is not in the table
+is refused by name.
 
 **No new mesh packet type**: everything travels in `DATA`, section
 `builtin_id("fleet")`. The node's management plane is untouched.
@@ -889,6 +1009,11 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `MAX_FILE_CALLS` | 8 file operations hosted at once, per peer |
 | `MAX_UPLOADS` / `UPLOAD_IDLE` | 2 uploads per operator / reaped after 300 s |
 | `MAX_GRANT_SESSIONS` | 4 passwordless console sessions per operator |
+| `MAX_DOCKER_CALLS` | 2 docker operations hosted at once, per peer |
+| `MAX_UPDATE_STACKS` | 32 stacks one node's *Update* may also bring up |
+| `MAX_GROUPS` / `MAX_GROUP_NODES` | 32 groups / 512 nodes in one |
+| `MAX_RESPONSE` (docker) | 4 MB read from one Engine API answer |
+| `MAX_COMPOSE` | 40,000 B, so one reply frame still fits |
 
 The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
 ledger (we forget who we believed, rather than trusting a forged list), and an
@@ -943,6 +1068,10 @@ All behind the console session (Bearer or cookie). Details:
 |---|---|---|
 | GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, facts, **jobs**, scans) |
 | GET | `/api/fleet/shell?sid=&offset=[&wait=1]` | terminal bytes (base64); `wait=1` holds the answer until there are some |
+| POST | `/api/fleet/docker` | `{node, op, …}` → one docker operation. The reads are waited on; the ones that pull images hand back a `rid` and are watched in the job list |
+| POST | `/api/fleet/stacks` | `{node, stacks[]}` → which stacks *Update* also brings up there |
+| POST | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → groups, local to this console |
+| POST | `/api/fleet/update-group` | `{group}` → *Update* on every node in it |
 | GET | `/api/fleet/keys` | local SSH keys — **metadata only** |
 | POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
 | POST | `/api/fleet/caps-set` | an operator's rights **on this node** (a local human) |

@@ -1079,6 +1079,118 @@ class TestInvite:
 
 
 # ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+
+class TestDockerPlane:
+    """The gate in front of the daemon, and the one place two grants are needed
+    at once. Nothing here reaches a real docker: what is under test is what a
+    request is allowed to become before it would."""
+
+    async def test_docker_needs_its_own_grant(self, operator, agent):
+        await enrol(operator, agent, caps=["status", "update", "shell"])
+        await operator.app.request_docker(agent.id, "containers")
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
+        assert failures and "not authorised for docker" in failures[0].error
+
+    async def test_an_operation_that_is_not_one_is_refused_by_name(self, operator, agent):
+        await enrol(operator, agent, caps=["docker"])
+        await operator.app.request_docker(agent.id, "exec")
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
+        assert failures and "not a docker operation" in failures[0].error
+
+    async def test_a_docker_signature_does_not_open_a_shell(self, operator, agent):
+        """Gate 3, on this plane as on every other: the purpose names the
+        capability, so a signature obtained for one act is useless for another."""
+        await enrol(operator, agent, caps=list(CAPABILITIES))
+        frame = operator.app._signed_frame(
+            fleet.SHELL_OPEN, agent.id, fleet.PURPOSE_BY_CAP["docker"],
+            {"rid": "aa" * 8, "cols": 80, "rows": 24})
+        agent.app._dispatch(operator.id, frame)
+        assert agent.app._shells == {}
+
+    async def test_only_so_many_docker_operations_at_once(self, operator, agent):
+        """A pull is minutes of somebody else's disk and network. "Several at
+        once" is not something an operator ever wanted, and it is exactly what
+        a flood would ask for."""
+        await enrol(operator, agent, caps=["docker"])
+        agent.app._docker_calls[operator.id.raw] = fleet.MAX_DOCKER_CALLS
+        await operator.app.request_docker(agent.id, "containers")
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
+        assert failures and "too many docker" in failures[0].error
+
+
+class TestUpdateWithStacks:
+    """`Update` brings a machine up to date — its packages, and the stacks this
+    console chose for it. One signed request, because it is one act; two grants,
+    because recreating containers is not running a package manager."""
+
+    async def test_stack_names_are_dropped_without_the_docker_grant(self, operator, agent):
+        await enrol(operator, agent, caps=["update"])
+        seen = {}
+        original = agent.app._run_update
+
+        async def record(src, rid, commands, stacks=None):
+            seen["stacks"] = list(stacks or [])
+
+        agent.app._run_update = record
+        try:
+            await operator.app.request_update(agent.id, ["site", "other"])
+            await deliver(operator, agent)
+        finally:
+            agent.app._run_update = original
+        assert seen.get("stacks") == []
+
+    async def test_stack_names_survive_when_both_grants_are_there(self, operator, agent):
+        await enrol(operator, agent, caps=["update", "docker"])
+        seen = {}
+
+        async def record(src, rid, commands, stacks=None):
+            seen["stacks"] = list(stacks or [])
+
+        agent.app._run_update = record
+        await operator.app.request_update(agent.id, ["site", "other"])
+        await deliver(operator, agent)
+        assert seen.get("stacks") == ["site", "other"]
+
+    async def test_a_name_that_is_not_a_stack_never_leaves_this_node(self, operator, agent):
+        await enrol(operator, agent, caps=["update", "docker"])
+        seen = {}
+
+        async def record(src, rid, commands, stacks=None):
+            seen["stacks"] = list(stacks or [])
+
+        agent.app._run_update = record
+        await operator.app.request_update(
+            agent.id, ["good", "; rm -rf /", "../escape", "with space", "x" * 90])
+        await deliver(operator, agent)
+        assert seen.get("stacks") == ["good"]
+
+    async def test_a_machine_with_no_package_manager_can_still_update_its_stacks(
+            self, operator, agent):
+        """A container has no apt and a dozen stacks. Refusing the whole update
+        because half of it does not apply is refusing the half that does."""
+        await enrol(operator, agent, caps=["update", "docker"])
+        agent.app.facts.package_manager = None
+        seen = {}
+
+        async def record(src, rid, commands, stacks=None):
+            seen["commands"] = list(commands)
+            seen["stacks"] = list(stacks or [])
+
+        agent.app._run_update = record
+        await operator.app.request_update(agent.id, ["site"])
+        await deliver(operator, agent)
+        assert seen.get("commands") == [] and seen.get("stacks") == ["site"]
+
+
+# ---------------------------------------------------------------------------
 # Shell session binding
 # ---------------------------------------------------------------------------
 

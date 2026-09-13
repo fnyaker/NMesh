@@ -33,12 +33,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import threading
 import time
 
 # What an operator may be granted. Ordered from harmless to total.
 CAPABILITIES = ("status", "invite", "update", "scan", "provision", "shell",
-                "manage", "passwordless")
+                "docker", "manage", "passwordless")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
@@ -49,6 +50,12 @@ CAP_DESCRIPTIONS = {
     "scan": "sweep this machine's LAN for SSH hosts",
     "provision": "install NMesh on machines on this LAN",
     "shell": "open an interactive shell as this node's user",
+    # Root, said plainly. A process that can talk to the docker socket can start
+    # a privileged container bind-mounting `/`, which is the machine — so this
+    # is not "manage containers", it is "be root here", and the description has
+    # to say the thing an operator is actually agreeing to.
+    "docker": "drive this machine's docker: containers, images and stacks "
+              "(equivalent to root — the docker socket is)",
     # Not a second way in: the operator still has to type this node's console
     # password. The grant opens the channel; the password opens the session.
     "manage": "drive this node's web console remotely (its console password is "
@@ -67,9 +74,16 @@ MAX_MANAGED = 4096
 MAX_PENDING = 256
 MAX_PROVISION_RECORDS = 512
 MAX_LABEL = 128
+MAX_UPDATE_STACKS = 32            # stacks one node's Update may also bring up
+MAX_GROUPS = 32                   # groups an operator may keep
+MAX_GROUP_NODES = 512             # nodes in one group
+_GROUP_RE = re.compile(r"\A[^\x00-\x1f]{1,48}\Z")
+_STACK_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 MAX_SSH_KEYS = 8                  # uploaded private keys held at once
 MAX_SSH_KEY_BYTES = 64 * 1024
 _KEY_PREFIX = "sshkey:"           # drawer key holding one uploaded private key
+_SECRET_PREFIX = "secret:"        # drawer key holding one credential we hold
+MAX_SECRET_BYTES = 4096
 _STATE_KEY = "fleet-state"
 _STATE_BUDGET = 200 * 1024        # serialised ledger ceiling (under the drawer cap)
 PENDING_TTL = 7 * 86400           # an unanswered request expires after a week
@@ -83,6 +97,30 @@ def clean_caps(caps) -> list[str]:
     if not isinstance(caps, (list, tuple, set)):
         return []
     return [cap for cap in CAPABILITIES if cap in set(caps)]
+
+
+def clean_group(name) -> str:
+    """A group name from anywhere. A label, so it may hold anything printable —
+    it never reaches a shell, a path or another machine."""
+    if not isinstance(name, str):
+        return ""
+    text = " ".join(name.split())[:48]
+    return text if text and _GROUP_RE.match(text) else ""
+
+
+def clean_stack_names(raw) -> list[str]:
+    """Stack names from anywhere, bounded and charset-checked.
+
+    A stack name reaches an argv on the far side, so what is not a name is
+    dropped rather than escaped — there is no escaping here to get wrong."""
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for name in list(raw)[:MAX_UPDATE_STACKS]:
+        if (isinstance(name, str) and _STACK_RE.match(name)
+                and name not in out):
+            out.append(name)
+    return out
 
 
 def clean_label(label) -> str:
@@ -116,6 +154,11 @@ class FleetState:
         self._provisioned: dict[str, dict] = {}  # token digest -> provisioning run
         self._ssh_keys: dict[str, dict] = {}     # key id -> metadata (never material)
         self._ram_keys: dict[str, str] = {}      # material when no drawer is wired
+        self._ram_secrets: dict[str, bytes] = {}  # ditto, for held credentials
+        # Group name -> the nodes in it. One membership list, not a field on
+        # each node: two places saying who is in a group is two chances for
+        # them to disagree, and the group is the thing an operator acts on.
+        self._groups: dict[str, dict] = {}
         self._version = 0
         self._load()
 
@@ -144,6 +187,13 @@ class FleetState:
         self._provisioned = _load_map(document.get("provisioned"),
                                       MAX_PROVISION_RECORDS)
         self._ssh_keys = _load_map(document.get("ssh_keys"), MAX_SSH_KEYS)
+        self._groups = {
+            name: {"nodes": [node for node in (entry.get("nodes") or [])
+                             if _is_node_hex(node)][:MAX_GROUP_NODES],
+                   "at": entry.get("at") or time.time()}
+            for name, entry in _load_map(document.get("groups"), MAX_GROUPS).items()
+            if clean_group(name)
+        }
         self._expire_pending()
 
     def _save(self) -> None:
@@ -157,6 +207,7 @@ class FleetState:
             "pending_out": self._pending_out,
             "provisioned": self._provisioned,
             "ssh_keys": self._ssh_keys,
+            "groups": self._groups,
         }
         try:
             blob = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -280,11 +331,112 @@ class FleetState:
                 "grant": _b64(grant),
                 "status": existing.get("status"),
                 "last_seen": time.time(),
+                # Carried over rather than rebuilt: re-enrolment refreshes the
+                # grant, and it would be a poor surprise for it to also forget
+                # which stacks an operator had chosen to update.
+                "update_stacks": existing.get("update_stacks") or [],
             }
             self._managed[node_hex] = entry
             self._pending_out.pop(node_hex, None)
             self._save()
             return dict(entry, id=node_hex)
+
+    def set_update_stacks(self, node_hex: str, stacks) -> list[str]:
+        """Which of that node's docker stacks *Update* should also bring up.
+
+        Ours, not theirs: it is a choice an operator made on this console about
+        a machine, so it lives beside the grant we hold rather than travelling
+        with every request."""
+        clean = clean_stack_names(stacks)
+        with self._lock:
+            entry = self._managed.get(node_hex)
+            if entry is None:
+                return []
+            entry["update_stacks"] = clean
+            self._save()
+            return list(clean)
+
+    def update_stacks(self, node_hex: str) -> list[str]:
+        with self._lock:
+            entry = self._managed.get(node_hex)
+            return list(entry.get("update_stacks") or []) if entry else []
+
+    # -- groups (an operator's own names for sets of machines) -------------
+    #
+    # Ours, not theirs: a group is a way of pointing at several machines at
+    # once from this console, and says nothing to any of them. Membership lives
+    # in one place — the group's list — so "which groups is this node in?" is
+    # derived rather than stored a second time and allowed to disagree.
+
+    def groups(self) -> list[dict]:
+        with self._lock:
+            return [{"name": name, "nodes": list(entry.get("nodes") or []),
+                     "at": entry.get("at") or 0}
+                    for name, entry in sorted(self._groups.items())]
+
+    def group_nodes(self, name) -> list[str]:
+        clean = clean_group(name)
+        with self._lock:
+            entry = self._groups.get(clean)
+            # Only nodes we still manage: a group holding a node whose grant is
+            # gone is a button that half works.
+            return [node for node in (entry.get("nodes") or [])
+                    if node in self._managed] if entry else []
+
+    def set_group(self, name, nodes) -> dict | None:
+        """Create a group, or replace what is in one."""
+        clean = clean_group(name)
+        if not clean:
+            return None
+        members = []
+        if isinstance(nodes, (list, tuple, set)):
+            for node in list(nodes)[:MAX_GROUP_NODES]:
+                if _is_node_hex(node) and node not in members:
+                    members.append(node)
+        with self._lock:
+            if clean not in self._groups and len(self._groups) >= MAX_GROUPS:
+                return None
+            entry = self._groups.setdefault(clean, {"nodes": [], "at": time.time()})
+            entry["nodes"] = members
+            self._save()
+            return {"name": clean, "nodes": list(members), "at": entry["at"]}
+
+    def remove_group(self, name) -> bool:
+        clean = clean_group(name)
+        with self._lock:
+            if self._groups.pop(clean, None) is None:
+                return False
+            self._save()
+            return True
+
+    def set_node_groups(self, node_hex: str, names) -> list[str]:
+        """Put one node in exactly these groups — a node may be in several.
+
+        Written through the same one list per group, so this is an edit of the
+        membership rather than a second copy of it."""
+        if not _is_node_hex(node_hex):
+            return []
+        wanted = []
+        if isinstance(names, (list, tuple, set)):
+            for name in list(names)[:MAX_GROUPS]:
+                clean = clean_group(name)
+                if clean and clean not in wanted:
+                    wanted.append(clean)
+        with self._lock:
+            for name in wanted:
+                if name not in self._groups and len(self._groups) >= MAX_GROUPS:
+                    continue
+                entry = self._groups.setdefault(name, {"nodes": [], "at": time.time()})
+                if node_hex not in entry["nodes"]:
+                    if len(entry["nodes"]) >= MAX_GROUP_NODES:
+                        continue
+                    entry["nodes"].append(node_hex)
+            for name, entry in self._groups.items():
+                if name not in wanted and node_hex in entry["nodes"]:
+                    entry["nodes"].remove(node_hex)
+            self._save()
+            return [name for name, entry in sorted(self._groups.items())
+                    if node_hex in entry["nodes"]]
 
     def may_use(self, node_hex: str, capability: str) -> bool:
         """Whether *that* node granted *us* this capability.
@@ -300,6 +452,12 @@ class FleetState:
         with self._lock:
             gone = self._managed.pop(node_hex, None) is not None
             if gone:
+                # Out of the groups too. A membership pointing at a node this
+                # console no longer manages is a row that looks like a machine
+                # and is not one.
+                for entry in self._groups.values():
+                    if node_hex in entry["nodes"]:
+                        entry["nodes"].remove(node_hex)
                 self._save()
             return gone
 
@@ -486,6 +644,61 @@ class FleetState:
                     pass
             self._save()
             return True
+
+    # -- a credential this node holds for something else -------------------
+    #
+    # One drawer entry per name, encrypted at rest under the node identity like
+    # every other app's state, and deliberately **not** in the ledger blob: the
+    # ledger is read by the console on every poll, and a token has no business
+    # travelling that path. Nothing reads one of these back over the mesh —
+    # what a console is told is that one is configured, and where.
+
+    def write_secret(self, name: str, value: dict | None) -> bool:
+        key = _SECRET_PREFIX + str(name)[:32]
+        with self._lock:
+            if value is None:
+                self._ram_secrets.pop(key, None)
+                if self._store is not None:
+                    try:
+                        self._store.delete(key)
+                    except Exception:
+                        pass
+                self._save()
+                return True
+            try:
+                blob = json.dumps(value, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError):
+                return False
+            if len(blob) > MAX_SECRET_BYTES:
+                return False
+            if self._store is None:
+                self._ram_secrets[key] = blob
+            else:
+                try:
+                    if not self._store.put(key, blob):
+                        return False
+                except Exception:
+                    return False
+            self._save()
+            return True
+
+    def read_secret(self, name: str) -> dict | None:
+        key = _SECRET_PREFIX + str(name)[:32]
+        with self._lock:
+            if self._store is None:
+                blob = self._ram_secrets.get(key)
+            else:
+                try:
+                    blob = self._store.get(key)
+                except Exception:
+                    blob = None
+            if not blob:
+                return None
+            try:
+                value = json.loads(blob.decode("utf-8"))
+            except Exception:
+                return None
+            return value if isinstance(value, dict) else None
 
     def provisioned(self) -> list[dict]:
         with self._lock:

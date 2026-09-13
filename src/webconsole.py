@@ -53,6 +53,7 @@ from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
+from .apps.fleet_docker import DockerError
 from .apps.fleet_console import REPLAY_HEADER
 
 # The page names the node it is driving with this header. Absent (or naming us)
@@ -255,6 +256,11 @@ _MAX_STREAMS = 16
 # node's console answers before that call gives up on it.
 _SHELL_HOLD = 15.0
 _MAX_SHELL_HOLDS = 8
+# What a docker request body may carry through to a managed node. Named rather
+# than forwarded whole: a body passed straight through is every field the far
+# side does not know about, and there is no list of those to reason about.
+_DOCKER_ARGS = ("id", "action", "tail", "image", "spec", "stack", "compose",
+                "url", "token", "fingerprint", "clear", "endpoint")
 
 
 class WebConsole:
@@ -2138,8 +2144,24 @@ def _make_handler(console: WebConsole):
                                {"ok": bool(ok), "keys": fleet.local_keys()})
                 elif action == "provision":
                     self._handle_provision(fleet, node, data)
+                elif action == "docker":
+                    self._handle_docker(fleet, node, data)
+                elif action == "stacks":
+                    # Which of a node's stacks *Update* should also bring up.
+                    # Ours to remember, so it is written here and nowhere else.
+                    self._json(200, {"stacks": fleet.set_update_stacks(
+                        node, data.get("stacks"))})
+                elif action == "groups":
+                    self._handle_groups(fleet, data)
+                elif action == "update-group":
+                    self._json(200, fleet.update_group(
+                        str(data.get("group") or "")[:48]))
                 else:
                     self._json(404, {"error": "not found"})
+            except DockerError as exc:
+                # The far node refused, or has no docker. Not this console
+                # failing, and an operator has to be able to tell them apart.
+                self._json(502, {"error": str(exc)[:200]})
             except FleetFileError as exc:
                 # The far node refused, or never answered. Not this console
                 # failing, and an operator has to be able to tell them apart.
@@ -2148,6 +2170,40 @@ def _make_handler(console: WebConsole):
                 self._json(400, {"error": "bad request"})
             except Exception as exc:
                 self._json(503, {"error": str(exc)[:200]})
+
+        def _handle_docker(self, fleet, node: str, data) -> None:
+            """One docker operation on a managed node.
+
+            Everything in the body is passed on as *named arguments* the far
+            side validates; nothing is interpreted here. The one thing this
+            console does decide is which keys may travel at all — a body
+            forwarded whole would be every field the far side does not know
+            about, and there is no list of those to reason about."""
+            op = str(data.get("op") or "")[:32]
+            if not op:
+                self._json(400, {"error": "an operation is required"})
+                return
+            arguments = {key: data[key] for key in _DOCKER_ARGS if key in data}
+            self._json(200, fleet.docker(node, op, **arguments))
+
+        def _handle_groups(self, fleet, data) -> None:
+            """Groups: an operator's own names for sets of machines.
+
+            Local by construction. A group says nothing to any node in it — it
+            is a way of pointing at several of them at once from here."""
+            operation = str(data.get("op") or "")[:16]
+            if operation == "set":
+                entry = fleet.set_group(data.get("group"), data.get("nodes"))
+                self._json(200 if entry else 400,
+                           entry or {"error": "that group name is not usable"})
+            elif operation == "remove":
+                ok = fleet.remove_group(data.get("group"))
+                self._json(200 if ok else 404, {"ok": bool(ok)})
+            elif operation == "node":
+                self._json(200, {"groups": fleet.set_node_groups(
+                    data.get("node") or "", data.get("groups"))})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_file_upload(self, fleet, node: str, data) -> None:
             """Push one file onto a node that granted ``shell``.

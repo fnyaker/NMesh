@@ -14,9 +14,9 @@ import pytest
 
 from src.apps import fleet_host
 from src.apps.fleet_state import (
-    CAPABILITIES, MAX_OPERATORS, MAX_PENDING, MAX_PROVISION_RECORDS,
-    MAX_SSH_KEYS,
-    FleetState, clean_caps, clean_label,
+    CAPABILITIES, MAX_GROUPS, MAX_OPERATORS, MAX_PENDING,
+    MAX_PROVISION_RECORDS, MAX_SSH_KEYS,
+    FleetState, clean_caps, clean_group, clean_label, clean_stack_names,
 )
 
 PUB = b"\x11" * 64
@@ -372,3 +372,156 @@ class TestSshKeyVault:
         state = FleetState(FullStore())
         assert state.add_ssh_key("laptop", self.KEY) is None
         assert state.ssh_keys() == []
+
+
+# ---------------------------------------------------------------------------
+# Groups, and the stacks Update also brings up
+# ---------------------------------------------------------------------------
+
+NODE_A = "a" * 40
+NODE_B = "b" * 40
+
+
+def _managed(state, *nodes):
+    for node in nodes:
+        state.add_managed(node, caps=["update", "docker"], label="")
+
+
+class TestGroups:
+    """An operator's own names for sets of machines. Local by construction: a
+    group says nothing to any node in it."""
+
+    def test_a_node_can_be_in_several_groups(self):
+        state = FleetState()
+        _managed(state, NODE_A)
+        assert state.set_node_groups(NODE_A, ["prod", "eu"]) == ["eu", "prod"]
+        assert state.group_nodes("prod") == [NODE_A]
+        assert state.group_nodes("eu") == [NODE_A]
+
+    def test_membership_lives_in_one_place(self):
+        """Two lists saying who is in a group is two chances for them to
+        disagree, so setting from either side is the same edit."""
+        state = FleetState()
+        _managed(state, NODE_A, NODE_B)
+        state.set_group("prod", [NODE_A])
+        state.set_node_groups(NODE_B, ["prod"])
+        assert sorted(state.group_nodes("prod")) == sorted([NODE_A, NODE_B])
+        state.set_node_groups(NODE_A, [])
+        assert state.group_nodes("prod") == [NODE_B]
+
+    def test_a_group_only_ever_names_nodes_we_still_manage(self):
+        """A membership pointing at a node whose grant is gone is a row that
+        looks like a machine and is not one."""
+        state = FleetState()
+        _managed(state, NODE_A, NODE_B)
+        state.set_group("prod", [NODE_A, NODE_B])
+        state.remove_managed(NODE_A)
+        assert state.group_nodes("prod") == [NODE_B]
+        assert state.groups()[0]["nodes"] == [NODE_B]
+
+    def test_a_name_that_is_not_a_name_is_refused(self):
+        state = FleetState()
+        assert state.set_group("", []) is None
+        assert state.set_group("\x00evil", []) is None
+        assert state.set_group("  spaced   out  ", [])["name"] == "spaced out"
+        assert clean_group("x" * 100) == "x" * 48
+        assert clean_group(None) == ""
+
+    def test_a_node_id_that_is_not_one_never_joins(self):
+        state = FleetState()
+        _managed(state, NODE_A)
+        entry = state.set_group("prod", [NODE_A, "nope", 7, None, NODE_A])
+        assert entry["nodes"] == [NODE_A]
+
+    def test_groups_are_bounded(self):
+        state = FleetState()
+        for index in range(MAX_GROUPS + 10):
+            state.set_group(f"group-{index}", [])
+        assert len(state.groups()) == MAX_GROUPS
+
+    def test_groups_survive_a_reopen(self):
+        store = MemoryStore()
+        state = FleetState(store)
+        _managed(state, NODE_A)
+        state.set_group("prod", [NODE_A])
+        assert FleetState(store).group_nodes("prod") == [NODE_A]
+
+    def test_a_tampered_blob_yields_no_groups_rather_than_forged_ones(self):
+        store = MemoryStore()
+        store.data["fleet-state"] = json.dumps(
+            {"groups": {"prod": {"nodes": ["not-a-node", NODE_A, 7]},
+                        "\x00bad": {"nodes": [NODE_B]}}}).encode()
+        state = FleetState(store)
+        names = [group["name"] for group in state.groups()]
+        assert names == ["prod"]
+        assert state.groups()[0]["nodes"] == [NODE_A]
+
+    def test_removing_a_group_leaves_the_nodes_alone(self):
+        state = FleetState()
+        _managed(state, NODE_A)
+        state.set_group("prod", [NODE_A])
+        assert state.remove_group("prod") is True
+        assert state.remove_group("prod") is False
+        assert state.managed_one(NODE_A) is not None
+
+
+class TestUpdateStacks:
+    def test_a_stack_name_is_charset_checked_and_bounded(self):
+        assert clean_stack_names(["ok", "al-so_1", "a.b"]) == ["ok", "al-so_1", "a.b"]
+        assert clean_stack_names(["; rm -rf /", "../x", "with space", "", None,
+                                  "x" * 90]) == []
+        assert clean_stack_names("not a list") == []
+        assert clean_stack_names(["dup", "dup"]) == ["dup"]
+
+    def test_the_choice_is_remembered_per_node(self):
+        state = FleetState()
+        _managed(state, NODE_A, NODE_B)
+        assert state.set_update_stacks(NODE_A, ["site", "bad name"]) == ["site"]
+        assert state.update_stacks(NODE_A) == ["site"]
+        assert state.update_stacks(NODE_B) == []
+
+    def test_re_enrolment_does_not_forget_it(self):
+        """Refreshing a grant should not also silently drop a choice an operator
+        made about that machine."""
+        state = FleetState()
+        _managed(state, NODE_A)
+        state.set_update_stacks(NODE_A, ["site"])
+        state.add_managed(NODE_A, caps=["update", "docker", "shell"], label="x")
+        assert state.update_stacks(NODE_A) == ["site"]
+
+    def test_an_unmanaged_node_has_no_choice_to_remember(self):
+        state = FleetState()
+        assert state.set_update_stacks(NODE_A, ["site"]) == []
+        assert state.update_stacks(NODE_A) == []
+
+
+class TestHeldCredentials:
+    """A credential this node holds for something else — a Portainer token. It
+    lives in the drawer, not in the ledger blob the console reads every poll."""
+
+    def test_a_secret_round_trips_through_the_drawer(self):
+        store = MemoryStore()
+        state = FleetState(store)
+        assert state.write_secret("portainer", {"url": "https://x:9443",
+                                                "token": "ptr_abc"}) is True
+        assert FleetState(store).read_secret("portainer")["token"] == "ptr_abc"
+
+    def test_it_is_not_in_the_blob_the_console_reads(self):
+        store = MemoryStore()
+        state = FleetState(store)
+        state.write_secret("portainer", {"token": "ptr_abc"})
+        assert "ptr_abc" not in store.data["fleet-state"].decode()
+
+    def test_forgetting_actually_forgets(self):
+        store = MemoryStore()
+        state = FleetState(store)
+        state.write_secret("portainer", {"token": "ptr_abc"})
+        assert state.write_secret("portainer", None) is True
+        assert state.read_secret("portainer") is None
+        assert FleetState(store).read_secret("portainer") is None
+
+    def test_an_oversized_or_unserialisable_secret_is_refused(self):
+        state = FleetState()
+        assert state.write_secret("x", {"a": "y" * 8192}) is False
+        assert state.write_secret("x", {"a": object()}) is False
+        assert state.read_secret("x") is None
