@@ -875,6 +875,10 @@ TermScreen.prototype.measure = function(){
   const height = Math.max(20, this.host.clientHeight - padY);
   this.cols = Math.max(20, Math.min(400, Math.floor(width / this.cw)));
   this.rows = Math.max(6, Math.min(200, Math.floor(height / this.lh)));
+  // Kept in CSS pixels as well: the context is scaled by the device ratio, so
+  // everything drawn through it is in those, and reaching for `canvas.width`
+  // (which is not) is how a fill ends up three times too wide.
+  this.width = width; this.height = height;
   this.canvas.width = Math.round(width * this.dpr);
   this.canvas.height = Math.round(height * this.dpr);
   this.canvas.style.width = width + "px";
@@ -962,7 +966,7 @@ TermScreen.prototype.drawRow = function(k, row, cursorX){
   const ctx = this.ctx, cw = this.cw, lh = this.lh;
   const top = k * lh;
   ctx.fillStyle = T_DEF_BG;
-  ctx.fillRect(0, top, this.canvas.width, lh);
+  ctx.fillRect(0, top, this.width, lh);
   if(!row) return;
   const width = Math.min(row.length, this.cols);
   // Backgrounds first, as runs: a panel is one rectangle, not two hundred.
@@ -981,50 +985,52 @@ TermScreen.prototype.drawRow = function(k, row, cursorX){
   const baseline = top + Math.round(lh * 0.78);
   let run = "", runAt = 0, runStyle = null;
   const flush = () => {
-    if(!run) return;
-    ctx.fillStyle = runStyle.front;
-    ctx.globalAlpha = runStyle.dim ? 0.62 : 1;
-    ctx.font = this.font(runStyle);
-    ctx.fillText(run, runAt * cw, baseline, run.length * cw);
-    ctx.globalAlpha = 1;
+    if(run.trim()){
+      ctx.fillStyle = runStyle.front;
+      ctx.globalAlpha = runStyle.dim ? 0.62 : 1;
+      ctx.font = this.font(runStyle);
+      // maxWidth: a glyph that came from a wider fallback font is condensed
+      // into the cells it belongs to rather than pushing its neighbours along.
+      ctx.fillText(run, runAt * cw, baseline, run.length * cw);
+      ctx.globalAlpha = 1;
+    }
     run = "";
   };
   for(let column = 0; column < width; column++){
     const cell = row[column];
     if(cell.w === 0) continue;
     const style = cell.s;
-    const glyph = cell.c || " ";
+    const glyph = style.hidden ? " " : (cell.c || " ");
     // A run is only ever plain ASCII of width one: those are the characters the
     // measured advance was taken from, so drawing them together lands each one
     // exactly where drawing them apart would. Everything else — a box, a
     // braille cell, a wide form — is placed on its own column, which is the
     // whole reason this is a canvas.
-    const simple = cell.w === 1 && glyph.length === 1 && glyph < "\x7f" &&
-                   glyph >= " " && style !== null;
+    const simple = cell.w === 1 && glyph.length === 1 &&
+                   glyph >= " " && glyph < "\x7f";
     if(simple && style === runStyle && runAt + run.length === column){
       run += glyph;
       continue;
     }
     flush();
-    if(style.hidden || glyph === " "){
-      if(style.under || style.strike){ this.decorate(ctx, column, top, cell.w, style); }
-      if(simple){ runStyle = style; runAt = column; run = ""; }
-      continue;
-    }
     if(simple){ runStyle = style; runAt = column; run = glyph; continue; }
+    runStyle = null;
+    if(glyph === " ") continue;
     ctx.fillStyle = style.front;
     ctx.globalAlpha = style.dim ? 0.62 : 1;
     ctx.font = this.font(style);
     ctx.fillText(glyph, column * cw, baseline, cw * Math.max(1, cell.w));
     ctx.globalAlpha = 1;
-    if(style.under || style.strike) this.decorate(ctx, column, top, cell.w, style);
   }
   flush();
-  // The underline and strike of a run, drawn once the text is down.
+  // Underlines and strikes once the text is down, so a decoration is never
+  // painted over by the glyph beside it. A blank cell carries them too — an
+  // underlined space is underlined.
   for(let column = 0; column < width; column++){
     const cell = row[column];
-    if(cell.w !== 0 && (cell.s.under || cell.s.strike) && cell.c !== " ")
+    if(cell.w !== 0 && (cell.s.under || cell.s.strike)){
       this.decorate(ctx, column, top, cell.w, cell.s);
+    }
   }
   if(cursorX >= 0 && cursorX < this.cols) this.drawCursor(cursorX, top, row[cursorX]);
 };
@@ -1132,7 +1138,7 @@ ShellSession.prototype.say = function(text){
   this.screen.mirror.textContent = text;
   const ctx = this.screen.ctx;
   ctx.fillStyle = T_DEF_BG;
-  ctx.fillRect(0, 0, this.screen.canvas.width, this.screen.canvas.height);
+  ctx.fillRect(0, 0, this.screen.width, this.screen.height);
   ctx.fillStyle = T_DEF_FG;
   ctx.font = this.screen.font(null);
   ctx.fillText(text, 0, this.screen.lh);
@@ -1246,10 +1252,11 @@ ShellSession.prototype.draw = function(){
 };
 ShellSession.prototype.say_closed = function(){
   const screen = this.screen, ctx = screen.ctx;
+  ctx.fillStyle = T_DEF_BG;
+  ctx.fillRect(0, screen.height - screen.lh, screen.width, screen.lh);
   ctx.fillStyle = T_DEF_FG;
   ctx.font = screen.font(null);
-  ctx.fillText("[session closed]", 0,
-               Math.min(screen.rows, screen.term ? screen.term.y + 2 : 1) * screen.lh);
+  ctx.fillText("[session closed]", 0, screen.height - Math.round(screen.lh * 0.25));
 };
 // Keystrokes are queued, never fired in parallel. One request per key looks
 // fine and is not: two POSTs in flight reach a threaded server in whichever
@@ -1337,7 +1344,9 @@ ShellSession.prototype.mouse = function(event, kind){
 ShellSession.prototype.bind = function(){
   const box = this.box;
   box.addEventListener("mousedown", (event) => {
-    if(this.mouse(event, "down")){ event.preventDefault(); return; }
+    // Shift bypasses mouse reporting, the way every terminal does it: without
+    // it there is no way to select text out of a program that took the pointer.
+    if(!event.shiftKey && this.mouse(event, "down")){ event.preventDefault(); return; }
     if(event.button !== 0) return;
     this.dragging = true;
     this.screen.beginSelect(event);
@@ -1357,7 +1366,7 @@ ShellSession.prototype.bind = function(){
     this.mouse(event, "up");
   });
   box.addEventListener("wheel", (event) => {
-    if(this.mouse(event, "wheel")){ event.preventDefault(); return; }
+    if(!event.shiftKey && this.mouse(event, "wheel")){ event.preventDefault(); return; }
     if(!this.term) return;
     const lines = event.deltaMode === 1 ? event.deltaY : event.deltaY / this.screen.lh;
     if(this.screen.scrollBy(Math.round(lines) || (event.deltaY > 0 ? 1 : -1))){
