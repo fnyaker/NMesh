@@ -957,8 +957,11 @@ function paintKeys(){
   $("key-del").disabled = !(KEYS.length && chosen && chosen.indexOf("file:") !== 0);
 }
 async function loadKeys(){
-  try{ KEYS = (await apiJson("/api/fleet/keys")).data.keys || []; }
-  catch(_){ KEYS = []; }
+  // A read that failed must not empty this: the rest of the page then offers
+  // password-only deployment as though the node held no key at all, which is
+  // a false statement about a machine's credentials.
+  const data = await FEED.read("/api/fleet/keys").catch(() => null);
+  if(data && Array.isArray(data.keys)) KEYS = data.keys;
   paintKeys();
 }
 async function uploadKey(file){
