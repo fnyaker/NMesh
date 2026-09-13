@@ -787,6 +787,24 @@ def test_a_page_never_replaces_what_it_holds_with_an_error():
     poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
     assert 'FEED.read("/api/fleet/state"' in poll
     assert "if(!data){" in poll and "return;" in poll
+    # And chat's, which held the same shape of world: a conversation list that
+    # was right until a 502 was assigned over it.
+    chat = webassets.CHAT_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert 'FEED.read("/api/chat/messages"' in chat
+    assert "if(!j) return;" in chat
+
+
+def test_the_lists_a_page_offers_are_not_emptied_by_a_read_that_failed():
+    """The same bug in a smaller hat. Three reads fill a selector each — the
+    keys a deploy may use, the networks we may invite into, and the machines the
+    top bar switches between — and each took its list out of the body of
+    whatever came back. One timed-out read then removed the way to every other
+    machine, which is not a thing the page had any grounds to claim."""
+    for source, path in ((webassets.FLEET_JS, "/api/fleet/keys"),
+                         (webassets.APP_JS, "/api/invite/issuers"),
+                         (webassets.APP_JS, "/api/remote/targets")):
+        assert 'FEED.read("' + path + '")' in source
+        assert '(await apiJson("' + path + '")).data' not in source
 
 
 def test_a_page_notices_when_the_node_under_it_was_updated():

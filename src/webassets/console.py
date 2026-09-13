@@ -3695,8 +3695,11 @@ $("config-reload").addEventListener("click", loadConfig);
 // because the node that will honour a code is the node that mints it, so a mesh
 // reached through another machine is invited into by asking that machine.
 async function loadIssuers(){
-  let data;
-  try{ data = (await apiJson("/api/invite/issuers")).data; }catch(_){ return; }
+  // Through `FEED`, so a read that failed leaves the list of networks we can
+  // invite into as it was. An error body has no issuers in it either, and
+  // assigning it here would quietly take away every choice but this node.
+  const data = await FEED.read("/api/invite/issuers").catch(() => null);
+  if(!data || !Array.isArray(data.issuers)) return;
   const select = $("inv-from");
   const keep = select.value;
   const rows = [["", "This node"]].concat((data.issuers || []).map((entry) =>
@@ -4090,9 +4093,12 @@ $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async
 let TARGETS = [];
 
 async function loadTargets(){
-  let data;
-  try{ data = (await apiJson("/api/remote/targets")).data; }catch(_){ return; }
-  TARGETS = data.targets || [];
+  // Same reason, and the visible cost is larger: this list is the context
+  // selector in the top bar, so a failed read used to remove the way back to
+  // every other machine until something else happened to call this again.
+  const data = await FEED.read("/api/remote/targets").catch(() => null);
+  if(!data || !Array.isArray(data.targets)) return;
+  TARGETS = data.targets;
   const pick = $("ctx-pick");
   pick.hidden = !(data.available && TARGETS.length);
   const select = $("ctx-node");
