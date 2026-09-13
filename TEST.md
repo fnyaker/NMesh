@@ -206,7 +206,11 @@ tests/
 │     closed, and the `manage` console relay: refused paths (fleet, remote, chat,
 │     outside the API), splitting and reassembling a reply, an over-large reply
 │     explained rather than truncated, a reply forged by a third party ignored,
-│     bounded calls
+│     bounded calls. Plus the terminal path: output leaves the pty in the order
+│     it was produced (one drain, never a task per chunk) and its buffer keeps
+│     the tail when a program outruns the link, and a held read answers on the
+│     byte, returns at once when there is backlog, gives up rather than parking
+│     for ever, and does not wait at all for a session nobody opened
 ├── test_fleet_deploy.py                               — remote deployment and the
 │     right to update: the authorised script is not inside the node's prefix, the
 │     rule names one path with no wildcard, the wrapper refuses every argument,
@@ -255,7 +259,13 @@ tests/
 │     test), no `$("id")` points at a missing element, no external resource, no
 │     `style=` attribute (the CSP ignores it silently), and the terminal emulator
 │     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node). Also the shared node view: one implementation mounted in four places
+│     node) — including what a *full-screen* program does: the alternate screen,
+│     a scroll region, insert/delete of lines and characters, 256-colour and
+│     24-bit, erase painting the background, a resize that keeps its content,
+│     the reports a program waits on, mouse encoding, and the two forms of the
+│     cursor keys. Plus the contracts around it: the read is held rather than
+│     polled, the pty is told the size the pane actually has, and the mouse is
+│     reported only while a program asked for it. Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
 │     came from, and the addresses start folded away. And the wiring a switch of

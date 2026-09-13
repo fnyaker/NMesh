@@ -343,11 +343,56 @@ who knows the password types it**. There is no permanent credential-free root
 access, and nothing to grant in advance.
 
 In the browser, the panel is a real terminal: keystrokes go out **raw** (Ctrl-C,
-Tab, arrows, Ctrl-D), nothing is echoed locally, and a small emulator written
-for the occasion interprets the escape sequences. That is what makes a password
-prompt correct: the remote pty turns echo off, and there is nothing on this side
-to display it — where a line-by-line text field would have shown it in the
-clear.
+Tab, arrows, Ctrl-D), nothing is echoed locally, and an emulator written for the
+occasion interprets the escape sequences. That is what makes a password prompt
+correct: the remote pty turns echo off, and there is nothing on this side to
+display it — where a line-by-line text field would have shown it in the clear.
+
+### What a full-screen program needs, and gets
+
+A log pane shows what a shell *printed*. A terminal shows what a program
+*drew*, and the two only coincide for programs that draw nothing. `btop`,
+`htop`, `vim` and `less` all do the same handful of things, and any one of them
+missing is a screen of garbage rather than a missing feature:
+
+| What the program does | What it needs from the terminal |
+|---|---|
+| takes the screen without eating the scrollback | the **alternate screen** (`?1049`), a grid of its own, given back untouched |
+| animates a list instead of repainting it | a **scroll region** (`DECSTBM`), and insert/delete of lines and characters inside it |
+| paints panels and gauges | **backgrounds**, from the eight colours through the 256-colour cube to 24-bit — and *erase* painting the current background, or every panel comes back the colour of the page |
+| lays its whole screen out once | the **size**, pushed to the pty, so the boxes are drawn to the width that exists |
+| responds to a click or a wheel | **mouse reporting** (`?1000`/`?1002`/`?1003`, SGR encoding), and only while it asked for it |
+| asks the terminal a question | an **answer** — a cursor-position report it never gets is a hang, not a missing feature |
+| draws with the old line-drawing set | `ESC ( 0`, mapped to the Unicode box characters |
+
+Two of those are why a pane that resizes has to say so. A pty carries
+`TIOCSWINSZ`; the kernel raises `SIGWINCH` on the program when it changes. So
+the pane is measured, the size goes to the pty, the emulator's own grid is
+resized **keeping what is on it** — a shell at a prompt is never told anything
+and never repaints — and the program redraws itself. The pane is watched with a
+`ResizeObserver` rather than the window: a tab switching, a key row appearing or
+a font loading all change the pane while the window stands still.
+
+Colour past the sixteen palette entries is a class **minted at runtime** and
+inserted through the CSSOM. The console's policy has no `unsafe-inline`, so a
+`style=` attribute would be dropped by the browser without an error — the one
+failure mode worse than a missing feature. The set of minted classes is
+bounded, like everything else a remote peer can grow.
+
+> **Output is read, not polled.** A timer is a floor on latency — half the
+> interval on average — and it is paid on every keystroke, because what a person
+> sees after typing is the echo coming back. `GET /api/fleet/shell?…&wait=1` is
+> **held** until the pty produces bytes, and the page asks again as soon as it is
+> answered. An idle shell costs one parked request; a keystroke costs one round
+> trip. The hold is bounded in time and in how many can be parked at once, since
+> each one is a thread of the console's server.
+
+> **And it is sent in order.** The agent used to spawn a task per 4 kB read from
+> the pty; two sends in flight arrive in whichever order they finish, and a
+> terminal stream out of order is not slow output, it is garbage. One task per
+> shell drains the buffer instead — which also coalesces the burst a redraw
+> arrives in into one frame. The buffer is bounded; when a program outruns the
+> link the **oldest** bytes go, because the tail is what a screen shows.
 
 ### The terminal, full screen and on a phone
 
@@ -375,9 +420,12 @@ deliberate answer to that:
 | two keys at once is not something a touch screen does | **Ctrl and Alt are sticky**: armed, they apply to the next key and release |
 | the soft keyboard shrinks the *visual* viewport rather than scrolling | the layout follows `visualViewport`, so the key row stays above the keyboard |
 | a button press steals focus and folds the keyboard away | the key row cancels the default on `pointerdown`, so focus never leaves |
+| the pane changes size when the keyboard opens | the element is watched, the pty is told, and the grid is resized keeping its content |
 
 **Copy and paste both work.** *Copy* takes the selection, or the whole screen
-when there is none. *Paste* asks the browser for the clipboard and sends it; when
+as characters when there is none. *Paste* is announced as a paste when the
+program asked to be told (`?2004`), which is what stops an editor
+auto-indenting every line of it. *Paste* asks the browser for the clipboard and sends it; when
 the browser refuses to hand it over silently — Firefox, and most of Android — a
 field to paste into is offered instead, which is the one path that always works.
 A `paste` event on the terminal or the hidden field goes straight through, and
@@ -894,7 +942,7 @@ All behind the console session (Bearer or cookie). Details:
 | Method | Route | Role |
 |---|---|---|
 | GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, facts, **jobs**, scans) |
-| GET | `/api/fleet/shell?sid=&offset=` | terminal bytes (base64) |
+| GET | `/api/fleet/shell?sid=&offset=[&wait=1]` | terminal bytes (base64); `wait=1` holds the answer until there are some |
 | GET | `/api/fleet/keys` | local SSH keys — **metadata only** |
 | POST | `/api/fleet/enrol` / `approve` / `deny` / `revoke` | enrolment |
 | POST | `/api/fleet/caps-set` | an operator's rights **on this node** (a local human) |

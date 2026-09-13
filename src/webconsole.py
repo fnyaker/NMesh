@@ -249,6 +249,12 @@ _STREAM_PING = 10.0
 # room for the pages of a couple of browsers plus whatever a reload left
 # behind for a ping or two.
 _MAX_STREAMS = 16
+# A terminal read that is *held* until the pty has something to say. Bounded
+# for the same reason a stream is — it parks a server thread — and shorter than
+# the ceiling on a proxied console call, so a terminal driven through another
+# node's console answers before that call gives up on it.
+_SHELL_HOLD = 15.0
+_MAX_SHELL_HOLDS = 8
 
 
 class WebConsole:
@@ -280,6 +286,7 @@ class WebConsole:
         self._changes = _Changes()
         self._streams = 0
         self._streams_lock = threading.Lock()
+        self._shell_holds = 0
 
         # The management plane, and the context the modules on it act through.
         # Built here rather than at the first request: what this node can be
@@ -1853,18 +1860,7 @@ def _make_handler(console: WebConsole):
                 self._json(200, console._fleet.snapshot(since))
                 return
             if path == "/api/fleet/shell":
-                sid = (query.get("sid") or [""])[0]
-                node = (query.get("node") or [""])[0]
-                # A page that has just asked for a shell knows the node, not the
-                # session: the open answers asynchronously. Naming the node is
-                # how a terminal draws itself without polling the whole ledger.
-                if not sid and node:
-                    sid = console._fleet.newest_shell(node)
-                    if not sid:
-                        self._json(404, {"error": "no session"})
-                        return
-                data = console._fleet.shell_data(sid, _int_param(query, "offset", 0))
-                self._json(200 if data else 404, data or {"error": "no session"})
+                self._handle_shell_read(query)
                 return
             if path in ("/api/fleet/files", "/api/fleet/file"):
                 self._handle_files_get(path, query)
@@ -1874,6 +1870,41 @@ def _make_handler(console: WebConsole):
                 self._json(200, {"keys": console._fleet.local_keys()})
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_shell_read(self, query: dict) -> None:
+            """Terminal bytes, optionally *held* until there are some.
+
+            `wait=1` parks the request instead of answering "nothing yet", so a
+            keystroke costs one round trip rather than one round trip plus half
+            a polling interval. The hold is bounded twice: in time, and in how
+            many can be parked at once — each one is a thread of this server."""
+            sid = (query.get("sid") or [""])[0]
+            node = (query.get("node") or [""])[0]
+            offset = _int_param(query, "offset", 0)
+            hold = (query.get("wait") or [""])[0] in ("1", "true", "yes")
+            if hold:
+                with console._streams_lock:
+                    if console._shell_holds >= _MAX_SHELL_HOLDS:
+                        hold = False
+                    else:
+                        console._shell_holds += 1
+            try:
+                # A page that has just asked for a shell knows the node, not the
+                # session: the open answers asynchronously. Naming the node is
+                # how a terminal draws itself without reading the whole ledger.
+                if not sid and node:
+                    sid = (console._fleet.wait_shell_open(node, _SHELL_HOLD) if hold
+                           else console._fleet.newest_shell(node))
+                    if not sid:
+                        self._json(404, {"error": "no session"})
+                        return
+                data = (console._fleet.wait_shell(sid, offset, _SHELL_HOLD) if hold
+                        else console._fleet.shell_data(sid, offset))
+            finally:
+                if hold:
+                    with console._streams_lock:
+                        console._shell_holds -= 1
+            self._json(200 if data else 404, data or {"error": "no session"})
 
         def _handle_files_get(self, path: str, query: dict) -> None:
             """Browsing and downloading, under the ``shell`` right.

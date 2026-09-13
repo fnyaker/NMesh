@@ -17,6 +17,8 @@ import base64
 import json
 import os
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -45,6 +47,24 @@ class StubClient:
         await asyncio.Event().wait()
 
     async def close(self):
+        pass
+
+
+class _StubApp:
+    """Just enough of the app for the bridge's own bookkeeping.
+
+    The shell buffer and the wait on it touch nothing else: a whole node and a
+    console to prove a condition variable would be a slower test proving less.
+    """
+
+    def __init__(self):
+        self.state = FleetState()
+        self.node_id = NodeID(b"\x11" * 20)
+
+    def add_listener(self, _listener):
+        pass
+
+    def remove_listener(self, _listener):
         pass
 
 
@@ -519,6 +539,82 @@ class TestFleetRoutes:
                     console, "/api/fleet/input", token,
                     {"node": "aa" * 20, "sid": "cc" * 16, "data": data})
                 assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_held_read_answers_the_moment_the_pty_speaks(self):
+        """The latency a terminal has is whatever it waits before asking again.
+        A held read has none: it answers on the byte, not on the next tick."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+
+        def speak():
+            time.sleep(0.05)
+            bridge._append_shell("ab" * 16, b"hello")
+
+        threading.Thread(target=speak, daemon=True).start()
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 5.0)
+        assert time.monotonic() - started < 2.0
+        assert base64.b64decode(answer["data"]) == b"hello"
+
+    async def test_a_held_read_returns_at_once_when_there_is_backlog(self):
+        """Holding a read that already has an answer would add exactly the
+        latency the hold exists to remove."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+        bridge._append_shell("ab" * 16, b"already here")
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 5.0)
+        assert time.monotonic() - started < 1.0
+        assert base64.b64decode(answer["data"]) == b"already here"
+
+    async def test_a_held_read_gives_up_rather_than_parking_for_ever(self):
+        """Every hold is a thread of the console's server. Bounded in time, like
+        every other thing here that waits."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 0.2)
+        assert 0.15 < time.monotonic() - started < 3.0
+        assert answer["data"] == ""
+
+    async def test_a_held_read_of_an_unknown_session_does_not_wait(self):
+        """There is nothing to wait for: no session ever produces bytes under a
+        sid nobody opened."""
+        bridge = FleetBridge(_StubApp())
+        started = time.monotonic()
+        assert bridge.wait_shell("ff" * 16, 0, 5.0) is None
+        assert time.monotonic() - started < 1.0
+
+    async def test_waiting_for_a_shell_to_open_answers_when_it_does(self):
+        """Opening answers asynchronously over the mesh; the page would
+        otherwise spend several requests discovering that."""
+        bridge = FleetBridge(_StubApp())
+
+        def opened():
+            time.sleep(0.05)
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+
+        threading.Thread(target=opened, daemon=True).start()
+        assert bridge.wait_shell_open("ee" * 20, 5.0) == "ab" * 16
+        assert bridge.wait_shell_open("11" * 20, 0.2) == ""
+
+    async def test_the_route_holds_only_when_it_is_asked_to(self):
+        """`wait=1` is the page saying it will park. Without it the answer is
+        immediate, because something else is driving the cadence."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+            started = time.monotonic()
+            status, _, _, data = await _get(
+                console, "/api/fleet/shell?sid=" + "ab" * 16, token)
+            assert status == 200 and data["data"] == ""
+            assert time.monotonic() - started < 2.0
         finally:
             console.stop()
             await host.stop_all()

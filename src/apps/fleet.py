@@ -137,6 +137,10 @@ MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
 SHELL_CHUNK = 8192
 SHELL_INPUT_MAX = 8192
+# What a pty may have produced and not yet been sent. A full-screen program
+# redraws faster than a slow path drains, so this is the one buffer on the
+# terminal path that can grow — and therefore the one that needs a ceiling.
+SHELL_OUT_MAX = 512 * 1024
 MAX_INFLIGHT = 64                 # requests we track as an operator
 UPDATE_TIMEOUT = 1800.0
 UPDATE_CHUNK = 4096
@@ -323,7 +327,8 @@ def _make_controlling_tty(slave_fd: int):
 class _Shell:
     """One interactive shell bound to one operator, on a pty."""
 
-    __slots__ = ("sid", "owner", "proc", "master_fd", "stop_reader", "last_active")
+    __slots__ = ("sid", "owner", "proc", "master_fd", "stop_reader", "last_active",
+                 "out", "sender")
 
     def __init__(self, sid: bytes, owner: NodeID, proc, master_fd: int) -> None:
         self.sid = sid
@@ -332,8 +337,28 @@ class _Shell:
         self.master_fd = master_fd
         self.stop_reader = None
         self.last_active = time.monotonic()
+        # What the pty has produced and one task is draining, in order. A task
+        # per chunk would be two sends racing each other over the mesh, and a
+        # terminal stream delivered out of order is not slow output, it is
+        # garbage on the screen.
+        self.out = bytearray()
+        self.sender = None
+
+    def feed(self, chunk: bytes) -> None:
+        """Hold what the pty produced until the sender gets to it.
+
+        Bounded: a program that outruns the link would otherwise grow this
+        without end. The tail is what survives — a screen repaints, and the
+        oldest bytes are the ones already superseded on it."""
+        self.out += chunk
+        if len(self.out) > SHELL_OUT_MAX:
+            del self.out[:len(self.out) - SHELL_OUT_MAX]
 
     def close(self) -> None:
+        if self.sender is not None:
+            self.sender.cancel()
+            self.sender = None
+        self.out.clear()
         if self.stop_reader is not None:
             try:
                 self.stop_reader()
@@ -1467,17 +1492,36 @@ class FleetApp:
         """Stream the pty back to its operator until it closes.
 
         Reader-based, never a thread: a blocking read on a pty is joined at
-        asyncio shutdown and wedges it (``gotchas.md`` §2)."""
+        asyncio shutdown and wedges it (``gotchas.md`` §2). And drained by one
+        task rather than one per chunk, because order is the whole contract
+        here — two sends in flight arrive in whichever order they finish."""
         def on_chunk(chunk: bytes) -> None:
             shell.last_active = time.monotonic()
-            self._spawn(self._send(shell.owner,
-                                   bytes([SHELL_OUTPUT]) + shell.sid + chunk))
+            shell.feed(chunk)
+            self._wake_sender(shell)
 
         def on_eof() -> None:
             status = shell.proc.returncode
             self._close_shell(shell.sid, status=status if status is not None else 0)
 
         shell.stop_reader = fleet_ssh.watch_pty(shell.master_fd, on_chunk, on_eof)
+
+    def _wake_sender(self, shell: _Shell) -> None:
+        """One draining task per shell, started only when there is none."""
+        if shell.sender is None or shell.sender.done():
+            shell.sender = asyncio.create_task(self._drain_shell(shell))
+
+    async def _drain_shell(self, shell: _Shell) -> None:
+        """Send what the pty produced, in order, coalesced.
+
+        Coalesced because a redraw arrives as a burst of 4 kB reads and one
+        frame carries far more than that: the burst costs one packet rather
+        than a dozen, and the screen is repainted once."""
+        header = bytes([SHELL_OUTPUT]) + shell.sid
+        while shell.out and self._shells.get(shell.sid) is shell:
+            chunk = bytes(shell.out[:SHELL_CHUNK])
+            del shell.out[:len(chunk)]
+            await self._send(shell.owner, header + chunk)
 
     def _close_shell(self, sid: bytes, *, status: int = 0,
                      notify: bool = True) -> None:

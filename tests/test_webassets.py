@@ -735,9 +735,56 @@ def test_no_page_carries_a_refresh_control_with_nothing_behind_it():
 def test_a_terminal_keeps_its_own_cadence():
     """A shell is not a status page, and the interval in the top bar can be set
     to zero. Freezing somebody's terminal with it is not a preference."""
-    assert "SHELL_TICK" in webassets.FLEET_JS
+    assert "SHELL_RETRY" in webassets.FLEET_JS
     poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
     assert "pollShell" not in poll
+
+
+def test_the_terminal_holds_its_read_instead_of_asking_on_a_timer():
+    """A timer is a floor on latency, and it is paid on every keystroke: what a
+    person sees after typing is the echo coming back. The read is held open
+    instead, and the loop asks again the moment it is answered."""
+    source = webassets.FLEET_JS
+    assert "&wait=1" in source
+    read = source.split("ShellSession.prototype.read =")[1].split("\nShellSession")[0]
+    assert "setInterval" not in read
+    # And there is no interval anywhere in the driver: the only timer left is
+    # the retry after a failed read, and the frame that coalesces repaints.
+    driver = source.split("// ---- one shell session")[1].split("// ---- /term")[0]
+    assert "setInterval" not in driver
+
+
+def test_the_terminal_tells_the_pty_the_size_it_actually_has():
+    """A pty told the wrong size is the whole "full-screen programs look broken"
+    bug: the program lays its screen out once, on the answer it was given."""
+    source = webassets.FLEET_JS
+    fit = source.split("ShellSession.prototype.fit =")[1].split("\nShellSession")[0]
+    assert "termMetrics(" in fit
+    assert "this.term.resize(" in fit, "the emulator's own grid has to follow"
+    assert "/api/fleet/resize" in fit, "and so does the pty"
+    # The pane changes size without the window moving — a tab switch, a key row
+    # appearing — so the element is what is watched.
+    assert "ResizeObserver" in source
+
+
+def test_the_terminal_reports_the_mouse_only_when_asked():
+    """A click that does nothing in `btop` reads as a broken terminal. Inventing
+    one when no program asked would be worse: a drag would stop selecting."""
+    source = webassets.FLEET_JS
+    assert "mouseReport" in source
+    mouse = source.split("ShellSession.prototype.mouse =")[1].split("\nShellSession")[0]
+    assert "if(!term || !term.mouse" in mouse
+    assert 'addEventListener("mousedown"' in source
+    assert 'addEventListener("wheel"' in source
+
+
+def test_the_terminal_has_an_alternate_screen():
+    """Without it a full-screen program eats the scrollback it was drawn over,
+    and leaving it gives back a screen that never existed."""
+    source = _terminal_source()
+    assert "Term.prototype.useAlt" in source
+    assert "1049" in source
+    assert "Term.prototype.scrollUp" in source and "this.top" in source
 
 
 def test_every_view_that_shows_a_moving_number_is_on_the_cadence():

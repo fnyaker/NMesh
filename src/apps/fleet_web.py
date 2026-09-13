@@ -84,7 +84,10 @@ class FleetBridge:
     def __init__(self, fleet_app) -> None:
         self._app = fleet_app
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._lock = threading.Lock()
+        # A condition rather than a plain lock: every mutation already ends in
+        # `_bump`, so "something moved" is a signal that costs nothing to send
+        # and lets a reader park on it instead of asking again on a timer.
+        self._lock = threading.Condition()
         # (local session token, node hex) -> {token, at}. Memory only.
         self._remote: OrderedDict = OrderedDict()
         self._version = 0
@@ -125,6 +128,9 @@ class FleetBridge:
 
     def _bump(self) -> None:
         self._version += 1
+        # Held under `_lock` by every caller, which is what makes this legal —
+        # and what makes a waiter's check-then-wait free of a race.
+        self._lock.notify_all()
 
     def _say(self, level: str, text: str, node: str = "") -> None:
         with self._lock:
@@ -358,6 +364,45 @@ class FleetBridge:
                 if record["node"] == node_hex and record["open"]:
                     return record["sid"]
             return ""
+
+    def wait_shell(self, sid: str, offset: int, timeout: float) -> dict | None:
+        """``shell_data``, but held until there is something to say.
+
+        A terminal read on a timer is a floor on latency: half the interval on
+        average, and it is paid on every keystroke, because what a person sees
+        after typing is the echo coming back. Parking here instead costs one
+        idle request and answers the moment the pty produces a byte."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while True:
+                record = self._shells.get(sid)
+                if record is None:
+                    return None
+                if record["seq"] > offset or not record["open"]:
+                    break
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self._lock.wait(left)
+        return self.shell_data(sid, offset)
+
+    def wait_shell_open(self, node_hex: str, timeout: float) -> str:
+        """The sid of a live shell on that node, waiting for one to appear.
+
+        Opening answers asynchronously over the mesh, so a page that asked for a
+        shell and then asked for its bytes used to get a 404 and try again on a
+        timer. It is the same wait either way; doing it here spends one request
+        on it instead of several."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while True:
+                for record in reversed(list(self._shells.values())):
+                    if record["node"] == node_hex and record["open"]:
+                        return record["sid"]
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return ""
+                self._lock.wait(left)
 
     def shell_data(self, sid: str, offset: int = 0) -> dict | None:
         """Terminal bytes since ``offset``, base64-encoded (a terminal stream is
