@@ -572,6 +572,30 @@ containers": it is "be root here", the capability description says exactly that,
 and it is separate from `update` and from `shell` so that an operator has to tick
 it deliberately rather than receive it folded into something smaller.
 
+### The capability needs the machine to agree
+
+A capability is permission to ask; it is not access. The node's own account has
+to be able to reach `/var/run/docker.sock`, and on any sane machine it cannot:
+that socket belongs to the `docker` group. So the grant is made **at install
+time**, on the machine itself:
+
+```
+./install.sh --docker        # …and --no-docker takes it back
+```
+
+It is off unless asked for, and it is never inferred from docker happening to be
+installed. It is also not the same kind of thing as the update grant beside it:
+that one is a single fixed command the node cannot rewrite, while this is
+membership of a group whose socket starts containers — and a container can
+bind-mount `/`. The installer says so where it grants it, the systemd unit
+carries `SupplementaryGroups=docker` with the reason written next to it, and the
+summary at the end names it.
+
+A node whose account is *not* in that group does not report "no docker": it says
+docker is running and this account cannot reach its socket, and names the switch.
+The two are one group membership apart and only one of them is something an
+operator fixes in a minute.
+
 Three ways in, deliberately not interchangeable
 ([`src/apps/fleet_docker.py`](../../src/apps/fleet_docker.py),
 [`src/apps/fleet_portainer.py`](../../src/apps/fleet_portainer.py)):
@@ -763,6 +787,30 @@ per-host timeout left a busy LAN scan motionless for several minutes after the
 sweep finished — seen from a remote node, that reads as "the scan did nothing".
 Hosts not reached keep an empty key list, which the interface already shows as
 "no host key".
+
+### Install options, chosen where the machine is chosen
+
+A machine installed from this page is a machine nobody is going to log into
+afterwards to change its mind, so the install's own switches are part of the
+deploy form rather than something to fix later over SSH:
+
+| Option | What it is |
+|---|---|
+| **docker** | that machine's account joins the `docker` group — off by default, and the description says what it is: root on that machine |
+| **updates** | the one-fixed-command sudo grant (`--no-allow-update` turns it off) |
+| **fleet app** | so the new node can be managed, and can deploy further |
+| install dir / state dir / service name | where it lands, when the defaults are wrong |
+
+Every one of them is a switch `install.sh` already has. Nothing here is a second
+installer — the phase-two script assembles arguments and calls the delivered
+tree's `install.sh`, exactly as before.
+
+And every one of them ends on a command line on a **third** machine, so none of
+it is a string that travelled: a path is checked against a charset and a bound,
+a switch is a boolean, and the node flags come from a list written in the source
+(`fleet_provision.NODE_FLAGS`). What does not validate is dropped, never escaped
+— there is no escaping here to get wrong. It is cleaned on the operator's node
+when the request is built, and cleaned again on the node that will run the SSH.
 
 ### Phase 2 — choosing and deploying
 

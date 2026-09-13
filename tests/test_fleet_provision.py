@@ -768,3 +768,65 @@ class TestMaterialisedKey:
         creds = SshCredentials("root", key_data=self.KEY)
         assert "PRIVATE KEY" not in repr(creds)
         assert "<set>" in repr(creds)
+
+
+# ---------------------------------------------------------------------------
+# Install options
+# ---------------------------------------------------------------------------
+
+class TestInstallOptions:
+    """What a deploy may choose about the install. All of it ends on
+    `install.sh`'s command line on a third machine, so none of it is a string
+    somebody sent: a path is charset-checked, a switch is a switch, and the node
+    flags come from a list written here."""
+
+    def test_the_two_grants_default_the_way_they_do_for_a_reason(self):
+        chosen = fleet_provision.clean_install_options(None)
+        # A machine nobody will log into again has to be able to take a security
+        # update; an account that can reach the docker socket is root on that
+        # machine.
+        assert chosen["allow_update"] is True
+        assert chosen["docker"] is False
+
+    def test_a_path_that_is_not_one_is_dropped_rather_than_escaped(self):
+        chosen = fleet_provision.clean_install_options({
+            "install_dir": "/opt/nmesh", "data_dir": "; rm -rf /",
+            "service": "nmesh"})
+        assert chosen["install_dir"] == "/opt/nmesh"
+        assert chosen["data_dir"] == ""
+        for bad in ("relative/path", "/with space", "/quote'd", "/a$(id)",
+                    "/" + "x" * 300, "", None, 7):
+            assert fleet_provision.clean_install_options(
+                {"install_dir": bad})["install_dir"] == ""
+
+    def test_a_service_name_is_a_name(self):
+        assert fleet_provision.clean_install_options(
+            {"service": "nmesh-edge"})["service"] == "nmesh-edge"
+        for bad in ("with space", "-lead", "a;b", "x" * 40, ""):
+            assert fleet_provision.clean_install_options(
+                {"service": bad})["service"] == ""
+
+    def test_node_flags_come_from_a_list_not_from_the_wire(self):
+        chosen = fleet_provision.clean_install_options({
+            "node_flags": ["--fleet", "--fleet", "--rm-rf", "; id", "--chat"]})
+        assert chosen["node_flags"] == ["--fleet", "--chat"]
+
+    def test_they_reach_the_install_script_as_switches_it_already_has(self):
+        phase = fleet_provision.build_install_phase(
+            stage="s", options={"docker": True, "allow_update": False,
+                                "install_dir": "/srv/nmesh",
+                                "service": "edge",
+                                "node_flags": ["--fleet"]})
+        assert "WANT_DOCKER=1" in phase
+        assert "ALLOW_UPDATE=0" in phase
+        assert "NODE_FLAGS='--fleet'" in phase
+        assert "INSTALL_DIR='/srv/nmesh'" in phase
+        assert "SERVICE='edge'" in phase
+        # And nothing here is a second installer.
+        assert "./install.sh $ARGS" in phase
+
+    def test_nothing_chosen_leaves_the_defaults_alone(self):
+        phase = fleet_provision.build_install_phase(stage="s")
+        assert "WANT_DOCKER=0" in phase
+        assert "ALLOW_UPDATE=1" in phase
+        assert "NODE_FLAGS=''" in phase

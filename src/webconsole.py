@@ -2278,6 +2278,10 @@ def _make_handler(console: WebConsole):
                 # log into again is a machine that has to be able to update
                 # itself, and it can only be told whose code to take now.
                 auto_update=data.get("auto_update", True) is not False,
+                # What the install itself should be: docker access, the update
+                # grant, where it lands, which apps come up. Cleaned by the app
+                # — this console decides nothing about another machine.
+                options=data.get("options"),
                 join_uris=data.get("join_uris"),
                 join_code=data.get("join_code"),
             )

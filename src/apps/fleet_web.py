@@ -949,7 +949,7 @@ class FleetBridge:
                   key_passphrase: str | None = None,
                   can_sudo: bool = True, sudo_user: str | None = None,
                   sudo_password: str | None = None, mode: str = "system",
-                  caps=None, auto_update: bool = True,
+                  caps=None, auto_update: bool = True, options=None,
                   join_uris=None, join_code: str | None = None) -> str:
         """Kick off a provisioning run on a managed node.
 
@@ -968,6 +968,7 @@ class FleetBridge:
             sudo_user=sudo_user, sudo_password=sudo_password, mode=mode,
             caps=clean_caps(caps) if caps else None,
             publishers=self._app.local_publishers() if auto_update else [],
+            options=options,
             join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
     # -- local (this node's own LAN) --------------------------------------
@@ -995,7 +996,7 @@ class FleetBridge:
                         can_sudo: bool = True, sudo_user: str | None = None,
                         sudo_password: str | None = None,
                         mode: str = "system", caps=None,
-                        auto_update: bool = True,
+                        auto_update: bool = True, options=None,
                         join_uris=None, join_code: str | None = None) -> list:
         def on_progress(host: str, step: str) -> None:
             self._say("out", f"{host}: {step}", self.me)
@@ -1007,6 +1008,7 @@ class FleetBridge:
             can_sudo=can_sudo, sudo_user=sudo_user, sudo_password=sudo_password,
             mode=mode, caps=caps,
             publishers=self._app.local_publishers() if auto_update else [],
+            options=options,
             join_uris=join_uris, join_code=join_code,
             on_progress=on_progress), timeout=3600.0)
         ok = sum(1 for entry in results if entry.get("ok"))

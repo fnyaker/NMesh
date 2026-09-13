@@ -287,6 +287,37 @@ FLEET_HTML = """<!doctype html>
             here or nowhere: a headless box has nobody to paste a publisher key into a console,
             and would accept nothing from the mesh for ever.</p>
 
+          <details class="card"><summary>Install options</summary>
+            <div class="card-body stack">
+              <p class="muted small">Every one of these is a switch
+                <code class="inline">install.sh</code> already has. Chosen here because a machine
+                installed from this page is a machine nobody is going to log into afterwards to
+                change its mind.</p>
+              <label class="check"><input id="dep-docker" type="checkbox">
+                <span>Let the node manage that machine's <b>docker</b> — its account joins the
+                  <code class="inline">docker</code> group</span></label>
+              <p class="muted small">Off by default, and it is not a small tick: an account that
+                can reach the docker socket can start a privileged container bind-mounting
+                <code class="inline">/</code>. That is root on that machine. It is also what the
+                <code class="inline">docker</code> capability needs in order to work at all.</p>
+              <label class="check"><input id="dep-update" type="checkbox" checked>
+                <span>Let it run its own system updates (one fixed root command)</span></label>
+              <label class="check"><input id="dep-fleet" type="checkbox" checked>
+                <span>Start the fleet app on it, so it can be managed and can deploy further</span></label>
+              <div class="split">
+                <label class="field"><span>Install directory</span>
+                  <input id="dep-prefix" class="mono" placeholder="/opt/nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+                <label class="field"><span>State directory</span>
+                  <input id="dep-data" class="mono" placeholder="/var/lib/nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+                <label class="field"><span>Service name</span>
+                  <input id="dep-service" class="mono" placeholder="nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+              </div>
+            </div>
+          </details>
+
           <div class="btn-row">
             <button id="deploy-btn" class="primary">Deploy to <span id="deploy-count-2">0</span> machine(s)</button>
             <span id="deploy-state" class="msg"></span>
@@ -968,6 +999,16 @@ async function deploy(event){
     mode:(document.querySelector('input[name="dep-mode"]:checked') || {}).value || "system",
     caps:capsOf($("deploy-caps")),
     auto_update:$("deploy-auto").checked,
+    // What the install itself should be. Blank means "whatever install.sh
+    // would have chosen", which is the only sensible default for a path.
+    options:{
+      docker:$("dep-docker").checked,
+      allow_update:$("dep-update").checked,
+      install_dir:$("dep-prefix").value.trim(),
+      data_dir:$("dep-data").value.trim(),
+      service:$("dep-service").value.trim(),
+      node_flags:$("dep-fleet").checked ? ["--fleet"] : [],
+    },
   };
   if(!body.username){ setMessage("deploy-state", "An SSH user is required.", true); return; }
   if(!body.password && !body.key_id){

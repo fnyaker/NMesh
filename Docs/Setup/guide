@@ -17,6 +17,7 @@ itself after a distro upgrade or a broken venv. Docker is still possible
 ```bash
 ./install.sh                        # installs, enables at boot, runs
 ./install.sh --fleet                # …and enables the fleet app
+./install.sh --docker               # …and lets it manage this machine's docker
 ./install.sh --prefix /srv/nmesh    # choose where it lands
 ./install.sh --no-start             # installs and enables, without running
 ./install.sh --uninstall            # removes the service and the files
@@ -234,6 +235,30 @@ anything listens or dials; a refused value or an unknown scheme comes out as
 `Config warn` and stays at its default. In the console: **Network → Reachability**,
 one panel per transport, rendered from what the transport declares. See
 [`Docs/Architecture/transports.md`](../Architecture/transports.md).
+
+### Letting the node manage this machine's docker
+
+```bash
+./install.sh --docker                # the node's account joins the docker group
+./install.sh --no-docker             # takes it back
+```
+
+**Off unless asked for**, and never inferred from docker being installed. It is
+not the same kind of grant as the update one below: that is a single fixed
+command the node cannot rewrite, this is membership of a group whose socket
+starts containers — and a container can bind-mount `/`. An account in `docker`
+is root on the machine, and the installer, the systemd unit and the summary all
+say so where they say it.
+
+Without it the fleet `docker` capability is permission to ask for something the
+account cannot do. A node in that state reports exactly that — docker is
+running, this account cannot reach its socket, here is the switch — rather than
+"no docker here", because the two are one group membership apart and only one is
+something an operator fixes in a minute.
+
+The same choice is offered where a machine is **installed from another node**:
+*Fleet → Discover & deploy → Install options*. A machine installed from there is
+one nobody will log into afterwards.
 
 ### Letting the node run system updates
 
