@@ -1026,6 +1026,13 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `MAX_GROUPS` / `MAX_GROUP_NODES` | 32 groups / 512 nodes in one |
 | `MAX_RESPONSE` (docker) | 4 MB read from one Engine API answer |
 | `MAX_COMPOSE` | 40,000 B, so one reply frame still fits |
+| `_STACK_OUTPUT_LINES` | 200 lines of a stack's own output forwarded per update |
+
+A reply that will not fit one frame is **cut**, never sent whole and dropped:
+`_dump_json` drops whole entries from the named list keys, and cuts a named text
+key from the front — a log is read from its end, and no fixed ceiling on it
+would do, because under JSON escaping one `ESC` becomes six characters and a
+screen of colour codes is six times its own length on the wire.
 
 The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
 ledger (we forget who we believed, rather than trusting a forged list), and an

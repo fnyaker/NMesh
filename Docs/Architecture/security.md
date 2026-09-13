@@ -697,6 +697,11 @@ single-use code either way.
   local deployment has. What comes back says which, so a page can tell somebody
   "this only works on your own network" rather than let them find out after
   sharing it.
+- **One forward per rendezvous per gap.** Forty bytes in becomes five kilobytes
+  out — the key and signature the offer holds — so without a gap somebody
+  holding a ticket could vary the expiry, mint a fresh `msg_id` past dedup, and
+  spend the inviter's link at the seek rate limit's full width. A joiner
+  retrying is well inside it.
 - **The relay half is a rendezvous, not a copy of the invitation.** A relayed
   invitation needs the inviter's ML-DSA public key and a signature over the
   code — five kilobytes, far past what any QR code carries. So the inviter

@@ -834,6 +834,7 @@ _REACH_PENDING_MAX    = 64
 _SHORT_SEEK_LEN    = 40        # exp(8) | h_code(32) — nothing else fits in it
 _OFFER_MAX         = 256       # rendezvous offers one node holds for others
 _OFFER_RATE_MAX    = 8         # offers one peer may leave us per window
+_SHORT_SEEK_GAP    = 2.0       # seconds between two forwards of one rendezvous
 _RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
 _RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
 _RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
@@ -8147,6 +8148,15 @@ class MeshNode:
             return
         if packet.src_id == offer["inviter"]:
             return                      # a node seeking itself is not a joiner
+        # One forward per rendezvous per gap. Forty bytes in becomes five
+        # kilobytes out — the key and signature the offer holds — so without
+        # this, somebody holding a ticket could vary the expiry, mint a fresh
+        # msg_id past dedup, and spend the inviter's link at the seek rate
+        # limit's full width. A joiner retrying is well inside it.
+        now_mono = time.monotonic()
+        if now_mono - offer.get("last", 0.0) < _SHORT_SEEK_GAP:
+            return
+        offer["last"] = now_mono
         self._rdv_record(packet.src_id, peer)
         full = Packet.create(
             INVITE_SEEK, packet.src_id, offer["inviter"],
