@@ -116,6 +116,15 @@ beside it — **two versions at once**, which is the case a version number exist
 for. A claim that cannot be read is answered in full: always correct, only ever
 slower, which is the right way round for something a browser sends.
 
+Two pages read this way, and for the same reason. The fleet page holds the
+ledger — the machines, the jobs, the capabilities, the facts. The chat page
+holds the social half — the contacts, the groups, this node's own name — which
+is the same answer on nearly every read and used to be re-sent whole beside the
+one message that had arrived. What is *already* incremental stays outside the
+sections and always travels: the messages, asked for by sequence, and the fleet
+log, asked for by line. A checksum buys nothing on something that is only ever
+sent once.
+
 The rail says *Not answering* while reads are failing. That is a different and
 much smaller claim than an empty list, and it is the true one.
 
@@ -629,7 +638,7 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/store`       | the local view: `{catalog, installed}` — `store.overview`, annotated by the node so a page renders rather than re-derives |
 | POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name |
 | POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` — `store.*`, and these **do** travel: an app is not the node's own program, so managing a machine includes managing its apps |
-| GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing |
+| GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only the parts that moved (`src/console_feed.py`); the messages travel beside them either way |
 | GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
 | GET     | `/api/chat/avatar` | `?id=…` → an avatar's bytes (`self` or a node id) |
 | POST    | `/api/chat/send`   | `{conv, text, reply?}` (`conv` = node id or `g:`+group_id) |
