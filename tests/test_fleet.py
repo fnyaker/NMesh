@@ -1116,6 +1116,25 @@ class TestDockerPlane:
         agent.app._dispatch(operator.id, frame)
         assert agent.app._shells == {}
 
+    async def test_a_reply_answers_a_request_once(self, operator, agent):
+        """Which is why nothing streams progress on this plane: `_on_docker_reply`
+        claims the request id and forgets it, so a progress frame would consume
+        the very id the result has to come back under."""
+        rid = "cc" * 8
+        operator.app._inflight[rid] = (agent.id, "docker", 0.0)
+        operator.app._on_docker_reply(agent.id, {"rid": rid, "op": "stacks",
+                                                 "items": [1]})
+        operator.app._on_docker_reply(agent.id, {"rid": rid, "op": "stacks",
+                                                 "items": [2]})
+        reports = [e for e in operator.drain_events()
+                   if isinstance(e, fleet.DockerReport)]
+        assert len(reports) == 1 and reports[0].data["items"] == [1]
+
+    async def test_an_unsolicited_answer_is_dropped(self, operator, agent):
+        operator.app._on_docker_reply(agent.id, {"rid": "ff" * 8, "op": "stacks"})
+        assert not [e for e in operator.drain_events()
+                    if isinstance(e, fleet.DockerReport)]
+
     async def test_only_so_many_docker_operations_at_once(self, operator, agent):
         """A pull is minutes of somebody else's disk and network. "Several at
         once" is not something an operator ever wanted, and it is exactly what

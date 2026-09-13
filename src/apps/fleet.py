@@ -164,6 +164,10 @@ MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
 DOCKER_TIMEOUT = 60.0
 DOCKER_SLOW_TIMEOUT = 1800.0      # a pull, a `compose up`, a Portainer redeploy
 MAX_DOCKER_CALLS = 2              # docker operations we host at once, per peer
+# Lines of a stack's own output forwarded while an update runs. A `compose pull`
+# is a wall of progress bars; what an operator needs is that it is moving, and
+# every frame past that is a task queued against `MAX_INFLIGHT` for nothing.
+_STACK_OUTPUT_LINES = 200
 _PORTAINER_KEY = "portainer"      # drawer key holding this node's Portainer
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 FILE_TIMEOUT = 30.0               # one file operation, mesh round trip included
@@ -435,13 +439,18 @@ class FleetApp:
 
     def __init__(self, client, auth, *, state: FleetState | None = None,
                  repo_root: str | None = None, mesh_invite=None,
-                 release_publishers=None,
+                 release_publishers=None, state_dir: str | None = None,
                  auto_status: bool = True, local_console=None) -> None:
         self._client = client
         self._auth = auth              # src.app_auth.AppAuth, scoped to our app id
         self.node_id = auth.node_id
         self.state = state or FleetState()
         self._repo_root = repo_root
+        # Where a compose file this node deploys is written. The node's own data
+        # directory when it has one: a file that decides what runs on this
+        # machine belongs with its identity and its session store, backed up and
+        # wiped with them.
+        self._state_dir = state_dir or ""
         self._mesh_invite = mesh_invite
         self._release_publishers = release_publishers
         self._auto_status = auto_status
@@ -1674,7 +1683,7 @@ class FleetApp:
         if not name:
             raise fleet_docker.DockerError("that is not a stack name")
         return {"info": await fleet_docker.deploy_stack(
-            name[0], document.get("compose"))}
+            name[0], document.get("compose"), root=self._state_dir)}
 
     async def _docker_portainer_set(self, _src, rid, document) -> dict:
         """Record (or forget) where this machine's Portainer is.
@@ -1785,10 +1794,19 @@ class FleetApp:
                     done = await portainer.redeploy(entry)
                     done["through"] = "portainer"
                     return done
+        # Streamed only where there is a stream to carry it. On the docker
+        # plane a reply *is* the answer — `_on_docker_reply` claims the request
+        # id and forgets it — so a progress frame there would consume the very
+        # rid the result has to come back under.
+        sent = [0]
+
         def say(line: str) -> None:
-            self._reply(src, UPDATE_OUTPUT if kind == "update" else DOCKER_REPLY,
-                        {"rid": rid, "kind": kind, "op": "stack",
-                         "text": line[:UPDATE_CHUNK]})
+            if kind != "update" or sent[0] >= _STACK_OUTPUT_LINES:
+                return
+            sent[0] += 1
+            self._reply(src, UPDATE_OUTPUT,
+                        {"rid": rid, "kind": kind, "text": line[:UPDATE_CHUNK]})
+
         done = await fleet_docker.stack_up(
             name, fleet_docker.compose_files(found.get("files", "")),
             found.get("workdir", ""), on_output=say)

@@ -1890,13 +1890,14 @@ def _make_handler(console: WebConsole):
             sid = (query.get("sid") or [""])[0]
             node = (query.get("node") or [""])[0]
             offset = _int_param(query, "offset", 0)
-            hold = (query.get("wait") or [""])[0] in ("1", "true", "yes")
-            if hold:
+            wanted = (query.get("wait") or [""])[0] in ("1", "true", "yes")
+            parked = False
+            if wanted:
                 with console._streams_lock:
-                    if console._shell_holds >= _MAX_SHELL_HOLDS:
-                        hold = False
-                    else:
+                    if console._shell_holds < _MAX_SHELL_HOLDS:
                         console._shell_holds += 1
+                        parked = True
+            hold = parked
             try:
                 # A page that has just asked for a shell knows the node, not the
                 # session: the open answers asynchronously. Naming the node is
@@ -1907,10 +1908,15 @@ def _make_handler(console: WebConsole):
                     if not sid:
                         self._json(404, {"error": "no session"})
                         return
+                    # One hold per request. Waiting for the session *and* then
+                    # for its first byte would be twice the ceiling, and a
+                    # terminal driven through another node's console answers
+                    # under one that is shorter than that.
+                    hold = False
                 data = (console._fleet.wait_shell(sid, offset, _SHELL_HOLD) if hold
                         else console._fleet.shell_data(sid, offset))
             finally:
-                if hold:
+                if parked:
                     with console._streams_lock:
                         console._shell_holds -= 1
             self._json(200 if data else 404, data or {"error": "no session"})
