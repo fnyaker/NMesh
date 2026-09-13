@@ -26,9 +26,11 @@ cryptography; relays never see the content.
   central authority.
 - **Opt-in persistence** — sessions and peers survive a restart (encrypted at
   rest).
-- **Quick join** — a 34-character string (or a QR code you can scan with a
-  camera) carrying the address and a single-use code, issued by a publicly
-  reachable node.
+- **One invitation, both ways round** — a short string (or a QR code you can
+  scan with a camera) carrying a single-use code, the inviting node's own
+  address when it has one, *and* a relay to reach it through when it does not.
+  Whichever situation the two machines are in, it is the same artifact and there
+  is no second exchange.
 - **Multi-link operation** — a node reached over two media at once (a LAN
   address and a punched UDP path, IPv4 and IPv6) can carry one peer's traffic
   down *both*, in turn, instead of leaving one idle. Off by default and ticked
@@ -39,11 +41,14 @@ cryptography; relays never see the content.
 - **Application identity (SSO)** — an app uses the node's mesh identity to
   authenticate its peers: signed assertions, scoped, fresh, single-use.
 - **Fleet management & deployment** — the *Fleet* app: enrol nodes with
-  capabilities, read their status, update them, open a shell — full screen in a
-  tab, usable from a phone, with the machine's files behind the same right —
-  discover the LAN and install NMesh over SSH. A machine deployed this way comes up trusting the
-  operator who installed it, accepting their release publishers, and reachable
-  from their console without a password nobody ever typed on it.
+  capabilities, group them, read their status, update them (packages *and* the
+  docker stacks you chose for each), drive their docker and the Portainer in
+  front of it, open a shell — a real terminal, so `btop` and `vim` draw; full
+  screen in a tab, usable from a phone, with the machine's files behind the same
+  right — discover the LAN and install NMesh over SSH. A machine deployed this
+  way comes up trusting the operator who installed it, accepting their release
+  publishers, and reachable from their console without a password nobody ever
+  typed on it.
 - **Minimal dependencies** — Python stdlib + `liboqs-python` + `cryptography`.
 
 ## Quick start
