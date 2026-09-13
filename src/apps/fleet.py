@@ -143,7 +143,10 @@ MAX_REQUESTS = 64
 REQUEST_WINDOW = 10.0
 MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
-SHELL_CHUNK = 8192
+# Bytes of terminal output per frame. A full-screen redraw is tens of kilobytes
+# and used to arrive as eight frames; the packet payload holds 60 kB, so this is
+# one or two. Fewer frames is fewer wake-ups on both sides for one picture.
+SHELL_CHUNK = 32768
 SHELL_INPUT_MAX = 8192
 # What a pty may have produced and not yet been sent. A full-screen program
 # redraws faster than a slow path drains, so this is the one buffer on the
