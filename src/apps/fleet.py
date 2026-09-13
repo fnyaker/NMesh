@@ -2264,7 +2264,8 @@ class FleetApp:
                                 caps: list[str] | None = None,
                                 join_uris: list[str] | None = None,
                                 join_code: str | None = None,
-                                publishers: list[dict] | None = None) -> str:
+                                publishers: list[dict] | None = None,
+                                options: dict | None = None) -> str:
         """Operator side: have ``target`` install NMesh on machines it can reach.
 
         The SSH credential travels inside the end-to-end-encrypted DATA payload
@@ -2288,6 +2289,11 @@ class FleetApp:
             "join_code": str(join_code or "")[:64],
             "mode": "user" if str(mode) == "user" else "system",
             "can_sudo": bool(can_sudo),
+            # What the install itself should be: whether the new node may drive
+            # that machine's docker, whether it keeps the update grant, where it
+            # goes, and which apps come up. Cleaned here and cleaned again on the
+            # far side — it ends on a command line on a third machine.
+            "options": fleet_provision.clean_install_options(options),
         }
         if sudo_user:
             document["sudo_user"] = str(sudo_user)[:64]
@@ -2352,6 +2358,7 @@ class FleetApp:
             self._fail(src, rid, str(exc))
             return
 
+        options = fleet_provision.clean_install_options(document.get("options"))
         caps = clean_caps(document.get("caps")) or ["status", "update"]
         # The operator's list, re-cleaned here like anything else off the wire.
         # This node relays it; it never adds to it.
@@ -2365,7 +2372,7 @@ class FleetApp:
                 results.append(await self._provision_one(
                     src, rid, target, creds, payload, caps, join_uris,
                     str(document.get("join_code") or ""), mode,
-                    publishers=publishers))
+                    publishers=publishers, options=options))
         finally:
             creds.wipe()          # the secret does not outlive the run
         self._reply(src, PROVISION_RESULT, {"rid": rid, "results": results},
@@ -2375,7 +2382,8 @@ class FleetApp:
                              creds, payload: bytes, caps: list[str],
                              join_uris: list[str], join_code: str,
                              mode: str = "system",
-                             publishers: list[dict] | None = None) -> dict:
+                             publishers: list[dict] | None = None,
+                             options: dict | None = None) -> dict:
         """Provision one machine, reporting each step as it happens.
 
         The pre-authorisation is minted *here*, on the node doing the SSH, but
@@ -2406,7 +2414,7 @@ class FleetApp:
             host, creds, payload=payload, preauth=preauth,
             port=int(target.get("port") or 22),
             known_hosts_lines=target.get("known_hosts"),
-            mode=mode, on_progress=on_progress)
+            mode=mode, options=options, on_progress=on_progress)
         result["token_digest"] = fleet_provision.token_digest(token)
         result["label"] = target.get("label", host)
         # Installed but with nowhere to join is a half-success worth naming: the
@@ -2528,6 +2536,7 @@ class FleetApp:
                               join_uris: list[str] | None = None,
                               join_code: str | None = None,
                               publishers: list[dict] | None = None,
+                              options: dict | None = None,
                               on_progress=None) -> list[dict]:
         """Provision machines on *our* LAN, from this node, for ourselves.
 
@@ -2569,7 +2578,7 @@ class FleetApp:
                     target["ip"], creds, payload=payload, preauth=preauth,
                     port=int(target.get("port") or 22),
                     known_hosts_lines=target.get("known_hosts"),
-                    mode=mode, on_progress=on_progress)
+                    mode=mode, options=options, on_progress=on_progress)
                 result["token_digest"] = digest
                 result["joins"] = bool(uris and code)
                 results.append(result)

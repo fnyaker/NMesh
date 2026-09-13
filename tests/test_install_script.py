@@ -139,6 +139,26 @@ class TestServiceUnits:
         assert "Environment=OQS_INSTALL_PATH=/opt/nmesh/_oqs" in out
         assert "ProtectSystem=full" in out
 
+    def test_the_unit_says_nothing_about_docker_unless_asked(self, tmp_path):
+        """An account that can reach the docker socket can start a privileged
+        container bind-mounting `/`. That is root on the machine, so it is never
+        a default and never inferred from docker being installed."""
+        plain = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nm "" multi-user.target').stdout
+        assert "SupplementaryGroups" not in plain
+        asked = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh nm "" multi-user.target false true'
+        ).stdout
+        assert "SupplementaryGroups=docker" in asked
+        # And it is nothing to grant when the node is already root.
+        as_root = run_snippet(
+            tmp_path,
+            'systemd_unit /opt/nmesh /var/lib/nmesh "" "" multi-user.target false true'
+        ).stdout
+        assert "SupplementaryGroups" not in as_root
+
     def test_systemd_unit_omits_user_when_empty(self, tmp_path):
         out = run_snippet(
             tmp_path,
@@ -210,6 +230,34 @@ class TestServiceAccount:
             tmp_path, 'SUDO=; create_service_user nmesh /opt/nmesh || echo NO_ACCOUNT',
             fake_bins=[("id", "#!/bin/sh\nexit 1\n")], isolate=True)
         assert "NO_ACCOUNT" in result.stdout
+
+    def test_joining_a_group_tries_every_spelling(self, tmp_path):
+        """Every distro spells this differently and most reject the others'
+        flags — the same reason `create_service_user` works the way it does."""
+        result = run_snippet(
+            tmp_path, 'SUDO=; add_to_group nmesh docker && echo JOINED',
+            fake_bins=[("usermod", "#!/bin/sh\nexit 1\n"),
+                       ("gpasswd", "#!/bin/sh\nexit 0\n")],
+            isolate=True)
+        assert "JOINED" in result.stdout
+
+    def test_no_tool_to_join_a_group_is_reported_not_assumed(self, tmp_path):
+        result = run_snippet(
+            tmp_path, 'SUDO=; add_to_group nmesh docker || echo NOT_JOINED',
+            isolate=True)
+        assert "NOT_JOINED" in result.stdout
+
+    def test_a_group_that_is_not_there_is_not_there(self, tmp_path):
+        """`--docker` on a machine with no docker has to say so rather than
+        create the group and hand out membership of nothing."""
+        present = run_snippet(
+            tmp_path, 'group_exists docker && echo YES',
+            fake_bins=[("getent", "#!/bin/sh\nexit 0\n")], isolate=True)
+        assert "YES" in present.stdout
+        missing = run_snippet(
+            tmp_path, 'group_exists docker || echo NO',
+            fake_bins=[("getent", "#!/bin/sh\nexit 2\n")], isolate=True)
+        assert "NO" in missing.stdout
 
     def test_owner_spec_without_a_group_is_the_bare_name(self, tmp_path):
         """`chown nmesh:nmesh` fails outright when the distro put the account in

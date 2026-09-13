@@ -252,7 +252,10 @@ tests/
 │     install.sh travels in the payload and nothing reimplements it, no password
 │     written into a script, escalation stated rather than probed, prompt order
 │     (login then escalation, never replayed), refusing a system install with no
-│     route to root
+│     route to root; plus the **install options** a deploy may choose, every one
+│     of which ends on a command line on a third machine — a path that is not one
+│     is dropped rather than escaped, a service name is a name, and the node
+│     flags come from a list in the source rather than from the wire
 ├── test_join_ticket.py / test_qr.py                   — compact ticket and QR:
 │     round trip, case and spaces immaterial, a typo caught, random bytes that
 │     raise nothing but TicketError, a hostname refused; for the QR, structure and
