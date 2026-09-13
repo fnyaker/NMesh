@@ -77,7 +77,7 @@ receipt for routable types (see the gates).
 | OBSERVED_ADDR | 0x0F | "here is the IP I see you from" (public address discovery) |
 | PUNCH_REQUEST / _RELAY | 0x10 / 0x11 | coordinating a NAT hole punch through a relay |
 | PUNCH_PROBE / _ACK | 0x12 / 0x13 | **raw UDP datagrams** (not mesh Packets), ML-DSA signed |
-| INVITE_SEEK | 0x14 | relayed invitation, **routable BEFORE auth**, token-gated |
+| INVITE_SEEK | 0x14 | relayed invitation, **routable BEFORE auth**, token-gated. A 40-byte payload is the *short* form — an expiry and a code hash, honoured only where the inviter left a rendezvous (`INVITE_OFFER`) for that code |
 | RELAY_CARRY | 0x15 | carries a handshake packet between two nodes through a relay |
 | REACH_PROBE / _ACK | 0x16 / 0x17 | AutoNAT: "call me back to confirm I am reachable" |
 | CATALOG_ANNOUNCE | 0x18 | gossip of a **signed release** for the app store catalogue |
@@ -95,6 +95,7 @@ receipt for routable types (see the gates).
 | PKG_STORE / _FIND / _FOUND | 0x29 / 0x2A / 0x2B | package directory: store/seek/answer a **signed record** in which a node says "I hold this release and I serve it". Filed under the **node id**, under the **release** it names, and under the package name's prefixes — so "what does this machine offer?", "who can serve this release?" and "who offers something called this?" are one lookup with three keys. A record may carry a second signature by the key that signed the release, proving the node published it (see [`../Updates/guide`](../Updates/guide)) |
 | PKG_ANNOUNCE | 0x2C | gossip of the same record — the epidemic half of the plane, terminating on "only re-gossip when our view changed" like the others |
 | KEY_OFFER / KEY_ACCEPT / KEY_GRANT | 0x2D / 0x2E / 0x2F | handing a **publisher secret key** to another node, in three steps: the offer is signed *by the publisher key* (proof of possession, both node ids inside the signature), the acceptance is signed by the recipient's identity over a **fresh ML-KEM public key** (there is no long-term encryption key to seal to, so consent is what produces one), and the grant is that secret sealed to it — unsigned, because the recipient checks the delivered secret against the public half from the offer (see [`../Updates/guide`](../Updates/guide)) |
+| INVITE_OFFER | 0x30 | a **rendezvous** an inviter leaves with a relay: "expect a seek for this code, and here is the proof I authorised it". Authenticated link only, and only ever about its own sender. It is what lets an invitation reach a node with no address of its own out of a string short enough for a QR code — the ML-DSA key and signature a relayed invitation needs stay with the relay, and the joiner sends 40 bytes |
 
 Groupings (constants):
 - `_DIRECT_TYPES`: a single authenticated hop → **they require an authenticated
@@ -118,6 +119,11 @@ Groupings (constants):
   towards a direct peer.
 - `INVITE_SEEK` and `RELAY_CARRY` are handled **before** the gates (pre-auth,
   strictly bounded/token-gated).
+- `INVITE_OFFER` (0x30) is the opposite: it is only ever accepted from an
+  **authenticated** peer, and only about that peer itself — the key in it has to
+  hash to the sender's own id and to have signed the token, which is the same
+  pair of checks a full seek goes through. Holding one is holding a statement
+  the sender could have made to anybody, never an authority over a third node.
 
 ### Application sections (inside the DATA payload)
 

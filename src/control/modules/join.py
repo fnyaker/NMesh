@@ -1,13 +1,17 @@
 """
 The ``join`` module: the ways in, and the ways this node offers one.
 
-Four of them, and they differ in what has to travel and who carries it: a code
-typed from one screen to another, a compact **ticket** that carries the address
-with it, a **block** for a node that cannot reach this one directly, and the
-manual exchange when neither end can dial the other. Only the first two and the
-small block are here — the relay and connect blocks are 32 kB by their own
-ceiling (`node._RELAY_BLOCK_MAX_LEN`), which is larger than a frame carries,
-and they are pasted into the console of the machine you are sitting at anyway.
+The one that matters is the **ticket**: one short string carrying the inviter's
+own address *and* a relay to reach it through, with a single-use code. Whichever
+way round the two machines are, it is the same artifact and there is no second
+exchange — the node decides which route to try, in that order, so a ticket is
+handed to it whole rather than taken apart here.
+
+Beside it: a bare code typed from one screen to another, a small invitation
+**block** listing every address this node advertises, and the manual exchange
+for when neither end can dial the other. The relay and connect blocks are not
+here — 32 kB by their own ceiling (`node._RELAY_BLOCK_MAX_LEN`), larger than a
+frame carries, and they are pasted into the console you are sitting at anyway.
 
 **Minting is local.** A code this node issues lets somebody into *its* network,
 which is a credential rather than a setting — and the fleet already has a
@@ -38,6 +42,10 @@ _JOIN = 15.0
 # node advertises — small, unlike the relay block, which is why this one is
 # here (`node._JOIN_BLOCK_MAX_LEN`).
 _BLOCK = 8192
+# Minting leaves a rendezvous with a relay before it hands the string over — a
+# joiner that scans it the same second has to find it already there — so it is a
+# round trip over the mesh rather than a local read.
+_TICKET = 12.0
 
 
 class JoinModule:
@@ -59,7 +67,7 @@ class JoinModule:
                   # have, because the ticket format owns that number.
                   [param("ttl", "count", required=False, default=0,
                          limit=int(join_ticket.MAX_TTL))],
-                  changes=True, timeout=_READ),
+                  changes=True, timeout=_TICKET),
         operation("block", "A shareable invitation block for one node",
                   changes=True, timeout=_READ),
         operation("use_block", "Join from an invitation block",
@@ -87,18 +95,25 @@ class JoinModule:
     # -- getting in --------------------------------------------------------
 
     def op_network(self, uri: str, code: str, ticket: str) -> dict:
-        """A ticket is the same join, with the address and the code travelling
-        together instead of separately — so it is decoded here and the one
-        implementation below does the joining."""
+        """A ticket is the same join with the address and the code travelling
+        together — and, since it may also name a relay, with a second route to
+        try when the first has nowhere to go. The node owns that order, so a
+        ticket is handed to it whole rather than taken apart here."""
         if ticket:
             if uri or code:
                 raise ControlError("bad_request",
                                    "a ticket carries both; do not send either")
             try:
-                parsed = join_ticket.decode(ticket)
+                join_ticket.decode(ticket)      # refuse a typo before dialling
             except join_ticket.TicketError as exc:
                 raise ControlError("bad_request", str(exc)[:200]) from None
-            uri, code = parsed["uri"], parsed["code"]
+            result = self._ask(self._node.console_use_ticket(ticket), _JOIN)
+            if not result.get("ok"):
+                raise ControlError(
+                    "unavailable",
+                    str(result.get("reason") or "the join failed")[:200],
+                    {"detail": str(result.get("detail") or "")[:200]})
+            return result
         if not uri or not code:
             raise ControlError("bad_request", "an address and a code are required")
         result = self._ask(self._node.console_join(uri, code), _JOIN)
@@ -134,12 +149,11 @@ class JoinModule:
         one."""
         try:
             ticket = self._ask(
-                on_loop(self._node.issue_join_ticket,
-                        join_ticket.clamp_ttl(ttl)), _READ)
+                self._node.issue_join_ticket(join_ticket.clamp_ttl(ttl)),
+                _TICKET)
         except ControlError as exc:
-            # Not reachable from the open internet is a *state*, not a bad
-            # argument: say why, rather than handing over a ticket that cannot
-            # work.
+            # No route in at all is a *state*, not a bad argument: say why,
+            # rather than handing over a ticket that cannot work.
             if exc.code == "bad_request":
                 raise ControlError("conflict", exc.message) from None
             raise

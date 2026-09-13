@@ -17,6 +17,8 @@ import base64
 import json
 import os
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -45,6 +47,24 @@ class StubClient:
         await asyncio.Event().wait()
 
     async def close(self):
+        pass
+
+
+class _StubApp:
+    """Just enough of the app for the bridge's own bookkeeping.
+
+    The shell buffer and the wait on it touch nothing else: a whole node and a
+    console to prove a condition variable would be a slower test proving less.
+    """
+
+    def __init__(self):
+        self.state = FleetState()
+        self.node_id = NodeID(b"\x11" * 20)
+
+    def add_listener(self, _listener):
+        pass
+
+    def remove_listener(self, _listener):
         pass
 
 
@@ -519,6 +539,243 @@ class TestFleetRoutes:
                     console, "/api/fleet/input", token,
                     {"node": "aa" * 20, "sid": "cc" * 16, "data": data})
                 assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_held_read_answers_the_moment_the_pty_speaks(self):
+        """The latency a terminal has is whatever it waits before asking again.
+        A held read has none: it answers on the byte, not on the next tick."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+
+        def speak():
+            time.sleep(0.05)
+            bridge._append_shell("ab" * 16, b"hello")
+
+        threading.Thread(target=speak, daemon=True).start()
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 5.0)
+        assert time.monotonic() - started < 2.0
+        assert base64.b64decode(answer["data"]) == b"hello"
+
+    async def test_a_held_read_returns_at_once_when_there_is_backlog(self):
+        """Holding a read that already has an answer would add exactly the
+        latency the hold exists to remove."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+        bridge._append_shell("ab" * 16, b"already here")
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 5.0)
+        assert time.monotonic() - started < 1.0
+        assert base64.b64decode(answer["data"]) == b"already here"
+
+    async def test_a_held_read_gives_up_rather_than_parking_for_ever(self):
+        """Every hold is a thread of the console's server. Bounded in time, like
+        every other thing here that waits."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("ab" * 16, "ee" * 20)
+        started = time.monotonic()
+        answer = bridge.wait_shell("ab" * 16, 0, 0.2)
+        assert 0.15 < time.monotonic() - started < 3.0
+        assert answer["data"] == ""
+
+    async def test_a_held_read_of_an_unknown_session_does_not_wait(self):
+        """There is nothing to wait for: no session ever produces bytes under a
+        sid nobody opened."""
+        bridge = FleetBridge(_StubApp())
+        started = time.monotonic()
+        assert bridge.wait_shell("ff" * 16, 0, 5.0) is None
+        assert time.monotonic() - started < 1.0
+
+    async def test_waiting_for_a_shell_to_open_answers_when_it_does(self):
+        """Opening answers asynchronously over the mesh; the page would
+        otherwise spend several requests discovering that."""
+        bridge = FleetBridge(_StubApp())
+
+        def opened():
+            time.sleep(0.05)
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+
+        threading.Thread(target=opened, daemon=True).start()
+        assert bridge.wait_shell_open("ee" * 20, 5.0) == "ab" * 16
+        assert bridge.wait_shell_open("11" * 20, 0.2) == ""
+
+    async def test_the_route_holds_only_when_it_is_asked_to(self):
+        """`wait=1` is the page saying it will park. Without it the answer is
+        immediate, because something else is driving the cadence."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+            started = time.monotonic()
+            status, _, _, data = await _get(
+                console, "/api/fleet/shell?sid=" + "ab" * 16, token)
+            assert status == 200 and data["data"] == ""
+            assert time.monotonic() - started < 2.0
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_console_can_be_told_who_else_can_let_somebody_in(self):
+        """The `invite` capability exists because the node that will *honour* a
+        code is the node that mints it. Offering that choice on the page where
+        somebody is actually inviting a machine is what makes it usable."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["invite"], label="gateway")
+            app.state.add_managed("dd" * 20, caps=["status"], label="other")
+            status, _, _, data = await _get(console, "/api/invite/issuers", token)
+            assert status == 200 and data["available"] is True
+            assert [row["id"] for row in data["issuers"]] == ["ee" * 20]
+            assert data["issuers"][0]["label"] == "gateway"
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_issuers_needs_a_session_like_everything_else(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _get(console, "/api/invite/issuers")
+            assert status == 401
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_docker_on_a_node_that_never_granted_it_is_refused_here(self):
+        """A request that can only come back denied is a round trip over the
+        mesh for nothing, and "not authorised" read thirty seconds later tells
+        an operator less than "that node has not granted docker" read now."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _post(
+                console, "/api/fleet/docker", token,
+                {"node": "ee" * 20, "op": "containers"})
+            assert status == 502 and "granted docker" in data["error"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_docker_request_with_no_operation_is_a_bad_request(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await _post(
+                console, "/api/fleet/docker", token, {"node": "ee" * 20})
+            assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_groups_are_kept_here_and_never_sent_anywhere(self):
+        """A group is this console's own name for a set of machines. Nothing
+        about it travels, so the whole of it is a local write."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["update"], label="one")
+            status, _, _, data = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "set", "group": "prod", "nodes": ["ee" * 20]})
+            assert status == 200 and data["nodes"] == ["ee" * 20]
+            status, _, _, data = await _get(console, "/api/fleet/state", token)
+            assert [group["name"] for group in data["groups"]] == ["prod"]
+            status, _, _, data = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "node", "node": "ee" * 20, "groups": []})
+            assert status == 200 and data["groups"] == []
+            status, _, _, _ = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "remove", "group": "prod"})
+            assert status == 200
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_an_unknown_group_operation_is_a_404(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await _post(
+                console, "/api/fleet/groups", token, {"op": "drop", "group": "x"})
+            assert status == 404
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_stacks_update_brings_up_are_remembered_per_node(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            built["app"].state.add_managed("ee" * 20, caps=["update", "docker"],
+                                           label="one")
+            status, _, _, data = await _post(
+                console, "/api/fleet/stacks", token,
+                {"node": "ee" * 20, "stacks": ["site", "; rm -rf /"]})
+            assert status == 200 and data["stacks"] == ["site"]
+            status, _, _, state = await _get(console, "/api/fleet/state", token)
+            entry = [row for row in state["managed"] if row["id"] == "ee" * 20][0]
+            assert entry["update_stacks"] == ["site"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_updating_a_group_says_which_nodes_it_started_on(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["update"], label="one")
+            app.state.add_managed("dd" * 20, caps=["status"], label="two")
+            app.state.set_group("prod", ["ee" * 20, "dd" * 20])
+            status, _, _, data = await _post(
+                console, "/api/fleet/update-group", token, {"group": "prod"})
+            # The one without `update` is refused rather than attempted: a
+            # request that can only come back denied is noise.
+            assert status == 200
+            assert data["started"] == ["ee" * 20]
+            assert data["refused"] == ["dd" * 20]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_held_read_always_gives_its_slot_back(self):
+        """Each hold is a thread of this server, so there is a ceiling on them.
+        A slot that leaks is a terminal that silently stops holding after a
+        handful of reads and goes back to being slow."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+            bridge._append_shell("ab" * 16, b"already here")
+            for _ in range(3):
+                # By node, which is the path that finds the session and then
+                # answers without a second wait.
+                status, _, _, _ = await _get(
+                    console, "/api/fleet/shell?node=" + "ee" * 20 + "&wait=1",
+                    token)
+                assert status == 200
+                status, _, _, _ = await _get(
+                    console, "/api/fleet/shell?sid=" + "ab" * 16 + "&wait=1",
+                    token)
+                assert status == 200
+            assert console._shell_holds == 0
         finally:
             console.stop()
             await host.stop_all()

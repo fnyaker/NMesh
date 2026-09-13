@@ -28,12 +28,15 @@ from collections import OrderedDict, deque
 from .. import app_api
 from ..node_id import NodeID
 from . import fleet_files
+from .fleet_docker import DockerError
 from .fleet import (
-    CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, EnrolAnswered,
-    EnrolRequested, Failure, FileTransferError, InviteIssued, NodeAdopted,
-    Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput, StatusReceived,
+    CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
+    EnrolAnswered, EnrolRequested, Failure, FileTransferError, InviteIssued,
+    NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput,
+    StatusReceived,
 )
-from .fleet_state import CAP_DESCRIPTIONS, CAPABILITIES, clean_caps
+from .fleet_state import (CAP_DESCRIPTIONS, CAPABILITIES, clean_caps,
+                          clean_stack_names)
 
 MAX_LOG = 500                 # activity lines kept for the UI
 MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
@@ -41,6 +44,14 @@ MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
 MAX_UPDATES = 64              # per-node update progress kept for the UI
 MAX_INVITES = 32              # invitations held for the page, one per node
+MAX_DOCKER_ANSWERS = 32       # docker answers held for the page that asked
+# What a docker operation costs on the far side. The reads are one round trip;
+# the four that pull images are minutes, and a browser is not going to hold a
+# request open for those — they are started and watched through the job list.
+_DOCKER_WAIT = 25.0
+_DOCKER_SLOW = ("pull", "deploy", "deploy_stack", "portainer_deploy")
+_DOCKER_ACTS = ("act", "pull", "deploy", "stack", "deploy_stack",
+                "portainer_stack", "portainer_deploy", "portainer")
 # How long a caller waits for a managed node to answer with an invitation. A
 # mesh hop and one signature, not a job: long enough for a slow path, short
 # enough that a page is never left hanging on a node that went away.
@@ -84,7 +95,10 @@ class FleetBridge:
     def __init__(self, fleet_app) -> None:
         self._app = fleet_app
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._lock = threading.Lock()
+        # A condition rather than a plain lock: every mutation already ends in
+        # `_bump`, so "something moved" is a signal that costs nothing to send
+        # and lets a reader park on it instead of asking again on a timer.
+        self._lock = threading.Condition()
         # (local session token, node hex) -> {token, at}. Memory only.
         self._remote: OrderedDict = OrderedDict()
         self._version = 0
@@ -100,6 +114,10 @@ class FleetBridge:
         # only sign of life.
         self._updates: "OrderedDict[str, dict]" = OrderedDict()
         self._shells: "OrderedDict[str, dict]" = OrderedDict()
+        # rid -> the answer to one docker operation. Held here rather than in
+        # the snapshot: a container list is what a page asked for once, not
+        # something every poll should carry to every open tab.
+        self._docker: "OrderedDict[str, dict]" = OrderedDict()
         # rid -> what we asked, of whom, and how it ended. A remote action
         # answers asynchronously; without this the page has no way to say
         # whether it succeeded, failed, or is still running.
@@ -125,6 +143,9 @@ class FleetBridge:
 
     def _bump(self) -> None:
         self._version += 1
+        # Held under `_lock` by every caller, which is what makes this legal —
+        # and what makes a waiter's check-then-wait free of a race.
+        self._lock.notify_all()
 
     def _say(self, level: str, text: str, node: str = "") -> None:
         with self._lock:
@@ -203,6 +224,19 @@ class FleetBridge:
             # that asked for it and nowhere else.
             self._say("ok", f"{short}… issued an invitation to its mesh, valid "
                             f"{_window(event.ttl)}", node_hex)
+        elif isinstance(event, DockerReport):
+            with self._lock:
+                while len(self._docker) >= MAX_DOCKER_ANSWERS:
+                    self._docker.popitem(last=False)
+                self._docker[event.rid] = dict(event.data, node=node_hex,
+                                               op=event.op, at=time.time())
+                self._bump()
+            self._finish(event.rid, "ok", _docker_line(event.op, event.data))
+            # Only the acts are logged. A list of containers is a page asking a
+            # question, and an activity log full of questions hides the answers.
+            if event.op in _DOCKER_ACTS:
+                self._say("ok", f"{short}…: {_docker_line(event.op, event.data)}",
+                          node_hex)
         elif isinstance(event, ShellOpened):
             self._finish(event.rid, "ok")
             self._open_shell_record(event.sid.hex(), node_hex)
@@ -339,6 +373,10 @@ class FleetBridge:
             "provisioned": state.provisioned(),
             "scans": scans,
             "updates": updates,
+            # One membership list, and the page derives "which groups is this
+            # node in?" from it. A second copy on each node is a second chance
+            # for the two to disagree.
+            "groups": state.groups(),
             "shells": shells,
             "jobs": jobs,
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
@@ -358,6 +396,45 @@ class FleetBridge:
                 if record["node"] == node_hex and record["open"]:
                     return record["sid"]
             return ""
+
+    def wait_shell(self, sid: str, offset: int, timeout: float) -> dict | None:
+        """``shell_data``, but held until there is something to say.
+
+        A terminal read on a timer is a floor on latency: half the interval on
+        average, and it is paid on every keystroke, because what a person sees
+        after typing is the echo coming back. Parking here instead costs one
+        idle request and answers the moment the pty produces a byte."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while True:
+                record = self._shells.get(sid)
+                if record is None:
+                    return None
+                if record["seq"] > offset or not record["open"]:
+                    break
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self._lock.wait(left)
+        return self.shell_data(sid, offset)
+
+    def wait_shell_open(self, node_hex: str, timeout: float) -> str:
+        """The sid of a live shell on that node, waiting for one to appear.
+
+        Opening answers asynchronously over the mesh, so a page that asked for a
+        shell and then asked for its bytes used to get a 404 and try again on a
+        timer. It is the same wait either way; doing it here spends one request
+        on it instead of several."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while True:
+                for record in reversed(list(self._shells.values())):
+                    if record["node"] == node_hex and record["open"]:
+                        return record["sid"]
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return ""
+                self._lock.wait(left)
 
     def shell_data(self, sid: str, offset: int = 0) -> dict | None:
         """Terminal bytes since ``offset``, base64-encoded (a terminal stream is
@@ -540,6 +617,22 @@ class FleetBridge:
             if "manage" in (entry.get("caps") or [])
         ]
 
+    def invite_issuers(self) -> list:
+        """Nodes that granted us ``invite`` — who else can let somebody in.
+
+        The point of the `invite` capability is that the node which will
+        *honour* a code is the node that mints it. So an operator inviting
+        somebody into a mesh they reach through another machine should be
+        choosing that machine here, rather than handing out a code for a node
+        the joiner may have no route to."""
+        return [
+            {"id": entry["id"], "label": entry.get("label") or "",
+             "pseudo": self._name_of(entry["id"])}
+            for entry in sorted(self._app.state.managed(),
+                                key=lambda item: item.get("label") or item["id"])
+            if "invite" in (entry.get("caps") or [])
+        ]
+
     def remote_connect(self, session: str, node_hex: str,
                        password: str | None = None) -> tuple:
         """Open a session on a remote node's console. ``(ok, detail)``.
@@ -643,8 +736,81 @@ class FleetBridge:
             self._node(node_hex))), "status", node_hex)
 
     def update(self, node_hex: str) -> str:
+        """Bring that machine up to date — packages, and the stacks chosen here.
+
+        The stack list is ours: it is a choice an operator made on this console
+        about that machine, so it is read from our own ledger rather than sent
+        by whoever clicked. The far side still checks that it granted us
+        ``docker`` before acting on any of it."""
+        stacks = (self._app.state.update_stacks(node_hex)
+                  if self._app.state.may_use(node_hex, "docker") else [])
         return self._job(self._call(self._app.request_update(
-            self._node(node_hex))), "update", node_hex)
+            self._node(node_hex), stacks)), "update", node_hex)
+
+    def update_group(self, name: str) -> dict:
+        """Update every node in a group, each with its own chosen stacks."""
+        started, refused = [], []
+        for node_hex in self._app.state.group_nodes(name):
+            if not self._app.state.may_use(node_hex, "update"):
+                refused.append(node_hex)
+                continue
+            try:
+                self.update(node_hex)
+                started.append(node_hex)
+            except Exception:              # noqa: BLE001 — one node, not the group
+                refused.append(node_hex)
+        if started:
+            self._say("ok", f"update started on {len(started)} node(s) "
+                            f"in {name!r}")
+        return {"group": name, "started": started, "refused": refused}
+
+    def set_update_stacks(self, node_hex: str, stacks) -> list[str]:
+        return self._app.state.set_update_stacks(node_hex, stacks)
+
+    def set_group(self, name, nodes) -> dict | None:
+        return self._app.state.set_group(name, nodes)
+
+    def remove_group(self, name) -> bool:
+        return self._app.state.remove_group(name)
+
+    def set_node_groups(self, node_hex: str, names) -> list[str]:
+        return self._app.state.set_node_groups(node_hex, names)
+
+    # -- docker -----------------------------------------------------------
+    #
+    # Every one of these refuses locally first, like the file plane: a request
+    # that can only come back denied is a round trip over the mesh for nothing,
+    # and "that node has not granted docker" read now beats "not authorised"
+    # read thirty seconds later.
+
+    def docker(self, node_hex: str, op: str, **arguments) -> dict:
+        """One docker operation on a managed node, and its answer.
+
+        The reads are waited on — a page with nothing to draw is not a page.
+        The four that pull images are started and watched through the job list
+        instead: a browser is not going to hold a request open for minutes, and
+        an operation that reports nothing until it finishes is one nobody can
+        tell from a hang."""
+        if not self._app.state.may_use(node_hex, "docker"):
+            raise DockerError("that node has not granted docker")
+        rid = self._job(self._call(self._app.request_docker(
+            self._node(node_hex), op, **arguments)), "docker", node_hex)
+        if op in _DOCKER_SLOW:
+            return {"rid": rid, "started": True}
+        deadline = time.monotonic() + _DOCKER_WAIT
+        while time.monotonic() < deadline:
+            answer = self.take_docker(rid)
+            if answer is not None:
+                return answer
+            failure = self._job_failure(rid)
+            if failure is not None:
+                raise DockerError(failure)
+            time.sleep(0.05)
+        raise DockerError("that node did not answer")
+
+    def take_docker(self, rid: str) -> dict | None:
+        with self._lock:
+            return self._docker.pop(str(rid), None)
 
     def invite(self, node_hex: str, ttl=None, ticket: bool = False) -> str:
         return self._job(self._call(self._app.request_invite(
@@ -879,6 +1045,30 @@ class FleetBridge:
         if isinstance(key_id, str) and key_id:
             return None, self._app.state.ssh_key_material(key_id)
         return (key_path or None), None
+
+
+def _docker_line(op: str, data: dict) -> str:
+    """One line saying what a docker operation did, for a log and a job row."""
+    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    items = data.get("items") if isinstance(data.get("items"), list) else None
+    if op == "act":
+        return f"{info.get('action', 'acted on')} {str(info.get('container', ''))[:12]}"
+    if op == "pull":
+        return f"pulled {info.get('image', 'an image')}"
+    if op == "deploy":
+        return f"deployed {info.get('name') or info.get('image') or 'a container'}"
+    if op in ("stack", "deploy_stack"):
+        through = info.get("through")
+        return (f"stack {info.get('stack', '')} "
+                f"{info.get('action', 'updated')}"
+                + (f" through {through}" if through else ""))
+    if op in ("portainer_stack", "portainer_deploy"):
+        return f"Portainer stack {info.get('name') or info.get('stack', '')}"
+    if op == "portainer":
+        return "Portainer configured" if info.get("configured") else "Portainer forgotten"
+    if items is not None:
+        return f"{len(items)} item(s)"
+    return "done"
 
 
 def _window(seconds) -> str:

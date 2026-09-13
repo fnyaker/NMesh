@@ -53,6 +53,7 @@ from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
+from .apps.fleet_docker import DockerError
 from .apps.fleet_console import REPLAY_HEADER
 
 # The page names the node it is driving with this header. Absent (or naming us)
@@ -249,6 +250,17 @@ _STREAM_PING = 10.0
 # room for the pages of a couple of browsers plus whatever a reload left
 # behind for a ping or two.
 _MAX_STREAMS = 16
+# A terminal read that is *held* until the pty has something to say. Bounded
+# for the same reason a stream is — it parks a server thread — and shorter than
+# the ceiling on a proxied console call, so a terminal driven through another
+# node's console answers before that call gives up on it.
+_SHELL_HOLD = 15.0
+_MAX_SHELL_HOLDS = 8
+# What a docker request body may carry through to a managed node. Named rather
+# than forwarded whole: a body passed straight through is every field the far
+# side does not know about, and there is no list of those to reason about.
+_DOCKER_ARGS = ("id", "action", "tail", "image", "spec", "stack", "compose",
+                "url", "token", "fingerprint", "clear", "endpoint")
 
 
 class WebConsole:
@@ -280,6 +292,7 @@ class WebConsole:
         self._changes = _Changes()
         self._streams = 0
         self._streams_lock = threading.Lock()
+        self._shell_holds = 0
 
         # The management plane, and the context the modules on it act through.
         # Built here rather than at the first request: what this node can be
@@ -1125,6 +1138,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/remote/targets":
                 self._handle_remote_targets()
                 return
+            if path == "/api/invite/issuers":
+                self._handle_invite_issuers()
+                return
             if path == "/api/events":
                 self._stream_changes()
                 return
@@ -1853,18 +1869,7 @@ def _make_handler(console: WebConsole):
                 self._json(200, console._fleet.snapshot(since))
                 return
             if path == "/api/fleet/shell":
-                sid = (query.get("sid") or [""])[0]
-                node = (query.get("node") or [""])[0]
-                # A page that has just asked for a shell knows the node, not the
-                # session: the open answers asynchronously. Naming the node is
-                # how a terminal draws itself without polling the whole ledger.
-                if not sid and node:
-                    sid = console._fleet.newest_shell(node)
-                    if not sid:
-                        self._json(404, {"error": "no session"})
-                        return
-                data = console._fleet.shell_data(sid, _int_param(query, "offset", 0))
-                self._json(200 if data else 404, data or {"error": "no session"})
+                self._handle_shell_read(query)
                 return
             if path in ("/api/fleet/files", "/api/fleet/file"):
                 self._handle_files_get(path, query)
@@ -1874,6 +1879,47 @@ def _make_handler(console: WebConsole):
                 self._json(200, {"keys": console._fleet.local_keys()})
                 return
             self._json(404, {"error": "not found"})
+
+        def _handle_shell_read(self, query: dict) -> None:
+            """Terminal bytes, optionally *held* until there are some.
+
+            `wait=1` parks the request instead of answering "nothing yet", so a
+            keystroke costs one round trip rather than one round trip plus half
+            a polling interval. The hold is bounded twice: in time, and in how
+            many can be parked at once — each one is a thread of this server."""
+            sid = (query.get("sid") or [""])[0]
+            node = (query.get("node") or [""])[0]
+            offset = _int_param(query, "offset", 0)
+            wanted = (query.get("wait") or [""])[0] in ("1", "true", "yes")
+            parked = False
+            if wanted:
+                with console._streams_lock:
+                    if console._shell_holds < _MAX_SHELL_HOLDS:
+                        console._shell_holds += 1
+                        parked = True
+            hold = parked
+            try:
+                # A page that has just asked for a shell knows the node, not the
+                # session: the open answers asynchronously. Naming the node is
+                # how a terminal draws itself without reading the whole ledger.
+                if not sid and node:
+                    sid = (console._fleet.wait_shell_open(node, _SHELL_HOLD) if hold
+                           else console._fleet.newest_shell(node))
+                    if not sid:
+                        self._json(404, {"error": "no session"})
+                        return
+                    # One hold per request. Waiting for the session *and* then
+                    # for its first byte would be twice the ceiling, and a
+                    # terminal driven through another node's console answers
+                    # under one that is shorter than that.
+                    hold = False
+                data = (console._fleet.wait_shell(sid, offset, _SHELL_HOLD) if hold
+                        else console._fleet.shell_data(sid, offset))
+            finally:
+                if parked:
+                    with console._streams_lock:
+                        console._shell_holds -= 1
+            self._json(200 if data else 404, data or {"error": "no session"})
 
         def _handle_files_get(self, path: str, query: dict) -> None:
             """Browsing and downloading, under the ``shell`` right.
@@ -1987,6 +2033,22 @@ def _make_handler(console: WebConsole):
                 "me": console._node.id.raw.hex(),
                 "available": fleet is not None,
                 "targets": fleet.remote_targets() if fleet is not None else [],
+            })
+
+        def _handle_invite_issuers(self) -> None:
+            """Who, besides this node, can let somebody into a mesh.
+
+            The `invite` capability exists because the node that will *honour* a
+            code is the node that mints it. Offering the choice here is what
+            makes the capability usable from the page where somebody is actually
+            inviting a machine, rather than only from the fleet page."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            fleet = console._fleet
+            self._json(200, {
+                "available": fleet is not None,
+                "issuers": fleet.invite_issuers() if fleet is not None else [],
             })
 
         def _handle_remote_post(self, path: str, data) -> None:
@@ -2107,8 +2169,24 @@ def _make_handler(console: WebConsole):
                                {"ok": bool(ok), "keys": fleet.local_keys()})
                 elif action == "provision":
                     self._handle_provision(fleet, node, data)
+                elif action == "docker":
+                    self._handle_docker(fleet, node, data)
+                elif action == "stacks":
+                    # Which of a node's stacks *Update* should also bring up.
+                    # Ours to remember, so it is written here and nowhere else.
+                    self._json(200, {"stacks": fleet.set_update_stacks(
+                        node, data.get("stacks"))})
+                elif action == "groups":
+                    self._handle_groups(fleet, data)
+                elif action == "update-group":
+                    self._json(200, fleet.update_group(
+                        str(data.get("group") or "")[:48]))
                 else:
                     self._json(404, {"error": "not found"})
+            except DockerError as exc:
+                # The far node refused, or has no docker. Not this console
+                # failing, and an operator has to be able to tell them apart.
+                self._json(502, {"error": str(exc)[:200]})
             except FleetFileError as exc:
                 # The far node refused, or never answered. Not this console
                 # failing, and an operator has to be able to tell them apart.
@@ -2117,6 +2195,40 @@ def _make_handler(console: WebConsole):
                 self._json(400, {"error": "bad request"})
             except Exception as exc:
                 self._json(503, {"error": str(exc)[:200]})
+
+        def _handle_docker(self, fleet, node: str, data) -> None:
+            """One docker operation on a managed node.
+
+            Everything in the body is passed on as *named arguments* the far
+            side validates; nothing is interpreted here. The one thing this
+            console does decide is which keys may travel at all — a body
+            forwarded whole would be every field the far side does not know
+            about, and there is no list of those to reason about."""
+            op = str(data.get("op") or "")[:32]
+            if not op:
+                self._json(400, {"error": "an operation is required"})
+                return
+            arguments = {key: data[key] for key in _DOCKER_ARGS if key in data}
+            self._json(200, fleet.docker(node, op, **arguments))
+
+        def _handle_groups(self, fleet, data) -> None:
+            """Groups: an operator's own names for sets of machines.
+
+            Local by construction. A group says nothing to any node in it — it
+            is a way of pointing at several of them at once from here."""
+            operation = str(data.get("op") or "")[:16]
+            if operation == "set":
+                entry = fleet.set_group(data.get("group"), data.get("nodes"))
+                self._json(200 if entry else 400,
+                           entry or {"error": "that group name is not usable"})
+            elif operation == "remove":
+                ok = fleet.remove_group(data.get("group"))
+                self._json(200 if ok else 404, {"ok": bool(ok)})
+            elif operation == "node":
+                self._json(200, {"groups": fleet.set_node_groups(
+                    data.get("node") or "", data.get("groups"))})
+            else:
+                self._json(404, {"error": "not found"})
 
         def _handle_file_upload(self, fleet, node: str, data) -> None:
             """Push one file onto a node that granted ``shell``.

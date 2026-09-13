@@ -38,6 +38,13 @@ Among other things they check:
   table exceeds the historical cliff of five certified nodes must still answer
   lookups, relay ping/data/directory, learn the return path along a chain, and
   stay responsive under packets addressed to unreachable ids.
+- **An invitation that reaches a node with no address of its own**
+  (`tests/integration/test_relay_invite.py`): the relay-invite block, and the
+  compact invitation doing the same journey out of a string short enough to
+  scan — the rendezvous really lands with the relay before the string is handed
+  over, the joiner's 40 bytes become a session with the inviter, and E2E data
+  flows over the relayed path. The same file holds the other direction: a
+  ticket that names both routes tries the direct one first.
 - Recovery **after a restart** without re-inviting (routing + E2E sessions
   restored from disk).
 - **Self-repair** (purging a dead peer) and the **app→mesh→app** path through
@@ -115,7 +122,15 @@ tests/
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
-├── test_invite*.py / test_cert_store.py               — invitations & trust
+├── test_invite*.py / test_cert_store.py               — invitations & trust,
+│     including the **rendezvous** that lets one reach a node with no address of
+│     its own: an offer only ever about its own sender (the key must hash to the
+│     sender's id and have signed the token), never from an unauthenticated
+│     link, never naming somebody else's key, expiring, bounded and rate
+│     limited — and the short seek it authorises, which becomes an ordinary
+│     signed seek only where a matching offer is, is refused when aimed at a
+│     node the offer does not name, and is silent everywhere else rather than
+│     answering "no such code"
 ├── test_release_trust.py                              — what may replace this
 │     node's code: corroboration counted in signatures and never in mirrors, a
 │     quorum of endorsed keys that 200 minted publishers cannot reach, a
@@ -206,7 +221,28 @@ tests/
 │     closed, and the `manage` console relay: refused paths (fleet, remote, chat,
 │     outside the API), splitting and reassembling a reply, an over-large reply
 │     explained rather than truncated, a reply forged by a third party ignored,
-│     bounded calls
+│     bounded calls. The `docker` plane: its own grant, an operation that is not
+│     one refused by name, a signature for it that still cannot open a shell, and
+│     a ceiling on how many run at once; `Update` carrying stack names, which are
+│     dropped without the second grant and cleaned before they could reach an
+│     argv; groups, where membership lives in one place and a revoked node leaves
+│     them. Plus the terminal path: output leaves the pty in the order
+│     it was produced (one drain, never a task per chunk) and its buffer keeps
+│     the tail when a program outruns the link, and a held read answers on the
+│     byte, returns at once when there is backlog, gives up rather than parking
+│     for ever, and does not wait at all for a session nobody opened
+├── test_fleet_docker.py                               — docker and Portainer: what
+│     may reach a socket or an argv (a name that is not a name is refused, never
+│     escaped; a container is *built* from a validated shape rather than
+│     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute
+│     paths or a volume name; a command is split, never handed to a shell), the
+│     stacks recovered from compose's own labels, the multiplexed log header
+│     taken off rather than printed, and the wire itself driven against a socket
+│     that answers like a daemon — both framings, the daemon's own message
+│     surfaced, a failed pull *inside* a 200 still a failure, an oversized answer
+│     refused. For Portainer: an address that is a host and nothing else, a token
+│     that cannot become a second header, a fingerprint pin, and a git stack
+│     redeployed through git rather than handed the file it already had
 ├── test_fleet_deploy.py                               — remote deployment and the
 │     right to update: the authorised script is not inside the node's prefix, the
 │     rule names one path with no wildcard, the wrapper refuses every argument,
@@ -255,7 +291,13 @@ tests/
 │     test), no `$("id")` points at a missing element, no external resource, no
 │     `style=` attribute (the CSP ignores it silently), and the terminal emulator
 │     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node). Also the shared node view: one implementation mounted in four places
+│     node) — including what a *full-screen* program does: the alternate screen,
+│     a scroll region, insert/delete of lines and characters, 256-colour and
+│     24-bit, erase painting the background, a resize that keeps its content,
+│     the reports a program waits on, mouse encoding, and the two forms of the
+│     cursor keys. Plus the contracts around it: the read is held rather than
+│     polled, the pty is told the size the pane actually has, and the mouse is
+│     reported only while a program asked for it. Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
 │     came from, and the addresses start folded away. And the wiring a switch of

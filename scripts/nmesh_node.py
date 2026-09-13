@@ -78,8 +78,9 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),
                        state=FleetState(store=store), repo_root=ROOT,
+                       state_dir=data_dir,
                        mesh_invite=lambda ttl=None, ticket=False:
-                           _mesh_invitation(node, ttl, ticket),
+                           _mesh_invitation(node, ttl, ticket),   # a coroutine
                        release_publishers=lambda: _release_publishers(node),
                        local_console=local_console)
         return app, FleetBridge(app)
@@ -112,26 +113,26 @@ def _release_publishers(node) -> list:
 PROVISION_INVITE_TTL = 3 * 3600
 
 
-def _mesh_invitation(node, ttl=None, ticket=False) -> dict:
+async def _mesh_invitation(node, ttl=None, ticket=False) -> dict:
     """A fresh single-use invitation to this node's mesh, plus where to reach it.
 
     Redeeming it runs the ordinary invite → handshake path, so the newcomer's
     certificate is **issued and signed by this node** — the one that scanned and
     installed it — and chains from there to the network's root.
 
-    ``ticket`` asks for the same invitation in the compact scannable form. It
-    needs a confirmed public address, which not every node has, so a node that
-    cannot mint one still returns the invitation — with no ticket in it, rather
-    than nothing at all."""
+    ``ticket`` asks for the same invitation in the compact scannable form. That
+    one carries both routes in — an address of this node's own, and a relay to
+    reach it through — and a node with neither still returns the invitation,
+    with no ticket in it rather than nothing at all."""
     window = PROVISION_INVITE_TTL if ttl is None else float(ttl)
     if ticket:
         try:
-            issued = node.issue_join_ticket(window)
+            issued = await node.issue_join_ticket(window)
             return {"uris": node.advertised_uris()[:8], "code": issued["code"],
                     "ticket": issued["ticket"],
                     "expires_at": issued["expires_at"], "ttl": issued["ttl"]}
         except Exception:
-            pass          # no public address — fall through to the plain code
+            pass          # no route in at all — fall through to the plain code
     return {"uris": node.advertised_uris()[:8],
             "code": node.generate_invite(window),
             "ticket": "", "expires_at": time.time() + window, "ttl": window}
