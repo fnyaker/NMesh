@@ -81,7 +81,9 @@ Shell → Full screen*, in a **tab**. It is the same session as the panel — th
 same emulator, the same driver — with the whole screen instead of two thirds of
 it, a key row for what a phone's keyboard does not have (Esc, Tab, sticky Ctrl
 and Alt, arrows, `^c`), copy and paste both ways, and **Files**: browse the
-machine, download, upload, make a folder. All of it under the `shell` right and
+machine, download, upload, make a folder. The emulator is a real one: the
+alternate screen, scroll regions, 24-bit colour, mouse reporting and a size
+pushed to the pty, which is what `btop` and `vim` need to draw at all. All of it under the `shell` right and
 nothing more, because an operator who can open a shell there can already read
 and write those files by typing. Detail:
 [`Docs/Apps/fleet`](../Apps/fleet).
@@ -207,9 +209,11 @@ waiting on a stream that will never speak.
 **Every page, one control.** `/fleet` used to carry the interval's markup with
 nothing behind it while polling at a rate of its own; a control that does
 nothing is worse than no control, so it drives that page's poll too. The
-**shell** is the exception and keeps its own faster cadence, running only while
-a session is open: a terminal is not a status page, and the interval can be set
-to zero.
+**shell** is the exception and is on no cadence at all: its read is *held* by
+the console until the pty has something to say (`&wait=1`), and the page asks
+again the moment it is answered. A terminal is not a status page, the interval
+can be set to zero, and a timer would only ever be a floor on how long a
+keystroke takes to come back.
 
 **A refresh writes the values, it does not redraw the page.** A view whose
 numbers always change is a view `setHTML` cannot help — it only skips a write
@@ -588,7 +592,7 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/pseudo`      | this node's name, id and the length limit (`pseudo.get`); `?q=…` searches the names this node holds (`pseudo.search`), `&wide=1` asks the directory instead (`pseudo.lookup`, **local only** — a Kademlia round does not fit the relay) |
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
-| GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64)     |
+| GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64); `&wait=1` holds the answer until there are some (bounded in time, and in how many are parked at once) |
 | GET     | `/api/transports` | what each transport declares it takes, with the values in force — `transports.options` |
 | POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` — `transports.save` |
 | GET     | `/api/fleet/keys`  | available SSH keys (disk + imported) — **metadata only** |

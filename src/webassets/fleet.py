@@ -1087,7 +1087,7 @@ $("term").addEventListener("keydown", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
   if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
      window.getSelection().toString()) return;          // let copy/paste through
-  const bytes = keyBytes(event);
+  const bytes = keyBytes(event, TERM_SESSION.term);
   if(bytes === null) return;
   event.preventDefault();
   await TERM_SESSION.send(bytes);
@@ -1095,8 +1095,33 @@ $("term").addEventListener("keydown", async (event) => {
 $("term").addEventListener("paste", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
   event.preventDefault();
-  await TERM_SESSION.send((event.clipboardData || window.clipboardData).getData("text"));
+  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
 });
+// The pointer, only while a program has asked to see it. With reporting off a
+// drag stays an ordinary selection, which is what a shell session wants.
+$("term").addEventListener("mousedown", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "down")) event.preventDefault();
+});
+$("term").addEventListener("mouseup", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "up")) event.preventDefault();
+});
+$("term").addEventListener("mousemove", (event) => {
+  if(TERM_SESSION) TERM_SESSION.mouse(event, "move");
+});
+$("term").addEventListener("wheel", (event) => {
+  if(TERM_SESSION && TERM_SESSION.mouse(event, "wheel")) event.preventDefault();
+}, {passive:false});
+$("term").addEventListener("contextmenu", (event) => {
+  if(TERM_SESSION && TERM_SESSION.term && TERM_SESSION.term.mouse) event.preventDefault();
+});
+// The panel changes size without the window moving — a tab switch, a rail
+// folding away — and a pty told the old size draws every box to the wrong
+// place. So the element is watched, not the window.
+if(window.ResizeObserver){
+  new ResizeObserver(debounce(() => {
+    if(TERM_SESSION) TERM_SESSION.fit();
+  }, 150)).observe($("term"));
+}
 
 [["Nodes you control", "nodes"], ["Who controls this node", "access"],
  ["Discover & deploy", "deploy"], ["Shell", "shell"], ["Activity", "activity"],

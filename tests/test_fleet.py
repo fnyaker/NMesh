@@ -1131,6 +1131,36 @@ class TestShellBinding:
                             + b"\x00\x50\x00\x18")
         assert agent.app._shells[sid].owner == operator.id
 
+    async def test_output_keeps_the_order_the_pty_produced_it_in(self, operator, agent):
+        """A terminal stream delivered out of order is not slow output, it is
+        garbage on the screen — so one task drains it, never one per chunk."""
+        sid, _read_fd = self._shell(agent, operator.id)
+        shell = agent.app._shells[sid]
+        for index in range(20):
+            shell.feed(b"chunk%02d;" % index)
+            agent.app._wake_sender(shell)
+            await asyncio.sleep(0)
+        for _ in range(50):
+            if not shell.out and (shell.sender is None or shell.sender.done()):
+                break
+            await asyncio.sleep(0.01)
+        body = b"".join(payload[1 + fleet.SID_LEN:]
+                        for _target, payload in agent.take_sent()
+                        if payload[0] == fleet.SHELL_OUTPUT)
+        assert body == b"".join(b"chunk%02d;" % index for index in range(20))
+
+    async def test_a_program_that_outruns_the_link_keeps_its_tail(self, operator, agent):
+        """The most recent output is what a screen shows. A buffer that grew
+        without end would be the one place on this path an attacker could push
+        memory, so it is bounded — and it is the oldest bytes that go."""
+        sid, _read_fd = self._shell(agent, operator.id)
+        shell = agent.app._shells[sid]
+        shell.feed(b"old" * 8)
+        shell.feed(b"z" * (fleet.SHELL_OUT_MAX + 4096))
+        assert len(shell.out) == fleet.SHELL_OUT_MAX
+        assert bytes(shell.out[-8:]) == b"z" * 8
+        assert b"old" not in bytes(shell.out[:64])
+
     async def test_output_for_an_unknown_session_is_dropped(self, operator, agent):
         operator.app._dispatch(agent.id, bytes([fleet.SHELL_OUTPUT])
                                + os.urandom(fleet.SID_LEN) + b"junk")
