@@ -467,3 +467,21 @@ class TestWhereAComposeFileLands:
             with pytest.raises(docker.DockerError):
                 await docker.deploy_stack("ok", bad, root=str(tmp_path))
         assert list(tmp_path.iterdir()) == []
+
+
+def test_a_log_reply_is_cut_to_fit_the_frame_that_carries_it():
+    """A reply too long to trim is not a truncated answer — it is a reply nobody
+    receives at all, because the far side cannot parse half a JSON document.
+
+    And no fixed ceiling on the text would do: under JSON escaping one `ESC`
+    becomes six characters, so a screen of colour codes is six times its own
+    length on the wire."""
+    import json
+    from src.apps.fleet import MAX_BODY, _dump_json
+    log = "\x1b[31m" * 20_000              # all escape bytes: the worst case
+    blob = _dump_json({"rid": "aa" * 8, "op": "logs", "text": log},
+                      "items", "text")
+    assert len(blob) <= MAX_BODY
+    answer = json.loads(blob)
+    # Cut from the front: a log is read from its end.
+    assert answer["text"] and log.endswith(answer["text"])

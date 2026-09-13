@@ -1600,7 +1600,9 @@ class FleetApp:
             return                          # the handler answered for itself
         reply = {"rid": rid, "op": op}
         reply.update(data)
-        self._reply(src, DOCKER_REPLY, reply, "items")
+        # `items` is a list and `text` is a log: both are the part of an answer
+        # worth losing before the answer itself is.
+        self._reply(src, DOCKER_REPLY, reply, "items", "text")
 
     def _on_docker_reply(self, src: NodeID, document: dict) -> None:
         if not self._claim_inflight(src, document, "docker"):
@@ -2684,13 +2686,30 @@ def _dump_json(document: dict, *trim_keys: str) -> bytes:
     and therefore drops in silence — the worst possible failure for a reply the
     operator is waiting on. So we drop **entries**, never bytes: the named list
     keys are shortened until the frame fits, and ``truncated`` says how many
-    went. A short answer beats an answer that never arrives."""
+    went. A short answer beats an answer that never arrives.
+
+    A named key holding **text** is cut at a character instead, from the front:
+    a log or a command's output is read from its end, and the alternative is a
+    guess at how much a terminal's escape bytes will grow under JSON escaping —
+    where one ``ESC`` becomes six characters, so no fixed ceiling on the text is
+    both safe and useful."""
     blob = _encode(document)
     if len(blob) <= MAX_BODY:
         return blob
     document = dict(document)
     dropped = 0
     for key in trim_keys:
+        text = document.get(key)
+        if isinstance(text, str) and text:
+            keep = len(text)
+            while keep > 0:
+                keep = keep * 3 // 4 if keep > 64 else 0
+                document[key] = text[len(text) - keep:]
+                blob = _encode(document)
+                if len(blob) <= MAX_BODY:
+                    return blob
+            document[key] = ""
+            continue
         items = document.get(key)
         if not isinstance(items, list) or not items:
             continue

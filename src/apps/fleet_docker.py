@@ -51,7 +51,10 @@ MAX_CONTAINERS = 250
 MAX_IMAGES = 250
 MAX_STACKS = 100
 MAX_LOG_TAIL = 2000               # lines
-MAX_LOG_BYTES = 128 * 1024
+# What a reply may carry back. Sized to fit one frame *after* JSON escaping:
+# `_dump_json` drops whole list entries to make a reply fit, and a string is not
+# a list — a log too long to trim is a reply nobody receives at all.
+MAX_LOG_BYTES = 32_000
 MAX_COMPOSE = 40_000              # a compose file, so one reply frame still fits
 MAX_ENV = 64                      # variables on a container we create
 MAX_PORTS = 32

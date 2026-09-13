@@ -17,7 +17,7 @@ from src.node import (
     MeshNode, INVITE_OFFER, INVITE_SEEK, _make_invite_seek, _encode_seek,
     _decode_seek, _h_code, _seek_signed_blob, _SEEK_RATE_MAX, _RDV_MAX,
     _SEEK_MAX_PAYLOAD, _SEEK_TTL, _SEEK_TTL_PREAUTH, _OFFER_MAX,
-    _OFFER_RATE_MAX, _SHORT_SEEK_LEN,
+    _OFFER_RATE_MAX, _SHORT_SEEK_LEN, _SHORT_SEEK_GAP,
 )
 from src.node_id import NodeID
 from src.crypto import SessionKey, CryptoIdentity
@@ -475,6 +475,25 @@ class TestShortSeek:
             await _ingress(relay),
             _short_seek(inviter_id.raw, inviter_id, "abc1234567", _exp()))
         assert [p for p in link.transport.sent if p.type == INVITE_SEEK] == []
+
+    async def test_one_forward_per_rendezvous_per_gap(self):
+        """Forty bytes in becomes five kilobytes out — the key and signature the
+        offer holds. Without a gap, somebody holding a ticket could vary the
+        expiry, mint a fresh msg_id past dedup, and spend the inviter's link at
+        the seek limit's full width."""
+        relay, inviter_id, link = await self._relay_holding()
+        ingress = await _ingress(relay)
+        for step in range(6):
+            await relay._handle_invite_seek(
+                ingress,
+                _short_seek(b"\x09" * 20, inviter_id, "abc1234567",
+                            _exp(300 + step)))
+        assert len([p for p in link.transport.sent if p.type == INVITE_SEEK]) == 1
+        # …and it opens again once the gap has passed.
+        relay._offers[_h_code("abc1234567")]["last"] -= _SHORT_SEEK_GAP + 1
+        await relay._handle_invite_seek(
+            ingress, _short_seek(b"\x09" * 20, inviter_id, "abc1234567", _exp(999)))
+        assert len([p for p in link.transport.sent if p.type == INVITE_SEEK]) == 2
 
     def test_the_short_form_is_told_apart_by_its_length_alone(self):
         """40 bytes exactly, which is one byte under what the full decoder will
