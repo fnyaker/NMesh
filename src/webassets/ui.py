@@ -66,6 +66,11 @@ TOKENS = """
   /* -- type -- */
   --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  /* The terminal's own stack, and not the same one. A screen `btop` draws is
+     box-drawing and braille; the families below carry those, and the ones a
+     console picks for a code snippet routinely do not — a missing glyph falls
+     back to whatever does have it, at whatever width that font advances. */
+  --term-font:"DejaVu Sans Mono","Liberation Mono","Noto Sans Mono","Cascadia Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --fs-2xs:11px; --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:16px;
   --fs-xl:20px; --fs-2xl:26px; --fs-3xl:32px;
   --lh-tight:1.25; --lh:1.55;

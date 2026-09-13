@@ -291,13 +291,18 @@ tests/
 │     test), no `$("id")` points at a missing element, no external resource, no
 │     `style=` attribute (the CSP ignores it silently), and the terminal emulator
 │     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node) — including what a *full-screen* program does: the alternate screen,
+│     node), read back from the **model** rather than from markup — the screen is
+│     drawn on a canvas now, so there is no HTML to assert on and no injection to
+│     guard against — including what a *full-screen* program does: the alternate screen,
 │     a scroll region, insert/delete of lines and characters, 256-colour and
 │     24-bit, erase painting the background, a resize that keeps its content,
 │     the reports a program waits on, mouse encoding, and the two forms of the
 │     cursor keys. Plus the contracts around it: the read is held rather than
 │     polled, the pty is told the size the pane actually has, and the mouse is
-│     reported only while a program asked for it. Also the shared node view: one implementation mounted in four places
+│     reported only while a program asked for it. Plus the two shapes that make
+│     it fast: the parser never slices its buffer (asserted as *time* — a frame's
+│     worth of escapes has to parse in well under the frame it belongs to), and a
+│     repaint touches the rows a program moved rather than the whole screen. Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
 │     came from, and the addresses start folded away. And the wiring a switch of

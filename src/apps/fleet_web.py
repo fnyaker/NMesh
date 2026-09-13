@@ -443,9 +443,12 @@ class FleetBridge:
             record = self._shells.get(sid)
             if record is None:
                 return None
-            buffer = bytes(record["data"])
+            buffer = record["data"]
             total = record["seq"]
-            # The buffer holds the tail; map an absolute offset onto it.
+            # The buffer holds the tail; map an absolute offset onto it. Sliced,
+            # never copied whole: a terminal is read many times a second and
+            # this buffer is a quarter of a megabyte — `bytes(buffer)` first was
+            # megabytes a second of copying to hand back the last few hundred.
             start = max(0, len(buffer) - max(0, total - offset))
             return {"sid": sid, "seq": total, "open": record["open"],
                     "status": record["status"],

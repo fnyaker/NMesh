@@ -386,11 +386,36 @@ and never repaints — and the program redraws itself. The pane is watched with 
 `ResizeObserver` rather than the window: a tab switching, a key row appearing or
 a font loading all change the pane while the window stands still.
 
-Colour past the sixteen palette entries is a class **minted at runtime** and
-inserted through the CSSOM. The console's policy has no `unsafe-inline`, so a
-`style=` attribute would be dropped by the browser without an error — the one
-failure mode worse than a missing feature. The set of minted classes is
-bounded, like everything else a remote peer can grow.
+### Why the screen is a canvas
+
+A grid of text laid out in the DOM depends on **every glyph having the same
+advance**. `btop` draws with box-drawing and braille characters, which many
+monospace fonts do not carry; the browser then falls back per glyph, the advance
+changes mid-line, and every column after it drifts. That is what a broken `btop`
+looks like, and no font stack fixes it — the fallback is per character and the
+fonts that have those glyphs are not the ones a console picks for a code
+snippet.
+
+So each cell is **drawn at `col * cw`** on a canvas, and `fillText`'s own
+`maxWidth` condenses a glyph that came from a wider fallback into the cell it
+belongs to. Alignment stops being a property of the font. There is a stack of
+its own (`--term-font`) that prefers families which *do* carry those glyphs,
+because a condensed glyph still looks worse than a right one — but nothing
+depends on it.
+
+It is also what a repaint costs. The DOM version rebuilt a few thousand nodes
+for a frame in which a program moved one line; here the emulator marks the rows
+it touched, a repaint draws those rows, and a row is a handful of canvas calls.
+Repaints are coalesced on `requestAnimationFrame`, so a screen that arrives in
+three chunks is painted once, in step with the display.
+
+Two things follow from drawing rather than laying out, and both are handled
+rather than lost: **selection** is the screen's own (drag to select, `Copy` and
+Ctrl-C take it), and the **scrollback** is reached with the wheel or
+Shift-PageUp/PageDown, with a "back to the bottom" chip while you are above it.
+A screen reader gets the same text from an off-screen mirror written as
+`textContent` — which is also why escaping stopped being load-bearing here:
+nothing on this path builds markup any more.
 
 > **Output is read, not polled.** A timer is a floor on latency — half the
 > interval on average — and it is paid on every keystroke, because what a person
@@ -406,6 +431,15 @@ bounded, like everything else a remote peer can grow.
 > shell drains the buffer instead — which also coalesces the burst a redraw
 > arrives in into one frame. The buffer is bounded; when a program outruns the
 > link the **oldest** bytes go, because the tail is what a screen shows.
+
+The rest of that path was measured rather than assumed, and three things on it
+were costing more than the network:
+
+| Where | What it was | What it is |
+|---|---|---|
+| the emulator's parser | `data.slice(i)` at every escape, to run a regex against — **quadratic** in the size of a frame, and a frame from a full-screen program is thousands of escapes | sticky regexes, matched at the escape's own offset |
+| the console's held read | `bytes(record["data"])` copied the whole quarter-megabyte buffer to hand back the last few hundred bytes, many times a second | the buffer is sliced |
+| the pty reader | 4 kB a read, so one screenful was a dozen wake-ups and a dozen frames on the mesh | 64 kB a read, 32 kB a frame |
 
 ### The terminal, full screen and on a phone
 

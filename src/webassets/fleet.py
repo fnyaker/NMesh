@@ -311,8 +311,8 @@ FLEET_HTML = """<!doctype html>
           <button id="shell-kill" class="danger">Close</button>
         </div>
         <div class="card-body tight">
-          <pre id="term" class="term" tabindex="0" role="textbox" aria-label="Remote shell"
-               aria-multiline="true">Open a shell on a node that granted you the shell capability.</pre>
+          <div id="term" class="term" tabindex="0" role="application"
+               aria-label="Remote shell"></div>
           <form id="term-form" class="toolbar padded">
             <label class="field grow"><span class="sr-only">Send a whole line</span>
               <input id="term-in" class="mono" placeholder="…or type a whole line here and press Enter"
@@ -1346,8 +1346,8 @@ let TERM_SESSION = null;
 
 async function openShell(){
   const node = $("shell-node").value;
-  if(!node){ $("term").textContent = "No node has granted you a shell."; return; }
   if(!TERM_SESSION) TERM_SESSION = new ShellSession($("term"), {});
+  if(!node){ TERM_SESSION.say("No node has granted you a shell."); return; }
   if(await TERM_SESSION.open(node)) $("term").focus();
 }
 
@@ -1667,8 +1667,20 @@ $("term-form").addEventListener("submit", async (event) => {
 // is focusable, so a click puts the keyboard where the user is looking.
 $("term").addEventListener("keydown", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
+  // Copy and paste are the browser's while something is selected on the screen.
   if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
-     window.getSelection().toString()) return;          // let copy/paste through
+     TERM_SESSION.screen.selected()) return;
+  // Shift with a page key scrolls the scrollback rather than reaching the pty —
+  // the convention every terminal uses, and the only way back up now that the
+  // screen is drawn rather than laid out.
+  if(event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")){
+    if(TERM_SESSION.screen.scrollBy(
+        (event.key === "PageUp" ? -1 : 1) * (TERM_SESSION.screen.rows - 1))){
+      TERM_SESSION.paint(true);
+    }
+    event.preventDefault();
+    return;
+  }
   const bytes = keyBytes(event, TERM_SESSION.term);
   if(bytes === null) return;
   event.preventDefault();
@@ -1679,22 +1691,14 @@ $("term").addEventListener("paste", async (event) => {
   event.preventDefault();
   await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
 });
-// The pointer, only while a program has asked to see it. With reporting off a
-// drag stays an ordinary selection, which is what a shell session wants.
-$("term").addEventListener("mousedown", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "down")) event.preventDefault();
-});
-$("term").addEventListener("mouseup", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "up")) event.preventDefault();
-});
-$("term").addEventListener("mousemove", (event) => {
-  if(TERM_SESSION) TERM_SESSION.mouse(event, "move");
-});
-$("term").addEventListener("wheel", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "wheel")) event.preventDefault();
-}, {passive:false});
-$("term").addEventListener("contextmenu", (event) => {
-  if(TERM_SESSION && TERM_SESSION.term && TERM_SESSION.term.mouse) event.preventDefault();
+// The pointer, the wheel and the selection belong to the session: it owns the
+// screen they act on, and there is no text in the DOM for a browser to select.
+$("term").addEventListener("copy", (event) => {
+  if(!TERM_SESSION) return;
+  const picked = TERM_SESSION.screen.selected();
+  if(!picked) return;
+  event.preventDefault();
+  event.clipboardData.setData("text/plain", picked);
 });
 // The panel changes size without the window moving — a tab switch, a rail
 // folding away — and a pty told the old size draws every box to the wrong

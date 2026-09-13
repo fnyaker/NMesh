@@ -1,10 +1,14 @@
-// Feed the emulator the exact bytes a real bash session produced, and check the
+// Feed the emulator the exact bytes a real shell session produced, and check the
 // screen reads back the way a human would see it.
-global.escHtml = null;
+//
+// Read back from the *model*, not from markup: the screen is drawn on a canvas
+// now, so there is no HTML to assert on — and no HTML injection to guard
+// against either. What a test can hold here is what the cells say, which is
+// also what a copy takes and what a screen reader is given.
 const src = require('fs').readFileSync(process.argv[2], 'utf8');
 eval(src);
 
-function screen(t){ return t.render(false).split("\n").map(l=>l.replace(/<[^>]*>/g,"")); }
+function screen(t){ return t.lines(); }
 
 let fails = 0;
 function check(name, got, want){
@@ -19,7 +23,7 @@ check("plain text", screen(t)[0], "hello world");
 
 t = new Term(40, 5);
 t.write("password: ");            // sudo's prompt, echo off, nothing typed back
-check("prompt stays put", screen(t)[0], "password:");   // trailing space trimmed on display
+check("prompt stays put", screen(t)[0], "password:");   // trailing space trimmed
 
 t = new Term(40, 5);
 t.write("abc\b\b\bxyz");          // backspace editing, as readline does
@@ -40,11 +44,13 @@ check("clear screen", screen(t)[0], "");
 t = new Term(40, 5);
 t.write("\x1b[31mred\x1b[0m ok");
 check("colour is not printed", screen(t)[0], "red ok");
-check("colour becomes a class", /t-c1/.test(t.render()), true);
+check("colour is on the cell", t.cell(0, 0).s.fg, 1);
+check("and it stops where it was reset", t.cell(0, 4).s.fg, null);
 
 t = new Term(40, 5);
 t.write("\x1b]0;a window title\x07shown");
 check("OSC title swallowed", screen(t)[0], "shown");
+check("…and kept", t.title, "a window title");
 
 t = new Term(40, 5);
 t.write("a\x1b[");                 // escape split across two chunks
@@ -54,6 +60,7 @@ check("split escape rejoined", screen(t)[0], "ab");
 t = new Term(40, 5);
 t.write("\x1b[?2004hprompt$ ");    // bracketed paste, as bash sends
 check("bracketed paste mode hidden", screen(t)[0], "prompt$");
+check("…and remembered", t.bracketed, true);
 
 t = new Term(6, 3);
 t.write("abcdefghij");             // wrap at the right margin
@@ -62,16 +69,17 @@ check("wraps at the margin", screen(t)[0]+"|"+screen(t)[1], "abcdef|ghij");
 t = new Term(10, 2);
 t.write("one\r\ntwo\r\nthree");    // scrolls, keeps scrollback
 check("scrolls", screen(t).slice(-2).join("|"), "two|three");
+check("and the line above is kept", screen(t)[0], "one");
 
 t = new Term(40, 3);
 t.write("<script>alert(1)</script>");
-check("html is escaped", /&lt;script&gt;/.test(t.render()), true);
-check("no raw tag", /<script>/.test(t.render()), false);
+check("markup is text like anything else", screen(t)[0], "<script>alert(1)</script>");
 
 t = new Term(20, 2);
 t.write("ab");
-check("cursor is drawn", /t-cur/.test(t.render()), true);
-check("cursor can be hidden", /t-cur/.test(t.render(false)), false);
+check("the cursor is where the text left it", t.x + ":" + t.y, "2:0");
+t.write("\x1b[?25l");
+check("a program can hide it", t.cursorVisible, false);
 
 // ---- what a full-screen program does --------------------------------------
 // Everything below is a thing `btop`, `htop`, `vim` or `less` does on the way
@@ -113,31 +121,24 @@ check("erase char leaves the rest", screen(t)[0], "ab  ef");
 t = new Term(20, 2);
 t.write("\x1b[38;5;208morange\x1b[0m");
 check("256-colour is a style, not text", screen(t)[0], "orange");
-// The colour is a class minted for it, not a `style=` attribute: the console's
-// policy has no `unsafe-inline`, so an inline style would be dropped in silence.
-check("256-colour becomes a class", /class="t-x\d+"/.test(t.render()), true);
-// `t_class` is idempotent, so asking for the declaration hands back the class
-// already minted for it — and a different one if nothing was minted at all.
-check("and the class is the one that colour minted",
-      new RegExp('class="' + t_class("color:rgb(255,135,0)") + '"').test(t.render()), true);
-check("nothing is written as an inline style", /style=/.test(t.render()), false);
+check("256-colour resolves to a colour", t.cell(0, 0).s.front, "#ff8700");
 t = new Term(20, 2);
 t.write("\x1b[48;2;10;20;30mdeep\x1b[0m");
-check("24-bit background",
-      new RegExp('class="' + t_class("background:rgb(10,20,30)") + '"').test(t.render()), true);
+check("24-bit background", t.cell(0, 0).s.back, "#0a141e");
 
 // Background-colour erase: a program sets a background and erases to paint a
 // panel. Without it every painted area comes back the colour of the page.
 t = new Term(6, 2);
 t.write("\x1b[41m\x1b[2J");
-check("erase paints the background", /t-g1/.test(t.render()), true);
+check("erase paints the background", t.cell(0, 0).s.bg, 1);
 
 t = new Term(20, 2);
 t.write("\x1b[7minverse\x1b[27m");
 check("inverse swaps, it does not print", screen(t)[0], "inverse");
+check("…and the swap is resolved once", t.cell(0, 0).s.back, "#cfe0f7");
 
-// Resizing keeps what is on the screen: a shell at a prompt is never told the
-// size changed and never repaints.
+// Resizing keeps the content: a shell at a prompt is never told the size
+// changed and never repaints.
 t = new Term(40, 5);
 t.write("kept across a resize");
 t.resize(60, 8);
@@ -191,6 +192,7 @@ t = new Term(10, 2);
 t.write("你好!");
 check("a wide character takes two cells", t.x, 5);
 check("and reads back whole", screen(t)[0], "你好!");
+check("its second column is a continuation", t.cell(0, 1).w, 0);
 
 // `ESC ( 0` — the line-drawing set older programs still use.
 t = new Term(10, 2);
@@ -210,11 +212,43 @@ t = new Term(5, 3);
 t.write("\x1b[?7labcdefgh");
 check("no wrap means no second line", screen(t)[1], "");
 
-// The cursor is drawn where the program put it, and hidden when it asks.
-t = new Term(10, 2);
-t.write("\x1b[?25l");
-check("a hidden cursor is not drawn", /t-cur/.test(t.render()), false);
-t.write("\x1b[?25h");
-check("and comes back", /t-cur/.test(t.render()), true);
+// ---- the shape of the parser -----------------------------------------------
+// It used to slice the remaining buffer at every escape to run a regex against,
+// which on a screen a full-screen program draws — thousands of escapes in one
+// chunk — is quadratic in the size of a frame. That is not a thing a unit test
+// can assert directly, so it is asserted as time: a frame's worth of escapes
+// has to parse in well under the frame it belongs to.
+t = new Term(200, 60);
+let frame = "";
+for(let row = 1; row <= 60; row++){
+  frame += "\x1b[" + row + ";1H";
+  for(let col = 0; col < 60; col++) frame += "\x1b[38;5;" + (col % 200 + 16) + "m⠿";
+}
+const started = Date.now();
+for(let n = 0; n < 10; n++) t.write(frame);
+const elapsed = (Date.now() - started) / 10;
+check("a frame parses in well under a frame", elapsed < 60, true);
+if(elapsed >= 60) console.log("  (took " + elapsed.toFixed(1) + "ms per frame)");
+
+// The dirty set is what makes a repaint cost the lines that moved. A program
+// that wrote one line must not ask for the whole screen back.
+t = new Term(80, 24);
+t.write("first\r\n");
+t.dirty.clear(); t.allDirty = false;
+t.write("\x1b[5;1Hjust this line");
+// Two: the line that was written, and the one the cursor left — a repaint has
+// to take the old cursor off as well as draw the new one.
+check("one line written, two lines dirty", t.dirty.size, 2);
+check("the one that moved", t.dirty.has(4), true);
+check("and the one the cursor left", t.dirty.has(1), true);
+check("without claiming the whole screen", t.allDirty, false);
+t.write("\x1b[2J");
+check("clearing the screen claims all of it", t.allDirty, true);
+
+// What a copy takes, and what a screen reader is given.
+t = new Term(20, 3);
+t.write("one\r\ntwo\r\nthree");
+check("text is the lines joined", t.text(), "one\ntwo\nthree");
+check("a range spans rows", t.range({row:0, col:1}, {row:1, col:2}).text, "ne\ntw");
 
 process.exit(fails ? 1 : 0);

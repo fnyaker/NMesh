@@ -83,7 +83,11 @@ it, a key row for what a phone's keyboard does not have (Esc, Tab, sticky Ctrl
 and Alt, arrows, `^c`), copy and paste both ways, and **Files**: browse the
 machine, download, upload, make a folder. The emulator is a real one: the
 alternate screen, scroll regions, 24-bit colour, mouse reporting and a size
-pushed to the pty, which is what `btop` and `vim` need to draw at all. All of it under the `shell` right and
+pushed to the pty, which is what `btop` and `vim` need to draw at all — and the
+screen is a **canvas**, because a grid of text in the DOM drifts the moment one
+glyph falls back to a font with a different advance. Selection and the
+scrollback (the wheel, Shift-PageUp/PageDown) are the screen's own; a screen
+reader gets the same text from an off-screen mirror. All of it under the `shell` right and
 nothing more, because an operator who can open a shell there can already read
 and write those files by typing. Detail:
 [`Docs/Apps/fleet`](../Apps/fleet).
