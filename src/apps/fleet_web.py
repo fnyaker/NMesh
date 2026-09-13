@@ -28,6 +28,7 @@ from collections import OrderedDict, deque
 from .. import app_api
 from ..node_id import NodeID
 from . import fleet_files
+from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
@@ -346,7 +347,17 @@ class FleetBridge:
 
     # -- snapshot (what the browser polls) --------------------------------
 
-    def snapshot(self, since: int = 0) -> dict:
+    def snapshot(self, since: int = 0, *, have=None, proto: int = 1) -> dict:
+        """What a page reads, in the shape it asked for.
+
+        Split into named sections and handed to :mod:`src.console_feed`, which
+        sends back only the ones whose content actually moved. A ledger of forty
+        machines re-encoded and re-sent because one job finished is most of what
+        a console costs, and on a relay it is the whole of it.
+
+        The split is by *question*, not by size: "which machines do I manage",
+        "what is running", "what has this node been told". A section is what a
+        view redraws when it changes."""
         state = self._app.state
         with self._lock:
             version = self._version + state.version
@@ -357,11 +368,8 @@ class FleetBridge:
                        "seq": r["seq"], "status": r["status"]}
                       for r in self._shells.values()]
             jobs = [dict(job) for job in self._jobs.values()]
-        return {
+        sections = {
             "me": self.me,
-            "version": version,
-            "log_seq": self._log_seq,
-            "log": log,
             "managed": sorted((dict(entry, pseudo=self._name_of(entry["id"]))
                                for entry in state.managed()),
                               key=lambda entry: entry.get("label")
@@ -371,12 +379,12 @@ class FleetBridge:
             "pending_in": state.pending_in(),
             "pending_out": state.pending_out(),
             "provisioned": state.provisioned(),
-            "scans": scans,
-            "updates": updates,
             # One membership list, and the page derives "which groups is this
             # node in?" from it. A second copy on each node is a second chance
             # for the two to disagree.
             "groups": state.groups(),
+            "scans": scans,
+            "updates": updates,
             "shells": shells,
             "jobs": jobs,
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
@@ -384,6 +392,13 @@ class FleetBridge:
             "host": self._app.facts.as_dict(),
             "notice": self._notice,
         }
+        # The log is already incremental — it is read by sequence, not by
+        # revision — so it travels beside the sections rather than as one.
+        return console_feed.build(sections, have=have, proto=proto, extra={
+            "version": version,
+            "log_seq": self._log_seq,
+            "log": log,
+        })
 
     def newest_shell(self, node_hex: str) -> str:
         """The sid of the live shell on that node, or "".

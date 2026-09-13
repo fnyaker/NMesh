@@ -774,6 +774,49 @@ def test_the_terminal_tells_the_pty_the_size_it_actually_has():
     assert "ResizeObserver" in source
 
 
+def test_a_page_never_replaces_what_it_holds_with_an_error():
+    """The bug this is for: `apiJson` answers a 502 with a *body*, and a page
+    that assigns it over what it holds has just replaced every list with
+    nothing. Which reads as "there is nothing here" — a different and much worse
+    claim than "I have not heard lately"."""
+    source = webassets.ui.JS
+    read = source.split("  async read(path, params){")[1].split("\n  },")[0]
+    assert "if(!answer.ok" in read and "return null" in read
+    # And the one page that did it reads through the feed now, and keeps what it
+    # has when the answer is not one.
+    poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert 'FEED.read("/api/fleet/state"' in poll
+    assert "if(!data){" in poll and "return;" in poll
+
+
+def test_a_page_notices_when_the_node_under_it_was_updated():
+    """A node that updates itself replaces the assets under an open page. The
+    page then asks questions the new node no longer answers, gets refusals, and
+    empties — so it reloads once instead."""
+    source = webassets.ui.JS
+    assert 'const BUILD = "' in source and "__NMESH_BUILD__" not in source
+    agrees = source.split("  agrees(data){")[1].split("\n  },")[0]
+    assert "data.build === BUILD" in agrees
+    # Once, and only once: a reload loop is worse than a stale page.
+    assert "this.reloading" in agrees
+    # The stream is the first place it shows, because it reconnects on its own
+    # after the restart an update ends in.
+    assert "FEED.agrees(hello)" in source
+
+
+def test_a_read_asks_for_what_it_does_not_already_have():
+    """A ledger of forty machines re-encoded and re-sent because one job
+    finished is most of what a console costs."""
+    source = webassets.ui.JS
+    read = source.split("  async read(path, params){")[1].split("\n  },")[0]
+    assert 'query.set("proto", "2")' in read
+    assert 'query.set("have"' in read
+    # A page that lost its state has to be able to ask for all of it again.
+    assert "if(have.length && hold.state)" in read
+    # Sections are merged into what is held, never assigned over it.
+    assert "Object.assign({}, hold.state || {}, data.sections)" in read
+
+
 def test_the_terminal_draws_on_a_canvas_rather_than_in_the_dom():
     """A grid of text in the DOM depends on every glyph having the same advance.
     `btop` draws with box-drawing and braille characters many monospace fonts do

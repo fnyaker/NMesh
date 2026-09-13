@@ -464,10 +464,26 @@ function capsList(caps){
 }
 
 // ---- polling ---------------------------------------------------------------
+// Whether what is on screen is still being confirmed. Said in the rail rather
+// than by emptying the page: a list that went blank reads as "there is nothing",
+// which is a different and much worse claim than "I have not heard lately".
+function feedState(live){
+  $("rail-dot").className = "dot " + (live ? "ok" : "warn");
+  $("rail-text").textContent = live ? "Fleet" : "Not answering";
+}
 async function poll(){
   let data;
-  try{ data = (await apiJson("/api/fleet/state?since=" + VER)).data; }
-  catch(_){ return; }
+  // Through `FEED`, which merges what changed into what is held and hands back
+  // nothing when an answer is unusable. Assigning the answer straight over `ST`
+  // is what emptied this page: a 502 has a body too, and its body has no
+  // machines in it.
+  try{ data = await FEED.read("/api/fleet/state", {since: VER}); }
+  catch(_){ data = null; }
+  if(!data){
+    feedState(false);
+    return;                      // keep what is on screen: it was true a moment ago
+  }
+  feedState(true);
   const first = !ST.capabilities;
   ST = data;
   if(typeof data.log_seq === "number") VER = data.log_seq;
