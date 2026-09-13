@@ -38,6 +38,13 @@ Among other things they check:
   table exceeds the historical cliff of five certified nodes must still answer
   lookups, relay ping/data/directory, learn the return path along a chain, and
   stay responsive under packets addressed to unreachable ids.
+- **An invitation that reaches a node with no address of its own**
+  (`tests/integration/test_relay_invite.py`): the relay-invite block, and the
+  compact invitation doing the same journey out of a string short enough to
+  scan — the rendezvous really lands with the relay before the string is handed
+  over, the joiner's 40 bytes become a session with the inviter, and E2E data
+  flows over the relayed path. The same file holds the other direction: a
+  ticket that names both routes tries the direct one first.
 - Recovery **after a restart** without re-inviting (routing + E2E sessions
   restored from disk).
 - **Self-repair** (purging a dead peer) and the **app→mesh→app** path through
@@ -115,7 +122,15 @@ tests/
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown
 ├── test_e2e.py / test_data.py                         — E2E encryption
-├── test_invite*.py / test_cert_store.py               — invitations & trust
+├── test_invite*.py / test_cert_store.py               — invitations & trust,
+│     including the **rendezvous** that lets one reach a node with no address of
+│     its own: an offer only ever about its own sender (the key must hash to the
+│     sender's id and have signed the token), never from an unauthenticated
+│     link, never naming somebody else's key, expiring, bounded and rate
+│     limited — and the short seek it authorises, which becomes an ordinary
+│     signed seek only where a matching offer is, is refused when aimed at a
+│     node the offer does not name, and is silent everywhere else rather than
+│     answering "no such code"
 ├── test_release_trust.py                              — what may replace this
 │     node's code: corroboration counted in signatures and never in mirrors, a
 │     quorum of endorsed keys that 200 minted publishers cannot reach, a

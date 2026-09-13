@@ -617,6 +617,22 @@ class FleetBridge:
             if "manage" in (entry.get("caps") or [])
         ]
 
+    def invite_issuers(self) -> list:
+        """Nodes that granted us ``invite`` — who else can let somebody in.
+
+        The point of the `invite` capability is that the node which will
+        *honour* a code is the node that mints it. So an operator inviting
+        somebody into a mesh they reach through another machine should be
+        choosing that machine here, rather than handing out a code for a node
+        the joiner may have no route to."""
+        return [
+            {"id": entry["id"], "label": entry.get("label") or "",
+             "pseudo": self._name_of(entry["id"])}
+            for entry in sorted(self._app.state.managed(),
+                                key=lambda item: item.get("label") or item["id"])
+            if "invite" in (entry.get("caps") or [])
+        ]
+
     def remote_connect(self, session: str, node_hex: str,
                        password: str | None = None) -> tuple:
         """Open a session on a remote node's console. ``(ok, detail)``.

@@ -95,15 +95,20 @@ class TestJoinByTicket:
 
 
 class TestPublicGate:
-    async def test_a_node_with_no_public_address_refuses_to_issue_one(self):
-        """A ticket pointing at an address nobody can reach is worse than no
-        ticket: it fails after being shared."""
+    async def test_a_node_with_no_route_in_at_all_refuses_to_issue_one(self):
+        """An invitation pointing nowhere is worse than none: it fails after
+        being shared.
+
+        A loopback listener is neither a public address nor one anybody on a
+        network can dial, and with no peer to carry a rendezvous there is
+        nothing left to put in the string."""
         node = make_node()
         await node.start(["tcp://127.0.0.1:19375"])
         try:
             assert node.public_endpoints() == []
+            assert node.local_endpoints() == []
             with pytest.raises(ValueError):
-                node.issue_join_ticket(600)
+                await node.issue_join_ticket(600)
         finally:
             await node.stop()
 
@@ -115,7 +120,7 @@ class TestPublicGate:
                 {"transport": "tcp", "scope": "world", "anchor": "",
                  "address": "tcp://203.0.113.7:9000", "confirmed": True},
             ])
-            ticket = node.issue_join_ticket(600)
+            ticket = await node.issue_join_ticket(600)
             parsed = join_ticket.decode(ticket["ticket"])
             assert parsed["uri"] == "tcp://203.0.113.7:9000"
             assert parsed["code"] == ticket["code"]
@@ -134,6 +139,6 @@ class TestPublicGate:
             ]
             assert node.public_endpoints() == []
             with pytest.raises(ValueError):
-                node.issue_join_ticket(600)
+                await node.issue_join_ticket(600)
         finally:
             await node.stop()

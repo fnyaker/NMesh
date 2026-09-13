@@ -1138,6 +1138,9 @@ def _make_handler(console: WebConsole):
             if path == "/api/remote/targets":
                 self._handle_remote_targets()
                 return
+            if path == "/api/invite/issuers":
+                self._handle_invite_issuers()
+                return
             if path == "/api/events":
                 self._stream_changes()
                 return
@@ -2024,6 +2027,22 @@ def _make_handler(console: WebConsole):
                 "me": console._node.id.raw.hex(),
                 "available": fleet is not None,
                 "targets": fleet.remote_targets() if fleet is not None else [],
+            })
+
+        def _handle_invite_issuers(self) -> None:
+            """Who, besides this node, can let somebody into a mesh.
+
+            The `invite` capability exists because the node that will *honour* a
+            code is the node that mints it. Offering the choice here is what
+            makes the capability usable from the page where somebody is actually
+            inviting a machine, rather than only from the fleet page."""
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            fleet = console._fleet
+            self._json(200, {
+                "available": fleet is not None,
+                "issuers": fleet.invite_issuers() if fleet is not None else [],
             })
 
         def _handle_remote_post(self, path: str, data) -> None:

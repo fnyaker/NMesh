@@ -982,7 +982,9 @@ class TestInvite:
     should not cost a grant of the whole machine."""
 
     def _agent_that_invites(self, agent, minted):
-        def _mint(ttl=None, ticket=False):
+        # A coroutine: minting a scannable invitation leaves a rendezvous with a
+        # relay first, which is a round trip over the mesh.
+        async def _mint(ttl=None, ticket=False):
             minted.append((ttl, ticket))
             return {"uris": ["tcp://10.0.0.9:9000"], "code": "abcdefghij",
                     "ticket": "TICKET" if ticket else "",
@@ -996,6 +998,7 @@ class TestInvite:
         await enrol(operator, agent, caps=["invite"])
         await operator.app.request_invite(agent.id, ttl=3600, ticket=True)
         await deliver(operator, agent)
+        await settle()
         await deliver(agent, operator)
         issued = [e for e in operator.drain_events()
                   if isinstance(e, fleet.InviteIssued)]

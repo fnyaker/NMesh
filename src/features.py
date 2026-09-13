@@ -79,6 +79,11 @@ RELEASE = "release"        # the node's own code: gossip and transfer
 PUNCH = "punch"            # UDP hole punching
 REACH = "reach"            # reachability probes
 RELAY = "relay"            # relayed invitation and carry
+# A rendezvous left with a relay: "expect a seek for this code, and here is the
+# proof I authorised it". Separate from `relay` because it is the half that lets
+# an invitation fit in a QR code, and a node that predates it has to keep
+# working — it simply never receives one.
+RENDEZVOUS = "rdv"
 RENEW = "certren"          # membership renewal
 REVOKE = "revoke"          # membership revocation gossip
 ABUSE = "abuse"            # signed abuse reports
@@ -94,14 +99,14 @@ PACKAGES = "pkgdir"        # the package directory (PKG_STORE / FIND / FOUND / A
 HANDOVER = "handover"
 
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
-                    PUNCH, REACH, RELAY, RENEW, REVOKE, ABUSE,
+                    PUNCH, REACH, RELAY, RENDEZVOUS, RENEW, REVOKE, ABUSE,
                     KEEPALIVE, MLO, PACKAGES, HANDOVER})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
-SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER})
+SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS})
 
 
 class FeatureError(Exception):

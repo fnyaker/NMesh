@@ -1315,11 +1315,20 @@ class FleetApp:
         if self._mesh_invite is None:
             self._fail(src, rid, "this node cannot issue invitations")
             return
+        self._spawn(self._issue_invitation(src, rid, document))
+
+    async def _issue_invitation(self, src: NodeID, rid: str,
+                                document: dict) -> None:
+        """Mint on the operator's behalf, off the receive loop.
+
+        Off it because minting a scannable invitation leaves a rendezvous with a
+        relay first — a round trip over the mesh — and the receive loop is not
+        somewhere to wait for one."""
         # The operator asked for a window; this node decides what it is worth.
         ttl = _invite_ttl(document.get("ttl"))
         want_ticket = document.get("ticket") is True
         try:
-            invitation = self._mesh_invite(ttl=ttl, ticket=want_ticket)
+            invitation = await self._mesh_invite(ttl=ttl, ticket=want_ticket)
         except Exception:                       # noqa: BLE001 — never crash here
             invitation = None
         if not isinstance(invitation, dict) or not invitation.get("code"):
@@ -2357,7 +2366,7 @@ class FleetApp:
         # handshake anchors the newcomer to the network. The operator is a
         # separate matter: it is who the machine will *obey*, carried by the
         # pre-authorisation, and it need not be reachable at first boot.
-        uris, code = self._fresh_invitation(join_uris, join_code)
+        uris, code = await self._fresh_invitation(join_uris, join_code)
         preauth, token = fleet_provision.make_preauth(
             src.raw, self._operator_key(src), capabilities=caps,
             join_uris=uris, join_code=code,
@@ -2382,8 +2391,8 @@ class FleetApp:
         result["joins"] = bool(uris and code)
         return result
 
-    def _fresh_invitation(self, fallback_uris: list[str],
-                          fallback_code: str) -> tuple[list[str], str]:
+    async def _fresh_invitation(self, fallback_uris: list[str],
+                                fallback_code: str) -> tuple[list[str], str]:
         """One single-use mesh invitation for one machine.
 
         Minted per target, never shared: an invitation is single-use by design,
@@ -2397,7 +2406,7 @@ class FleetApp:
         if self._mesh_invite is None:
             return fallback_uris, fallback_code
         try:
-            invitation = self._mesh_invite()
+            invitation = await self._mesh_invite()
         except Exception:
             return fallback_uris, fallback_code
         if not isinstance(invitation, dict):
@@ -2523,8 +2532,8 @@ class FleetApp:
         results = []
         try:
             for target in targets:
-                uris, code = self._fresh_invitation(join_uris or [],
-                                                    join_code or "")
+                uris, code = await self._fresh_invitation(join_uris or [],
+                                                          join_code or "")
                 preauth, token = fleet_provision.make_preauth(
                     self.node_id.raw, self._auth.public_key,
                     capabilities=caps, join_uris=uris, join_code=code,

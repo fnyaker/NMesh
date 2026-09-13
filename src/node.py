@@ -159,6 +159,7 @@ PKG_ANNOUNCE      = 0x2C   # gossip a signed record: "this key publishes that"
 KEY_OFFER         = 0x2D   # "I hold this publisher key and offer it to you"
 KEY_ACCEPT        = 0x2E   # "I want it — seal it to this KEM key" (signed)
 KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
+INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a relay
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -825,9 +826,18 @@ _REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded
 # twice over, so anything much later than this is not an answer to our question.
 _REACH_PENDING_TTL    = 30.0
 _REACH_PENDING_MAX    = 64
+# A rendezvous an inviter left with a relay: "a joiner will come asking for
+# this code; here is the proof I authorised it". It is what lets an invitation
+# reach a node with no address of its own from a string short enough to put in a
+# QR code — the heavy part (an ML-DSA key and a signature, five kilobytes) stays
+# with the relay, and the ticket carries an identity and a seed.
+_SHORT_SEEK_LEN    = 40        # exp(8) | h_code(32) — nothing else fits in it
+_OFFER_MAX         = 256       # rendezvous offers one node holds for others
+_OFFER_RATE_MAX    = 8         # offers one peer may leave us per window
 _RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
 _RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
 _RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
+_RELAY_TRIES       = 3         # relays a ticket's rendezvous is offered to
 _MAX_RELAY_PEERS   = 64        # bounded virtual (relayed) peer table
 _RELAY_QUEUE_MAX   = 32        # packets a relayed tunnel may hold undelivered
 
@@ -1904,6 +1914,11 @@ class MeshNode:
         self._rdv: OrderedDict[bytes, tuple] = OrderedDict()      # seeker_id -> (peer, exp)
         self._seek_rate: OrderedDict[bytes, tuple] = OrderedDict()  # _rate_key(peer) -> (count, window)
         self._pending_seeks: OrderedDict[bytes, dict] = OrderedDict()  # seeker_id -> record
+        # Rendezvous offers other nodes left with us: h_code -> what a seek for
+        # that code needs to become. Bounded, expiring, and only ever written by
+        # an authenticated peer about *itself*.
+        self._offers: OrderedDict[bytes, dict] = OrderedDict()
+        self._offer_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._carry_rate: OrderedDict[bytes, tuple] = OrderedDict()     # _rate_key(peer) -> (count, window)
         self._relay_peers: dict[bytes, _Peer] = {}   # remote_id -> virtual peer (tunnelled)
         self._lan_discovery = None                    # LanDiscovery answerer (opt-in)
@@ -6287,33 +6302,180 @@ class MeshNode:
                     out.append(address)
         return out
 
-    def issue_join_ticket(self, ttl: float | None = None) -> dict:
-        """Mint a compact join ticket. Raises ``ValueError`` if we are not
-        publicly reachable — the whole point of this shape of invitation is that
-        the scanner needs nothing but the string."""
+    def local_endpoints(self) -> list[str]:
+        """Addresses a node on our own networks can dial.
+
+        Not a weaker version of :meth:`public_endpoints` — a different audience,
+        proved by a different thing (`ip_utils.ip_reachability`). A ticket that
+        names one works on that network and nowhere else, which is exactly right
+        for the case it exists for and is why what comes back says so."""
+        out: list[str] = []
+        for descriptor in self.reachability():
+            if descriptor.get("scope") != "lan" or not descriptor.get("confirmed"):
+                continue
+            address = descriptor.get("address")
+            if isinstance(address, str) and address.startswith("tcp://"):
+                if address not in out:
+                    out.append(address)
+        return out
+
+    async def issue_join_ticket(self, ttl: float | None = None) -> dict:
+        """Mint one invitation that works whichever way round the two nodes are.
+
+        It carries a direct endpoint when this node has one, **and** a relay
+        when a peer can carry for it — so the joiner dials us if it can and
+        reaches us *through* somebody if it cannot, with the same single-use
+        code either way. That is what removes the second exchange: there used to
+        be a ticket for the reachable case and a block of base64 pasted between
+        two consoles for the other, and an operator had to know which situation
+        they were in before they could invite anybody.
+
+        The heavy part of a relayed invitation — an ML-DSA key and a signature,
+        five kilobytes of it — is left **with the relay** rather than put in the
+        string, which is the only reason both routes fit in something scannable.
+
+        Raises ``ValueError`` when neither route exists: an invitation nobody
+        can act on is worse than none, because it fails after it has been
+        shared."""
         from . import join_ticket
-        endpoints = self.public_endpoints()
-        if not endpoints:
-            raise ValueError(
-                "this node has no confirmed public address — a scanned ticket "
-                "would have nowhere to connect. Use the full join instead.")
-        parsed = _validate_uri(endpoints[0])
-        hostport = split_host_port(parsed[1]) if parsed else None
-        if hostport is None:
-            raise ValueError("could not read our own public address")
-        host, port = hostport
         window = join_ticket.clamp_ttl(ttl)
+        expires_at = time.time() + window
+
+        direct = None
+        # A public address if there is one; otherwise one that works on this
+        # machine's own networks, which is the whole of what a LAN deployment
+        # has and is useless to pretend is nothing.
+        endpoints = self.public_endpoints()
+        scope = "world"
+        if not endpoints:
+            endpoints = self.local_endpoints()
+            scope = "lan" if endpoints else ""
+        if endpoints:
+            parsed = _validate_uri(endpoints[0])
+            hostport = split_host_port(parsed[1]) if parsed else None
+            if hostport is not None:
+                direct = (hostport[0].strip("[]"), hostport[1])
+
+        candidates = self._rendezvous_candidates()
+        if direct is None and not candidates:
+            raise ValueError(
+                "this node has no confirmed public address and no peer that can "
+                "carry an invitation for it — nothing could reach it. Use the "
+                "manual exchange instead.")
+
         code, seed = self._invite.generate_seeded_code(window)
-        text = join_ticket.encode(host.strip("[]"), port, seed,
-                                  time.time() + window)
+        relay = None
+        if candidates:
+            # Left before the string is handed over, so what stands between the
+            # two is one network trip — against a human reading a QR code off a
+            # screen. Not a handshake: an acknowledgement would be a second
+            # message type to buy a margin nobody can spend.
+            for peer, host, port in candidates[:_RELAY_TRIES]:
+                if await self.leave_rendezvous(peer, code, int(expires_at)):
+                    relay = (host, port)
+                    break
+
+        text = join_ticket.encode(
+            direct[0] if direct else "", direct[1] if direct else 0,
+            seed, expires_at,
+            relay=relay, node_id=self._id.raw if relay else b"")
         return {
             "ticket": text,
-            "uri": f"tcp://{host}:{port}",
+            "uri": f"tcp://{direct[0]}:{direct[1]}" if direct else "",
+            "relay_uri": f"tcp://{relay[0]}:{relay[1]}" if relay else "",
+            # Which audience the direct address is for. A page showing a ticket
+            # has to be able to say "this one only works on your own network"
+            # rather than let somebody find out after sharing it.
+            "scope": scope if direct else "",
             "code": code,
-            "expires_at": time.time() + window,
+            "expires_at": expires_at,
             "ttl": window,
             "endpoints": endpoints,
         }
+
+    async def console_use_ticket(self, text: str) -> dict:
+        """Act on a ticket: dial the inviter, or reach it through the relay.
+
+        Direct first, because a direct link is the thing a relayed one exists to
+        stand in for — and because trying it costs one connection. The fallback
+        is not a second invitation: it is the same code, over the rendezvous the
+        inviter left with the node named in the string."""
+        from . import join_ticket
+        parsed = join_ticket.decode(text)          # TicketError, never anything else
+        code = parsed["code"]
+        if parsed["uri"]:
+            outcome = await self.console_join(parsed["uri"], code)
+            if outcome.get("ok"):
+                return dict(outcome, through="direct")
+            if not parsed["relay_uri"]:
+                return outcome
+        elif not parsed["relay_uri"]:
+            raise ValueError("that ticket points nowhere")
+        try:
+            inviter = NodeID(bytes.fromhex(parsed["node"]))
+        except (ValueError, TypeError):
+            raise ValueError("that ticket names no inviter") from None
+        if inviter == self._id:
+            raise ValueError("that is our own invitation")
+        ok = await self._relay_join_short(parsed["relay_uri"], inviter, code)
+        return {"ok": ok, "through": "relay",
+                "reason": "" if ok else "no_session",
+                "detail": "" if ok else
+                          "the relay in that ticket did not produce a session"}
+
+    async def _relay_join_short(self, relay_uri: str, inviter: NodeID,
+                                code: str) -> bool:
+        """The relayed half of a ticket: one short seek, then the tunnel.
+
+        Same machinery as a relay-invite block, with one difference — the seek
+        carries the code's hash and nothing else, because the proof the inviter
+        signed is already sitting with the relay."""
+        if self._join_task is not None and not self._join_task.done():
+            raise ValueError("a join is already in progress")
+        rlink = None
+        vpa = None
+        try:
+            transport = await self._transport_manager.connect(relay_uri)
+            rlink = _Peer(transport, is_client_side=True)
+            rlink.relay_only = True
+            rlink.on_dead = self._reap_peer
+            rlink.total = self._metrics.total
+            rlink.remote_addr = relay_uri
+            self._peers.append(rlink)
+            self._running = True
+            await rlink.start(self._handle_packet)
+
+            vpa = _Peer(RelayedTransport(self, inviter, rlink), is_client_side=True)
+            vpa.join_code = code
+            vpa.on_dead = self._relay_on_dead(inviter.raw)
+            vpa.total = self._metrics.total
+            self._relay_peers[inviter.raw] = vpa
+            self._peers.append(vpa)
+            await vpa.start(self._handle_packet)
+
+            await rlink.send(Packet.create(
+                INVITE_SEEK, self._id.raw, inviter.raw,
+                struct.pack("!Q", int(time.time() + _RELAY_INVITE_TTL))
+                + _h_code(code),
+                ttl=_SEEK_TTL))
+
+            deadline = time.monotonic() + self._relay_join_timeout
+            while time.monotonic() < deadline:
+                if vpa.session is not None and vpa.authenticated_id == inviter:
+                    return True
+                if vpa not in self._peers or rlink not in self._peers:
+                    break
+                await asyncio.sleep(0.05)
+            return False
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"that relay could not be reached ({exc})"[:160]) from None
+        finally:
+            if (vpa is not None and
+                    (vpa.session is None or vpa.authenticated_id != inviter)):
+                self._relay_peers.pop(inviter.raw, None)
+                await self._safe_stop_peer(vpa)
+                if rlink is not None:
+                    await self._safe_stop_peer(rlink)
 
     def relay_capable(self) -> bool:
         """True if we are confirmed reachable by a broad audience — i.e. we can
@@ -7784,6 +7946,9 @@ class MeshNode:
             # Pre-auth, token-gated, bounded — handled entirely on its own.
             await self._handle_invite_seek(peer, packet)
             return
+        if packet.type == INVITE_OFFER:
+            self._handle_invite_offer(peer, packet)
+            return
         if packet.type == RELAY_CARRY:
             await self._handle_relay_carry(peer, packet)
             return
@@ -7914,6 +8079,12 @@ class MeshNode:
             return  # msg_id must commit to content (anti-amplification)
         if self._is_seen(packet.msg_id):
             return
+        # A *short* seek: the joiner holds a ticket, not five kilobytes of key
+        # and signature. It only means anything to a node the inviter left a
+        # rendezvous with — which is the node the ticket named.
+        if len(packet.payload) == _SHORT_SEEK_LEN:
+            await self._handle_short_seek(peer, packet)
+            return
         decoded = _decode_seek(packet.payload)
         if decoded is None:
             return
@@ -7941,6 +8112,154 @@ class MeshNode:
             return
         # 4. relay toward the inviter over authenticated member links only
         await self._forward_seek(peer, packet)
+
+    async def _handle_short_seek(self, peer: '_Peer', packet: Packet) -> None:
+        """A seek carrying only an expiry and a code hash.
+
+        There is no signature in it to verify, and it needs none: it is honoured
+        **only** where the inviter itself left a rendezvous under that code hash,
+        over an authenticated link, naming the very identity this packet is
+        addressed to. The offer is the authorisation; this packet is a pointer
+        at one. Anywhere else — a stranger's node, a relay the inviter never
+        spoke to, a code nobody offered — it is dropped in silence, which is
+        also what stops it being a way to ask whether a code exists.
+
+        What it buys is the whole point: an invitation that reaches a node with
+        no address of its own, out of a string short enough to put in a QR code.
+        """
+        try:
+            exp = struct.unpack_from("!Q", packet.payload, 0)[0]
+        except struct.error:
+            return
+        h_code = packet.payload[8:_SHORT_SEEK_LEN]
+        now = time.time()
+        if exp < now or exp > now + _SEEK_MAX_FUTURE:
+            return
+        offer = self._offers.get(h_code)
+        if offer is None:
+            return
+        if offer["exp"] < now:
+            self._offers.pop(h_code, None)
+            return
+        # The ticket names the inviter; the offer names who left it. A mismatch
+        # is somebody trying to aim a rendezvous at a third node.
+        if packet.dst_id != offer["inviter"]:
+            return
+        if packet.src_id == offer["inviter"]:
+            return                      # a node seeking itself is not a joiner
+        self._rdv_record(packet.src_id, peer)
+        full = Packet.create(
+            INVITE_SEEK, packet.src_id, offer["inviter"],
+            _encode_seek(offer["exp"], h_code, offer["pub"], offer["token"]),
+            ttl=_SEEK_TTL_PREAUTH)
+        await self._forward_seek(peer, full)
+
+    def _offer_allowed(self, peer: '_Peer') -> bool:
+        """Per-peer ceiling on rendezvous offers, on the same window as seeks."""
+        now = time.monotonic()
+        for key in [k for k, (_, started) in self._offer_rate.items()
+                    if now - started > _SEEK_RATE_WINDOW]:
+            del self._offer_rate[key]
+        while len(self._offer_rate) > _RDV_MAX:
+            self._offer_rate.popitem(last=False)
+        key = self._rate_key(peer)
+        count, started = self._offer_rate.get(key, (0, now))
+        if now - started > _SEEK_RATE_WINDOW:
+            count, started = 0, now
+        if count >= _OFFER_RATE_MAX:
+            self._offer_rate[key] = (count, started)
+            return False
+        self._offer_rate[key] = (count + 1, started)
+        return True
+
+    def _handle_invite_offer(self, peer: '_Peer', packet: Packet) -> None:
+        """An authenticated peer says: expect a seek for this code, from me.
+
+        Only ever about *itself*: the key in the payload has to hash to the
+        sender's own id and to have signed the token, which is the same pair of
+        checks a full seek goes through. So holding one of these is holding a
+        statement the sender could have made to anybody — never an authority
+        over a third node."""
+        if peer.authenticated_id is None or packet.ttl <= 0:
+            return
+        if packet.src_id != peer.authenticated_id.raw:
+            return
+        if not self._offer_allowed(peer):
+            return
+        if packet.msg_id != packet.compute_msg_id():
+            return
+        decoded = _decode_seek(packet.payload)
+        if decoded is None:
+            return
+        exp, h_code, inviter_pub, token = decoded
+        now = time.time()
+        if exp < now or exp > now + _SEEK_MAX_FUTURE:
+            return
+        try:
+            if NodeID.from_public_key(inviter_pub) != peer.authenticated_id:
+                return
+            if not self._identity.verify(_seek_signed_blob(h_code, exp), token,
+                                         inviter_pub):
+                return
+        except Exception:
+            return
+        self._prune_offers(now)
+        while len(self._offers) >= _OFFER_MAX:
+            self._offers.popitem(last=False)
+        self._offers[h_code] = {"inviter": packet.src_id, "exp": exp,
+                                "pub": inviter_pub, "token": token}
+
+    def _prune_offers(self, now: float) -> None:
+        for key in [k for k, entry in self._offers.items() if entry["exp"] < now]:
+            del self._offers[key]
+
+    async def leave_rendezvous(self, peer: '_Peer', code: str,
+                               exp: int) -> bool:
+        """Tell one relay to expect a seek for ``code``. Best effort."""
+        if peer.session is None or peer.authenticated_id is None:
+            return False
+        if not self.peer_announces(peer, features.RENDEZVOUS):
+            return False
+        h_code = _h_code(code)
+        token = self._identity.sign(_seek_signed_blob(h_code, exp))
+        payload = _encode_seek(exp, h_code, self._identity.dsa_public_key, token)
+        try:
+            await peer.send(Packet.create(INVITE_OFFER, self._id.raw,
+                                          peer.authenticated_id.raw, payload))
+        except Exception:
+            return False
+        return True
+
+    def _rendezvous_candidates(self) -> list[tuple]:
+        """Peers that could carry an invitation for us, best first.
+
+        Three things have to hold at once, and each one of them has failed on
+        its own: the peer must be **reachable by a stranger** (its own
+        advertised world address, not the address we dialled it on), it must
+        **speak this plane**, and there has to be a live session to leave the
+        rendezvous over."""
+        world: list[tuple] = []
+        near: list[tuple] = []
+        for peer in self._authenticated_peers():
+            node_id = peer.authenticated_id
+            if node_id is None or peer.session is None:
+                continue
+            if not self.peer_announces(peer, features.RENDEZVOUS):
+                continue
+            for uri in self._known_addresses(node_id):
+                parsed = _validate_uri(uri)
+                if parsed is None or parsed[0] != "tcp":
+                    continue
+                hostport = split_host_port(parsed[1])
+                if hostport is None:
+                    continue
+                entry = (peer, hostport[0].strip("[]"), hostport[1])
+                # World first, and a LAN address only as a fallback: a relay a
+                # stranger cannot dial is no use to a ticket that travelled, but
+                # it is the whole of what a LAN-only deployment has.
+                (world if self._is_world_address(uri) else near).append(entry)
+                break
+        return world + near
 
     def _on_seek_for_self(self, seeker: NodeID, h_code: bytes,
                           inviter_pub: bytes, peer: '_Peer') -> None:
@@ -13521,6 +13840,7 @@ _MESSAGE_PLANE = {
     PUNCH_REQUEST: features.PUNCH, PUNCH_RELAY: features.PUNCH,
     REACH_PROBE: features.REACH, REACH_PROBE_ACK: features.REACH,
     INVITE_SEEK: features.RELAY, RELAY_CARRY: features.RELAY,
+    INVITE_OFFER: features.RENDEZVOUS,
     CERT_RENEW: features.RENEW, CERT_RENEWED: features.RENEW,
     CERT_REVOKE: features.REVOKE,
     ABUSE_REPORT: features.ABUSE,

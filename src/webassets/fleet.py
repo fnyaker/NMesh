@@ -1505,9 +1505,6 @@ function inviteDialog(id){
     '<label class="field"><span>Stays live for</span><select id="inv-ttl">' +
     INVITE_WINDOWS.map((pair) => '<option value="' + pair[0] + '">' + pair[1] +
       "</option>").join("") + "</select></label>" +
-    '<label class="check"><input id="inv-ticket" type="checkbox" checked>' +
-    "<span>Also make it scannable — needs a confirmed public address on that node, " +
-    "and it is left out rather than refused when there is none</span></label>" +
     '<div class="btn-row"><button id="inv-go" class="primary">Create</button>' +
     '<button id="inv-no">Cancel</button></div>' +
     '<p id="inv-msg" class="msg"></p><div id="inv-out"></div>';
@@ -1515,9 +1512,11 @@ function inviteDialog(id){
   $("inv-no").addEventListener("click", () => $("modal").close());
   $("inv-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     setMessage("inv-msg", "Asking " + who + "…");
+    // Always scannable when that node can manage it: one invitation carries
+    // both routes in, and a node with neither answers with the code alone
+    // rather than refusing.
     const {ok, data} = await apiJson("/api/fleet/invite", "POST",
-      {node:id, ttl:parseInt($("inv-ttl").value, 10) || 300,
-       ticket:$("inv-ticket").checked});
+      {node:id, ttl:parseInt($("inv-ttl").value, 10) || 300, ticket:true});
     if(!ok || data.error){
       setMessage("inv-msg", data.error || "That node refused.", true);
       return;
@@ -1536,7 +1535,7 @@ function inviteHTML(invite){
     '</code><button class="sm" data-copy="' + esc(invite.code) + '">Copy code</button></div>' +
     (invite.ticket ? '<div class="copyable"><code class="mono">' + esc(invite.ticket) +
       '</code><button class="sm" data-copy="' + esc(invite.ticket) +
-      '">Copy ticket</button></div>' : "") +
+      '">Copy invitation</button></div>' : "") +
     (invite.qr_svg ? '<div class="qr-holder">' + invite.qr_svg + "</div>" : "") +
     (uris ? '<p class="small muted">Reachable at</p>' + uris : "");
 }

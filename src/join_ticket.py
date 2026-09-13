@@ -14,16 +14,34 @@ it, which is why it is single-use, short-lived by default, and why the console
 says so next to every one it prints. Photographing a QR code off a screen is not
 an attack anyone needs to be clever about.
 
-Layout, ``version_and_type | address | port | seed | expiry | check``::
+Layout, ``version_and_flags | [direct] | [relay ‖ node id] | seed | expiry | check``::
 
-    byte 0      version (high nibble) and address family (low nibble)
-    1..4/16     the address, 4 bytes for IPv4 or 16 for IPv6
-    +2          port, big endian
+    byte 0      version (high nibble) and flags (low nibble)
+                  bit 0  a direct endpoint follows
+                  bit 1  …and it is IPv6
+                  bit 2  a relay endpoint follows, with the inviter's node id
+                  bit 3  …and it is IPv6
+    [4/16 + 2]  the inviter's own address and port          (bit 0)
+    [4/16 + 2]  a relay's address and port                  (bit 2)
+    [20]        the inviter's node id                       (bit 2)
     +8          the invite code's seed (the code is derived from it)
     +4          expiry, unix minutes — a **hint** for the reader
     +2          checksum, to catch a typo before dialling anything
 
-21 bytes for IPv4, 33 for IPv6, rendered in unpadded base32.
+21 bytes for a direct IPv4 ticket, 47 for one carrying both routes — 76
+characters of base32, still short enough to read aloud and well inside a small
+QR code.
+
+**Both routes in one string, so there is no second exchange.** An invitation
+used to be either a ticket (direct only, and useless if the inviter has no
+public address) or a block of base64 pasted between two consoles. Carrying a
+relay beside the direct endpoint makes one artifact work in both cases: the
+joiner dials the inviter if it can, and otherwise reaches it *through* the relay
+named here — with the same single-use code either way.
+
+Version 1 tickets still decode. They are the direct-only case with the flags
+spelled differently, and refusing to read one would strand invitations already
+in somebody's hands.
 
 Two deliberate choices worth stating. Base32 rather than base64: it is longer as
 a string, but it is *case-insensitive* (so it can be dictated and retyped) and
@@ -41,11 +59,18 @@ import ipaddress
 import struct
 import time
 
-VERSION = 1
+VERSION = 2
+LEGACY_VERSION = 1      # the direct-only ticket, still readable
 FAMILY_V4 = 4
 FAMILY_V6 = 6
 
+FLAG_DIRECT = 1
+FLAG_DIRECT_V6 = 2
+FLAG_RELAY = 4
+FLAG_RELAY_V6 = 8
+
 SEED_BYTES = 8          # 64 bits, behind a single-use code and a lockout
+NODE_BYTES = 20         # a NodeID — sha256(DSA public key)[:20]
 CHECK_BYTES = 2
 _LENGTHS = {FAMILY_V4: 4, FAMILY_V6: 16}
 
@@ -83,24 +108,50 @@ def code_from_seed(seed: bytes) -> str:
     return _b32(seed)
 
 
-def encode(host: str, port: int, seed: bytes, expires_at: float) -> str:
-    """Build the ticket string. Raises ``TicketError`` on anything unusable."""
+def _endpoint(host, port) -> tuple[bytes, bool]:
+    """One address and port, packed. Raises ``TicketError`` on anything else."""
     try:
         address = ipaddress.ip_address(host)
-    except ValueError:
+    except (ValueError, TypeError):
         # Deliberate: a ticket carries an address, never a name. A name would
         # need a resolver on the scanning side and could point anywhere later.
         raise TicketError("a ticket needs a numeric IP address") from None
-    if not 1 <= int(port) <= 65535:
+    try:
+        number = int(port)
+    except (TypeError, ValueError):
+        raise TicketError("port out of range") from None
+    if not 1 <= number <= 65535:
         raise TicketError("port out of range")
+    return address.packed + struct.pack("!H", number), address.version == 6
+
+
+def encode(host, port, seed: bytes, expires_at: float, *,
+           relay=None, node_id: bytes = b"") -> str:
+    """Build the ticket string. Raises ``TicketError`` on anything unusable.
+
+    ``host``/``port`` are the inviter's own endpoint and may be omitted when it
+    has none; ``relay`` is ``(host, port)`` for a node the joiner can reach it
+    *through*, and needs ``node_id`` with it — a relayed invitation is routed to
+    an identity, so the identity has to be in the string."""
     if len(seed) != SEED_BYTES:
         raise TicketError("wrong seed length")
+    flags = 0
+    parts: list[bytes] = []
+    if host:
+        packed, is_v6 = _endpoint(host, port)
+        flags |= FLAG_DIRECT | (FLAG_DIRECT_V6 if is_v6 else 0)
+        parts.append(packed)
+    if relay:
+        if len(node_id) != NODE_BYTES:
+            raise TicketError("a relayed ticket needs the inviter's node id")
+        packed, is_v6 = _endpoint(relay[0], relay[1])
+        flags |= FLAG_RELAY | (FLAG_RELAY_V6 if is_v6 else 0)
+        parts.append(packed)
+        parts.append(node_id)
+    if not flags:
+        raise TicketError("a ticket needs somewhere to connect")
 
-    family = FAMILY_V4 if address.version == 4 else FAMILY_V6
-    body = (bytes([(VERSION << 4) | family])
-            + address.packed
-            + struct.pack("!H", int(port))
-            + seed
+    body = (bytes([(VERSION << 4) | flags]) + b"".join(parts) + seed
             + struct.pack("!I", max(0, int(expires_at // 60))))
     return _b32(body + _checksum(body))
 
@@ -130,31 +181,93 @@ def decode(text: str) -> dict:
         # This catches a mistyped or half-scanned ticket before we dial.
         raise TicketError("this ticket is mistyped or damaged")
 
-    version, family = body[0] >> 4, body[0] & 0x0F
+    version, low = body[0] >> 4, body[0] & 0x0F
+    if version == LEGACY_VERSION:
+        return _decode_v1(body, low)
     if version != VERSION:
         raise TicketError(f"ticket version {version} is not supported")
+    return _decode_v2(body, low)
+
+
+def _decode_v1(body: bytes, family: int) -> dict:
+    """The direct-only ticket. Read, never written — see the module docstring."""
     size = _LENGTHS.get(family)
     if size is None:
         raise TicketError("unknown address family")
     if len(body) != 1 + size + 2 + SEED_BYTES + 4:
         raise TicketError("this ticket is the wrong length")
+    reader = _Reader(body, 1)
+    host, port = reader.endpoint(size)
+    seed = reader.take(SEED_BYTES)
+    minutes = struct.unpack("!I", reader.take(4))[0]
+    return _ticket(host, port, "", 0, b"", seed, minutes)
 
-    offset = 1
-    address = ipaddress.ip_address(body[offset:offset + size])
-    offset += size
-    port = struct.unpack_from("!H", body, offset)[0]
-    offset += 2
-    seed = body[offset:offset + SEED_BYTES]
-    offset += SEED_BYTES
-    minutes = struct.unpack_from("!I", body, offset)[0]
 
-    if not 1 <= port <= 65535:
-        raise TicketError("port out of range")
-    host = f"[{address}]" if address.version == 6 else str(address)
+def _decode_v2(body: bytes, flags: int) -> dict:
+    if not flags & (FLAG_DIRECT | FLAG_RELAY):
+        raise TicketError("this ticket points nowhere")
+    expected = 1 + SEED_BYTES + 4
+    if flags & FLAG_DIRECT:
+        expected += (16 if flags & FLAG_DIRECT_V6 else 4) + 2
+    if flags & FLAG_RELAY:
+        expected += (16 if flags & FLAG_RELAY_V6 else 4) + 2 + NODE_BYTES
+    if len(body) != expected:
+        raise TicketError("this ticket is the wrong length")
+
+    reader = _Reader(body, 1)
+    host, port = ("", 0)
+    relay_host, relay_port, node = ("", 0, b"")
+    if flags & FLAG_DIRECT:
+        host, port = reader.endpoint(16 if flags & FLAG_DIRECT_V6 else 4)
+    if flags & FLAG_RELAY:
+        relay_host, relay_port = reader.endpoint(16 if flags & FLAG_RELAY_V6 else 4)
+        node = reader.take(NODE_BYTES)
+    seed = reader.take(SEED_BYTES)
+    minutes = struct.unpack("!I", reader.take(4))[0]
+    return _ticket(host, port, relay_host, relay_port, node, seed, minutes)
+
+
+class _Reader:
+    """A cursor over a ticket's body that cannot run off the end silently."""
+
+    __slots__ = ("body", "at")
+
+    def __init__(self, body: bytes, at: int) -> None:
+        self.body, self.at = body, at
+
+    def take(self, count: int) -> bytes:
+        piece = self.body[self.at:self.at + count]
+        if len(piece) != count:
+            raise TicketError("this ticket is truncated")
+        self.at += count
+        return piece
+
+    def endpoint(self, size: int) -> tuple[str, int]:
+        address = ipaddress.ip_address(self.take(size))
+        port = struct.unpack("!H", self.take(2))[0]
+        if not 1 <= port <= 65535:
+            raise TicketError("port out of range")
+        return str(address), port
+
+
+def _uri(host: str, port: int) -> str:
+    if not host:
+        return ""
+    shown = f"[{host}]" if ":" in host else host
+    return f"tcp://{shown}:{port}"
+
+
+def _ticket(host, port, relay_host, relay_port, node, seed, minutes) -> dict:
     return {
-        "uri": f"tcp://{host}:{port}",
-        "host": str(address),
+        "uri": _uri(host, port),
+        "host": host,
         "port": port,
+        # Where to reach the inviter *through* somebody, when it has no address
+        # of its own — or when the one it has does not answer.
+        "relay_uri": _uri(relay_host, relay_port),
+        "relay_host": relay_host,
+        "relay_port": relay_port,
+        "node": node.hex() if node else "",
         "code": code_from_seed(seed),
         # Advisory only — the issuing node decides whether the code still works.
         "expires_at": minutes * 60,
