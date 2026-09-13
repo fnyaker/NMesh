@@ -443,3 +443,27 @@ class TestPortainerCalls:
         with pytest.raises(portainer.PortainerError) as failure:
             await client.stacks()
         assert "Portainer" in str(failure.value)
+
+
+class TestWhereAComposeFileLands:
+    """A file that decides what runs on a machine belongs with that node's own
+    state — backed up and wiped with it, never in `/tmp` and never at a path
+    somebody sent."""
+
+    def test_it_is_under_the_nodes_data_directory(self):
+        assert docker.stack_dir("/var/lib/nmesh") == "/var/lib/nmesh/stacks"
+
+    def test_and_falls_back_to_the_accounts_own_directory(self):
+        assert docker.stack_dir().endswith("/.nmesh/stacks")
+
+    async def test_a_name_that_could_climb_out_never_reaches_a_path(self, tmp_path):
+        for bad in ("../../etc/cron.d", "/etc/nmesh", "a/b", "", "."):
+            with pytest.raises(docker.DockerError):
+                await docker.deploy_stack(bad, "services: {}", root=str(tmp_path))
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_an_empty_or_oversized_compose_file_is_refused(self, tmp_path):
+        for bad in ("", "   ", "x" * (docker.MAX_COMPOSE + 1), "a\0b"):
+            with pytest.raises(docker.DockerError):
+                await docker.deploy_stack("ok", bad, root=str(tmp_path))
+        assert list(tmp_path.iterdir()) == []

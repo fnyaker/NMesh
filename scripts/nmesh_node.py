@@ -78,6 +78,7 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
         app = FleetApp(client, node.app_auth(FLEET_APP_ID),
                        state=FleetState(store=store), repo_root=ROOT,
+                       state_dir=data_dir,
                        mesh_invite=lambda ttl=None, ticket=False:
                            _mesh_invitation(node, ttl, ticket),   # a coroutine
                        release_publishers=lambda: _release_publishers(node),

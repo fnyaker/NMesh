@@ -800,13 +800,15 @@ async def stack_act(project: str, files: list[str], action: str,
     return {"stack": name, "action": action, "containers": len(rows)}
 
 
-async def deploy_stack(project: str, content: str, *, on_output=None) -> dict:
+async def deploy_stack(project: str, content: str, *, root: str = "",
+                       on_output=None) -> dict:
     """Deploy a stack from a compose file an operator wrote.
 
-    The file is written under a directory of this app's own, named for the
+    The file is written under a directory of this node's own, named for the
     project, so a redeploy later finds it exactly where compose recorded it —
     and so nothing this deploys can be made to overwrite a path chosen by
-    whoever sent the file."""
+    whoever sent the file: the only thing from the wire that reaches the path is
+    a name that passed :func:`clean_id`."""
     name = clean_id(project)
     if not name:
         raise DockerError("that is not a stack name")
@@ -815,8 +817,7 @@ async def deploy_stack(project: str, content: str, *, on_output=None) -> dict:
         raise DockerError("that compose file is empty or too large")
     if not compose_available():
         raise DockerError("this machine has no docker compose")
-    root = stack_dir()
-    directory = os.path.join(root, name)
+    directory = os.path.join(stack_dir(root), name)
     os.makedirs(directory, mode=0o700, exist_ok=True)
     path = os.path.join(directory, "docker-compose.yml")
     tmp = path + ".new"
@@ -827,10 +828,12 @@ async def deploy_stack(project: str, content: str, *, on_output=None) -> dict:
     return await stack_up(name, [path], directory, on_output=on_output)
 
 
-def stack_dir() -> str:
+def stack_dir(root: str = "") -> str:
     """Where compose files this node deployed are kept.
 
-    Under the node's own state, not `/tmp` and not a path from the wire: the
-    file decides what runs on this machine."""
-    base = os.environ.get("NMESH_STATE_DIR") or os.path.expanduser("~/.nmesh")
+    Under the node's own data directory when it has one — the same place its
+    identity and its session store live, so a compose file that decides what
+    runs on this machine is backed up and wiped with the rest of its state.
+    Never `/tmp`, and never a path from the wire."""
+    base = root or os.path.expanduser("~/.nmesh")
     return os.path.join(base, "stacks")

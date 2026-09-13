@@ -705,11 +705,19 @@ server** (same session, same cookie) as the chat sub-page. **Off by default**:
 it can open a shell, so it is enabled explicitly (`--fleet`, or the **Enable**
 button in the Apps section).
 
-The page has five sections, split by the question being asked: **Nodes** (the
-ones we control, with their status and the update / shell / scan actions),
-**Who controls this node** (the ones controlling us, with their rights and the
-pending requests), **Discover & deploy** (LAN discovery and SSH provisioning),
-**Shell** (an interactive terminal), **Activity** (the log).
+The page has six sections, split by the question being asked: **Nodes** (the
+ones we control, with their status and the update / docker / shell / scan
+actions), **Who controls this node** (the ones controlling us, with their rights
+and the pending requests), **Docker** (containers, stacks, images and the
+Portainer in front of them, on one node at a time), **Discover & deploy** (LAN
+discovery and SSH provisioning), **Shell** (an interactive terminal),
+**Activity** (the log).
+
+**Groups** sit above the node list: this console's own names for sets of
+machines. A node can be in several, membership lives in one list so editing from
+either side is the same edit, and **Update group** runs *Update* on every node in
+it — each with the docker stacks chosen for it. Nothing about a group is sent to
+any node; it is a way of pointing at several at once from here.
 
 The `/api/fleet/*` routes require the **same session** as the rest of the
 console, and do not exist (404) when the app is disabled. They only allow

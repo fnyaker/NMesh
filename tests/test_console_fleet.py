@@ -754,6 +754,33 @@ class TestFleetRoutes:
             await host.stop_all()
             await node.stop()
 
+    async def test_a_held_read_always_gives_its_slot_back(self):
+        """Each hold is a thread of this server, so there is a ceiling on them.
+        A slot that leaks is a terminal that silently stops holding after a
+        handful of reads and goes back to being slow."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._open_shell_record("ab" * 16, "ee" * 20)
+            bridge._append_shell("ab" * 16, b"already here")
+            for _ in range(3):
+                # By node, which is the path that finds the session and then
+                # answers without a second wait.
+                status, _, _, _ = await _get(
+                    console, "/api/fleet/shell?node=" + "ee" * 20 + "&wait=1",
+                    token)
+                assert status == 200
+                status, _, _, _ = await _get(
+                    console, "/api/fleet/shell?sid=" + "ab" * 16 + "&wait=1",
+                    token)
+                assert status == 200
+            assert console._shell_holds == 0
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_shell_data_for_an_unknown_session(self):
         node, console, host, _ = await _make(enabled=True)
         try:

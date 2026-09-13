@@ -849,6 +849,7 @@ function keyBytes(event, term){
 // person sees after a keystroke costs one round trip instead of one round trip
 // plus half a polling interval.
 const SHELL_RETRY = 700;        // after a failed read, before trying again
+const SHELL_MISSES = 20;        // …and how many in a row before giving up
 const SHELL_FRAME = 1000 / 30;  // repaints are coalesced to a frame
 
 // Measured from the pane rather than assumed: the remote pty is told these
@@ -883,7 +884,7 @@ function ShellSession(box, handlers){
   this.size = {cols:80, rows:24}; this.metrics = null;
   this.reading = false; this.stopped = true; this.retry = null;
   this.pending = ""; this.sending = null; this.frame = null;
-  this.decoder = null; this.lastCell = null;
+  this.decoder = null; this.lastCell = null; this.misses = 0;
 }
 ShellSession.prototype.say = function(text){
   this.box.textContent = text;
@@ -902,6 +903,7 @@ ShellSession.prototype.newTerm = function(){
 ShellSession.prototype.open = async function(node){
   await this.stop();
   this.node = node; this.sid = null; this.off = 0; this.stopped = false;
+  this.misses = 0;
   this.newTerm();
   try{
     await api("/api/fleet/shell", "POST",
@@ -919,6 +921,7 @@ ShellSession.prototype.open = async function(node){
 // tab did not start — is picked back up instead of a second one being spawned.
 ShellSession.prototype.attach = function(node){
   this.node = node; this.sid = null; this.off = 0; this.stopped = false;
+  this.misses = 0;
   this.newTerm();
   this.loop();
 };
@@ -938,8 +941,9 @@ ShellSession.prototype.read = async function(){
   let answer;
   try{
     answer = await apiJson("/api/fleet/shell?" + where + "&offset=" + this.off + "&wait=1");
-  }catch(_){ await this.pause(); return; }
-  if(!answer.ok || !answer.data){ await this.pause(); return; }   // not open yet
+  }catch(_){ return this.miss(); }
+  if(!answer.ok || !answer.data) return this.miss();   // not open yet, or gone
+  this.misses = 0;
   const data = answer.data;
   if(!this.sid){ this.sid = data.sid; this.off = 0; }
   if(data.data){
@@ -961,8 +965,19 @@ ShellSession.prototype.read = async function(){
     if(this.on.closed) this.on.closed();
   }
 };
-ShellSession.prototype.pause = function(){
-  return new Promise((resolve) => { this.retry = setTimeout(resolve, SHELL_RETRY); });
+// A read that answered nothing. Retried, but not for ever: a session the
+// console has forgotten answers 404 as readily as one that is merely slow to
+// open, and a loop that cannot tell them apart is a tab asking a question
+// nobody will ever answer.
+ShellSession.prototype.miss = function(){
+  this.misses += 1;
+  if(this.misses < SHELL_MISSES){
+    return new Promise((resolve) => { this.retry = setTimeout(resolve, SHELL_RETRY); });
+  }
+  this.node = null; this.sid = null; this.stopped = true;
+  this.say("That session is gone.");
+  if(this.on.closed) this.on.closed();
+  return Promise.resolve();
 };
 // Repaints are coalesced to one a frame: a program redrawing a whole screen
 // sends it in several chunks, and painting each one is the same picture three
@@ -1036,14 +1051,12 @@ ShellSession.prototype.cellAt = function(event){
   const rect = this.box.getBoundingClientRect();
   const x = event.clientX - rect.left - this.metrics.padLeft + this.box.scrollLeft;
   const y = event.clientY - rect.top - this.metrics.padTop + this.box.scrollTop;
-  // The screen starts below whatever scrollback is drawn above it.
-  const above = this.term && !this.term.alt()
-    ? Math.max(0, this.box.scrollHeight - this.box.clientHeight) : 0;
-  const offset = this.term && !this.term.alt()
-    ? (this.box.firstElementChild ? this.box.firstElementChild.offsetHeight : 0) : 0;
+  // The screen starts below whatever scrollback is drawn above it, so a click
+  // is measured from there rather than from the top of the pane.
+  const above = (this.term && !this.term.alt() && this.box.firstElementChild)
+    ? this.box.firstElementChild.offsetHeight : 0;
   return {col: Math.floor(x / this.metrics.cw) + 1,
-          row: Math.floor((y - offset) / this.metrics.lh) + 1,
-          above: above};
+          row: Math.floor((y - above) / this.metrics.lh) + 1};
 };
 // A program that turned mouse reporting on is *waiting* for these: without them
 // a pointer does nothing in `btop`, `htop` or `less`, and a click that does
