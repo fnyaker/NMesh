@@ -71,6 +71,14 @@ class Party:
                     return event
 
 
+def _minter(node, uri):
+    """A mesh invitation provider, as the node script wires one: a coroutine,
+    because minting a scannable invitation is a round trip over the mesh."""
+    async def mint(ttl=None, ticket=False):
+        return {"uris": [uri], "code": node.generate_invite(3600)}
+    return mint
+
+
 async def _party(node, *, mesh_invite=None) -> Party:
     connector = DataConnector(node, host="127.0.0.1", port=0)
     await connector.start()
@@ -495,12 +503,11 @@ class TestProvisionedNodeJoinsTheMesh:
         await provisioner.start(["tcp://127.0.0.1:19323"])
         party = await _party(
             provisioner,
-            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19323"],
-                                 "code": provisioner.generate_invite(3600)})
+            mesh_invite=_minter(provisioner, "tcp://127.0.0.1:19323"))
         newcomer = MeshNode(_mgr())
         try:
             # What provisioning leaves on the new machine.
-            uris, code = party.app._fresh_invitation([], "")
+            uris, code = await party.app._fresh_invitation([], "")
             assert uris and code
 
             # What the new machine does with it on its first start.
@@ -526,12 +533,11 @@ class TestProvisionedNodeJoinsTheMesh:
         await provisioner.start(["tcp://127.0.0.1:19321"])
         party = await _party(
             provisioner,
-            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19321"],
-                                 "code": provisioner.generate_invite(3600)})
+            mesh_invite=_minter(provisioner, "tcp://127.0.0.1:19321"))
         first = MeshNode(_mgr())
         second = MeshNode(_mgr())
         try:
-            uris, code = party.app._fresh_invitation([], "")
+            uris, code = await party.app._fresh_invitation([], "")
             await first.join(uris[0], code)
             await first.wait_for_session(timeout=20.0)
 
@@ -549,11 +555,10 @@ class TestProvisionedNodeJoinsTheMesh:
         await provisioner.start(["tcp://127.0.0.1:19322"])
         party = await _party(
             provisioner,
-            mesh_invite=lambda: {"uris": ["tcp://127.0.0.1:19322"],
-                                 "code": provisioner.generate_invite(3600)})
+            mesh_invite=_minter(provisioner, "tcp://127.0.0.1:19322"))
         try:
-            _uris_a, code_a = party.app._fresh_invitation([], "")
-            _uris_b, code_b = party.app._fresh_invitation([], "")
+            _uris_a, code_a = await party.app._fresh_invitation([], "")
+            _uris_b, code_b = await party.app._fresh_invitation([], "")
             assert code_a != code_b
         finally:
             await party.close()
@@ -564,19 +569,19 @@ class TestProvisionedNodeJoinsTheMesh:
         node = MeshNode(_mgr())
         party = await _party(node, mesh_invite=None)
         try:
-            uris, code = party.app._fresh_invitation([], "")
+            uris, code = await party.app._fresh_invitation([], "")
             assert uris == [] and code == ""
         finally:
             await party.close()
 
     async def test_a_broken_provider_does_not_break_provisioning(self):
-        def boom():
+        async def boom():
             raise RuntimeError("no invite for you")
 
         node = MeshNode(_mgr())
         party = await _party(node, mesh_invite=boom)
         try:
-            assert party.app._fresh_invitation(["tcp://fallback:1"], "fb") == (
+            assert await party.app._fresh_invitation(["tcp://fallback:1"], "fb") == (
                 ["tcp://fallback:1"], "fb")
         finally:
             await party.close()

@@ -840,9 +840,17 @@ class TestStoreAndJoining:
         def console_invite_block(self):
             return "a-block"
 
-        def issue_join_ticket(self, ttl):
+        async def issue_join_ticket(self, ttl):
+            # Minting leaves a rendezvous with a relay before it hands the
+            # string over, so it is a round trip rather than a local read.
             self.ttl = ttl
-            return {"ticket": "TICKET", "ttl": ttl, "code": "secret"}
+            return {"ticket": "TICKET", "ttl": ttl, "code": "secret",
+                    "relay_uri": "tcp://relay:9000"}
+
+        async def console_use_ticket(self, text):
+            self.did.append(("ticket", text))
+            return {"ok": False, "reason": "no_session",
+                    "detail": "the relay in that ticket did not answer"}
 
         async def console_join(self, uri, code):
             self.did.append(("join", uri, code))
@@ -912,6 +920,18 @@ class TestStoreAndJoining:
         # it rather than being folded into the sentence.
         assert reply.error == "the invitation was refused"
         assert reply.detail["detail"] == "it had been used"
+
+    async def test_a_ticket_is_handed_to_the_node_whole(self):
+        """It may name two routes and the node owns the order it tries them in;
+        taking it apart here would put half of that decision in the wrong
+        place."""
+        node = self._Node()
+        reply = await asyncio.to_thread(
+            self._channel(node).call, "join.network",
+            {"ticket": "NM1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"})
+        # Not a ticket — refused before anything is dialled.
+        assert reply.ok is False and reply.code == "bad_request"
+        assert node.did == []
 
     async def test_a_silly_ticket_lifetime_is_clamped_by_the_ticket(self):
         from src import join_ticket

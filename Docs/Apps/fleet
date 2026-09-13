@@ -58,7 +58,7 @@ From the most harmless to total. One never implies another.
 | Capability | What it allows |
 |---|---|
 | `status` | reading uptime, load, memory, disks |
-| `invite` | minting a single-use invitation to **that node's** mesh, on its behalf |
+| `invite` | minting a single-use invitation to **that node's** mesh, on its behalf — offered wherever somebody is inviting a machine, including the console's own *Add a node* page |
 | `update` | running the machine's package manager upgrade |
 | `scan` | scanning this machine's LAN for SSH hosts |
 | `provision` | installing NMesh on machines of that LAN |
@@ -279,10 +279,22 @@ certificate is **issued and signed by that node** and chains from there — the
 operator is not in the chain at all.
 
 `INVITE_REQUEST` carries `{ttl, ticket}`; `INVITE_ISSUED` comes back with the
-`uris`, the single-use `code`, and — when that node has a confirmed public
-address — the same invitation in the compact scannable form plus its QR. A node
-with no public address returns the invitation without a ticket rather than
-refusing.
+`uris`, the single-use `code`, and — whenever that node has any route in at
+all — the same invitation in the compact scannable form plus its QR. That one
+carries both routes: an address of the node's own when it has one, and a relay
+to reach it through when it does not. A node with neither returns the invitation
+without it rather than refusing.
+
+Minting runs **off the receive loop**: a scannable invitation leaves a
+rendezvous with a relay first, which is a round trip over the mesh, and the
+receive loop is not somewhere to wait for one.
+
+**Where the choice is offered.** The console's own *Add a node* page lists every
+node that granted this one `invite`, under *Into which node's network* — because
+the node which will honour a code is the node that mints it, and somebody
+inviting a machine into a mesh reached *through* another one should be choosing
+that one rather than handing out a code for a node the joiner may have no route
+to. The fleet page's own **Invite** button does the same thing for one node.
 
 The code **is** the secret, so it is treated like one: it never enters the
 activity log (a bounded list that sits on a screen), the console holds it until

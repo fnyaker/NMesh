@@ -620,6 +620,35 @@ class TestFleetRoutes:
             await host.stop_all()
             await node.stop()
 
+    async def test_the_console_can_be_told_who_else_can_let_somebody_in(self):
+        """The `invite` capability exists because the node that will *honour* a
+        code is the node that mints it. Offering that choice on the page where
+        somebody is actually inviting a machine is what makes it usable."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["invite"], label="gateway")
+            app.state.add_managed("dd" * 20, caps=["status"], label="other")
+            status, _, _, data = await _get(console, "/api/invite/issuers", token)
+            assert status == 200 and data["available"] is True
+            assert [row["id"] for row in data["issuers"]] == ["ee" * 20]
+            assert data["issuers"][0]["label"] == "gateway"
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_issuers_needs_a_session_like_everything_else(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            status, _, _, _ = await _get(console, "/api/invite/issuers")
+            assert status == 401
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_docker_on_a_node_that_never_granted_it_is_refused_here(self):
         """A request that can only come back denied is a round trip over the
         mesh for nothing, and "not authorised" read thirty seconds later tells

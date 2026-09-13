@@ -96,3 +96,89 @@ class TestRelayedInvitation:
             await A.stop()
             await B.stop()
             await R.stop()
+
+
+class TestTicketThroughARelay:
+    """The same journey, out of a string short enough to put in a QR code.
+
+    A relayed invitation is an ML-DSA key plus a signature — five kilobytes,
+    which is far past what any QR code carries. So the heavy part is left *with
+    the relay* as a rendezvous, and the ticket carries an identity, a seed and
+    where to find that relay. What the joiner sends is 40 bytes.
+
+    This is the whole reason an invitation no longer comes in two shapes: one
+    string works whether or not the inviter has an address of its own, and there
+    is no second exchange to decide between them.
+    """
+
+    async def test_a_ticket_reaches_a_node_with_no_address_of_its_own(self):
+        base = free_port()
+        R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
+        await R.start([f"tcp://127.0.0.1:{base}"])
+        await A.join(f"tcp://127.0.0.1:{base}", R.generate_invite())
+        await asyncio.wait_for(A.wait_for_session(10), 15)
+        try:
+            # A has nothing a stranger could dial: what the ticket carries is R.
+            assert A.public_endpoints() == []
+            ticket = await A.issue_join_ticket(600)
+            assert ticket["uri"] == ""
+            assert ticket["relay_uri"] == f"tcp://127.0.0.1:{base}"
+
+            from src import join_ticket
+            parsed = join_ticket.decode(ticket["ticket"])
+            assert parsed["node"] == A.id.raw.hex()
+            # And the rendezvous is on its way to R before the string is handed
+            # over: what is left is one network trip, against a human reading a
+            # QR code.
+            from src.node import _h_code
+            async with asyncio.timeout(10):
+                while _h_code(parsed["code"]) not in R._offers:
+                    await asyncio.sleep(0.02)
+
+            outcome = await B.console_use_ticket(ticket["ticket"])
+            assert outcome["ok"] is True and outcome["through"] == "relay"
+            assert _authed_relayed(B, A.id)
+            assert _authed_relayed(A, B.id)
+
+            await B.send_data(A.id, b"hello A from a ticket")
+            async with asyncio.timeout(15):
+                while True:
+                    src, data = await A.receive_data()
+                    if data == b"hello A from a ticket" and src == B.id:
+                        break
+        finally:
+            await A.stop()
+            await B.stop()
+            await R.stop()
+
+    async def test_the_same_ticket_prefers_the_direct_route(self):
+        """Direct first, because a relayed link is the thing a direct one exists
+        to stand in for — and trying it costs one connection."""
+        base = free_port()
+        R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
+        await R.start([f"tcp://127.0.0.1:{base}"])
+        await A.start([f"tcp://127.0.0.1:{base + 1}"])
+        await A.join(f"tcp://127.0.0.1:{base}", R.generate_invite())
+        await asyncio.wait_for(A.wait_for_session(10), 15)
+        try:
+            # A loopback listener is nobody's public address, and confirming one
+            # needs a connection from off this machine's networks. So the
+            # reachability A would have on a real host is stated here — what is
+            # under test is the *order* the two routes are tried in.
+            real = A.reachability
+            A.reachability = lambda: list(real()) + [
+                {"transport": "tcp", "scope": "world", "anchor": "",
+                 "address": f"tcp://127.0.0.1:{base + 1}", "confirmed": True}]
+            ticket = await A.issue_join_ticket(600)
+            from src import join_ticket
+            parsed = join_ticket.decode(ticket["ticket"])
+            # Both routes are in it: the relay is what the direct one falls back
+            # to if that address turns out not to answer.
+            assert parsed["uri"] == f"tcp://127.0.0.1:{base + 1}"
+            assert parsed["relay_uri"] == f"tcp://127.0.0.1:{base}"
+            outcome = await B.console_use_ticket(ticket["ticket"])
+            assert outcome["ok"] is True and outcome["through"] == "direct"
+        finally:
+            await A.stop()
+            await B.stop()
+            await R.stop()

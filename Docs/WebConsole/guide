@@ -414,13 +414,20 @@ are on, with what to do next, rather than waiting to be found on this card. On a
 node with nothing connected, Overview says the same thing as an ordered list of
 the steps — and both disappear the moment a link authenticates.
 
-*Add a node* opens with **Which way in?** — the four routes and the one fact
-that decides between them, which is only ever what can reach what. A ticket is
-the usual way and needs the inviting node to have a confirmed public address; the
-manual exchange needs no address to work at all, which is why it is the fallback
-that always exists; a relay covers the joiner that can reach *some* member but
-not the inviter; the address-and-code pair is the primitive the other three are
-built on. The rest of the page is grouped in that order.
+*Add a node* opens with **Invite a node** — one string, whichever way round the
+two machines are. It carries the inviter's own address when it has one, a relay
+to reach it through when it does not, and the same single-use code either way,
+so there is nothing to choose before inviting anybody and no second exchange.
+Under it, *Use one* takes any of them in one field: an invitation, or a block
+pasted from an older node. Below that, and folded away: the manual exchange for
+when neither end can dial the other (the fallback that needs no address to work
+at all), and the primitives the rest is built on.
+
+**And it need not be this node's network.** *Into which node's network* lists
+every node that granted this one the fleet `invite` capability — because the
+node which will **honour** a code is the node that mints it, so inviting
+somebody into a mesh reached through another machine means asking that machine.
+Choosing one sends the ask over the mesh and shows what comes back, once.
 
 **Anchors, and taking a membership back** is its own fold, and deliberately so:
 nothing in it adds a node. It holds the two ways trust is withdrawn, and they
@@ -564,7 +571,8 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
 | POST    | `/api/invite`    | generates an invitation code — `join.invite`, **local only**: a code this node issues is a credential, and asking a node you manage for one is the fleet's `invite` capability |
 | POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network — `join.network`, one of the two here a console *managing* this node may ask for: pointing a machine at a network is what provisioning one is. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **503** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
-| POST    | `/api/ticket`    | `{ttl}` → compact ticket + QR SVG; **409** if the node has no confirmed public address — `join.ticket`, local only, and a silly lifetime is clamped by the ticket format rather than refused |
+| POST    | `/api/ticket`    | `{ttl}` → one invitation (direct endpoint, relay, or both) + QR SVG; **409** if the node has neither route in — `join.ticket`, local only, and a silly lifetime is clamped by the ticket format rather than refused. Minting leaves a rendezvous with a relay first, so it is a round trip over the mesh rather than a local read |
+| GET     | `/api/invite/issuers` | which managed nodes granted this one the fleet `invite` capability — who else can let somebody in |
 | GET     | `/api/rootcert`  | our root certificate (hex) to share — `node.rootcert` |
 | POST    | `/api/trust`     | `{cert_hex}` — trusts a root cert — `trust.add`, which checks it *is* hex before the node parses it |
 | POST    | `/api/trust/revoke`  | `{node, reason}` — takes back a membership **this node issued** and announces it to the mesh — `trust.revoke` |
@@ -911,9 +919,10 @@ Format, bounds and the command line > file > default precedence:
 
 ## Fast join: ticket and QR code (Network → Add a node)
 
-A full join means moving two things by hand: an address and a code. A **ticket**
-packs both into a single **34-character** string for IPv4 — dictable, typable on
-a phone, scannable from a screen.
+A full join means moving two things by hand: an address and a code. An
+**invitation** packs them into one string — 34 characters for a direct IPv4 one,
+76 when it carries a relay as well — dictable, typable on a phone, scannable
+from a screen.
 
 ```
 CTFQA4IHEMUHTNEHTMEQGWR7AHDJXX3KLQ
@@ -924,11 +933,18 @@ expires or is used once — exactly as sensitive as the invitation code it
 contains. Photographing a QR code on a screen takes no ingenuity, and the
 interface says so next to every ticket issued.
 
-- **Only from a publicly reachable node.** Issuing one requires a **confirmed**
-  `world` address (an inbound connection really arrived on it), not an address
-  we believe to be public. Otherwise: 409, with the explanation — a ticket
-  pointing at an unreachable address is worse than no ticket, it fails after
-  being shared.
+- **Both routes, in one string.** A confirmed address of the inviter's own —
+  `world` (an inbound connection really arrived on it, never one we merely
+  believe is public) or, failing that, `lan`, which is a different audience and
+  the whole of what a local deployment has — *and* a relay to reach it through
+  when that address does not answer. The page says which it got. A node with
+  neither gets a 409 and the explanation: an invitation pointing nowhere is
+  worse than none, because it fails after being shared.
+- **The relay half is a rendezvous.** A relayed invitation needs a post-quantum
+  key and a signature, five kilobytes — far past a QR code. So the inviter
+  leaves that with the relay and the string carries the relay's address and the
+  inviter's node id; the joiner then sends 40 bytes. See
+  [`../Architecture/security.md`](../Architecture/security.md).
 - **Lifetime chosen by the operator** (1 minute to 6 hours), bounded on the
   node: an absurd value is brought back into range, never obeyed.
 - **Single use**, like every invitation code: a ticket photographed by two people
@@ -987,8 +1003,10 @@ for are **capped**, not obeyed.
 
 ## Joining / bridging two networks
 
-1. On the host node: **Generate invite code**.
-2. On the invited node: **Join network** with `tcp://host:port` + the code.
+1. On the host node: **Create invitation** (or, for the primitives,
+   **Generate invite code**).
+2. On the invited node: paste it into **Use one** — or **Join network** with
+   `tcp://host:port` + the code.
 3. For mutual trust between distinct roots: each node shows its certificate via
    **Show our root certificate**; the other pastes it into **Trust certificate**.
 
