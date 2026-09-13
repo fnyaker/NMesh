@@ -593,6 +593,10 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64); `&wait=1` holds the answer until there are some (bounded in time, and in how many are parked at once) |
+| POST    | `/api/fleet/docker` | `{node, op, …}` → one docker operation on a managed node (`docker` right). Reads are waited on; the ones that pull images hand back a `rid` watched in the job list |
+| POST    | `/api/fleet/stacks` | `{node, stacks[]}` → which of that node's docker stacks *Update* also brings up |
+| POST    | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → this console's own names for sets of machines; nothing about a group travels |
+| POST    | `/api/fleet/update-group` | `{group}` → *Update* on every node in that group |
 | GET     | `/api/transports` | what each transport declares it takes, with the values in force — `transports.options` |
 | POST    | `/api/transports` | `{scheme, values}` → applies then persists; returns `applied` / `rejected` — `transports.save` |
 | GET     | `/api/fleet/keys`  | available SSH keys (disk + imported) — **metadata only** |

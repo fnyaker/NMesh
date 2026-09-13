@@ -620,6 +620,111 @@ class TestFleetRoutes:
             await host.stop_all()
             await node.stop()
 
+    async def test_docker_on_a_node_that_never_granted_it_is_refused_here(self):
+        """A request that can only come back denied is a round trip over the
+        mesh for nothing, and "not authorised" read thirty seconds later tells
+        an operator less than "that node has not granted docker" read now."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _post(
+                console, "/api/fleet/docker", token,
+                {"node": "ee" * 20, "op": "containers"})
+            assert status == 502 and "granted docker" in data["error"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_docker_request_with_no_operation_is_a_bad_request(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await _post(
+                console, "/api/fleet/docker", token, {"node": "ee" * 20})
+            assert status == 400
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_groups_are_kept_here_and_never_sent_anywhere(self):
+        """A group is this console's own name for a set of machines. Nothing
+        about it travels, so the whole of it is a local write."""
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["update"], label="one")
+            status, _, _, data = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "set", "group": "prod", "nodes": ["ee" * 20]})
+            assert status == 200 and data["nodes"] == ["ee" * 20]
+            status, _, _, data = await _get(console, "/api/fleet/state", token)
+            assert [group["name"] for group in data["groups"]] == ["prod"]
+            status, _, _, data = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "node", "node": "ee" * 20, "groups": []})
+            assert status == 200 and data["groups"] == []
+            status, _, _, _ = await _post(
+                console, "/api/fleet/groups", token,
+                {"op": "remove", "group": "prod"})
+            assert status == 200
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_an_unknown_group_operation_is_a_404(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, _ = await _post(
+                console, "/api/fleet/groups", token, {"op": "drop", "group": "x"})
+            assert status == 404
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_stacks_update_brings_up_are_remembered_per_node(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            built["app"].state.add_managed("ee" * 20, caps=["update", "docker"],
+                                           label="one")
+            status, _, _, data = await _post(
+                console, "/api/fleet/stacks", token,
+                {"node": "ee" * 20, "stacks": ["site", "; rm -rf /"]})
+            assert status == 200 and data["stacks"] == ["site"]
+            status, _, _, state = await _get(console, "/api/fleet/state", token)
+            entry = [row for row in state["managed"] if row["id"] == "ee" * 20][0]
+            assert entry["update_stacks"] == ["site"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_updating_a_group_says_which_nodes_it_started_on(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            app = built["app"]
+            app.state.add_managed("ee" * 20, caps=["update"], label="one")
+            app.state.add_managed("dd" * 20, caps=["status"], label="two")
+            app.state.set_group("prod", ["ee" * 20, "dd" * 20])
+            status, _, _, data = await _post(
+                console, "/api/fleet/update-group", token, {"group": "prod"})
+            # The one without `update` is refused rather than attempted: a
+            # request that can only come back denied is noise.
+            assert status == 200
+            assert data["started"] == ["ee" * 20]
+            assert data["refused"] == ["dd" * 20]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_shell_data_for_an_unknown_session(self):
         node, console, host, _ = await _make(enabled=True)
         try:
