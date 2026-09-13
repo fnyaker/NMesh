@@ -267,7 +267,11 @@ tests/
 │     read is answered in full rather than interpreted, only the section that
 │     moved comes back, what is not a section always travels, every answer names
 │     the build that gave it — and a page that says nothing still gets the flat
-│     shape it always got, which is the case a version number exists for
+│     shape it always got, which is the case a version number exists for. The
+│     two feeds that ride it are checked where they live: the fleet ledger in
+│     test_console_fleet.py, chat's social half in test_chat_web.py — sections
+│     named, one that moved coming back, one that did not staying away, and the
+│     messages travelling beside them whatever the claim says
 ├── test_console_auth.py                               — console credential:
 │     the password never stored, a salt per credential, a corrupt file or an
 │     unknown algorithm refused, an outsized input rejected before hashing,

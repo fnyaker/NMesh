@@ -1181,21 +1181,16 @@ def _make_handler(console: WebConsole):
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
                     return
-                qs = self.path.split("?", 1)
-                since = 0
-                if len(qs) == 2:
-                    from urllib.parse import parse_qs
-                    try:
-                        since = int(parse_qs(qs[1]).get("since", ["0"])[0])
-                    except ValueError:
-                        since = 0
-                self._json(200, console._chat.snapshot(since))
+                query = parse_qs(self.path.partition("?")[2])
+                self._json(200, console._chat.snapshot(
+                    _int_param(query, "since", 0),
+                    have=(query.get("have") or [""])[0],
+                    proto=console_feed.clean_proto((query.get("proto") or [0])[0])))
                 return
             if path == "/api/chat/file":
                 if console._chat is None or not self._authed():
                     self._json(404 if console._chat is None else 401, {"error": "no"})
                     return
-                from urllib.parse import parse_qs
                 mid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("mid", [""])[0]
                 got = console._chat.get_file(mid)
                 if got is None:
@@ -1208,7 +1203,6 @@ def _make_handler(console: WebConsole):
                 if console._chat is None or not self._authed():
                     self._json(404 if console._chat is None else 401, {"error": "no"})
                     return
-                from urllib.parse import parse_qs
                 aid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("id", ["self"])[0]
                 data = console._chat.get_avatar(aid)
                 if not data:

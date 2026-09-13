@@ -11,7 +11,7 @@ other half and is `src/console_feed.py`: the protocol version and the build on
 every answer, the named sections sent only when their content moved, and the
 rule that an answer which is not one never replaces what a page has. The two
 meet at the routes that have not moved onto the plane yet — the fleet state feed
-is the big one.
+and chat's are the two that carry a page's whole world.
 
 > **Read this before adding an operation to the console, before changing what a
 > remote operator may do, and before touching `_from_plane`.**

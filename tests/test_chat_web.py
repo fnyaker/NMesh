@@ -16,6 +16,7 @@ from src.apps.chat import (ChatApp, Deleted, Edited, Reaction,
                            TextMessage)
 from src.apps.chat_web import ChatWebServer
 from src.node_id import NodeID
+from src.version import __version__
 
 TOKEN = "chat-token-xyz"
 PEER = NodeID(os.urandom(20))
@@ -212,3 +213,100 @@ class TestArrivingOutOfOrder:
         bridge._on_event(TextMessage(SRC, "mine", mid))
         message = bridge.snapshot(0)["messages"][0]
         assert not message.get("deleted") and message["text"] == "mine"
+
+
+class TestWhatThePageHolds:
+    """The chat page reads through the same feed as the console's pages.
+
+    Two halves travel on every read and they do not move at the same rate: the
+    messages are already asked for by sequence, while the social half — the
+    contacts, the groups, this node's own name — is the same answer nearly
+    every time and used to be re-sent beside the one message that arrived.
+    The version and the build travel with them, because the failure that
+    emptied a page was a page still asking a node that had been replaced
+    underneath it."""
+
+    def _bridge(self):
+        return ChatWebServer(ChatApp(StubClient()), host="127.0.0.1", port=0,
+                             token=TOKEN, peer=PEER).bridge
+
+    async def test_a_reader_that_asks_for_nothing_gets_the_flat_shape(self):
+        """Every page written before this one, still answered as it was."""
+        got = self._bridge().snapshot(0)
+        assert got["proto"] == 1
+        assert "sections" not in got and "revs" not in got
+        for name in ("me", "pseudo", "contacts", "known", "groups",
+                     "unread", "typing", "peer"):
+            assert name in got
+
+    async def test_the_sectioned_shape_names_every_section(self):
+        got = self._bridge().snapshot(0, proto=2)
+        assert got["proto"] == 2 and got["full"] is True
+        assert set(got["revs"]) == {
+            "peer", "me", "pseudo", "bio", "has_avatar",
+            "contacts", "known", "groups", "unread", "typing"}
+        assert set(got["sections"]) == set(got["revs"])
+
+    async def test_a_section_that_did_not_move_is_not_sent_again(self):
+        bridge = self._bridge()
+        first = bridge.snapshot(0, proto=2)
+        have = ",".join(n + ":" + r for n, r in first["revs"].items())
+        again = bridge.snapshot(0, have=have, proto=2)
+        assert again["sections"] == {} and again["full"] is False
+        # Still named, so a page that dropped one knows it is still there.
+        assert again["revs"] == first["revs"]
+
+    async def test_a_section_that_moved_comes_back(self):
+        app, server = await _make()
+        try:
+            bridge = server.bridge
+            first = bridge.snapshot(0, proto=2)
+            have = ",".join(n + ":" + r for n, r in first["revs"].items())
+            app._emit(TextMessage(SRC, "one nobody has read"))
+            again = bridge.snapshot(0, have=have, proto=2)
+            assert "unread" in again["sections"]
+            assert again["revs"]["unread"] != first["revs"]["unread"]
+            # And what did not move stayed where it was.
+            assert "pseudo" not in again["sections"]
+        finally:
+            server.stop()
+
+    async def test_the_messages_travel_beside_the_sections(self):
+        bridge = self._bridge()
+        bridge._on_event(TextMessage(SRC, "hello"))
+        first = bridge.snapshot(0, proto=2)
+        assert [m["text"] for m in first["messages"]] == ["hello"]
+        # And a claim covering every section does not swallow them: they are
+        # asked for by sequence, not by revision.
+        have = ",".join(n + ":" + r for n, r in first["revs"].items())
+        again = bridge.snapshot(0, have=have, proto=2)
+        assert [m["text"] for m in again["messages"]] == ["hello"]
+        assert again["version"] == first["version"]
+
+    async def test_a_claim_that_cannot_be_read_gets_everything(self):
+        """Always correct, only ever slower — the right way round for
+        something a browser sends."""
+        got = self._bridge().snapshot(0, have="not a claim at all", proto=2)
+        assert set(got["sections"]) == set(got["revs"])
+
+    async def test_every_answer_says_which_build_made_it(self):
+        bridge = self._bridge()
+        assert bridge.snapshot(0)["build"] == __version__
+        assert bridge.snapshot(0, proto=2)["build"] == __version__
+
+    async def test_the_route_reads_the_shape_the_page_asked_for(self):
+        app, server = await _make()
+        try:
+            _, _, flat = await asyncio.to_thread(
+                _request, server, "GET", "/api/messages?since=0", TOKEN)
+            assert flat["proto"] == 1 and "sections" not in flat
+            _, _, sectioned = await asyncio.to_thread(
+                _request, server, "GET", "/api/messages?since=0&proto=2", TOKEN)
+            assert sectioned["proto"] == 2 and "contacts" in sectioned["sections"]
+            have = "contacts:" + sectioned["revs"]["contacts"]
+            _, _, held = await asyncio.to_thread(
+                _request, server, "GET",
+                "/api/messages?since=0&proto=2&have=" + have, TOKEN)
+            assert "contacts" not in held["sections"]
+        finally:
+            server.stop()
