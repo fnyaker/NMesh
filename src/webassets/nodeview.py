@@ -519,6 +519,12 @@ const NODEVIEW = {
       else buttons.push('<button data-nv-act="enrol">Request access</button>');
     }
     buttons.push('<button data-nv-act="ping">' + icon("pulse") + "Ping</button>");
+    // Only where there is a link to load. A speed test with no direct link is
+    // a button that can only ever answer "no", and the node says so first
+    // (`node.console_speedtest`) — so the page does not offer it.
+    if(view.connected && CHANNEL.has("node.speedtest"))
+      buttons.push('<button data-nv-act="speedtest">' + icon("gauge") +
+                   "Speed test</button>");
     return '<div class="btn-row">' + buttons.join("") + "</div>";
   },
 
@@ -902,6 +908,7 @@ const NODEVIEW = {
     if(what === "message"){ openLinked("/chat#c/" + id); return; }
     if(what === "fleet"){ openLinked("/fleet#nodes"); return; }
     if(what === "ping"){ await this.ping(element, button, id); return; }
+    if(what === "speedtest"){ await this.speedtest(element, button, id); return; }
     if(what === "packages"){ await this.askPackages(element, button, id, options); return; }
     if(what === "contact"){ await this.contact(element, button, id, options); return; }
     if(what === "invite"){ await this.invite(element, button, id); return; }
@@ -935,6 +942,42 @@ const NODEVIEW = {
             " via " + (data.via || "the mesh")
           : "Node is currently unreachable", !data.reachable);
       }catch(error){ if(!isStale(error)) this.say(element, "Ping failed", true); }
+    });
+  },
+
+  // Every other reading on this card *watches* the link — round trips, loss,
+  // the bytes that happened to flow. This one loads it, which is the only way
+  // to answer "how fast is it" and the reason it is a button somebody presses
+  // rather than something on a cadence. The node bounds it (ten seconds, eight
+  // megabytes, whichever ends first); this just waits, because the operation
+  // travels as a job and `CHANNEL.call` already knows how to wait for one.
+  async speedtest(element, button, id){
+    await withBusy(button, async () => {
+      this.say(element, "Loading the link — up to ten seconds…");
+      try{
+        const {ok, error, data} = await this.op("node.speedtest", {node:id});
+        if(!ok || data.ok === false){
+          this.say(element, (data && data.error) || error || "Could not measure",
+                   true);
+          return;
+        }
+        const rate = (bps) => bps >= 1e6 ? (bps / 1e6).toFixed(1) + " MB/s"
+                                         : Math.round(bps / 1e3) + " kB/s";
+        // Both figures, because one of them alone is a half-truth: the round
+        // trip is what was actually moved, and the one-way is what an
+        // application would see.
+        const lost = data.lost_bytes
+          ? ", " + Math.round(data.lost_bytes * 100 / data.sent_bytes) + "% lost"
+          : "";
+        this.say(element,
+          rate(data.one_way_bps) + " one way, " + rate(data.round_trip_bps) +
+          " round trip over " + (data.transport || "the link") +
+          " — " + (data.rtt_ms == null ? "no round trip measured"
+                                       : data.rtt_ms + " ms under load, " +
+                                         data.best_ms + " ms at best") + lost);
+      }catch(error){
+        if(!isStale(error)) this.say(element, "The speed test failed", true);
+      }
     });
   },
 

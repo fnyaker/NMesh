@@ -30,6 +30,9 @@ from ..plane import operation
 _READ = 10.0            # a snapshot, a certificate: state this node holds
 _PING_NODE = 15.0       # may have to establish a link first, bounded by the node
 _RETRY = 60.0           # one dial per known address, bounded by the node
+# A test bounded at ten seconds, plus the room a loaded link needs to drain.
+# The node owns the ten (`node._SPEED_MAX_SECONDS`); this only has to outlast it.
+_SPEEDTEST = 25.0
 
 
 class NodeModule:
@@ -60,6 +63,9 @@ class NodeModule:
         operation("restart", "Stop this node properly and come back",
                   [param("confirm", "flag")],
                   changes=True, remote=True, timeout=_READ),
+        operation("speedtest", "Measure the link to one node by loading it",
+                  [param("node", "node")],
+                  remote=True, background=True, timeout=_SPEEDTEST),
         operation("retry", "Dial a node's known addresses now",
                   [param("node", "node"),
                    param("uri", "line", required=False, default="")],
@@ -145,6 +151,16 @@ class NodeModule:
 
     def op_ping(self) -> dict:
         return {"ok": True, **self._ask(self._node.console_ping_peers(), _READ)}
+
+    def op_speedtest(self, node: str) -> dict:
+        """What this link actually carries, rather than what it is called.
+
+        The charter names a speed principle and a figure to beat, and nothing
+        measured either — every other reading here watches a link rather than
+        loading one. This is the one that spends it, so it is bounded by the
+        node (`node._SPEED_MAX_BYTES`, `_SPEED_MAX_SECONDS`) and refused
+        outright without a direct authenticated link."""
+        return self._ask(self._node.console_speedtest(node), _SPEEDTEST)
 
     def op_ping_node(self, node: str) -> dict:
         return self._ask(self._node.console_ping_node(node), _PING_NODE)
