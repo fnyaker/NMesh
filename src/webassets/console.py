@@ -438,7 +438,7 @@ INDEX_HTML = """<!doctype html>
               <code id="invite-out" class="mono grow"></code></div>
             <div class="toolbar">
               <label class="field grow"><span class="sr-only">Address</span>
-                <input id="join-uri" class="mono" placeholder="tcp://host:port" spellcheck="false"></label>
+                <input id="join-uri" class="mono" placeholder="host:port" spellcheck="false"></label>
               <label class="field grow"><span class="sr-only">Invite code</span>
                 <input id="join-code" class="mono" placeholder="Invite code" spellcheck="false"></label>
               <button id="join-btn">Join</button></div>
@@ -1292,7 +1292,7 @@ async function tick(sample){
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
-    paintBroken(STATE);
+    paintBroken(STATE); paintJoinHint(STATE);
     refreshLive();
   }catch(error){
     // The rail is a verdict about the node on screen, so it has to name the
@@ -1324,6 +1324,16 @@ function trackRates(state){
   RATES.push({inbound:Math.max(0,inbound), outbound:Math.max(0,outbound)});
   while(RATES.length > 90) RATES.shift();
   state._rates = RATE_NOW = {inbound, outbound};
+}
+
+// The address field's example, from the schemes this node actually speaks. It
+// said `tcp://host:port` whatever the node was running, which on a machine
+// speaking only `lora://` is an instruction to type something that cannot work.
+function paintJoinHint(state){
+  const field = $("join-uri");
+  if(!field) return;
+  const scheme = (state.transports || [])[0];
+  field.placeholder = scheme ? scheme + "://host:port" : "host:port";
 }
 
 // A section of the node's own snapshot that could not be built. Empty on a
@@ -2882,8 +2892,15 @@ function paintTransportLive(state){
     "</button></span>").join("")
       : '<span class="small muted">Nothing bound — this node cannot be dialled over ' +
         esc(scheme) + ".</span>");
-    if(scheme !== "udp") return;
-    const on = details.some((item) => item.hole_punch);
+    // Keyed on what the node *declared*, not on the name of a medium. The
+    // snapshot already carries `hole_punch` for whatever scheme can punch
+    // (`node._transport_details`), so a page testing `scheme !== "udp"` was
+    // deciding for itself something the node had already answered — and it was
+    // the one hardcoded transport left in this interface. The medium describes
+    // itself; the page interprets nothing (`CLAUDE.md` §3).
+    const punchable = details.filter((item) => item.hole_punch);
+    if(!punchable.length) return;
+    const on = punchable.length > 0;
     const port = block.querySelector("[data-udp-port]");
     block.querySelector("[data-udp-toggle]").textContent = on ? "Stop UDP" : "Start UDP";
     port.disabled = on;

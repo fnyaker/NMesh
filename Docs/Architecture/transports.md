@@ -625,6 +625,14 @@ writes (`sess-` + 16 hex characters, `_SESSION_RE`) is not a session at all.
 
 ## NAT hole punching (in `node.py`)
 
+> This is the one place the core knows a concrete medium, and it is declared as
+> such in `CLAUDE.md` §3 rather than admitted in a heading. A hole is punched
+> through a stateful datagram NAT by sending from the very socket the listener
+> owns; there is no transport-agnostic way to say that.
+> `tests/test_medium_agnostic.py` holds the exception to exactly UDP and the
+> node's own relayed transport, and holds the punch path to the three UDP
+> internals it already reaches into.
+
 The goal: establish a **direct UDP** link between two nodes behind NAT,
 coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
 
@@ -1043,7 +1051,7 @@ because it feeds `msg_id` and a guessable `msg_id` is a way to seed a relay's
 dedup window so a *later* legitimate packet is dropped as a replay. The pool is
 dropped in a forked child, or both sides would hand out the same bytes.
 
-## Multi-link operation (`mlo.py`, off by default)
+## Multi-link operation (`mlo.py`)
 
 A node holds several links to one peer as a matter of course — a LAN address
 and a punched UDP path, IPv4 and IPv6. Exactly one of them carried anything:
@@ -1060,7 +1068,7 @@ Six tests, and each one is a way this could otherwise break a mesh.
 
 | test | why |
 |---|---|
-| the **medium** declares `mlo` | `tcp.mlo` / `udp.mlo`, off by default. Only the operator knows whether a probe ten times a second is cheap on that medium — a transport that does not declare the option at all (spool) can never be bundled, and that absence is the right answer rather than a gap |
+| the **medium** declares `mlo` | `tcp.mlo` / `udp.mlo`, **on by default**: a probe every hundred milliseconds on a socket over IP is cheap, and the throughput and the reaction to a link going bad are what the node is for. Turn it off on a metered or battery-powered medium. A transport that does not declare the option at all (spool) can never be bundled, and that absence is the right answer rather than a gap |
 | the **node** is awake | `mlo_active()`: somebody is using it, or `mlo_always` |
 | the **peer announced** `mlo` **and** `keepalive` | one end missing is no MLO — which is the backward-compatibility story, and it is the negotiation's, not a special case |
 | the accord has a **fast mode** (`fast_ok`) | a cadence *both* call fast. Without one the pair would be measured at whatever the slower tolerates and called multi-link operation: fifty probes at twenty seconds is seventeen minutes of history. Either end declaring a fast range that does not reach the other's is how a node opts out, and that opt-out has to work |
