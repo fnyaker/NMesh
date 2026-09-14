@@ -16,6 +16,8 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,9 @@ from src import control
 from src.apps import fleet as fleet_app
 from src.apps import fleet_console
 from src.control import frame as frame_mod
+from src.control import jobs as jobs_mod
 from src.control import params as params_mod
+from src.control.modules.jobs import JobsModule
 from src.control.errors import ControlError
 from src.control.plane import ControlPlane, Origin, REMOTE_BUDGET, operation
 from src.node import MeshNode
@@ -462,10 +466,31 @@ class TestBoundsFitTheRelay:
         assert REMOTE_BUDGET < fleet_app.CONSOLE_TIMEOUT
 
     def test_every_remotely_reachable_operation_fits_the_budget(self):
+        """Or is a job, which is the *only* other way across the relay.
+
+        The two are exclusive on purpose: a caller never has to work out which
+        of two mechanisms an operation uses, because its ceiling already says.
+        """
         plane = control.build(control.Context(node=None))
-        for module in plane.catalogue(Origin.REMOTE):
-            for entry in module["operations"]:
-                assert entry["timeout"] <= REMOTE_BUDGET, entry["name"]
+        for origin in (Origin.REMOTE, Origin.GOVERN):
+            for module in plane.catalogue(origin):
+                for entry in module["operations"]:
+                    fits = entry["timeout"] <= REMOTE_BUDGET
+                    assert fits is not entry["background"], entry["name"]
+
+    def test_everything_this_node_can_do_can_be_done_at_a_distance(self):
+        """The headline, as an assertion rather than a promise.
+
+        Not one operation is local-only. Whatever a new one costs and whatever
+        it decides, it declares a reach — and a module that quietly leaves both
+        off fails here rather than being discovered by the operator who could
+        not press the button from where they were."""
+        plane = control.build(control.Context(node=None))
+        stranded = [module["module"] + "." + entry["name"]
+                    for module in plane.catalogue(Origin.LOCAL)
+                    for entry in module["operations"]
+                    if entry["reach"] == "local"]
+        assert stranded == []
 
     def test_every_code_a_refusal_can_carry_has_a_status(self):
         assert set(control.CODES) <= set(_STATUS_BY_CODE)
@@ -482,7 +507,12 @@ class TestTheLedgerIsTrue:
         / "control-plane.md"
 
     def _table(self) -> dict:
-        """``{module: {operation: travels}}`` as the document claims."""
+        r"""``{module: {operation: (reach, background)}}`` as the document claims.
+
+        Two marks, outside the backticks and escaped for markdown: ``\*`` for
+        an operation that needs the ``govern`` capability, ``~`` for one that
+        travels as a job. Both may be on one operation — installing a release
+        is a decision *and* four hundred seconds."""
         rows, inside = {}, False
         for line in self.LEDGER.read_text().splitlines():
             if line.startswith("| Module | Operations |"):
@@ -500,10 +530,10 @@ class TestTheLedgerIsTrue:
             for word in cells[1].split():
                 if not word.startswith("`"):
                     continue
-                # The star marks local-only and sits *outside* the backticks,
-                # escaped for markdown: `` `retry`\* ``.
-                operations[word.replace("\\*", "").strip("`*")] = \
-                    not word.endswith("*")
+                marks = word.replace("\\*", "*").split("`")[-1]
+                name = word.split("`")[1]
+                operations[name] = ("govern" if "*" in marks else "remote",
+                                    "~" in marks)
             rows.setdefault(module, {}).update(operations)
         return rows
 
@@ -514,15 +544,16 @@ class TestTheLedgerIsTrue:
         real = {}
         for module in plane.catalogue():
             real.setdefault(module["module"], {}).update(
-                {row["name"]: row["remote"] for row in module["operations"]})
+                {row["name"]: (row["reach"], row["background"])
+                 for row in module["operations"]})
         for name, operations in real.items():
             assert name in claimed, f"{name} is not in the ledger"
-            for operation_name, travels in operations.items():
+            for operation_name, reach in operations.items():
                 assert operation_name in claimed[name], \
                     f"{name}.{operation_name} is not in the ledger"
-                assert claimed[name][operation_name] is travels, (
-                    f"{name}.{operation_name} travels={travels}, the ledger "
-                    f"says {claimed[name][operation_name]}")
+                assert claimed[name][operation_name] == reach, (
+                    f"{name}.{operation_name} is {reach}, the ledger says "
+                    f"{claimed[name][operation_name]}")
         for name in claimed:
             assert name in real, f"the ledger names {name}, which does not exist"
 
@@ -1112,21 +1143,36 @@ class TestReleases:
         return control.build(control.Context(
             node=node, loop=asyncio.get_event_loop(), restart=lambda: False))
 
-    async def test_only_the_read_travels(self):
+    async def test_deciding_what_this_node_runs_needs_the_second_grant(self):
+        """`manage` is "drive this console"; it was never "choose what program
+        this machine is allowed to become". So a console holding only that sees
+        the reads, and a console a human also granted `govern` sees the rest."""
         plane = self._plane(self._Node())
-        remote = {row["name"] for module in plane.catalogue(Origin.REMOTE)
-                  for row in module["operations"]
-                  if module["module"] == "releases"}
-        # What a node accepts for replacing its own program is pinned by a
-        # human *at that node* (`MeshNode.trust_publisher`), and updating a
-        # managed node has its own capability and its own path.
-        assert remote == {"overview"}
+
+        def offered(origin):
+            return {row["name"] for module in plane.catalogue(origin)
+                    for row in module["operations"]
+                    if module["module"] == "releases"}
+
+        assert offered(Origin.REMOTE) == {"overview", "check"}
+        assert offered(Origin.GOVERN) == offered(Origin.LOCAL)
         channel = control.LocalChannel(plane, Origin.REMOTE)
         for op in ("trust", "untrust", "auto", "endorse", "publish", "install",
-                   "check", "apply"):
+                   "apply"):
             reply = await asyncio.to_thread(channel.call, "releases." + op, {})
             assert reply.ok is False and reply.code == "refused", op
         assert (await asyncio.to_thread(channel.call, "releases.overview")).ok
+
+    async def test_what_does_not_fit_the_relay_is_offered_as_a_job(self):
+        """And says so, rather than timing out in the middle and telling the
+        operator nothing — which is what these used to do."""
+        plane = self._plane(self._Node())
+        channel = control.LocalChannel(plane, Origin.GOVERN)
+        reply = await asyncio.to_thread(
+            channel.call, "releases.install", {"release": "x", "confirm": True})
+        assert reply.ok is False and reply.code == "refused"
+        assert reply.detail.get("background") is True
+        assert reply.detail.get("job") == "releases.install"
 
     async def test_a_passphrase_is_not_trimmed(self):
         node = self._Node()
@@ -1615,9 +1661,77 @@ class TestConsoleControlRoute:
                         for module in answer[1]["result"]["modules"]
                         for entry in module["operations"]}
 
-            assert "node.retry" in names(here)
-            assert "node.retry" not in names(there)
-            assert names(there) < names(here)
+            everywhere = await asyncio.to_thread(
+                _post, console, {"v": 1, "op": "control.catalogue"}, token,
+                {fleet_console.REPLAY_HEADER: "1",
+                 fleet_console.GOVERN_HEADER: "1"})
+
+            # A long operation is offered to a remote console — as a job, which
+            # is how it now travels — and a *decision* is not, until a human at
+            # this node grants the capability that covers decisions.
+            assert "node.retry" in names(here) and "node.retry" in names(there)
+            assert "releases.trust" not in names(there)
+            assert "releases.trust" in names(everywhere)
+            assert names(there) < names(everywhere) <= names(here)
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_the_govern_marker_is_only_read_beside_the_replay_one(self):
+        """Both markers can only ever ask for *less* than a page here already
+        has, which is why nothing that can set them gains anything by lying.
+        On its own the govern marker is a header anybody holding a console
+        session could set — so on its own it means nothing at all."""
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+
+            async def trust(headers):
+                return await asyncio.to_thread(
+                    _post, console,
+                    {"v": 1, "op": "releases.trust", "params": {}}, token,
+                    headers)
+
+            # A decision, refused to a console holding only `manage`…
+            _status, body = await trust({fleet_console.REPLAY_HEADER: "1"})
+            assert body["code"] == "refused" and "govern" in body["error"]
+            # …reached by one a human also granted `govern`. It is refused
+            # again, but for the argument it is missing rather than for where
+            # it came from, which is the whole difference.
+            _status, body = await trust({fleet_console.REPLAY_HEADER: "1",
+                                         fleet_console.GOVERN_HEADER: "1"})
+            assert body["code"] == "bad_request"
+            # And the marker alone is not a way in, because it is not a way to
+            # anything: this is a page on the machine, which has more already.
+            _status, body = await trust({fleet_console.GOVERN_HEADER: "1"})
+            assert body["code"] == "bad_request"
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_a_long_operation_is_startable_from_a_remote_console(self):
+        """End to end on the real route: refused as a call, with the shape that
+        says how, and then answered as a job."""
+        node, console = await _make_console()
+        try:
+            token = await _login(console)
+            remote = {fleet_console.REPLAY_HEADER: "1"}
+            _status, body = await asyncio.to_thread(
+                _post, console,
+                {"v": 1, "op": "pseudo.lookup", "params": {"query": "who"}},
+                token, remote)
+            assert body["code"] == "refused"
+            assert body["detail"]["job"] == "pseudo.lookup"
+            _status, body = await asyncio.to_thread(
+                _post, console,
+                {"v": 1, "op": "jobs.start",
+                 "params": {"op": "pseudo.lookup", "params": {"query": "who"}}},
+                token, remote)
+            assert body["ok"] is True and body["result"]["job"]
+            _status, body = await asyncio.to_thread(
+                _post, console,
+                {"v": 1, "op": "jobs.list"}, token, remote)
+            assert len(body["result"]["jobs"]) == 1
         finally:
             console.stop()
             await node.stop()
@@ -1711,3 +1825,260 @@ class TestConsoleControlRoute:
         finally:
             console.stop()
             await node.stop()
+
+
+# --------------------------------------------------------------------------
+# Everything travels: the two mechanisms that made it true.
+# --------------------------------------------------------------------------
+
+class _Slow:
+    """A module whose operations are the two shapes that could not travel:
+    one that takes far longer than the relay holds, and one that is a decision
+    rather than an operation."""
+
+    NAME = "slow"
+    OPERATIONS = (
+        operation("work", "Takes longer than the relay can hold",
+                  [control.param("label", "text", required=False, default="")],
+                  remote=True, background=True, timeout=60.0),
+        operation("decide", "A decision, not an operation",
+                  govern=True, timeout=5.0),
+        operation("judge", "A long decision",
+                  govern=True, background=True, timeout=60.0),
+        operation("fail", "A job that refuses",
+                  remote=True, background=True, timeout=60.0),
+        operation("hang", "A job that never comes back",
+                  remote=True, background=True, timeout=60.0),
+    )
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.started = threading.Event()
+        self.calls = []
+
+    def op_work(self, label):
+        self.calls.append(label)
+        self.started.set()
+        self.done.wait(5.0)
+        return {"label": label, "worked": True}
+
+    def op_decide(self):
+        return {"decided": True}
+
+    def op_judge(self):
+        return {"judged": True}
+
+    def op_fail(self):
+        raise ControlError("conflict", "not in that state")
+
+    def op_hang(self):
+        self.started.set()
+        self.done.wait(30.0)
+        return {"never": True}
+
+
+def _slow_plane():
+    module = _Slow()
+    plane = ControlPlane()
+    plane.register(module)
+    plane.register(JobsModule(plane, None))
+    return plane, module
+
+
+def _await_job(plane, ticket, origin, tries=200):
+    """Poll one ticket until it stops running. Bounded — a test that waits for
+    ever on a thread that wedged is a test that reports nothing."""
+    for _ in range(tries):
+        state = plane.call("jobs.poll", {"job": ticket}, origin=origin)
+        if state["state"] != jobs_mod.RUNNING:
+            return state
+        time.sleep(0.02)
+    raise AssertionError("that job never finished")
+
+
+class TestJobsCarryWhatTheRelayCannot:
+    def test_a_long_operation_answers_through_a_ticket(self):
+        plane, module = _slow_plane()
+        started = plane.call("jobs.start",
+                             {"op": "slow.work", "params": {"label": "x"}},
+                             origin=Origin.REMOTE)
+        assert started["state"] == jobs_mod.RUNNING and started["job"]
+        assert module.started.wait(2.0)
+        module.done.set()
+        finished = _await_job(plane, started["job"], Origin.REMOTE)
+        assert finished["state"] == jobs_mod.DONE
+        assert finished["result"] == {"label": "x", "worked": True}
+
+    def test_a_direct_call_is_refused_with_the_shape_that_says_how(self):
+        """Not "you may not": "ask me the other way". The browser reads this
+        and re-asks, so no page had to learn there is such a thing as a job."""
+        plane, _module = _slow_plane()
+        with pytest.raises(ControlError) as raised:
+            plane.call("slow.work", {}, origin=Origin.REMOTE)
+        assert raised.value.code == "refused"
+        assert raised.value.detail == {"background": True, "job": "slow.work"}
+
+    def test_locally_a_long_operation_is_just_a_call(self):
+        """Nothing here has to hand back a ticket: there is no relay in the way,
+        and a second mechanism for a machine that does not need one is the sort
+        of thing that ends up with two answers to one question."""
+        plane, module = _slow_plane()
+        module.done.set()
+        assert plane.call("slow.work", {"label": "here"})["worked"] is True
+
+    def test_a_job_may_not_reach_further_than_a_call(self):
+        plane, _module = _slow_plane()
+        for origin, op in ((Origin.REMOTE, "slow.decide"),
+                           (Origin.REMOTE, "slow.judge")):
+            with pytest.raises(ControlError) as raised:
+                plane.call("jobs.start", {"op": op}, origin=origin)
+            assert raised.value.code == "refused", op
+        # And with the grant, the same ask goes through.
+        started = plane.call("jobs.start", {"op": "slow.judge"},
+                             origin=Origin.GOVERN)
+        assert _await_job(plane, started["job"],
+                          Origin.GOVERN)["result"] == {"judged": True}
+
+    def test_a_bad_argument_is_refused_before_a_thread_exists(self):
+        plane, module = _slow_plane()
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.start",
+                       {"op": "slow.work", "params": {"nonsense": 1}},
+                       origin=Origin.REMOTE)
+        assert raised.value.code == "bad_request"
+        assert module.calls == []
+
+    def test_an_operation_nobody_declared_is_not_startable(self):
+        plane, _module = _slow_plane()
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.start", {"op": "slow.op_work"},
+                       origin=Origin.REMOTE)
+        assert raised.value.code == "not_found"
+
+    def test_a_job_cannot_start_a_job(self):
+        plane, _module = _slow_plane()
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.start", {"op": "jobs.list"}, origin=Origin.REMOTE)
+        assert raised.value.code == "refused"
+
+    def test_a_refusal_inside_a_job_keeps_its_own_code(self):
+        plane, _module = _slow_plane()
+        started = plane.call("jobs.start", {"op": "slow.fail"},
+                             origin=Origin.REMOTE)
+        finished = _await_job(plane, started["job"], Origin.REMOTE)
+        assert finished["state"] == jobs_mod.FAILED
+        assert finished["code"] == "conflict"
+        assert "not in that state" in finished["error"]
+
+    def test_a_ticket_is_readable_only_by_the_console_that_could_have_made_it(self):
+        """The answer to "adopt this key" must not be collectable by whoever
+        can poll — and a job started at the machine is nobody's business from
+        the mesh."""
+        plane, module = _slow_plane()
+        module.done.set()
+        here = plane.call("jobs.start", {"op": "slow.work"})["job"]
+        there = plane.call("jobs.start", {"op": "slow.work"},
+                           origin=Origin.REMOTE)["job"]
+        for ticket, origin in ((here, Origin.REMOTE), (here, Origin.GOVERN),
+                               (there, Origin.GOVERN), (there, Origin.LOCAL)):
+            with pytest.raises(ControlError) as raised:
+                plane.call("jobs.poll", {"job": ticket}, origin=origin)
+            # "No such job", not "not yours": which of the two it was is a way
+            # of counting the tickets somebody else holds.
+            assert raised.value.code == "not_found"
+        assert plane.call("jobs.poll", {"job": there}, origin=Origin.REMOTE)
+        assert plane.call("jobs.list", origin=Origin.REMOTE)["jobs"]
+        assert len(plane.call("jobs.list")["jobs"]) == 1
+
+    def test_a_console_at_a_distance_cannot_fill_the_book(self):
+        plane, module = _slow_plane()
+        for _ in range(jobs_mod.MAX_RUNNING_REMOTE):
+            plane.call("jobs.start", {"op": "slow.hang"}, origin=Origin.REMOTE)
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.start", {"op": "slow.hang"}, origin=Origin.REMOTE)
+        assert raised.value.code == "conflict"
+        # And what the network filled does not lock this machine out of its own
+        # node: the wider ceiling is still above what a peer may hold.
+        assert plane.call("jobs.start", {"op": "slow.hang"})["job"]
+        module.done.set()
+
+    def test_a_job_that_outlives_its_ceiling_is_given_up_on(self):
+        """Abandoned, never joined — the thread is let go exactly as a wedged
+        console call is (`Docs/Architecture/gotchas.md`), and its slot with it,
+        so one stuck operation cannot be a way to fill the book for good."""
+        clock = [0.0]
+        book = jobs_mod.JobBook(_slow_plane()[0], clock=lambda: clock[0])
+        ticket = book.start("slow.hang", {}, Origin.REMOTE)["job"]
+        assert book.poll(ticket, Origin.REMOTE)["state"] == jobs_mod.RUNNING
+        clock[0] = 60.0 + jobs_mod.GRACE + 1.0
+        gone = book.poll(ticket, Origin.REMOTE)
+        assert gone["state"] == jobs_mod.FAILED
+        assert gone["code"] == "unavailable"
+        assert book.listing(Origin.REMOTE)["running"] == 0
+
+    def test_a_finished_job_is_forgotten_and_a_running_one_is_not(self):
+        plane, module = _slow_plane()
+        running = plane.call("jobs.start", {"op": "slow.hang"},
+                             origin=Origin.REMOTE)["job"]
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.forget", {"job": running}, origin=Origin.REMOTE)
+        assert raised.value.code == "conflict"
+        module.done.set()
+        _await_job(plane, running, Origin.REMOTE)
+        assert plane.call("jobs.forget", {"job": running},
+                          origin=Origin.REMOTE)["forgotten"] is True
+        assert plane.call("jobs.list", origin=Origin.REMOTE)["jobs"] == []
+
+    def test_a_signing_key_fits_through_a_ticket(self):
+        """`jobs.start` carries another operation's arguments, and a document
+        would have capped a value at 512 characters — which is how an 8 kB
+        signing key would have been refused on its way to `releases.publish`
+        and nowhere else."""
+        field = control.param("params", "payload", required=False, default=None)
+        assert control.coerce(field, {"key": "ab" * 4000})["key"] == "ab" * 4000
+        for bad in ("text", 7, {"not a name!": 1}):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+
+
+class TestTheSecondGrant:
+    """`govern` — deciding what a node trusts, as opposed to operating it."""
+
+    def test_reach_is_a_table_and_not_an_ordering(self):
+        plane, _module = _slow_plane()
+        assert plane.call("slow.decide", origin=Origin.GOVERN)["decided"]
+        assert plane.call("slow.decide")["decided"]
+        with pytest.raises(ControlError) as raised:
+            plane.call("slow.decide", origin=Origin.REMOTE)
+        assert raised.value.code == "refused"
+        assert "govern" in raised.value.message
+
+    def test_declaring_both_reaches_is_a_contradiction(self):
+        with pytest.raises(ControlError):
+            operation("both", "…", remote=True, govern=True)
+
+    def test_the_catalogue_a_govern_console_reads_sits_between_the_two(self):
+        plane, _module = _slow_plane()
+
+        def names(origin):
+            return {module["module"] + "." + entry["name"]
+                    for module in plane.catalogue(origin)
+                    for entry in module["operations"]}
+
+        assert names(Origin.REMOTE) < names(Origin.GOVERN) <= names(Origin.LOCAL)
+        assert "slow.decide" in names(Origin.GOVERN)
+        assert "slow.decide" not in names(Origin.REMOTE)
+
+    def test_a_book_full_of_answers_does_not_stop_the_node_working(self):
+        """Finished records are worth keeping and are not worth an outage: the
+        oldest answer makes way for new work rather than refusing it."""
+        plane, module = _slow_plane()
+        module.done.set()
+        first = None
+        for _ in range(jobs_mod.MAX_JOBS + 4):
+            ticket = plane.call("jobs.start", {"op": "slow.work"})["job"]
+            first = first or ticket
+            _await_job(plane, ticket, Origin.LOCAL)
+        book = plane.call("jobs.list")["jobs"]
+        assert len(book) <= jobs_mod.MAX_JOBS
+        assert first not in {entry["job"] for entry in book}

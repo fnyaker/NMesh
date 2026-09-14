@@ -1291,6 +1291,46 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## A request is stale when it *fails*, not only when it succeeds
+
+"Switching from a remote node back to my own turns the console *unreachable* —
+but I can still connect to another one." Both halves were true and neither was
+about the console.
+
+Every call the page makes records the context epoch it was made in and drops its
+answer when that epoch has moved (`CONTEXT.epoch`, `StaleContext`) — which is
+what makes the switch atomic instead of eventual. The check sat **after the
+fetch resolved**. A call to a node that had gone quiet sits on the relay for its
+whole ceiling — `fleet.CONSOLE_TIMEOUT`, 25 s — and then fails at the transport
+rather than answering, so it left through the `catch` with the epoch never
+consulted. The operator, long since back on their own machine, got that
+failure painted over it. `tick()` then wrote `railState("danger", "Console
+unreachable")` about a console that was answering perfectly well, and nothing
+repaints the rail except a tick that *succeeded* — so with the interval set to
+zero, it stayed.
+
+Three fixes, and only the first is the bug:
+
+- **The epoch is checked on the failure path too**, in `api()` and in
+  `CHANNEL.frame()`. A request for a node we have left is stale however it
+  ended.
+- **The rail names the node it is about.** It is a verdict on the machine on
+  screen; "Console unreachable" over a node being *managed* reads as this
+  console having died. And it is reset on a switch, because a verdict about the
+  machine you left has no business surviving into the one you arrived at.
+- **A managed node's 401 is not ours.** On the older routes the console relays
+  and hands back the far node's status untouched, so `api()` read *that* node's
+  expired session as this console signing us out — `SESSION.clear()`, straight
+  to the gate. The control plane had already fixed this for frames by never
+  letting a remote refusal travel as a status; the routes that have not moved
+  onto the plane had not. It now hands the context back with a sentence, the
+  way a refused frame does.
+
+The shape to remember: **anything a page decides from a reply must be decided
+from a failure as well.** An error path that skips a check the success path
+makes is a check that does not exist on the day it matters, because the day it
+matters is the day something failed.
+
 ## The console's pages: what a repaint quietly destroys
 
 Four bugs of one family, all invisible until somebody is *using* the page while

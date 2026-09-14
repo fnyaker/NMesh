@@ -22,15 +22,24 @@ The shape
       ┌────────────────────────────────────────────┐
       │ ControlPlane — the modules, and only them  │
       │  node · config · transports · trace ·      │
-      │  pseudo · control                          │
+      │  pseudo · jobs · control                   │
       └────────────────────────────────────────────┘
 
-One vocabulary, three properties that came out of naming it:
+One vocabulary, four properties that came out of naming it:
 
 **Reject by default, per operation.** What a peer holding the fleet's ``manage``
 right may ask of this node is a list this node keeps about *itself* — one
-``remote=True`` per operation — instead of a denylist of URL prefixes that every
+declared reach per operation — instead of a denylist of URL prefixes that every
 new route joined by default.
+
+**And everything on that list travels.** Not one operation is local-only. The
+two things that used to stand in the way were not one thing, so they did not get
+one answer: what takes longer than the relay can hold is run as a **job**
+(``background=True``, started and polled through small calls), and what is a
+*decision* rather than an operation — pinning a signing key, minting an
+invitation, holding a private key — needs the fleet's ``govern`` capability as
+well (``govern=True``), granted by a human at the target and taken back the same
+way. ``Docs/Architecture/control-plane.md`` has the long version.
 
 **The front end stops speaking HTTP.** A page asks for ``node.state``; whether
 that reaches this machine or the machine it is managing is which channel carried
@@ -63,16 +72,18 @@ from .context import Context, on_loop
 from .errors import CODES, ControlError, FrameError
 from .frame import (MAX_FRAME, MAX_REPLY, Reply, Request, decode_reply,
                     decode_request, encode)
+from .jobs import JobBook
 from .modules import install
 from .params import coerce, param
-from .plane import ControlPlane, Origin, operation
+from .plane import ControlPlane, Origin, operation, reaches
 
 __all__ = [
     "BaseChannel", "CODES", "Context", "ControlError", "ControlPlane",
-    "FrameError", "LocalChannel", "MAX_FRAME", "MAX_REPLY", "Origin",
+    "FrameError", "JobBook", "LocalChannel", "MAX_FRAME", "MAX_REPLY", "Origin",
     "RefusedChannel", "RemoteChannel", "Reply", "Request", "build", "coerce",
     "decode_reply",
     "decode_request", "encode", "install", "on_loop", "operation", "param",
+    "reaches",
 ]
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 from ..plane import ControlPlane
 from .apps import AppsModule
 from .core import ControlModule
+from .jobs import JobsModule
 from .node import NodeModule
 from .pseudo import PseudoModule
 from .releases import ReleasesModule
@@ -39,9 +40,12 @@ BUILT_IN = (NodeModule, ConfigModule, TransportsModule, TraceModule,
 def install(plane: ControlPlane, context) -> ControlPlane:
     """Register every built-in module onto ``plane``.
 
-    ``control`` last and separately: it is the only module that needs the plane
-    itself, because what it answers *is* the plane."""
+    ``control`` and ``jobs`` last and separately: they are the two modules that
+    need the plane itself. One answers what the plane *is*; the other runs what
+    the plane declares, which is why a job can never reach further than a call
+    — it goes back through the same door."""
     for module in BUILT_IN:
         plane.register(module(context))
     plane.register(ControlModule(plane, context))
+    plane.register(JobsModule(plane, context))
     return plane

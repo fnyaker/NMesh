@@ -251,10 +251,12 @@ class StubConsole:
 
     def __init__(self):
         self.calls = []
+        self.governed = []
         self.available = True
 
-    def call(self, method, path, body, token, timeout=None):
+    def call(self, method, path, body, token, govern=False, timeout=None):
         self.calls.append((method, path, body, token))
+        self.governed.append(bool(govern))
         return 200, "application/json", b'{"id":"the-target"}' + b"." * 90_000
 
 
@@ -324,18 +326,25 @@ class TestControlFrameOverRealMesh:
         available = True
 
         def __init__(self, plane):
-            self._channel = control.LocalChannel(plane, control.Origin.REMOTE)
+            self._plane = plane
             self.paths = []
 
-        def call(self, method, path, body, token, timeout=None):
+        def call(self, method, path, body, token, govern=False, timeout=None):
             self.paths.append((method, path))
             if path != CONTROL_PATH:
                 return 404, "application/json", b'{"error": "not found"}'
-            return 200, "application/json", self._channel.send(body)
+            # The one decision the real console makes here, made the same way:
+            # the origin comes from what the *agent* read in its own ledger and
+            # wrote beside the replay marker, never from the frame
+            # (`webconsole._origin`).
+            origin = (control.Origin.GOVERN if govern
+                      else control.Origin.REMOTE)
+            channel = control.LocalChannel(self._plane, origin)
+            return 200, "application/json", channel.send(body)
 
-    async def _managed(self, port):
+    async def _managed(self, port, caps=("manage",)):
         operator, agent = await _linked_pair(port)
-        await operator.app.request_enrolment(agent.id, caps=["manage"])
+        await operator.app.request_enrolment(agent.id, caps=list(caps))
         await agent.wait_for(EnrolRequested)
         await agent.app.approve_enrolment(operator.hex)
         async with asyncio.timeout(20.0):
@@ -379,15 +388,54 @@ class TestControlFrameOverRealMesh:
             await operator.close()
             await agent.close()
 
-    async def test_what_that_node_keeps_to_itself_is_refused_over_the_mesh(self):
+    async def test_what_outlasts_the_relay_crosses_it_as_a_ticket(self):
+        """A directory round takes thirty seconds and the relay carries
+        fifteen. It is not refused for good: the node says *ask me as a job*,
+        and the ticket and the poll are what cross the mesh."""
         operator, agent = await self._managed(19346)
         try:
             channel = self._channel(operator, agent)
             reply = await asyncio.to_thread(
                 channel.call, "pseudo.lookup", {"query": "somebody"})
-            # Local-only there, so refused there — with a code this side can
-            # act on rather than a timeout it would have to guess about.
             assert reply.ok is False and reply.code == "refused"
+            assert reply.detail.get("job") == "pseudo.lookup"
+
+            started = await asyncio.to_thread(
+                channel.call, "jobs.start",
+                {"op": "pseudo.lookup", "params": {"query": "somebody"}})
+            assert started.ok is True and started.result["job"]
+            polled = await asyncio.to_thread(
+                channel.call, "jobs.poll", {"job": started.result["job"]})
+            assert polled.ok is True
+            assert polled.result["op"] == "pseudo.lookup"
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_the_second_grant_decides_what_that_node_will_change(self):
+        """`manage` drives the console; deciding what the node *trusts* is
+        `govern`. Over a real mesh, because the marker that carries it is
+        written by the agent out of its own ledger — the one place a stub
+        cannot prove anything."""
+        operator, agent = await self._managed(19348)
+        try:
+            channel = self._channel(operator, agent)
+            reply = await asyncio.to_thread(channel.call, "join.invite")
+            assert reply.ok is False and reply.code == "refused"
+            assert "govern" in reply.error
+        finally:
+            await operator.close()
+            await agent.close()
+
+    async def test_with_the_second_grant_it_is_reached(self):
+        operator, agent = await self._managed(19349, caps=("manage", "govern"))
+        try:
+            channel = self._channel(operator, agent)
+            reply = await asyncio.to_thread(
+                channel.call, "releases.trust", {})
+            # Refused for the argument it is missing rather than for where it
+            # came from, which is the whole difference the grant makes.
+            assert reply.ok is False and reply.code == "bad_request"
         finally:
             await operator.close()
             await agent.close()

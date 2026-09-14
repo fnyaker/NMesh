@@ -63,7 +63,8 @@ class NodeModule:
         operation("retry", "Dial a node's known addresses now",
                   [param("node", "node"),
                    param("uri", "line", required=False, default="")],
-                  changes=True, timeout=_RETRY),
+                  changes=True, remote=True, background=True,
+                  timeout=_RETRY),
     )
 
     def __init__(self, context) -> None:

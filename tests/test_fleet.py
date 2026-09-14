@@ -337,9 +337,14 @@ class StubConsole:
         self.available = True
         self.issued = []
         self.revoked = []
+        self.governed = []
 
-    def call(self, method, path, body, token, timeout=None):
+    def call(self, method, path, body, token, govern=False, timeout=None):
         self.calls.append((method, path, body, token))
+        # The second grant, as the agent read it from its own ledger. Recorded
+        # apart from the call so a test can check the thing that matters: it is
+        # never taken from what the peer sent.
+        self.governed.append(bool(govern))
         return self.status, self.ctype, self.body
 
     def issue_session(self):
@@ -406,6 +411,49 @@ class TestRemoteConsole:
         assert ctype.startswith("application/json")
         # The token travels with the call: the agent mints nothing of its own.
         assert console.calls == [("GET", "/api/state", None, "remote-token")]
+
+    async def test_the_second_grant_is_read_from_the_ledger_not_the_call(
+            self, operator, agent):
+        """`govern` decides whether a console at a distance may change what this
+        node *trusts*, so the one thing that must never decide it is the call
+        asking. The peer sends a method, a path, a body and a token; the marker
+        beside them is written here, out of our own ledger
+        (`fleet_console.GOVERN_HEADER`)."""
+        console = StubConsole(body=b'{"ok":true}')
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent)
+        await task
+        assert console.governed == [False]
+
+        # The same peer, once a human on the target grants the second right.
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k",
+                                     caps=["manage", "govern"])
+        task = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/state"))
+        await deliver_both(operator, agent)
+        await task
+        assert console.governed == [False, True]
+
+    async def test_a_peer_cannot_write_the_marker_into_its_own_request(
+            self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        # Straight at the handler with the field a peer would have to invent.
+        # It is not read, it is not refused — there is simply nowhere in the
+        # document for a caller to say what it is allowed.
+        agent.app._on_console_request(
+            operator.id, None,
+            {"rid": "r1", "method": "GET", "path": "/api/state",
+             "govern": True, "origin": "govern"})
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if console.governed:
+                break
+        assert console.governed == [False]
 
     async def test_the_answer_is_chunked_and_reassembled(self, operator, agent):
         """One console snapshot on a busy node does not fit a single frame."""
