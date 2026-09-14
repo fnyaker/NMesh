@@ -1698,6 +1698,12 @@ class _Peer:
         # Invoked when the receive loop exits on its own (dead link or abuse),
         # so the node can prune this peer. Cleared on intentional stop().
         self.on_dead = None
+        # Invoked when a *frame* would not decode. The link's own counter below
+        # is all this object can keep, and `CLAUDE.md` is explicit that a count
+        # kept per link is a count a peer sheds by reconnecting — so the node
+        # hangs its identity-wide book here. Set by `MeshNode._new_peer`; a peer
+        # nobody owns simply counts locally, which is the honest fallback.
+        self.on_abuse = None
         self._task: asyncio.Task | None = None
 
     async def start(self, on_packet) -> None:
@@ -1728,6 +1734,7 @@ class _Peer:
                 # oversized payload). One bad packet must never kill the link:
                 # drop it, count the abuse, and keep serving. Persistent garbage
                 # is treated as hostile and the peer is cut.
+                self._charge_identity()
                 if self.note_abuse():
                     return
                 continue
@@ -1739,6 +1746,7 @@ class _Peer:
             # exactly like a frame that would not decode (`src/medium.py`).
             packet = medium.received(packet)
             if packet is None:
+                self._charge_identity()
                 if self.note_abuse():
                     return
                 continue
@@ -1754,6 +1762,28 @@ class _Peer:
                 raise
             except Exception:
                 pass  # malformed payload or handler bug — drop, loop continues
+
+    def _charge_identity(self) -> None:
+        """Tell the node a frame would not decode, so the *identity* is charged.
+
+        Every other violation in this product goes through
+        `MeshNode._charge_abuse`, which charges the link **and** the node's
+        reputation book. Frames that fail to decode were the exception: they
+        were counted here, on the link, and nowhere else — so an authenticated
+        peer could send noise up to the cut, reconnect, and start again, for
+        ever, without its standing ever moving. That is exactly the shape
+        `CLAUDE.md` names when it says a count is kept per identity and not per
+        link.
+
+        Never raises: this is the receive loop, and a bookkeeping failure must
+        not be a way to end one."""
+        hook = self.on_abuse
+        if hook is None or self.authenticated_id is None:
+            return          # nothing better than the link counter to charge
+        try:
+            hook(self)
+        except Exception:                       # noqa: BLE001 — never the reason
+            pass
 
     def note_handshake_attempt(self) -> bool:
         """Claim one handshake attempt on this link. False once they run out."""
@@ -6039,6 +6069,7 @@ class MeshNode:
         and an invite link carries the code it was opened with."""
         peer = _Peer(transport, is_client_side=is_client_side)
         peer.on_dead = on_dead if on_dead is not None else self._reap_peer
+        peer.on_abuse = self._charge_identity_abuse
         peer.total = self._metrics.total
         peer.trace = self.trace
         return peer
@@ -10603,6 +10634,17 @@ Hints come first (the ``have`` byte on an announce, from an
         self._detached.add(task)
         task.add_done_callback(self._detached.discard)
 
+    def _charge_identity_abuse(self, peer: '_Peer') -> None:
+        """Charge a protocol violation against the *node*, not the link.
+
+        The half of `_charge_abuse` that outlives the socket, on its own,
+        because the receive loop already keeps the link's half and must not
+        keep it twice."""
+        if peer.authenticated_id is not None:
+            self.report_abuse(peer.authenticated_id, 1.0,
+                              "protocol violations",
+                              kind=accusation.KIND_MALFORMED)
+
     def _charge_abuse(self, peer: '_Peer') -> None:
         """Count a protocol violation, against the link and against the node.
 
@@ -10615,10 +10657,7 @@ Hints come first (the ``have`` byte on an announce, from an
 
         Never inline: we are inside that peer's own receive task, which must not
         be cancelled from here (see :meth:`_reap_peer`)."""
-        if peer.authenticated_id is not None:
-            self.report_abuse(peer.authenticated_id, 1.0,
-                              "protocol violations",
-                              kind=accusation.KIND_MALFORMED)
+        self._charge_identity_abuse(peer)
         if peer.note_abuse():
             self._spawn_bounded(self._reap_peer(peer))
 

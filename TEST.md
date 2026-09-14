@@ -21,6 +21,22 @@ what is held to a number is in the suite itself.)
 
 ---
 
+## The charter, as tests
+
+`CLAUDE.md` is the specification, and a test written *from the code* only proves
+the code agrees with itself. These are written from its sentences, so the day
+one fails the argument is about the rule:
+
+| File | Clause it holds |
+|---|---|
+| `test_charter.py` | the supply chain (no third dependency arrives in a commit that needed a helper), the language, a floor under the framing hot path, and the two security absolutes that had exceptions — the session token's comparison and where noise is charged |
+| `test_medium_agnostic.py` | "transport-agnostic": no module but `node.py` may name a medium, it may name exactly the two the charter declares, and the charter and `transports.md` must say the same thing |
+| `test_hostile_plugins.py` | a transport or an app that throws, lies about types, answers enormously, or implements the bare minimum must not break the node |
+| `test_speedtest.py` | every refusal that makes "measure a link by loading it" safe to offer |
+| `test_control_plane.py` | the reach of every operation, against the ledger in `control-plane.md` |
+| `test_webassets.py` | no emoji in an interface |
+| `test_updater.py` | the version, in the two files that carry it |
+
 ## Integration tests
 
 Real nodes, real post-quantum crypto, a real network stack. Excluded by default

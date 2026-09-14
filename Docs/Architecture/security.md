@@ -304,6 +304,42 @@ reads *too short* as malformed and *longer than we understand* as a newer build
 reads like rigour and is the same bug as reading silence as refusal: it reports
 every node running tomorrow's code. See `gotchas.md`.
 
+## A session token is a secret, and it is compared like one
+
+The charter states it without an exception — *secrets compared in constant time
+(`hmac.compare_digest`)* — and the console had one nobody had written down. A
+live session lived in `dict[token] -> deadline`, so the comparison on **every
+request** was a dictionary lookup, which compares strings and stops at the first
+difference.
+
+The table is keyed by a **handle** now — the SHA-256 of the token — and the
+token itself is then compared with `hmac.compare_digest`. The digest is what
+indexes the table, so what an attacker could time is a lookup on a value they
+cannot invert into a session; the acceptance is the constant-time comparison
+after it. Same O(1), same sliding expiry, same revocation.
+
+Honest about the size of it: the token is 32 bytes from `secrets`, and the
+timing signal from a hash-table lookup is very weak. This is not a hole that was
+being walked through. It is an absolute that was not absolute, which is the kind
+of thing that stays wrong until something else leans on it.
+
+## Noise is charged to whoever sent it, not to the socket it arrived on
+
+`CLAUDE.md` is explicit: *counted per identity, not per link — a peer that
+reconnects to shed an exhausted count is the whole point of counting.* Every
+violation in this product went through `MeshNode._charge_abuse`, which charges
+the link **and** the node's reputation book — every one except the first gate of
+all. A frame that would not *decode* was counted by `_Peer.note_abuse`, on the
+link, and nowhere else.
+
+So an authenticated peer could send noise up to the cut, reconnect, and begin
+again, indefinitely, with its standing never moving — which is exactly the
+sentence above, describing the one path it did not cover. The receive loop now
+tells the node through `_Peer.on_abuse`, hung there by `MeshNode._new_peer`, and
+`_charge_abuse` is expressed in terms of the same call rather than repeating it.
+A peer with no identity is still charged on the link alone, because there is
+nothing else to charge.
+
 ## Zero trust: being in the network is not being trusted
 
 Source: `reputation.py`, `accusation.py`, and `MeshNode.report_abuse`.

@@ -308,7 +308,14 @@ class WebConsole:
         self._plane = control.build(self._control_context)
 
         # Sessions: token -> expiry monotonic deadline.
-        self._tokens: dict[str, float] = {}
+        # Live sessions, keyed by a **handle** — the SHA-256 of the token —
+        # rather than by the token itself. `CLAUDE.md` says secrets are compared
+        # in constant time and this was the exception nobody had written down: a
+        # dict lookup compares strings, and a session token is a secret. The
+        # handle is what the table is indexed on (a digest tells an attacker who
+        # could time the lookup nothing they can invert) and the token itself is
+        # then compared with `hmac.compare_digest`.
+        self._tokens: dict[str, tuple[bytes, float]] = {}
         self._tokens_lock = threading.Lock()
 
         # Login throttling. Under its own lock: the HTTP server is threaded, so
@@ -372,10 +379,11 @@ class WebConsole:
         The caller's own session is kept: someone changing their password
         because they think a session was stolen must not be logged out by the
         very act of fixing it, and the stolen one is gone either way."""
+        spared = self._handle(keep) if keep else ""
         with self._tokens_lock:
-            doomed = [token for token in self._tokens if token != keep]
-            for token in doomed:
-                self._tokens.pop(token, None)
+            doomed = [handle for handle in self._tokens if handle != spared]
+            for handle in doomed:
+                self._tokens.pop(handle, None)
         return len(doomed)
 
     # -- TLS --------------------------------------------------------------
@@ -427,10 +435,16 @@ class WebConsole:
 
     # -- token sessions ---------------------------------------------------
 
+    @staticmethod
+    def _handle(token: str) -> str:
+        """What the session table is indexed on. Never the token."""
+        return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
+
     def _issue_token(self) -> str:
         token = secrets.token_urlsafe(32)
         with self._tokens_lock:
-            self._tokens[token] = time.monotonic() + _TOKEN_TTL
+            self._tokens[self._handle(token)] = (
+                token.encode("utf-8"), time.monotonic() + _TOKEN_TTL)
             self._gc_tokens()
         return token
 
@@ -459,22 +473,31 @@ class WebConsole:
         if not token:
             return False
         now = time.monotonic()
+        handle = self._handle(token)
         with self._tokens_lock:
-            deadline = self._tokens.get(token)
-            if deadline is None or deadline < now:
-                self._tokens.pop(token, None)
+            held = self._tokens.get(handle)
+            if held is None:
                 return False
-            self._tokens[token] = now + _TOKEN_TTL  # sliding expiry
+            stored, deadline = held
+            # The digest found a candidate; this is what accepts it. Constant
+            # time, because the thing being compared is the secret itself.
+            if not hmac.compare_digest(stored, token.encode("utf-8", "replace")):
+                return False
+            if deadline < now:
+                self._tokens.pop(handle, None)
+                return False
+            self._tokens[handle] = (stored, now + _TOKEN_TTL)  # sliding expiry
             return True
 
     def _revoke_token(self, token: str) -> None:
         with self._tokens_lock:
-            self._tokens.pop(token, None)
+            self._tokens.pop(self._handle(token), None)
 
     def _gc_tokens(self) -> None:
         now = time.monotonic()
-        for t in [t for t, d in self._tokens.items() if d < now]:
-            self._tokens.pop(t, None)
+        for handle in [h for h, (_, deadline) in self._tokens.items()
+                       if deadline < now]:
+            self._tokens.pop(handle, None)
 
     # -- login throttle ---------------------------------------------------
 
