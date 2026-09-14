@@ -349,6 +349,9 @@ class TestTheNodeHandsOneOver:
     class _Peer:
         authenticated_id = None
         malformed = 0
+        # A real `_Peer` is built around one and never exists without it; a
+        # stub that leaves it out is testing against a node that cannot happen.
+        transport = None
 
         def note_abuse(self):
             self.malformed += 1

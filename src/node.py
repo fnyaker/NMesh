@@ -15,6 +15,8 @@ from collections import OrderedDict
 from .app_auth import AppAuth
 from .trace import Trace
 from .node_id import NodeID
+from . import faults
+from . import medium
 from . import routed
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
@@ -160,6 +162,8 @@ KEY_OFFER         = 0x2D   # "I hold this publisher key and offer it to you"
 KEY_ACCEPT        = 0x2E   # "I want it — seal it to this KEM key" (signed)
 KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
 INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a relay
+SPEED_PROBE       = 0x31   # padding, to measure a link by loading it
+SPEED_ECHO        = 0x32   # the same padding back — one for one, never more
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -380,6 +384,27 @@ _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
 _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 _DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallback
+# Measuring a link by loading it. Every figure here is a *refusal* first and a
+# measurement second, because this is the one plane whose purpose is to spend
+# somebody else's bandwidth.
+#
+#   * one chunk is well under what a packet carries (`packet.py`, 60 000), so a
+#     probe is a probe and never a way to find the framing's edge;
+#   * an echo is the same size as its probe — **one for one**. A reflector that
+#     answered more than it was sent is an amplifier, which is the single worst
+#     thing this pair could be, so the handler copies the payload rather than
+#     generating one;
+#   * a test is bounded by bytes *and* by seconds, whichever ends first, so a
+#     fast link cannot be asked for an unbounded amount and a dead one cannot
+#     hold the caller;
+#   * and the answering side rate-limits per identity, so a peer cannot make us
+#     echo without end however politely it asks.
+_SPEED_CHUNK           = 16 * 1024
+_SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
+_SPEED_MAX_SECONDS     = 10.0
+_SPEED_WINDOW          = 60.0              # what the *answering* side allows…
+_SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
+_SPEED_INFLIGHT        = 8                 # probes outstanding at once
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -1673,6 +1698,12 @@ class _Peer:
         # Invoked when the receive loop exits on its own (dead link or abuse),
         # so the node can prune this peer. Cleared on intentional stop().
         self.on_dead = None
+        # Invoked when a *frame* would not decode. The link's own counter below
+        # is all this object can keep, and `CLAUDE.md` is explicit that a count
+        # kept per link is a count a peer sheds by reconnecting — so the node
+        # hangs its identity-wide book here. Set by `MeshNode._new_peer`; a peer
+        # nobody owns simply counts locally, which is the honest fallback.
+        self.on_abuse = None
         self._task: asyncio.Task | None = None
 
     async def start(self, on_packet) -> None:
@@ -1703,6 +1734,19 @@ class _Peer:
                 # oversized payload). One bad packet must never kill the link:
                 # drop it, count the abuse, and keep serving. Persistent garbage
                 # is treated as hostile and the peer is cut.
+                self._charge_identity()
+                if self.note_abuse():
+                    return
+                continue
+            # …and what came back has to *be* a packet. Everything below counts
+            # its length, traces it and hands it to a handler, all three of
+            # which assumed one — so a transport answering `None` raised
+            # outside this guard, took the link down and left an unretrieved
+            # task behind it. A medium that answers nonsense is charged for it
+            # exactly like a frame that would not decode (`src/medium.py`).
+            packet = medium.received(packet)
+            if packet is None:
+                self._charge_identity()
                 if self.note_abuse():
                     return
                 continue
@@ -1718,6 +1762,28 @@ class _Peer:
                 raise
             except Exception:
                 pass  # malformed payload or handler bug — drop, loop continues
+
+    def _charge_identity(self) -> None:
+        """Tell the node a frame would not decode, so the *identity* is charged.
+
+        Every other violation in this product goes through
+        `MeshNode._charge_abuse`, which charges the link **and** the node's
+        reputation book. Frames that fail to decode were the exception: they
+        were counted here, on the link, and nowhere else — so an authenticated
+        peer could send noise up to the cut, reconnect, and start again, for
+        ever, without its standing ever moving. That is exactly the shape
+        `CLAUDE.md` names when it says a count is kept per identity and not per
+        link.
+
+        Never raises: this is the receive loop, and a bookkeeping failure must
+        not be a way to end one."""
+        hook = self.on_abuse
+        if hook is None or self.authenticated_id is None:
+            return          # nothing better than the link counter to charge
+        try:
+            hook(self)
+        except Exception:                       # noqa: BLE001 — never the reason
+            pass
 
     def note_handshake_attempt(self) -> bool:
         """Claim one handshake attempt on this link. False once they run out."""
@@ -2111,6 +2177,11 @@ class MeshNode:
         self._directory_wake = asyncio.Event()
         self._restart_hook = None
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
+        # Echoes we have answered, per identity, per window. The speedtest is
+        # the one plane whose purpose is to spend a link, so the side being
+        # measured keeps its own ceiling and the side measuring cannot raise it.
+        self._speed_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        self._speed_seen: OrderedDict[bytes, float] = OrderedDict()
         # Pseudos: the changeable name beside the unchangeable id. One book
         # holds every claim we have verified — our own included — and answers
         # both "what is this node called?" and "who is called this?".
@@ -2714,10 +2785,7 @@ class MeshNode:
 
     async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._connect_for_join(address)
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         peer.remote_addr = address
         peer.join_code = code
         self._peers.append(peer)
@@ -3161,6 +3229,130 @@ class MeshNode:
             if not fut.done():
                 fut.cancel()
 
+    # -- measuring a link by loading it ------------------------------------
+    #
+    # Everything else here measures a link by *watching* it: round trips, loss,
+    # the bytes that happened to flow. That answers "is it alive" and never "how
+    # fast is it", which the charter names a principle and nothing measured.
+    #
+    # So: padding out, the same padding back, timed. The whole design is in what
+    # it refuses. It is answered **only on a direct, authenticated link** — never
+    # routed, never before a handshake — so a stranger cannot make this node
+    # speak to a victim, and the pair is one-for-one so it is not an amplifier
+    # even between peers. The answering side keeps its own ceiling per identity,
+    # which is the bound that matters: the side asking cannot raise it, and a
+    # peer that reconnects to shed it is counted by identity like every other
+    # abuse here.
+
+    def _speed_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._speed_rate, peer,
+                                    _SPEED_WINDOW, _SPEED_MAX_PER_WINDOW)
+
+    async def _handle_speed_probe(self, peer: _Peer, packet: Packet) -> None:
+        """Answer one probe with exactly what it carried, or answer nothing."""
+        if peer.authenticated_id is None or peer.session is None:
+            # Pre-auth this is a stranger asking us to generate traffic. There
+            # is no version of that worth serving.
+            return
+        if packet.dst_id != self._id.raw:
+            return          # not addressed to us: never reflected onward
+        if not packet.payload or len(packet.payload) > _SPEED_CHUNK:
+            self._charge_abuse(peer)
+            return
+        if not self._speed_allowed(peer):
+            return          # silently: a peer told it hit a ceiling learns it
+        await peer.send(Packet.create(SPEED_ECHO, self._id.raw,
+                                      peer.authenticated_id.raw,
+                                      packet.payload))
+
+    async def _handle_speed_echo(self, peer: _Peer, packet: Packet) -> None:
+        """One answer back. The measurement is kept by whoever asked."""
+        if peer.authenticated_id is None or peer.session is None:
+            return
+        if len(packet.payload) < _QID_LEN:
+            self._charge_abuse(peer)
+            return
+        pending = self._pending_echo.get(packet.payload[:_QID_LEN])
+        if pending is None:
+            return          # late, or never ours: not an accusation either way
+        target, fut = pending
+        if packet.src_id != target.raw or fut.done():
+            return
+        fut.set_result(len(packet.payload))
+
+    async def console_speedtest(self, node_id_hex: str) -> dict:
+        """Load the link to one node and say how fast it actually is.
+
+        Bounded twice over — by bytes and by seconds, whichever ends first — so
+        a fast link cannot be asked for an unbounded amount and a dead one
+        cannot hold the caller. Direct links only: routing a speedtest would
+        measure somebody else's link and spend it to do so."""
+        try:
+            nid = NodeID(bytes.fromhex(node_id_hex))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "bad id"}
+        if nid == self._id:
+            return {"ok": False, "error": "a node cannot measure itself"}
+        peer = self._link_to(nid)
+        if peer is None or peer.session is None:
+            return {"ok": False, "error": "no direct link to that node"}
+        if not self.peer_announces(peer, features.SPEEDTEST):
+            return {"ok": False, "error": "that node does not run speed tests"}
+
+        payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
+        sent = echoed = 0
+        rtts: list[float] = []
+        started = time.monotonic()
+        deadline = started + _SPEED_MAX_SECONDS
+        try:
+            while (echoed < _SPEED_MAX_BYTES
+                   and time.monotonic() < deadline):
+                batch = []
+                for _ in range(_SPEED_INFLIGHT):
+                    qid = os.urandom(_QID_LEN)
+                    future: asyncio.Future = asyncio.get_running_loop().create_future()
+                    while len(self._pending_echo) >= _PENDING_ECHO_MAX:
+                        _, (_, old) = self._pending_echo.popitem(last=False)
+                        if not old.done():
+                            old.cancel()
+                    self._pending_echo[qid] = (nid, future)
+                    batch.append((qid, future, time.monotonic()))
+                    await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
+                                                  nid.raw, qid + payload))
+                    sent += _SPEED_CHUNK
+                for qid, future, at in batch:
+                    try:
+                        size = await asyncio.wait_for(
+                            asyncio.shield(future),
+                            max(0.05, deadline - time.monotonic()))
+                        echoed += int(size)
+                        rtts.append((time.monotonic() - at) * 1000.0)
+                    except Exception:
+                        pass            # a lost probe is a measurement too
+                    finally:
+                        self._pending_echo.pop(qid, None)
+                        if not future.done():
+                            future.cancel()
+        except Exception:
+            return {"ok": False, "error": "the link failed during the test"}
+        elapsed = max(1e-6, time.monotonic() - started)
+        # Round trip: what went out *and* came back, which is the honest figure
+        # for a measurement made by echoing. Saying "throughput" for one
+        # direction of it would be twice the truth.
+        return {
+            "ok": True,
+            "node": nid.raw.hex(),
+            "seconds": round(elapsed, 2),
+            "sent_bytes": sent,
+            "echoed_bytes": echoed,
+            "lost_bytes": max(0, sent - echoed),
+            "round_trip_bps": round((sent + echoed) / elapsed),
+            "one_way_bps": round(echoed / elapsed),
+            "rtt_ms": round(sum(rtts) / len(rtts), 1) if rtts else None,
+            "best_ms": round(min(rtts), 1) if rtts else None,
+            "transport": self._peer_scheme(peer),
+        }
+
     async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
         # Delivered here because dst==self (forwarding routed it to us). Reply
         # routed back to the origin so the round-trip crosses the same mesh path.
@@ -3534,13 +3726,10 @@ class MeshNode:
         it. Applied locally rather than folded into the accord for exactly that
         reason — the two ends may run different transports settings, and each
         one is right about its own."""
-        try:
-            timeout = peer.transport.idle_timeout()
-        except Exception:
+        timeout = medium.idle_timeout(peer.transport)
+        if timeout is None:
             return None
-        if not timeout or timeout <= 0:
-            return None
-        return float(timeout) * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
+        return timeout * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
 
     def _keepalive_interval(self, peer: '_Peer') -> float:
         """Seconds until this link's next probe. O(1): the role this link plays
@@ -4063,24 +4252,13 @@ class MeshNode:
         screen that can disagree with the bundle."""
         bundles = []
         for target, bundle in self._bundles.items():
-            members = [{"scheme": self._peer_scheme(peer),
-                        "remote": peer.remote_addr,
-                        "mean_ms": (None if peer.quality.recent_ms() is None
-                                    else round(peer.quality.recent_ms(), 1)),
-                        "loss": (None if peer.quality.recent_loss() is None
-                                 else round(peer.quality.recent_loss(), 3)),
-                        "probes": peer.quality.recent_probes(),
-                        # What this link is *actually* probed at, not what the
-                        # accord agreed: the medium under it can take that back
-                        # (`_idle_ceiling`), and a screen showing the agreement
-                        # beside a link running at something else is a label
-                        # that lies. One expression, read off the same function
-                        # the loop schedules with.
-                        "probe_ms": round(self._keepalive_interval(peer) * 1000),
-                        "carrying": peer in bundle.keys}
-                       for peer in list(bundle.keys) + list(bundle.benched())]
-            agreed = next((self._accord_with(peer)
-                           for peer in bundle.keys), None)
+            members = [self._mlo_member_row(member, bundle)
+                       for member in list(bundle.keys) + list(bundle.benched())]
+            # An accord is a property of a **link**, so it is read off the
+            # first member that is one. A bundle can be entirely routed, and
+            # then there is no accord to show rather than one to invent.
+            agreed = next((self._accord_with(member) for member in bundle.keys
+                           if not isinstance(member, routed.Path)), None)
             bundles.append({
                 "node": target.raw.hex(),
                 "pseudo": self.pseudo_of(target),
@@ -4117,6 +4295,49 @@ class MeshNode:
                                    "slow_min", "slow_max"),
                                   self.keepalive_bounds().as_tuple())),
             "bundles": bundles,
+        }
+
+    def _mlo_member_row(self, member, bundle) -> dict:
+        """One bundle member, described as what it actually is.
+
+        **A member is a way to reach an identity, and there are two kinds** —
+        `_member_peer` says so in its own docstring: a direct link, which is a
+        `_Peer`; and a routed path, which is a `routed.Path` naming a first hop.
+        This read called every one of them ``peer`` and asked each for
+        `remote_addr`, so the moment a node held a hybrid bundle
+        (`routed.py`, MRLO/HMLO) `console_snapshot` raised `AttributeError` —
+        and with it every `node.state`, which is the whole console. One name
+        for two things, and the screen it fed went dark.
+
+        A routed path measures itself (`Path.quality`), so its numbers come off
+        the path. What it *rides* is the link to its first hop, which is where
+        a cadence lives — there is one accord per link, not per path."""
+        routed_path = isinstance(member, routed.Path)
+        quality = member.quality
+        # The link a cadence can be read from: a direct member is one; a routed
+        # member rides the link to its first hop, which may be gone.
+        link = self._link_to(member.via) if routed_path else member
+        recent_ms = quality.recent_ms()
+        recent_loss = quality.recent_loss()
+        return {
+            "scheme": "routed" if routed_path else self._peer_scheme(member),
+            # Where this member goes. For a path that is the neighbour it goes
+            # through, said as an id rather than an address: a first hop is a
+            # node, and printing its socket would be printing the wrong thing.
+            "remote": (member.via.raw.hex() if routed_path
+                       else member.remote_addr),
+            "via": member.via.raw.hex() if routed_path else None,
+            "mean_ms": None if recent_ms is None else round(recent_ms, 1),
+            "loss": None if recent_loss is None else round(recent_loss, 3),
+            "probes": quality.recent_probes(),
+            # What this link is *actually* probed at, not what the accord
+            # agreed: the medium under it can take that back (`_idle_ceiling`),
+            # and a screen showing the agreement beside a link running at
+            # something else is a label that lies. One expression, read off the
+            # same function the loop schedules with.
+            "probe_ms": (round(self._keepalive_interval(link) * 1000)
+                         if link is not None else None),
+            "carrying": member in bundle.keys,
         }
 
     def set_mlo_always(self, enabled: bool) -> bool:
@@ -5629,10 +5850,7 @@ class MeshNode:
             if self._unauthenticated_peers() >= _MAX_UNAUTH_PEERS:
                 await transport.close()
                 return
-        peer = _Peer(transport, is_client_side=False)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=False)
         self._peers.append(peer)
         self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
@@ -5722,11 +5940,8 @@ class MeshNode:
         try:
             async with asyncio.timeout(timeout):
                 transport = await self._transport_manager.connect(uri)
-                peer = _Peer(transport, is_client_side=True)
-                peer.on_dead = self._reap_peer
+                peer = self._new_peer(transport, is_client_side=True)
                 peer.probation = probe   # set before the handshake can complete
-                peer.total = self._metrics.total
-                peer.trace = self.trace
                 peer.remote_addr = uri
                 self._peers.append(peer)
                 await peer.start(self._handle_packet)
@@ -5830,13 +6045,33 @@ class MeshNode:
 
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
         """For testing only — injects a fake transport as a client-side peer."""
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
+        return peer
+
+    def _new_peer(self, transport, *, is_client_side: bool,
+                  on_dead=None) -> _Peer:
+        """Build a peer this node owns, wired to this node.
+
+        A `_Peer` needs three things from the node it belongs to — where to
+        count bytes, where to trace packets, and who to tell when its link
+        dies — and every one of the ten places that made one set them by hand,
+        three lines at a time. Five of them forgot `trace`, so packets on the
+        relay link and on every relayed peer were invisible to the one
+        diagnostic an operator turns on to see what is happening. Nobody chose
+        that; the shape chose it.
+
+        So the node makes its own peers and a half-wired one cannot exist. The
+        differences stay at the call sites, because they are real: a relayed
+        peer is reaped through a callback that forgets it by remote id first,
+        and an invite link carries the code it was opened with."""
+        peer = _Peer(transport, is_client_side=is_client_side)
+        peer.on_dead = on_dead if on_dead is not None else self._reap_peer
+        peer.on_abuse = self._charge_identity_abuse
+        peer.total = self._metrics.total
+        peer.trace = self.trace
         return peer
 
     async def _reap_peer(self, peer: _Peer) -> None:
@@ -6075,6 +6310,28 @@ class MeshNode:
                 "silent": self._routing.is_silent(e, now),
                 "link": self._link_view(p, now) if p is not None else None,
             })
+        # Every field below this line that *asks a subsystem a question* goes
+        # through `section`, and that is not tidiness. One of them — `mlo`,
+        # with a member it called a peer and that was a routed path — raised,
+        # and took the whole snapshot with it; `node.state` is what every page
+        # of the console reads first, so a console that had been working went
+        # entirely dark and stayed dark. **A diagnostic must not be able to end
+        # the management surface it is diagnosed through.**
+        #
+        # Not silent, though, and that is the other half: what broke is named
+        # in `broken` and its traceback is written where the machine can read
+        # it (`src/faults.py`). A section that returns `null` and says nothing
+        # is how a bug lives for months.
+        broken: list[str] = []
+
+        def section(name: str, produce, default=None):
+            try:
+                return produce()
+            except Exception as exc:            # noqa: BLE001 — never the whole
+                faults.note(f"console snapshot section {name}", exc)
+                broken.append(name)
+                return default
+
         return {
             "id": self._id.raw.hex(),
             "pseudo": self._pseudo,
@@ -6099,33 +6356,48 @@ class MeshNode:
             "routing": routing,
             "routing_size": len(routing),
             "e2e_sessions": [nid.raw.hex() for nid in self._e2e_sessions],
-            "topology": self._console_topology(now),
+            "topology": section("topology", lambda: self._console_topology(now),
+                               {}),
             "total": self._metrics.total.as_dict(),
             "load": self._metrics.load(),
             # What is running, by name. Built here from counters the loops kept
             # anyway — a snapshot costs one pass over at most a dozen jobs, and
             # nothing at all when nobody reads it.
-            "activity": self._activity.jobs(),
+            "activity": section("activity", lambda: self._activity.jobs(),
+                               []),
             "recent": self._activity.recent(20),
             "detached": len(self._detached),
-            "network": (self._net_monitor.status()
+            "network": section("network", lambda: (self._net_monitor.status()
                         if self._net_monitor is not None else None),
-            "transport_details": self._transport_details(),
-            "handshake_refusals": self.handshake_refusals(),
-            "trust": self.trust_status(),
-            "abuse": self.abuse_status(),
-            "behaviour": self.behaviour_status(),
-            "reachability": self.reachability(),
+                               None),
+            "transport_details": section("transport_details", lambda: self._transport_details(),
+                               []),
+            "handshake_refusals": section("handshake_refusals", lambda: self.handshake_refusals(),
+                               []),
+            "trust": section("trust", lambda: self.trust_status(),
+                               {}),
+            "abuse": section("abuse", lambda: self.abuse_status(),
+                               {}),
+            "behaviour": section("behaviour", lambda: self.behaviour_status(),
+                               {}),
+            "reachability": section("reachability", lambda: self.reachability(),
+                               {}),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
             "lan_discovery": self._lan_discovery is not None,
             "dynamic_address": self._dynamic_address,
-            "mlo": self.mlo_status(),
+            "mlo": section("mlo", lambda: self.mlo_status(),
+                               {}),
             "transport_balance": self._transport_balance,
-            "transport_preference": self.transport_preference(),
+            "transport_preference": section("transport_preference", lambda: self.transport_preference(),
+                               None),
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
+            # Empty on a healthy node, which is the only state it should ever
+            # be seen in. A name here means a section of this page is missing
+            # and the log says why.
+            "broken": broken,
         }
 
     def _console_topology(self, now: float) -> dict:
@@ -6234,12 +6506,9 @@ class MeshNode:
 
         Never raises: a transport that cannot say where its peer is has not
         proved anything, which is the safe answer."""
-        try:
-            if isinstance(peer.transport, RelayedTransport):
-                return False
-            ip = peer.transport.remote_ip()
-        except Exception:
+        if isinstance(peer.transport, RelayedTransport):
             return False
+        ip = medium.remote_ip(peer.transport)
         return bool(ip) and is_global_ip(ip)
 
     def _note_public_scheme(self, scheme: str | None) -> None:
@@ -6278,10 +6547,8 @@ class MeshNode:
         ctx = self._reachability_ctx()
         out = list(self._transport_manager.reachability(ctx))
         if self._udp_server is not None and self._udp_listen_uri is not None:
-            try:
-                out.extend(self._udp_server.reachability(self._udp_listen_uri, ctx))
-            except Exception:
-                pass
+            out.extend(medium.reachability(self._udp_server,
+                                           self._udp_listen_uri, ctx))
         return out
 
     def public_endpoints(self) -> list[str]:
@@ -6437,19 +6704,17 @@ class MeshNode:
         vpa = None
         try:
             transport = await self._transport_manager.connect(relay_uri)
-            rlink = _Peer(transport, is_client_side=True)
+            rlink = self._new_peer(transport, is_client_side=True)
             rlink.relay_only = True
-            rlink.on_dead = self._reap_peer
-            rlink.total = self._metrics.total
             rlink.remote_addr = relay_uri
             self._peers.append(rlink)
             self._running = True
             await rlink.start(self._handle_packet)
 
-            vpa = _Peer(RelayedTransport(self, inviter, rlink), is_client_side=True)
+            vpa = self._new_peer(RelayedTransport(self, inviter, rlink),
+                                 is_client_side=True,
+                                 on_dead=self._relay_on_dead(inviter.raw))
             vpa.join_code = code
-            vpa.on_dead = self._relay_on_dead(inviter.raw)
-            vpa.total = self._metrics.total
             self._relay_peers[inviter.raw] = vpa
             self._peers.append(vpa)
             await vpa.start(self._handle_packet)
@@ -7180,10 +7445,7 @@ class MeshNode:
         if peer is not None:
             in_use = peer.remote_addr
             if in_use is None:
-                try:
-                    in_use = (peer.transport.endpoints() or {}).get("remote")
-                except Exception:
-                    in_use = None
+                in_use = medium.endpoints(peer.transport).get("remote")
         book = self._dial_log.get(node_hex) or {}
         rows = []
         for uri in list(addresses)[:_DIAL_LOG_ADDRESSES]:
@@ -7213,19 +7475,14 @@ class MeshNode:
         (``BaseTransport.endpoints`` / ``stats``), so a medium this file has
         never heard of describes itself and shows up in the console with no
         change here."""
-        endpoints = {"local": None, "remote": None}
-        stats: dict = {}
         transport = peer.transport
-        try:
-            endpoints = transport.endpoints() or endpoints
-        except Exception:
-            pass          # a transport that cannot describe itself is not a fault
-        try:
-            stats = {str(key)[:32]: value
-                     for key, value in (transport.stats() or {}).items()
-                     if isinstance(value, (int, float, str, bool)) or value is None}
-        except Exception:
-            stats = {}
+        # Both through the one reader, which guards the call *and* the answer.
+        # This used to guard only the call, and bound `stats` here rather than
+        # where every other medium answer is bounded — two spellings of one
+        # rule, and the one a new call site copies is whichever it happens to
+        # be sitting next to (`src/medium.py`).
+        endpoints = medium.endpoints(transport)
+        stats = medium.stats(transport)
         return {
             "scheme": self._peer_scheme(peer),
             "dialled": peer.remote_addr,
@@ -7707,19 +7964,17 @@ class MeshNode:
         vpa = None
         try:
             transport = await self._transport_manager.connect(relay_uri)
-            rlink = _Peer(transport, is_client_side=True)
+            rlink = self._new_peer(transport, is_client_side=True)
             rlink.relay_only = True
-            rlink.on_dead = self._reap_peer
-            rlink.total = self._metrics.total
             rlink.remote_addr = relay_uri
             self._peers.append(rlink)
             self._running = True
             await rlink.start(self._handle_packet)
 
-            vpa = _Peer(RelayedTransport(self, inviter_id, rlink), is_client_side=True)
+            vpa = self._new_peer(RelayedTransport(self, inviter_id, rlink),
+                                 is_client_side=True,
+                                 on_dead=self._relay_on_dead(inviter_id.raw))
             vpa.join_code = code
-            vpa.on_dead = self._relay_on_dead(inviter_id.raw)
-            vpa.total = self._metrics.total
             self._relay_peers[inviter_id.raw] = vpa
             self._peers.append(vpa)
             await vpa.start(self._handle_packet)
@@ -8006,10 +8261,7 @@ class MeshNode:
         these a per-connection limit rather than a per-peer one."""
         if peer.authenticated_id is not None:
             return peer.authenticated_id.raw
-        try:
-            remote = peer.transport.remote_ip()
-        except Exception:
-            remote = None
+        remote = medium.remote_ip(peer.transport)
         return (b"ip:" + remote.encode("utf-8", "replace")) if remote \
             else b"anon:%d" % id(peer)
 
@@ -8293,9 +8545,9 @@ class MeshNode:
             return
         if len(self._relay_peers) >= _MAX_RELAY_PEERS or len(self._peers) >= _MAX_PEERS:
             return
-        vp = _Peer(RelayedTransport(self, seeker, via), is_client_side=False)
-        vp.on_dead = self._relay_on_dead(seeker.raw)
-        vp.total = self._metrics.total
+        vp = self._new_peer(RelayedTransport(self, seeker, via),
+                            is_client_side=False,
+                            on_dead=self._relay_on_dead(seeker.raw))
         self._relay_peers[seeker.raw] = vp
         self._peers.append(vp)
         await vp.start(self._handle_packet)
@@ -8641,7 +8893,7 @@ class MeshNode:
             return
         # Dial ONLY the address we observed this peer at — never a value it
         # supplied — so it can never make us dial an arbitrary victim.
-        observed = peer.transport.remote_ip()
+        observed = medium.remote_ip(peer.transport)
         if observed is None:
             return
         # …and never inline. A dial-back is two bounded waits of
@@ -10382,6 +10634,17 @@ Hints come first (the ``have`` byte on an announce, from an
         self._detached.add(task)
         task.add_done_callback(self._detached.discard)
 
+    def _charge_identity_abuse(self, peer: '_Peer') -> None:
+        """Charge a protocol violation against the *node*, not the link.
+
+        The half of `_charge_abuse` that outlives the socket, on its own,
+        because the receive loop already keeps the link's half and must not
+        keep it twice."""
+        if peer.authenticated_id is not None:
+            self.report_abuse(peer.authenticated_id, 1.0,
+                              "protocol violations",
+                              kind=accusation.KIND_MALFORMED)
+
     def _charge_abuse(self, peer: '_Peer') -> None:
         """Count a protocol violation, against the link and against the node.
 
@@ -10394,10 +10657,7 @@ Hints come first (the ``have`` byte on an announce, from an
 
         Never inline: we are inside that peer's own receive task, which must not
         be cancelled from here (see :meth:`_reap_peer`)."""
-        if peer.authenticated_id is not None:
-            self.report_abuse(peer.authenticated_id, 1.0,
-                              "protocol violations",
-                              kind=accusation.KIND_MALFORMED)
+        self._charge_identity_abuse(peer)
         if peer.note_abuse():
             self._spawn_bounded(self._reap_peer(peer))
 
@@ -12417,7 +12677,7 @@ Hints come first (the ``have`` byte on an announce, from an
         self._wake_autonat()
         self._persist_state()  # persist the newly-known peer for restart recovery
         # Tell the peer the source IP we saw — that's their public address.
-        observed = peer.transport.remote_ip()
+        observed = medium.remote_ip(peer.transport)
         if observed and _is_ip_address(observed):
             try:
                 await peer.send(Packet.create(OBSERVED_ADDR, self._id.raw,
@@ -13359,13 +13619,13 @@ Hints come first (the ``have`` byte on an announce, from an
             return  # can't relay if we don't have a link to the target
 
         # Observe the requester's source IP
-        requester_ip = peer.transport.remote_ip()
+        requester_ip = medium.remote_ip(peer.transport)
         if requester_ip is None or not _is_ip_address(requester_ip):
             return
         requester_udp_addr = f"{requester_ip}:{requester_udp_port}"
 
         # Observe the target's source IP (from its TCP connection to us)
-        target_ip = target_peer.transport.remote_ip()
+        target_ip = medium.remote_ip(target_peer.transport)
         if target_ip is None or not _is_ip_address(target_ip):
             return
         # We don't know the target's UDP port yet — ask it by sending a
@@ -13743,10 +14003,7 @@ Hints come first (the ``have`` byte on an announce, from an
                                               self._udp_server)
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"
         self._peers.append(peer)
@@ -13818,6 +14075,8 @@ _HANDLERS = {
     KEY_ACCEPT:        MeshNode._handle_key_accept,
     KEY_GRANT:         MeshNode._handle_key_grant,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
+    SPEED_PROBE:       MeshNode._handle_speed_probe,
+    SPEED_ECHO:        MeshNode._handle_speed_echo,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
@@ -13855,4 +14114,5 @@ _MESSAGE_PLANE = {
     CERT_REVOKE: features.REVOKE,
     ABUSE_REPORT: features.ABUSE,
     KA_PROPOSE: features.KEEPALIVE, KA_REQUEST: features.KEEPALIVE,
+    SPEED_PROBE: features.SPEEDTEST, SPEED_ECHO: features.SPEEDTEST,
 }

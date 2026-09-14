@@ -98,15 +98,22 @@ PACKAGES = "pkgdir"        # the package directory (PKG_STORE / FIND / FOUND / A
 # name that costs more than it saves.
 HANDOVER = "handover"
 
+# Measuring a link by loading it. Its own name because it is the one plane whose
+# whole purpose is to *spend* the link, and a node must be able to decline that
+# without declining anything else — a phone on a metered connection speaks
+# everything here except this.
+SPEEDTEST = "speed"
+
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENDEZVOUS, RENEW, REVOKE, ABUSE,
-                    KEEPALIVE, MLO, PACKAGES, HANDOVER})
+                    KEEPALIVE, MLO, PACKAGES, HANDOVER, SPEEDTEST})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
-SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS})
+SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS,
+                               SPEEDTEST})
 
 
 class FeatureError(Exception):
