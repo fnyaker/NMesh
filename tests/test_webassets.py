@@ -1314,7 +1314,12 @@ def test_a_package_can_be_read_before_it_is_run():
     running is the whole argument for offering the bytes at all."""
     source = webassets.APP_JS
     actions = source.split("actionsHTML(row, opts){", 1)[1].split("\n  },", 1)[0]
-    assert actions.index("/download") < actions.index('data-pkg-act="install"')
+    assert (actions.index('data-pkg-act="download"')
+            < actions.index('data-pkg-act="install"'))
+    # And it is a button on the channel, never a link: a browser navigation
+    # cannot carry the header that says which node this page is driving, so an
+    # `<a href download>` here always fetched from the machine serving the page.
+    assert "href=" not in actions
 
 
 def _package_view_js():

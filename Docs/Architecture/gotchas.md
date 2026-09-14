@@ -1291,6 +1291,54 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## A window opened with `noopener` starts with an empty sessionStorage
+
+"The package window is not in the remote node's context." It was not, and neither
+was the node card, and the cause is one line neither of them contains.
+
+`openLinked` opens these pages with `window.open(url, name, "noopener")`.
+`noopener` severs the link the new window would otherwise have to the page that
+opened it — which is the point, and is also what stops the browser copying that
+tab's **sessionStorage** into it. `CONTEXT` lives there, deliberately (it is the
+same lifetime as the session token it travels with, and never `localStorage`).
+So a window opened from a console driving another machine came up knowing
+nothing, described the *local* node, and had no strip to say which — three
+pages, one truth, and the satellite ones quietly told a different one.
+
+The context travels in the address now (`?node=<hex>`), and three things make
+that safe and legible rather than merely working:
+
+- **A node id in a URL is a claim, never a grant.** `CONTEXT.confirm()` checks
+  it against the console that actually holds the remote session — the same check
+  a context restored from a reload already went through — and drops it if that
+  session is gone. Nothing becomes reachable because a link said so.
+- **The page draws once, after the claim is settled.** Drawing the local node's
+  card first and correcting it is how somebody reads a number that was never
+  true.
+- **The satellite pages embed the strip too**, without its *Back to this node*
+  button (`ui.ctx_bar(leave=False)`): they follow a context, and handing the
+  remote session back from a satellite would end it under the console that
+  opened it. One place changes a context on purpose.
+
+## A link cannot carry a header, so a download went to the wrong machine
+
+The same report, the other half, and the more serious one. The package card's
+Download was an `<a class="btn" download href="/api/packages/<id>/download">`.
+That is a browser **navigation**: it carries cookies, and nothing else this page
+decided. `X-NMesh-Node` — the whole of how the console says which machine it is
+driving — is set by `fetch`, and a navigation has no `fetch` to set it on.
+
+So the button fetched the bytes of *this* node's copy while the page around it
+described another machine's, with no error anywhere, which is the worst shape a
+bug can have. It is a button on the channel now
+(`CHANNEL.download` → `transfer.fetch`/`take`), and the bytes are handed to the
+browser from a `Blob` we are already holding.
+
+The rule that generalises: **anything that leaves the page by a route the
+channel did not open is outside the context.** A navigation, an `<img src>`, a
+form post, an `EventSource` — none of them can carry what `fetch` carries. If it
+has to follow the node being driven, it goes through `CHANNEL`.
+
 ## A request is stale when it *fails*, not only when it succeeds
 
 "Switching from a remote node back to my own turns the console *unreachable* —
