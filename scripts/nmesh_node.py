@@ -436,7 +436,12 @@ async def main() -> None:
     host = None
     wants_apps = registry.is_enabled("chat") or registry.is_enabled("fleet")
     if wants_apps or args.connector_port is not None:
-        connector = DataConnector(node, host="127.0.0.1", port=args.connector_port or 0)
+        # Which apps may *read* the node's log is the registry's answer, asked
+        # per frame rather than captured once: an operator who takes a grant
+        # back has taken it back now, not at the next restart.
+        connector = DataConnector(
+            node, host="127.0.0.1", port=args.connector_port or 0,
+            log_access=lambda app_id: registry.granted_to_id(app_id, "logs"))
         await connector.start()
         launcher = ProcessLauncher(connector, node_id=node.id)
         for cmd in args.launch:

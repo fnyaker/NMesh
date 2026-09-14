@@ -13,6 +13,8 @@ import threading
 import time
 from collections import OrderedDict
 from .app_auth import AppAuth
+from . import logbook
+from .logbook import LogBook
 from .trace import Trace
 from .node_id import NodeID
 from . import faults
@@ -2216,6 +2218,17 @@ class MeshNode:
         # packet funnels (_Peer.send and _Peer._loop) can record without the
         # node having to know anything about tracing.
         self.trace = Trace()
+        # What this node *said*, beside what it sent. Off exactly like the
+        # trace, bounded in megabytes rather than in lines, and cleared when it
+        # stops — a ring of what a node was thinking, left in memory after
+        # somebody stopped looking, is a record it has no business holding
+        # (`src/logbook.py`).
+        self.logs = LogBook()
+        # Every failure a guard swallows lands in the ring as well as on
+        # stderr. Those are the ones with no other reader at all
+        # (`src/faults.py`), which makes them the lines an operator turning a
+        # log on is most often looking for.
+        faults.watch(self._note_fault)
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
         # keys stay in RAM only. When enabled, resume prior sessions on start.
         self._session_store = None
@@ -2947,6 +2960,12 @@ class MeshNode:
 
     async def stop(self) -> None:
         self._running = False
+        # Before anything else, and unconditionally: what the node kept about
+        # who it talked to goes with the node. `LogBook.stop` drops the ring
+        # rather than leaving it readable, which is the whole reason it is not
+        # `Trace`.
+        faults.unwatch(self._note_fault)
+        self.logs.stop()
         self._persist_state()
         # Cancel any in-flight address-gossip tasks before tearing down links.
         tasks = list(self._announce_tasks)
@@ -6051,6 +6070,22 @@ class MeshNode:
         await peer.start(self._handle_packet)
         return peer
 
+    def _note_fault(self, where: str, exc: BaseException) -> None:
+        """One swallowed failure, as a log line. Never raises: `faults.note`
+        guards this, and a guard's guard is not a place to be clever."""
+        self.logs.record("faults", f"{where} failed", level=logbook.ERROR,
+                         topic="fault", fields={"error": type(exc).__name__})
+
+    def log(self, message: str, *, source: str = "node",
+            level: str = logbook.INFO, topic: str = "", **fields) -> None:
+        """Say one thing, if anybody is keeping a log. Never raises.
+
+        The one door, for the same reason `report_abuse` is the one door for
+        abuse: the node decides whether anything is kept, and a caller that had
+        to ask first would be a caller that forgets to."""
+        self.logs.record(source, message, level=level, topic=topic,
+                         fields=fields or None)
+
     def _new_peer(self, transport, *, is_client_side: bool,
                   on_dead=None) -> _Peer:
         """Build a peer this node owns, wired to this node.
@@ -6082,6 +6117,14 @@ class MeshNode:
         releases the transport. On-demand routing re-establishes any link that
         is needed again, so the mesh self-heals without explicit reconnect.
         """
+        # Read with `getattr`, and that is not defensive clutter: this runs on
+        # the path a link takes when it dies, including a link that died half
+        # built. A diagnostic that raises on the failure it is describing turns
+        # a dropped link into a dropped task.
+        who = getattr(peer, "authenticated_id", None)
+        self.log("link dropped", source="peers", topic="link",
+                 node=who.raw.hex()[:16] if who is not None else "",
+                 address=str(getattr(peer, "remote_addr", "") or "")[:64])
         try:
             self._peers.remove(peer)
         except ValueError:
@@ -10641,6 +10684,14 @@ Hints come first (the ``have`` byte on an announce, from an
         because the receive loop already keeps the link's half and must not
         keep it twice."""
         if peer.authenticated_id is not None:
+            # Tested before the line is built, and only here: this runs once
+            # per violation, which under a flood is as often as an attacker
+            # likes. `record` would drop it anyway, but the hex conversion
+            # would already have been paid for.
+            if self.logs.enabled:
+                self.log("protocol violation charged to a peer", source="peers",
+                         level=logbook.WARN, topic="abuse",
+                         node=peer.authenticated_id.raw.hex()[:16])
             self.report_abuse(peer.authenticated_id, 1.0,
                               "protocol violations",
                               kind=accusation.KIND_MALFORMED)

@@ -62,7 +62,30 @@ class TraceModule:
         return payload
 
     def op_set(self, action: str, seconds: int, events: int) -> dict:
+        """Start, stop or clear — and the node's log ring with it.
+
+        Two recordings, one switch, because "turn the trace on" is one thing an
+        operator does and nobody wants to find out afterwards that half of it
+        was off. What crossed the wire and what the node thought while it
+        crossed are the two halves of one answer, and neither is much use
+        alone: a trace shows a handshake that never completed, a log says which
+        gate refused it.
+
+        `logs.set` is still there for the case this cannot express — sizing the
+        ring, or keeping lines from a node whose packet headers you have no
+        business recording, which is what a fleet subscription needs."""
         trace = self._trace
+        book = getattr(self._context.node, "logs", None)
+        if book is not None:
+            try:
+                if action == "start":
+                    book.start()
+                elif action == "stop":
+                    book.stop()
+                else:
+                    book.clear()
+            except Exception:           # noqa: BLE001 — never the reason
+                pass                    # a trace must still start without it
         if action == "start":
             # Zero means "whatever the trace's own default is": the caller left
             # the field alone, and this is not the place to invent a number.

@@ -16,7 +16,7 @@ ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
 hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Around 3600 tests in ~30 seconds. (The figure is prose, not a promise —
+Around 3700 tests in ~30 seconds. (The figure is prose, not a promise —
 what is held to a number is in the suite itself.)
 
 ---
@@ -297,6 +297,20 @@ tests/
 │     never a payload in what is kept, a bounded ring, automatic stop, a
 │     malformed packet that does not raise, throughput computed over the
 │     recording window (not over the burst), the file in 0600
+├── test_logbook.py                                    — the log ring: nothing
+│     kept until asked and what was kept dropped when it stops, a flood that
+│     never grows past the megabytes an operator allowed, a reader too slow for
+│     the ring told how much it lost, a source refused rather than truncated
+│     into somebody else's, and `record` that never raises whatever it is handed
+├── test_control_logs.py                               — the same ring driven
+│     from a console: sized before it is started, read newest-first by a person
+│     and oldest-first by a subscriber, the trace's switch that starts both
+│     recordings, and the grant that decides what an app may read
+├── test_app_logs.py                                   — an app's half: the node
+│     stamps the source so one app cannot be quoted as another, a read without
+│     the grant is *answered* and refused rather than dropped, a grant asked per
+│     frame rather than captured once, a watcher forgotten when its socket goes,
+│     and a line recorded off the loop that still reaches one
 ├── test_session_store.py                              — persistence (encrypted)
 ├── test_start_script.py / test_install_script.py      — both scripts, sourced in
 │     library mode (nothing is installed): distro, sudo, venv probe for one;

@@ -24,6 +24,7 @@ that knows who is asking. An app must not have to.
 from __future__ import annotations
 
 from ... import app_api
+from ...app_registry import GRANTS
 from ..errors import ControlError
 from ..params import param
 from ..plane import Origin, operation
@@ -54,6 +55,12 @@ class AppsModule:
                   [param("app", "text"),
                    param("action", "choice",
                          choices=("install", "enable", "disable", "uninstall"))],
+                  changes=True, remote=True, timeout=_LIFECYCLE),
+        operation("grant", "Give or take back one grant from a built-in app",
+                  [param("app", "text"),
+                   param("capability", "choice",
+                         choices=tuple(grant["name"] for grant in GRANTS)),
+                   param("granted", "flag")],
                   changes=True, remote=True, timeout=_LIFECYCLE),
     )
 
@@ -108,6 +115,22 @@ class AppsModule:
 
     def op_list(self) -> dict:
         return {"apps": self._context.apps()}
+
+    def op_grant(self, app: str, capability: str, granted: bool) -> dict:
+        """What an app may ask of the node beyond running.
+
+        Separate from ``set`` because it is a different decision: enabling an
+        app says it runs, granting says what it is answered when it asks for
+        something that is not its own. An app that does not exist here is a bad
+        request rather than a silent no-op — an operator who mistyped a name
+        must not be told the grant was made."""
+        host = self._context.host()
+        if host is None:
+            raise ControlError("conflict", "this node hosts no built-in apps")
+        if not host.registry.set_grant(app, capability, granted):
+            raise ControlError("bad_request",
+                               f"no app called {app[:32]!r}, or no such grant")
+        return {"ok": True, "apps": self._context.apps()}
 
     def op_set(self, app: str, action: str) -> dict:
         host = self._context.host()

@@ -1632,9 +1632,15 @@ def _make_handler(console: WebConsole):
                 data = _parse_json(body) or {}
                 # ``id`` is the registry key; ``name`` is accepted as the older
                 # spelling so a caller written against either keeps working.
-                self._from_plane("apps.set",
-                                 {"app": data.get("id") or data.get("name") or "",
-                                  "action": path.rsplit("/", 1)[1]})
+                app = data.get("id") or data.get("name") or ""
+                action = path.rsplit("/", 1)[1]
+                if action == "grant":
+                    self._from_plane("apps.grant",
+                                     {"app": app,
+                                      "capability": data.get("capability") or "",
+                                      "granted": data.get("granted") is True})
+                    return
+                self._from_plane("apps.set", {"app": app, "action": action})
                 return
             if path == "/api/update/apply":
                 data = _parse_json(body) or {}

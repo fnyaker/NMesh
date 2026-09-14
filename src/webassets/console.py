@@ -1162,6 +1162,9 @@ CONSOLE_PAGE_CSS = """
 .app-tile h3{flex:1 1 auto;min-width:0}
 .app-tile p{font-size:var(--fs-sm);color:var(--text-muted);flex:1 1 auto}
 .app-tile .btn-row{margin-top:auto}
+.app-tile .grants{display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-4);
+  padding:var(--s-2) 0;border-top:1px solid var(--border)}
+.app-tile .grants .check{font-size:var(--fs-sm);color:var(--text-muted)}
 /* A watched row stays one line high: the version is a hint, not the row. The
    wrapper scrolls on a narrow screen rather than squeezing the name into a
    column one character wide. */
@@ -2969,8 +2972,44 @@ function appTile(app){
     '<span class="app-ic" aria-hidden="true">' + esc((app.name || "A").slice(0, 2).toUpperCase()) +
     "</span><h3>" + esc(app.name) + "</h3>" + badge(state[0], state[1]) + "</div>" +
     "<p>" + esc(app.description || "Built-in application.") + "</p>" +
+    grantsHTML(app) +
     '<div class="btn-row">' + buttons.join("") + "</div></article>";
 }
+// What an app may ask of the node beyond running — rendered from what the node
+// declared, never from a list held here: a grant this page has never heard of
+// still appears, with the node's own words for it.
+function grantsHTML(app){
+  const grants = Array.isArray(app.grants) ? app.grants : [];
+  if(!app.installed || !grants.length) return "";
+  return '<div class="grants">' + grants.map((grant) =>
+    '<label class="check" title="' + esc(grant.description || "") + '">' +
+    '<input type="checkbox" data-grant-app="' + esc(app.id) + '"' +
+    ' data-grant="' + esc(grant.name) + '"' + (grant.granted ? " checked" : "") +
+    "><span>" + esc(grant.title || grant.name) + "</span></label>").join("") +
+    "</div>";
+}
+$("builtin-apps").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-grant]");
+  if(!box) return;
+  const app = box.dataset.grantApp, capability = box.dataset.grant;
+  const granted = box.checked;
+  // The box is what the operator pressed, so it is what waits for the answer;
+  // a grant that was refused goes back to what the node says it is.
+  box.disabled = true;
+  try{
+    const {ok, error, data} = await CHANNEL.ask(
+      "apps.grant", {app:app, capability:capability, granted:granted});
+    if(ok){
+      toast(granted ? capability + " granted to " + app
+                    : capability + " taken back from " + app);
+      if(data.apps && STATE) STATE.apps = data.apps;
+    }else{
+      box.checked = !granted;
+      toast(error || "the grant was refused", "danger");
+    }
+  }catch(_){ box.checked = !granted; toast("the grant was refused", "danger"); }
+  finally{ box.disabled = false; if(STATE) paintApps(STATE); }
+});
 $("builtin-apps").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-builtin-action]");
   if(!button) return;
