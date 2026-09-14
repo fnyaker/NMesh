@@ -252,12 +252,26 @@ tests/
 │     install.sh travels in the payload and nothing reimplements it, no password
 │     written into a script, escalation stated rather than probed, prompt order
 │     (login then escalation, never replayed), refusing a system install with no
-│     route to root
+│     route to root; plus the **install options** a deploy may choose, every one
+│     of which ends on a command line on a third machine — a path that is not one
+│     is dropped rather than escaped, a service name is a name, and the node
+│     flags come from a list in the source rather than from the wire
 ├── test_join_ticket.py / test_qr.py                   — compact ticket and QR:
 │     round trip, case and spaces immaterial, a typo caught, random bytes that
 │     raise nothing but TicketError, a hostname refused; for the QR, structure and
 │     bounds, plus — if the optional tooling is installed — module-by-module
 │     equality with an independent encoder and a real decode of the rendered SVG
+├── test_console_feed.py                               — what the console sends
+│     a page: the revision is the content and not a counter (so it cannot drift
+│     from what it describes), key order is not content, a claim that cannot be
+│     read is answered in full rather than interpreted, only the section that
+│     moved comes back, what is not a section always travels, every answer names
+│     the build that gave it — and a page that says nothing still gets the flat
+│     shape it always got, which is the case a version number exists for. The
+│     two feeds that ride it are checked where they live: the fleet ledger in
+│     test_console_fleet.py, chat's social half in test_chat_web.py — sections
+│     named, one that moved coming back, one that did not staying away, and the
+│     messages travelling beside them whatever the claim says
 ├── test_console_auth.py                               — console credential:
 │     the password never stored, a salt per credential, a corrupt file or an
 │     unknown algorithm refused, an outsized input rejected before hashing,
@@ -291,13 +305,18 @@ tests/
 │     test), no `$("id")` points at a missing element, no external resource, no
 │     `style=` attribute (the CSP ignores it silently), and the terminal emulator
 │     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node) — including what a *full-screen* program does: the alternate screen,
+│     node), read back from the **model** rather than from markup — the screen is
+│     drawn on a canvas now, so there is no HTML to assert on and no injection to
+│     guard against — including what a *full-screen* program does: the alternate screen,
 │     a scroll region, insert/delete of lines and characters, 256-colour and
 │     24-bit, erase painting the background, a resize that keeps its content,
 │     the reports a program waits on, mouse encoding, and the two forms of the
 │     cursor keys. Plus the contracts around it: the read is held rather than
 │     polled, the pty is told the size the pane actually has, and the mouse is
-│     reported only while a program asked for it. Also the shared node view: one implementation mounted in four places
+│     reported only while a program asked for it. Plus the two shapes that make
+│     it fast: the parser never slices its buffer (asserted as *time* — a frame's
+│     worth of escapes has to parse in well under the frame it belongs to), and a
+│     repaint touches the rows a program moved rather than the whole screen. Also the shared node view: one implementation mounted in four places
 │     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
 │     offers what an app declares, it hides the button pointing back where you
 │     came from, and the addresses start folded away. And the wiring a switch of

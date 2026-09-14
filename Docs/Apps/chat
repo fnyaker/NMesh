@@ -176,7 +176,18 @@ here (see `Docs/WebConsole/design` → *Constraints you cannot see*):
 Both lists are **keyed**: the page polls every 1.2 s, and a row is created once,
 updated in place, and removed when it goes. Rebuilding them threw away the
 scroll position, any selection, and the click somebody was in the middle of
-making. A message that arrives while you are reading further up does not yank
+making.
+
+The poll reads through the console's feed (`src/console_feed.py`), which
+decides three things for it. A read that is not an answer — a 502 carries a
+body too, and that body has no contacts in it — hands back **nothing**, and the
+page keeps the conversation list it had: it was true a moment ago and an error
+is not a newer truth. The social half travels as named **sections** and only
+when it moved, instead of the whole contact list arriving beside each message.
+And every answer names the build that gave it, so a node that updated itself
+under an open page is noticed once and reloaded, rather than found out through
+a run of questions it no longer answers. The messages stay outside the
+sections — they are already asked for by sequence. A message that arrives while you are reading further up does not yank
 the view — it offers a **New messages ↓** button instead.
 
 ## Who you are talking to (the details panel)

@@ -287,6 +287,37 @@ FLEET_HTML = """<!doctype html>
             here or nowhere: a headless box has nobody to paste a publisher key into a console,
             and would accept nothing from the mesh for ever.</p>
 
+          <details class="card"><summary>Install options</summary>
+            <div class="card-body stack">
+              <p class="muted small">Every one of these is a switch
+                <code class="inline">install.sh</code> already has. Chosen here because a machine
+                installed from this page is a machine nobody is going to log into afterwards to
+                change its mind.</p>
+              <label class="check"><input id="dep-docker" type="checkbox">
+                <span>Let the node manage that machine's <b>docker</b> — its account joins the
+                  <code class="inline">docker</code> group</span></label>
+              <p class="muted small">Off by default, and it is not a small tick: an account that
+                can reach the docker socket can start a privileged container bind-mounting
+                <code class="inline">/</code>. That is root on that machine. It is also what the
+                <code class="inline">docker</code> capability needs in order to work at all.</p>
+              <label class="check"><input id="dep-update" type="checkbox" checked>
+                <span>Let it run its own system updates (one fixed root command)</span></label>
+              <label class="check"><input id="dep-fleet" type="checkbox" checked>
+                <span>Start the fleet app on it, so it can be managed and can deploy further</span></label>
+              <div class="split">
+                <label class="field"><span>Install directory</span>
+                  <input id="dep-prefix" class="mono" placeholder="/opt/nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+                <label class="field"><span>State directory</span>
+                  <input id="dep-data" class="mono" placeholder="/var/lib/nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+                <label class="field"><span>Service name</span>
+                  <input id="dep-service" class="mono" placeholder="nmesh"
+                         autocomplete="off" spellcheck="false"></label>
+              </div>
+            </div>
+          </details>
+
           <div class="btn-row">
             <button id="deploy-btn" class="primary">Deploy to <span id="deploy-count-2">0</span> machine(s)</button>
             <span id="deploy-state" class="msg"></span>
@@ -311,8 +342,8 @@ FLEET_HTML = """<!doctype html>
           <button id="shell-kill" class="danger">Close</button>
         </div>
         <div class="card-body tight">
-          <pre id="term" class="term" tabindex="0" role="textbox" aria-label="Remote shell"
-               aria-multiline="true">Open a shell on a node that granted you the shell capability.</pre>
+          <div id="term" class="term" tabindex="0" role="application"
+               aria-label="Remote shell"></div>
           <form id="term-form" class="toolbar padded">
             <label class="field grow"><span class="sr-only">Send a whole line</span>
               <input id="term-in" class="mono" placeholder="…or type a whole line here and press Enter"
@@ -433,10 +464,26 @@ function capsList(caps){
 }
 
 // ---- polling ---------------------------------------------------------------
+// Whether what is on screen is still being confirmed. Said in the rail rather
+// than by emptying the page: a list that went blank reads as "there is nothing",
+// which is a different and much worse claim than "I have not heard lately".
+function feedState(live){
+  $("rail-dot").className = "dot " + (live ? "ok" : "warn");
+  $("rail-text").textContent = live ? "Fleet" : "Not answering";
+}
 async function poll(){
   let data;
-  try{ data = (await apiJson("/api/fleet/state?since=" + VER)).data; }
-  catch(_){ return; }
+  // Through `FEED`, which merges what changed into what is held and hands back
+  // nothing when an answer is unusable. Assigning the answer straight over `ST`
+  // is what emptied this page: a 502 has a body too, and its body has no
+  // machines in it.
+  try{ data = await FEED.read("/api/fleet/state", {since: VER}); }
+  catch(_){ data = null; }
+  if(!data){
+    feedState(false);
+    return;                      // keep what is on screen: it was true a moment ago
+  }
+  feedState(true);
   const first = !ST.capabilities;
   ST = data;
   if(typeof data.log_seq === "number") VER = data.log_seq;
@@ -910,8 +957,11 @@ function paintKeys(){
   $("key-del").disabled = !(KEYS.length && chosen && chosen.indexOf("file:") !== 0);
 }
 async function loadKeys(){
-  try{ KEYS = (await apiJson("/api/fleet/keys")).data.keys || []; }
-  catch(_){ KEYS = []; }
+  // A read that failed must not empty this: the rest of the page then offers
+  // password-only deployment as though the node held no key at all, which is
+  // a false statement about a machine's credentials.
+  const data = await FEED.read("/api/fleet/keys").catch(() => null);
+  if(data && Array.isArray(data.keys)) KEYS = data.keys;
   paintKeys();
 }
 async function uploadKey(file){
@@ -968,6 +1018,16 @@ async function deploy(event){
     mode:(document.querySelector('input[name="dep-mode"]:checked') || {}).value || "system",
     caps:capsOf($("deploy-caps")),
     auto_update:$("deploy-auto").checked,
+    // What the install itself should be. Blank means "whatever install.sh
+    // would have chosen", which is the only sensible default for a path.
+    options:{
+      docker:$("dep-docker").checked,
+      allow_update:$("dep-update").checked,
+      install_dir:$("dep-prefix").value.trim(),
+      data_dir:$("dep-data").value.trim(),
+      service:$("dep-service").value.trim(),
+      node_flags:$("dep-fleet").checked ? ["--fleet"] : [],
+    },
   };
   if(!body.username){ setMessage("deploy-state", "An SSH user is required.", true); return; }
   if(!body.password && !body.key_id){
@@ -1346,8 +1406,8 @@ let TERM_SESSION = null;
 
 async function openShell(){
   const node = $("shell-node").value;
-  if(!node){ $("term").textContent = "No node has granted you a shell."; return; }
   if(!TERM_SESSION) TERM_SESSION = new ShellSession($("term"), {});
+  if(!node){ TERM_SESSION.say("No node has granted you a shell."); return; }
   if(await TERM_SESSION.open(node)) $("term").focus();
 }
 
@@ -1667,8 +1727,20 @@ $("term-form").addEventListener("submit", async (event) => {
 // is focusable, so a click puts the keyboard where the user is looking.
 $("term").addEventListener("keydown", async (event) => {
   if(!TERM_SESSION || !TERM_SESSION.live()) return;
+  // Copy and paste are the browser's while something is selected on the screen.
   if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
-     window.getSelection().toString()) return;          // let copy/paste through
+     TERM_SESSION.screen.selected()) return;
+  // Shift with a page key scrolls the scrollback rather than reaching the pty —
+  // the convention every terminal uses, and the only way back up now that the
+  // screen is drawn rather than laid out.
+  if(event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")){
+    if(TERM_SESSION.screen.scrollBy(
+        (event.key === "PageUp" ? -1 : 1) * (TERM_SESSION.screen.rows - 1))){
+      TERM_SESSION.paint(true);
+    }
+    event.preventDefault();
+    return;
+  }
   const bytes = keyBytes(event, TERM_SESSION.term);
   if(bytes === null) return;
   event.preventDefault();
@@ -1679,22 +1751,14 @@ $("term").addEventListener("paste", async (event) => {
   event.preventDefault();
   await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
 });
-// The pointer, only while a program has asked to see it. With reporting off a
-// drag stays an ordinary selection, which is what a shell session wants.
-$("term").addEventListener("mousedown", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "down")) event.preventDefault();
-});
-$("term").addEventListener("mouseup", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "up")) event.preventDefault();
-});
-$("term").addEventListener("mousemove", (event) => {
-  if(TERM_SESSION) TERM_SESSION.mouse(event, "move");
-});
-$("term").addEventListener("wheel", (event) => {
-  if(TERM_SESSION && TERM_SESSION.mouse(event, "wheel")) event.preventDefault();
-}, {passive:false});
-$("term").addEventListener("contextmenu", (event) => {
-  if(TERM_SESSION && TERM_SESSION.term && TERM_SESSION.term.mouse) event.preventDefault();
+// The pointer, the wheel and the selection belong to the session: it owns the
+// screen they act on, and there is no text in the DOM for a browser to select.
+$("term").addEventListener("copy", (event) => {
+  if(!TERM_SESSION) return;
+  const picked = TERM_SESSION.screen.selected();
+  if(!picked) return;
+  event.preventDefault();
+  event.clipboardData.setData("text/plain", picked);
 });
 // The panel changes size without the window moving — a tab switch, a rail
 // folding away — and a pty told the old size draws every box to the wrong

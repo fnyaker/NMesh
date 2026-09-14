@@ -44,6 +44,7 @@ from . import control
 from .control import listing
 from . import updater
 from . import console_auth
+from .version import __version__
 from .control.modules.settings import write_settings
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
@@ -54,6 +55,7 @@ from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
+from . import console_feed
 from .apps.fleet_console import REPLAY_HEADER
 
 # The page names the node it is driving with this header. Absent (or naming us)
@@ -1179,21 +1181,16 @@ def _make_handler(console: WebConsole):
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
                     return
-                qs = self.path.split("?", 1)
-                since = 0
-                if len(qs) == 2:
-                    from urllib.parse import parse_qs
-                    try:
-                        since = int(parse_qs(qs[1]).get("since", ["0"])[0])
-                    except ValueError:
-                        since = 0
-                self._json(200, console._chat.snapshot(since))
+                query = parse_qs(self.path.partition("?")[2])
+                self._json(200, console._chat.snapshot(
+                    _int_param(query, "since", 0),
+                    have=(query.get("have") or [""])[0],
+                    proto=console_feed.clean_proto((query.get("proto") or [0])[0])))
                 return
             if path == "/api/chat/file":
                 if console._chat is None or not self._authed():
                     self._json(404 if console._chat is None else 401, {"error": "no"})
                     return
-                from urllib.parse import parse_qs
                 mid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("mid", [""])[0]
                 got = console._chat.get_file(mid)
                 if got is None:
@@ -1206,7 +1203,6 @@ def _make_handler(console: WebConsole):
                 if console._chat is None or not self._authed():
                     self._json(404 if console._chat is None else 401, {"error": "no"})
                     return
-                from urllib.parse import parse_qs
                 aid = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("id", ["self"])[0]
                 data = console._chat.get_avatar(aid)
                 if not data:
@@ -1865,8 +1861,13 @@ def _make_handler(console: WebConsole):
                 return
             query = parse_qs(self.path.partition("?")[2])
             if path == "/api/fleet/state":
-                since = _int_param(query, "since", 0)
-                self._json(200, console._fleet.snapshot(since))
+                # `proto` and `have` are the page saying which shape it speaks
+                # and what it already holds. A page that says neither gets the
+                # flat snapshot it has always got — see `src/console_feed.py`.
+                self._json(200, console._fleet.snapshot(
+                    _int_param(query, "since", 0),
+                    have=(query.get("have") or [""])[0],
+                    proto=console_feed.clean_proto((query.get("proto") or [0])[0])))
                 return
             if path == "/api/fleet/shell":
                 self._handle_shell_read(query)
@@ -1998,11 +1999,20 @@ def _make_handler(console: WebConsole):
             for key, value in _SECURITY_HEADERS.items():
                 self.send_header(key, value)
             self.end_headers()
-            seq = console._changes.seq
+            # Where the page was when it lost the connection. The browser
+            # reconnects on its own and sends back the last id it saw; without
+            # honouring it, everything that moved in between is simply missed —
+            # and a page that missed a change is a page showing yesterday.
+            seq = self._resume_from(console._changes.seq)
             try:
                 # Says the stream is live before anything has moved, so a page
-                # can stop its timer on evidence rather than on hope.
-                self._emit("ready", {"at": time.time()})
+                # can stop its timer on evidence rather than on hope. It also
+                # names the build answering, so a page whose assets were
+                # replaced under it can reload instead of asking questions this
+                # node no longer recognises.
+                self._emit("ready", {"at": time.time(), "seq": seq,
+                                     "build": __version__,
+                                     "proto": console_feed.PROTO})
                 while console._server is not None:
                     topics, seq = console._changes.since(seq, _STREAM_PING)
                     if not topics:
@@ -2011,7 +2021,8 @@ def _make_handler(console: WebConsole):
                         self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
                         continue
-                    self._emit("change", {"topics": topics, "at": time.time()})
+                    self._emit("change", {"topics": topics, "at": time.time()},
+                               event_id=seq)
                     # Hold the frame open rather than answering each event: the
                     # next pass picks up everything that piled up meanwhile, in
                     # one message. Ten a second, whatever the mesh is doing.
@@ -2019,10 +2030,29 @@ def _make_handler(console: WebConsole):
             except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
                 return          # the page went away; nothing to report
 
-        def _emit(self, name: str, document: dict) -> None:
+        def _emit(self, name: str, document: dict, event_id=None) -> None:
+            head = "" if event_id is None else f"id: {int(event_id)}\n"
             self.wfile.write(
-                f"event: {name}\ndata: {json.dumps(document)}\n\n".encode("utf-8"))
+                f"{head}event: {name}\ndata: {json.dumps(document)}\n\n"
+                .encode("utf-8"))
             self.wfile.flush()
+
+        def _resume_from(self, now: int) -> int:
+            """Where a reconnecting page left off, from `Last-Event-ID`.
+
+            Clamped to what exists: a header from another run of this console
+            names a sequence this one has never reached, and starting *ahead*
+            of the truth is a stream that never speaks again. An id we are past
+            is fine, and is the point — the next pass answers with everything
+            that moved since."""
+            raw = self.headers.get("Last-Event-ID")
+            if not raw:
+                return now
+            try:
+                asked = int(str(raw)[:20])
+            except ValueError:
+                return now
+            return max(0, min(asked, now))
 
         def _handle_remote_targets(self) -> None:
             if not self._authed():
@@ -2278,6 +2308,10 @@ def _make_handler(console: WebConsole):
                 # log into again is a machine that has to be able to update
                 # itself, and it can only be told whose code to take now.
                 auto_update=data.get("auto_update", True) is not False,
+                # What the install itself should be: docker access, the update
+                # grant, where it lands, which apps come up. Cleaned by the app
+                # — this console decides nothing about another machine.
+                options=data.get("options"),
                 join_uris=data.get("join_uris"),
                 join_code=data.get("join_code"),
             )

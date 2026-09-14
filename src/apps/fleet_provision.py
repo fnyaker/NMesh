@@ -46,6 +46,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import tarfile
 import time
@@ -271,13 +272,52 @@ def build_bootstrap(payload: bytes, preauth: dict, *, stage: str) -> str:
     )
 
 
+# What a deploy may choose about the install, and the only shapes it may be.
+# Each one reaches `install.sh`'s command line on the far machine, so none of it
+# is a string somebody sent: a path is checked against a charset and a bound, a
+# switch is a switch, and the node arguments come from a list written here.
+_PATH_RE = re.compile(r"\A/[A-Za-z0-9._/-]{1,255}\Z")
+_SERVICE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
+# Node flags a deploy may turn on. An allowlist rather than a free field: the
+# other end of this is an argument vector on somebody else's machine.
+NODE_FLAGS = ("--fleet", "--chat", "--lan-discovery")
+
+
+def clean_install_options(raw) -> dict:
+    """Install options from an operator, brought inside what may be installed.
+
+    Absent is not the same as false for the two grants: `allow_update` defaults
+    to on because a machine nobody will log into again has to be able to take a
+    security update, and `docker` defaults to **off** because an account that can
+    reach the docker socket is root on that machine."""
+    raw = raw if isinstance(raw, dict) else {}
+    flags = []
+    for flag in raw.get("node_flags") or []:
+        if flag in NODE_FLAGS and flag not in flags:
+            flags.append(flag)
+    def path(name):
+        value = raw.get(name)
+        return value if isinstance(value, str) and _PATH_RE.match(value) else ""
+    service = raw.get("service")
+    return {
+        "docker": raw.get("docker") is True,
+        "allow_update": raw.get("allow_update", True) is not False,
+        "install_dir": path("install_dir"),
+        "data_dir": path("data_dir"),
+        "service": service if isinstance(service, str) and _SERVICE_RE.match(service)
+                   else "",
+        "node_flags": flags,
+    }
+
+
 def build_install_phase(*, stage: str, install_dir: str | None = None,
                         data_dir: str | None = None,
                         service_name: str = "nmesh",
                         setup_only: bool = False,
                         mode: str = "system",
                         sudo_user: str | None = None,
-                        can_sudo: bool = True) -> str:
+                        can_sudo: bool = True,
+                        options: dict | None = None) -> str:
     """Phase two: escalate and install, run under a remote terminal.
 
     ``mode`` is ``"system"`` (a dedicated service account under ``/opt``, what a
@@ -287,16 +327,20 @@ def build_install_phase(*, stage: str, install_dir: str | None = None,
     deploy and a local one are the same install."""
     if mode not in ("system", "user"):
         raise ProvisionError("install mode must be 'system' or 'user'")
+    chosen = clean_install_options(options)
     return _INSTALL_PHASE.format(
         stage=_sh_quote(stage),
-        install_dir=_sh_quote(install_dir or ""),
-        data_dir=_sh_quote(data_dir or ""),
-        service=_sh_quote(service_name),
+        install_dir=_sh_quote(chosen["install_dir"] or install_dir or ""),
+        data_dir=_sh_quote(chosen["data_dir"] or data_dir or ""),
+        service=_sh_quote(chosen["service"] or service_name),
         preauth_name=_sh_quote(PREAUTH_FILENAME),
         setup_only="1" if setup_only else "0",
         mode=_sh_quote(mode),
         sudo_user=_sh_quote(sudo_user or ""),
         can_sudo="1" if can_sudo else "0",
+        want_docker="1" if chosen["docker"] else "0",
+        allow_update="1" if chosen["allow_update"] else "0",
+        node_flags=_sh_quote(" ".join(chosen["node_flags"])),
     )
 
 
@@ -391,6 +435,9 @@ SETUP_ONLY={setup_only}
 MODE={mode}
 SUDO_USER_NAME={sudo_user}
 CAN_SUDO={can_sudo}
+WANT_DOCKER={want_docker}
+ALLOW_UPDATE={allow_update}
+NODE_FLAGS={node_flags}
 
 [ -d "$STAGE/tree" ] || die "staging directory is gone"
 cleanup() {{ rm -rf "$STAGE"; }}
@@ -444,6 +491,12 @@ elevated "mkdir -p '$DATA' && chmod 700 '$DATA' && cp '$STAGE/$PREAUTH_NAME' '$D
 ARGS="--prefix '$INSTALL_DIR' --data '$DATA' --service '$SERVICE'"
 [ "$MODE" = "user" ] && ARGS="$ARGS --run-as '$(id -un)'"
 [ "$SETUP_ONLY" = "1" ] && ARGS="$ARGS --no-start"
+# The options the operator chose. Each one is a switch install.sh already has —
+# nothing here is a second installer, and nothing here is a string from the
+# wire: the paths were charset-checked and the flags came from a list.
+[ "$WANT_DOCKER" = "1" ] && ARGS="$ARGS --docker"
+[ "$ALLOW_UPDATE" = "0" ] && ARGS="$ARGS --no-allow-update"
+[ -n "$NODE_FLAGS" ] && ARGS="$ARGS $NODE_FLAGS"
 
 say "running install.sh (dependencies can take a while)"
 # Streamed, not swallowed: "dependency setup failed" with nothing behind it is a
@@ -466,6 +519,7 @@ async def provision_host(host: str, creds: SshCredentials, *,
                          setup_only: bool = False,
                          mode: str = "system",
                          run_as: str | None = None,
+                         options: dict | None = None,
                          timeout: float = PROVISION_TIMEOUT,
                          on_progress=None) -> dict:
     """Install NMesh on one machine and report what happened.
@@ -477,7 +531,7 @@ async def provision_host(host: str, creds: SshCredentials, *,
     delivery = build_bootstrap(payload, preauth, stage=stage)
     install = build_install_phase(
         stage=stage, install_dir=install_dir, data_dir=data_dir,
-        setup_only=setup_only, mode=mode,
+        setup_only=setup_only, mode=mode, options=options,
         sudo_user=creds.sudo_user, can_sudo=creds.can_sudo)
     steps: list[str] = []
     # The last lines the remote actually printed. Markers alone say *that*

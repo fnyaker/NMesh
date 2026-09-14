@@ -544,6 +544,66 @@ class TestFleetRoutes:
             await host.stop_all()
             await node.stop()
 
+    async def test_a_page_that_says_nothing_gets_the_shape_it_always_got(self):
+        """A page from before this change, against a node from after it. That is
+        the case a version number exists for."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _get(console, "/api/fleet/state", token)
+            assert status == 200
+            # The flat shape, with every key where it has always been.
+            for key in ("managed", "operators", "capabilities", "host", "jobs",
+                        "groups", "log", "log_seq"):
+                assert key in data, key
+            assert "sections" not in data
+            # …and it says who answered, which is the half the page needs to
+            # notice that the node updated under it.
+            assert data["build"] and data["proto"] == 1
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_page_that_asks_for_sections_gets_only_what_moved(self):
+        node, console, host, built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, first = await _get(
+                console, "/api/fleet/state?proto=2", token)
+            assert status == 200 and first["proto"] == 2 and first["full"] is True
+            assert "managed" in first["sections"]
+            have = ",".join(f"{name}:{rev}" for name, rev in first["revs"].items())
+            # Nothing moved: nothing comes back.
+            status, _, _, again = await _get(
+                console, f"/api/fleet/state?proto=2&have={have}", token)
+            assert again["sections"] == {} and again["full"] is False
+            # One thing moved: one thing comes back.
+            built["app"].state.add_managed("ee" * 20, caps=["status"], label="one")
+            status, _, _, delta = await _get(
+                console, f"/api/fleet/state?proto=2&have={have}", token)
+            assert set(delta["sections"]) == {"managed"}
+            assert delta["sections"]["managed"][0]["id"] == "ee" * 20
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_a_claim_that_cannot_be_read_is_answered_in_full(self):
+        """Always correct, and only ever slower — which is the right way round
+        for something a browser sends."""
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _get(
+                console, "/api/fleet/state?proto=2&have=nonsense%3Bdrop", token)
+            assert status == 200
+            assert "managed" in data["sections"]
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_a_held_read_answers_the_moment_the_pty_speaks(self):
         """The latency a terminal has is whatever it waits before asking again.
         A held read has none: it answers on the byte, not on the next tick."""
