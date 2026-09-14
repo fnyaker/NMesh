@@ -65,6 +65,7 @@ From the most harmless to total. One never implies another.
 | `shell` | opening an interactive shell as the node's user — **and browsing, downloading and uploading its files**, which is the same authority through a different door |
 | `docker` | driving that machine's docker: containers, images, compose stacks, and the Portainer in front of them. **Equivalent to root** — the docker socket is |
 | `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
+| `govern` | deciding what that node **trusts**: pinning signing keys, installing and publishing releases, minting invitations, holding private keys. Needs `manage` to be of any use |
 | `passwordless` | opening this node's console **without** its password: the grant is the second key. Needs `manage` to be of any use |
 
 ## Enrolment — the notification
@@ -110,6 +111,38 @@ is neither stored nor logged. The token the remote console returns stays **in
 the local console's memory**, indexed by the local session that opened it: the
 browser never sees it, and signing out locally closes every remote session
 opened from there.
+
+### `govern` — operating a machine, and deciding what it trusts
+
+`manage` is a big grant and it has one shape: *drive that console*. Everything an
+operator does to a node they look after is inside it — its settings, its
+transports, its apps, its links, its trace, its password. What is **not** inside
+it is the handful of things that are not operation but judgement:
+
+| What `govern` covers | Why it is not `manage` |
+|---|---|
+| pinning, unpinning and endorsing **signing keys** | which keys this node accepts a program from |
+| **installing and publishing** releases | what program this machine becomes, and what it signs in its own name |
+| pinning and subscribing to a **package** | the same decision, reached through a record |
+| **private keys** this node holds, and the passphrases over them | custody, not configuration |
+| minting an **invitation**, a ticket or a block | who is let into its network — a credential, not a setting |
+
+Handing somebody the console so they can restart a service should not hand them
+the choice of what the machine is allowed to run next. So it is a second word,
+asked for and accepted like every other, revoked like every other, and useless
+on its own — `manage` is what carries the call.
+
+With it, **everything a node can do is reachable from a console anywhere**, the
+four-hundred-second operations included: those travel as *jobs* rather than as
+calls (`Docs/Architecture/control-plane.md`). Without it, a console reaches
+every read and every operational write, and none of the five rows above.
+
+One consequence worth stating plainly: a passphrase typed into a console
+managing another node now **travels** — inside the mesh session, to a machine
+whose operator granted `govern` deliberately. That is the only way "install this
+release over there" can be a thing somebody does from where they are. An
+operator who does not want it grants `manage` and not `govern`, which is the
+whole reason the two are separate words.
 
 ### `passwordless` — when nobody can type the second key
 
@@ -264,12 +297,16 @@ refused. Otherwise a typo would become a cut-off.
 
 ## `invite`: a right of its own, on purpose
 
-An operator holding `manage` could already do this — drive that node's console
-and press its own **Add a node** button. That is exactly the reason `invite`
-exists: *"let me add somebody to your mesh"* and *"let me drive your console"*
-are not the same ask, and having to grant the second to obtain the first is the
+*"Let me add somebody to your mesh"* and *"let me drive your console"* are not
+the same ask, and having to grant the second to obtain the first is the
 over-grant this ledger is here to prevent. So the two are independent, and
 `manage` does **not** imply `invite`.
+
+The console's own **Add a node** button is on the other side of the same line:
+minting a code is `join.invite`, which is one of the operations `govern`
+covers — so driving a node's console does not get you there either, and neither
+of the two grants is a way round the other. `invite` remains the narrow one, and
+the one to give when *minting on that node's behalf* is all somebody needs.
 
 The node that will honour the invitation is the node that mints it. It checks
 the right, it chooses the lifetime (the operator's number is a request, capped

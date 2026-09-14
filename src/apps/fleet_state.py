@@ -39,7 +39,7 @@ import time
 
 # What an operator may be granted. Ordered from harmless to total.
 CAPABILITIES = ("status", "invite", "update", "scan", "provision", "shell",
-                "docker", "manage", "passwordless")
+                "docker", "manage", "govern", "passwordless")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
@@ -60,6 +60,17 @@ CAP_DESCRIPTIONS = {
     # password. The grant opens the channel; the password opens the session.
     "manage": "drive this node's web console remotely (its console password is "
               "still required)",
+    # The difference between *operating* a machine and *deciding what it
+    # trusts*. `manage` covers everything an operator does to a node they look
+    # after — its settings, its transports, its apps, its links. This covers the
+    # handful of things that are not operation but judgement: which signing keys
+    # this node accepts a program from, who it lets into its network, and which
+    # private keys it holds. Those used to be reachable from nowhere but the
+    # machine itself; they are reachable from a console now, and this is the
+    # grant that makes them so — asked for on its own, and taken back on its
+    # own. Useless without `manage`, which is what carries the call.
+    "govern": "decide what this node trusts: pin signing keys, mint "
+              "invitations, hold private keys (needs `manage` too)",
     # The one grant that removes a key instead of adding one. A machine nobody
     # ever typed a password on — one this operator provisioned — has a console
     # password only its own log ever saw, so without this the `manage` grant

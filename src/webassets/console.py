@@ -1294,7 +1294,12 @@ async function tick(sample){
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
     refreshLive();
   }catch(error){
-    if(!isStale(error)) railState("danger", "Console unreachable");
+    // The rail is a verdict about the node on screen, so it has to name the
+    // one it is about: "Console unreachable" over a machine being managed from
+    // a console that is answering fine reads as this console having died.
+    if(!isStale(error)) railState("danger", CONTEXT.node
+      ? (CONTEXT.label || shortId(CONTEXT.node)) + " is not answering"
+      : "Console unreachable");
   }finally{ if(TICKING === epoch) TICKING = false; }
 }
 // The node says when something structural moved; the page reads then. Every
@@ -4118,6 +4123,11 @@ async function loadTargets(){
 // is reset by the same list as the rest.
 CONTEXT.subscribe(() => {
   STATE = null; PREVIOUS = null; RATES.length = 0; TICKING = false;
+  // And the rail, which is the one thing on the chrome that outlived a switch:
+  // it is only ever repainted by a tick that *succeeded*, so a node that had
+  // stopped answering left its verdict standing over the machine you came back
+  // to until the next good read — and with the interval off, for ever.
+  railState("", "Reading the node…");
   RATE_NOW = {inbound:0, outbound:0};
   MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];

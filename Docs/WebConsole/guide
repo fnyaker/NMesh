@@ -171,11 +171,28 @@ caps, same lockout. Full detail, bounds and refused paths:
 What travels is a **control frame** — one request, one answer, over the channel
 described in [`../Architecture/control-plane.md`](../Architecture/control-plane.md).
 So what an operator may do to a node they manage is a list that node keeps about
-itself, one `remote=True` per operation, rather than a denylist of URL prefixes
-that every new route joined by default. Two operations stay local for a reason
-that is a ceiling rather than a secret: dialling a node's addresses back and
-asking the directory for a name both take longer than the relay carries, and a
-refusal that says so beats a wait that says nothing.
+itself, one declared reach per operation, rather than a denylist of URL prefixes
+that every new route joined by default.
+
+**Everything that list holds can be done from here**, and getting there took two
+mechanisms rather than a wider permission:
+
+- **What takes longer than the relay can hold travels as a job.** Installing a
+  release is four hundred seconds and the relay carries fifteen, so the work
+  stays there and a *ticket* comes back: `jobs.start` runs it, `jobs.poll` says
+  what became of it. The page does not have to know — a node refusing a call
+  because it is too long says so with a shape, and `CHANNEL.call` re-asks as a
+  job by itself. A button simply takes as long as the thing behind it.
+- **What a node *trusts* is a second grant.** Pinning a signing key, installing
+  a release, minting an invitation, holding a private key — those are not "drive
+  this console", and folding them into `manage` would have made one grant mean
+  two things. They need the fleet's **`govern`** capability as well, asked for
+  and taken back like every other. Without it a console reaches every read and
+  every operational write, and none of those; with it, there is nothing left
+  that has to be done at the machine.
+
+A page never has to know which is which: it reads the far node's catalogue and
+draws what that node will answer.
 
 ### What makes the switch reliable
 
@@ -629,7 +646,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/mlo` | `network.mlo` — `{always?}` / `{skew_ms?}` / `{drop_percent?}` / `{keepalive_fast_min?}` … `{keepalive_slow_max?}` — multi-link operation: keep bundling with nobody here, how far apart two links may measure, what drop share benches one, and the four cadence bounds this node offers. Partial like the transports' own settings. Returns the live `mlo` block — whose `waiting` names the nodes that are one link short of a bundle and the address the node is opening the second one on |
 | GET     | `/api/app-api`   | what the installed apps declare they can do (name, summary, parameters, whether it changes anything, whether it may be driven from a remote console) — `apps.catalogue`, filtered by who is asking |
 | POST    | `/api/app-call`  | `{app, op, args}` — calls one declared operation. Nothing undeclared, every argument coerced and bounded, and from a remote console only what the app itself let travel — `apps.call`. **404** when the operation does not exist (including an app that is not running) |
-| POST    | `/api/invite`    | generates an invitation code — `join.invite`, **local only**: a code this node issues is a credential, and asking a node you manage for one is the fleet's `invite` capability |
+| POST    | `/api/invite`    | generates an invitation code — `join.invite`. A code this node issues is a credential rather than a setting, so from a remote console it needs the fleet's `govern` right (asking a *managed* node to mint one on its own behalf is the separate `invite` capability) |
 | POST    | `/api/join`      | `{uri, code}` or `{ticket}` — joins a network — `join.network`, one of the two here a console *managing* this node may ask for: pointing a machine at a network is what provisioning one is. **Waits for the session**, not for the socket: `200 {node}` once the far end has authenticated, **503** with the reason it did not (`that address could not be reached`, `the invitation was refused`, `the other node closed the link`, `this node refused the answer`, `the handshake was never finished`) |
 | POST    | `/api/ticket`    | `{ttl}` → one invitation (direct endpoint, relay, or both) + QR SVG; **409** if the node has neither route in — `join.ticket`, local only, and a silly lifetime is clamped by the ticket format rather than refused. Minting leaves a rendezvous with a relay first, so it is a round trip over the mesh rather than a local read |
 | GET     | `/api/invite/issuers` | which managed nodes granted this one the fleet `invite` capability — who else can let somebody in |

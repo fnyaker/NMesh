@@ -1175,9 +1175,33 @@ async function api(path, method, body, options){
   if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
   if(body !== undefined) headers["Content-Type"] = "application/json";
   if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
-  const response = await fetch(path, {method: method || "GET", headers,
-    body: body === undefined ? undefined : JSON.stringify(body)});
-  if(response.status === 401){ SESSION.clear(); SESSION.onLost(); throw new Error("unauthorized"); }
+  let response;
+  try{
+    response = await fetch(path, {method: method || "GET", headers,
+      body: body === undefined ? undefined : JSON.stringify(body)});
+  }catch(error){
+    // **A call that fails is as stale as one that succeeds.** The epoch was
+    // only ever checked on the way back from a *successful* fetch, so a
+    // request to a node the operator had already left — one the relay sits on
+    // for its full 25 s before giving up — came back as an ordinary network
+    // error and was painted as the failure of whatever machine was on screen
+    // by then. That is how leaving a quiet node put "Console unreachable" over
+    // a console that was answering perfectly well, and left it there.
+    if(!here && CONTEXT.epoch !== at) throw new StaleContext();
+    throw error;
+  }
+  if(response.status === 401){
+    // On these older routes the local console relays to the managed node and
+    // hands back *its* status untouched, so a 401 here is that node's session,
+    // not ours. Signing the operator out of their own console for it is the
+    // same bug the control plane fixed by never letting a remote refusal
+    // travel as a status (`Docs/Architecture/control-plane.md`).
+    if(!here && CONTEXT.node){
+      CONTEXT.lost("that node asked for its password again");
+      throw new StaleContext();
+    }
+    SESSION.clear(); SESSION.onLost(); throw new Error("unauthorized");
+  }
   // A local call answers for this node whatever is on screen, so it is never
   // stale; everything else belongs to the node that was being driven when it
   // was asked for, and must not paint over the one that replaced it.

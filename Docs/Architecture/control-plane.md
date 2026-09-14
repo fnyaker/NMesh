@@ -138,8 +138,10 @@ class TraceModule:
 |---|---|
 | `changes` | alters state — lets a page confirm first, keeps reads and writes apart at a glance. Not a permission. |
 | `remote` | **may be driven from another operator's console.** Defaults to `False`. |
+| `govern` | may be driven from one that also holds the fleet's `govern` capability. Not `remote` plus something — `remote` already includes every console that holds `govern`, so declaring both is a contradiction and is refused. |
+| `background` | run as a **job**: `jobs.start` hands back a ticket rather than the answer. Required of anything that travels and declares more than `REMOTE_BUDGET`, refused on anything that fits it. |
 | `timeout` | how long this may take. Also the ceiling the module waits with. |
-| `wants_origin` | the answer depends on who is asking (only `control.catalogue`). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
+| `wants_origin` | the answer depends on who is asking (`control.catalogue`, and every `jobs` operation). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
 
 Reject by default, three times over:
 
@@ -158,9 +160,17 @@ shape of a `NodeID` is checked in one place in this project. Five are added for
 the management plane — `line` (a path or URI: longer than a label, still one
 line), `document` (a bounded mapping, two levels, scalars at the leaves),
 `choice` (one of a closed list the operation writes down), `hex` (bytes written
-as hex, with a limit: a certificate is 14 kB of it) and `secret` (a passphrase,
+as hex, with a limit: a certificate is 14 kB of it), `secret` (a passphrase,
 and the only kind that is never trimmed — a space at the end of one *is* the
-passphrase).
+passphrase) and `payload` (the arguments of *another* operation, on their way
+through `jobs.start`).
+
+`payload` is deliberately not a `document`: a document is a settings file's
+worth of values and caps a leaf at 512 characters, which would have quietly
+refused the 8 kB signing key `releases.publish` takes. So its shape is checked
+— a mapping, named keys, no more of them than a frame carries — and every value
+is handed on untouched for the target operation's own `bind` to judge. One
+authority per argument, and it is the operation that declared it.
 
 A `document`'s leaves may not contain a newline, and that is not a nicety.
 These values are written into a configuration file, one `name = value` per
@@ -198,21 +208,106 @@ set it gains anything by lying.
 `control.catalogue` is filtered by origin, so a remote console draws what that
 node will actually answer.
 
-### Why two operations are local-only
+### Origins: and the third one
 
-Not secrecy — a ceiling. The relay carries one bounded call and its answer, and
-`REMOTE_BUDGET` (15 s) is what fits inside `fleet_console.CALL_TIMEOUT` (20 s)
-and `fleet.CONSOLE_TIMEOUT` (25 s). An operation declaring more **and** `remote`
-is refused *at declaration*, at import, not on the press:
+`Origin.GOVERN` is the same peer as `Origin.REMOTE`, holding the fleet's
+`govern` capability as well as `manage`. The console decides which of the three
+a request is, and never the caller: a call replayed through the relay carries
+`fleet_console.REPLAY_HEADER`, and beside it `GOVERN_HEADER` **written by this
+node out of its own ledger** — what arrives over the mesh is a method, a path, a
+body and a token, never a header. The govern marker is only ever read together
+with the replay marker, so on its own it is a header anybody holding a console
+session could set and it grants nothing; both can only ever ask for *less* than
+a page here already has, which is why nothing that can set them gains anything
+by lying.
 
-| Operation | Ceiling | Why it cannot travel |
-|---|---|---|
-| `node.retry` | 60 s | one dial per known address; a machine with several dead ones outlasts the pipe |
-| `pseudo.lookup` | 30 s | a Kademlia round plus a query per target |
+Reach, written once, in `plane.REACHED_BY`:
 
-Both used to be reachable remotely and would simply time out somewhere in the
-middle, telling the operator nothing. `Docs/Architecture/gotchas.md` — "a bound
-at one layer is not a bound".
+| Origin | Reaches |
+|---|---|
+| `LOCAL` | everything |
+| `GOVERN` | `govern=True` and `remote=True` |
+| `REMOTE` | `remote=True` |
+
+## Everything travels, and the two things that stood in the way
+
+The goal was always "an operator can do at a distance whatever they could do at
+the machine". Twenty-two operations could not, and reading them as one list was
+the mistake — they were two lists with nothing in common but the symptom.
+
+### A ceiling: what does not fit in one call is a job
+
+The relay carries one bounded call and its answer. `REMOTE_BUDGET` (15 s) is
+what fits inside `fleet_console.CALL_TIMEOUT` (20 s) and `fleet.CONSOLE_TIMEOUT`
+(25 s), and installing a release takes four hundred. So the *work* stays here
+and a **ticket** travels: `jobs.start` checks the call exactly as a direct one is
+checked, runs it on a daemon thread, and answers with an identifier; `jobs.poll`
+says what became of it. Both are small calls with room to spare.
+
+An operation says which it is, and the two are exclusive:
+
+* travels and declares more than `REMOTE_BUDGET` → must say `background=True`;
+* declares less → must **not**, because a ticket for something that could simply
+  have been answered is a second mechanism for nothing.
+
+Both halves are refused *at declaration*, at import, not on the press
+(`tests/test_control_plane.py`). A caller therefore never has to work out which
+mechanism an operation uses — its ceiling already says — and a remote console
+calling a job operation directly is not left to time out: it is refused with
+`detail: {"background": true, "job": "releases.install"}`, which is what
+`CHANNEL.call` in the browser re-asks on, so no page had to learn about jobs.
+
+The book is bounded in every direction that an attacker could push
+(`src/control/jobs.py`): how many run at once, how many of those a console at a
+distance may hold, how many records are kept and for how long. A job that
+outlives its own declared ceiling is abandoned and reported failed — the thread
+is let go, never joined, for the reason `gotchas.md` gives about `to_thread`.
+
+**A ticket is only readable by the kind of console that could have made it.** A
+job started here is invisible from the mesh, and one started by a console
+holding `govern` cannot be polled by one holding only `manage` — otherwise "make
+a key" would be an answer collectable by whoever can poll. The plane knows which
+*kind* of console is asking and never which machine, so two operators sharing a
+capability do share a view; pretending otherwise would be a promise this layer
+cannot keep.
+
+### A decision: what a node trusts is a second grant
+
+The other list was never about time. Pinning a signing key, minting an
+invitation, holding a private key — those are not "drive this console", they are
+"decide what this node trusts", and `manage` covers the first. Folding them in
+would have made one grant mean two things, and an operator handing somebody the
+console so they could restart a service would have handed them the choice of
+what program the machine is allowed to become.
+
+So there is a capability for exactly that — `govern`, granted by a human at the
+target and taken back the same way, useless without `manage` because `manage` is
+what carries the call. `MeshNode.trust_publisher` still says the only way a key
+enters its list is an operator acting locally, and that is still true of a
+*packet*; what changed is that a console two grants deep is now one of the ways
+somebody is "at" a node.
+
+What each of them covers:
+
+| `govern` | Why it is not `manage` |
+|---|---|
+| `releases.trust` `untrust` `auto` `endorse` | which signing keys this node accepts a program from |
+| `releases.apply` `publish` `install` | what program it becomes, and what it signs in its own name |
+| `packages.trust` `subscribe` `install` | the same decision, reached through a record |
+| `keys.*` (bar the overview) | private keys this node holds, and the passphrases over them |
+| `join.invite` `ticket` `block` | who is let into its network — a credential, not a setting |
+
+`store` stays on `manage`, and the distinction is worth stating: installing a
+**node release** replaces the code this process is running, while installing an
+**app** writes a directory and starts something beside it. Managing a machine is
+managing its apps. It is not choosing its program.
+
+A passphrase now travels, and that is a real change rather than an oversight.
+It crosses inside the mesh session (ML-KEM-768, AES-256-GCM) to a node whose
+operator granted `govern` deliberately, and it is the only way "install this
+release on that machine" can be a thing an operator does from where they are.
+An operator who does not want that grants `manage` and not `govern`, which is
+the whole reason the two are separate words.
 
 ## The channels
 
@@ -277,86 +372,54 @@ keeps working, with one implementation behind it.
 
 | Module | Operations | Older route |
 |---|---|---|
-| `node` | `state` `ping` `ping_node` `forget` `rootcert` `restart` `retry`\* | `/api/state`, `/api/ping`, `/api/ping/node`, `/api/nodes/forget`, `/api/rootcert`, `/api/restart`, `/api/peers/retry` |
+| `node` | `state` `list` `ping` `ping_node` `forget` `rootcert` `restart` `retry`~ | `/api/state`, `/api/nodes`, `/api/ping`, `/api/ping/node`, `/api/nodes/forget`, `/api/rootcert`, `/api/restart`, `/api/peers/retry` |
 | `trust` | `add` `untrust` `revoke` `forgive` `accept_change` `witness` | `/api/trust`, `/api/trust/*` |
 | `network` | `probe` `recheck` `dynamic` `balance` `mlo` `punch` `punch_keepalive` `punch_open` `discovery` `udp` `listen` `unlisten` | `/api/reachability/probe`, `/api/net/recheck`, `/api/addressing/*`, `/api/mlo`, `/api/punch*`, `/api/lan/discovery`, `/api/udp`, `/api/listen`, `/api/unlisten` |
 | `config` | `get` `save` | `/api/config` |
 | `transports` | `options` `save` | `/api/transports` |
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
-| `pseudo` | `get` `search` `lookup`\* `save` | `/api/pseudo` (`?q=`, `?wide=1`) |
-| `control` | `catalogue` `changes` | — (new) |
+| `pseudo` | `get` `search` `save` `lookup`~ | `/api/pseudo` (`?q=`, `?wide=1`) |
+| `control` | `catalogue` `changes` | — |
+| `jobs` | `start` `poll` `list` `forget` | — (new) |
 | `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
-| `node` (lists) | `list` | `/api/nodes` |
-| `releases` | `overview` `check`\* `apply`\* `publish`\* `install`\* `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
-| `packages` | `search` `held` `entry` `lookup`\* `describe`\* `install`\* `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
-| `keys` | `overview` `create`\* `adopt`\* `offer`\* `accept`\* `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
-| `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install\|update\|uninstall` |
-| `join` | `network` `use_block` `invite`\* `ticket`\* `block`\* | `/api/join`, `/api/invite`, `/api/ticket`, `/api/invite/block`, `/api/join/block` |
+| `releases` | `overview` `check`~ `apply`\*~ `publish`\*~ `install`\*~ `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
+| `packages` | `search` `held` `entry` `lookup`~ `describe`~ `install`\*~ `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
+| `keys` | `overview` `create`\*~ `adopt`\*~ `offer`\*~ `accept`\*~ `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
+| `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install|update|uninstall` |
+| `join` | `network` `invite`\* `ticket`\* `block`\* `use_block` | `/api/join`, `/api/invite`, `/api/ticket`, `/api/invite/block`, `/api/join/block` |
 
-\* local only.
+`\*` needs the fleet's `govern` capability as well as `manage`. `~` travels as a
+**job** — `jobs.start` hands back a ticket, `jobs.poll` answers what became of
+it — because it declares more than `REMOTE_BUDGET` and the relay cannot hold a
+call open that long. **Nothing is local-only**, and
+`tests/test_control_plane.py` asserts it operation by operation.
 
-### The releases module is almost entirely local, and on purpose
 
-Two reasons that look like one and are not.
+### What is still not on the plane
 
-**What a node accepts is pinned by a human at that node.**
-`MeshNode.trust_publisher` says it in its own docstring — *the only way a key
-enters this list is here, an operator acting locally, never a packet*. A console
-reached over the mesh is not a packet, but it is not somebody at that machine
-either: the fleet's `manage` right is "drive that node's console", not "decide
-what may replace its program". Updating a node somebody manages has its own
-capability and its own path (`update`, in `Docs/Apps/fleet`), which reports
-progress instead of holding a call open. So pinning, unpinning, endorsing and
-arming automatic installs are local — a **tightening** against the old path
-relay, which allowed all of them to anybody holding `manage`.
+Everything the plane declares now travels. What is left outside it is a shorter
+list than it used to be, and each entry is outside for a reason that is not
+"nobody got to it yet":
 
-**And the rest would not fit anyway.** Publishing signs a whole tree (300 s),
-installing fetches and replaces it (400 s), asking GitHub is 40 s. The relay
-carries 15. An operation that declares more than `REMOTE_BUDGET` *and* `remote`
-is refused at declaration, so this half is not a rule anybody has to remember.
+* **Login, and the console password.** How a session begins, and that door's own
+  key rather than the node's state. A managed node's password is typed once, by
+  the operator, into their own console (`/api/remote/connect`); `passwordless`
+  is the grant that replaces even that.
+* **Bytes.** Publishing an app or a release's files, downloading a package, a
+  chat file, an avatar. A control frame is capped to fit `fleet.CONSOLE_REQ_MAX`
+  (24 kB) and a reply to `CONSOLE_RESP_MAX`; a 64 MB upload is not a sentence,
+  and cutting it into frames would be a transport written twice. The fleet app
+  already carries files to a machine you manage, and that is where it belongs.
+* **The relay and connect blocks.** 32 kB by their own ceiling
+  (`node._RELAY_BLOCK_MAX_LEN`), larger than a frame — and pasted into the
+  console of the machine you are sitting at anyway.
+* **Chat and fleet's own page surfaces.** By design, not by omission: a managed
+  node is not a jump host. What those apps choose to expose *as operations*
+  travels on the plane like everything else.
 
-What does travel is the one read — what this node holds, what it has pinned and
-what it is watching — because an operator managing a machine needs to see that
-without being able to change it.
-
-`store` is the deliberate exception in that family, and the distinction is
-worth stating: installing a **node release** replaces the code this process is
-running, while installing an **app** writes a directory and starts something
-beside it. So an operator managing a machine may install, update and remove its
-apps — that is what managing a machine is — and may not change what its own
-program is allowed to become.
-
-`join` splits the same way. **Minting is local**: a code this node issues lets
-somebody into *its* network, which is a credential rather than a setting, and
-the fleet already has a capability for asking a node you manage to mint one
-(`invite`) — leaving `join.invite` local is what keeps `manage` from quietly
-including it. **Joining travels**, because pointing a machine you manage at a
-network is what provisioning one is.
-
-`packages` and `keys` follow from the same sentence. Pinning the key inside a
-record, installing what a record names, and watching a package are the same
-decision as pinning a publisher, so they stay local; asking the *directory* is
-local because a Kademlia round does not fit the relay, while what this node
-already knows answers a remote console fine. And for `keys` it is simpler
-still: **a passphrase is typed at the machine that will hold the key**, so only
-the overview travels — which is the structural half of what
-:mod:`src.key_share` is for.
-
-Still routes of their own: chat and fleet's own page surfaces, and what carries
-bytes — publishing an app or a release's files, downloading a package, a chat
-file or avatar. Plus login/logout. Four things are not candidates at all: **login** is how a session begins, **the
-console password** is that door's own key rather than the node's state,
-**uploads and downloads** carry bytes rather than a sentence (a control frame is
-capped to fit `fleet.CONSOLE_REQ_MAX`), and the **relay and connect blocks** are
-32 kB by their own ceiling (`node._RELAY_BLOCK_MAX_LEN`) — larger than a frame,
-and pasted into the console of the machine you are sitting at anyway. Chat and
-fleet keep their page APIs by design — a managed node is not a jump host — while
-what they choose to expose *as operations* travels on the plane like everything
-else.
-
-The path relay (`console_path_refusal`) therefore still governs the routes that
-have not moved, and shrinks as they do. The rule to hold on to: **a route that
-moves onto the plane loses its prefix-based remote permission and gains a
+The path relay (`console_path_refusal`) therefore still governs the older routes
+that have not moved, and shrinks as they do. The rule to hold on to: **a route
+that moves onto the plane loses its prefix-based remote permission and gains a
 declared one.**
 
 ## The apps are on it too, and they declare their own reach

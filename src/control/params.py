@@ -67,7 +67,8 @@ MAX_KEY = 64             # length of one of its keys
 MAX_VALUE = 512          # length of one of its scalar values
 MAX_CHOICES = 32
 
-KINDS = app_api.KINDS + ("line", "document", "choice", "hex", "secret")
+KINDS = app_api.KINDS + ("line", "document", "choice", "hex", "secret",
+                         "payload")
 
 # The largest `hex` a declaration may allow. A self-signed certificate is about
 # 14 kB of hex; the ceiling leaves room for a longer key without ever
@@ -219,6 +220,26 @@ def coerce(field: dict, raw):
         return text
     if kind == "document":
         return _document(raw, name, depth=1)
+    if kind == "payload":
+        # The arguments of *another* operation, on their way to `jobs.start`.
+        # Deliberately not a `document`: a document is a settings file's worth
+        # of values and caps a leaf at 512 characters, which would quietly
+        # refuse the 8 kB signing key `releases.publish` takes. So the shape is
+        # checked here — a mapping, named keys, no more of them than a frame
+        # carries — and every value is left exactly as it arrived for the
+        # target operation's own `bind` to judge. One authority per argument,
+        # and it is the operation that declared it.
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ControlError("bad_request", f"{name} must be a mapping")
+        if len(raw) > MAX_KEYS:
+            raise ControlError("bad_request", f"{name} has too many entries")
+        for key in raw:
+            if not isinstance(key, str) or not _KEY_RE.match(key):
+                raise ControlError("bad_request",
+                                   f"{name}: bad name {str(key)[:32]!r}")
+        return dict(raw)
     if kind == "choice":
         text = "" if raw is None else str(raw).strip()
         if text not in field.get("choices", ()):

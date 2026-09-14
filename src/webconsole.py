@@ -56,7 +56,7 @@ from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
 from . import console_feed
-from .apps.fleet_console import REPLAY_HEADER
+from .apps.fleet_console import GOVERN_HEADER, REPLAY_HEADER
 
 # The page names the node it is driving with this header. Absent (or naming us)
 # means "this node", which is what a page that has never heard of contexts does.
@@ -1040,11 +1040,21 @@ def _make_handler(console: WebConsole):
             # A call a peer is replaying through the fleet's `manage` right is a
             # page on *their* machine, so it reaches the plane as a remote
             # origin — which is what turns "what may the network ask of this
-            # node?" into one `remote=True` per operation, in a list this node
+            # node?" into one declared reach per operation, in a list this node
             # keeps about itself (`fleet_console.REPLAY_HEADER`).
-            origin = (control.Origin.REMOTE if self.headers.get(REPLAY_HEADER)
-                      else control.Origin.LOCAL)
-            return console.local_channel(origin)
+            #
+            # `govern` is that same peer's second grant, and it is only ever
+            # read *beside* the replay marker: alone it would be a header
+            # anybody holding a console session could set, and this way both
+            # markers can only ever ask for less than a page here already has.
+            # Which is why nothing that can set either gains anything by lying.
+            return console.local_channel(self._origin())
+
+        def _origin(self) -> str:
+            if not self.headers.get(REPLAY_HEADER):
+                return control.Origin.LOCAL
+            return (control.Origin.GOVERN if self.headers.get(GOVERN_HEADER)
+                    else control.Origin.REMOTE)
 
         def _handle_control(self, body) -> None:
             """One frame in, one frame out.
