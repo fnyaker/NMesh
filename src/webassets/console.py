@@ -1292,6 +1292,7 @@ async function tick(sample){
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
+    paintBroken(STATE);
     refreshLive();
   }catch(error){
     // The rail is a verdict about the node on screen, so it has to name the
@@ -1323,6 +1324,20 @@ function trackRates(state){
   RATES.push({inbound:Math.max(0,inbound), outbound:Math.max(0,outbound)});
   while(RATES.length > 90) RATES.shift();
   state._rates = RATE_NOW = {inbound, outbound};
+}
+
+// A section of the node's own snapshot that could not be built. Empty on a
+// healthy node, and a page that quietly drew one panel short would be the bug
+// this exists to make impossible to miss — the node writes the traceback to its
+// log, and this is what sends somebody to look. Said once per change, not once
+// per tick: a toast every two seconds is a toast nobody reads.
+let BROKEN_SAID = "";
+function paintBroken(state){
+  const names = (state.broken || []).join(", ");
+  if(names === BROKEN_SAID) return;
+  BROKEN_SAID = names;
+  if(names) toast("This node could not build: " + names, "danger",
+                  "Its log says why. The rest of this page is still true.");
 }
 
 // The rail is hidden on a phone and the same line shows in the ⋯ menu; written
@@ -4133,6 +4148,7 @@ async function loadTargets(){
 // is reset by the same list as the rest.
 CONTEXT.subscribe(() => {
   STATE = null; PREVIOUS = null; RATES.length = 0; TICKING = false;
+  BROKEN_SAID = "";              // a verdict about the machine we just left
   // And the rail, which is the one thing on the chrome that outlived a switch:
   // it is only ever repainted by a tick that *succeeded*, so a node that had
   // stopped answering left its verdict standing over the machine you came back

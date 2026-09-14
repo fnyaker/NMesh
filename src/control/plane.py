@@ -78,9 +78,8 @@ told nothing about why.
 from __future__ import annotations
 
 import re
-import sys
-import traceback
 
+from .. import faults
 from .errors import ControlError
 from .frame import Reply, Request
 from .params import bind
@@ -99,38 +98,6 @@ DEFAULT_TIMEOUT = 10.0
 REMOTE_BUDGET = 15.0
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-
-# How much of a failed operation's traceback is written down. Bounded because
-# a management plane must not become a way to fill somebody's disk, and because
-# a log line nobody can read past is a log line nobody reads.
-MAX_TRACE_FRAMES = 12
-
-
-def _note_failure(op: str, exc: BaseException) -> None:
-    """Write a failed operation down, on the machine it failed on.
-
-Nothing else in this project prints a traceback, and that was right up to
-    the moment a module could throw: an exception's text is a description of
-    this machine and must never reach a peer, so the plane replaces it with a
-    type name. Which left a bug inside an operation invisible **everywhere** —
-    the console said ``node.state failed: AttributeError`` and the node's own
-    log said nothing at all, so the one machine that could have fixed it was
-    the one machine not told.
-
-    A **reply** is still not where it goes, even to a page on this machine:
-    replies are relayed, pasted and read by scripts, and
-    ``tests/test_control_plane.py`` holds the plane to carrying nothing of this
-    machine in one whoever asked. A log is the machine's own, so that is where
-    it goes, and the refusal says to look there."""
-    try:
-        lines = traceback.format_exception(type(exc), exc, exc.__traceback__,
-                                           limit=MAX_TRACE_FRAMES)
-        sys.stderr.write(f"nmesh: control operation {op} failed\n")
-        sys.stderr.write("".join(lines))
-        sys.stderr.flush()
-    except Exception:                       # noqa: BLE001 — never the reason
-        pass                                # a failed report is not a failure
-
 
 class Origin:
     """Who is asking — never *what* they are allowed, only where they are.
@@ -347,7 +314,8 @@ class ControlPlane:
             # This one is the plane's own fault rather than a module's, which
             # makes writing it down more important, not less: nothing above
             # here will ever see it again.
-            _note_failure(getattr(request, "op", "?"), exc)
+            faults.note(
+                f"control plane on {getattr(request, 'op', '?')}", exc)
             return Reply.refusal(
                 ControlError("failed", "the operation could not be answered"),
                 ident=ident)
@@ -398,7 +366,7 @@ class ControlPlane:
             # is a description of this machine. So it is written down here
             # instead — on the machine that owns the node, which is the one
             # able to do anything about it.
-            _note_failure(op, exc)
+            faults.note(f"control operation {op}", exc)
             # The sentence names where the rest of it is. Not an internal —
             # an instruction, and the difference between an operator who can
             # act and one reading the word "AttributeError" about their own
