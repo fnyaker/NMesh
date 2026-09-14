@@ -48,7 +48,8 @@ class PseudoModule:
                   [param("pseudo", "text", required=False, default="")],
                   changes=True, remote=True, timeout=_LOCAL),
         operation("lookup", "Ask the directory for a name",
-                  [param("query", "text")], timeout=_WIDE),
+                  [param("query", "text")],
+                  remote=True, background=True, timeout=_WIDE),
     )
 
     def __init__(self, context) -> None:

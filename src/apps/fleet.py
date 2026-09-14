@@ -1202,16 +1202,23 @@ class FleetApp:
         if self._console_hosted.get(key, 0) >= MAX_CONSOLE_CALLS:
             self._fail(src, rid, "too many calls in flight")
             return
+        # The second grant, read here and from the ledger — never from the
+        # document that arrived. A peer describes what it wants done; what it is
+        # allowed to ask for is ours to say, and saying it once, at the door,
+        # is what keeps `govern` from becoming a word a caller can write.
+        govern = self.state.allows(key, "govern")
         self._console_hosted[key] = self._console_hosted.get(key, 0) + 1
-        self._spawn(self._run_console_call(src, rid, method, path, body, token))
+        self._spawn(self._run_console_call(src, rid, method, path, body, token,
+                                           govern))
 
     async def _run_console_call(self, src: NodeID, rid: str, method: str,
                                 path: str, body: bytes | None,
-                                token: str | None) -> None:
+                                token: str | None, govern: bool = False) -> None:
         key = src.raw.hex()
         try:
             status, ctype, payload = await fleet_console.bounded(
-                lambda: self._local_console.call(method, path, body, token),
+                lambda: self._local_console.call(method, path, body, token,
+                                                 govern=govern),
                 fleet_console.CALL_TIMEOUT)
         except fleet_console.ConsoleError as exc:
             status, ctype = 502, "application/json"

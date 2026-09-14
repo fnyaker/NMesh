@@ -60,16 +60,16 @@ class JoinModule:
                    param("ticket", "text", required=False, default="")],
                   changes=True, remote=True, timeout=_JOIN),
         operation("invite", "Mint an invitation code to this node's network",
-                  changes=True, timeout=_READ),
+                  changes=True, govern=True, timeout=_READ),
         operation("ticket", "Mint a compact join ticket, with its QR",
                   # The ticket's own ceiling, not a second opinion about it: a
                   # silly lifetime is clamped to the longest one a ticket may
                   # have, because the ticket format owns that number.
                   [param("ttl", "count", required=False, default=0,
                          limit=int(join_ticket.MAX_TTL))],
-                  changes=True, timeout=_TICKET),
+                  changes=True, govern=True, timeout=_TICKET),
         operation("block", "A shareable invitation block for one node",
-                  changes=True, timeout=_READ),
+                  changes=True, govern=True, timeout=_READ),
         operation("use_block", "Join from an invitation block",
                   [param("block", "text")],
                   changes=True, remote=True, timeout=_JOIN),
