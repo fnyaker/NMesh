@@ -731,6 +731,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
 | GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |
 | —       | (plane only)     | `logs.status`, `logs.set`, `logs.query`, `logs.since`, `logs.sources` — the node's own log ring, off until asked, bounded in megabytes ([`../Architecture/logging.md`](../Architecture/logging.md)) |
+| —       | (plane only)     | `alerts.list`, `alerts.ack`, `alerts.drop` — the notice board, always on ([`../Architecture/alerts.md`](../Architecture/alerts.md)). It also rides `node.state` as `alerts`, so a page that reads the snapshot already has it |
 | POST    | `/api/apps/grant` | `{id, capability, granted}` — gives or takes back one grant from a built-in app — `apps.grant` |
 | POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
@@ -1111,6 +1112,24 @@ who this node keeps company with, when, and how much. So: off by default, in
 memory, bounded in number of events *and* in time, it stops on its own, and it
 reaches the disk only if an operator asks (0600). The bounds the request asks
 for are **capped**, not obeyed.
+
+## What wants attention (Overview)
+
+Above everything else on the overview, and hidden when there is nothing: one
+card listing what this node noticed about itself and about the machines it talks
+to — a peer whose standing crossed, a guard that swallowed a failure, a problem
+an app reported about itself.
+
+Two things make it readable rather than a wall. It is **one row per problem**
+with a count ("300 times"), never one per occurrence — a board that grew a row
+per event would be a page an attacker writes. And it is **always on**, unlike
+the log beside it: a node cannot know in advance which problem somebody will
+wish they had been told about.
+
+*Seen* marks a row read and leaves it there, because "is it still happening?" is
+a question about the count. *Dismiss* forgets it; whatever raised it raises it
+again if it is still true. Nothing on this card acts on anything — it is a
+sentence for a person, and what acts on a peer is the reputation book.
 
 ## The node's log (`logs.*`)
 

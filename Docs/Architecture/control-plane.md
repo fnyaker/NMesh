@@ -380,6 +380,7 @@ keeps working, with one implementation behind it.
 | `transports` | `options` `save` | `/api/transports` |
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
 | `logs` | `status` `set` `query` `since` `sources` | — (new) |
+| `alerts` | `list` `ack` `drop` | — (new) |
 | `pseudo` | `get` `search` `save` `lookup`~ | `/api/pseudo` (`?q=`, `?wide=1`) |
 | `control` | `catalogue` `changes` | — |
 | `jobs` | `start` `poll` `list` `forget` | — (new) |

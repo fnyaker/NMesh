@@ -122,6 +122,14 @@ INDEX_HTML = """<!doctype html>
           <button id="go-join" class="primary">Add a node</button>
         </div>
       </div>
+      <article id="alerts-card" class="card" hidden>
+        <div class="card-head"><div class="grow"><h2>Wants attention
+          <span id="alerts-count" class="badge"></span></h2>
+          <div class="sub">What this node noticed about itself and about the
+            machines it talks to. One line per problem, with how often</div></div>
+          <button id="alerts-clear" class="sm">Clear all</button></div>
+        <div class="card-body tight"><div id="alerts-list" class="stack"></div></div>
+      </article>
       <article id="first-run" class="card" hidden>
         <div class="card-head"><div class="grow"><h2 id="first-run-title"></h2>
           <div class="sub" id="first-run-sub"></div></div></div>
@@ -1295,7 +1303,7 @@ async function tick(sample){
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
-    paintBroken(STATE); paintJoinHint(STATE);
+    paintBroken(STATE); paintJoinHint(STATE); paintAlerts(STATE);
     refreshLive();
   }catch(error){
     // The rail is a verdict about the node on screen, so it has to name the
@@ -1352,6 +1360,53 @@ function paintBroken(state){
   if(names) toast("This node could not build: " + names, "danger",
                   "Its log says why. The rest of this page is still true.");
 }
+
+// ---- what wants attention -------------------------------------------------
+// The board, not the log: these are always collected, because a node cannot
+// know in advance which problem somebody will wish they had been told about.
+// One row per problem with a count, never one per occurrence — three hundred
+// refused handshakes are one sentence an operator can act on, and a page that
+// scrolled them would be a page an attacker writes.
+function paintAlerts(state){
+  const board = state.alerts || {};
+  const rows = board.alerts || [];
+  $("alerts-card").hidden = rows.length === 0;
+  $("alerts-count").textContent = board.unread
+    ? board.unread + " unread" : String(rows.length || "");
+  if(!rows.length) return;
+  setHTML("alerts-list", rows.map((alert) =>
+    '<div class="toolbar' + (alert.acknowledged ? " muted" : "") + '">' +
+    badge(alert.level, alert.level === "error" ? "danger" : "warn") +
+    '<span class="grow"><b>' + esc(alert.summary || alert.key) + "</b>" +
+    (alert.detail ? ' <span class="muted small">' + esc(alert.detail) +
+      "</span>" : "") + "</span>" +
+    (alert.count > 1 ? '<span class="muted small">' + esc(alert.count) +
+      " times</span>" : "") +
+    '<span class="muted small">' + esc(alert.source || "") + "</span>" +
+    '<span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - alert.at)) +
+    "</span>" +
+    (alert.acknowledged ? "" : '<button data-alert-ack="' + esc(alert.key) +
+      '">Seen</button>') +
+    '<button data-alert-drop="' + esc(alert.key) + '">Dismiss</button>' +
+    "</div>").join(""));
+}
+document.addEventListener("click", (event) => {
+  const seen = event.target.closest("[data-alert-ack]");
+  const gone = event.target.closest("[data-alert-drop]");
+  if(!seen && !gone) return;
+  const button = seen || gone;
+  withBusy(button, async () => {
+    await CHANNEL.ask(seen ? "alerts.ack" : "alerts.drop",
+                      {key: button.dataset.alertAck || button.dataset.alertDrop});
+    await tick(false);
+  });
+});
+$("alerts-clear").addEventListener("click", (event) => {
+  withBusy(event.target, async () => {
+    await CHANNEL.ask("alerts.drop", {key: ""});
+    await tick(false);
+  });
+});
 
 // The rail is hidden on a phone and the same line shows in the ⋯ menu; written
 // once so the two cannot disagree about whether this node is up.

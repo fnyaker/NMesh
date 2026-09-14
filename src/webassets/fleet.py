@@ -707,7 +707,7 @@ function paintNodes(){
       esc(node.id) + "</div></div>" + badge("managed", "ok") + "</div>" +
       '<div class="card-body">' +
       '<div class="caps">' + capsList(caps) + "</div>" +
-      groupChips(node.id) + stacksLine(node) +
+      groupChips(node.id) + stacksLine(node) + logsLine(node) +
       updateHTML(node.id) + statusHTML(node.status) +
       '<div class="btn-row">' +
       (can("status") ? '<button data-status="' + esc(node.id) + '">Refresh</button>' : "") +
@@ -716,6 +716,7 @@ function paintNodes(){
       (can("shell") ? '<button data-shell="' + esc(node.id) + '">Shell</button>' : "") +
       (can("scan") ? '<button data-scan="' + esc(node.id) + '">Scan LAN</button>' : "") +
       (can("docker") ? '<button data-docker="' + esc(node.id) + '">Docker</button>' : "") +
+      (can("logs") ? '<button data-logs="' + esc(node.id) + '">Logs</button>' : "") +
       '<button data-groups="' + esc(node.id) + '">Groups</button>' +
       '<button data-rights="' + esc(node.id) + '">Rights</button>' +
       '<button data-details="' + esc(node.id) + '">Details</button>' +
@@ -861,6 +862,38 @@ function paintLog(){
   while(box.childElementCount > 500) box.removeChild(box.firstChild);
   if(atEnd) box.scrollTop = box.scrollHeight;
 }
+// What this node does about that machine's log, said on the machine's own card
+// rather than only in a settings page: the decision is about *this* machine,
+// and an operator reading its card is where they make it.
+function logsLine(node){
+  if(!(node.caps || []).includes("logs")) return "";
+  const policy = (LOGS.policies || {})[node.id] || LOGS.defaults || {};
+  const held = ((LOGS.status || {}).nodes || {})[node.id];
+  const words = {always: "always collected",
+                 active: "collected while its page is open",
+                 never: "not collected"};
+  return '<div class="row wrap small muted"><span>Log: ' +
+    esc(words[policy.policy] || "") +
+    ((policy.own || []).length ? "" : " (the default)") +
+    (held ? " · " + esc(held.records) + " line(s) here" : "") + "</span>" +
+    '<select class="sm" data-log-policy="' + esc(node.id) + '">' +
+    ["always", "active", "never"].map((name) =>
+      '<option value="' + name + '"' +
+      (policy.policy === name ? " selected" : "") + ">" +
+      esc(words[name]) + "</option>").join("") + "</select></div>";
+}
+document.addEventListener("change", async (event) => {
+  const picker = event.target.closest("[data-log-policy]");
+  if(!picker) return;
+  const node = picker.dataset.logPolicy;
+  try{
+    await apiJson("/api/fleet/logs-policy", "POST",
+                  {node, policy: picker.value});
+    toast("Log collection for " + shortId(node) + ": " + picker.value);
+  }catch(_){ toast("That could not be changed", "danger"); }
+  refreshLogs();
+});
+
 // ---- the logs of the machines we manage ------------------------------------
 // Read from what this node has already collected, never from the network: a
 // page scrolling a log must not become traffic towards forty machines. The one
@@ -1644,6 +1677,13 @@ document.body.addEventListener("click", async (event) => {
   }
   if(data.copy) return void copyText(data.copy);
   if(data.invite) return inviteDialog(data.invite);
+  if(data.logs){
+    // The machine's own card sends the operator to the panel, filtered to it.
+    $("logs-node").value = data.logs;
+    ROUTER.go("logs");
+    refreshLogs();
+    return;
+  }
   if(data.status){ await api("/api/fleet/status", "POST", {node:data.status}); return; }
   if(data.update){
     const node = (ST.managed || []).find((entry) => entry.id === data.update);

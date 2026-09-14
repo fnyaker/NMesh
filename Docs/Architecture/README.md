@@ -69,6 +69,7 @@ is therefore safe to accept from strangers.
 | `console_auth.py` | The console credential: scrypt hashing + salt, atomic 0600 write, constant-time comparison, bounds on the password. Shared by the console and by the installer's reset — one implementation. |
 | `trace.py` | **Protocol trace**: a bounded ring of packet events (type, size, TTL, ids) + totals per message type. Never a payload. Off by default, bounded in memory *and* in time, stops on its own. See [`../WebConsole/guide`](../WebConsole/guide). |
 | `logbook.py` | **The log**: what the node and its apps *said*, beside what `trace.py` says they sent. Off until an operator asks, bounded in **megabytes** rather than in lines, compressed a block at a time, and dropped when it stops. Read by sequence number, so a console four hops away follows it exactly as a page on the machine does. See [`logging.md`](logging.md). |
+| `alerts.py` | **The notice board**: what wants a person's attention, one entry per problem with a count rather than one per occurrence. Always on — the conditions worth telling somebody about are the ones nobody knew to start a log for — bounded so the worst survives, and never a reason to act on its own. See [`alerts.md`](alerts.md). |
 | `faults.py` | Where a swallowed failure goes: stderr, bounded, named — plus one sink, so a node keeping a log gets the failures that have no other reader at all. |
 | `config.py` | The node's configuration file (`nmesh.conf`): bounded, defensive parsing, per-setting validation, commented rendering, atomic 0600 write. Precedence command line > file > default. See [`../Setup/guide`](../Setup/guide). |
 | `version.py` / `updater.py` | The current version and tag comparison; obtaining a release (from GitHub — the published releases, or `src/version.py` at a branch when `update_branch` names one — or from the mesh) and replacing the installed tree — the node's state is untouched, the previous tree is kept and restored on failure. See [`../Setup/guide`](../Setup/guide). |
@@ -97,7 +98,9 @@ is therefore safe to accept from strangers.
 7. **[logging.md](logging.md)** — the log engine: why nothing is kept by
    default, why the bound is in megabytes, how a subscriber catches up after a
    gap, and the two unequal halves of an app's access to it.
-8. **[behaviour-rules.md](behaviour-rules.md)** — what a node measures to
+8. **[alerts.md](alerts.md)** — the notice board: one entry per problem, what
+   an app may put on it, and why nothing on it ever acts.
+9. **[behaviour-rules.md](behaviour-rules.md)** — what a node measures to
    notice one that is not playing the protocol. Partly implemented
    (`behaviour.py`), mostly still a catalogue. Chain-of-trust genealogy, signature correlation, protocol
    conformance, traffic shape, routing, gossip, the update chain — with the

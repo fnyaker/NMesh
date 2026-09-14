@@ -39,6 +39,7 @@ import secrets
 import struct
 import threading
 
+from . import alerts
 from . import logbook
 from .app_auth import CTX_LEN, MAX_PURPOSE_LEN
 from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
@@ -122,6 +123,12 @@ _PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo, ts, match}]     (LOOKUP reply
 _PSEUDO_NAMES = 0x8E  # body = JSON {id_hex: pseudo}              (OF reply)
 _AUTH_ASSERTION = 0x8C # body = the signed assertion, or empty on refusal
 _AUTH_PRINCIPAL = 0x8D # body = JSON principal, or JSON null when it fails
+# A problem worth a person's attention. Open to every app, like a log line and
+# for the same reason: the node attributes it, bounds it, and decides what the
+# board looks like — an app that could post as the core would be an app that
+# could make an operator act on something the node never said.
+_NOTIFY = 0x15        # body = level(1) ‖ keylen(1) ‖ key ‖ JSON {summary, detail}
+_NOTIFY_KEY_MAX = 64
 _LOG_LINES = 0x8F     # body = JSON {lines, matched, returned, seq, lost?}
 _LOG_LINE = 0x90      # body = JSON one line, pushed to a watching client
 
@@ -419,6 +426,8 @@ class DataConnector:
                     self._handle_log_write(app_id, body)
                 elif ftype in (_LOG_QUERY, _LOG_SINCE, _LOG_WATCH):
                     await self._handle_log_read(writer, app_id, ftype, body)
+                elif ftype == _NOTIFY:
+                    self._handle_notify(app_id, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -626,6 +635,33 @@ class DataConnector:
                         level=level, topic=topic)
         except Exception:               # noqa: BLE001
             pass          # a log line must never break a client's connection
+
+    def _handle_notify(self, app_id: bytes, body: bytes) -> None:
+        """One problem, from an app. Fire and forget, like `_ABUSE`.
+
+        **Not answered**, deliberately: a reply would let an app read the node's
+        board back, and what else is wrong with this machine is nobody's
+        business but the operator's. The key is namespaced by the app here, so
+        one app's notice can never overwrite another's — or the core's."""
+        book = getattr(self._node, "alerts", None)
+        if book is None or not body:
+            return
+        try:
+            level = (alerts.ERROR if body[:1] == b"e" else alerts.WARN)
+            key_len = body[1] if len(body) > 1 else 0
+            key = body[2:2 + min(key_len, _NOTIFY_KEY_MAX)].decode(
+                "utf-8", "replace")
+            document = json.loads(body[2 + key_len:].decode("utf-8")) \
+                if len(body) > 2 + key_len else {}
+            if not isinstance(document, dict):
+                document = {}
+            source = f"app:{app_id.hex()[:16]}"
+            book.raise_alert(f"{source}:{key}",
+                             str(document.get("summary") or key),
+                             level=level, source=source,
+                             detail=str(document.get("detail") or ""))
+        except Exception:               # noqa: BLE001
+            pass          # a notice must never break a client's connection
 
     async def _handle_log_read(self, writer, app_id: bytes, ftype: int,
                                body: bytes) -> None:
@@ -1002,6 +1038,30 @@ class ConnectorClient:
     def next_log(self) -> dict | None:
         """One pushed line, or ``None``. Never blocks, never raises."""
         return self._log_inbox.popleft() if self._log_inbox else None
+
+    async def notify(self, key: str, summary: str = "", *,
+                     level: str = "warn", detail: str = "") -> None:
+        """Put one problem on this node's board, for a person to see.
+
+        Not a log line: a log is off until an operator turns it on, and the
+        conditions worth telling somebody about are the ones nobody knew to
+        start recording. Bounded, attributed to this app by the node, and — like
+        an abuse report — answered by nothing, so it is never a way to read the
+        node's state back.
+
+        ``key`` names the *problem*, not the occurrence: the same key twice is
+        one entry with a count, which is what an operator can act on."""
+        if self._writer is None:
+            return
+        name = str(key or "").encode("utf-8")[:_NOTIFY_KEY_MAX]
+        if not name:
+            return
+        document = json.dumps({"summary": str(summary or "")[:200],
+                               "detail": str(detail or "")[:400]})
+        await _write_frame(
+            self._writer, _NOTIFY,
+            (b"e" if str(level).strip().lower() == "error" else b"w")
+            + bytes([len(name)]) + name + document.encode("utf-8"))
 
     async def whoami(self) -> NodeID:
         return NodeID(await self._roundtrip(_WHOAMI, b"", _WHOAMI_RESP))
