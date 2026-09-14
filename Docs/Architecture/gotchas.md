@@ -1291,6 +1291,37 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## A failure nobody is told about is a failure nobody can fix
+
+A console stopped working entirely: every `node.state` came back
+`{"ok": false, "code": "failed", "error": "node.state failed: AttributeError"}`,
+and that sentence was the whole of what anybody, anywhere, could know about it.
+
+The plane replaces a module's exception with its **type name** on purpose: on
+some channels the reader is a peer, and an exception's text is a description of
+this machine — a path, a field name, a value. That rule is right and it stays.
+What was missing is the other half: nothing in this project has ever written a
+traceback down, so the one machine able to fix the bug was the one machine not
+told about it.
+
+`plane._note_failure` now writes the operation and its traceback to stderr,
+where a node already says what it has to say, bounded to `MAX_TRACE_FRAMES`. And
+the refusal says where the rest of it went, because "AttributeError" with
+nowhere to go is not an answer.
+
+**The reply is still not where it goes — not even to a page on this machine.**
+That is the part worth not getting wrong twice: a first attempt handed the
+sentence and the `file:line` to `Origin.LOCAL`, on the reasoning that somebody
+at the machine is not a peer. A test caught it
+(`test_a_frame_is_answered_however_hostile_and_says_nothing_extra`), and the
+test is right: a reply is relayed, pasted into an issue, and read by scripts, so
+"nothing of this machine travels in one" is an invariant about the *document*
+and not about who asked for it. A log is the machine's own; a reply never is.
+
+The shape to remember: **an error path that produces no evidence anywhere is
+worse than one that crashes.** A crash leaves a traceback. Swallowing leaves a
+type name and a person reloading the page.
+
 ## A window opened with `noopener` starts with an empty sessionStorage
 
 "The package window is not in the remote node's context." It was not, and neither

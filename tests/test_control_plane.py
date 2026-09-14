@@ -29,6 +29,7 @@ from src.apps import fleet_console
 from src.control import frame as frame_mod
 from src.control import jobs as jobs_mod
 from src.control import params as params_mod
+from src.control import plane as plane_mod
 from src.control import transfer as transfer_mod
 from src.control.modules.jobs import JobsModule
 from src.control.modules.transfer import TransferModule
@@ -2342,3 +2343,38 @@ class TestTransfer:
             with pytest.raises(ControlError) as raised:
                 plane.call(op, params, origin=Origin.REMOTE)
             assert raised.value.detail.get("background") is True, op
+
+
+class TestAFailureIsWrittenDownWhereItHappened:
+    """A module that throws used to be invisible everywhere at once.
+
+    The reply carries a type name, deliberately — on some channels the reader is
+    a peer, and an exception's text is a description of this machine. But the
+    node's own log said nothing either, so "node.state failed: AttributeError"
+    was the whole of what anybody, anywhere, could know about a console that had
+    stopped working. The machine that owns the node is now told."""
+
+    def test_the_traceback_reaches_this_machine(self, capsys):
+        control.LocalChannel(_plane()).call("sample.boom")
+        written = capsys.readouterr().err
+        assert "control operation sample.boom failed" in written
+        assert "Traceback" in written
+        assert "a secret about this machine" in written
+
+    def test_and_still_never_reaches_the_caller(self, capsys):
+        """Including a caller on this machine: a reply is relayed, pasted and
+        read by scripts, so the rule is not about who asked."""
+        for origin in Origin.ALL:
+            reply = control.LocalChannel(_plane(), origin).call("sample.boom")
+            capsys.readouterr()
+            text = json.dumps({"error": reply.error, "detail": reply.detail})
+            assert "a secret about this machine" not in text
+            assert "Traceback" not in text and "/home/" not in text
+            # And it says where the rest of it went, which is the difference
+            # between an operator who can act and one who cannot.
+            assert "log" in reply.error
+
+    def test_a_report_that_fails_is_not_itself_a_failure(self, monkeypatch, capsys):
+        monkeypatch.setattr(plane_mod.sys, "stderr", None)
+        reply = control.LocalChannel(_plane()).call("sample.boom")
+        assert reply.ok is False and reply.code == "failed"
