@@ -303,6 +303,11 @@ tests/
 │     for, one bounded ring per machine so a chatty one cannot push out a quiet
 │     one's, and a merged view ordered by *our* clock rather than by the time
 │     the far machine supplied
+├── test_alerts.py                                     — the notice board: a
+│     flood that is one line with a count, a chatty warning that never pushes
+│     out an error, "seen" that is not "gone", an app that cannot post as
+│     another or as the core, and a module whose own call graph proves it acts
+│     on nothing
 ├── test_logbook.py                                    — the log ring: nothing
 │     kept until asked and what was kept dropped when it stops, a flood that
 │     never grows past the megabytes an operator allowed, a reader too slow for

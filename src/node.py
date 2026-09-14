@@ -14,6 +14,8 @@ import time
 from collections import OrderedDict
 from .app_auth import AppAuth
 from . import logbook
+from . import alerts
+from .alerts import AlertBook
 from .logbook import LogBook
 from .trace import Trace
 from .node_id import NodeID
@@ -2224,6 +2226,12 @@ class MeshNode:
         # somebody stopped looking, is a record it has no business holding
         # (`src/logbook.py`).
         self.logs = LogBook()
+        # What is wrong here, as a human would want it said — a notice board
+        # rather than a recording, so it is always on and deliberately poorer
+        # than the ring beside it (`src/alerts.py`). An operator must be able to
+        # learn that this node has a problem without having had the foresight
+        # to start a log first.
+        self.alerts = AlertBook()
         # Every failure a guard swallows lands in the ring as well as on
         # stderr. Those are the ones with no other reader at all
         # (`src/faults.py`), which makes them the lines an operator turning a
@@ -6071,10 +6079,17 @@ class MeshNode:
         return peer
 
     def _note_fault(self, where: str, exc: BaseException) -> None:
-        """One swallowed failure, as a log line. Never raises: `faults.note`
-        guards this, and a guard's guard is not a place to be clever."""
+        """One swallowed failure, as a log line and as an alert. Never raises:
+        `faults.note` guards this, and a guard's guard is not a place to be
+        clever.
+
+        Keyed on *where*, so a guard failing in a loop is one line saying how
+        many times rather than a page of them."""
         self.logs.record("faults", f"{where} failed", level=logbook.ERROR,
                          topic="fault", fields={"error": type(exc).__name__})
+        self.alerts.raise_alert(f"fault:{where}", f"{where} failed",
+                                level=alerts.ERROR, source="faults",
+                                detail=type(exc).__name__)
 
     def log(self, message: str, *, source: str = "node",
             level: str = logbook.INFO, topic: str = "", **fields) -> None:
@@ -6085,6 +6100,16 @@ class MeshNode:
         to ask first would be a caller that forgets to."""
         self.logs.record(source, message, level=level, topic=topic,
                          fields=fields or None)
+
+    def alert(self, key: str, summary: str, *, level: str = alerts.WARN,
+              source: str = "node", node: str = "", detail: str = "") -> None:
+        """Put one problem on the board. Never raises, always on.
+
+        Separate from `log` rather than derived from it: a log is off until
+        somebody turns it on, and the conditions worth waking an operator for
+        are exactly the ones nobody knew to start recording."""
+        self.alerts.raise_alert(key, summary, level=level, source=source,
+                                node=node, detail=detail)
 
     def _new_peer(self, transport, *, is_client_side: bool,
                   on_dead=None) -> _Peer:
@@ -6420,6 +6445,12 @@ class MeshNode:
             "trust": section("trust", lambda: self.trust_status(),
                                {}),
             "abuse": section("abuse", lambda: self.abuse_status(),
+                               {}),
+            # What a person should look at, beside everything a person *may*
+            # look at. Always in the snapshot because the board is always on:
+            # a node cannot know in advance which problem somebody will want to
+            # have been told about (`src/alerts.py`).
+            "alerts": section("alerts", lambda: self.alerts.status(),
                                {}),
             "behaviour": section("behaviour", lambda: self.behaviour_status(),
                                {}),
@@ -13232,6 +13263,15 @@ Hints come first (the ``have`` byte on an announce, from an
         `_maybe_announce`, which only `report_abuse` calls."""
         if standing == OK:
             return
+        # On the board as well as in the reputation book: a peer this node has
+        # decided to stop enduring is a sentence an operator wants without
+        # having had the foresight to start a log first. Keyed per identity, so
+        # a peer that goes on trying is one line with a count.
+        short = node_id.raw.hex()[:16]
+        self.alert(f"standing:{short}", f"a peer is {standing}",
+                   level=alerts.ERROR if standing != "suspect" else alerts.WARN,
+                   source="peers", node=node_id.raw.hex(),
+                   detail=str(reason or "")[:120])
         for peer in [p for p in self._peers if p.authenticated_id == node_id]:
             self._tarpit(peer)
         self._note_change("links")

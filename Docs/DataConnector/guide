@@ -88,6 +88,7 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | →    | `LOG_SINCE` (0x13)   | JSON `{seq, …}`             | everything after a sequence number, oldest first — same grant |
 | →    | `LOG_WATCH` (0x14)   | `flag(1) + level(1)`        | subscribe to new lines at or above a floor, or stop — same grant |
 | ←    | `LOG_LINES` (0x8F)   | JSON `{lines, matched, returned, seq}` | the answer to the three above (`lost` on a `LOG_SINCE`, `refused: true` without the grant, `watching` for a `LOG_WATCH`) |
+| →    | `NOTIFY` (0x15)      | `level(1) + keylen(1) + key + JSON {summary, detail}` | puts one problem on this node's board. No answer, by design |
 | ←    | `LOG_LINE` (0x90)    | one line as JSON            | pushed to a watching client as it is recorded |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
@@ -171,6 +172,28 @@ Three things are worth knowing before writing against it:
   that stops reading loses pushes — its own bounded queue, nobody else's — and
   catches up with `logs_since(seq)`, which answers `lost` rather than handing
   back a gap it cannot see.
+
+## Saying that something is wrong (`NOTIFY`)
+
+A log line is for whoever reads the log. A **notice** is for whoever is looking
+after this machine, and the difference matters because the log is off until an
+operator turns it on:
+
+```python
+await client.notify("uploads", "too many failed uploads",
+                    level="error", detail="12 in a minute")
+```
+
+Only this app knows what "too many" means for it — the same argument as
+`report_abuse`, and the same division: the app judges, the node decides what the
+board looks like. `key` names the **problem**, not the occurrence: the same key
+twice is one entry with a count, which is the sentence an operator can act on.
+
+The node namespaces the key with this client's app id, so one app can never
+overwrite another's entry or post as the core, and bounds every field. Like
+`ABUSE`, it is **answered by nothing**: a reply would let an app read the node's
+state back, and what else is wrong with this machine is the operator's business.
+Details and bounds: [`Docs/Architecture/alerts.md`](../Architecture/alerts.md).
 
 The `STORE_*` frames drive the **per-app local store** (the "drawer"): an
 encrypted key→value store, isolated per section. The `app_id` **does not appear**
