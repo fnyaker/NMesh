@@ -60,6 +60,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
+from .. import logbook
 from ..accusation import KIND_FLOOD as ABUSE_FLOOD
 from ..app_auth import ctx_hash
 from ..app_guard import AppGuard, Limit
@@ -114,6 +115,12 @@ FILE_DATA = 0x72
 # capability — and the capability is the gate, not the verb.
 DOCKER_REQUEST = 0x80
 DOCKER_REPLY = 0x81
+
+# Logs: one request type carrying a named operation (like docker), one reply,
+# and the same reply type for the lines pushed while somebody is following —
+# a follow is a subscription, not a second protocol.
+LOGS_REQUEST = 0x90
+LOGS_REPLY = 0x91
 
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
@@ -175,6 +182,13 @@ _PORTAINER_KEY = "portainer"      # drawer key holding this node's Portainer
 KEYSCAN_TIMEOUT = 60.0            # whole fingerprint pass, not per host
 FILE_TIMEOUT = 30.0               # one file operation, mesh round trip included
 MAX_FILE_CALLS = 8                # file operations we host at once, per peer
+# Logs. Followers we push lines to at once, and how long a follow lasts without
+# being asked for again: a follower that stopped listening — a page closed, a
+# console that went away — costs us nothing for longer than this.
+MAX_LOG_FOLLOWERS = 16
+LOG_FOLLOW_TTL = 300.0
+LOG_LINES_PER_PUSH = 64           # lines carried in one pushed frame
+MAX_LOG_LINES = 500               # lines one answer may carry, whoever asks
 # Remote console. A request must fit one frame; an answer is chunked, because a
 # node with a hundred peers has a snapshot that does not.
 CONSOLE_REQ_MAX = 24 * 1024       # proxied request body, one frame
@@ -287,6 +301,17 @@ class DockerReport:
     rid: str
     op: str
     data: dict
+
+
+@dataclass
+class LogsReceived:
+    """Lines from a machine we manage — answered, or pushed while following."""
+    src: NodeID
+    rid: str
+    lines: list
+    lost: int = 0
+    pushed: bool = False
+    following: bool | None = None       # set only by the answer to a follow
 
 
 @dataclass
@@ -481,6 +506,14 @@ class FleetApp:
         self._file_calls: dict[str, asyncio.Future] = {}
         self._file_hosted: dict[str, int] = {}
         self._uploads: dict[tuple, "fleet_files.Upload"] = {}
+        # Logs. Agent side: who is following ours, until when, and the pump that
+        # feeds them — started when the first follower arrives and stopped when
+        # the last goes, so a node nobody is watching runs nothing. Operator
+        # side: the follow we opened per node, which is what makes a pushed
+        # frame something we asked for rather than something we were sent.
+        self._log_followers: dict[str, dict] = {}         # agent side
+        self._log_pump: asyncio.Task | None = None        # agent side
+        self._log_follows: dict[str, str] = {}            # operator side
         # What one sender may ask of us, and the one place a breach is reported.
         # Fleet has a single kind, because every inbound frame here costs the
         # same thing: one ML-DSA verification before any handler sees it.
@@ -530,6 +563,11 @@ class FleetApp:
         for upload in list(self._uploads.values()):
             upload.abort()
         self._uploads.clear()
+        if self._log_pump is not None:
+            self._log_pump.cancel()
+            self._log_pump = None
+        self._log_followers.clear()
+        self._log_follows.clear()
         await self._client.close()
 
     async def _names_loop(self) -> None:
@@ -1306,6 +1344,251 @@ class FleetApp:
         if isinstance(status, dict):
             self.state.record_status(src.raw.hex(), status)
             self._emit(StatusReceived(src, status, _rid(document)))
+
+    # ======================================================================
+    # Logs
+    # ======================================================================
+    #
+    # The one capability whose answer is a *recording of the past*, which is why
+    # it is a grant of its own and not a corner of `status`. A log says who this
+    # machine talked to and when; handing that over is a decision, and the
+    # machine that keeps the log is the one that decides.
+    #
+    # Two shapes, and one message type for both. A *question* — the ring through
+    # filters, or everything after a sequence number — is answered once. A
+    # *follow* is a standing answer: lines are pushed as they are recorded,
+    # until the follow expires or the operator stops it. A follow is deliberately
+    # not a second protocol: a pushed frame is the same reply carrying the same
+    # rid, so an operator that never asked receives nothing it can make sense of.
+    #
+    # Nothing is buffered per follower here either. This node's ring *is* the
+    # buffer, so an operator that was away comes back with the last sequence it
+    # holds and asks for what it missed — which is what makes this work over a
+    # mesh that partitions, rather than only over a link that stays up.
+
+    async def request_logs(self, target: NodeID, *, op: str = "query",
+                           seq: int = 0, **filters) -> str:
+        """Ask a machine we manage for its log. Returns the request id."""
+        rid = self._new_rid(target, "logs")
+        document = {"rid": rid, "op": "since" if op == "since" else "query",
+                    "seq": max(0, int(seq or 0))}
+        document.update({key: value for key, value in filters.items()
+                         if key in ("level", "source", "topic", "contains",
+                                    "since_time", "until_time", "limit")})
+        await self._send(target, self._signed_frame(
+            LOGS_REQUEST, target, PURPOSE_BY_CAP["logs"], document))
+        return rid
+
+    async def follow_logs(self, target: NodeID, on: bool = True, *,
+                          level: str = "info", seq: int = 0) -> str:
+        """Start or stop being pushed a machine's lines as it records them.
+
+        ``seq`` is what we already hold: a follow that starts by handing back
+        what was missed is what makes a reconnection invisible to whoever is
+        reading, and asking for it here costs one round trip rather than two."""
+        rid = self._new_rid(target, "logs")
+        node_hex = target.raw.hex()
+        if on:
+            self._log_follows[node_hex] = rid
+            while len(self._log_follows) > MAX_INFLIGHT:
+                self._log_follows.pop(next(iter(self._log_follows)), None)
+        else:
+            self._log_follows.pop(node_hex, None)
+        await self._send(target, self._signed_frame(
+            LOGS_REQUEST, target, PURPOSE_BY_CAP["logs"],
+            {"rid": rid, "op": "follow", "on": bool(on),
+             "level": str(level or "info")[:8], "seq": max(0, int(seq or 0))}))
+        return rid
+
+    def following(self) -> list[str]:
+        """The nodes we are following, as this node believes it."""
+        return sorted(self._log_follows)
+
+    # -- the machine being read -------------------------------------------
+
+    def _on_logs_request(self, src: NodeID, principal, document: dict) -> None:
+        rid = _rid(document)
+        if not self._authorised(src, "logs", rid):
+            return
+        op = str(document.get("op") or "query")
+        if op == "follow":
+            self._spawn(self._set_log_follower(src, rid, document))
+            return
+        if op not in ("query", "since"):
+            self._fail(src, rid, "no such log operation")
+            return
+        self._spawn(self._run_logs(src, rid, op, document))
+
+    async def _run_logs(self, src: NodeID, rid: str, op: str,
+                        document: dict) -> None:
+        """One question about our log, answered from the node's own ring.
+
+        Read through the connector like everything else this app touches, which
+        means it needs the node's `logs` grant — an app is not trusted with the
+        machine's diary because it happens to be the fleet app."""
+        asked = {key: document[key] for key in
+                 ("level", "source", "topic", "contains", "since_time",
+                  "until_time")
+                 if key in document}
+        asked["limit"] = MAX_LOG_LINES
+        try:
+            if op == "since":
+                answer = await self._client.logs_since(
+                    max(0, int(document.get("seq") or 0)), **asked)
+            else:
+                answer = await self._client.logs_query(**asked)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._fail(src, rid, "this node's log is unavailable")
+            return
+        if not isinstance(answer, dict) or answer.get("refused"):
+            self._fail(src, rid, "this node has not granted its fleet app the "
+                                 "right to read its log")
+            return
+        self._reply(src, LOGS_REPLY,
+                    {"rid": rid, "op": op, "ok": True,
+                     "lines": answer.get("lines") or [],
+                     "lost": int(answer.get("lost") or 0),
+                     "seq": int(answer.get("seq") or 0),
+                     "matched": int(answer.get("matched") or 0)},
+                    "lines")
+
+    async def _set_log_follower(self, src: NodeID, rid: str,
+                                document: dict) -> None:
+        node_hex = src.raw.hex()
+        if not document.get("on"):
+            self._log_followers.pop(node_hex, None)
+            self._reply(src, LOGS_REPLY, {"rid": rid, "op": "follow",
+                                          "ok": True, "following": False})
+            return
+        if (node_hex not in self._log_followers
+                and len(self._log_followers) >= MAX_LOG_FOLLOWERS):
+            self._fail(src, rid, "too many consoles are following this log")
+            return
+        if not await self._start_log_pump():
+            self._fail(src, rid, "this node has not granted its fleet app the "
+                                 "right to read its log")
+            return
+        self._log_followers[node_hex] = {
+            "id": src, "rid": rid,
+            "level": str(document.get("level") or "info")[:8],
+            "until": time.monotonic() + LOG_FOLLOW_TTL,
+        }
+        self._reply(src, LOGS_REPLY, {"rid": rid, "op": "follow", "ok": True,
+                                      "following": True,
+                                      "ttl": LOG_FOLLOW_TTL})
+        # What they missed, before anything new: a follow that begins at "now"
+        # leaves a hole exactly where the operator stopped being able to look.
+        # Sent as a *push* under the follow's own rid, because that is what the
+        # far side is now expecting on it — answering it as a question would be
+        # an answer to a question the operator's book has already closed.
+        await self._push_backlog(src, rid, document.get("seq"))
+
+    async def _push_backlog(self, src: NodeID, rid: str, seq) -> None:
+        """Hand a new follower what its ring missed. Best effort: a follow that
+        is live is worth more than the backlog, so this never un-does it."""
+        try:
+            answer = await self._client.logs_since(
+                max(0, int(seq or 0)), limit=MAX_LOG_LINES)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+        lines = answer.get("lines") if isinstance(answer, dict) else None
+        if not lines and not (isinstance(answer, dict) and answer.get("lost")):
+            return
+        self._reply(src, LOGS_REPLY,
+                    {"rid": rid, "op": "push", "ok": True,
+                     "lines": lines or [],
+                     "lost": int(answer.get("lost") or 0)}, "lines")
+
+    async def _start_log_pump(self) -> bool:
+        """Subscribe to the node's lines, once, for however many followers."""
+        if self._log_pump is not None and not self._log_pump.done():
+            return True
+        try:
+            if not await self._client.logs_watch(True, level="debug"):
+                return False
+        except Exception:
+            return False
+        self._log_pump = asyncio.create_task(self._log_loop())
+        return True
+
+    async def _log_loop(self) -> None:
+        """Hand the node's new lines to whoever is following.
+
+        Polled rather than woken: the connector client has one reader, and a
+        second coroutine waiting on the same event as `recv` is a lost wake-up
+        — which here would be a follower that silently stops receiving. A
+        quarter of a second is imperceptible on a log and free on a node that
+        is saying nothing.
+
+        It ends **itself** when the last follower goes, rather than being
+        cancelled by whoever noticed: a task that cancels itself never reaches
+        the line that unsubscribes, so the node would have gone on compressing
+        and queueing lines for nobody."""
+        try:
+            while self._log_followers:
+                await asyncio.sleep(0.25)
+                self._push_to_followers(self._take_lines())
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._log_pump = None
+            try:
+                await self._client.logs_watch(False)
+            except Exception:
+                pass      # the subscription dies with the connection anyway
+
+    def _take_lines(self) -> list:
+        batch = []
+        while len(batch) < LOG_LINES_PER_PUSH:
+            line = self._client.next_log()
+            if line is None:
+                break
+            batch.append(line)
+        return batch
+
+    def _push_to_followers(self, batch) -> None:
+        """One turn: drop the follows that have run out, push to the rest."""
+        now = time.monotonic()
+        for node_hex, entry in list(self._log_followers.items()):
+            if entry["until"] <= now:
+                self._log_followers.pop(node_hex, None)
+                continue
+            if not batch:
+                continue
+            floor = logbook.rank(entry["level"])
+            wanted = [line for line in batch
+                      if logbook.rank(line.get("level")) >= floor]
+            if wanted:
+                self._reply(entry["id"], LOGS_REPLY,
+                            {"rid": entry["rid"], "op": "push", "ok": True,
+                             "lines": wanted}, "lines")
+
+    # -- the operator reading ---------------------------------------------
+
+    def _on_logs_reply(self, src: NodeID, document: dict) -> None:
+        rid = _rid(document)
+        lines = document.get("lines")
+        lines = [line for line in lines if isinstance(line, dict)][:MAX_LOG_LINES] \
+            if isinstance(lines, list) else []
+        if document.get("op") == "push":
+            # Unsolicited unless it carries the rid of the follow *we* opened
+            # with this node. Anything else is a machine pushing us lines we
+            # never asked for, which is the one thing this shape could become.
+            if self._log_follows.get(src.raw.hex()) != rid:
+                return
+            self._emit(LogsReceived(src, rid, lines, pushed=True,
+                                    lost=int(document.get("lost") or 0)))
+            return
+        if not self._claim_inflight(src, document, "logs"):
+            return
+        following = document.get("following")
+        self._emit(LogsReceived(
+            src, rid, lines, lost=int(document.get("lost") or 0),
+            following=bool(following) if following is not None else None))
 
     # ======================================================================
     # Invitations minted on another node's behalf
@@ -2973,6 +3256,7 @@ _SIGNED_INBOUND = {
     FILE_REQUEST: FleetApp._on_file_request,
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
+    LOGS_REQUEST: FleetApp._on_logs_request,
     INVITE_REQUEST: FleetApp._on_invite_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
     DOCKER_REQUEST: FleetApp._on_docker_request,
@@ -2992,6 +3276,7 @@ _PURPOSE_FOR = {
     FILE_REQUEST: PURPOSE_BY_CAP["shell"],
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
+    LOGS_REQUEST: PURPOSE_BY_CAP["logs"],
     INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],
     DOCKER_REQUEST: PURPOSE_BY_CAP["docker"],
@@ -3003,6 +3288,7 @@ _PURPOSE_FOR = {
 _REPLY_INBOUND = {
     STATUS_REPORT: FleetApp._on_status_report,
     INVITE_ISSUED: FleetApp._on_invite_issued,
+    LOGS_REPLY: FleetApp._on_logs_reply,
     UPDATE_OUTPUT: FleetApp._on_update_output,
     UPDATE_RESULT: FleetApp._on_update_result,
     DOCKER_REPLY: FleetApp._on_docker_reply,

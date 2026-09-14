@@ -1918,6 +1918,25 @@ def _make_handler(console: WebConsole):
                 # Paths and comments of local SSH keys — never key material.
                 self._json(200, {"keys": console._fleet.local_keys()})
                 return
+            if path == "/api/fleet/logs":
+                # What this console has collected from the machines it manages.
+                # A read of our own rings: it never asks the network, so a page
+                # scrolling a log cannot become traffic towards forty nodes.
+                node = (query.get("node") or [""])[0]
+                if node:
+                    # Reading a node's log *is* what "somebody is looking at
+                    # it" means, and the `active` policy is what reads it.
+                    console._fleet.logs_watching(node)
+                self._json(200, console._fleet.logs(
+                    node,
+                    level=(query.get("level") or [""])[0],
+                    source=(query.get("source") or [""])[0],
+                    topic=(query.get("topic") or [""])[0],
+                    contains=(query.get("contains") or [""])[0],
+                    since_time=_int_param(query, "since_time", 0),
+                    until_time=_int_param(query, "until_time", 0),
+                    limit=_int_param(query, "limit", 0)))
+                return
             self._json(404, {"error": "not found"})
 
         def _handle_shell_read(self, query: dict) -> None:
@@ -2240,6 +2259,20 @@ def _make_handler(console: WebConsole):
                     self._handle_provision(fleet, node, data)
                 elif action == "docker":
                     self._handle_docker(fleet, node, data)
+                elif action == "logs-fetch":
+                    # The `never` policy's escape hatch: ask that node now.
+                    self._json(200, {"rid": fleet.logs_fetch(node)})
+                elif action == "logs-policy":
+                    answer = (fleet.set_log_defaults(data.get("policy"),
+                                                     data.get("megabytes"))
+                              if not node else
+                              fleet.set_log_policy(node, data.get("policy"),
+                                                   data.get("megabytes"),
+                                                   data.get("inherit") is True))
+                    self._json(200 if answer is not None else 404,
+                               answer or {"error": "not managed"})
+                elif action == "logs-forget":
+                    self._json(200, fleet.forget_logs(node))
                 elif action == "stacks":
                     # Which of a node's stacks *Update* should also bring up.
                     # Ours to remember, so it is written here and nowhere else.

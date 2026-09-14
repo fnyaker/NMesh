@@ -689,6 +689,10 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only what moved (`src/console_feed.py`); without `proto` it is the flat snapshot it has always been |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64); `&wait=1` holds the answer until there are some (bounded in time, and in how many are parked at once) |
 | POST    | `/api/fleet/docker` | `{node, op, …}` → one docker operation on a managed node (`docker` right). Reads are waited on; the ones that pull images hand back a `rid` watched in the job list |
+| GET     | `/api/fleet/logs`  | `?node=&level=&source=&contains=&since_time=&until_time=` → the lines this node has **already collected** from the machines it manages, newest first, with the policies and what is being followed. Reads our own rings: it never asks the network, so scrolling a log cannot become traffic towards forty machines. Naming a node here is also what says somebody is *looking* at it, which is what the `active` policy follows |
+| POST    | `/api/fleet/logs-fetch` | `{node}` → ask that machine for its log now, whatever its policy says about collecting it |
+| POST    | `/api/fleet/logs-policy` | `{policy?, megabytes?}` for the fleet-wide default, or `{node, policy?, megabytes?, inherit?}` for one machine |
+| POST    | `/api/fleet/logs-forget` | `{node?}` → drop what was collected, from one machine or from all |
 | POST    | `/api/fleet/stacks` | `{node, stacks[]}` → which of that node's docker stacks *Update* also brings up |
 | POST    | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → this console's own names for sets of machines; nothing about a group travels |
 | POST    | `/api/fleet/update-group` | `{group}` → *Update* on every node in that group |

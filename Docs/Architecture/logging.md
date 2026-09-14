@@ -124,6 +124,20 @@ that has stopped reading loses pushes, alone, then catches up with `_LOG_SINCE`.
 Watchers are forgotten when the socket goes, and the table is bounded like every
 other one here.
 
+## A fleet's half
+
+One node's ring answers "what is happening here, now". An operator managing forty
+machines has a different question — *what happened on any of them while nobody
+was looking* — and a ring on a node that has since rebooted cannot answer it.
+
+So the fleet app collects: a machine grants `logs` by name, the operator's node
+follows it (always, only while a page is open on it, or never), and what arrives
+is kept in **one bounded ring per machine** on the operator's node. A follow
+expires unless renewed, carries the sequence number the operator already holds,
+and is answered from the far ring — so a partition costs a gap that is reported
+(`lost`) rather than a silence that is not. Details, bounds and the two grants it
+needs: [`Docs/Apps/fleet`](../Apps/fleet).
+
 ## What this is not
 
 * **Not a file.** Nothing is written to disk, by design. A ring in memory dies
