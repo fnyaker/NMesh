@@ -352,6 +352,33 @@ not the same as being read.
     the node and its edges on the map. The selected row carries a **Details**
     button — selecting is not opening, so a tap that only meant to point at
     something does not throw a dialog over the map.
+  - **Growing it past what this node can see** (Grow the map, in the panel).
+    The drawing stops at this node's neighbours and the sessions it routes,
+    because that is everything it can *measure*. Beyond it, one machine at a
+    time, an operator can ask a node they manage what **it** is connected to —
+    one call, when the button is pressed, never on a timer.
+
+    What comes back is a **claim**, and it is kept apart on every axis: its own
+    outer ring, a dashed hollow dot, an edge labelled "said by …" rather than
+    with a latency, its own rows in the panel, and an expiry of five minutes so
+    the map shrinks back on its own instead of showing an hour-old mesh as
+    though it were now. Bounded at 120 reported nodes and 300 reported edges, at
+    most one question per machine every ten seconds, and at most 64 links taken
+    from any one answer. **None of it reaches the node**: nothing is stored,
+    gossiped, routed on or held against anybody — it is a drawing in one
+    browser tab, and "Forget what was reported" empties it.
+
+    Only machines that granted `manage` can be asked, and only the fleet app
+    offers it — growing a map is driving another machine's console, which is
+    remote management under another name. A machine whose console needs a
+    password and has no session open says so instead of offering a button that
+    always fails. The two questions the map asks fleet (`map_targets`,
+    `map_overlay`) **do not travel**: they hand over the list of machines this
+    node manages, so they are answered only for the console an operator is
+    sitting at.
+  - **What an app knows about a node is drawn beside it.** Fleet says "managed",
+    "controls this node", "log" — its own words, rendered by a map that holds no
+    idea of what any of them mean.
 - **Which link carries the traffic is chosen, not stumbled on.** A node reached
   over two media at once may have one of them losing every probe. The score that
   picks between them multiplies the address score by `(1 − loss)⁴`, so a tenth

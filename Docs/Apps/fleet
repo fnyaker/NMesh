@@ -592,6 +592,36 @@ on its node card in the Nodes tab and in Fleet → Logs.
 read of this node's ledger. `logs_policy` does **not**: what this console
 collects is a decision about this operator's own machine, like `enrol`.
 
+## The map, grown through the machines you manage
+
+The console's mesh map draws what its node can *measure*: its own links, and the
+sessions it routes through them. Fleet offers the layer past that — ask a machine
+you manage what it is connected to, and the map grows around it
+([`Docs/WebConsole/guide`](../WebConsole/guide)).
+
+It is fleet's to offer because of what it costs: the answer comes back over the
+**remote console relay**, so it needs `manage` and a session on that machine,
+exactly like driving its console by hand. No new capability, no new message, no
+new authority — and nothing an app that is not fleet can reach.
+
+Two operations serve the page, and both read this node's ledger only:
+
+| Operation | Answers |
+|---|---|
+| `map_targets` | machines that granted `manage`, and whether one can be asked now (a session is open, or `passwordless` was granted so one can be minted) |
+| `map_overlay` | what fleet knows about each node on the map — managed, controls this node, log being collected — in fleet's words, for a map that holds no idea what they mean |
+
+Neither travels. That is the harder half of the decision and it is deliberate:
+neither one *acts*, so letting them ride to another operator's console looks
+harmless — but together they hand that operator the list of machines this node
+manages and can reach, which is precisely how a node somebody manages becomes a
+way to reach the nodes *it* manages. `relation` may travel because it answers
+about one node the caller already named; these answer about all of them.
+
+What comes back from a grown map is a **claim**, never a measurement, and it
+lives in the browser tab that asked for it: bounded, expiring, attributed to the
+machine that said it, and never written to this node.
+
 ## What you do with a managed node
 
 - **Status** — uptime, load, memory, disks, distro, package manager. The last

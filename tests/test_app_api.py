@@ -276,7 +276,7 @@ class TestTheShippedApps:
         from src.apps.fleet_web import FleetBridge
         operations = {op["name"]: op for op in app_api.declared(FleetBridge)}
         assert set(operations) == {"relation", "enrol", "request", "invite",
-                                   "logs_policy"}
+                                   "logs_policy", "map_targets", "map_overlay"}
         assert operations["relation"]["changes"] is False
         assert operations["enrol"]["changes"] is True
         assert operations["request"]["changes"] is True
@@ -288,6 +288,12 @@ class TestTheShippedApps:
         # operator's decision about their own console, so it stays here.
         assert operations["relation"]["remote"] is True
         assert operations["logs_policy"]["remote"] is False
+        # The two the map asks read this console's own ledger and act on
+        # nothing — and still do not travel: they hand over the whole list of
+        # machines this node manages, which is the pivot the fleet guide names.
+        for name in ("map_targets", "map_overlay"):
+            assert operations[name]["remote"] is False
+            assert operations[name]["changes"] is False
 
     def test_no_shipped_operation_takes_a_free_form_blob(self):
         """Every argument that crosses this boundary has a shape. If one ever

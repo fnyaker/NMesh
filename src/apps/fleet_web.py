@@ -550,6 +550,23 @@ class FleetBridge:
              app_api.param("policy", "text", required=False, default=""),
              app_api.param("megabytes", "count", required=False, default=0)],
             changes=True),
+        # The map, and the two questions it asks. Both read this console's own
+        # ledger and nothing else, so both are cheap and neither reaches the
+        # network. **Fleet only**, because growing a map means driving another
+        # machine's console — the same authority as remote management, not
+        # something every app gets to have.
+        #
+        # And **local only**, which is the harder half. Neither of these acts,
+        # so the instinct is to let them travel like `relation`. But `relation`
+        # answers about *one node the caller already named*, while these two
+        # hand over the whole list of machines this node manages and can reach
+        # — which is precisely how a node somebody manages becomes a way to
+        # reach the nodes *it* manages (`Docs/Apps/fleet`). A map grows on the
+        # console an operator is sitting at.
+        app_api.operation(
+            "map_targets", "Machines this console may grow the map through"),
+        app_api.operation(
+            "map_overlay", "What fleet knows about the nodes on the map"),
         app_api.operation(
             "invite", "Have a node we manage mint an invitation to its mesh",
             [app_api.param("node", "node"),
@@ -588,6 +605,47 @@ class FleetBridge:
                              for cap in CAPABILITIES],
             "page": "/fleet#nodes",
         }
+
+    # -- the map -----------------------------------------------------------
+
+    def api_map_targets(self) -> dict:
+        """Which machines the map may be grown through, and whether it can be
+        now.
+
+        Two conditions and they are different: the *grant* (`manage`, which the
+        operator was given once) and the *session* (open now, or openable
+        without a password because `passwordless` was granted too). A page that
+        offered "expand" on a machine with no session would offer a button that
+        always fails."""
+        return {"targets": self.remote_targets()}
+
+    def api_map_overlay(self) -> dict:
+        """What fleet knows about each node, for the map to draw beside it.
+
+        Fleet's words, not the map's: the page renders the badges it is handed
+        and holds no idea of what `govern` or a log policy is. That is what
+        makes this the shape another app could fill later — and why nothing
+        here is computed twice from what the ledger already answers."""
+        out = {}
+        following = set(self._app.following())
+        for entry in self._app.state.managed():
+            node = entry.get("id") or ""
+            caps = list(entry.get("caps") or [])
+            badges = ["managed"]
+            if "logs" in caps and node in following:
+                badges.append("log")
+            out[node] = {"badges": badges, "label": entry.get("label") or "",
+                         "caps": caps, "tone": "ok"}
+        for entry in self._app.state.operators():
+            node = entry.get("id") or ""
+            row = out.setdefault(node, {"badges": [], "label": "", "caps": [],
+                                        "tone": ""})
+            row["badges"] = row["badges"] + ["controls this node"]
+            # An operator of *ours* outranks anything else this row says: it is
+            # the one line on a map that an operator must never have to look
+            # twice to see.
+            row["tone"] = "warn"
+        return {"nodes": out}
 
     def _logs_relation(self, node: str) -> dict:
         policy = self._app.state.log_policy(node)
