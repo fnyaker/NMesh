@@ -54,6 +54,7 @@ the app API, whose callers are HTML forms where everything is a string.
 """
 from __future__ import annotations
 
+import base64
 import re
 
 from .. import app_api
@@ -68,7 +69,7 @@ MAX_VALUE = 512          # length of one of its scalar values
 MAX_CHOICES = 32
 
 KINDS = app_api.KINDS + ("line", "document", "choice", "hex", "secret",
-                         "payload")
+                         "payload", "blob")
 
 # The largest `hex` a declaration may allow. A self-signed certificate is about
 # 14 kB of hex; the ceiling leaves room for a longer key without ever
@@ -77,6 +78,11 @@ MAX_HEX = 20000
 # A passphrase. Long enough for anything a person types or a manager generates,
 # short enough that it is an argument rather than a payload.
 MAX_SECRET = 512
+# One chunk of a file, written as base64. The ceiling a *declaration* may ask
+# for, not what any one operation asks for: `transfer` declares the figure that
+# actually fits a frame with its envelope around it, and this only has to refuse
+# a declaration that forgot there is a frame at all.
+MAX_BLOB = 32 * 1024
 # An identifier written as hex — a record, an offer, a signing key's id. They
 # are hashes, so the real ones are 40 or 64 characters; the ceiling is well
 # above that because its job is to refuse a payload, not to police a length the
@@ -123,6 +129,10 @@ def param(name: str, kind: str, *, required: bool = True, default=None,
         if limit is None:
             raise ControlError("bad_request", f"{name}: hex needs a limit")
         field["limit"] = min(max(0, int(limit)), MAX_HEX)
+    if kind == "blob":
+        if limit is None:
+            raise ControlError("bad_request", f"{name}: blob needs a limit")
+        field["limit"] = min(max(0, int(limit)), MAX_BLOB)
     return field
 
 
@@ -255,6 +265,21 @@ def coerce(field: dict, raw):
         if "\x00" in raw:
             raise ControlError("bad_request", "contains a null byte")
         return raw            # not stripped, deliberately
+    if kind == "blob":
+        # Bytes, on their way through a channel that carries text. Decoded
+        # *here*, so no module ever handles base64 and no module ever forgets
+        # to bound it: the length is checked on the encoding — which is what
+        # arrived and what costs memory — before anything is decoded, because
+        # decoding forty megabytes to then decide it was too much is the work
+        # an attacker was hoping for (`frame.decode_request`, same rule).
+        if not isinstance(raw, str):
+            raise ControlError("bad_request", "must be base64 text")
+        if len(raw) > int(field.get("limit", MAX_BLOB)):
+            raise ControlError("bad_request", "longer than this field allows")
+        try:
+            return base64.b64decode(raw, validate=True)
+        except (ValueError, TypeError):
+            raise ControlError("bad_request", "not base64") from None
     if kind == "hex":
         if not isinstance(raw, str):
             raise ControlError("bad_request", "must be hex text")

@@ -60,7 +60,8 @@ wrote; each was a consequence of the *shape*.
             ▼                                          ▼
    ┌───────────────────────────────────────────────────────────────┐
    │ ControlPlane — the modules, and nothing else                   │
-   │   node · config · transports · trace · pseudo · control        │
+   │   node · config · transports · trace · pseudo · jobs ·         │
+   │   transfer · control                                           │
    └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -386,6 +387,7 @@ keeps working, with one implementation behind it.
 | `packages` | `search` `held` `entry` `lookup`~ `describe`~ `install`\*~ `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
 | `keys` | `overview` `create`\*~ `adopt`\*~ `offer`\*~ `accept`\*~ `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
 | `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install|update|uninstall` |
+| `transfer` | `kinds` `fetch`~ `take` `offer` `put` `commit`~ `drop` | `/api/packages/<id>/download`, `/api/app/publish`, `/api/store/publish` |
 | `join` | `network` `invite`\* `ticket`\* `block`\* `use_block` | `/api/join`, `/api/invite`, `/api/ticket`, `/api/invite/block`, `/api/join/block` |
 
 `\*` needs the fleet's `govern` capability as well as `manage`. `~` travels as a
