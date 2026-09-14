@@ -95,6 +95,8 @@ receipt for routable types (see the gates).
 | PKG_STORE / _FIND / _FOUND | 0x29 / 0x2A / 0x2B | package directory: store/seek/answer a **signed record** in which a node says "I hold this release and I serve it". Filed under the **node id**, under the **release** it names, and under the package name's prefixes — so "what does this machine offer?", "who can serve this release?" and "who offers something called this?" are one lookup with three keys. A record may carry a second signature by the key that signed the release, proving the node published it (see [`../Updates/guide`](../Updates/guide)) |
 | PKG_ANNOUNCE | 0x2C | gossip of the same record — the epidemic half of the plane, terminating on "only re-gossip when our view changed" like the others |
 | KEY_OFFER / KEY_ACCEPT / KEY_GRANT | 0x2D / 0x2E / 0x2F | handing a **publisher secret key** to another node, in three steps: the offer is signed *by the publisher key* (proof of possession, both node ids inside the signature), the acceptance is signed by the recipient's identity over a **fresh ML-KEM public key** (there is no long-term encryption key to seal to, so consent is what produces one), and the grant is that secret sealed to it — unsigned, because the recipient checks the delivered secret against the public half from the offer (see [`../Updates/guide`](../Updates/guide)) |
+| SPEED_PROBE | 0x31 | padding sent to measure a link by **loading** it. Answered only on a direct authenticated link, only when addressed to us, and only up to `_SPEED_CHUNK` — a stranger must never be able to make this node generate traffic, and a peer must never be able to make it answer *to somebody else* |
+| SPEED_ECHO | 0x32 | the same padding back, **one for one and byte for byte**. The handler copies the payload rather than producing one, because a reflector that answers more than it was sent is an amplifier — which is the single worst thing this pair could be. The answering side keeps its own ceiling per identity; the asking side cannot raise it |
 | INVITE_OFFER | 0x30 | a **rendezvous** an inviter leaves with a relay: "expect a seek for this code, and here is the proof I authorised it". Authenticated link only, and only ever about its own sender. It is what lets an invitation reach a node with no address of its own out of a string short enough for a QR code — the ML-DSA key and signature a relayed invitation needs stay with the relay, and the joiner sends 40 bytes |
 
 Groupings (constants):
@@ -119,6 +121,14 @@ Groupings (constants):
   towards a direct peer.
 - `INVITE_SEEK` and `RELAY_CARRY` are handled **before** the gates (pre-auth,
   strictly bounded/token-gated).
+- `SPEED_PROBE` / `SPEED_ECHO` (0x31/0x32) are the one plane whose *purpose*
+  is to spend a link, so the design is the list of what it refuses: a direct
+  authenticated link or nothing, addressed to us or nothing, one echo per probe
+  of exactly the size that arrived, a ceiling the **answering** side owns and
+  counts per identity (so reconnecting sheds none of it), and a feature name of
+  its own — `speed` — so a node on a metered connection declines this and
+  nothing else. The side asking bounds itself twice over, in bytes and in
+  seconds, whichever ends first.
 - `INVITE_OFFER` (0x30) is the opposite: it is only ever accepted from an
   **authenticated** peer, and only about that peer itself — the key in it has to
   hash to the sender's own id and to have signed the token, which is the same

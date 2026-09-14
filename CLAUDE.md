@@ -112,6 +112,12 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
 
 ### 4. Speed — close to real time
 - Goal: comfortably beat the ~4 MB/s already reached (TCP + routing).
+- **And measure it.** A node card carries a *speed test* that loads the link to
+  one peer and reports what it actually carries (`node.speedtest`,
+  `SPEED_PROBE`/`SPEED_ECHO`). A principle with a figure in it and nothing that
+  reads the figure is a wish; this is the reading. It is bounded on both sides,
+  refused without a direct authenticated link, and negotiated under its own
+  feature name so a node on a metered link declines it and nothing else.
 - Optimise **without ever losing** security, solidity or flexibility. A
   performance gain that weakens any of the three above is refused.
 - Hot paths with no superfluous allocation, no needless copy, no redundant

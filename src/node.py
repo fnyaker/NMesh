@@ -162,6 +162,8 @@ KEY_OFFER         = 0x2D   # "I hold this publisher key and offer it to you"
 KEY_ACCEPT        = 0x2E   # "I want it — seal it to this KEM key" (signed)
 KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
 INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a relay
+SPEED_PROBE       = 0x31   # padding, to measure a link by loading it
+SPEED_ECHO        = 0x32   # the same padding back — one for one, never more
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -382,6 +384,27 @@ _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
 _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
 _DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallback
+# Measuring a link by loading it. Every figure here is a *refusal* first and a
+# measurement second, because this is the one plane whose purpose is to spend
+# somebody else's bandwidth.
+#
+#   * one chunk is well under what a packet carries (`packet.py`, 60 000), so a
+#     probe is a probe and never a way to find the framing's edge;
+#   * an echo is the same size as its probe — **one for one**. A reflector that
+#     answered more than it was sent is an amplifier, which is the single worst
+#     thing this pair could be, so the handler copies the payload rather than
+#     generating one;
+#   * a test is bounded by bytes *and* by seconds, whichever ends first, so a
+#     fast link cannot be asked for an unbounded amount and a dead one cannot
+#     hold the caller;
+#   * and the answering side rate-limits per identity, so a peer cannot make us
+#     echo without end however politely it asks.
+_SPEED_CHUNK           = 16 * 1024
+_SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
+_SPEED_MAX_SECONDS     = 10.0
+_SPEED_WINDOW          = 60.0              # what the *answering* side allows…
+_SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
+_SPEED_INFLIGHT        = 8                 # probes outstanding at once
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -2124,6 +2147,11 @@ class MeshNode:
         self._directory_wake = asyncio.Event()
         self._restart_hook = None
         self._pending_echo: OrderedDict[bytes, tuple[NodeID, asyncio.Future]] = OrderedDict()
+        # Echoes we have answered, per identity, per window. The speedtest is
+        # the one plane whose purpose is to spend a link, so the side being
+        # measured keeps its own ceiling and the side measuring cannot raise it.
+        self._speed_rate: OrderedDict[bytes, tuple] = OrderedDict()
+        self._speed_seen: OrderedDict[bytes, float] = OrderedDict()
         # Pseudos: the changeable name beside the unchangeable id. One book
         # holds every claim we have verified — our own included — and answers
         # both "what is this node called?" and "who is called this?".
@@ -3170,6 +3198,130 @@ class MeshNode:
             self._pending_echo.pop(qid, None)
             if not fut.done():
                 fut.cancel()
+
+    # -- measuring a link by loading it ------------------------------------
+    #
+    # Everything else here measures a link by *watching* it: round trips, loss,
+    # the bytes that happened to flow. That answers "is it alive" and never "how
+    # fast is it", which the charter names a principle and nothing measured.
+    #
+    # So: padding out, the same padding back, timed. The whole design is in what
+    # it refuses. It is answered **only on a direct, authenticated link** — never
+    # routed, never before a handshake — so a stranger cannot make this node
+    # speak to a victim, and the pair is one-for-one so it is not an amplifier
+    # even between peers. The answering side keeps its own ceiling per identity,
+    # which is the bound that matters: the side asking cannot raise it, and a
+    # peer that reconnects to shed it is counted by identity like every other
+    # abuse here.
+
+    def _speed_allowed(self, peer: '_Peer') -> bool:
+        return self._gossip_allowed(self._speed_rate, peer,
+                                    _SPEED_WINDOW, _SPEED_MAX_PER_WINDOW)
+
+    async def _handle_speed_probe(self, peer: _Peer, packet: Packet) -> None:
+        """Answer one probe with exactly what it carried, or answer nothing."""
+        if peer.authenticated_id is None or peer.session is None:
+            # Pre-auth this is a stranger asking us to generate traffic. There
+            # is no version of that worth serving.
+            return
+        if packet.dst_id != self._id.raw:
+            return          # not addressed to us: never reflected onward
+        if not packet.payload or len(packet.payload) > _SPEED_CHUNK:
+            self._charge_abuse(peer)
+            return
+        if not self._speed_allowed(peer):
+            return          # silently: a peer told it hit a ceiling learns it
+        await peer.send(Packet.create(SPEED_ECHO, self._id.raw,
+                                      peer.authenticated_id.raw,
+                                      packet.payload))
+
+    async def _handle_speed_echo(self, peer: _Peer, packet: Packet) -> None:
+        """One answer back. The measurement is kept by whoever asked."""
+        if peer.authenticated_id is None or peer.session is None:
+            return
+        if len(packet.payload) < _QID_LEN:
+            self._charge_abuse(peer)
+            return
+        pending = self._pending_echo.get(packet.payload[:_QID_LEN])
+        if pending is None:
+            return          # late, or never ours: not an accusation either way
+        target, fut = pending
+        if packet.src_id != target.raw or fut.done():
+            return
+        fut.set_result(len(packet.payload))
+
+    async def console_speedtest(self, node_id_hex: str) -> dict:
+        """Load the link to one node and say how fast it actually is.
+
+        Bounded twice over — by bytes and by seconds, whichever ends first — so
+        a fast link cannot be asked for an unbounded amount and a dead one
+        cannot hold the caller. Direct links only: routing a speedtest would
+        measure somebody else's link and spend it to do so."""
+        try:
+            nid = NodeID(bytes.fromhex(node_id_hex))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "bad id"}
+        if nid == self._id:
+            return {"ok": False, "error": "a node cannot measure itself"}
+        peer = self._link_to(nid)
+        if peer is None or peer.session is None:
+            return {"ok": False, "error": "no direct link to that node"}
+        if not self.peer_announces(peer, features.SPEEDTEST):
+            return {"ok": False, "error": "that node does not run speed tests"}
+
+        payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
+        sent = echoed = 0
+        rtts: list[float] = []
+        started = time.monotonic()
+        deadline = started + _SPEED_MAX_SECONDS
+        try:
+            while (echoed < _SPEED_MAX_BYTES
+                   and time.monotonic() < deadline):
+                batch = []
+                for _ in range(_SPEED_INFLIGHT):
+                    qid = os.urandom(_QID_LEN)
+                    future: asyncio.Future = asyncio.get_running_loop().create_future()
+                    while len(self._pending_echo) >= _PENDING_ECHO_MAX:
+                        _, (_, old) = self._pending_echo.popitem(last=False)
+                        if not old.done():
+                            old.cancel()
+                    self._pending_echo[qid] = (nid, future)
+                    batch.append((qid, future, time.monotonic()))
+                    await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
+                                                  nid.raw, qid + payload))
+                    sent += _SPEED_CHUNK
+                for qid, future, at in batch:
+                    try:
+                        size = await asyncio.wait_for(
+                            asyncio.shield(future),
+                            max(0.05, deadline - time.monotonic()))
+                        echoed += int(size)
+                        rtts.append((time.monotonic() - at) * 1000.0)
+                    except Exception:
+                        pass            # a lost probe is a measurement too
+                    finally:
+                        self._pending_echo.pop(qid, None)
+                        if not future.done():
+                            future.cancel()
+        except Exception:
+            return {"ok": False, "error": "the link failed during the test"}
+        elapsed = max(1e-6, time.monotonic() - started)
+        # Round trip: what went out *and* came back, which is the honest figure
+        # for a measurement made by echoing. Saying "throughput" for one
+        # direction of it would be twice the truth.
+        return {
+            "ok": True,
+            "node": nid.raw.hex(),
+            "seconds": round(elapsed, 2),
+            "sent_bytes": sent,
+            "echoed_bytes": echoed,
+            "lost_bytes": max(0, sent - echoed),
+            "round_trip_bps": round((sent + echoed) / elapsed),
+            "one_way_bps": round(echoed / elapsed),
+            "rtt_ms": round(sum(rtts) / len(rtts), 1) if rtts else None,
+            "best_ms": round(min(rtts), 1) if rtts else None,
+            "transport": self._peer_scheme(peer),
+        }
 
     async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
         # Delivered here because dst==self (forwarding routed it to us). Reply
@@ -13884,6 +14036,8 @@ _HANDLERS = {
     KEY_ACCEPT:        MeshNode._handle_key_accept,
     KEY_GRANT:         MeshNode._handle_key_grant,
     ECHO_REQUEST:      MeshNode._handle_echo_request,
+    SPEED_PROBE:       MeshNode._handle_speed_probe,
+    SPEED_ECHO:        MeshNode._handle_speed_echo,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
@@ -13921,4 +14075,5 @@ _MESSAGE_PLANE = {
     CERT_REVOKE: features.REVOKE,
     ABUSE_REPORT: features.ABUSE,
     KA_PROPOSE: features.KEEPALIVE, KA_REQUEST: features.KEEPALIVE,
+    SPEED_PROBE: features.SPEEDTEST, SPEED_ECHO: features.SPEEDTEST,
 }
