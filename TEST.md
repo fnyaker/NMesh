@@ -303,6 +303,11 @@ tests/
 │     for, one bounded ring per machine so a chatty one cannot push out a quiet
 │     one's, and a merged view ordered by *our* clock rather than by the time
 │     the far machine supplied
+├── test_map_growth.py                                 — growing the link map:
+│     a claim drawn as a claim (dashed, attributed, expiring), bounded on every
+│     axis, asked one machine at a time and only of one that granted `manage`,
+│     never reaching the node — and the two questions the map asks fleet that
+│     deliberately do not travel
 ├── test_alerts.py                                     — the notice board: a
 │     flood that is one line with a count, a chatty warning that never pushes
 │     out an error, "seen" that is not "gone", an app that cannot post as

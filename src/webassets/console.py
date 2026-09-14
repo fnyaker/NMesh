@@ -996,6 +996,7 @@ INDEX_HTML = """<!doctype html>
         <span class="row"><i class="dot self"></i>this node</span>
         <span class="row"><i class="dot direct"></i>direct link</span>
         <span class="row"><i class="dot routed"></i>routed session</span>
+        <span class="row"><i class="dot reported"></i>reported by a machine you manage</span>
       </span>
       <span class="grow"></span>
       <span id="map-summary" class="badge"></span>
@@ -1015,6 +1016,16 @@ INDEX_HTML = """<!doctype html>
       <aside class="map-side">
         <h3>Links</h3>
         <div id="map-links" class="stack"></div>
+        <div id="map-reported" class="stack"></div>
+        <div id="map-grow" class="map-grow stack" hidden>
+          <h3>Grow the map</h3>
+          <p class="tiny muted">Ask a machine you manage what <i>it</i> is
+            connected to. What comes back is its word, not a measurement: it is
+            drawn dashed, it says who reported it, and it fades on its own.</p>
+          <div id="map-grow-list" class="stack"></div>
+          <div class="row"><button id="map-grow-all" class="sm">Ask them all</button>
+            <button id="map-grow-clear" class="sm">Forget what was reported</button></div>
+        </div>
       </aside>
     </div>
   </div>
@@ -1081,6 +1092,12 @@ CONSOLE_PAGE_CSS = """
 .mesh-graph .node circle.hit{fill:transparent;stroke:none;transition:none}
 .mesh-graph .node.direct circle:not(.hit){fill:var(--accent)}
 .mesh-graph .node.routed circle:not(.hit){fill:var(--warn)}
+/* A claim, drawn as one: hollow, faint, dashed. Nothing this node measured
+   looks like this, which is the whole point of the layer. */
+.mesh-graph .edge.reported{stroke-dasharray:2 5;opacity:.5;stroke-width:1}
+.mesh-graph .node.reported circle:not(.hit){fill:none;stroke:var(--text-faint);
+  stroke-dasharray:2 3}
+.mesh-graph .node.reported text{fill:var(--text-faint)}
 .mesh-graph .node.self circle:not(.hit){fill:var(--text)}
 .mesh-graph .node.self text{fill:var(--text);font-weight:700}
 /* Labels sit over the edges: painting the stroke first gives each one a halo of
@@ -1115,6 +1132,9 @@ CONSOLE_PAGE_CSS = """
 .map-legend .dot.self{background:var(--text)}
 .map-legend .dot.direct{background:var(--accent)}
 .map-legend .dot.routed{background:var(--warn)}
+.map-legend .dot.reported{background:transparent;border:1px dashed var(--text-faint)}
+.map-grow{border-top:1px solid var(--border);padding-top:var(--s-3);margin-top:var(--s-3)}
+.map-grow .row{gap:var(--s-2)}
 .map-link{border:1px solid var(--border);border-radius:var(--r-md);padding:var(--s-2) var(--s-3);
   cursor:pointer;font-size:var(--fs-sm);background:var(--surface)}
 .map-link:hover,.map-link.on{border-color:var(--accent);background:var(--accent-soft)}
@@ -1613,9 +1633,13 @@ function svgEl(name, attrs){
 // is where the mesh is actually watched, so it labels every edge with the
 // medium and the latency, and thickens it with what it carries.
 const GRAPH_SMALL = {w:420, h:250, rx:96, ry:58, rx2:168, ry2:100, r:9, self:12,
-                     labels:false};
+                     rx3:216, ry3:124, labels:false};
 const GRAPH_BIG = {w:900, h:520, rx:250, ry:150, rx2:390, ry2:225, r:13, self:18,
-                   labels:true};
+                   // A third ring, for what other machines report. Placed
+                   // outside the two this node can vouch for, because distance
+                   // from the centre is exactly what it means here: how far
+                   // from what we saw ourselves.
+                   rx3:560, ry3:330, labels:true};
 
 function drawGraph(state){ renderGraph($("graph"), state, GRAPH_SMALL); }
 
@@ -1630,6 +1654,91 @@ function edgeLabelAt(from, to, share){
           y:from.y + dy * t + (dx / length) * 9 - 2};
 }
 
+// ---- growing the map -------------------------------------------------------
+// The map this node can draw from what it *sees* stops at its own neighbours
+// and the sessions it routes: one hop, and one more where it happens to know
+// the first. Everything past that is somebody else's knowledge, and asking for
+// it is driving another machine's console — the same authority as remote
+// management, which is why only fleet offers it and only where the operator
+// already holds `manage` on that machine.
+//
+// What comes back is a **report**, never a measurement, and it is kept apart
+// on every axis: its own store, its own line style, its own word in the panel,
+// and an expiry. Nothing here reaches the node: a claim about who is connected
+// to whom must not become something this console keeps, gossips or acts on.
+const MAP_GROWTH = {
+  // Small, because it is a drawing: past a hundred or so nodes a mesh map is a
+  // picture of a hairball, and the bound is also what stops one machine's
+  // answer from filling this page.
+  MAX_NODES: 120,
+  MAX_EDGES: 300,
+  // A report is only as good as its age, and nobody refreshes one for us. So
+  // the map shrinks back on its own rather than showing an hour-old mesh as
+  // though it were now.
+  TTL: 300000,
+  nodes: new Map(),          // id -> {id, from, at, pseudo}
+  edges: new Map(),          // "a|b" -> {a, b, from, at, transport, rtt_ms}
+  asked: new Map(),          // id -> when we last asked it, so a click is not a flood
+
+  sweep(){
+    const now = Date.now();
+    for(const [key, edge] of this.edges) if(now - edge.at > this.TTL) this.edges.delete(key);
+    for(const [id, node] of this.nodes) if(now - node.at > this.TTL) this.nodes.delete(id);
+  },
+  clear(){ this.nodes.clear(); this.edges.clear(); this.asked.clear(); },
+  // One machine's answer about its own links. `from` is who said it, and it is
+  // kept on every row: a map that cannot say who claimed an edge is a map that
+  // invites being believed.
+  absorb(from, topology){
+    const now = Date.now();
+    const direct = ((topology || {}).direct || []).slice(0, 64);
+    for(const peer of direct){
+      if(!peer || typeof peer.id !== "string") continue;
+      this.remember(peer.id, from, peer.pseudo || "", now);
+      const key = from < peer.id ? from + "|" + peer.id : peer.id + "|" + from;
+      if(!this.edges.has(key) && this.edges.size >= this.MAX_EDGES)
+        this.edges.delete(this.edges.keys().next().value);
+      this.edges.set(key, {a:from, b:peer.id, from, at:now,
+                           transport:peer.transport || "", rtt_ms:peer.rtt_ms});
+    }
+    this.remember(from, from, "", now);
+    return direct.length;
+  },
+  remember(id, from, pseudo, at){
+    if(!this.nodes.has(id) && this.nodes.size >= this.MAX_NODES)
+      this.nodes.delete(this.nodes.keys().next().value);
+    const held = this.nodes.get(id) || {};
+    this.nodes.set(id, {id, from, at, pseudo: pseudo || held.pseudo || ""});
+  },
+  // What the drawing should show, with anything this node can see itself taken
+  // out: a reported edge to a machine we are talking to *is* our own link, and
+  // drawing both would say the mesh is twice the size it is.
+  view(state){
+    this.sweep();
+    const topology = state.topology || {};
+    const known = new Set([state.id]);
+    (topology.direct || []).forEach((node) => known.add(node.id));
+    (topology.routed || []).forEach((node) => known.add(node.id));
+    const edges = [];
+    const extra = new Map();
+    for(const edge of this.edges.values()){
+      if(known.has(edge.a) && known.has(edge.b)) continue;
+      edges.push(edge);
+      for(const id of [edge.a, edge.b])
+        if(!known.has(id)) extra.set(id, this.nodes.get(id) || {id, from:edge.from, at:edge.at});
+    }
+    return {nodes:[...extra.values()].sort((a, b) => a.id < b.id ? -1 : 1), edges};
+  },
+  // A machine is asked at most this often, however many times it is clicked.
+  ASK_EVERY: 10000,
+  mayAsk(id){
+    const last = this.asked.get(id) || 0;
+    if(Date.now() - last < this.ASK_EVERY) return false;
+    this.asked.set(id, Date.now());
+    return true;
+  },
+};
+
 let MAP_NAMES = {};
 
 // What decides the drawing: which nodes are on it, where each sits, and what
@@ -1637,9 +1746,14 @@ let MAP_NAMES = {};
 // label, an uptime — is written into the drawing that is already there.
 function graphShape(state, size){
   const topology = state.topology || {};
+  const grown = size.labels ? MAP_GROWTH.view(state) : {nodes:[], edges:[]};
   return JSON.stringify([size.w, !!size.labels, state.id,
     (topology.direct || []).map((node) => [node.id, node.pseudo || ""]),
-    (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""])]);
+    (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""]),
+    // Reported nodes and edges only on the expanded map: the card on the
+    // overview answers "am I connected", which is this node's own question.
+    grown.nodes.map((node) => node.id),
+    grown.edges.map((edge) => edge.a + "|" + edge.b)]);
 }
 
 // The numbers on a drawing that has not changed shape.
@@ -1696,6 +1810,7 @@ function renderGraph(svg, state, size){
   svg.dataset.graphShape = shape;
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
+  const grown = size.labels ? MAP_GROWTH.view(state) : {nodes:[], edges:[]};
   const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
@@ -1709,6 +1824,15 @@ function renderGraph(svg, state, size){
     const angle = step * index - Math.PI / 2 + step / 2 + .3;
     place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx2,
                         y:centre.y + Math.sin(angle) * size.ry2});
+  });
+  // The outer ring, in id order. Sorted rather than laid out by who reported
+  // them: a deterministic place is what keeps the map still between two polls,
+  // and a node that moves every two seconds is a node nobody can click.
+  grown.nodes.forEach((node, index) => {
+    const step = Math.PI * 2 / Math.max(1, grown.nodes.length);
+    const angle = step * index - Math.PI / 2 + step / 2;
+    place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx3,
+                        y:centre.y + Math.sin(angle) * size.ry3});
   });
   // Colour carries health beside it: a thin amber line is a link losing probes.
   direct.forEach((node) => {
@@ -1736,6 +1860,23 @@ function renderGraph(svg, state, size){
       const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
                                                 {class:"elabel"}));
       label.textContent = "via " + shortId(node.via);
+      svg.appendChild(label);
+    }
+  });
+  // Reported edges, drawn before the dots so a claim never sits on top of
+  // something this node measured. Dashed, faint, and labelled with *who said
+  // so* rather than with a latency: we did not measure this and must not look
+  // as though we had.
+  grown.edges.forEach((edge) => {
+    const from = place.get(edge.a), to = place.get(edge.b);
+    if(!from || !to) return;
+    svg.appendChild(svgEl("line", {x1:from.x, y1:from.y, x2:to.x, y2:to.y,
+                                   class:"edge reported",
+                                   "data-reported":edge.a + "|" + edge.b}));
+    if(size.labels){
+      const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
+                                                {class:"elabel reported"}));
+      label.textContent = "said by " + shortId(edge.from);
       svg.appendChild(label);
     }
   });
@@ -1771,6 +1912,9 @@ function renderGraph(svg, state, size){
                                node.since ? "up " + fmtDuration(node.since) : ""));
   routed.forEach((node) => dot(node.id, place.get(node.id), "routed",
                                "Routed session with " + node.id + " via " + node.via, null));
+  grown.nodes.forEach((node) => dot(node.id, place.get(node.id), "reported",
+                                    "Reported by " + node.from + ": " + node.id,
+                                    "reported"));
   dot(state.id, centre, "self", "This node");
   if(!direct.length && !routed.length){
     const text = svgEl("text", {x:centre.x, y:centre.y + size.self + 34, class:"lonely"});
@@ -1790,6 +1934,7 @@ let MAP_PICK = null;
 function paintMap(){
   const dialog = $("map-dialog");
   if(!dialog.open || !STATE) return;
+  paintGrow();
   renderGraph($("map-svg"), STATE, GRAPH_BIG);
   // renderGraph resets the viewBox to the whole drawing; whatever the operator
   // had zoomed into has to survive the two-second poll, or the map is unusable
@@ -1799,6 +1944,18 @@ function paintMap(){
   // A pick that no longer exists is dropped — the one deselection a repaint is
   // allowed to make.
   if(MAP_PICK && !direct.some((node) => node.id === MAP_PICK)) MAP_PICK = null;
+  // Reported machines get a row of their own, under the links: they are on the
+  // drawing, so a panel that listed only what we measured would make half the
+  // map unclickable and unexplained.
+  const reported = MAP_GROWTH.view(STATE).nodes;
+  setHTML("map-reported", reported.length ? reported.map((node) =>
+    '<div class="map-link" data-link="' + esc(node.id) + '">' +
+    '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo || "")) + "</b>" +
+    badge("reported", "") + overlayBadges(node.id) + "</div>" +
+    '<div class="tiny muted">said by ' + esc(shortId(node.from)) + " · " +
+    esc(fmtAgo((Date.now() - node.at) / 1000)) + "</div>" +
+    '<div class="btn-row"><button class="sm" data-link-details="' + esc(node.id) +
+    '">Details</button></div></div>').join("") : "");
   setHTML("map-links", direct.length ? direct.map((node) => {
     const quality = node.quality || {}, counters = node.counters || {};
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
@@ -1806,7 +1963,7 @@ function paintMap(){
       '" data-link="' + esc(node.id) + '">' +
       '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo)) + "</b>" +
       badge(node.transport || "?", "") +
-      (loss ? badge(loss + "%", "warn") : "") + "</div>" +
+      (loss ? badge(loss + "%", "warn") : "") + overlayBadges(node.id) + "</div>" +
       '<div class="tiny muted">' +
       (node.rtt_ms == null ? "no probe yet" : node.rtt_ms + " ms" +
         (quality.jitter_ms ? " ±" + quality.jitter_ms : "")) +
@@ -1820,6 +1977,95 @@ function paintMap(){
                           "Nothing to watch until this node has a neighbour."));
   highlightEdge();
   revealPick();
+}
+
+// ---- what fleet knows, and what it can reach -------------------------------
+// Asked of **fleet and only fleet**, deliberately: growing the map means
+// driving another machine's console, which is remote management under another
+// name. When that is something other apps may offer, this is the line that
+// changes — and the page will not have to, because it already renders whatever
+// words it is handed.
+let MAP_TARGETS = [], MAP_OVERLAY = {};
+
+async function loadMapExtras(){
+  const ask = async (op) => {
+    try{
+      const answer = await CHANNEL.call("apps.call",
+        {app:"fleet", op, args:{}});
+      return (answer || {}).result || {};
+    }catch(_){ return {}; }        // no fleet, or it is not running: no growth
+  };
+  const [targets, overlay] = await Promise.all([ask("map_targets"),
+                                                ask("map_overlay")]);
+  MAP_TARGETS = targets.targets || [];
+  MAP_OVERLAY = overlay.nodes || {};
+  paintGrow();
+}
+
+function paintGrow(){
+  const block = $("map-grow");
+  block.hidden = MAP_TARGETS.length === 0;
+  if(block.hidden) return;
+  setHTML("map-grow-list", MAP_TARGETS.map((target) => {
+    const name = target.label || target.pseudo || shortId(target.id);
+    // A machine with no console session cannot be asked *yet*, and saying that
+    // is not the same as offering a button that always fails. Unless it granted
+    // `passwordless`, in which case the session is minted on the way.
+    const ready = target.connected || target.passwordless;
+    return '<div class="row"><span class="grow truncate">' + esc(name) + "</span>" +
+      (ready
+        ? '<button class="sm" data-grow="' + esc(target.id) + '">Ask</button>'
+        : badge("needs its password", "warn")) + "</div>";
+  }).join(""));
+}
+
+async function growFrom(id, button){
+  if(!MAP_GROWTH.mayAsk(id)){ toast("Just asked that machine", "warn"); return; }
+  const work = async () => {
+    try{
+      // One call, to one named machine, without moving the operator's context
+      // there and back (`CHANNEL.frame`, `options.node`).
+      const state = await CHANNEL.call("node.state", {}, {node:id});
+      const added = MAP_GROWTH.absorb(id, state.topology || {});
+      toast(added ? shortId(id) + " reported " + plural(added, "link")
+                  : shortId(id) + " reported no links");
+      if(STATE) paintMap();
+    }catch(error){
+      if(isStale(error)) return;
+      toast(isRefused(error) ? (error.message || "that machine refused")
+                             : "that machine did not answer", "danger");
+    }
+  };
+  if(button) await withBusy(button, work); else await work();
+}
+
+$("map-grow-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-grow]");
+  if(button) growFrom(button.dataset.grow, button);
+});
+$("map-grow-all").addEventListener("click", async (event) => {
+  await withBusy(event.target, async () => {
+    // One at a time: each of these is a console call across the mesh, and
+    // forty at once is a burst this node would be the source of.
+    for(const target of MAP_TARGETS){
+      if(!target.connected && !target.passwordless) continue;
+      await growFrom(target.id, null);
+    }
+  });
+});
+$("map-grow-clear").addEventListener("click", () => {
+  MAP_GROWTH.clear();
+  if(STATE) paintMap();
+  toast("Reported links forgotten");
+});
+
+// What an app says about a node, rendered in the app's own words. The map holds
+// no idea of what `managed` or a log policy means — which is what makes this the
+// shape a second app could fill without this file changing.
+function overlayBadges(id){
+  const row = MAP_OVERLAY[id];
+  if(!row || !(row.badges || []).length) return "";
+  return row.badges.map((word) => badge(word, row.tone || "")).join("");
 }
 
 // The drawing and the list are one selection, so picking on either has to bring
@@ -1977,6 +2223,10 @@ $("map-open").addEventListener("click", () => {
   MAP_VIEW = null;
   $("map-dialog").showModal();
   paintMap();
+  // Read when the map is opened, not on the cadence: what fleet can reach and
+  // what it knows are two local questions, and a map nobody is looking at
+  // should cost nothing at all.
+  loadMapExtras();
 });
 $("map-close").addEventListener("click", () => $("map-dialog").close());
 $("map-links").addEventListener("click", (event) => {
