@@ -41,18 +41,39 @@ and every caller reaches them the same way, over whatever channel it has:
 **Reject by default, three times over.** An operation that is not declared does
 not exist (dispatch never looks up a name a caller supplied — only a name a
 module wrote down). An argument that is not declared is refused rather than
-passed on. And an operation is **local-only unless it says otherwise**:
-``remote=True`` is the whole of what a peer holding the fleet's ``manage`` right
-may ask of this node, which turns that permission from a path denylist into a
-list this node maintains about itself.
+passed on. And an operation is **local-only unless it says otherwise**.
+
+**Everything a node can do, an operator can do at a distance.** That is the
+goal, and reaching it took two mechanisms rather than a wider permission,
+because the two things standing in the way were not one thing:
+
+* *a ceiling* — the fleet relay carries one bounded call and its answer, so an
+  operation that takes four hundred seconds could never be one of them. It now
+  travels as a **job**: ``background=True``, started through ``jobs.start`` and
+  polled through ``jobs.poll``, both of which are small calls. What crosses the
+  mesh is a ticket and a question about it, never the wait.
+* *a decision* — pinning a publisher key, minting an invitation, holding a
+  private key. Those are not "drive this console", they are "decide what this
+  node trusts", and folding them into ``manage`` would have made one grant mean
+  two things. They declare ``govern=True`` and need the fleet capability of
+  that name, which a human at the target grants separately and takes back the
+  same way.
+
+So an operation declares **how far it travels**:
+
+==================  ====================================================
+``remote=True``     any console holding the fleet's ``manage`` right
+``govern=True``     a console holding ``manage`` *and* ``govern``
+neither             this machine only — and nothing declares that now
+==================  ====================================================
 
 **A declared ceiling, and it has to fit.** Every operation says how long it may
-take. An operation that may be driven remotely must fit inside
-:data:`REMOTE_BUDGET` — what the fleet relay can carry there and back — and one
-that declares more is refused **at declaration**, not on the call. That is the
-gotchas' rule about layered bounds turned into something a reader cannot get
-wrong: an operator asking a distant machine to walk six dead addresses would
-otherwise wait for the relay to give up and be told nothing about why.
+take. One that travels and declares more than :data:`REMOTE_BUDGET` must say
+``background=True``, and one that does neither is refused **at declaration**,
+not on the call. That is the gotchas' rule about layered bounds turned into
+something a reader cannot get wrong: an operator asking a distant machine to
+walk six dead addresses would otherwise wait for the relay to give up and be
+told nothing about why.
 """
 from __future__ import annotations
 
@@ -84,18 +105,40 @@ class Origin:
     ``LOCAL`` is a page on this machine, holding a session this console issued.
     ``REMOTE`` is a peer driving us through the fleet's ``manage`` capability:
     an operator at another console, whose right to be here was decided by the
-    ledger long before the frame arrived. The distinction is not authorisation
-    — both are authenticated — it is *reach*: an operator at a remote console
-    is not somebody at this node, and what this node spends on itself must not
-    be something the network can turn on."""
+    ledger long before the frame arrived. ``GOVERN`` is that same peer holding
+    the fleet's ``govern`` capability as well — a second grant, given by a human
+    at *this* node and taken back the same way.
+
+    The distinction is not authentication — all three are authenticated — it is
+    **reach**: an operator at a remote console is not somebody at this node, and
+    a node's own trust decisions are not something the network gets to make
+    because it was let in to drive a console."""
 
     LOCAL = "local"
+    GOVERN = "govern"
     REMOTE = "remote"
-    ALL = (LOCAL, REMOTE)
+    ALL = (LOCAL, GOVERN, REMOTE)
+
+
+# What each origin may call, by the reach an operation declares. Written out
+# rather than computed from an ordering: a table a reader can check against the
+# sentence above beats a comparison they have to reason about, and this is the
+# one place in the plane where being wrong is being open.
+REACHED_BY = {
+    Origin.LOCAL: ("local", "govern", "remote"),
+    Origin.GOVERN: ("govern", "remote"),
+    Origin.REMOTE: ("remote",),
+}
+
+
+def reaches(origin: str, entry: dict) -> bool:
+    """May ``origin`` call an operation declared like ``entry``?"""
+    return entry.get("reach") in REACHED_BY.get(origin, ())
 
 
 def operation(name: str, summary: str, params=(), *, changes: bool = False,
-              remote: bool = False, timeout: float = DEFAULT_TIMEOUT,
+              remote: bool = False, govern: bool = False,
+              background: bool = False, timeout: float = DEFAULT_TIMEOUT,
               wants_origin: bool = False) -> dict:
     """Declare one operation.
 
@@ -103,7 +146,16 @@ def operation(name: str, summary: str, params=(), *, changes: bool = False,
     still decides — but it lets a page ask for confirmation, and it keeps a
     read apart from a write at a glance.
 
-    ``remote`` is the permission, and its default is the point.
+    ``remote`` and ``govern`` are how far it travels, and the default — neither
+    — is the point. They are not two permissions to add up: ``remote`` is every
+    console holding ``manage``, which already includes the ones holding
+    ``govern`` too, so declaring both is a contradiction and is refused here.
+
+    ``background`` says the operation is run as a **job** rather than inside the
+    call. An operation that travels and takes longer than :data:`REMOTE_BUDGET`
+    has to, because the relay cannot hold a call open that long; one that fits
+    the budget must not, because a ticket for something that could simply have
+    been answered is a second mechanism for nothing.
 
     ``wants_origin`` is for the one kind of operation whose *answer* depends on
     who is asking rather than on what they sent: the catalogue, which must list
@@ -131,12 +183,32 @@ def operation(name: str, summary: str, params=(), *, changes: bool = False,
     ceiling = float(timeout)
     if ceiling <= 0:
         raise ControlError("bad_request", f"{name}: a ceiling must be positive")
-    if remote and ceiling > REMOTE_BUDGET:
+    if remote and govern:
         raise ControlError(
             "bad_request",
-            f"{name}: {ceiling:g}s does not fit the relay's {REMOTE_BUDGET:g}s")
+            f"{name}: remote already includes govern — declare one")
+    reach = "remote" if remote else "govern" if govern else "local"
+    travels = reach != "local"
+    # The two halves of one rule, so neither can be declared alone and be
+    # quietly wrong: what does not fit the relay is a job, and what fits it is
+    # not. A caller then never has to ask which of two mechanisms an operation
+    # uses — its ceiling already says.
+    if travels and ceiling > REMOTE_BUDGET and not background:
+        raise ControlError(
+            "bad_request",
+            f"{name}: {ceiling:g}s does not fit the relay's {REMOTE_BUDGET:g}s "
+            f"— declare background=True")
+    if background and ceiling <= REMOTE_BUDGET:
+        raise ControlError(
+            "bad_request",
+            f"{name}: {ceiling:g}s fits the relay; answer it rather than "
+            f"handing back a ticket")
+    if background and not travels:
+        raise ControlError(
+            "bad_request", f"{name}: a job is how an operation travels")
     return {"name": name, "summary": str(summary)[:200], "params": fields,
-            "changes": bool(changes), "remote": bool(remote),
+            "changes": bool(changes), "reach": reach,
+            "background": bool(background),
             "timeout": ceiling, "wants_origin": bool(wants_origin)}
 
 
@@ -209,16 +281,17 @@ class ControlPlane:
 
         A page uses this to decide what to *offer*: a button that calls an
         operation this node does not have — an app that is not installed, a
-        module a remote console cannot reach — should not be drawn at all
-        rather than drawn and then refused when pressed. Which is also why the
-        remote view is filtered here: an operator driving another node is shown
-        what that node lets them do, not what their own would."""
+        module this console cannot reach — should not be drawn at all rather
+        than drawn and then refused when pressed. Which is also why it is
+        filtered here: an operator driving another node is shown what that node
+        lets *them* do, not what their own would, and an operator who was never
+        granted ``govern`` is not shown the buttons it opens."""
         out = []
         for name in sorted(self._modules):
             entries = [{key: value for key, value in entry.items()
                         if key != "wants_origin"}
                        for entry in declared(self._modules[name])
-                       if origin != Origin.REMOTE or entry["remote"]]
+                       if reaches(origin, entry)]
             if entries:
                 out.append({"module": name, "operations": entries})
         return out
@@ -242,25 +315,39 @@ class ControlPlane:
                 ControlError("failed", "the operation could not be answered"),
                 ident=ident)
 
-    def call(self, op: str, params=None, *, origin: str = Origin.LOCAL) -> dict:
-        """Invoke a declared operation, raising :class:`ControlError`.
+    def check(self, op: str, params=None, *, origin: str = Origin.LOCAL):
+        """Everything that decides whether a call happens, and nothing that
+        happens. ``(module, declaration, arguments)``, or a refusal.
 
-        The Python-side door — used by :class:`~src.control.channel.LocalChannel`
-        and by anything in this process that wants the same answer a page gets,
-        rather than a second implementation of it."""
+        Its own step because a job needs it *twice over*: once in the caller's
+        own call, so a bad argument is a refusal they can read rather than a
+        ticket that fails a minute later, and once again in the thread that
+        runs it, because between the two the answer is allowed to have
+        changed."""
         if origin not in Origin.ALL:
             raise ControlError("bad_request", "unknown origin")
         found = self.find(op)
         if found is None:
             raise ControlError("not_found", "no such operation")
         module, entry = found
-        if origin == Origin.REMOTE and not entry["remote"]:
+        if not reaches(origin, entry):
             raise ControlError(
-                "refused", f"{op} cannot be driven from a remote console")
+                "refused", f"{op} needs the govern capability"
+                if entry["reach"] == "govern"
+                else f"{op} cannot be driven from a remote console")
         arguments = bind(entry["params"],
                          params if isinstance(params, dict) else {})
         if entry.get("wants_origin"):
             arguments["origin"] = origin
+        return module, entry, arguments
+
+    def invoke(self, op: str, params=None, *, origin: str = Origin.LOCAL) -> dict:
+        """Run a declared operation here and now, whatever it costs.
+
+        The door a **job** comes through, and the only caller that may hold a
+        four-hundred-second operation open: it is already off the channel that
+        could not have carried it. Everything else calls :meth:`call`."""
+        module, entry, arguments = self.check(op, params, origin=origin)
         handler = getattr(module, "op_" + entry["name"], None)
         if not callable(handler):
             raise ControlError("not_found", "operation is unavailable")
@@ -275,3 +362,23 @@ class ControlPlane:
             raise ControlError(
                 "failed", f"{op} failed: {type(exc).__name__}") from None
         return result if isinstance(result, dict) else {"result": result}
+
+    def call(self, op: str, params=None, *, origin: str = Origin.LOCAL) -> dict:
+        """Invoke a declared operation, raising :class:`ControlError`.
+
+        The Python-side door — used by :class:`~src.control.channel.LocalChannel`
+        and by anything in this process that wants the same answer a page gets,
+        rather than a second implementation of it."""
+        found = self.find(op)
+        # A job is not a slower call: the relay cannot hold one open, so a
+        # console at a distance is handed a ticket instead of a timeout. Said
+        # as a refusal with a shape, so a caller re-asks through `jobs.start`
+        # rather than having to have read the catalogue first. Checked before
+        # `check` binds anything, because the answer does not depend on the
+        # arguments and an operator should hear the one thing that is wrong.
+        if (found is not None and found[1]["background"]
+                and origin != Origin.LOCAL and reaches(origin, found[1])):
+            raise ControlError(
+                "refused", f"{op} takes longer than one call across the mesh — "
+                f"start it as a job", {"background": True, "job": op})
+        return self.invoke(op, params, origin=origin)

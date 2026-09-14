@@ -104,8 +104,20 @@ const CHANNEL = {
     if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
     if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
     this.seq = (this.seq + 1) % 100000;
-    const response = await fetch(CONTROL_PATH, {method:"POST", headers,
-      body: JSON.stringify({v:1, id:String(this.seq), op, params: params || {}})});
+    let response;
+    try{
+      response = await fetch(CONTROL_PATH, {method:"POST", headers,
+        body: JSON.stringify({v:1, id:String(this.seq), op, params: params || {}})});
+    }catch(error){
+      // Checked here as well as below, and for the failure rather than the
+      // answer: a call to the node we have just left can sit on the relay for
+      // its full ceiling and then fail, long after the operator is somewhere
+      // else. Painting that as the current node's trouble is what used to say
+      // "Console unreachable" about a console that was answering (`ui.js`,
+      // `api`, same fix).
+      if(!here && CONTEXT.epoch !== at) throw new StaleContext();
+      throw error;
+    }
     // An HTTP 401 is this console's own session, and only ever that: a managed
     // node's refusal comes back as a 200 carrying `unauthorized`.
     if(response.status === 401 && !CONTEXT.node){
@@ -124,19 +136,63 @@ const CHANNEL = {
   },
 
   // The answer, or a throw. What almost every caller wants.
+  //
+  // A node the operator is managing refuses anything that takes longer than
+  // one call across the mesh — installing a release is four hundred seconds
+  // and the relay holds twenty — and says so with a shape rather than only a
+  // sentence: `detail.background`. That is not a refusal to show anybody; it
+  // is the node saying "ask me for this as a job", so the ask is made here,
+  // once, and no page ever had to learn there is such a thing as a job.
   async call(op, params, options){
     const reply = await this.frame(op, params, options);
-    if(!reply.ok) throw new Refused(reply);
-    return reply.result || {};
+    if(reply.ok) return reply.result || {};
+    if(reply.detail && reply.detail.background && !String(op).startsWith("jobs."))
+      return this.run(op, params, options);
+    throw new Refused(reply);
+  },
+
+  // ---- a long operation, watched instead of waited on ----------------------
+  // The node runs it; this asks what became of it. Two seconds is the cadence
+  // a four-minute install deserves — often enough that a page finishing feels
+  // immediate, rare enough that a mesh hop is not carrying a question a second
+  // for the whole of it.
+  JOB_EVERY: 2000,
+  // Longer than the longest ceiling any operation declares (400 s), plus the
+  // node's own grace, plus room for a slow relay. Past it the job is still the
+  // node's — `jobs.list` will still show it — but this page stops asking, so a
+  // button cannot spin for ever on something that will never come back.
+  JOB_FOR: 600000,
+
+  async run(op, params, options){
+    const started = await this.call("jobs.start", {op, params: params || {}},
+                                    options);
+    const ticket = started.job;
+    if(!ticket) throw new Refused({code:"failed", error:"that node started no job"});
+    const until = Date.now() + this.JOB_FOR;
+    for(;;){
+      await new Promise((wake) => setTimeout(wake, this.JOB_EVERY));
+      // `call` throws `StaleContext` when the node being driven has changed,
+      // which is what stops a poll outliving the context that started it.
+      const state = await this.call("jobs.poll", {job: ticket}, options);
+      if(state.state === "done") return state.result || {};
+      if(state.state !== "running"){
+        throw new Refused({code: state.code || "failed", detail: state.detail,
+                           error: state.error || (op + " did not finish")});
+      }
+      if(Date.now() > until){
+        throw new Refused({code:"unavailable", error:
+          "that node is still working on it — it is listed under its jobs"});
+      }
+    }
   },
 
   // The answer *and* whether it was refused, for a caller that paints the
-  // refusal in place rather than as a toast.
+  // refusal in place rather than as a toast. Through `call`, so a long
+  // operation is a long answer here too rather than a refusal nobody asked for.
   async ask(op, params, options){
     try{
-      const reply = await this.frame(op, params, options);
-      return {ok: !!reply.ok, code: reply.code || "", error: reply.error || "",
-              detail: reply.detail || {}, data: reply.result || {}};
+      return {ok:true, code:"", error:"", detail:{},
+              data: await this.call(op, params, options)};
     }catch(error){
       if(isStale(error)) throw error;
       if(isRefused(error)) return {ok:false, code:error.code, error:error.message,

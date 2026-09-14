@@ -47,6 +47,14 @@ CALL_TIMEOUT = 20.0
 # times a second per bundled link — must not be something the network turns on
 # (`webconsole._authed`, `Docs/Architecture/transports.md`).
 REPLAY_HEADER = "X-NMesh-Replayed"
+# Set beside it when the peer whose call this is also holds the fleet's
+# `govern` right. **This node writes it, never the caller**: what arrives over
+# the mesh is a document of method, path, body and token, and headers are made
+# here out of what our own ledger says about that peer. Which is also why it is
+# only ever read together with the header above — on its own it would be a
+# header anybody holding a console session could set, and a console session is
+# already more than it grants.
+GOVERN_HEADER = "X-NMesh-Govern"
 READ_MAX = 512 * 1024
 
 
@@ -163,15 +171,21 @@ class LocalConsole:
             raise ConsoleError("the console's certificate does not match")
 
     def call(self, method: str, path: str, body: bytes | None,
-             token: str | None, *, timeout: float = CALL_TIMEOUT) -> tuple:
+             token: str | None, *, govern: bool = False,
+             timeout: float = CALL_TIMEOUT) -> tuple:
         """``(status, content_type, body)`` — blocking, run it through
-        :func:`bounded`."""
+        :func:`bounded`.
+
+        ``govern`` is the caller's second grant, read from the ledger by the
+        handler above us and never from anything the caller sent."""
         connection = self._connection(timeout)
         try:
             connection.connect()
             if getattr(self._console, "_use_tls", False):
                 self._verify(connection)
             headers = {"Accept": "application/json", REPLAY_HEADER: "1"}
+            if govern:
+                headers[GOVERN_HEADER] = "1"
             if token:
                 headers["Authorization"] = "Bearer " + token
             if body is not None:
