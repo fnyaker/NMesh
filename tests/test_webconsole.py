@@ -1505,12 +1505,14 @@ class TestTheChangeStream:
     reporting every event, it names what moved without describing it, it is
     bounded, and it refuses to pretend it can be relayed to another node."""
 
-    def _open(self, console, token, timeout=8.0):
+    def _open(self, console, token, timeout=8.0, last_id=None):
         """Open the stream. The caller reads the frames it is waiting for."""
         connection = http.client.HTTPConnection(console.host, console.port,
                                                 timeout=timeout)
-        connection.request("GET", "/api/events",
-                           headers={"Authorization": "Bearer " + token})
+        headers = {"Authorization": "Bearer " + token}
+        if last_id is not None:
+            headers["Last-Event-ID"] = str(last_id)
+        connection.request("GET", "/api/events", headers=headers)
         response = connection.getresponse()
         return connection, response
 
@@ -1546,10 +1548,81 @@ class TestTheChangeStream:
             node._note_change("links")
             ready, change = await asyncio.wait_for(job, timeout=8)
             assert "at" in ready
+            # The build answering. A page served by one build and answered by
+            # another is a page whose assets were replaced under it, and the
+            # stream is the first place that shows — it reconnects on its own
+            # after the restart an update ends in.
+            assert ready["build"] and "proto" in ready and "seq" in ready
             assert change["topics"] == ["links"]
             # Only that it moved. A second description of a node travelling
             # down a second channel is two things to keep in step.
             assert set(change) == {"topics", "at"}
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_reconnecting_page_is_told_what_it_missed(self):
+        """The browser reconnects on its own; what it cannot do is notice that
+        everything which moved in between was simply dropped. So each change
+        carries an id, and a stream that is handed one back resumes from it."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+            # Something moved while nobody was listening.
+            node._note_change("links")
+            node._note_change("nodes")
+
+            def read(last_id):
+                connection, response = self._open(console, token, last_id=last_id)
+                assert response.status == 200
+                out = {"ids": [], "data": []}
+                while len(out["data"]) < 2:
+                    line = response.fp.readline().decode("utf-8", "replace")
+                    if line.startswith("id:"):
+                        out["ids"].append(int(line[3:].strip()))
+                    elif line.startswith("data:"):
+                        out["data"].append(json.loads(line[5:]))
+                connection.close()
+                return out
+
+            # Resuming from the very beginning: the change is delivered without
+            # anything further having to happen.
+            got = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, read, 0),
+                timeout=8)
+            ready, change = got["data"]
+            assert ready["seq"] == 0
+            assert set(change["topics"]) == {"links", "nodes"}
+            # …and the change says where the page now is, so the next reconnect
+            # does not replay it.
+            assert got["ids"] and got["ids"][0] > 0
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_an_id_from_another_run_cannot_send_the_stream_ahead(self):
+        """A `Last-Event-ID` naming a sequence this console has never reached
+        would leave it waiting for a change it has already passed — a stream
+        that never speaks again."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+
+            def read():
+                connection, response = self._open(console, token,
+                                                  last_id=10 ** 9)
+                lines = []
+                while len(lines) < 2:
+                    line = response.fp.readline().decode("utf-8", "replace")
+                    if line.startswith("data:"):
+                        lines.append(json.loads(line[5:]))
+                connection.close()
+                return lines
+
+            job = asyncio.get_running_loop().run_in_executor(None, read)
+            await asyncio.sleep(0.2)
+            node._note_change("links")
+            ready, change = await asyncio.wait_for(job, timeout=8)
+            assert ready["seq"] <= 1
+            assert change["topics"] == ["links"]
         finally:
             console.stop(); await node.stop()
 

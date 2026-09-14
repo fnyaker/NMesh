@@ -265,6 +265,15 @@ async def _open() -> tuple:
             return await asyncio.open_unix_connection(where)
         host, _, port = where.partition(":")
         return await asyncio.open_connection(host, int(port or 2375))
+    except PermissionError:
+        # The socket is there and this account may not speak to it. That is one
+        # missing group membership, and saying which is the difference between
+        # an operator fixing it in a minute and an operator concluding the
+        # machine has no docker.
+        raise DockerError(
+            "docker is running here, but this node's account cannot reach its "
+            "socket — re-run install.sh --docker on that machine, or add its "
+            "account to the docker group") from None
     except (OSError, ValueError) as exc:
         raise DockerError(f"no docker daemon here ({type(exc).__name__})") from None
 

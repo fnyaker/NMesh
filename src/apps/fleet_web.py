@@ -28,6 +28,7 @@ from collections import OrderedDict, deque
 from .. import app_api
 from ..node_id import NodeID
 from . import fleet_files
+from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
@@ -346,7 +347,17 @@ class FleetBridge:
 
     # -- snapshot (what the browser polls) --------------------------------
 
-    def snapshot(self, since: int = 0) -> dict:
+    def snapshot(self, since: int = 0, *, have=None, proto: int = 1) -> dict:
+        """What a page reads, in the shape it asked for.
+
+        Split into named sections and handed to :mod:`src.console_feed`, which
+        sends back only the ones whose content actually moved. A ledger of forty
+        machines re-encoded and re-sent because one job finished is most of what
+        a console costs, and on a relay it is the whole of it.
+
+        The split is by *question*, not by size: "which machines do I manage",
+        "what is running", "what has this node been told". A section is what a
+        view redraws when it changes."""
         state = self._app.state
         with self._lock:
             version = self._version + state.version
@@ -357,11 +368,8 @@ class FleetBridge:
                        "seq": r["seq"], "status": r["status"]}
                       for r in self._shells.values()]
             jobs = [dict(job) for job in self._jobs.values()]
-        return {
+        sections = {
             "me": self.me,
-            "version": version,
-            "log_seq": self._log_seq,
-            "log": log,
             "managed": sorted((dict(entry, pseudo=self._name_of(entry["id"]))
                                for entry in state.managed()),
                               key=lambda entry: entry.get("label")
@@ -371,12 +379,12 @@ class FleetBridge:
             "pending_in": state.pending_in(),
             "pending_out": state.pending_out(),
             "provisioned": state.provisioned(),
-            "scans": scans,
-            "updates": updates,
             # One membership list, and the page derives "which groups is this
             # node in?" from it. A second copy on each node is a second chance
             # for the two to disagree.
             "groups": state.groups(),
+            "scans": scans,
+            "updates": updates,
             "shells": shells,
             "jobs": jobs,
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
@@ -384,6 +392,13 @@ class FleetBridge:
             "host": self._app.facts.as_dict(),
             "notice": self._notice,
         }
+        # The log is already incremental — it is read by sequence, not by
+        # revision — so it travels beside the sections rather than as one.
+        return console_feed.build(sections, have=have, proto=proto, extra={
+            "version": version,
+            "log_seq": self._log_seq,
+            "log": log,
+        })
 
     def newest_shell(self, node_hex: str) -> str:
         """The sid of the live shell on that node, or "".
@@ -443,9 +458,12 @@ class FleetBridge:
             record = self._shells.get(sid)
             if record is None:
                 return None
-            buffer = bytes(record["data"])
+            buffer = record["data"]
             total = record["seq"]
-            # The buffer holds the tail; map an absolute offset onto it.
+            # The buffer holds the tail; map an absolute offset onto it. Sliced,
+            # never copied whole: a terminal is read many times a second and
+            # this buffer is a quarter of a megabyte — `bytes(buffer)` first was
+            # megabytes a second of copying to hand back the last few hundred.
             start = max(0, len(buffer) - max(0, total - offset))
             return {"sid": sid, "seq": total, "open": record["open"],
                     "status": record["status"],
@@ -946,7 +964,7 @@ class FleetBridge:
                   key_passphrase: str | None = None,
                   can_sudo: bool = True, sudo_user: str | None = None,
                   sudo_password: str | None = None, mode: str = "system",
-                  caps=None, auto_update: bool = True,
+                  caps=None, auto_update: bool = True, options=None,
                   join_uris=None, join_code: str | None = None) -> str:
         """Kick off a provisioning run on a managed node.
 
@@ -965,6 +983,7 @@ class FleetBridge:
             sudo_user=sudo_user, sudo_password=sudo_password, mode=mode,
             caps=clean_caps(caps) if caps else None,
             publishers=self._app.local_publishers() if auto_update else [],
+            options=options,
             join_uris=join_uris, join_code=join_code)), "provision", node_hex)
 
     # -- local (this node's own LAN) --------------------------------------
@@ -992,7 +1011,7 @@ class FleetBridge:
                         can_sudo: bool = True, sudo_user: str | None = None,
                         sudo_password: str | None = None,
                         mode: str = "system", caps=None,
-                        auto_update: bool = True,
+                        auto_update: bool = True, options=None,
                         join_uris=None, join_code: str | None = None) -> list:
         def on_progress(host: str, step: str) -> None:
             self._say("out", f"{host}: {step}", self.me)
@@ -1004,6 +1023,7 @@ class FleetBridge:
             can_sudo=can_sudo, sudo_user=sudo_user, sudo_password=sudo_password,
             mode=mode, caps=caps,
             publishers=self._app.local_publishers() if auto_update else [],
+            options=options,
             join_uris=join_uris, join_code=join_code,
             on_progress=on_progress), timeout=3600.0)
         ok = sum(1 for entry in results if entry.get("ok"))

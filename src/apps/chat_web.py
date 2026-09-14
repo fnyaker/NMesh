@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from .. import app_api
+from .. import console_feed
 from ..node_id import NodeID
 from .chat import (
     TextMessage, FileReceived, GroupMessage,
@@ -556,17 +557,20 @@ class ChatBridge:
         claim. This only says that this node is one we care about."""
         return {"added": bool(self.add_contact(node))}
 
-    def snapshot(self, since: int) -> dict:
+    def snapshot(self, since: int, *, have=None, proto: int = 1) -> dict:
+        """What a page reads, in the shape it asked for.
+
+        The social half — who this node knows, what it is called — is the same
+        answer on nearly every read, and it was re-sent every time beside the
+        one message that arrived. Split into sections and handed to
+        :mod:`src.console_feed`, which sends back only what moved. The messages
+        are already read by sequence and travel beside them."""
         state = self._chat.state.snapshot()
         now = time.time()
         with self._lock:
             msgs = [m for m in self._messages if m.get("seq", 0) > since]
             typing = {c: s for c, (s, exp) in self._typing.items() if exp > now}
-            return {
-                "version": self._version,
-                "messages": msgs,
-                "unread": dict(self._unread),
-                "typing": typing,
+            sections = {
                 "peer": self._peer.raw.hex() if self._peer else None,
                 "me": self.me,
                 "pseudo": state["pseudo"],
@@ -575,7 +579,16 @@ class ChatBridge:
                 "contacts": state["contacts"],
                 "known": state["known"],
                 "groups": state["groups"],
+                "unread": dict(self._unread),
+                # Somebody typing is by definition what just changed, and it
+                # expires on a clock rather than on an event — a section that is
+                # different on every read costs more as a section than as itself.
+                "typing": typing,
             }
+            return console_feed.build(sections, have=have, proto=proto, extra={
+                "version": self._version,
+                "messages": msgs,
+            })
 
 
 class ChatWebServer:
@@ -625,8 +638,8 @@ class ChatWebServer:
     def send_text(self, peer_hex: str | None, text: str) -> None:
         self.bridge.send_text(peer_hex, text)
 
-    def snapshot(self, since: int) -> dict:
-        return self.bridge.snapshot(since)
+    def snapshot(self, since: int, *, have=None, proto: int = 1) -> dict:
+        return self.bridge.snapshot(since, have=have, proto=proto)
 
 
 def _make_handler(server: "ChatWebServer"):
@@ -677,12 +690,14 @@ def _make_handler(server: "ChatWebServer"):
                 if not self._authed():
                     self._json(401, {"error": "unauthorized"})
                     return
-                qs = parse_qs(urlparse(self.path).query)
+                query = parse_qs(urlparse(self.path).query)
                 try:
-                    since = int(qs.get("since", ["0"])[0])
+                    since = int(query.get("since", ["0"])[0])
                 except ValueError:
                     since = 0
-                self._json(200, server.snapshot(since))
+                self._json(200, server.snapshot(
+                    since, have=(query.get("have") or [""])[0],
+                    proto=console_feed.clean_proto((query.get("proto") or [0])[0])))
                 return
             self._json(404, {"error": "not found"})
 

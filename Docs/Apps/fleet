@@ -386,11 +386,36 @@ and never repaints — and the program redraws itself. The pane is watched with 
 `ResizeObserver` rather than the window: a tab switching, a key row appearing or
 a font loading all change the pane while the window stands still.
 
-Colour past the sixteen palette entries is a class **minted at runtime** and
-inserted through the CSSOM. The console's policy has no `unsafe-inline`, so a
-`style=` attribute would be dropped by the browser without an error — the one
-failure mode worse than a missing feature. The set of minted classes is
-bounded, like everything else a remote peer can grow.
+### Why the screen is a canvas
+
+A grid of text laid out in the DOM depends on **every glyph having the same
+advance**. `btop` draws with box-drawing and braille characters, which many
+monospace fonts do not carry; the browser then falls back per glyph, the advance
+changes mid-line, and every column after it drifts. That is what a broken `btop`
+looks like, and no font stack fixes it — the fallback is per character and the
+fonts that have those glyphs are not the ones a console picks for a code
+snippet.
+
+So each cell is **drawn at `col * cw`** on a canvas, and `fillText`'s own
+`maxWidth` condenses a glyph that came from a wider fallback into the cell it
+belongs to. Alignment stops being a property of the font. There is a stack of
+its own (`--term-font`) that prefers families which *do* carry those glyphs,
+because a condensed glyph still looks worse than a right one — but nothing
+depends on it.
+
+It is also what a repaint costs. The DOM version rebuilt a few thousand nodes
+for a frame in which a program moved one line; here the emulator marks the rows
+it touched, a repaint draws those rows, and a row is a handful of canvas calls.
+Repaints are coalesced on `requestAnimationFrame`, so a screen that arrives in
+three chunks is painted once, in step with the display.
+
+Two things follow from drawing rather than laying out, and both are handled
+rather than lost: **selection** is the screen's own (drag to select, `Copy` and
+Ctrl-C take it), and the **scrollback** is reached with the wheel or
+Shift-PageUp/PageDown, with a "back to the bottom" chip while you are above it.
+A screen reader gets the same text from an off-screen mirror written as
+`textContent` — which is also why escaping stopped being load-bearing here:
+nothing on this path builds markup any more.
 
 > **Output is read, not polled.** A timer is a floor on latency — half the
 > interval on average — and it is paid on every keystroke, because what a person
@@ -406,6 +431,15 @@ bounded, like everything else a remote peer can grow.
 > shell drains the buffer instead — which also coalesces the burst a redraw
 > arrives in into one frame. The buffer is bounded; when a program outruns the
 > link the **oldest** bytes go, because the tail is what a screen shows.
+
+The rest of that path was measured rather than assumed, and three things on it
+were costing more than the network:
+
+| Where | What it was | What it is |
+|---|---|---|
+| the emulator's parser | `data.slice(i)` at every escape, to run a regex against — **quadratic** in the size of a frame, and a frame from a full-screen program is thousands of escapes | sticky regexes, matched at the escape's own offset |
+| the console's held read | `bytes(record["data"])` copied the whole quarter-megabyte buffer to hand back the last few hundred bytes, many times a second | the buffer is sliced |
+| the pty reader | 4 kB a read, so one screenful was a dozen wake-ups and a dozen frames on the mesh | 64 kB a read, 32 kB a frame |
 
 ### The terminal, full screen and on a phone
 
@@ -537,6 +571,30 @@ container bind-mounting `/`. That is the machine. So this is **not** "manage
 containers": it is "be root here", the capability description says exactly that,
 and it is separate from `update` and from `shell` so that an operator has to tick
 it deliberately rather than receive it folded into something smaller.
+
+### The capability needs the machine to agree
+
+A capability is permission to ask; it is not access. The node's own account has
+to be able to reach `/var/run/docker.sock`, and on any sane machine it cannot:
+that socket belongs to the `docker` group. So the grant is made **at install
+time**, on the machine itself:
+
+```
+./install.sh --docker        # …and --no-docker takes it back
+```
+
+It is off unless asked for, and it is never inferred from docker happening to be
+installed. It is also not the same kind of thing as the update grant beside it:
+that one is a single fixed command the node cannot rewrite, while this is
+membership of a group whose socket starts containers — and a container can
+bind-mount `/`. The installer says so where it grants it, the systemd unit
+carries `SupplementaryGroups=docker` with the reason written next to it, and the
+summary at the end names it.
+
+A node whose account is *not* in that group does not report "no docker": it says
+docker is running and this account cannot reach its socket, and names the switch.
+The two are one group membership apart and only one of them is something an
+operator fixes in a minute.
 
 Three ways in, deliberately not interchangeable
 ([`src/apps/fleet_docker.py`](../../src/apps/fleet_docker.py),
@@ -729,6 +787,30 @@ per-host timeout left a busy LAN scan motionless for several minutes after the
 sweep finished — seen from a remote node, that reads as "the scan did nothing".
 Hosts not reached keep an empty key list, which the interface already shows as
 "no host key".
+
+### Install options, chosen where the machine is chosen
+
+A machine installed from this page is a machine nobody is going to log into
+afterwards to change its mind, so the install's own switches are part of the
+deploy form rather than something to fix later over SSH:
+
+| Option | What it is |
+|---|---|
+| **docker** | that machine's account joins the `docker` group — off by default, and the description says what it is: root on that machine |
+| **updates** | the one-fixed-command sudo grant (`--no-allow-update` turns it off) |
+| **fleet app** | so the new node can be managed, and can deploy further |
+| install dir / state dir / service name | where it lands, when the defaults are wrong |
+
+Every one of them is a switch `install.sh` already has. Nothing here is a second
+installer — the phase-two script assembles arguments and calls the delivered
+tree's `install.sh`, exactly as before.
+
+And every one of them ends on a command line on a **third** machine, so none of
+it is a string that travelled: a path is checked against a charset and a bound,
+a switch is a boolean, and the node flags come from a list written in the source
+(`fleet_provision.NODE_FLAGS`). What does not validate is dropped, never escaped
+— there is no escaping here to get wrong. It is cleaned on the operator's node
+when the request is built, and cleaned again on the node that will run the SSH.
 
 ### Phase 2 — choosing and deploying
 

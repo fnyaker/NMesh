@@ -105,7 +105,10 @@ def watch_pty(fd: int, on_chunk, on_eof=None):
 
     def ready() -> None:
         try:
-            chunk = os.read(fd, 4096)
+            # A screenful at a time. A full-screen program redraws in tens of
+            # kilobytes, and reading it 4 kB at a time was a dozen wake-ups, a
+            # dozen frames on the mesh and a dozen appends for one picture.
+            chunk = os.read(fd, 65536)
         except BlockingIOError:
             return
         except OSError:

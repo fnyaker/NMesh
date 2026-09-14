@@ -13,6 +13,7 @@
 #   ./install.sh --prefix /srv/nmesh    # choose where it lives
 #   ./install.sh --no-start             # install and enable, don't start now
 #   ./install.sh --no-allow-update      # keep the node out of system updates
+#   ./install.sh --docker               # let the node manage this machine's docker
 #   ./install.sh --reset-password       # set a new console password, print it
 #   ./install.sh --uninstall            # remove the service and the files
 #   ./install.sh --uninstall --purge    # …and the node's identity + state
@@ -37,6 +38,7 @@
 #   NMESH_DATA=path      node state directory
 #   NMESH_SERVICE=name   service name (default nmesh)
 #   NMESH_USER=name      account the service runs as (root install: nmesh)
+#   NMESH_DOCKER=1       same as --docker
 #
 # Everything above the "MAIN" banner is definitions only: the test-suite sources
 # this file with NMESH_INSTALL_LIB=1 to exercise them without installing.
@@ -266,6 +268,32 @@ create_service_user() {
     return 1
 }
 
+group_exists() {
+    if command -v getent >/dev/null 2>&1; then
+        getent group "$1" >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    grep -q "^$1:" /etc/group 2>/dev/null
+}
+
+# Every distro spells this differently too, and most reject the others' flags.
+add_to_group() {
+    local name="$1" group="$2"
+    command -v usermod  >/dev/null 2>&1 && run_priv usermod  -aG "$group" "$name" 2>/dev/null && return 0
+    command -v gpasswd  >/dev/null 2>&1 && run_priv gpasswd  -a  "$name" "$group" 2>/dev/null && return 0
+    command -v adduser  >/dev/null 2>&1 && run_priv adduser      "$name" "$group" 2>/dev/null && return 0
+    command -v pw       >/dev/null 2>&1 && run_priv pw groupmod "$group" -m "$name" 2>/dev/null && return 0
+    return 1
+}
+
+remove_from_group() {
+    local name="$1" group="$2"
+    command -v gpasswd  >/dev/null 2>&1 && run_priv gpasswd -d "$name" "$group" 2>/dev/null && return 0
+    command -v deluser  >/dev/null 2>&1 && run_priv deluser     "$name" "$group" 2>/dev/null && return 0
+    command -v pw       >/dev/null 2>&1 && run_priv pw groupmod "$group" -d "$name" 2>/dev/null && return 0
+    return 1
+}
+
 delete_service_user() {
     local name="$1"
     user_exists "$name" || return 0
@@ -304,7 +332,7 @@ owner_spec() {
 # partial upgrade or a distro package change, and there is exactly one place
 # that knows how to install anything.
 systemd_unit() {
-    local prefix="$1" data="$2" user="$3" args="$4" target="$5" updates="${6:-false}"
+    local prefix="$1" data="$2" user="$3" args="$4" target="$5" updates="${6:-false}" docker="${7:-false}"
     # A node that was granted the right to run system updates cannot be confined
     # the same way as one that was not, and this is not a matter of taste:
     #
@@ -347,6 +375,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ${user:+User=$user}
+$(if [ "$docker" = true ] && [ -n "$user" ]; then echo "# Asked for with --docker. An account that can reach the docker socket can
+# start a privileged container bind-mounting /, so this is root on this machine
+# — re-run install.sh --no-docker to take it back.
+SupplementaryGroups=docker"; fi)
 WorkingDirectory=$prefix
 Environment=NMESH_DATA=$data
 # The whole install is self-contained under $prefix — including liboqs, which
@@ -491,6 +523,14 @@ ALLOW_UPDATE=true
 # every install that merely took the default.
 ALLOW_UPDATE_ASKED=false
 UPDATE_GRANTED=false
+# Docker is **off** unless asked for, and stays that way: an account in the
+# `docker` group can start a privileged container bind-mounting `/`, which is
+# the machine. That is a bigger grant than the update wrapper — which runs one
+# fixed command — so it is never a default and never inferred from docker
+# happening to be installed.
+WANT_DOCKER=false
+DOCKER_ASKED=false
+DOCKER_GRANTED=false
 NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -504,6 +544,8 @@ while [ $# -gt 0 ]; do
         --reset-password) RESET_PASSWORD=true; shift;;
         --allow-update)   ALLOW_UPDATE=true;  ALLOW_UPDATE_ASKED=true; shift;;
         --no-allow-update) ALLOW_UPDATE=false; ALLOW_UPDATE_ASKED=true; shift;;
+        --docker)     WANT_DOCKER=true;  DOCKER_ASKED=true; shift;;
+        --no-docker)  WANT_DOCKER=false; DOCKER_ASKED=true; shift;;
         --purge)      PURGE=true; shift;;
         -h|--help)    sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
         *)            NODE_ARGS+=("$1"); shift;;
@@ -523,6 +565,7 @@ fi
 # As root the node gets a dedicated account (created further down); otherwise it
 # can only run as whoever is installing it. `--run-as root` is the way out.
 SERVICE_ACCOUNT="${NMESH_ACCOUNT:-nmesh}"
+if [ "${NMESH_DOCKER:-}" = "1" ]; then WANT_DOCKER=true; DOCKER_ASKED=true; fi
 if [ -z "$RUN_USER" ]; then
     if is_root; then RUN_USER="$SERVICE_ACCOUNT"; else RUN_USER="$(id -un)"; fi
 fi
@@ -843,6 +886,30 @@ else
     fi
 fi
 
+# ── docker ───────────────────────────────────────────────────────────────────
+# Deliberately not like the update grant. That one is a single fixed command the
+# node cannot rewrite; this is membership of a group whose socket starts
+# containers, and a container can bind-mount `/`. So it is **root**, it is never
+# a default, and it is never inferred from docker being installed — somebody has
+# to ask for it, on this machine or in the deploy form that installed it.
+if [ "$WANT_DOCKER" = true ]; then
+    if ! group_exists docker; then
+        warn "--docker: this machine has no docker group — install docker first"
+    elif [ -z "$RUN_USER" ]; then
+        DOCKER_GRANTED=true      # running as root: the socket is already reachable
+    elif ! add_to_group "$RUN_USER" docker; then
+        warn "--docker: could not add $RUN_USER to the docker group"
+    else
+        DOCKER_GRANTED=true
+        ok "$RUN_USER may drive this machine's docker — which is root on it"
+    fi
+elif [ "$DOCKER_ASKED" = true ] && [ -n "$RUN_USER" ] && group_exists docker; then
+    # The absence of a right has to be expressible, exactly as above.
+    if remove_from_group "$RUN_USER" docker; then
+        info "Removed $RUN_USER from the docker group (--no-docker)"
+    fi
+fi
+
 # ── lock it down ─────────────────────────────────────────────────────────────
 # Only now: the venv and liboqs were just built as the invoking user, and they
 # live inside the install directory. Both trees go to the node's account, mode
@@ -872,7 +939,7 @@ case "$INIT" in
         info "Installing systemd unit $UNIT_PATH"
         TMP_UNIT="$(mktemp)"
         systemd_unit "$INSTALL_DIR" "$DATA" "$RUN_USER" "$ARGS" multi-user.target \
-                     "$UPDATE_GRANTED" > "$TMP_UNIT"
+                     "$UPDATE_GRANTED" "$DOCKER_GRANTED" > "$TMP_UNIT"
         # The files are already in place: a service manager that refuses is a
         # degraded install, not a failed one. Say so and keep going.
         if run_priv cp "$TMP_UNIT" "$UNIT_PATH" \
@@ -889,7 +956,7 @@ case "$INIT" in
         info "Installing user systemd unit $UNIT_PATH"
         mkdir -p "$(dirname "$UNIT_PATH")"
         systemd_unit "$INSTALL_DIR" "$DATA" "" "$ARGS" default.target \
-                     "$UPDATE_GRANTED" > "$UNIT_PATH"
+                     "$UPDATE_GRANTED" "$DOCKER_GRANTED" > "$UNIT_PATH"
         systemctl --user daemon-reload || warn "systemctl --user daemon-reload failed"
         systemctl --user enable "$SERVICE" >/dev/null 2>&1 || warn "Could not enable $SERVICE at boot"
         # Without lingering a user service only runs while you are logged in —
@@ -984,6 +1051,9 @@ echo "  State in     : $DATA"
 echo "  Runs as      : ${RUN_USER:-root} (files mode 700)"
 echo "  Service      : $SERVICE ($INIT)"
 echo "  Follow it    : $(service_hint "$INIT" "$SERVICE")"
+if [ "$DOCKER_GRANTED" = true ]; then
+echo "  Docker       : ${RUN_USER:-root} can drive it — which is root on this machine"
+fi
 echo ""
 if [ "$INIT" = runit ]; then
 echo "  Starts with Termux. To start it when the phone boots,"

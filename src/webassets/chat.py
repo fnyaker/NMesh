@@ -595,7 +595,13 @@ function avatarHTML(id, name, cls){
 // ---- polling ---------------------------------------------------------------
 async function poll(){
   let j;
-  try{ j = await (await api("/api/chat/messages?since=" + VER)).json(); }catch(_){ return; }
+  // Through `FEED`: the social half — who this node knows, what it is called —
+  // is the same answer on nearly every read, and an answer that is *not* one
+  // has no contacts in it either. Assigning it over what is held is what
+  // emptied the conversation list.
+  try{ j = await FEED.read("/api/chat/messages", {since: VER}); }
+  catch(_){ j = null; }
+  if(!j) return;                 // keep what is on screen: it was true a moment ago
   ST.me = j.me; ST.pseudo = j.pseudo || ""; ST.bio = j.bio || ""; ST.has_avatar = !!j.has_avatar;
   ST.contacts = j.contacts || []; ST.known = j.known || []; ST.groups = j.groups || [];
   UNREAD = j.unread || {}; TYPING = j.typing || {};

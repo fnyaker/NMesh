@@ -84,9 +84,11 @@ def _terminal_source() -> str:
 
     Sliced out of the fleet bundle rather than read from its module: what is
     proved has to be the code a browser runs, and both pages mount the same
-    shared block (``webassets/terminal.py``)."""
+    shared block (``webassets/terminal.py``). The slice stops where the screen
+    starts, because that half is what the node test drives — it must not touch
+    `document`."""
     body = webassets.FLEET_JS.split("// ---- a small terminal")[1]
-    return "// ---- a small terminal" + body.split("// ---- one shell session")[0]
+    return "// ---- a small terminal" + body.split("// ---- the screen")[0]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
@@ -256,12 +258,17 @@ def test_the_graph_is_rebuilt_only_when_it_changes_shape():
     assert "patchGraph(" in body
 
 
-def test_the_terminal_never_renders_unescaped_markup():
-    """The output comes from a remote machine: it is written into the DOM as
-    innerHTML, so escaping is not cosmetic."""
-    source = _terminal_source()
-    assert "escHtml" in source
-    assert 'replace(/&/g,"&amp;")' in source
+def test_the_terminal_never_puts_remote_output_into_markup():
+    """The output comes from a remote machine. It used to be written into the
+    DOM as innerHTML, which made escaping load-bearing; it is drawn on a canvas
+    now, and the one place it still reaches the DOM — the off-screen text a
+    screen reader is given — is written as `textContent`."""
+    source = webassets.FLEET_JS.split("// ---- a small terminal")[1]
+    screen = source.split("// ---- the screen")[1].split("// ---- one shell session")[0]
+    assert "innerHTML" not in screen
+    assert "this.mirror.textContent = " in screen
+    # And the emulator half builds no markup at all.
+    assert "innerHTML" not in _terminal_source()
 
 
 def test_the_terminal_pane_takes_real_keystrokes():
@@ -759,12 +766,113 @@ def test_the_terminal_tells_the_pty_the_size_it_actually_has():
     bug: the program lays its screen out once, on the answer it was given."""
     source = webassets.FLEET_JS
     fit = source.split("ShellSession.prototype.fit =")[1].split("\nShellSession")[0]
-    assert "termMetrics(" in fit
+    assert "this.screen.measure()" in fit
     assert "this.term.resize(" in fit, "the emulator's own grid has to follow"
     assert "/api/fleet/resize" in fit, "and so does the pty"
     # The pane changes size without the window moving — a tab switch, a key row
     # appearing — so the element is what is watched.
     assert "ResizeObserver" in source
+
+
+def test_a_page_never_replaces_what_it_holds_with_an_error():
+    """The bug this is for: `apiJson` answers a 502 with a *body*, and a page
+    that assigns it over what it holds has just replaced every list with
+    nothing. Which reads as "there is nothing here" — a different and much worse
+    claim than "I have not heard lately"."""
+    source = webassets.ui.JS
+    read = source.split("  async read(path, params){")[1].split("\n  },")[0]
+    assert "if(!answer.ok" in read and "return null" in read
+    # And the one page that did it reads through the feed now, and keeps what it
+    # has when the answer is not one.
+    poll = webassets.FLEET_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert 'FEED.read("/api/fleet/state"' in poll
+    assert "if(!data){" in poll and "return;" in poll
+    # And chat's, which held the same shape of world: a conversation list that
+    # was right until a 502 was assigned over it.
+    chat = webassets.CHAT_JS.split("async function poll(){")[1].split("\n}")[0]
+    assert 'FEED.read("/api/chat/messages"' in chat
+    assert "if(!j) return;" in chat
+
+
+def test_the_lists_a_page_offers_are_not_emptied_by_a_read_that_failed():
+    """The same bug in a smaller hat. Three reads fill a selector each — the
+    keys a deploy may use, the networks we may invite into, and the machines the
+    top bar switches between — and each took its list out of the body of
+    whatever came back. One timed-out read then removed the way to every other
+    machine, which is not a thing the page had any grounds to claim."""
+    for source, path in ((webassets.FLEET_JS, "/api/fleet/keys"),
+                         (webassets.APP_JS, "/api/invite/issuers"),
+                         (webassets.APP_JS, "/api/remote/targets")):
+        assert 'FEED.read("' + path + '")' in source
+        assert '(await apiJson("' + path + '")).data' not in source
+
+
+def test_a_page_notices_when_the_node_under_it_was_updated():
+    """A node that updates itself replaces the assets under an open page. The
+    page then asks questions the new node no longer answers, gets refusals, and
+    empties — so it reloads once instead."""
+    source = webassets.ui.JS
+    assert 'const BUILD = "' in source and "__NMESH_BUILD__" not in source
+    agrees = source.split("  agrees(data){")[1].split("\n  },")[0]
+    assert "data.build === BUILD" in agrees
+    # Once, and only once: a reload loop is worse than a stale page.
+    assert "this.reloading" in agrees
+    # The stream is the first place it shows, because it reconnects on its own
+    # after the restart an update ends in.
+    assert "FEED.agrees(hello)" in source
+
+
+def test_a_read_asks_for_what_it_does_not_already_have():
+    """A ledger of forty machines re-encoded and re-sent because one job
+    finished is most of what a console costs."""
+    source = webassets.ui.JS
+    read = source.split("  async read(path, params){")[1].split("\n  },")[0]
+    assert 'query.set("proto", "2")' in read
+    assert 'query.set("have"' in read
+    # A page that lost its state has to be able to ask for all of it again.
+    assert "if(have.length && hold.state)" in read
+    # Sections are merged into what is held, never assigned over it.
+    assert "Object.assign({}, hold.state || {}, data.sections)" in read
+
+
+def test_the_terminal_draws_on_a_canvas_rather_than_in_the_dom():
+    """A grid of text in the DOM depends on every glyph having the same advance.
+    `btop` draws with box-drawing and braille characters many monospace fonts do
+    not carry; the browser falls back per glyph, the advance changes mid-line,
+    and every column after it drifts. Drawing each cell at a computed x is what
+    removes the question — and it is also what stops a repaint being a few
+    thousand DOM nodes."""
+    source = webassets.FLEET_JS
+    screen = source.split("// ---- the screen")[1].split("// ---- one shell session")[0]
+    assert 'createElement("canvas")' in screen
+    assert "column * cw" in screen, "a cell is placed, not laid out"
+    # `fillText`'s own maxWidth condenses a glyph that came from a wider
+    # fallback into the cell it belongs to.
+    assert "fillText(glyph, column * cw, baseline, cw * Math.max(1, cell.w))" in screen
+    # And a font of its own: the console's code stack has no box drawing in it.
+    assert "--term-font:" in webassets.ui.CSS
+
+
+def test_a_repaint_costs_the_lines_that_moved():
+    """The whole screen for a cursor that moved one column is what made a
+    redraw stutter."""
+    source = webassets.FLEET_JS
+    screen = source.split("// ---- the screen")[1].split("// ---- one shell session")[0]
+    assert "term.dirty" in screen and "term.allDirty" in screen
+    assert "this.drawRow(" in screen
+    # Coalesced on the browser's own clock, so a picture is painted once and in
+    # step with the display on top of it.
+    assert "requestAnimationFrame" in source
+
+
+def test_the_parser_never_slices_the_buffer():
+    """It used to take `data.slice(i)` at every escape to run a regex against,
+    which on a frame full of escapes is quadratic in the size of the frame."""
+    source = _terminal_source()
+    write = source.split("Term.prototype.write =")[1].split("\nTerm.prototype.escape")[0]
+    assert ".slice(" not in write
+    # Sticky, so a match happens at the escape's own offset.
+    assert "const T_CSI = /" in source and "/y;" in source
 
 
 def test_the_terminal_reports_the_mouse_only_when_asked():

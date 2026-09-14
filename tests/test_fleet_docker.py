@@ -485,3 +485,35 @@ def test_a_log_reply_is_cut_to_fit_the_frame_that_carries_it():
     answer = json.loads(blob)
     # Cut from the front: a log is read from its end.
     assert answer["text"] and log.endswith(answer["text"])
+
+
+class TestReachingTheSocket:
+    async def test_a_socket_this_account_may_not_open_says_which(self, tmp_path):
+        """"No docker here" and "docker is here and this account cannot reach
+        it" are one missing group membership apart, and only one of them is
+        something an operator can fix in a minute."""
+        import socket as socketlib
+        path = str(tmp_path / "docker.sock")
+        server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        os.chmod(path, 0o000)
+        os.environ["DOCKER_HOST"] = "unix://" + path
+        try:
+            if os.geteuid() == 0:
+                pytest.skip("root can open any socket, which is the point of it")
+            with pytest.raises(docker.DockerError) as failure:
+                await docker.call("GET", "/version")
+            assert "docker group" in str(failure.value)
+        finally:
+            os.environ.pop("DOCKER_HOST", None)
+            server.close()
+
+    async def test_no_socket_at_all_says_that_instead(self, tmp_path):
+        os.environ["DOCKER_HOST"] = "unix://" + str(tmp_path / "nothing.sock")
+        try:
+            with pytest.raises(docker.DockerError) as failure:
+                await docker.call("GET", "/version")
+            assert "no docker daemon" in str(failure.value)
+        finally:
+            os.environ.pop("DOCKER_HOST", None)
