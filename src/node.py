@@ -15,6 +15,7 @@ from collections import OrderedDict
 from .app_auth import AppAuth
 from .trace import Trace
 from .node_id import NodeID
+from . import faults
 from . import routed
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
@@ -4063,24 +4064,13 @@ class MeshNode:
         screen that can disagree with the bundle."""
         bundles = []
         for target, bundle in self._bundles.items():
-            members = [{"scheme": self._peer_scheme(peer),
-                        "remote": peer.remote_addr,
-                        "mean_ms": (None if peer.quality.recent_ms() is None
-                                    else round(peer.quality.recent_ms(), 1)),
-                        "loss": (None if peer.quality.recent_loss() is None
-                                 else round(peer.quality.recent_loss(), 3)),
-                        "probes": peer.quality.recent_probes(),
-                        # What this link is *actually* probed at, not what the
-                        # accord agreed: the medium under it can take that back
-                        # (`_idle_ceiling`), and a screen showing the agreement
-                        # beside a link running at something else is a label
-                        # that lies. One expression, read off the same function
-                        # the loop schedules with.
-                        "probe_ms": round(self._keepalive_interval(peer) * 1000),
-                        "carrying": peer in bundle.keys}
-                       for peer in list(bundle.keys) + list(bundle.benched())]
-            agreed = next((self._accord_with(peer)
-                           for peer in bundle.keys), None)
+            members = [self._mlo_member_row(member, bundle)
+                       for member in list(bundle.keys) + list(bundle.benched())]
+            # An accord is a property of a **link**, so it is read off the
+            # first member that is one. A bundle can be entirely routed, and
+            # then there is no accord to show rather than one to invent.
+            agreed = next((self._accord_with(member) for member in bundle.keys
+                           if not isinstance(member, routed.Path)), None)
             bundles.append({
                 "node": target.raw.hex(),
                 "pseudo": self.pseudo_of(target),
@@ -4117,6 +4107,49 @@ class MeshNode:
                                    "slow_min", "slow_max"),
                                   self.keepalive_bounds().as_tuple())),
             "bundles": bundles,
+        }
+
+    def _mlo_member_row(self, member, bundle) -> dict:
+        """One bundle member, described as what it actually is.
+
+        **A member is a way to reach an identity, and there are two kinds** —
+        `_member_peer` says so in its own docstring: a direct link, which is a
+        `_Peer`; and a routed path, which is a `routed.Path` naming a first hop.
+        This read called every one of them ``peer`` and asked each for
+        `remote_addr`, so the moment a node held a hybrid bundle
+        (`routed.py`, MRLO/HMLO) `console_snapshot` raised `AttributeError` —
+        and with it every `node.state`, which is the whole console. One name
+        for two things, and the screen it fed went dark.
+
+        A routed path measures itself (`Path.quality`), so its numbers come off
+        the path. What it *rides* is the link to its first hop, which is where
+        a cadence lives — there is one accord per link, not per path."""
+        routed_path = isinstance(member, routed.Path)
+        quality = member.quality
+        # The link a cadence can be read from: a direct member is one; a routed
+        # member rides the link to its first hop, which may be gone.
+        link = self._link_to(member.via) if routed_path else member
+        recent_ms = quality.recent_ms()
+        recent_loss = quality.recent_loss()
+        return {
+            "scheme": "routed" if routed_path else self._peer_scheme(member),
+            # Where this member goes. For a path that is the neighbour it goes
+            # through, said as an id rather than an address: a first hop is a
+            # node, and printing its socket would be printing the wrong thing.
+            "remote": (member.via.raw.hex() if routed_path
+                       else member.remote_addr),
+            "via": member.via.raw.hex() if routed_path else None,
+            "mean_ms": None if recent_ms is None else round(recent_ms, 1),
+            "loss": None if recent_loss is None else round(recent_loss, 3),
+            "probes": quality.recent_probes(),
+            # What this link is *actually* probed at, not what the accord
+            # agreed: the medium under it can take that back (`_idle_ceiling`),
+            # and a screen showing the agreement beside a link running at
+            # something else is a label that lies. One expression, read off the
+            # same function the loop schedules with.
+            "probe_ms": (round(self._keepalive_interval(link) * 1000)
+                         if link is not None else None),
+            "carrying": member in bundle.keys,
         }
 
     def set_mlo_always(self, enabled: bool) -> bool:
@@ -6075,6 +6108,28 @@ class MeshNode:
                 "silent": self._routing.is_silent(e, now),
                 "link": self._link_view(p, now) if p is not None else None,
             })
+        # Every field below this line that *asks a subsystem a question* goes
+        # through `section`, and that is not tidiness. One of them — `mlo`,
+        # with a member it called a peer and that was a routed path — raised,
+        # and took the whole snapshot with it; `node.state` is what every page
+        # of the console reads first, so a console that had been working went
+        # entirely dark and stayed dark. **A diagnostic must not be able to end
+        # the management surface it is diagnosed through.**
+        #
+        # Not silent, though, and that is the other half: what broke is named
+        # in `broken` and its traceback is written where the machine can read
+        # it (`src/faults.py`). A section that returns `null` and says nothing
+        # is how a bug lives for months.
+        broken: list[str] = []
+
+        def section(name: str, produce, default=None):
+            try:
+                return produce()
+            except Exception as exc:            # noqa: BLE001 — never the whole
+                faults.note(f"console snapshot section {name}", exc)
+                broken.append(name)
+                return default
+
         return {
             "id": self._id.raw.hex(),
             "pseudo": self._pseudo,
@@ -6099,33 +6154,48 @@ class MeshNode:
             "routing": routing,
             "routing_size": len(routing),
             "e2e_sessions": [nid.raw.hex() for nid in self._e2e_sessions],
-            "topology": self._console_topology(now),
+            "topology": section("topology", lambda: self._console_topology(now),
+                               {}),
             "total": self._metrics.total.as_dict(),
             "load": self._metrics.load(),
             # What is running, by name. Built here from counters the loops kept
             # anyway — a snapshot costs one pass over at most a dozen jobs, and
             # nothing at all when nobody reads it.
-            "activity": self._activity.jobs(),
+            "activity": section("activity", lambda: self._activity.jobs(),
+                               []),
             "recent": self._activity.recent(20),
             "detached": len(self._detached),
-            "network": (self._net_monitor.status()
+            "network": section("network", lambda: (self._net_monitor.status()
                         if self._net_monitor is not None else None),
-            "transport_details": self._transport_details(),
-            "handshake_refusals": self.handshake_refusals(),
-            "trust": self.trust_status(),
-            "abuse": self.abuse_status(),
-            "behaviour": self.behaviour_status(),
-            "reachability": self.reachability(),
+                               None),
+            "transport_details": section("transport_details", lambda: self._transport_details(),
+                               []),
+            "handshake_refusals": section("handshake_refusals", lambda: self.handshake_refusals(),
+                               []),
+            "trust": section("trust", lambda: self.trust_status(),
+                               {}),
+            "abuse": section("abuse", lambda: self.abuse_status(),
+                               {}),
+            "behaviour": section("behaviour", lambda: self.behaviour_status(),
+                               {}),
+            "reachability": section("reachability", lambda: self.reachability(),
+                               {}),
             "relay_capable": self.relay_capable(),
             "pending_seeks": len(self._pending_seeks),
             "lan_discovery": self._lan_discovery is not None,
             "dynamic_address": self._dynamic_address,
-            "mlo": self.mlo_status(),
+            "mlo": section("mlo", lambda: self.mlo_status(),
+                               {}),
             "transport_balance": self._transport_balance,
-            "transport_preference": self.transport_preference(),
+            "transport_preference": section("transport_preference", lambda: self.transport_preference(),
+                               None),
             "punch_enabled": self._punch_enabled,
             "punch_keepalive": self._punch_keepalive,
             "join_status": self._join_status,
+            # Empty on a healthy node, which is the only state it should ever
+            # be seen in. A name here means a section of this page is missing
+            # and the log says why.
+            "broken": broken,
         }
 
     def _console_topology(self, now: float) -> dict:
