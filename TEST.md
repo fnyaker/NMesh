@@ -16,7 +16,8 @@ ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
 hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Around 2500 tests in ~30 seconds.
+Around 3600 tests in ~30 seconds. (The figure is prose, not a promise —
+what is held to a number is in the suite itself.)
 
 ---
 

@@ -2727,10 +2727,7 @@ class MeshNode:
 
     async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._connect_for_join(address)
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         peer.remote_addr = address
         peer.join_code = code
         self._peers.append(peer)
@@ -5671,10 +5668,7 @@ class MeshNode:
             if self._unauthenticated_peers() >= _MAX_UNAUTH_PEERS:
                 await transport.close()
                 return
-        peer = _Peer(transport, is_client_side=False)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=False)
         self._peers.append(peer)
         self._poke_net("peer-connected")
         await peer.start(self._handle_packet)
@@ -5764,11 +5758,8 @@ class MeshNode:
         try:
             async with asyncio.timeout(timeout):
                 transport = await self._transport_manager.connect(uri)
-                peer = _Peer(transport, is_client_side=True)
-                peer.on_dead = self._reap_peer
+                peer = self._new_peer(transport, is_client_side=True)
                 peer.probation = probe   # set before the handshake can complete
-                peer.total = self._metrics.total
-                peer.trace = self.trace
                 peer.remote_addr = uri
                 self._peers.append(peer)
                 await peer.start(self._handle_packet)
@@ -5872,13 +5863,32 @@ class MeshNode:
 
     async def _inject_peer(self, transport: BaseTransport) -> _Peer:
         """For testing only — injects a fake transport as a client-side peer."""
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         self._peers.append(peer)
         self._running = True
         await peer.start(self._handle_packet)
+        return peer
+
+    def _new_peer(self, transport, *, is_client_side: bool,
+                  on_dead=None) -> _Peer:
+        """Build a peer this node owns, wired to this node.
+
+        A `_Peer` needs three things from the node it belongs to — where to
+        count bytes, where to trace packets, and who to tell when its link
+        dies — and every one of the ten places that made one set them by hand,
+        three lines at a time. Five of them forgot `trace`, so packets on the
+        relay link and on every relayed peer were invisible to the one
+        diagnostic an operator turns on to see what is happening. Nobody chose
+        that; the shape chose it.
+
+        So the node makes its own peers and a half-wired one cannot exist. The
+        differences stay at the call sites, because they are real: a relayed
+        peer is reaped through a callback that forgets it by remote id first,
+        and an invite link carries the code it was opened with."""
+        peer = _Peer(transport, is_client_side=is_client_side)
+        peer.on_dead = on_dead if on_dead is not None else self._reap_peer
+        peer.total = self._metrics.total
+        peer.trace = self.trace
         return peer
 
     async def _reap_peer(self, peer: _Peer) -> None:
@@ -6511,19 +6521,17 @@ class MeshNode:
         vpa = None
         try:
             transport = await self._transport_manager.connect(relay_uri)
-            rlink = _Peer(transport, is_client_side=True)
+            rlink = self._new_peer(transport, is_client_side=True)
             rlink.relay_only = True
-            rlink.on_dead = self._reap_peer
-            rlink.total = self._metrics.total
             rlink.remote_addr = relay_uri
             self._peers.append(rlink)
             self._running = True
             await rlink.start(self._handle_packet)
 
-            vpa = _Peer(RelayedTransport(self, inviter, rlink), is_client_side=True)
+            vpa = self._new_peer(RelayedTransport(self, inviter, rlink),
+                                 is_client_side=True,
+                                 on_dead=self._relay_on_dead(inviter.raw))
             vpa.join_code = code
-            vpa.on_dead = self._relay_on_dead(inviter.raw)
-            vpa.total = self._metrics.total
             self._relay_peers[inviter.raw] = vpa
             self._peers.append(vpa)
             await vpa.start(self._handle_packet)
@@ -7773,19 +7781,17 @@ class MeshNode:
         vpa = None
         try:
             transport = await self._transport_manager.connect(relay_uri)
-            rlink = _Peer(transport, is_client_side=True)
+            rlink = self._new_peer(transport, is_client_side=True)
             rlink.relay_only = True
-            rlink.on_dead = self._reap_peer
-            rlink.total = self._metrics.total
             rlink.remote_addr = relay_uri
             self._peers.append(rlink)
             self._running = True
             await rlink.start(self._handle_packet)
 
-            vpa = _Peer(RelayedTransport(self, inviter_id, rlink), is_client_side=True)
+            vpa = self._new_peer(RelayedTransport(self, inviter_id, rlink),
+                                 is_client_side=True,
+                                 on_dead=self._relay_on_dead(inviter_id.raw))
             vpa.join_code = code
-            vpa.on_dead = self._relay_on_dead(inviter_id.raw)
-            vpa.total = self._metrics.total
             self._relay_peers[inviter_id.raw] = vpa
             self._peers.append(vpa)
             await vpa.start(self._handle_packet)
@@ -8356,9 +8362,9 @@ class MeshNode:
             return
         if len(self._relay_peers) >= _MAX_RELAY_PEERS or len(self._peers) >= _MAX_PEERS:
             return
-        vp = _Peer(RelayedTransport(self, seeker, via), is_client_side=False)
-        vp.on_dead = self._relay_on_dead(seeker.raw)
-        vp.total = self._metrics.total
+        vp = self._new_peer(RelayedTransport(self, seeker, via),
+                            is_client_side=False,
+                            on_dead=self._relay_on_dead(seeker.raw))
         self._relay_peers[seeker.raw] = vp
         self._peers.append(vp)
         await vp.start(self._handle_packet)
@@ -13806,10 +13812,7 @@ Hints come first (the ``have`` byte on an announce, from an
                                               self._udp_server)
         self._udp_server._transports[addr] = transport
         transport._start_tasks()
-        peer = _Peer(transport, is_client_side=True)
-        peer.on_dead = self._reap_peer
-        peer.total = self._metrics.total
-        peer.trace = self.trace
+        peer = self._new_peer(transport, is_client_side=True)
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"
         self._peers.append(peer)

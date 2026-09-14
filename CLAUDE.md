@@ -84,9 +84,27 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   kind). Error correction, retry, delay tolerance.
 
 ### 3. Flexibility — transport-agnostic
-- The core knows **no** concrete transport. Anyone implements `BaseTransport` +
-  `BaseServer` and registers it by URL scheme (`tcp://`, `ble://`, `lora://`,
-  `usb://`…). The "Jarvis" goal: run over any medium capable of carrying bytes.
+- Anyone implements `BaseTransport` + `BaseServer` and registers it by URL
+  scheme (`tcp://`, `ble://`, `lora://`, `usb://`…). The "Jarvis" goal: run over
+  any medium capable of carrying bytes.
+- **Every module of the core is medium-agnostic except one, and its exception is
+  bounded.** `src/node.py` may name exactly two concrete transports, for reasons
+  that are not laziness:
+  - **UDP**, for **NAT traversal**. A hole is punched through a stateful
+    datagram NAT by sending from the very socket the listener owns; there is no
+    medium-agnostic spelling of that, and an interface general enough to express
+    it would be a UDP interface under another name.
+  - **`RelayedTransport`**, which `node.py` defines itself: a link that is not a
+    socket at all but another node carrying frames between two peers that cannot
+    reach each other. That is core routing wearing the transport interface, not
+    a medium.
+  A **third** would be something else entirely, so the list is checked:
+  `tests/test_medium_agnostic.py` fails if any other module names a medium, if
+  the core names a third one, or if the punch path reaches into more of UDP's
+  internals than it already does. Saying "no concrete transport" and meaning
+  "two" is how a principle stops being one.
+- Whatever a medium *answers* is checked on the way back, never trusted for its
+  annotated type (`src/medium.py`).
 - Routing is medium-agnostic: if A↔B is Bluetooth and B↔C is Wi-Fi, A talks to
   C by routing through B, choosing the best link.
 - Nodes announce themselves with URLs listing their transports; each node only
