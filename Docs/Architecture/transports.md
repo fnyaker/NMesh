@@ -86,9 +86,55 @@ def stats(self) -> dict:          # {"retransmits": 12, "rto ms": 50.0, …}
   seen becomes observable with no console-side code.
 
 Two rules, because this is *polled*: the values are JSON-safe scalars, and
-reading them never blocks. The core protects itself anyway — a transport that
-raises, returns a nested object or fifty keys does not break the snapshot: it is
-ignored, filtered, bounded to 16 entries (`tests/test_link_stats.py`).
+reading them never blocks. The core protects itself anyway, and where it does
+that is worth knowing.
+
+## Everything the core asks a medium goes through `src/medium.py`
+
+A transport is **somebody else's code** — that is the whole third principle — so
+the core runs beside implementations it has never seen. It always wrapped these
+calls in `try`. That is half the job, and the missing half is the one that bit:
+**it guarded the call and trusted the answer.**
+
+`remote_ip` is annotated `str | None`, so the core did `remote.encode(…)`.
+`idle_timeout` is annotated `float | None`, so it did `timeout <= 0` — a
+`TypeError` on a string, *inside the sweep that decides when to probe*, which is
+how a lying medium stops a node noticing dead links. `receive` is annotated
+`Packet`, so the receive loop did `len(packet.payload)` outside its own guard,
+and a transport answering `None` ended the link with an exception nobody
+retrieved. An annotation is a note between people who agree; a bad
+implementation is not disagreeing with it.
+
+So every question the core asks a medium is asked in one place and comes back as
+the type it was asked for, or as the safe default:
+
+| Asked | Comes back as | Otherwise |
+|---|---|---|
+| `remote_ip()` | a non-empty string, ≤ `MAX_ADDRESS` | `None` — "does not know", which every caller already handles |
+| `endpoints()` | always `{"local", "remote"}`, string or `None` under each | both `None` |
+| `idle_timeout()` | a positive finite float | `None` — never reaps |
+| `stats()` | ≤ `MAX_STATS` scalar entries, keys and text bounded | `{}` |
+| `reachability()` | ≤ `MAX_DESCRIPTORS` mappings | `[]` |
+| `receive()` | a `Packet` | `None`, charged to the peer like a frame that would not decode |
+
+Three properties that follow, and each one is the point:
+
+- **Nothing raises**, so a caller needs no guard of its own — which is what
+  stops the next reader adding a seventh unguarded call site.
+- **The lookup is inside the guard.** `getattr` happens in `medium._ask`, not
+  at the call site: every one of these is *optional*, and a minimal transport
+  that implements none of them is correct. Writing it the other way round is a
+  mistake this module made on its first draft and the suite caught at once.
+- **Every answer is bounded.** "Bounds everywhere" applies to what comes back
+  from a plug-in exactly as it applies to what arrives on a socket: a medium
+  must not be able to put a megabyte into a console page, a log line or a
+  counter key.
+
+A failure is written down (`src/faults.py`) rather than swallowed — a transport
+that throws on every call is broken, and nobody ever finds out about one that
+fails politely. `tests/test_hostile_plugins.py` runs the whole surface against a
+transport that throws, one that lies about types, one that answers enormously,
+and one that implements the bare minimum.
 
 Current implementations: TCP reports the write buffer's fill (a number that
 stays high means that peer is not draining, which no packet counter shows) and

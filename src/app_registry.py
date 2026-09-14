@@ -27,6 +27,8 @@ crash and never an app enabled that the operator did not enable.
 """
 from __future__ import annotations
 
+from . import faults
+
 import asyncio
 import json
 import os
@@ -232,20 +234,34 @@ class AppHost:
             return False
         try:
             built = await factory()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            faults.note(f"app {name} factory", exc)
             return False          # a failing app must not take the node with it
-        if not built:
+        # The sentence above was true of the *call* and not of what it handed
+        # back: `app, bridge = built` is an unpack, and a factory answering one
+        # value, or three, or a number, raised here — outside every guard — and
+        # took `apply()` with it, which on start-up is the node. What a factory
+        # must return is written down in `register`; this is where that is held
+        # to rather than assumed.
+        if not isinstance(built, (tuple, list)) or len(built) != 2:
+            faults.note(f"app {name} factory",
+                        TypeError("a factory answers (app, bridge|None)"))
             return False
         app, bridge = built
+        if not hasattr(app, "start") or not hasattr(app, "stop"):
+            faults.note(f"app {name} factory",
+                        TypeError("an app needs start() and stop()"))
+            return False
         try:
             await app.start()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            faults.note(f"app {name} start", exc)
             return False
         if bridge is not None and self._loop is not None:
             try:
                 bridge.start(self._loop)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                faults.note(f"app {name} bridge", exc)
         self._running[name] = (app, bridge)
         return True
 
@@ -257,12 +273,15 @@ class AppHost:
         if bridge is not None:
             try:
                 bridge.stop()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                faults.note(f"app {name} bridge stop", exc)
         try:
             await app.stop()
-        except Exception:
-            pass          # a wedged app must not block the toggle
+        except Exception as exc:  # noqa: BLE001
+            faults.note(f"app {name} stop", exc)
+            # A wedged app must not block the toggle. It is still let go of
+            # below — an app that will not stop is not an app that keeps
+            # running.
         return True
 
     def bind_console(self, loop: asyncio.AbstractEventLoop) -> None:

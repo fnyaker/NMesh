@@ -1291,6 +1291,49 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## Guarding the call is half the job; the answer is the other half
+
+The `mlo` crash was one instance of a shape that was all over the boundary with
+pluggable code. A scan of every call the core makes into a transport, a server,
+an app or a bridge found the rest of it, and they all read the same way:
+
+```python
+try:
+    timeout = peer.transport.idle_timeout()   # guarded
+except Exception:
+    return None
+if not timeout or timeout <= 0:               # TypeError on a string
+```
+
+The `try` is there. It ends one line too early. `BaseTransport.idle_timeout` is
+annotated `float | None` and the code below the guard believed the annotation —
+which is a note between people who agree, and a plug-in is not bound by it. The
+same shape, four more times:
+
+| Where | Trusted | What a wrong answer did |
+|---|---|---|
+| `_rate_key` | `remote_ip()` is a `str` | `AttributeError` on the pre-auth rate limiter |
+| `_idle_ceiling` | `idle_timeout()` is a number | `TypeError` inside the keepalive sweep |
+| `_Peer._loop` | `receive()` is a `Packet` | link down, task exception nobody retrieved, peer never charged |
+| `reachability()` | a server answers descriptors | a `TypeError` in the console, the join ticket and the addressing logic |
+| `AppHost._start` | a factory answers `(app, bridge)` | `app, bridge = built` raised through `apply()`, which on start-up is the node |
+
+All of them now go through one reader — `src/medium.py` for a medium,
+an explicit shape check for a factory — which guards the call *and* the answer,
+bounds it, and writes the failure down. The rule to carry:
+
+> **A type annotation on a plug-in's method is a request, not a guarantee.**
+> Anything that crosses that boundary is checked on the way back exactly as
+> bytes off a socket are checked on the way in.
+
+And one more, learned immediately and the hard way: `medium._ask` was first
+written `_ask("endpoints", transport.endpoints, default)`. The attribute is read
+**before** the call, so a transport that does not implement an optional method —
+every minimal implementation, which is a *correct* implementation — raised an
+`AttributeError` the guard never saw. The `getattr` belongs inside the `try`.
+The suite caught it on the first run, which is the whole argument for having one
+reader: the mistake is available once instead of at every call site.
+
 ## A bundle member is not always a peer, and one name for two things went dark
 
 Every `node.state` on a live node answered

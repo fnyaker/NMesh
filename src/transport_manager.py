@@ -1,4 +1,5 @@
 from collections.abc import Callable, Awaitable
+from . import medium
 from .transport import BaseTransport, BaseServer
 from .uri import _validate_uri, _SCHEME_RE
 
@@ -156,10 +157,7 @@ class TransportManager:
         address(es); a server that doesn't implement it contributes nothing."""
         out: list[dict] = []
         for uri, server in self._servers.items():
-            try:
-                out.extend(server.reachability(uri, ctx))
-            except Exception:
-                pass
+            out.extend(medium.reachability(server, uri, ctx))
         return out
 
     async def stop_listen(self, uri: str) -> bool:
