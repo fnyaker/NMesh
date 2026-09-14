@@ -726,6 +726,8 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
 | GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |
+| —       | (plane only)     | `logs.status`, `logs.set`, `logs.query`, `logs.since`, `logs.sources` — the node's own log ring, off until asked, bounded in megabytes ([`../Architecture/logging.md`](../Architecture/logging.md)) |
+| POST    | `/api/apps/grant` | `{id, capability, granted}` — gives or takes back one grant from a built-in app — `apps.grant` |
 | POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
 The **Expert — addressing & transports** section shows every concrete URI
@@ -820,6 +822,16 @@ Install / Enable / Disable / Uninstall actions and the **Open** link
 state; uninstalling **purges its encrypted drawer**) and **enabled** (the app is
 plugged into the mesh right now; disabling stops it, its state survives). The
 toggle is **live** — no node restart — and persisted in `<data>/apps.json`.
+
+Each installed card also carries its **grants** as tick boxes: what that app may
+ask of the node *beyond running*. They are rendered from what the node declares,
+never from a list held in the page, so a grant added tomorrow appears with the
+node's own words for it. Today there is one — `logs`, reading the node's log
+ring: every other app's lines and the core's, not only its own. Off for every
+app until an operator ticks it, and dropped when the app is uninstalled, so one
+reinstalled later starts from nothing rather than from what somebody allowed the
+app that used to have that name. Writing a line needs no grant: the node stamps
+the source, so an app can only ever be quoted as itself.
 
 Wiring: pass an `app_host` (a `src.app_registry.AppHost`) to `WebConsole(...)`.
 `scripts/nmesh_node.py` does it; the `chat_bridge` parameter stays supported for
@@ -1095,6 +1107,34 @@ who this node keeps company with, when, and how much. So: off by default, in
 memory, bounded in number of events *and* in time, it stops on its own, and it
 reaches the disk only if an operator asks (0600). The bounds the request asks
 for are **capped**, not obeyed.
+
+## The node's log (`logs.*`)
+
+Beside the trace, and answering the other half of the question: the trace says
+what crossed the wire, the log says what the node was thinking while it crossed
+— which gate refused a handshake, why a loop gave up on an address, whatever an
+app chose to say.
+
+Same posture as the trace, for the same reason, and two differences that matter:
+
+- **Nothing is kept until somebody asks**, and **stopping drops what was kept**
+  rather than leaving it readable. A trace is a recording an operator asked for
+  and then reads; a log ring is a by-product, and one left in memory after the
+  person reading it stopped is a record this node has no business holding.
+- **The bound is in megabytes**, not in lines, because that is the question an
+  operator has about their machine. It is compressed a block at a time, so eight
+  megabytes holds on the order of a hundred thousand lines; `logs.status`
+  reports the *measured* ratio rather than a claim.
+
+Starting the trace starts the log with it: "turn the trace on" is one thing an
+operator does. `logs.set` is there for what that cannot express — sizing the
+ring, or keeping the lines of a node whose packet headers you have no business
+recording.
+
+A reader asks `logs.since` with the last sequence number it saw, so a console
+four hops away follows a live log over the same one-question-one-answer channel
+as everything else, and is told how much it `lost` if it fell behind the ring.
+Full mechanics: [`../Architecture/logging.md`](../Architecture/logging.md).
 
 ## Joining / bridging two networks
 

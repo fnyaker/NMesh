@@ -379,10 +379,11 @@ keeps working, with one implementation behind it.
 | `config` | `get` `save` | `/api/config` |
 | `transports` | `options` `save` | `/api/transports` |
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
+| `logs` | `status` `set` `query` `since` `sources` | — (new) |
 | `pseudo` | `get` `search` `save` `lookup`~ | `/api/pseudo` (`?q=`, `?wide=1`) |
 | `control` | `catalogue` `changes` | — |
 | `jobs` | `start` `poll` `list` `forget` | — (new) |
-| `apps` | `catalogue` `call` `list` `set` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
+| `apps` | `catalogue` `call` `list` `set` `grant` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 | `releases` | `overview` `check`~ `apply`\*~ `publish`\*~ `install`\*~ `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
 | `packages` | `search` `held` `entry` `lookup`~ `describe`~ `install`\*~ `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
 | `keys` | `overview` `create`\*~ `adopt`\*~ `offer`\*~ `accept`\*~ `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
