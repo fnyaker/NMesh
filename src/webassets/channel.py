@@ -186,6 +186,95 @@ const CHANNEL = {
     }
   },
 
+  // ---- bytes ---------------------------------------------------------------
+  // A file is a question and an answer, asked more than once. There is no
+  // second door for it: a download used to be an `<a href download>`, which is
+  // a browser *navigation* and cannot carry the header saying which node is
+  // being driven — so it always fetched from the machine serving the page,
+  // silently, whichever machine the operator thought they were looking at. And
+  // an upload could not have gone the other way at all, because the relay caps
+  // a request at 24 kB. Both go through here now, a chunk per frame, so bytes
+  // follow the context exactly like every other call.
+
+  // Base64 both ways, in pieces: `String.fromCharCode(...bytes)` on a four
+  // megabyte array is an argument list a browser refuses (`RangeError`), and
+  // the refusal only shows up on somebody's big file.
+  encode(bytes){
+    let text = "";
+    for(let at = 0; at < bytes.length; at += 8192)
+      text += String.fromCharCode.apply(null, bytes.subarray(at, at + 8192));
+    return btoa(text);
+  },
+  decode(text){
+    const raw = atob(text || "");
+    const out = new Uint8Array(raw.length);
+    for(let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  },
+
+  // `files` is `[{path, bytes}]`. Answers whatever committing the kind gives
+  // back — publishing an app answers its id, like the route it replaces.
+  async upload(kind, meta, files, onProgress){
+    const started = await this.call("transfer.offer", {kind, meta: meta || {}});
+    const id = started.transfer, chunk = started.chunk || 12288;
+    const total = files.reduce((sum, file) => sum + file.bytes.length, 0);
+    let sent = 0;
+    try{
+      for(const file of files){
+        // A file with no bytes still has to exist on the far side, so it is
+        // sent as one empty chunk rather than skipped.
+        const pieces = Math.max(1, Math.ceil(file.bytes.length / chunk));
+        for(let seq = 0; seq < pieces; seq++){
+          const slice = file.bytes.subarray(seq * chunk, (seq + 1) * chunk);
+          await this.call("transfer.put", {transfer:id, path:file.path,
+                                           seq, data:this.encode(slice)});
+          sent += slice.length;
+          if(onProgress) onProgress(sent, total);
+        }
+      }
+      return await this.call("transfer.commit", {transfer:id});
+    }catch(error){
+      // A transfer nobody finishes is dropped on its own after a few minutes;
+      // saying so now gives the node its memory back at the moment we know we
+      // are not coming back for it.
+      if(!isStale(error))
+        try{ await this.call("transfer.drop", {transfer:id}); }catch(_){}
+      throw error;
+    }
+  },
+
+  // Answers `{meta, files:[{path, bytes}]}` — the bytes of whatever the kind
+  // names, off whichever node this channel is pointed at.
+  async download(kind, id, onProgress){
+    const opened = await this.call("transfer.fetch", {kind, id});
+    const chunk = opened.chunk || 196608;
+    const total = (opened.files || []).reduce((sum, f) => sum + f.size, 0);
+    const out = [];
+    let got = 0;
+    try{
+      for(const file of opened.files || []){
+        const pieces = Math.max(1, Math.ceil(file.size / chunk));
+        const parts = [];
+        for(let seq = 0; seq < pieces; seq++){
+          const piece = await this.call("transfer.take",
+            {transfer:opened.transfer, path:file.path, seq});
+          const bytes = this.decode(piece.data);
+          parts.push(bytes);
+          got += bytes.length;
+          if(onProgress) onProgress(got, total);
+          if(piece.last) break;
+        }
+        const whole = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
+        let at = 0;
+        parts.forEach((part) => { whole.set(part, at); at += part.length; });
+        out.push({path:file.path, bytes:whole});
+      }
+    }finally{
+      try{ await this.call("transfer.drop", {transfer:opened.transfer}); }catch(_){}
+    }
+    return {meta: opened.meta || {}, files: out};
+  },
+
   // The answer *and* whether it was refused, for a caller that paints the
   // refusal in place rather than as a toast. Through `call`, so a long
   // operation is a long answer here too rather than a refusal nobody asked for.

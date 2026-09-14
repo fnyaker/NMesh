@@ -852,15 +852,26 @@ CSS = TOKENS + BASE + COMPONENTS + SHELL
 # for that node — chat and fleet run here whatever is on screen, because the far
 # console refuses them by design (see Docs/Apps/fleet).
 
-CTX_BAR = """
+def ctx_bar(leave: bool = True) -> str:
+    """The strip that says which machine this page is describing.
+
+    ``leave=False`` for a page opened *beside* the console — the package card,
+    the node card, in their own window. They follow the context, and they are
+    not where it is changed: handing the remote session back from a satellite
+    window would end it under the console that opened it, and there is one
+    place a context is changed on purpose."""
+    return """
     <div id="ctx-bar" class="ctx-bar" role="status" hidden>
       <span>Managing <b id="ctx-label"></b></span>
       <span id="ctx-id" class="mono tiny"></span>
       <span id="ctx-note" class="ctx-note"></span>
       <span id="ctx-trouble" class="ctx-trouble" hidden>not answering</span>
-      <button id="ctx-leave" class="sm">Back to this node</button>
-    </div>
+""" + ('      <button id="ctx-leave" class="sm">Back to this node</button>\n'
+       if leave else "") + """    </div>
 """
+
+
+CTX_BAR = ctx_bar()
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1075,26 @@ const CONTEXT = {
   },
 
   restore(){
+    // The address first, then the tab's memory. A window opened from the
+    // console is opened with `noopener` — which is what stops it reaching back
+    // into the page that opened it, and is also why it starts with an *empty*
+    // sessionStorage. So the package card and the node card opened from a
+    // console driving another machine came up describing the local one, with
+    // nothing on screen to say which. The context travels in the address now.
+    //
+    // A node id in a URL is a **claim**, never a grant: `confirm()` checks it
+    // against the console that actually holds the remote session before a page
+    // believes it, exactly as it already did for one restored from a reload.
+    // Nothing becomes reachable because a link said so.
+    try{
+      const asked = new URLSearchParams(location.search).get("node") || "";
+      if(/^[0-9a-f]{40}$/.test(asked)){
+        this.node = asked;
+        this.label = "";
+        this.save();
+        return this.node;
+      }
+    }catch(_){}
     try{
       const stored = JSON.parse(sessionStorage.getItem("nmesh_context") || "null");
       if(stored && /^[0-9a-f]{40}$/.test(stored.node || "")){
@@ -1366,7 +1397,39 @@ const OPEN = {
   },
 };
 
-function openLinked(url, name){
+// Hand the operator bytes we are already holding. A `Blob` and an object URL,
+// never a `data:` URI: those are capped at a few megabytes in some browsers and
+// silently truncated in others, and the file this saves came off a node over a
+// channel — losing the end of it without a word is the one outcome worse than
+// refusing.
+function saveBytes(name, bytes, type){
+  const url = URL.createObjectURL(
+    new Blob([bytes], {type: type || "application/octet-stream"}));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = (name || "download").replace(/[\\/]/g, "_");
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Not revoked immediately: Safari has not finished reading the blob when the
+  // click returns, and a revoked URL there saves an empty file.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// Whatever page is being opened beside this one, opened **about the same
+// machine**. `noopener` is what makes this necessary: it severs the link the
+// browser would otherwise use to copy this tab's sessionStorage, so the new
+// window starts knowing nothing — and a window quietly describing a different
+// node than the one you are managing is worse than no window at all.
+function contextual(url){
+  if(!CONTEXT.node) return url;
+  const [path, fragment] = String(url).split("#");
+  return path + (path.includes("?") ? "&" : "?") + "node=" +
+         encodeURIComponent(CONTEXT.node) + (fragment ? "#" + fragment : "");
+}
+
+function openLinked(rawUrl, name){
+  const url = contextual(rawUrl);
   if(OPEN.effective() === "tab"){ window.open(url, "_blank", "noopener"); return; }
   const width = Math.min(760, Math.max(420, Math.round(screen.availWidth * 0.5)));
   const height = Math.min(900, Math.max(480, Math.round(screen.availHeight * 0.8)));
@@ -2023,6 +2086,8 @@ function mountShell(){
   document.body.dataset.appHome = document.body.dataset.appName || "NMesh";
   CONTEXT.restore();
   CONTEXT.paint();
+  // Satellite pages embed the strip without this button on purpose
+  // (`ui.ctx_bar`): they follow a context, and one place changes it.
   const leave = $("ctx-leave");
   if(leave) leave.addEventListener("click", () => CONTEXT.leave());
 }

@@ -191,8 +191,16 @@ mechanisms rather than a wider permission:
   every operational write, and none of those; with it, there is nothing left
   that has to be done at the machine.
 
+- **Files go the same way.** A download used to be an `<a href download>` and an
+  upload a four-megabyte body — the first cannot carry the header that says
+  which node is being driven, the second does not fit the relay. Both are
+  operations now (`transfer`), carried a chunk per frame, so publishing an app
+  or downloading a package happens on the machine the console is pointed at.
+
 A page never has to know which is which: it reads the far node's catalogue and
-draws what that node will answer.
+draws what that node will answer. And a window opened *beside* it — the package
+card, the node card — carries the same context in its address and says so in its
+own strip.
 
 ### What makes the switch reliable
 
@@ -637,6 +645,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state` |
+| POST    | `/api/control`   | …and **files**, on that same channel: `transfer.offer`/`put`/`commit` sends a named set of byte streams a chunk per frame, `transfer.fetch`/`take` reads one back. What the bytes are *for* is a **kind**, with its own reach and its own ceiling — `package` to any console holding `manage`, `app` and `release` behind `govern` |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
 | GET     | `/api/nodes`     | `?scope=active\|known&q=&limit=&offset=` — paginated list of active peers / known nodes — `node.list`, which pages the **active** scope by node so one node's links never straddle a page |
 | POST    | `/api/nodes/forget` | `{id}` — forgets a known node (drops the routing-table entry, cuts a live session if there is one) — `node.forget` |
@@ -657,10 +666,10 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/trust/forgive` | `{node}` — drops everything held against a node — `trust.forgive` |
 | POST    | `/api/trust/accept-change` | `{node}` — "that was me": clears one entry of *Noticed, not judged* and the history behind it (the peer's profile, an issuer's admission rate, and the rule's charge) |
 | POST    | `/api/trust/witness` | `{node, remove?}` — counts a node's abuse reports as if we had seen it ourselves |
-| POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}` |
+| POST    | `/api/app/publish` | `{name, version, files:{path:b64}}` → `{app_id}`. The older spelling, answering for **this** node only: the console publishes through `transfer` now, which follows the context and is not capped by what one HTTP body may be |
 | POST    | `/api/app/fetch`   | `{app_id}` → `{name, version, files:{path:b64}}` |
 | GET     | `/api/store`       | the local view: `{catalog, installed}` — `store.overview`, annotated by the node so a page renders rather than re-derives |
-| POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name |
+| POST    | `/api/store/publish` | `{name, version, notes?, files:{path:b64}}` — publishes and files it under its name. Older spelling, as above (`transfer`, kind `release`) |
 | POST    | `/api/store/install` / `update` / `uninstall` | `{app_id}` — `store.*`, and these **do** travel: an app is not the node's own program, so managing a machine includes managing its apps |
 | GET     | `/api/chat/messages` | `?since=V` → feed (versioned) + profile + contacts/groups + unread + typing. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only the parts that moved (`src/console_feed.py`); the messages travel beside them either way |
 | GET     | `/api/chat/file`   | `?mid=…` → the bytes of a file/medium (images rendered inline) |
@@ -700,7 +709,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/releases/trust` / `untrust` / `auto` / `endorse` | pin a publisher key, take it back, let their releases install by themselves (**404** for a key not accepted for this node's code — there is no such install to allow), or let their signature count towards a quorum. `releases.*`, **local only**: what a node accepts for replacing its own program is pinned by a human at that node |
 | GET     | `/api/packages`  | the package directory — `?q=<name>` asks by name (`packages.search`), `?node=<id>` asks what one node holds and serves (`packages.held`), `&wide=1` asks the *network* instead, which is its own operation with its own ceiling (`packages.lookup`, local only). Nothing is listed: it answers questions |
 | GET     | `/api/packages/<id>` | one signed record, as a page reads it (`packages.entry`); `?fetch=1` also pulls the descriptor it points at (`packages.describe`, local only — it fetches from whoever serves it) |
-| GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz` |
+| GET     | `/api/packages/<id>/download` | the package itself, every byte verified against the hash its author signed, served as an opaque `tar.gz`. Older spelling: a browser navigation cannot carry `X-NMesh-Node`, so this always answers for **this** node — the card downloads through `transfer` (kind `package`) instead |
 | POST    | `/api/packages/install` | `{id, confirm:true}` — fetch, verify, install (a node release restarts; an app does not) |
 | POST    | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried inside that record's publication proof. What it is accepted for follows the record: node software pins a key that may replace this program, an app pins a party to that app. **400** when the node only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |
 | POST    | `/api/packages/subscribe` | `{id, on, auto?, quorum?}` — watch the **package** that record names, and say how many of the signing keys this operator chose must agree on the code first. Stopping also accepts the subscription's own id: it is all the watching table has when this node holds no record for the package |
