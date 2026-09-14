@@ -490,8 +490,31 @@ const NODEVIEW = {
             esc(fleet.asked_caps.join(", ")) + "</b>.");
       if(fleet.waiting_on_us)
         say("server", "Waiting on <b>you</b> to answer its request.", "warn");
+      // What this console *collects* from it, which is a different sentence
+      // from what it is allowed to ask of it — and the one control an operator
+      // wants exactly here, on the node they are looking at, whether they got
+      // to it from the map, from chat or from fleet.
+      if(fleet.logs) say("gauge", this.logsSentence(fleet.logs));
     }
     return '<ul class="nv-rel">' + lines.join("") + "</ul>";
+  },
+
+  // One sentence and one control. The words are the product's, the values are
+  // the node's: a policy this page has never heard of still renders, because
+  // the list comes back with the answer.
+  logsSentence(logs){
+    const words = {always: "always", active: "while its page is open",
+                   never: "never"};
+    const held = logs.records
+      ? plural(logs.records, "line") + " kept here" : "nothing kept yet";
+    return "Its log is collected <b>" + esc(words[logs.policy] || logs.policy) +
+      "</b> — " + esc(held) +
+      (logs.following ? ", following now" : "") + ". " +
+      '<select class="sm" data-nv-logs>' +
+      (logs.policies || []).map((name) =>
+        '<option value="' + esc(name) + '"' +
+        (logs.policy === name ? " selected" : "") + ">" +
+        esc(words[name] || name) + "</option>").join("") + "</select>";
   },
 
   schemes(view){
@@ -812,6 +835,12 @@ const NODEVIEW = {
     if(!element.dataset.nvWired){
       element.dataset.nvWired = "1";
       element.addEventListener("click", (event) => this.act(event, element, options));
+      // A `<select>` is changed, not clicked: the one control in here that the
+      // click handler above would never see.
+      element.addEventListener("change", (event) => {
+        const picker = event.target.closest("[data-nv-logs]");
+        if(picker) this.setLogPolicy(element, picker, options);
+      });
     }
     element.dataset.nvId = id;
     this.current = {id, selfId, options, element, extras:null};
@@ -914,6 +943,17 @@ const NODEVIEW = {
     if(what === "invite"){ await this.invite(element, button, id); return; }
     if(what === "enrol"){ await this.enrol(element, button, id, options); return; }
     if(what === "forget"){ await this.forget(element, id, options); return; }
+  },
+
+  async setLogPolicy(element, picker, options){
+    const id = element.dataset.nvId;
+    picker.disabled = true;
+    try{
+      await this.call("fleet", "logs_policy", {node:id, policy:picker.value});
+      await this.mount(element, id, options);
+    }catch(error){
+      if(!isStale(error)) this.say(element, "That could not be changed", true);
+    }finally{ picker.disabled = false; }
   },
 
   // The fold answers from what this node already holds; this spends a round of

@@ -540,6 +540,16 @@ class FleetBridge:
             "request", "Ask a node we already manage for extra rights",
             [app_api.param("node", "node"), app_api.param("caps", "tokens")],
             changes=True),
+        # What this console collects from that machine, and the one decision
+        # about it. Read travels with `relation` (it is part of how the two
+        # nodes stand); the write does not, for the same reason `enrol` does
+        # not — it is a decision *this* operator makes about their own console.
+        app_api.operation(
+            "logs_policy", "Whether this console collects that machine's log",
+            [app_api.param("node", "node"),
+             app_api.param("policy", "text", required=False, default=""),
+             app_api.param("megabytes", "count", required=False, default=0)],
+            changes=True),
         app_api.operation(
             "invite", "Have a node we manage mint an invitation to its mesh",
             [app_api.param("node", "node"),
@@ -568,12 +578,37 @@ class FleetBridge:
             "waiting_on_them": asked is not None,
             "asked_caps": list((asked or {}).get("caps") or []),
             "waiting_on_us": inbound is not None,
+            # What we collect from it, and what we hold. Part of how the two
+            # nodes stand: "you hold `logs` on it" and "you are keeping its
+            # log" are different sentences and an operator needs both.
+            "logs": self._logs_relation(node) if managed else None,
             # Names *and* what each one lets through: a page offering a choice
             # of rights has to be able to say what it is asking for.
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
                              for cap in CAPABILITIES],
             "page": "/fleet#nodes",
         }
+
+    def _logs_relation(self, node: str) -> dict:
+        policy = self._app.state.log_policy(node)
+        held = (self._logs.status()["nodes"] or {}).get(node) or {}
+        return dict(policy,
+                    following=node in self._app.following(),
+                    records=held.get("records", 0),
+                    used_bytes=held.get("used_bytes", 0),
+                    policies=list(fleet_logs.POLICIES))
+
+    def api_logs_policy(self, node: str, policy: str = "",
+                        megabytes: int = 0) -> dict:
+        """Set what this console does about that machine's log.
+
+        Answered with the relation rather than with "ok": the caller is a panel
+        that has just drawn the old answer, and asking again is how two
+        descriptions of one decision start to disagree."""
+        answer = self.set_log_policy(node, policy or None, megabytes or None)
+        if answer is None:
+            return {"ok": False, "error": "that node is not managed here"}
+        return {"ok": True, "logs": self._logs_relation(node)}
 
     def api_enrol(self, node: str, caps, label: str = "") -> dict:
         return {"sent": bool(self.enrol(node, caps, label))}

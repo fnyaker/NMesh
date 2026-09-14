@@ -138,6 +138,11 @@ and is answered from the far ring — so a partition costs a gap that is reporte
 (`lost`) rather than a silence that is not. Details, bounds and the two grants it
 needs: [`Docs/Apps/fleet`](../Apps/fleet).
 
+The per-machine decision — always, only while its page is open, never — is
+offered wherever that machine appears: on its node card, in Fleet → Logs, and on
+the shared node card the console's map opens (`fleet.relation` carries it,
+`fleet.logs_policy` changes it).
+
 ## What this is not
 
 * **Not a file.** Nothing is written to disk, by design. A ring in memory dies
