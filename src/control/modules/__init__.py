@@ -27,6 +27,7 @@ from .network import NetworkModule
 from .packages import PackagesModule
 from .settings import ConfigModule, TransportsModule
 from .store import StoreModule
+from .transfer import TransferModule
 from .trace import TraceModule
 from .trust import TrustModule
 
@@ -34,7 +35,7 @@ from .trust import TrustModule
 BUILT_IN = (NodeModule, ConfigModule, TransportsModule, TraceModule,
             PseudoModule, AppsModule, TrustModule, NetworkModule,
             ReleasesModule, PackagesModule, KeysModule, StoreModule,
-            JoinModule)
+            JoinModule, TransferModule)
 
 
 def install(plane: ControlPlane, context) -> ControlPlane:

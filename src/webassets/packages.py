@@ -36,6 +36,8 @@ Mounted by the console (Updates and Apps), by the node view, and served at
 not four that drift.
 """
 
+from . import ui
+
 # ---------------------------------------------------------------------------
 # Styles
 # ---------------------------------------------------------------------------
@@ -264,9 +266,13 @@ const PACKAGES = {
     const buttons = [];
     // Downloading works off any copy: the bytes are content-addressed and the
     // hash was signed, so who hands them over is not a question worth asking.
-    buttons.push('<a class="btn" download href="/api/packages/' +
-      encodeURIComponent(row.id) + '/download">' + icon("arrowDown") +
-      " Download</a>");
+    // *Which* copy, though, is very much a question — and it used to be an
+    // `<a href download>`, a browser navigation, which cannot carry the header
+    // saying which node this page is driving. So it always fetched from the
+    // machine serving the page, whichever machine the operator was looking at.
+    // It is a button on the channel now, like everything else here.
+    buttons.push('<button data-pkg-act="download">' + icon("arrowDown") +
+      " Download</button>");
     const core = row.kind === "core";
     if(core && !row.trusted)
       buttons.push('<button class="primary" data-pkg-act="trust"' +
@@ -358,7 +364,33 @@ const PACKAGES = {
       return;
     }
     if(button.dataset.pkgAct === "trust"){ await this.trust(row, element); return; }
+    if(button.dataset.pkgAct === "download"){ await this.download(row, button); return; }
     if(button.dataset.pkgAct === "install"){ await this.install(row, element); }
+  },
+
+  // The bytes off the node this page is driving, a chunk per frame, and then
+  // handed to the browser to save. A package is megabytes and a mesh hop is
+  // not instant, so the button says how far along it is rather than going
+  // quiet — the one thing a long download must never do.
+  async download(row, button){
+    await withBusy(button, async () => {
+      setMessage("pkg-status", "Fetching the package…");
+      try{
+        const got = await CHANNEL.download("package", row.id, (have, all) => {
+          setMessage("pkg-status", all
+            ? "Fetching… " + Math.round(have * 100 / all) + "%"
+            : "Fetching…");
+        });
+        const file = (got.files || [])[0];
+        if(!file){ setMessage("pkg-status", "That package is empty.", true); return; }
+        saveBytes(got.meta.name || file.path, file.bytes);
+        setMessage("pkg-status", "Downloaded " + file.path + ".");
+      }catch(error){
+        if(isStale(error)) return;
+        setMessage("pkg-status",
+                   isRefused(error) ? error.message : "The download failed", true);
+      }
+    });
   },
 
   async onChange(event, element){
@@ -533,7 +565,7 @@ PAGE_HTML = """<!doctype html>
   </form>
 </div>
 
-<main id="main" class="pkg-page hidden">
+<main id="main" class="pkg-page hidden">"""  + ui.ctx_bar(leave=False) + """
   <header class="pkg-page-head">
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Package</span></span></a>
@@ -585,7 +617,10 @@ async function draw(){
 function enter(){
   $("login").classList.add("hidden");
   $("main").classList.remove("hidden");
-  draw();
+  // Drawn once, after the claim in the address has been settled: a card is a
+  // description of a machine, and drawing the wrong machine's first and
+  // correcting it is how somebody reads a number that was never true.
+  CONTEXT.confirm().then(draw, draw);
 }
 
 async function boot(){
@@ -599,7 +634,13 @@ async function boot(){
   }));
   if(window.self !== window.top) document.body.classList.add("framed");
   window.addEventListener("hashchange", draw);
+  // Opened beside a console driving another machine, this page describes that
+  // machine — the id travels in the address, because `noopener` leaves this
+  // window with no sessionStorage to inherit it from. It is a claim until the
+  // console holding the remote session agrees; `confirm` drops it if it does
+  // not, and the strip above says which node is on screen either way.
   CONTEXT.restore();
+  CONTEXT.paint();
 
   $("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -617,7 +658,11 @@ async function boot(){
 
   SESSION.load();
   try{
-    const {ok} = await CHANNEL.ask("node.state");
+    // `local`, deliberately: this asks whether *this* console knows us, and
+    // the context restored a moment ago would otherwise send the question to
+    // the node being managed — whose answer says nothing about our session
+    // here, and whose silence would drop us at a login screen we do not need.
+    const {ok} = await CHANNEL.ask("node.state", null, {local:true});
     if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();

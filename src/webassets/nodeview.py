@@ -58,6 +58,8 @@ carries the console session. Nothing here decides who may do what; it asks, and
 the app answers with the same rules it always applies.
 """
 
+from . import ui
+
 # ---------------------------------------------------------------------------
 # Styles
 # ---------------------------------------------------------------------------
@@ -1110,7 +1112,7 @@ PAGE_HTML = """<!doctype html>
   </form>
 </div>
 
-<main id="main" class="node-page hidden">
+<main id="main" class="node-page hidden">"""  + ui.ctx_bar(leave=False) + """
   <header class="node-page-head">
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Node</span></span></a>
@@ -1193,7 +1195,10 @@ async function draw(){
 function enter(){
   $("login").classList.add("hidden");
   $("main").classList.remove("hidden");
-  draw();
+  // Drawn once, after the claim in the address has been settled: a card is a
+  // description of a machine, and drawing the wrong machine's first and
+  // correcting it is how somebody reads a number that was never true.
+  CONTEXT.confirm().then(draw, draw);
   // The card is registered with both already; this is what arms them. Without
   // it the page opened, drew once and stood still — the one view in the product
   // that was on no cadence at all.
@@ -1214,7 +1219,13 @@ async function boot(){
   // Framed by another app: drop our own chrome so it reads as one panel.
   if(window.self !== window.top) document.body.classList.add("framed");
   window.addEventListener("hashchange", draw);
+  // Opened beside a console driving another machine, this page describes that
+  // machine — the id travels in the address, because `noopener` leaves this
+  // window with no sessionStorage to inherit it from. It is a claim until the
+  // console holding the remote session agrees; `confirm` drops it if it does
+  // not, and the strip above says which node is on screen either way.
   CONTEXT.restore();
+  CONTEXT.paint();
 
   $("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1235,7 +1246,11 @@ async function boot(){
   // the same test every other page in this product makes.
   SESSION.load();
   try{
-    const {ok} = await CHANNEL.ask("node.state");
+    // `local`, deliberately: this asks whether *this* console knows us, and
+    // the context restored a moment ago would otherwise send the question to
+    // the node being managed — whose answer says nothing about our session
+    // here, and whose silence would drop us at a login screen we do not need.
+    const {ok} = await CHANNEL.ask("node.state", null, {local:true});
     if(ok){ enter(); return; }
   }catch(_){}
   SESSION.clear();

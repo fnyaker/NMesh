@@ -3022,17 +3022,16 @@ mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"})
       finally{ await refreshApps(); }
     });
   }));
-function fileToBase64(file){
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
+// What was picked, as bytes. Read here and sent over the channel a chunk at a
+// time (`CHANNEL.upload`) rather than as one body: the relay to a node being
+// managed carries 24 kB per request, so the whole-body route could only ever
+// publish to the machine serving the page — which is exactly the thing this
+// console is not supposed to have two of.
 async function selectedFiles(input){
-  const files = {};
-  for(const file of input.files) files[file.name] = await fileToBase64(file);
+  const files = [];
+  for(const file of input.files)
+    files.push({path: file.name,
+                bytes: new Uint8Array(await file.arrayBuffer())});
   return files;
 }
 $("store-publish-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -3042,16 +3041,21 @@ $("store-publish-btn").addEventListener("click", (event) => withBusy(event.targe
   if(!name || !input.files.length){
     setMessage("store-status", "A name and at least one file are required.", true); return;
   }
-  setMessage("store-status", "Reading and signing files…");
+  setMessage("store-status", "Reading files…");
   try{
-    const {ok, data} = await apiJson("/api/store/publish", "POST",
-      {name, version, notes:$("store-notes").value,
-       files:await selectedFiles(input)});
-    setMessage("store-status", ok
-      ? "Published and filed under its name — anybody can now find it by typing it."
-      : (data.error || "Publish failed"), !ok);
-    if(ok){ input.value = ""; toast("Published " + name + " " + version); }
-  }catch(_){ setMessage("store-status", "Publish failed", true); }
+    const files = await selectedFiles(input);
+    await CHANNEL.upload("release", {name, version, notes:$("store-notes").value},
+                         files, (sent, all) => setMessage("store-status",
+      all ? "Sending… " + Math.round(sent * 100 / all) + "%" : "Signing…"));
+    setMessage("store-status",
+      "Published and filed under its name — anybody can now find it by typing it.");
+    input.value = "";
+    toast("Published " + name + " " + version);
+  }catch(error){
+    if(isStale(error)) return;
+    setMessage("store-status",
+               isRefused(error) ? error.message : "Publish failed", true);
+  }
 }));
 
 // ---- updates ---------------------------------------------------------------
@@ -4061,13 +4065,19 @@ $("publish-btn").addEventListener("click", (event) => withBusy(event.target, asy
   if(!name || !input.files.length){
     setMessage("app-status", "A name and files are required.", true); return;
   }
-  setMessage("app-status", "Publishing content…");
+  setMessage("app-status", "Reading files…");
   try{
-    const {ok, data} = await apiJson("/api/app/publish", "POST",
-      {name, version, files:await selectedFiles(input)});
-    if(ok){ $("app-id-out").textContent = data.app_id; setMessage("app-status", "Content published."); }
-    else setMessage("app-status", data.error || "Publish failed", true);
-  }catch(_){ setMessage("app-status", "Publish failed", true); }
+    const files = await selectedFiles(input);
+    const done = await CHANNEL.upload("app", {name, version}, files,
+      (sent, all) => setMessage("app-status",
+        all ? "Sending… " + Math.round(sent * 100 / all) + "%" : "Publishing…"));
+    $("app-id-out").textContent = done.app_id || "";
+    setMessage("app-status", "Content published.");
+  }catch(error){
+    if(isStale(error)) return;
+    setMessage("app-status",
+               isRefused(error) ? error.message : "Publish failed", true);
+  }
 }));
 $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const app_id = $("fetch-id").value.trim();

@@ -29,7 +29,9 @@ from src.apps import fleet_console
 from src.control import frame as frame_mod
 from src.control import jobs as jobs_mod
 from src.control import params as params_mod
+from src.control import transfer as transfer_mod
 from src.control.modules.jobs import JobsModule
+from src.control.modules.transfer import TransferModule
 from src.control.errors import ControlError
 from src.control.plane import ControlPlane, Origin, REMOTE_BUDGET, operation
 from src.node import MeshNode
@@ -2082,3 +2084,261 @@ class TestTheSecondGrant:
         book = plane.call("jobs.list")["jobs"]
         assert len(book) <= jobs_mod.MAX_JOBS
         assert first not in {entry["job"] for entry in book}
+
+
+# --------------------------------------------------------------------------
+# Files, on the same channel as everything else.
+# --------------------------------------------------------------------------
+
+class TestTransfer:
+    """The last thing that did not follow the context.
+
+    A download was an `<a href download>` — a browser navigation, which cannot
+    carry the header saying which node is being driven — so it fetched from the
+    machine serving the page whichever machine the operator was looking at. And
+    an upload could not have gone the other way at all: the relay caps a request
+    at 24 kB and an app is four megabytes. Both are operations now, so both go
+    where the channel goes."""
+
+    class _Node:
+        def __init__(self):
+            self.published = None
+            self.blob = b"a signed package" * 20000     # ~320 kB: several chunks
+
+        async def fetch_package(self, record):
+            if record == "missing":
+                return None
+            return {"id": record}, self.blob, "thing-1.0.0.pkg"
+
+        async def publish_app(self, name, version, files):
+            self.published = (name, version, files)
+            return b"\xab" * 20
+
+        async def publish_store_app(self, name, version, files, notes=""):
+            self.published = (name, version, files, notes)
+            return {"record": "ab" * 20}
+
+    def _plane(self, node):
+        plane = ControlPlane()
+        plane.register(TransferModule(control.Context(
+            node=node, loop=asyncio.get_event_loop())))
+        plane.register(JobsModule(plane, None))
+        return plane
+
+    @staticmethod
+    def _b64(raw):
+        import base64
+        return base64.b64encode(raw).decode("ascii")
+
+    async def _upload(self, plane, kind, meta, files, origin=Origin.LOCAL):
+        started = plane.call("transfer.offer", {"kind": kind, "meta": meta},
+                             origin=origin)
+        chunk = started["chunk"]
+        for path, blob in files.items():
+            pieces = max(1, -(-len(blob) // chunk))
+            for seq in range(pieces):
+                plane.call("transfer.put", {
+                    "transfer": started["transfer"], "path": path, "seq": seq,
+                    "data": self._b64(blob[seq * chunk:(seq + 1) * chunk])},
+                    origin=origin)
+        return await asyncio.to_thread(
+            plane.call, "transfer.commit", {"transfer": started["transfer"]},
+            origin=origin)
+
+    async def test_an_app_goes_up_a_chunk_at_a_time_and_arrives_whole(self):
+        node = self._Node()
+        plane = self._plane(node)
+        files = {"main.py": b"x" * 40000, "lib/util.py": b"y" * 7,
+                 "empty.txt": b""}
+        answer = await self._upload(plane, "app", {"name": "thing",
+                                                   "version": "2.0.0"}, files)
+        assert answer["app_id"] == "ab" * 20
+        name, version, arrived = node.published
+        assert (name, version) == ("thing", "2.0.0")
+        # Byte for byte, the empty one included — a file with no bytes still
+        # has to exist on the far side rather than be skipped.
+        assert arrived == files
+
+    async def test_a_package_comes_down_a_chunk_at_a_time_and_arrives_whole(self):
+        node = self._Node()
+        plane = self._plane(node)
+        opened = await asyncio.to_thread(
+            plane.call, "transfer.fetch", {"kind": "package", "id": "ab" * 20})
+        assert opened["meta"]["name"] == "thing-1.0.0.pkg"
+        [entry] = opened["files"]
+        assert entry["size"] == len(node.blob)
+        got, seq = b"", 0
+        while True:
+            piece = plane.call("transfer.take", {
+                "transfer": opened["transfer"], "path": entry["path"], "seq": seq})
+            got += piece["data"]
+            if piece["last"]:
+                break
+            seq += 1
+        assert got == node.blob
+        assert seq > 0, "the test blob is meant to need more than one chunk"
+        plane.call("transfer.drop", {"transfer": opened["transfer"]})
+
+    async def test_a_chunk_fits_a_frame_with_its_envelope_around_it(self):
+        """The bound that makes the whole thing possible, held against the one
+        the relay actually carries rather than against a number in a comment."""
+        import base64
+        biggest = control.encode({
+            "v": 1, "id": "0123", "op": "transfer.put",
+            "params": {"transfer": "f" * 16, "path": "a" * 200, "seq": 999999,
+                       "data": base64.b64encode(
+                           b"\xff" * transfer_mod.UP_CHUNK).decode("ascii")}})
+        assert len(biggest) <= frame_mod.MAX_FRAME
+        assert len(biggest) <= fleet_app.CONSOLE_REQ_MAX
+        # And one coming back down fits a reply, base64 and all.
+        assert transfer_mod.DOWN_CHUNK * 4 // 3 < frame_mod.MAX_REPLY
+
+    @pytest.mark.parametrize("path", [
+        "../escape", "a/../../escape", "/etc/passwd", "..", ".", "",
+        "C:/windows", "a/./../../b", "\\\\..\\\\escape",
+    ])
+    def test_a_name_that_climbs_out_of_the_transfer_is_refused(self, path):
+        with pytest.raises(ControlError) as raised:
+            transfer_mod.clean_path(path)
+        assert raised.value.code == "bad_request"
+
+    async def test_a_chunk_out_of_order_or_sent_twice_is_refused(self):
+        plane = self._plane(self._Node())
+        started = plane.call("transfer.offer", {"kind": "app", "meta": {
+            "name": "thing", "version": "1.0.0"}})
+        ident = started["transfer"]
+        plane.call("transfer.put", {"transfer": ident, "path": "a", "seq": 0,
+                                    "data": self._b64(b"one")})
+        # `b"one"` is shorter than a chunk, so it ended that file. Every one
+        # of these is refused — including sequence 0 again, which is the one a
+        # count derived from the length so far would have kept accepting for
+        # ever, appending to a file the sender had already finished.
+        for seq in (0, 1, 2, 7):
+            with pytest.raises(ControlError) as raised:
+                plane.call("transfer.put", {"transfer": ident, "path": "a",
+                                            "seq": seq, "data": self._b64(b"x")})
+            assert raised.value.code == "conflict", seq
+        # Off the loop: `Context.call` refuses to be waited on from the loop it
+        # would marshal onto, which is the freeze that reads as "the console is
+        # slow" (`Docs/Architecture/gotchas.md`).
+        done = await asyncio.to_thread(
+            plane.call, "transfer.commit", {"transfer": ident})
+        assert done["files"] == 1
+
+    def test_a_chunk_larger_than_a_frame_carries_is_refused_by_the_field(self):
+        field = control.param("data", "blob", limit=transfer_mod.UP_CHUNK_B64)
+        assert control.coerce(field, self._b64(b"y" * 64)) == b"y" * 64
+        for bad in (self._b64(b"z" * (transfer_mod.UP_CHUNK + 4096)),
+                    "not base64!!", 7, None):
+            with pytest.raises(ControlError):
+                control.coerce(field, bad)
+
+    async def test_what_the_bytes_are_for_is_what_is_allowed(self):
+        """"May this console send bytes" is not a question worth answering.
+        Publishing an app is, and that is what a kind names."""
+        plane = self._plane(self._Node())
+        offered = {entry["name"] for entry in
+                   plane.call("transfer.kinds", origin=Origin.REMOTE)["kinds"]}
+        assert offered == {"package"}
+        assert {entry["name"] for entry in
+                plane.call("transfer.kinds", origin=Origin.GOVERN)["kinds"]} \
+            == {"package", "app", "release"}
+        with pytest.raises(ControlError) as raised:
+            plane.call("transfer.offer", {"kind": "app"}, origin=Origin.REMOTE)
+        assert raised.value.code == "refused" and "govern" in raised.value.message
+        # And a kind only travels the way it was declared to.
+        with pytest.raises(ControlError) as raised:
+            plane.call("transfer.offer", {"kind": "package"},
+                       origin=Origin.GOVERN)
+        assert raised.value.code == "bad_request"
+
+    async def test_the_grant_is_checked_again_where_the_bytes_are_acted_on(self):
+        """It can be taken back while a transfer is filling, and the moment that
+        matters is the one where something is done with what arrived."""
+        plane = self._plane(self._Node())
+        started = plane.call("transfer.offer", {"kind": "app", "meta": {
+            "name": "x", "version": "1.0.0"}}, origin=Origin.GOVERN)
+        plane.call("transfer.put", {"transfer": started["transfer"], "path": "a",
+                                    "seq": 0, "data": self._b64(b"hi")},
+                   origin=Origin.GOVERN)
+        # Through `invoke`, which is the door a job comes in by: `commit` is a
+        # job operation, so a *direct* remote call is refused for that first and
+        # would never reach the check this test is about.
+        with pytest.raises(ControlError) as raised:
+            plane.invoke("transfer.commit", {"transfer": started["transfer"]},
+                         origin=Origin.REMOTE)
+        # Not "you may not commit this": a transfer another console holds is a
+        # transfer that does not exist here, exactly as with a job.
+        assert raised.value.code == "not_found"
+
+    async def test_a_transfer_is_only_visible_to_the_console_that_opened_it(self):
+        plane = self._plane(self._Node())
+        mine = plane.call("transfer.offer", {"kind": "app"})["transfer"]
+        for origin in (Origin.REMOTE, Origin.GOVERN):
+            with pytest.raises(ControlError) as raised:
+                plane.call("transfer.put", {"transfer": mine, "path": "a",
+                                            "seq": 0, "data": self._b64(b"x")},
+                           origin=origin)
+            assert raised.value.code == "not_found"
+
+    async def test_a_console_at_a_distance_cannot_fill_this_node_with_bytes(self):
+        plane = self._plane(self._Node())
+        for _ in range(transfer_mod.MAX_OPEN_REMOTE):
+            plane.call("transfer.offer", {"kind": "app"}, origin=Origin.GOVERN)
+        with pytest.raises(ControlError) as raised:
+            plane.call("transfer.offer", {"kind": "app"}, origin=Origin.GOVERN)
+        assert raised.value.code == "conflict"
+        # What the network filled does not lock this machine out of its own node.
+        assert plane.call("transfer.offer", {"kind": "app"})["transfer"]
+
+    def test_the_bytes_every_transfer_holds_together_are_bounded(self):
+        """The per-transfer limit multiplied by the number of open transfers is
+        the figure an attacker reads, so there is a second one over all of them."""
+        book = transfer_mod.TransferBook()
+        kind = {"name": "app", "limit": transfer_mod.MAX_HELD * 4,
+                "way": transfer_mod.UP, "reach": "remote"}
+        ident = book.offer(kind, {}, Origin.LOCAL)["transfer"]
+        block = b"\x00" * transfer_mod.UP_CHUNK
+        with pytest.raises(ControlError) as raised:
+            for seq in range(transfer_mod.MAX_HELD // len(block) + 2):
+                book.put(ident, "big", seq, block, Origin.LOCAL)
+        assert raised.value.code == "conflict"
+
+    def test_a_transfer_nobody_touches_is_let_go(self):
+        clock = [0.0]
+        book = transfer_mod.TransferBook(clock=lambda: clock[0])
+        kind = {"name": "app", "limit": 1 << 20, "way": transfer_mod.UP,
+                "reach": "remote"}
+        ident = book.offer(kind, {}, Origin.REMOTE)["transfer"]
+        clock[0] = transfer_mod.IDLE + 1.0
+        with pytest.raises(ControlError) as raised:
+            book.put(ident, "a", 0, b"x", Origin.REMOTE)
+        assert raised.value.code == "not_found"
+        assert book.listing(Origin.REMOTE)["transfers"] == []
+
+    async def test_a_package_that_is_not_there_is_not_a_transfer(self):
+        plane = self._plane(self._Node())
+        with pytest.raises(ControlError) as raised:
+            await asyncio.to_thread(
+                plane.call, "transfer.fetch",
+                {"kind": "package", "id": "missing"})
+        assert raised.value.code == "not_found"
+
+    async def test_committing_nothing_is_refused_rather_than_published(self):
+        plane = self._plane(self._Node())
+        started = plane.call("transfer.offer", {"kind": "app", "meta": {
+            "name": "x", "version": "1.0.0"}})
+        with pytest.raises(ControlError) as raised:
+            plane.call("transfer.commit", {"transfer": started["transfer"]})
+        assert raised.value.code == "conflict"
+
+    async def test_the_two_that_do_work_travel_as_jobs(self):
+        """A directory fetch and a signing run both take longer than the relay
+        holds, so they compose with the other mechanism rather than needing a
+        third: nothing here had to learn what a job is."""
+        plane = self._plane(self._Node())
+        for op, params in (("transfer.fetch", {"kind": "package", "id": "ab"}),
+                           ("transfer.commit", {"transfer": "nope"})):
+            with pytest.raises(ControlError) as raised:
+                plane.call(op, params, origin=Origin.REMOTE)
+            assert raised.value.detail.get("background") is True, op
