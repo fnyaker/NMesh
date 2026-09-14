@@ -574,3 +574,54 @@ class TestNothingKeepsRunningForNobody:
         assert agent.app._log_pump is None
         await operator.app.stop()
         assert operator.app.following() == []
+
+
+class TestTheDecisionIsOfferedWhereTheMachineIs:
+    """A policy about a machine belongs on that machine's card — which is the
+    one the console's map, chat and fleet all open."""
+
+    async def test_the_relation_carries_what_we_collect(self):
+        from src.app_registry import FLEET_APP_ID
+        from src.apps.fleet import FleetApp
+        from src.apps.fleet_state import FleetState
+        from src.apps.fleet_web import FleetBridge
+        from src.node import MeshNode
+        from tests.conftest import make_manager
+        from tests.test_console_fleet import StubClient
+
+        node = MeshNode(transport_manager=make_manager())
+        app = FleetApp(StubClient(), node.app_auth(FLEET_APP_ID),
+                       state=FleetState(), auto_status=False)
+        bridge = FleetBridge(app)
+        bridge.start(asyncio.get_running_loop())
+        machine = "ab" * 20
+        try:
+            app.state.add_managed(machine, caps=["logs"])
+            relation = bridge.api_relation(machine)
+            assert relation["logs"]["policy"] == fleet_logs.DEFAULT_POLICY
+            # The choices come back with the answer, so a page never holds its
+            # own copy of what the policies are.
+            assert relation["logs"]["policies"] == list(fleet_logs.POLICIES)
+            answer = bridge.api_logs_policy(machine, "always")
+            assert answer["ok"] is True
+            assert answer["logs"]["policy"] == "always"
+            assert bridge.api_relation(machine)["logs"]["policy"] == "always"
+            # A node nobody manages has no policy to show, rather than a
+            # default that will never be acted on.
+            assert bridge.api_relation("cd" * 20)["logs"] is None
+            assert bridge.api_logs_policy("cd" * 20, "always")["ok"] is False
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    def test_the_node_card_renders_it_from_what_it_was_told(self):
+        source = webassets.APP_JS
+        block = source.split("logsSentence(logs){")[1].split("schemes(view)")[0]
+        # The words are the product's; the values and the choices are the
+        # node's, so a policy this page has never heard of still renders.
+        assert "logs.policies" in block
+        assert "data-nv-logs" in block
+        # And the sentence says what is *kept here*, not only what the policy
+        # is: "collected always" with nothing kept is the state an operator
+        # most needs to be able to see.
+        assert "logs.records" in block and "logs.following" in block

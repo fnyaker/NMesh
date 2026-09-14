@@ -580,6 +580,18 @@ is the same view as in the console and in chat
 The "Message" button is there; the fleet buttons are not, since you are already
 inside fleet.
 
+That card is also where a machine's **log collection** is decided, wherever the
+card is opened from — the console's map, chat, fleet, or `/node`. It reads the
+`logs` block of `fleet.relation` (what the policy is, whether we are following
+it now, how many lines are held here) and the one control changes it
+(`fleet.logs_policy`). The decision is about a machine, so it belongs on that
+machine's card rather than only in a settings panel; the same policy also shows
+on its node card in the Nodes tab and in Fleet → Logs.
+
+`relation` travels to another operator's console, as it always did — it is a
+read of this node's ledger. `logs_policy` does **not**: what this console
+collects is a decision about this operator's own machine, like `enrol`.
+
 ## What you do with a managed node
 
 - **Status** — uptime, load, memory, disks, distro, package manager. The last
