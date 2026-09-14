@@ -16,6 +16,7 @@ from .app_auth import AppAuth
 from .trace import Trace
 from .node_id import NodeID
 from . import faults
+from . import medium
 from . import routed
 from .routing import RoutingTable, NodeEntry
 from .transport import BaseTransport
@@ -1704,6 +1705,17 @@ class _Peer:
                 # oversized payload). One bad packet must never kill the link:
                 # drop it, count the abuse, and keep serving. Persistent garbage
                 # is treated as hostile and the peer is cut.
+                if self.note_abuse():
+                    return
+                continue
+            # …and what came back has to *be* a packet. Everything below counts
+            # its length, traces it and hands it to a handler, all three of
+            # which assumed one — so a transport answering `None` raised
+            # outside this guard, took the link down and left an unretrieved
+            # task behind it. A medium that answers nonsense is charged for it
+            # exactly like a frame that would not decode (`src/medium.py`).
+            packet = medium.received(packet)
+            if packet is None:
                 if self.note_abuse():
                     return
                 continue
@@ -3535,13 +3547,10 @@ class MeshNode:
         it. Applied locally rather than folded into the accord for exactly that
         reason — the two ends may run different transports settings, and each
         one is right about its own."""
-        try:
-            timeout = peer.transport.idle_timeout()
-        except Exception:
+        timeout = medium.idle_timeout(peer.transport)
+        if timeout is None:
             return None
-        if not timeout or timeout <= 0:
-            return None
-        return float(timeout) * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
+        return timeout * 1000.0 * mlo.IDLE_TIMEOUT_SHARE
 
     def _keepalive_interval(self, peer: '_Peer') -> float:
         """Seconds until this link's next probe. O(1): the role this link plays
@@ -6304,12 +6313,9 @@ class MeshNode:
 
         Never raises: a transport that cannot say where its peer is has not
         proved anything, which is the safe answer."""
-        try:
-            if isinstance(peer.transport, RelayedTransport):
-                return False
-            ip = peer.transport.remote_ip()
-        except Exception:
+        if isinstance(peer.transport, RelayedTransport):
             return False
+        ip = medium.remote_ip(peer.transport)
         return bool(ip) and is_global_ip(ip)
 
     def _note_public_scheme(self, scheme: str | None) -> None:
@@ -6348,10 +6354,8 @@ class MeshNode:
         ctx = self._reachability_ctx()
         out = list(self._transport_manager.reachability(ctx))
         if self._udp_server is not None and self._udp_listen_uri is not None:
-            try:
-                out.extend(self._udp_server.reachability(self._udp_listen_uri, ctx))
-            except Exception:
-                pass
+            out.extend(medium.reachability(self._udp_server,
+                                           self._udp_listen_uri, ctx))
         return out
 
     def public_endpoints(self) -> list[str]:
@@ -7250,10 +7254,7 @@ class MeshNode:
         if peer is not None:
             in_use = peer.remote_addr
             if in_use is None:
-                try:
-                    in_use = (peer.transport.endpoints() or {}).get("remote")
-                except Exception:
-                    in_use = None
+                in_use = medium.endpoints(peer.transport).get("remote")
         book = self._dial_log.get(node_hex) or {}
         rows = []
         for uri in list(addresses)[:_DIAL_LOG_ADDRESSES]:
@@ -7283,19 +7284,14 @@ class MeshNode:
         (``BaseTransport.endpoints`` / ``stats``), so a medium this file has
         never heard of describes itself and shows up in the console with no
         change here."""
-        endpoints = {"local": None, "remote": None}
-        stats: dict = {}
         transport = peer.transport
-        try:
-            endpoints = transport.endpoints() or endpoints
-        except Exception:
-            pass          # a transport that cannot describe itself is not a fault
-        try:
-            stats = {str(key)[:32]: value
-                     for key, value in (transport.stats() or {}).items()
-                     if isinstance(value, (int, float, str, bool)) or value is None}
-        except Exception:
-            stats = {}
+        # Both through the one reader, which guards the call *and* the answer.
+        # This used to guard only the call, and bound `stats` here rather than
+        # where every other medium answer is bounded — two spellings of one
+        # rule, and the one a new call site copies is whichever it happens to
+        # be sitting next to (`src/medium.py`).
+        endpoints = medium.endpoints(transport)
+        stats = medium.stats(transport)
         return {
             "scheme": self._peer_scheme(peer),
             "dialled": peer.remote_addr,
@@ -8076,10 +8072,7 @@ class MeshNode:
         these a per-connection limit rather than a per-peer one."""
         if peer.authenticated_id is not None:
             return peer.authenticated_id.raw
-        try:
-            remote = peer.transport.remote_ip()
-        except Exception:
-            remote = None
+        remote = medium.remote_ip(peer.transport)
         return (b"ip:" + remote.encode("utf-8", "replace")) if remote \
             else b"anon:%d" % id(peer)
 
@@ -8711,7 +8704,7 @@ class MeshNode:
             return
         # Dial ONLY the address we observed this peer at — never a value it
         # supplied — so it can never make us dial an arbitrary victim.
-        observed = peer.transport.remote_ip()
+        observed = medium.remote_ip(peer.transport)
         if observed is None:
             return
         # …and never inline. A dial-back is two bounded waits of
@@ -12487,7 +12480,7 @@ Hints come first (the ``have`` byte on an announce, from an
         self._wake_autonat()
         self._persist_state()  # persist the newly-known peer for restart recovery
         # Tell the peer the source IP we saw — that's their public address.
-        observed = peer.transport.remote_ip()
+        observed = medium.remote_ip(peer.transport)
         if observed and _is_ip_address(observed):
             try:
                 await peer.send(Packet.create(OBSERVED_ADDR, self._id.raw,
@@ -13429,13 +13422,13 @@ Hints come first (the ``have`` byte on an announce, from an
             return  # can't relay if we don't have a link to the target
 
         # Observe the requester's source IP
-        requester_ip = peer.transport.remote_ip()
+        requester_ip = medium.remote_ip(peer.transport)
         if requester_ip is None or not _is_ip_address(requester_ip):
             return
         requester_udp_addr = f"{requester_ip}:{requester_udp_port}"
 
         # Observe the target's source IP (from its TCP connection to us)
-        target_ip = target_peer.transport.remote_ip()
+        target_ip = medium.remote_ip(target_peer.transport)
         if target_ip is None or not _is_ip_address(target_ip):
             return
         # We don't know the target's UDP port yet — ask it by sending a
