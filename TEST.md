@@ -297,6 +297,12 @@ tests/
 │     never a payload in what is kept, a bounded ring, automatic stop, a
 │     malformed packet that does not raise, throughput computed over the
 │     recording window (not over the burst), the file in 0600
+├── test_fleet_logs.py                                 — a fleet's logs: the
+│     `logs` grant that `status` and `manage` do not imply, a follow that
+│     expires rather than running for ever, a push carrying a rid nobody asked
+│     for, one bounded ring per machine so a chatty one cannot push out a quiet
+│     one's, and a merged view ordered by *our* clock rather than by the time
+│     the far machine supplied
 ├── test_logbook.py                                    — the log ring: nothing
 │     kept until asked and what was kept dropped when it stops, a flood that
 │     never grows past the megabytes an operator allowed, a reader too slow for

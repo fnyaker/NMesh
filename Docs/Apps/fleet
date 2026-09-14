@@ -58,6 +58,7 @@ From the most harmless to total. One never implies another.
 | Capability | What it allows |
 |---|---|
 | `status` | reading uptime, load, memory, disks |
+| `logs` | reading that node's log, and following it live as it is recorded |
 | `invite` | minting a single-use invitation to **that node's** mesh, on its behalf — offered wherever somebody is inviting a machine, including the console's own *Add a node* page |
 | `update` | running the machine's package manager upgrade |
 | `scan` | scanning this machine's LAN for SSH hosts |
@@ -718,6 +719,78 @@ bounded, and one thing is deliberately left out: a container's **environment
 values**. Those routinely hold its secrets, so only the names travel. Somebody
 who needs a value has a shell.
 
+## `logs`: what the machines said, collected here
+
+A node keeps a bounded ring of what it said about itself, off until somebody
+asks for it ([`Docs/Architecture/logging.md`](../Architecture/logging.md)). A
+console holding `manage` can read one while it is looking at that machine. This
+capability answers the question a *fleet* has instead, which is the one neither
+of those answers: **what happened on any of these machines while nobody was
+looking**. A ring on a node that has since rebooted is gone, and a node that was
+unreachable at the time had nobody to tell.
+
+So the operator collects. Three pieces, and each one is a refusal as much as a
+feature.
+
+**The machine decides, per grant.** `logs` is asked for by name and taken back by
+name; `status` does not imply it and neither does `manage`. A log says who a node
+talked to and when, which is routing metadata about *its* neighbours as much as
+about it.
+
+**The machine's own app has to be allowed too.** Fleet reads the log through the
+connector like everything else it touches, so the node must have granted its
+fleet app the `logs` right in the console's Apps page. Two grants, deliberately:
+one says which operator may read, the other says that this machine's fleet app
+may read *anything*. A request refused for the second reason says so, because
+"nothing came back" and "not permitted" must not look alike.
+
+**A follow expires.** `LOGS_REQUEST` with `op: "follow"` registers the asking
+console for `LOG_FOLLOW_TTL` and no longer; the operator's console renews it
+while it still wants the lines. A console that died therefore stops costing that
+machine anything without the machine having to notice, and there is no state on
+the agent side that outlives the conversation.
+
+Nothing is buffered per follower. The machine's own ring **is** the buffer: a
+follow carries the sequence number the operator already holds, so a console that
+was away — or a partition that lasted an hour — resumes exactly where it stopped,
+and is told plainly how many lines went past if the ring turned over
+(`lost`). That is what makes this work over a mesh rather than only over a link
+that stays up.
+
+### What the operator keeps
+
+One bounded ring **per machine** (`src/apps/fleet_logs.py`), never one pool: a
+machine that says a great deal must not be able to push out the log of one that
+says little, which is precisely what an adversary among the managed nodes would
+aim for. The number of rings is bounded too, and the one that has been silent
+longest is dropped first — dropping the largest would reward a flood.
+
+Two times are kept per line, and they are not the same claim: `at` is **ours**
+(when the line reached this machine), which is what the merged view is ordered
+by, and `said_at` is the sending node's own word for when it happened, shown but
+never sorted on. A machine we manage is an adversary that happens to hold a
+grant, and an ordering it supplies is an ordering it can pin itself to the top
+of.
+
+### What is collected, and from whom
+
+A policy per machine, with a fleet-wide default (Fleet → Logs):
+
+| Policy | What it does |
+|---|---|
+| `always` | follow this machine whenever we can reach it |
+| `active` | follow it only while a page here is open on it — the default |
+| `never` | never follow it; its log is still readable by asking |
+
+The ring size is the same shape: a default in megabytes, overridable per
+machine. Both are stored in the ledger, because they are decisions an operator
+made. What was *collected* is memory only, like every other ring in this
+product.
+
+The **Logs** panel reads what is already held — by machine, by level (a floor,
+not an equality), by source, by text, and between two instants — and asks the
+network only through the button that says it is asking.
+
 ## Groups: pointing at several machines at once
 
 A group is **this console's own name** for a set of machines. It says nothing to
@@ -1106,6 +1179,7 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 | `CONSOLE_SESSION` / `_ISSUED` | 0x52 / 0x53 | → / ← | the request only (`fleet.passwordless`) |
 | `FILE_REQUEST` / `_REPLY` / `_DATA` | 0x70–0x72 | → / ← / ← | the request only (`fleet.shell`) |
 | `DOCKER_REQUEST` / `_REPLY` | 0x80 / 0x81 | → / ← | the request only (`fleet.docker`) |
+| `LOGS_REQUEST` / `_REPLY` | 0x90 / 0x91 | → / ← | the request only (`fleet.logs`) |
 
 `DOCKER_REQUEST` carries a **named operation** rather than having a message type
 per container verb: that would be twenty entries in the dispatch table for one

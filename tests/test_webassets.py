@@ -13,6 +13,7 @@ import tempfile
 import pytest
 
 from src import webassets
+from src.webassets import terminal
 from src.webassets import ui
 
 NODE = shutil.which("node")
@@ -757,7 +758,13 @@ def test_the_terminal_holds_its_read_instead_of_asking_on_a_timer():
     assert "setInterval" not in read
     # And there is no interval anywhere in the driver: the only timer left is
     # the retry after a failed read, and the frame that coalesces repaints.
-    driver = source.split("// ---- one shell session")[1].split("// ---- /term")[0]
+    #
+    # Read from the **driver's own module**, not from a slice of the bundle.
+    # The slice ran from the driver's heading to a marker that only exists in
+    # the *other* bundle (`/term`), so on /fleet it swallowed the whole page
+    # script below it — and any timer a page added, anywhere, failed this rule
+    # as though the terminal had grown one.
+    driver = terminal.JS.split("// ---- one shell session")[1]
     assert "setInterval" not in driver
 
 

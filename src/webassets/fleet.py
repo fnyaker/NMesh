@@ -50,6 +50,7 @@ FLEET_HTML = """<!doctype html>
       <button role="tab" data-tab="docker" data-label="Docker" aria-selected="false"><span class="lbl">Docker</span><span id="nav-docker" class="tail"></span></button>
       <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false"><span class="lbl">Discover &amp; deploy</span></button>
       <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false"><span class="lbl">Shell</span></button>
+      <button role="tab" data-tab="logs" data-label="Logs" aria-selected="false"><span class="lbl">Logs</span><span id="nav-logs" class="tail"></span></button>
       <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false"><span class="lbl">Activity</span></button>
     </nav>
     <div class="rail-foot">
@@ -354,6 +355,70 @@ FLEET_HTML = """<!doctype html>
       </article>
     </section>
 
+    <!-- ── Logs ─────────────────────────────────────────────────────────── -->
+    <section id="panel-logs" class="content panel" role="tabpanel" data-panel="logs" hidden>
+      <div class="page-head">
+        <div class="grow"><p class="eyebrow">What the machines said</p><h1>Logs</h1>
+          <p class="lede">Lines collected from the machines this node manages —
+            what happened on them while nobody was looking. Kept here, in memory,
+            one bounded ring per machine.</p></div>
+      </div>
+
+      <article class="card">
+        <div class="card-head"><div class="grow"><h2>Collection</h2>
+          <div class="sub">What is followed, and how much of it is kept.</div></div></div>
+        <div class="card-body">
+          <div class="row wrap gap-4">
+            <label class="field"><span>Default behaviour</span>
+              <select id="logs-default-policy">
+                <option value="always">Always follow</option>
+                <option value="active">Only while a page is open on it</option>
+                <option value="never">Never — ask when needed</option>
+              </select></label>
+            <label class="field"><span>Megabytes kept per machine</span>
+              <input id="logs-default-size" type="number" min="0.1" step="0.5"></label>
+            <span class="grow"></span>
+            <button id="logs-forget" class="danger">Forget everything collected</button>
+          </div>
+          <div id="logs-collection" class="small muted"></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><div class="grow"><h2>Lines <span id="logs-count" class="badge"></span></h2>
+          <div class="sub">Newest first, by the time this node received them.</div></div></div>
+        <div class="card-body">
+          <div class="row wrap gap-4">
+            <label class="field"><span>Machine</span>
+              <select id="logs-node"><option value="">Every machine</option></select></label>
+            <label class="field"><span>Level</span>
+              <select id="logs-level">
+                <option value="">Everything</option>
+                <option value="debug">debug and above</option>
+                <option value="info">info and above</option>
+                <option value="warn">warnings and errors</option>
+                <option value="error">errors only</option>
+              </select></label>
+            <label class="field"><span>Source</span>
+              <input id="logs-source" type="search" placeholder="node, peers, app:…"></label>
+            <label class="field"><span>Contains</span>
+              <input id="logs-contains" type="search" placeholder="text or a field value"></label>
+            <label class="field"><span>Since</span>
+              <input id="logs-since" type="datetime-local"></label>
+            <label class="field"><span>Until</span>
+              <input id="logs-until" type="datetime-local"></label>
+            <span class="grow"></span>
+            <button id="logs-fetch">Ask this machine now</button>
+          </div>
+          <div id="logs-policy" class="small muted"></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>When</th><th>Machine</th><th>Level</th><th>Source</th>
+              <th>Line</th></tr></thead>
+            <tbody id="logs-rows"></tbody></table></div>
+        </div>
+      </article>
+    </section>
+
     <!-- ── Activity ─────────────────────────────────────────────────────── -->
     <section id="panel-activity" class="content panel" role="tabpanel" data-panel="activity" hidden>
       <div class="page-head">
@@ -496,7 +561,7 @@ async function poll(){
     capBoxes($("deploy-caps"), ["status", "update", "manage", "passwordless"]);
   }
   paintInbox(); paintGroups(); paintNodes(); paintOperators(); paintPickers();
-  paintDocker(); paintLog(); paintJobs();
+  paintDocker(); paintLog(); paintJobs(); paintLogNodes();
   if(first) paintHosts(null);
   // A scan asked of a remote node answers asynchronously: its result lands in
   // ST.scans on a later poll, so the deploy tab has to redraw here.
@@ -796,6 +861,133 @@ function paintLog(){
   while(box.childElementCount > 500) box.removeChild(box.firstChild);
   if(atEnd) box.scrollTop = box.scrollHeight;
 }
+// ---- the logs of the machines we manage ------------------------------------
+// Read from what this node has already collected, never from the network: a
+// page scrolling a log must not become traffic towards forty machines. The one
+// button that *does* ask is the one labelled as asking.
+let LOGS = {lines:[], policies:{}, defaults:{}, status:{}};
+let LOGS_TIMER = null;
+
+function logsFilters(){
+  const stamp = (id) => {
+    const raw = $(id).value;
+    if(!raw) return 0;
+    const at = Date.parse(raw);
+    return Number.isFinite(at) ? Math.floor(at / 1000) : 0;
+  };
+  return {node: $("logs-node").value, level: $("logs-level").value,
+          source: $("logs-source").value.trim(),
+          contains: $("logs-contains").value.trim(),
+          since_time: stamp("logs-since"), until_time: stamp("logs-until")};
+}
+async function refreshLogs(){
+  if(ROUTER.section !== "logs") return;
+  const filters = logsFilters();
+  const query = Object.entries(filters)
+    .filter(([_k, value]) => value !== "" && value !== 0)
+    .map(([key, value]) => key + "=" + encodeURIComponent(value)).join("&");
+  try{
+    LOGS = await apiJson("/api/fleet/logs" + (query ? "?" + query : ""));
+  }catch(_){ return; }            // keep what is on screen; it was true a moment ago
+  paintLogs();
+}
+function paintLogs(){
+  const lines = LOGS.lines || [];
+  $("logs-count").textContent = lines.length
+    ? lines.length + " of " + (LOGS.matched || lines.length) : "";
+  $("nav-logs").textContent = (LOGS.following || []).length || "";
+  setHTML("logs-rows", lines.length ? lines.map(logRow).join("")
+    : '<tr><td colspan="5">' + emptyHTML("Nothing collected yet",
+        "Machines are followed by the rule above; one that is never followed " +
+        "can still be asked.") + "</td></tr>");
+  const held = LOGS.status || {};
+  const nodes = Object.keys(held.nodes || {}).length;
+  $("logs-collection").textContent =
+    nodes ? nodes + " machine(s) held, " + fmtBytes(held.used_bytes || 0) +
+            " compressed, " + (held.records || 0) + " line(s); following " +
+            (LOGS.following || []).length
+          : "Nothing is being kept yet.";
+  const policy = LOGS.policies && LOGS.policies[$("logs-node").value];
+  $("logs-policy").textContent = policy
+    ? "This machine: " + policy.policy + ", " + policy.megabytes + " MB" +
+      ((policy.own || []).length ? " (its own setting)" : " (the default)")
+    : "";
+  const defaults = LOGS.defaults || {};
+  if(document.activeElement !== $("logs-default-policy") && defaults.policy)
+    $("logs-default-policy").value = defaults.policy;
+  if(document.activeElement !== $("logs-default-size") && defaults.megabytes)
+    $("logs-default-size").value = defaults.megabytes;
+}
+function logRow(line){
+  const fields = line.fields || {};
+  const said = fields.said_at ? " · said " + esc(fmtTime(fields.said_at)) : "";
+  const extra = Object.entries(fields)
+    .filter(([key]) => key !== "said_at" && key !== "seq")
+    .map(([key, value]) => key + "=" + value).join(" ");
+  return "<tr><td class=\"mono small\" title=\"" + esc(fmtTime(line.at)) + said +
+    "\">" + esc(fmtTime(line.at)) + "</td>" +
+    "<td class=\"mono small\">" + esc(shortId(line.node || "")) + "</td>" +
+    "<td>" + badge(esc(line.level), line.level === "error" ? "danger"
+      : line.level === "warn" ? "warn" : "") + "</td>" +
+    "<td class=\"mono small\">" + esc(line.source || "") + "</td>" +
+    "<td>" + esc(line.message || "") +
+    (extra ? ' <span class="muted small">' + esc(extra) + "</span>" : "") +
+    "</td></tr>";
+}
+function paintLogNodes(){
+  // The machines we manage, as a filter. Kept in step with the ledger rather
+  // than with what has spoken: a machine that has said nothing is exactly the
+  // one an operator goes looking for.
+  fill($("logs-node"), [["", "Every machine"]].concat(
+    (ST.managed || []).map((node) =>
+      [node.id, node.label || node.pseudo || shortId(node.id)])));
+}
+// While the panel is open, on its own cadence. Reading a node's log is also
+// what *keeps* an `active` follow alive on that machine, so a page left open
+// is a page still receiving — which is the behaviour the policy promises.
+setInterval(() => { if(ROUTER.section === "logs") refreshLogs(); }, 5000);
+for(const id of ["logs-node", "logs-level", "logs-source", "logs-contains",
+                 "logs-since", "logs-until"]){
+  $(id).addEventListener("input", () => {
+    clearTimeout(LOGS_TIMER);
+    LOGS_TIMER = setTimeout(refreshLogs, 200);
+  });
+}
+$("logs-default-policy").addEventListener("change", async () => {
+  await apiJson("/api/fleet/logs-policy", "POST",
+                {policy: $("logs-default-policy").value});
+  refreshLogs();
+});
+$("logs-default-size").addEventListener("change", async () => {
+  await apiJson("/api/fleet/logs-policy", "POST",
+                {megabytes: Number($("logs-default-size").value) || 0});
+  refreshLogs();
+});
+$("logs-fetch").addEventListener("click", async (event) => {
+  const node = $("logs-node").value;
+  if(!node){ toast("Choose a machine first", "warn"); return; }
+  await withBusy(event.target, async () => {
+    try{
+      await apiJson("/api/fleet/logs-fetch", "POST", {node});
+      toast("Asked " + shortId(node) + " for its log");
+    }catch(_){ toast("That machine did not answer", "danger"); }
+  });
+  setTimeout(refreshLogs, 1200);
+});
+$("logs-forget").addEventListener("click", async (event) => {
+  const agreed = await confirmAction({
+    title: "Forget every collected log?",
+    body: '<p class="muted small">The lines this node has collected from the ' +
+      "machines it manages are dropped. Their own rings are untouched.</p>",
+    confirmLabel: "Forget", danger: true});
+  if(!agreed) return;
+  await withBusy(event.target, async () => {
+    await apiJson("/api/fleet/logs-forget", "POST", {});
+    toast("Collected logs dropped");
+  });
+  refreshLogs();
+});
+
 // ---- notifications ---------------------------------------------------------
 // These used to be chips laid straight into the topbar, which grew the bar every
 // time a job or a request showed up — the one place on the page whose height
@@ -1650,6 +1842,7 @@ $("dk-refresh").addEventListener("click", (event) => withBusy(event.target, asyn
 // somebody else's machine, and a tab nobody is looking at should cost nothing.
 ROUTER.onChange = (section) => {
   if(section === "docker" && DK.node && DK.overview === null) dockerLoad();
+  if(section === "logs") refreshLogs();
 };
 $("dk-stack-new").addEventListener("click", () => stackDialog());
 $("dk-container-new").addEventListener("click", () => runDialog());

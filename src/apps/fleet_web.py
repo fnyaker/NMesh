@@ -27,14 +27,14 @@ from collections import OrderedDict, deque
 
 from .. import app_api
 from ..node_id import NodeID
-from . import fleet_files
+from . import fleet_files, fleet_logs
 from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
     EnrolAnswered, EnrolRequested, Failure, FileTransferError, InviteIssued,
-    NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput,
-    StatusReceived,
+    LogsReceived, NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened,
+    ShellOutput, StatusReceived,
 )
 from .fleet_state import (CAP_DESCRIPTIONS, CAPABILITIES, clean_caps,
                           clean_stack_names)
@@ -86,6 +86,11 @@ _CALL_TIMEOUT = 30.0
 # reading from a slow disk, and short enough that a page never hangs on a node
 # that has gone away.
 _FILE_TIMEOUT = 40.0
+# How often the follows are reconciled against the policies and renewed. Well
+# inside `fleet.LOG_FOLLOW_TTL`, so a node never stops sending between two
+# renewals, and long enough that following forty machines is forty frames a
+# minute rather than a conversation.
+_FOLLOW_INTERVAL = 60.0
 MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
 REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
 
@@ -128,15 +133,36 @@ class FleetBridge:
         # ``_call`` returns, so completion must not depend on that ordering.
         self._done_early: "OrderedDict[str, tuple]" = OrderedDict()
         self._notice: str = ""
+        # The logs of the machines we manage, one bounded ring each
+        # (`fleet_logs.LogArchive`). Memory only, like every ring in this
+        # product: what an operator chose to *collect* is persisted in the
+        # ledger, what was collected is not.
+        self._logs = fleet_logs.LogArchive()
+        self._logs.set_default_megabytes(
+            self._app.state.log_defaults().get("megabytes"))
+        self._follow_task: asyncio.Task | None = None
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
         self._app.add_listener(self._on_event)
+        # Armed *on* the loop, never from whatever thread called this: a task
+        # created from another thread is created outside the loop's own
+        # bookkeeping, and this is called from the console's start as readily
+        # as from the node's.
+        loop.call_soon_threadsafe(self._arm_follow_loop)
+
+    def _arm_follow_loop(self) -> None:
+        if self._follow_task is None or self._follow_task.done():
+            self._follow_task = asyncio.get_event_loop().create_task(
+                self._follow_loop())
 
     def stop(self) -> None:
         self._app.remove_listener(self._on_event)
+        if self._follow_task is not None:
+            self._follow_task.cancel()
+            self._follow_task = None
 
     @property
     def me(self) -> str:
@@ -178,6 +204,15 @@ class FleetBridge:
                     else "now lets us")
             self._say("warn", f"{short}… {what} {', '.join(event.caps)}",
                       node_hex)
+        elif isinstance(event, LogsReceived):
+            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost)
+            if event.following is False:
+                self._say("warn", f"{short}… stopped sending its log", node_hex)
+            if kept or event.lost:
+                with self._lock:
+                    self._bump()
+            if not event.pushed and event.following is None:
+                self._finish(event.rid, "ok")
         elif isinstance(event, StatusReceived):
             self._finish(event.rid, "ok")
             with self._lock:
@@ -781,6 +816,105 @@ class FleetBridge:
             self._say("ok", f"update started on {len(started)} node(s) "
                             f"in {name!r}")
         return {"group": name, "started": started, "refused": refused}
+
+    # -- the logs of the machines we manage ---------------------------------
+    #
+    # Collected rather than asked for, because the question a fleet has is
+    # "what happened while nobody was looking" and a ring on a node that has
+    # since rebooted cannot answer it. What is collected is a decision per node
+    # (`fleet_logs`): every machine an operator actually watches, only the ones
+    # with a page open, or none.
+
+    async def _follow_loop(self) -> None:
+        """Keep the follows matching the policies, and renew the ones we want.
+
+        Renewed rather than opened once: a follow on the far side expires
+        (`fleet.LOG_FOLLOW_TTL`), so a console that died stops costing that node
+        anything without it having to notice. The price is this loop, and it is
+        one signed frame per followed node per interval."""
+        while True:
+            await asyncio.sleep(_FOLLOW_INTERVAL)
+            try:
+                await self._reconcile_follows()
+            except asyncio.CancelledError:
+                raise
+            except Exception:               # noqa: BLE001 — never the reason
+                continue                    # the console stops updating
+
+    async def _reconcile_follows(self) -> None:
+        state = self._app.state
+        following = set(self._app.following())
+        for row in state.managed():
+            node_hex = row.get("id") or ""
+            if not node_hex:
+                continue
+            policy = state.log_policy(node_hex)
+            wanted = (state.may_use(node_hex, "logs")
+                      and self._logs.wants(node_hex, policy.get("policy")))
+            if wanted:
+                # Always, not only when it is new: this *is* the renewal, and
+                # it carries what we hold so a node that restarted its ring, or
+                # a link that was down, resumes without a gap.
+                await self._app.follow_logs(self._node(node_hex), True,
+                                            seq=self._logs.seen(node_hex))
+            elif node_hex in following:
+                await self._app.follow_logs(self._node(node_hex), False)
+
+    def logs(self, node_hex: str = "", **filters) -> dict:
+        """What we hold, for the fleet log page. Never asks the network."""
+        answer = self._logs.query(node=str(node_hex or ""), **filters)
+        answer["policies"] = {
+            row["id"]: self._app.state.log_policy(row["id"])
+            for row in self._app.state.managed()}
+        answer["defaults"] = self._app.state.log_defaults()
+        answer["following"] = self._app.following()
+        answer["status"] = self._logs.status()
+        return answer
+
+    def logs_watching(self, node_hex: str) -> None:
+        """A page is open on this node — which is what the `active` policy
+        means. Said as it happens rather than stored: a page that was closed
+        stops saying it, and so does a browser that crashed."""
+        if node_hex:
+            self._logs.note_active(str(node_hex))
+
+    def logs_fetch(self, node_hex: str, **filters) -> str:
+        """Ask a node for its log now, whatever its policy says about
+        collecting it. This is the ``never`` policy's escape hatch, and the
+        answer lands in that node's ring like any other."""
+        return self._job(self._call(self._app.request_logs(
+            self._node(node_hex), op="since",
+            seq=self._logs.seen(node_hex), **filters)), "logs", node_hex)
+
+    def set_log_policy(self, node_hex: str, policy=None, megabytes=None,
+                       inherit: bool = False) -> dict | None:
+        answer = self._app.state.set_log_policy(
+            str(node_hex), policy=policy, megabytes=megabytes, inherit=inherit)
+        if answer is not None:
+            self._logs.set_megabytes(
+                str(node_hex), 0 if inherit or "megabytes" not in
+                (answer.get("own") or []) else answer.get("megabytes"))
+            with self._lock:
+                self._bump()
+        return answer
+
+    def set_log_defaults(self, policy=None, megabytes=None) -> dict:
+        answer = self._app.state.set_log_defaults(policy=policy,
+                                                  megabytes=megabytes)
+        self._logs.set_default_megabytes(answer.get("megabytes"))
+        with self._lock:
+            self._bump()
+        return answer
+
+    def forget_logs(self, node_hex: str = "") -> dict:
+        """Drop what we hold — one node's, or every node's."""
+        if node_hex:
+            self._logs.forget(str(node_hex))
+        else:
+            self._logs.clear()
+        with self._lock:
+            self._bump()
+        return self._logs.status()
 
     def set_update_stacks(self, node_hex: str, stacks) -> list[str]:
         return self._app.state.set_update_stacks(node_hex, stacks)
