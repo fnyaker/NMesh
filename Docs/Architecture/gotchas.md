@@ -1291,6 +1291,99 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   must be idempotent and order-independent, or the operation stays "running"
   forever. (Symptom: a test green on its own, red in parallel.)
 
+## Guarding the call is half the job; the answer is the other half
+
+The `mlo` crash was one instance of a shape that was all over the boundary with
+pluggable code. A scan of every call the core makes into a transport, a server,
+an app or a bridge found the rest of it, and they all read the same way:
+
+```python
+try:
+    timeout = peer.transport.idle_timeout()   # guarded
+except Exception:
+    return None
+if not timeout or timeout <= 0:               # TypeError on a string
+```
+
+The `try` is there. It ends one line too early. `BaseTransport.idle_timeout` is
+annotated `float | None` and the code below the guard believed the annotation —
+which is a note between people who agree, and a plug-in is not bound by it. The
+same shape, four more times:
+
+| Where | Trusted | What a wrong answer did |
+|---|---|---|
+| `_rate_key` | `remote_ip()` is a `str` | `AttributeError` on the pre-auth rate limiter |
+| `_idle_ceiling` | `idle_timeout()` is a number | `TypeError` inside the keepalive sweep |
+| `_Peer._loop` | `receive()` is a `Packet` | link down, task exception nobody retrieved, peer never charged |
+| `reachability()` | a server answers descriptors | a `TypeError` in the console, the join ticket and the addressing logic |
+| `AppHost._start` | a factory answers `(app, bridge)` | `app, bridge = built` raised through `apply()`, which on start-up is the node |
+
+All of them now go through one reader — `src/medium.py` for a medium,
+an explicit shape check for a factory — which guards the call *and* the answer,
+bounds it, and writes the failure down. The rule to carry:
+
+> **A type annotation on a plug-in's method is a request, not a guarantee.**
+> Anything that crosses that boundary is checked on the way back exactly as
+> bytes off a socket are checked on the way in.
+
+And one more, learned immediately and the hard way: `medium._ask` was first
+written `_ask("endpoints", transport.endpoints, default)`. The attribute is read
+**before** the call, so a transport that does not implement an optional method —
+every minimal implementation, which is a *correct* implementation — raised an
+`AttributeError` the guard never saw. The `getattr` belongs inside the `try`.
+The suite caught it on the first run, which is the whole argument for having one
+reader: the mistake is available once instead of at every call site.
+
+## A bundle member is not always a peer, and one name for two things went dark
+
+Every `node.state` on a live node answered
+`{"code": "failed", "error": "node.state failed: AttributeError"}`. The console
+was completely dead — not a slow panel, not a wrong number: nothing at all,
+because `node.state` is what every page reads first.
+
+```
+node.py:6123 console_snapshot   "mlo": self.mlo_status(),
+node.py:4066 mlo_status         members = [{"scheme": self._peer_scheme(peer), …
+node.py:7244 _peer_scheme       addr = peer.remote_addr
+AttributeError: 'Path' object has no attribute 'remote_addr'
+```
+
+`_member_peer` states the rule in its own docstring: *a bundle member is a way
+to reach an identity, and there are two kinds — a direct link, which is the
+link; and a routed path, which is a first hop.* The send path honours that. The
+console read did not: it called every member `peer` and asked each one for
+`remote_addr`. So the day a node formed a **hybrid** bundle (`routed.py`,
+MRLO/HMLO) its whole management surface stopped answering, and stayed stopped
+for as long as that bundle existed.
+
+This is the charter's *name the thing* rule with the volume turned up. The
+comprehension variable was the bug: `for peer in list(bundle.keys) + …` reads
+as a fact and is a guess. It is `member` now, and `_mlo_member_row` describes
+each kind as what it is — a routed member's numbers come off the path's own
+`LinkQuality`, its "remote" is the first hop *as a node id* rather than a socket
+it does not have, and a cadence is read from the link it rides, because an
+accord is a property of a link and a bundle can be entirely routed.
+
+## A diagnostic must not be able to end the surface it is diagnosed through
+
+The same failure, one layer out, and the more serious half: **one field out of
+forty took the whole snapshot with it.**
+
+`console_snapshot` builds about forty independent sections. Any one of them
+raising left the node with no readable state at all — the console painted
+"unreachable", every page stood empty, and the one thing an operator needed
+(*which* part is broken) was the one thing nobody could see. For a project whose
+first rule is that no input may kill a node, a management surface that a
+diagnostic can end is the same shape of bug.
+
+Every section that *asks a subsystem a question* now goes through one local
+`section()` guard: the field degrades to its empty value, the rest of the
+snapshot answers, and — this is the half that keeps it honest — its name lands
+in `snapshot["broken"]` and its traceback in the node's log
+(`src/faults.py`). The console says so once per change rather than once per
+tick. A section that returns `null` and says nothing is how a bug lives for
+months.
+
 ## A failure nobody is told about is a failure nobody can fix
 
 A console stopped working entirely: every `node.state` came back
@@ -1304,10 +1397,12 @@ What was missing is the other half: nothing in this project has ever written a
 traceback down, so the one machine able to fix the bug was the one machine not
 told about it.
 
-`plane._note_failure` now writes the operation and its traceback to stderr,
-where a node already says what it has to say, bounded to `MAX_TRACE_FRAMES`. And
-the refusal says where the rest of it went, because "AttributeError" with
-nowhere to go is not an answer.
+`src/faults.py` — `note(where, exc)` — writes the operation and its traceback to
+stderr, where a node already says what it has to say, bounded to `MAX_FRAMES`.
+One function rather than one per guard: the plane's two catch-alls and the
+snapshot's section guard are three readers of one rule. And the refusal says
+where the rest of it went, because "AttributeError" with nowhere to go is not an
+answer.
 
 **The reply is still not where it goes — not even to a page on this machine.**
 That is the part worth not getting wrong twice: a first attempt handed the

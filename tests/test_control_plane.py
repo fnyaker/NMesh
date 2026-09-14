@@ -29,7 +29,7 @@ from src.apps import fleet_console
 from src.control import frame as frame_mod
 from src.control import jobs as jobs_mod
 from src.control import params as params_mod
-from src.control import plane as plane_mod
+from src import faults as faults_mod
 from src.control import transfer as transfer_mod
 from src.control.modules.jobs import JobsModule
 from src.control.modules.transfer import TransferModule
@@ -2375,6 +2375,74 @@ class TestAFailureIsWrittenDownWhereItHappened:
             assert "log" in reply.error
 
     def test_a_report_that_fails_is_not_itself_a_failure(self, monkeypatch, capsys):
-        monkeypatch.setattr(plane_mod.sys, "stderr", None)
+        monkeypatch.setattr(faults_mod.sys, "stderr", None)
         reply = control.LocalChannel(_plane()).call("sample.boom")
         assert reply.ok is False and reply.code == "failed"
+
+
+class TestABrokenSectionIsNotTheWholeConsole:
+    """`node.state` is what every page of the console reads first.
+
+    One field out of forty raised — `mlo`, describing a routed bundle member as
+    if it were a peer — and took the snapshot with it, so a working console went
+    entirely dark and stayed dark for as long as that bundle existed. A
+    diagnostic must not be able to end the management surface it is diagnosed
+    through. Against the real snapshot, not a copy of its guard: a second
+    expression for one rule is a second chance to be wrong about it."""
+
+    async def test_the_rest_of_the_snapshot_still_answers(self, monkeypatch, capsys):
+        node = MeshNode(transport_manager=make_manager())
+        monkeypatch.setattr(type(node), "mlo_status", lambda self: 1 / 0)
+        snapshot = await node.console_snapshot()
+        capsys.readouterr()
+        # The page still has a node on it, and knows one panel is missing.
+        assert snapshot["id"] == node.id.raw.hex()
+        assert snapshot["mlo"] == {}
+        assert snapshot["broken"] == ["mlo"]
+
+    async def test_a_healthy_node_names_nothing(self):
+        node = MeshNode(transport_manager=make_manager())
+        assert (await node.console_snapshot())["broken"] == []
+
+    async def test_and_it_is_never_silent(self, monkeypatch, capsys):
+        node = MeshNode(transport_manager=make_manager())
+        monkeypatch.setattr(type(node), "trust_status",
+                            lambda self: {}["nope"])
+        await node.console_snapshot()
+        written = capsys.readouterr().err
+        assert "console snapshot section trust failed" in written
+        assert "KeyError" in written
+
+
+class TestABundleMemberIsNotAlwaysAPeer:
+    """`_member_peer` says it plainly: a member is a way to reach an identity,
+    and there are two kinds — a direct link, and a routed path naming a first
+    hop. One name for two things is what killed the console."""
+
+    async def test_a_snapshot_survives_a_routed_bundle_member(self):
+        """The failure as it actually happened: a hybrid bundle, and every
+        `node.state` on that node answering `AttributeError`."""
+        from src import mlo, routed
+        from src.node_id import NodeID
+
+        node = MeshNode(transport_manager=make_manager())
+        target, via = NodeID.generate(), NodeID.generate()
+        bundle = mlo.Bundle()
+        bundle._keys = (routed.Path(target, via),)
+        node._bundles[target] = bundle
+
+        snapshot = await node.console_snapshot()
+        assert snapshot["broken"] == []
+        [described] = snapshot["mlo"]["bundles"]
+        [member] = described["members"]
+        # Described as what it is: a first hop, named as a node rather than as
+        # a socket, and measured off the path's own quality.
+        assert member["scheme"] == "routed"
+        assert member["via"] == via.raw.hex()
+        assert member["remote"] == via.raw.hex()
+        assert member["carrying"] is True
+        # No link to that hop here, so there is no cadence to show rather than
+        # one invented. And no accord: that is a property of a link, and a
+        # bundle can be entirely routed.
+        assert member["probe_ms"] is None
+        assert described["agreed_fast_ms"] is None

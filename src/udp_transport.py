@@ -367,12 +367,13 @@ class UDPTransport(BaseTransport):
                "is a link an operator ends up reconnecting by hand. Raise it "
                "where UDP is the better medium and you know it.",
                minimum=-254, maximum=254),
-        option("mlo", "bool", False,
+        option("mlo", "bool", True,
                "Let this medium carry half of a peer's traffic beside another "
                "link (multi-link operation). It buys throughput and a much "
                "faster reaction to a link going bad, and it costs a probe "
-               "every hundred milliseconds on every link it bundles — so it is "
-               "off unless the medium is one where that is cheap.",
+               "every hundred milliseconds on every link it bundles — which on "
+               "a socket over IP is cheap, so it is on here. Turn it off on a "
+               "metered or battery-powered link.",
                label="MLO ready"),
         option("retry_interval", "float", 0.0,
                "How often to re-dial a known node this one has no link to, on "
