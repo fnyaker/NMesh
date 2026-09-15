@@ -276,3 +276,101 @@ class TestPunchDatagramsAreMetered:
             _punch_signed_blob(_PUNCH_PROBE_MAGIC, src, intended, nonce,
                                minute - 60),
             signature, sender.dsa_public_key)
+
+
+# ---------------------------------------------------------------------------
+# The keepalive burst asks the link, it does not read it
+# ---------------------------------------------------------------------------
+
+class _CountingLink:
+    """A link that answers the two questions the burst asks, and counts."""
+
+    def __init__(self, keepalives_until=3, closes_after=None):
+        self.authenticated = None
+        self.sent = 0
+        self._keepalives_until = keepalives_until
+        self._closes_after = closes_after
+
+    @property
+    def authenticated_id(self):
+        return self.authenticated
+
+    def is_closed(self) -> bool:
+        return (self._closes_after is not None
+                and self.sent >= self._closes_after)
+
+    def keepalive(self) -> bool:
+        if self.sent >= self._keepalives_until:
+            return False
+        self.sent += 1
+        return True
+
+
+class TestKeepaliveBurstAsksTheLink:
+    """`_kick_punched_link` must prod a punched link through the contract.
+
+    It used to read `transport._closed` and call
+    `transport._send_raw(transport._link.build_keepalive())`. Both are private
+    to the medium; the burst runs before the link can authenticate, so it
+    cannot go through `send()`. The two questions it actually has — is the link
+    gone, and put a keepalive out — are `is_closed()` and `keepalive()` on
+    `BaseTransport`, and a medium with neither simply ends the burst.
+    """
+
+    async def test_burst_stops_when_the_medium_refuses_more_kicks(self):
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=3)
+        # A burst that ignored the refusal would run _PUNCH_KICK_COUNT times.
+        await node._kick_punched_link(link, link)
+        assert link.sent == 3, "the burst did not stop when the medium said stop"
+        await node.stop()
+
+    async def test_burst_stops_when_the_link_closes(self):
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=99, closes_after=2)
+        await node._kick_punched_link(link, link)
+        assert link.sent == 2, "the burst kept kicking a closed link"
+        await node.stop()
+
+    async def test_burst_stops_once_the_link_authenticates(self):
+        import asyncio
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=99)
+
+        async def _authenticate():
+            await asyncio.sleep(0.4)      # let a couple of kicks land
+            link.authenticated = NodeID.from_public_key(
+                CryptoIdentity().dsa_public_key)
+
+        task = asyncio.create_task(_authenticate())
+        await node._kick_punched_link(link, link)
+        await task
+        assert link.sent < 8, "the burst did not stop at authentication"
+        await node.stop()
+
+    def test_a_medium_without_link_liveness_ends_the_burst_not_raises(self):
+        """The defaults are the honest answer for a stream or a file: the
+        traversal just does not happen. `keepalive()` returning False must end
+        the burst, and the base implementation must not raise."""
+        from src.transports.contract import BaseTransport
+
+        class _Plain(BaseTransport):
+            async def connect(self, address):
+                pass
+
+            async def listen(self, address):
+                pass
+
+            async def send(self, packet):
+                raise AssertionError("the burst must not reach send()")
+
+            async def receive(self):
+                raise AssertionError("the burst must not receive")
+
+            async def close(self):
+                pass
+
+        link = _Plain()
+        assert link.is_closed() is False
+        assert link.keepalive() is False
+
