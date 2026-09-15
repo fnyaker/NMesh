@@ -23,6 +23,8 @@ def _host_port(address: str) -> tuple[str, int]:
 
 class TCPTransport(BaseTransport):
 
+    SCHEME = "tcp"
+
     # Everything here is read where it is used, so a change applies to the next
     # dial or the next read — no restart, no reconnection.
     OPTIONS = (

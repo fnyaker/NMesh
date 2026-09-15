@@ -70,9 +70,6 @@ class FakeUDPServer(BaseServer):
         self.sent.append((data, remote))
         return True
 
-    def owns(self, transport: BaseTransport) -> bool:
-        return any(t is transport for t in self.transports.values())
-
 
 async def settle(node, timeout: float = 2.0) -> None:
     """Wait for the node's detached tasks to finish.

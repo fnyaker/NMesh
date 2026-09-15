@@ -5791,12 +5791,12 @@ class MeshNode:
         if scheme is not None:
             return scheme
         # A listener the node started itself need not be in the registry, so
-        # ask it whether the link is one of its own. This is the medium-agnostic
-        # form of the `isinstance(..., UDPTransport)` it replaces: a medium that
-        # registers nowhere is still able to name itself.
-        if self._udp_server is not None and self._udp_server.owns(peer.transport):
-            return "udp"
-        return None
+        # ask the link what medium it runs over. This is the medium-agnostic
+        # form of the `isinstance(..., UDPTransport)` it replaces, and unlike
+        # asking a server which links it owns, it holds for a dialled link too
+        # — a dialled transport has no server behind it at all.
+        ask = getattr(peer.transport, "scheme", None)
+        return ask() if ask is not None else None
 
     def _transport_details(self) -> list[dict]:
         """Per-scheme view of the transport layer for the console: listeners,
@@ -12252,9 +12252,13 @@ Hints come first (the ``have`` byte on an announce, from an
         target = peer.authenticated_id
         if target is None:
             return
-        # Only a link on the punched listener can settle a punch; a link that
-        # arrived some other way says nothing about this attempt.
-        if self._udp_server is None or not self._udp_server.owns(peer.transport):
+        # Only a link on the UDP medium can settle a punch; a link that arrived
+        # over TCP or a spool file says nothing about this attempt. Asked of the
+        # link itself: the initiator's dialled link has no listener behind it,
+        # so asking the server which links it owns answers "no" for half the
+        # punches and loses the completion entirely.
+        ask = getattr(peer.transport, "scheme", None)
+        if ask is None or ask() != "udp":
             return
         state = self._punch_pending.get(target)
         if state is None or state.completed:

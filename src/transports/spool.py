@@ -83,6 +83,8 @@ def _parse_records(data: bytes) -> tuple[list[bytes], int]:
 
 class SpoolTransport(BaseTransport):
 
+    SCHEME = "spool"
+
     OPTIONS = (
         option("priority", "int", -50,
                "How much this node prefers a spool directory over another medium, from "
