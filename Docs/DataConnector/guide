@@ -89,6 +89,8 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | →    | `LOG_WATCH` (0x14)   | `flag(1) + level(1)`        | subscribe to new lines at or above a floor, or stop — same grant |
 | ←    | `LOG_LINES` (0x8F)   | JSON `{lines, matched, returned, seq}` | the answer to the three above (`lost` on a `LOG_SINCE`, `refused: true` without the grant, `watching` for a `LOG_WATCH`) |
 | →    | `NOTIFY` (0x15)      | `level(1) + keylen(1) + key + JSON {summary, detail}` | puts one problem on this node's board. No answer, by design |
+| →    | `LINKS` (0x16)       | empty                       | which nodes this one is connected to — **needs the `links` grant** |
+| ←    | `LINKS_VIEW` (0x92)  | JSON `{links: [...], at}`   | the `LINKS` answer (`refused: true` without the grant) |
 | ←    | `LOG_LINE` (0x90)    | one line as JSON            | pushed to a watching client as it is recorded |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
@@ -194,6 +196,27 @@ overwrite another's entry or post as the core, and bounds every field. Like
 `ABUSE`, it is **answered by nothing**: a reply would let an app read the node's
 state back, and what else is wrong with this machine is the operator's business.
 Details and bounds: [`Docs/Architecture/alerts.md`](../Architecture/alerts.md).
+
+## Who this node is connected to (`LINKS`)
+
+```python
+answer = await client.links()      # {"links": [{id, pseudo, transport, rtt_ms, since}]}
+```
+
+Four fields per link and nothing else: an identity, a medium, a latency, an age.
+What an app is answered is the smallest thing that makes the question true.
+
+Behind the **`links` grant**, given per app in the Apps page like `logs` and for
+the same reason: who a machine keeps company with is routing metadata about its
+neighbours as much as about it. An app that shows a mesh map needs it; an app
+that sends messages does not. Without it the answer is `{"refused": true}` —
+answered, never dropped, so "not permitted" cannot be mistaken for a node that
+has wedged.
+
+The built-in fleet app uses exactly this to answer another operator's
+`LINKS_REQUEST`, which is why a machine can hold the fleet capability and still
+refuse: two grants, and the refusal says which one is missing
+([`Docs/Apps/fleet`](../Apps/fleet)).
 
 The `STORE_*` frames drive the **per-app local store** (the "drawer"): an
 encrypted key→value store, isolated per section. The `app_id` **does not appear**

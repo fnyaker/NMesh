@@ -207,7 +207,12 @@ class TestWhatAnAppMayRead:
         # The list comes back with it, so a page that just toggled a grant does
         # not have to ask a second question that could disagree.
         fleet = next(app for app in answer.result["apps"] if app["id"] == "fleet")
-        assert [grant["granted"] for grant in fleet["grants"]] == [True]
+        granted = {grant["name"]: grant["granted"] for grant in fleet["grants"]}
+        assert granted["logs"] is True
+        # One grant at a time: giving an app the log does not give it anything
+        # else the operator did not tick.
+        assert all(value is False for name, value in granted.items()
+                   if name != "logs")
 
         await asyncio.to_thread(
             chan.call, "apps.grant",

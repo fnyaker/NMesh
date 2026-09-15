@@ -2273,6 +2273,10 @@ def _make_handler(console: WebConsole):
                                answer or {"error": "not managed"})
                 elif action == "logs-forget":
                     self._json(200, fleet.forget_logs(node))
+                elif action == "links-forget":
+                    # The machines say it again a moment later if it is still
+                    # true, which is what makes dropping it safe to offer.
+                    self._json(200, fleet.forget_links(node))
                 elif action == "stacks":
                     # Which of a node's stacks *Update* should also bring up.
                     # Ours to remember, so it is written here and nowhere else.

@@ -1018,13 +1018,16 @@ INDEX_HTML = """<!doctype html>
         <div id="map-links" class="stack"></div>
         <div id="map-reported" class="stack"></div>
         <div id="map-grow" class="map-grow stack" hidden>
-          <h3>Grow the map</h3>
-          <p class="tiny muted">Ask a machine you manage what <i>it</i> is
-            connected to. What comes back is its word, not a measurement: it is
-            drawn dashed, it says who reported it, and it fades on its own.</p>
+          <h3>Beyond this node</h3>
+          <p class="tiny muted">While this map is open, the machines you manage
+            that granted <code>links</code> report what <i>they</i> are
+            connected to, and say so again whenever it changes. What comes back
+            is their word, not a measurement: it is drawn dashed, it names who
+            said it, and a machine that goes quiet leaves the map within
+            seconds rather than lingering.</p>
           <div id="map-grow-list" class="stack"></div>
-          <div class="row"><button id="map-grow-all" class="sm">Ask them all</button>
-            <button id="map-grow-clear" class="sm">Forget what was reported</button></div>
+          <div class="row">
+            <button id="map-grow-clear" class="sm">Drop what was reported</button></div>
         </div>
       </aside>
     </div>
@@ -1654,90 +1657,41 @@ function edgeLabelAt(from, to, share){
           y:from.y + dy * t + (dx / length) * 9 - 2};
 }
 
-// ---- growing the map -------------------------------------------------------
-// The map this node can draw from what it *sees* stops at its own neighbours
-// and the sessions it routes: one hop, and one more where it happens to know
-// the first. Everything past that is somebody else's knowledge, and asking for
-// it is driving another machine's console — the same authority as remote
-// management, which is why only fleet offers it and only where the operator
-// already holds `manage` on that machine.
+// ---- the map, past what this node can see -----------------------------------
+// A node draws what it *measures*: its own links, and the sessions it routes.
+// Everything beyond is another machine's word about its own links, and this
+// page does not keep it — **fleet does**. Three reasons, and none of them is
+// tidiness:
 //
-// What comes back is a **report**, never a measurement, and it is kept apart
-// on every axis: its own store, its own line style, its own word in the panel,
-// and an expiry. Nothing here reaches the node: a claim about who is connected
-// to whom must not become something this console keeps, gossips or acts on.
-const MAP_GROWTH = {
-  // Small, because it is a drawing: past a hundred or so nodes a mesh map is a
-  // picture of a hairball, and the bound is also what stops one machine's
-  // answer from filling this page.
-  MAX_NODES: 120,
-  MAX_EDGES: 300,
-  // A report is only as good as its age, and nobody refreshes one for us. So
-  // the map shrinks back on its own rather than showing an hour-old mesh as
-  // though it were now.
-  TTL: 300000,
-  nodes: new Map(),          // id -> {id, from, at, pseudo}
-  edges: new Map(),          // "a|b" -> {a, b, from, at, transport, rtt_ms}
-  asked: new Map(),          // id -> when we last asked it, so a click is not a flood
+//   * a reload must not empty the map, and two tabs must not each go asking
+//     forty machines the same question;
+//   * what is drawn has to be *now*. Fleet holds a freshness book, not a
+//     history: a machine that has not confirmed its links in the last few
+//     seconds has no links on this map rather than old ones
+//     (`src/apps/fleet_links.py`);
+//   * and asking for it is what tells this node somebody is looking, which is
+//     what makes those machines push. A map nobody has open costs nothing.
+//
+// So there is no store here at all. `MAP_LINKS` is the last answer, held only
+// until the next one.
+let MAP_LINKS = {edges:[], nodes:[], sources:[], following:[], may_ask:[]};
 
-  sweep(){
-    const now = Date.now();
-    for(const [key, edge] of this.edges) if(now - edge.at > this.TTL) this.edges.delete(key);
-    for(const [id, node] of this.nodes) if(now - node.at > this.TTL) this.nodes.delete(id);
-  },
-  clear(){ this.nodes.clear(); this.edges.clear(); this.asked.clear(); },
-  // One machine's answer about its own links. `from` is who said it, and it is
-  // kept on every row: a map that cannot say who claimed an edge is a map that
-  // invites being believed.
-  absorb(from, topology){
-    const now = Date.now();
-    const direct = ((topology || {}).direct || []).slice(0, 64);
-    for(const peer of direct){
-      if(!peer || typeof peer.id !== "string") continue;
-      this.remember(peer.id, from, peer.pseudo || "", now);
-      const key = from < peer.id ? from + "|" + peer.id : peer.id + "|" + from;
-      if(!this.edges.has(key) && this.edges.size >= this.MAX_EDGES)
-        this.edges.delete(this.edges.keys().next().value);
-      this.edges.set(key, {a:from, b:peer.id, from, at:now,
-                           transport:peer.transport || "", rtt_ms:peer.rtt_ms});
-    }
-    this.remember(from, from, "", now);
-    return direct.length;
-  },
-  remember(id, from, pseudo, at){
-    if(!this.nodes.has(id) && this.nodes.size >= this.MAX_NODES)
-      this.nodes.delete(this.nodes.keys().next().value);
-    const held = this.nodes.get(id) || {};
-    this.nodes.set(id, {id, from, at, pseudo: pseudo || held.pseudo || ""});
-  },
-  // What the drawing should show, with anything this node can see itself taken
-  // out: a reported edge to a machine we are talking to *is* our own link, and
-  // drawing both would say the mesh is twice the size it is.
-  view(state){
-    this.sweep();
-    const topology = state.topology || {};
-    const known = new Set([state.id]);
-    (topology.direct || []).forEach((node) => known.add(node.id));
-    (topology.routed || []).forEach((node) => known.add(node.id));
-    const edges = [];
-    const extra = new Map();
-    for(const edge of this.edges.values()){
-      if(known.has(edge.a) && known.has(edge.b)) continue;
-      edges.push(edge);
-      for(const id of [edge.a, edge.b])
-        if(!known.has(id)) extra.set(id, this.nodes.get(id) || {id, from:edge.from, at:edge.at});
-    }
-    return {nodes:[...extra.values()].sort((a, b) => a.id < b.id ? -1 : 1), edges};
-  },
-  // A machine is asked at most this often, however many times it is clicked.
-  ASK_EVERY: 10000,
-  mayAsk(id){
-    const last = this.asked.get(id) || 0;
-    if(Date.now() - last < this.ASK_EVERY) return false;
-    this.asked.set(id, Date.now());
-    return true;
-  },
-};
+// What the drawing needs, with anything this node can see itself taken out: a
+// reported edge to a machine we are talking to *is* our own link, and drawing
+// both would say the mesh is twice the size it is.
+function mapReported(state){
+  const known = new Set([state.id]);
+  const topology = state.topology || {};
+  (topology.direct || []).forEach((node) => known.add(node.id));
+  (topology.routed || []).forEach((node) => known.add(node.id));
+  const edges = (MAP_LINKS.edges || []).filter(
+    (edge) => !(known.has(edge.a) && known.has(edge.b)));
+  const drawn = new Set();
+  edges.forEach((edge) => { drawn.add(edge.a); drawn.add(edge.b); });
+  const nodes = (MAP_LINKS.nodes || []).filter(
+    (node) => drawn.has(node.id) && !known.has(node.id));
+  return {edges, nodes};
+}
 
 let MAP_NAMES = {};
 
@@ -1746,7 +1700,7 @@ let MAP_NAMES = {};
 // label, an uptime — is written into the drawing that is already there.
 function graphShape(state, size){
   const topology = state.topology || {};
-  const grown = size.labels ? MAP_GROWTH.view(state) : {nodes:[], edges:[]};
+  const grown = size.labels ? mapReported(state) : {nodes:[], edges:[]};
   return JSON.stringify([size.w, !!size.labels, state.id,
     (topology.direct || []).map((node) => [node.id, node.pseudo || ""]),
     (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""]),
@@ -1810,7 +1764,7 @@ function renderGraph(svg, state, size){
   svg.dataset.graphShape = shape;
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
-  const grown = size.labels ? MAP_GROWTH.view(state) : {nodes:[], edges:[]};
+  const grown = size.labels ? mapReported(state) : {nodes:[], edges:[]};
   const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
@@ -1947,7 +1901,7 @@ function paintMap(){
   // Reported machines get a row of their own, under the links: they are on the
   // drawing, so a panel that listed only what we measured would make half the
   // map unclickable and unexplained.
-  const reported = MAP_GROWTH.view(STATE).nodes;
+  const reported = mapReported(STATE).nodes;
   setHTML("map-reported", reported.length ? reported.map((node) =>
     '<div class="map-link" data-link="' + esc(node.id) + '">' +
     '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo || "")) + "</b>" +
@@ -1986,77 +1940,81 @@ function paintMap(){
 // changes — and the page will not have to, because it already renders whatever
 // words it is handed.
 let MAP_TARGETS = [], MAP_OVERLAY = {};
+// How often the open map asks fleet for what the machines are reporting. Well
+// inside the freshness window fleet keeps (`fleet_links.FRESH_FOR`), so what is
+// on screen is never something no machine has confirmed.
+const MAP_LINKS_EVERY = 5000;
+
+async function askFleet(op, args){
+  try{
+    const answer = await CHANNEL.call("apps.call",
+      {app:"fleet", op, args: args || {}});
+    return (answer || {}).result || {};
+  }catch(_){ return {}; }          // no fleet, or it is not running: no map
+}
 
 async function loadMapExtras(){
-  const ask = async (op) => {
-    try{
-      const answer = await CHANNEL.call("apps.call",
-        {app:"fleet", op, args:{}});
-      return (answer || {}).result || {};
-    }catch(_){ return {}; }        // no fleet, or it is not running: no growth
-  };
-  const [targets, overlay] = await Promise.all([ask("map_targets"),
-                                                ask("map_overlay")]);
+  const [targets, overlay] = await Promise.all([askFleet("map_targets"),
+                                                askFleet("map_overlay")]);
   MAP_TARGETS = targets.targets || [];
   MAP_OVERLAY = overlay.nodes || {};
   paintGrow();
 }
 
+// The live half, on its own cadence while the map is open. Asking is also how
+// this console says somebody is looking, which is what keeps the machines
+// pushing — so a map left open stays current, and a map nobody has open stops
+// costing anything within seconds of being closed.
+let MAP_LINKS_TIMER = null;
+
+async function refreshMapLinks(){
+  if(!$("map-dialog").open) return;
+  const answer = await askFleet("map_links");
+  if(answer && Array.isArray(answer.edges)) MAP_LINKS = answer;
+  if(STATE) paintMap();
+}
+
+function watchMapLinks(on){
+  clearInterval(MAP_LINKS_TIMER);
+  MAP_LINKS_TIMER = null;
+  if(!on) return;
+  refreshMapLinks();
+  MAP_LINKS_TIMER = setInterval(refreshMapLinks, MAP_LINKS_EVERY);
+}
+
 function paintGrow(){
   const block = $("map-grow");
-  block.hidden = MAP_TARGETS.length === 0;
+  const may = MAP_LINKS.may_ask || [];
+  block.hidden = may.length === 0 && MAP_TARGETS.length === 0;
   if(block.hidden) return;
-  setHTML("map-grow-list", MAP_TARGETS.map((target) => {
-    const name = target.label || target.pseudo || shortId(target.id);
-    // A machine with no console session cannot be asked *yet*, and saying that
-    // is not the same as offering a button that always fails. Unless it granted
-    // `passwordless`, in which case the session is minted on the way.
-    const ready = target.connected || target.passwordless;
+  const fresh = new Map((MAP_LINKS.sources || []).map((row) => [row.id, row]));
+  const following = new Set(MAP_LINKS.following || []);
+  setHTML("map-grow-list", may.map((id) => {
+    const target = MAP_TARGETS.find((row) => row.id === id) || {};
+    const name = target.label || target.pseudo || shortId(id);
+    const said = fresh.get(id);
+    // Three states and they are different things: it is telling us its links
+    // now, it has been asked and has not answered, or it never granted this.
+    const state = said
+      ? badge(plural(said.links, "link") + " · " + Math.round(said.age) + "s ago", "ok")
+      : (following.has(id) ? badge("waiting", "warn") : badge("idle", ""));
     return '<div class="row"><span class="grow truncate">' + esc(name) + "</span>" +
-      (ready
-        ? '<button class="sm" data-grow="' + esc(target.id) + '">Ask</button>'
-        : badge("needs its password", "warn")) + "</div>";
-  }).join(""));
+      state + "</div>";
+  }).join("") || '<p class="tiny muted">No machine here has granted <code>links</code>.</p>');
 }
 
-async function growFrom(id, button){
-  if(!MAP_GROWTH.mayAsk(id)){ toast("Just asked that machine", "warn"); return; }
-  const work = async () => {
-    try{
-      // One call, to one named machine, without moving the operator's context
-      // there and back (`CHANNEL.frame`, `options.node`).
-      const state = await CHANNEL.call("node.state", {}, {node:id});
-      const added = MAP_GROWTH.absorb(id, state.topology || {});
-      toast(added ? shortId(id) + " reported " + plural(added, "link")
-                  : shortId(id) + " reported no links");
-      if(STATE) paintMap();
-    }catch(error){
-      if(isStale(error)) return;
-      toast(isRefused(error) ? (error.message || "that machine refused")
-                             : "that machine did not answer", "danger");
-    }
-  };
-  if(button) await withBusy(button, work); else await work();
-}
-
-$("map-grow-list").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-grow]");
-  if(button) growFrom(button.dataset.grow, button);
-});
-$("map-grow-all").addEventListener("click", async (event) => {
+$("map-grow-clear").addEventListener("click", async (event) => {
   await withBusy(event.target, async () => {
-    // One at a time: each of these is a console call across the mesh, and
-    // forty at once is a burst this node would be the source of.
-    for(const target of MAP_TARGETS){
-      if(!target.connected && !target.passwordless) continue;
-      await growFrom(target.id, null);
-    }
+    try{
+      await apiJson("/api/fleet/links-forget", "POST", {});
+      MAP_LINKS = {edges:[], nodes:[], sources:[], following:[],
+                   may_ask: MAP_LINKS.may_ask || []};
+      if(STATE) paintMap();
+      // Said plainly, because it is what happens: the machines are still
+      // following, so anything still true comes back within seconds.
+      toast("Dropped — whatever is still true will be reported again");
+    }catch(_){ toast("That could not be dropped", "danger"); }
   });
-});
-$("map-grow-clear").addEventListener("click", () => {
-  MAP_GROWTH.clear();
-  if(STATE) paintMap();
-  toast("Reported links forgotten");
 });
 
 // What an app says about a node, rendered in the app's own words. The map holds
@@ -2227,8 +2185,13 @@ $("map-open").addEventListener("click", () => {
   // what it knows are two local questions, and a map nobody is looking at
   // should cost nothing at all.
   loadMapExtras();
+  watchMapLinks(true);
 });
 $("map-close").addEventListener("click", () => $("map-dialog").close());
+// Closed by the button, by Escape, or by the dialog being dismissed: the one
+// place all three end up, so the machines stop being asked whichever way the
+// operator left.
+$("map-dialog").addEventListener("close", () => watchMapLinks(false));
 $("map-links").addEventListener("click", (event) => {
   const details = event.target.closest("[data-link-details]");
   if(details){ openNode(details.dataset.linkDetails); return; }

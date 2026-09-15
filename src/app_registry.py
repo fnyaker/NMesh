@@ -71,12 +71,22 @@ BUILTIN_APPS = (
 #   Writing a line needs no grant (the connector stamps the source, so an app
 #   can only ever speak as itself); reading is the node's whole diary, which is
 #   a different question with a different answer.
+# ``links`` — read which nodes this one is connected to. Who a machine keeps
+#   company with, which is the same kind of thing as its log and is why it is
+#   asked for separately: an app that shows a mesh map needs it, and an app
+#   that sends messages does not.
 GRANTS = (
     {
         "name": "logs",
         "title": "Read the node's log",
         "description": ("Query and follow every line this node keeps — the "
                         "core's and every other app's, not only its own."),
+    },
+    {
+        "name": "links",
+        "title": "Read this node's links",
+        "description": ("See which nodes this one is connected to right now, "
+                        "over which medium and at what latency."),
     },
 )
 _GRANT_NAMES = tuple(grant["name"] for grant in GRANTS)

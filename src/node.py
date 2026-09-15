@@ -6512,6 +6512,22 @@ class MeshNode:
             })
         return {"direct": direct, "routed": routed}
 
+    def links_view(self) -> list[dict]:
+        """Who this node is connected to, right now, in four fields.
+
+        Derived from `_console_topology` rather than walking the peers again:
+        the map, the console snapshot and this must not be able to disagree
+        about what a link is, and two expressions for one quantity is two
+        chances to be wrong.
+
+        Deliberately poorer than the snapshot — an identity, a medium, a
+        latency, an age. It is read by an app, and what an app is answered is
+        the smallest thing that makes the question true."""
+        return [{"id": link["id"], "pseudo": link["pseudo"],
+                 "transport": link["transport"], "rtt_ms": link["rtt_ms"],
+                 "since": round(link["since"], 1)}
+                for link in self._console_topology(time.monotonic())["direct"]]
+
     def console_nodes(self, scope: str) -> list[dict]:
         """A focused console view of direct or routing-table nodes."""
         now = time.monotonic()

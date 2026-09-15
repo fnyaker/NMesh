@@ -27,14 +27,14 @@ from collections import OrderedDict, deque
 
 from .. import app_api
 from ..node_id import NodeID
-from . import fleet_files, fleet_logs
+from . import fleet_files, fleet_links, fleet_logs
 from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
     EnrolAnswered, EnrolRequested, Failure, FileTransferError, InviteIssued,
-    LogsReceived, NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened,
-    ShellOutput, StatusReceived,
+    LinksReceived, LogsReceived, NodeAdopted, Revoked, ScanReceived,
+    ShellClosed, ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import (CAP_DESCRIPTIONS, CAPABILITIES, clean_caps,
                           clean_stack_names)
@@ -91,6 +91,11 @@ _FILE_TIMEOUT = 40.0
 # renewals, and long enough that following forty machines is forty frames a
 # minute rather than a conversation.
 _FOLLOW_INTERVAL = 60.0
+# The same for links, and far shorter: a link follow is meant to lapse quickly
+# when nobody is drawing the map (`fleet.LINK_FOLLOW_TTL`), so it has to be
+# renewed well inside that. Cheap while nothing is watching — with no page open
+# this loop asks nothing at all.
+_LINKS_INTERVAL = 12.0
 MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
 REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
 
@@ -141,6 +146,14 @@ class FleetBridge:
         self._logs.set_default_megabytes(
             self._app.state.log_defaults().get("megabytes"))
         self._follow_task: asyncio.Task | None = None
+        self._links_task: asyncio.Task | None = None
+        # What the machines we manage say they are connected to, while it is
+        # still true (`fleet_links.LinkMap`). Held here rather than in the page
+        # that draws it, so a reload does not empty the map and two tabs do not
+        # each go asking every machine — and in memory, because a claim about
+        # somebody else's neighbours is not something to still have after a
+        # restart.
+        self._links = fleet_links.LinkMap()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -154,15 +167,19 @@ class FleetBridge:
         loop.call_soon_threadsafe(self._arm_follow_loop)
 
     def _arm_follow_loop(self) -> None:
+        loop = asyncio.get_event_loop()
         if self._follow_task is None or self._follow_task.done():
-            self._follow_task = asyncio.get_event_loop().create_task(
-                self._follow_loop())
+            self._follow_task = loop.create_task(self._follow_loop())
+        if self._links_task is None or self._links_task.done():
+            self._links_task = loop.create_task(self._links_loop())
 
     def stop(self) -> None:
         self._app.remove_listener(self._on_event)
-        if self._follow_task is not None:
-            self._follow_task.cancel()
-            self._follow_task = None
+        for name in ("_follow_task", "_links_task"):
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                setattr(self, name, None)
 
     @property
     def me(self) -> str:
@@ -204,6 +221,13 @@ class FleetBridge:
                     else "now lets us")
             self._say("warn", f"{short}… {what} {', '.join(event.caps)}",
                       node_hex)
+        elif isinstance(event, LinksReceived):
+            if event.links or event.pushed or event.following:
+                self._links.absorb(node_hex, event.links)
+                with self._lock:
+                    self._bump()
+            if not event.pushed and event.following is None:
+                self._finish(event.rid, "ok")
         elif isinstance(event, LogsReceived):
             kept = self._logs.absorb(node_hex, event.lines, lost=event.lost)
             if event.following is False:
@@ -567,6 +591,13 @@ class FleetBridge:
             "map_targets", "Machines this console may grow the map through"),
         app_api.operation(
             "map_overlay", "What fleet knows about the nodes on the map"),
+        # The map's own data, and the one thing that makes it worth holding
+        # here: reading it is also how the page says somebody is looking, which
+        # is what keeps the machines pushing. A map nobody has open costs
+        # nothing at all.
+        app_api.operation(
+            "map_links", "What the machines we manage say they are linked to",
+            changes=True),
         app_api.operation(
             "invite", "Have a node we manage mint an invitation to its mesh",
             [app_api.param("node", "node"),
@@ -618,6 +649,30 @@ class FleetBridge:
         offered "expand" on a machine with no session would offer a button that
         always fails."""
         return {"targets": self.remote_targets()}
+
+    def api_map_links(self) -> dict:
+        """The links the machines we manage are reporting **right now**.
+
+        Declared as changing state, which looks wrong for a read and is not:
+        asking is what tells this node somebody is drawing the map, and that is
+        what makes it follow those machines. A caller that asks for this is
+        starting something, so it says so.
+
+        Nothing here reaches the network: it answers from what has already been
+        pushed to us, and anything a machine has not confirmed in the last
+        `fleet_links.FRESH_FOR` seconds is not in the answer at all."""
+        self._links.note_watching()
+        answer = self._links.view()
+        answer["following"] = self._app.following_links()
+        answer["may_ask"] = [row["id"] for row in self._app.state.managed()
+                             if "links" in (row.get("caps") or [])]
+        return answer
+
+    def forget_links(self, node: str = "") -> dict:
+        self._links.forget(str(node or ""))
+        with self._lock:
+            self._bump()
+        return self._links.view()
 
     def api_map_overlay(self) -> dict:
         """What fleet knows about each node, for the map to draw beside it.
@@ -933,6 +988,52 @@ class FleetBridge:
                 raise
             except Exception:               # noqa: BLE001 — never the reason
                 continue                    # the console stops updating
+
+    async def _links_loop(self) -> None:
+        """The same reconciliation for links, on a much faster beat.
+
+        Its own loop rather than a second call inside the one above, and the
+        numbers are why: a link follow lasts `fleet.LINK_FOLLOW_TTL` — forty
+        seconds — so that a console which stopped drawing stops being pushed
+        almost at once. Renewing that from a sixty-second loop would let every
+        follow lapse for twenty seconds of every minute, and the map would
+        blink. A bound at one layer is not a bound
+        (`Docs/Architecture/gotchas.md`)."""
+        while True:
+            await asyncio.sleep(_LINKS_INTERVAL)
+            try:
+                await self._reconcile_links()
+            except asyncio.CancelledError:
+                raise
+            except Exception:               # noqa: BLE001 — never the reason
+                continue
+
+    async def _reconcile_links(self) -> None:
+        """Follow the links of every machine we may ask, while somebody is
+        drawing the map — and stop the moment nobody is.
+
+        Tied to a page being open rather than to a stored policy, and that is
+        the difference between this and the log beside it: a log is a recording
+        an operator wants kept whether or not they are watching, and a map is
+        only ever a picture of *now*. Nothing to keep means nothing to ask
+        for."""
+        state = self._app.state
+        watched = self._links.watched()
+        following = set(self._app.following_links())
+        for row in state.managed():
+            node_hex = row.get("id") or ""
+            if not node_hex:
+                continue
+            wanted = watched and state.may_use(node_hex, "links")
+            if wanted:
+                # Renewed every pass: the follow on the far side outlives one
+                # interval and not much more (`fleet.LINK_FOLLOW_TTL`), so a
+                # console that stopped drawing stops being pushed almost at
+                # once rather than at the next sweep.
+                await self._app.follow_links(self._node(node_hex), True)
+            elif node_hex in following:
+                await self._app.follow_links(self._node(node_hex), False)
+                self._links.forget(node_hex)
 
     async def _reconcile_follows(self) -> None:
         state = self._app.state

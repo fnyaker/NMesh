@@ -83,6 +83,12 @@ Among other things they check:
   un-enrolled operator who gets nothing, an ungranted capability refused,
   revocation cutting access off, and section isolation (another app sees none of
   the traffic).
+- The **live mesh map** (`tests/integration/test_fleet_map.py`): a third machine
+  joins a node an operator manages, and the operator's map learns of the new
+  link **because that machine said so** — not because anything here asked again.
+  Plus the two refusals that make it safe to offer, told apart: the capability
+  the operator was never granted, and the node's own grant its fleet app never
+  got.
 
 ---
 
@@ -303,11 +309,13 @@ tests/
 │     for, one bounded ring per machine so a chatty one cannot push out a quiet
 │     one's, and a merged view ordered by *our* clock rather than by the time
 │     the far machine supplied
-├── test_map_growth.py                                 — growing the link map:
-│     a claim drawn as a claim (dashed, attributed, expiring), bounded on every
-│     axis, asked one machine at a time and only of one that granted `manage`,
-│     never reaching the node — and the two questions the map asks fleet that
-│     deliberately do not travel
+├── test_map_growth.py                                 — the link map past one
+│     node's eyes: only a machine that granted `links` is asked, the map is a
+│     freshness book (a source that went quiet leaves it rather than ageing on
+│     it), an answer replaces rather than accumulates, a change is what is worth
+│     a frame and a moving latency is not, nothing is followed while nobody is
+│     looking, and the three questions the map asks fleet deliberately do not
+│     travel
 ├── test_alerts.py                                     — the notice board: a
 │     flood that is one line with a count, a chatty warning that never pushes
 │     out an error, "seen" that is not "gone", an app that cannot post as

@@ -352,30 +352,36 @@ not the same as being read.
     the node and its edges on the map. The selected row carries a **Details**
     button — selecting is not opening, so a tap that only meant to point at
     something does not throw a dialog over the map.
-  - **Growing it past what this node can see** (Grow the map, in the panel).
-    The drawing stops at this node's neighbours and the sessions it routes,
-    because that is everything it can *measure*. Beyond it, one machine at a
-    time, an operator can ask a node they manage what **it** is connected to —
-    one call, when the button is pressed, never on a timer.
+  - **Past what this node can see** (the panel's *Beyond this node*). The
+    drawing stops at this node's neighbours and the sessions it routes, because
+    that is everything it can *measure*. While the map is open, the machines
+    this console manages that granted `links` report what **they** are connected
+    to — and say so again whenever it changes, rather than when something here
+    happens to ask.
 
-    What comes back is a **claim**, and it is kept apart on every axis: its own
-    outer ring, a dashed hollow dot, an edge labelled "said by …" rather than
-    with a latency, its own rows in the panel, and an expiry of five minutes so
-    the map shrinks back on its own instead of showing an hour-old mesh as
-    though it were now. Bounded at 120 reported nodes and 300 reported edges, at
-    most one question per machine every ten seconds, and at most 64 links taken
-    from any one answer. **None of it reaches the node**: nothing is stored,
-    gossiped, routed on or held against anybody — it is a drawing in one
-    browser tab, and "Forget what was reported" empties it.
+    What comes back is a **claim**, kept apart on every axis: its own outer
+    ring, a dashed hollow dot, an edge labelled "said by …" rather than with a
+    latency nobody here measured, its own rows in the panel, and each machine's
+    age beside it.
 
-    Only machines that granted `manage` can be asked, and only the fleet app
-    offers it — growing a map is driving another machine's console, which is
-    remote management under another name. A machine whose console needs a
-    password and has no session open says so instead of offering a button that
-    always fails. The two questions the map asks fleet (`map_targets`,
-    `map_overlay`) **do not travel**: they hand over the list of machines this
-    node manages, so they are answered only for the console an operator is
-    sitting at.
+    It is a picture of **now**. Fleet keeps a freshness book rather than a
+    history: a machine that has not confirmed its links in the last 45 seconds
+    has *no* links on the map, not old ones. Closing the map stops the follows
+    within seconds and drops what was held — so the map is never showing
+    something nobody has confirmed, and a map nobody has open costs nothing at
+    all.
+
+    The state lives in the fleet app, not in the page: a reload does not empty
+    the map, and two tabs do not each go asking every machine. It is memory
+    only — a claim about somebody else's neighbours is not something to keep
+    across a restart — and *Drop what was reported* empties it, after which
+    whatever is still true is reported again a moment later.
+
+    Only machines that granted `links` are asked, and only fleet offers any of
+    this. The three questions the map asks fleet (`map_links`, `map_targets`,
+    `map_overlay`) **do not travel**: together they hand over the list of
+    machines this node manages, so they are answered only for the console an
+    operator is sitting at.
   - **What an app knows about a node is drawn beside it.** Fleet says "managed",
     "controls this node", "log" — its own words, rendered by a map that holds no
     idea of what any of them mean.
@@ -720,6 +726,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/fleet/logs-fetch` | `{node}` → ask that machine for its log now, whatever its policy says about collecting it |
 | POST    | `/api/fleet/logs-policy` | `{policy?, megabytes?}` for the fleet-wide default, or `{node, policy?, megabytes?, inherit?}` for one machine |
 | POST    | `/api/fleet/logs-forget` | `{node?}` → drop what was collected, from one machine or from all |
+| POST    | `/api/fleet/links-forget` | `{node?}` → drop the links being reported; whatever is still true is reported again within seconds |
 | POST    | `/api/fleet/stacks` | `{node, stacks[]}` → which of that node's docker stacks *Update* also brings up |
 | POST    | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → this console's own names for sets of machines; nothing about a group travels |
 | POST    | `/api/fleet/update-group` | `{group}` → *Update* on every node in that group |
