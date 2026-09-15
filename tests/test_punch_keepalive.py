@@ -18,7 +18,7 @@ from src.node import MeshNode, PUNCH_RELAY, _decode_punch_relay
 from src.node_id import NodeID
 from src.crypto import SessionKey
 from src.packet import Packet
-from tests.conftest import make_manager, make_node, FakeTransport
+from tests.conftest import make_manager, make_node, FakeTransport, FakeUDPServer
 
 
 def _stun_response(ip: str, port: int, txn: bytes = b"\x00" * 12) -> bytes:
@@ -31,20 +31,6 @@ def _stun_response(ip: str, port: int, txn: bytes = b"\x00" * 12) -> bytes:
     return header + attr
 
 
-class _FakeSock:
-    def __init__(self):
-        self.sent = []
-    def sendto(self, data, addr):
-        self.sent.append((data, addr))
-    def get_extra_info(self, _):
-        return None
-
-
-class _FakeUDPServer:
-    def __init__(self):
-        self._sock = _FakeSock()
-
-
 class TestKeepaliveControl:
     async def test_off_by_default(self):
         node, _ = await make_node()
@@ -55,7 +41,7 @@ class TestKeepaliveControl:
     async def test_toggle_starts_and_stops_loop(self):
         node, _ = await make_node()
         node._running = True
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         assert node.console_set_punch_keepalive(True) is True
         assert node._punch_keepalive_task is not None
         assert not node._punch_keepalive_task.done()
@@ -66,7 +52,7 @@ class TestKeepaliveControl:
 
     async def test_keepalive_sends_stun_from_listener_socket(self, monkeypatch):
         node, _ = await make_node()
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         # `bounded_getaddrinfo`, not `loop.getaddrinfo`: the latter runs on
         # asyncio's default executor, which is joined at shutdown (gotchas §2).
         import src.ip_utils
@@ -75,8 +61,8 @@ class TestKeepaliveControl:
         monkeypatch.setattr(src.ip_utils, "bounded_getaddrinfo", fake_gai)
 
         await node._send_nat_keepalive()
-        assert len(node._udp_server._sock.sent) == 1
-        data, addr = node._udp_server._sock.sent[0]
+        assert len(node._udp_server.sent) == 1
+        data, addr = node._udp_server.sent[0]
         assert addr == ("1.2.3.4", 3478)
         assert data[4:8] == b"\x21\x12\xa4\x42"  # STUN magic cookie
         assert node._punch_stats["keepalives"] == 1
@@ -88,10 +74,10 @@ class TestKeepaliveControl:
 
     async def test_keepalive_noop_when_punch_disabled(self, monkeypatch):
         node, _ = await make_node()
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         node.console_set_punch_enabled(False)
         await node._send_nat_keepalive()
-        assert node._udp_server._sock.sent == []
+        assert node._udp_server.sent == []
 
 
 class TestStunResponse:
@@ -139,7 +125,7 @@ class TestStunResponse:
 
     async def test_reported_in_snapshot(self):
         node, _ = await make_node()
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         node._udp_listen_uri = "udp://0.0.0.0:9001"
         node._punch_keepalive = True
         txn = os.urandom(12)

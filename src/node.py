@@ -798,9 +798,6 @@ class MeshNode:
         monitor — because only that socket's mapping is the one peers reach."""
         if not self._punch_enabled or self._udp_server is None:
             return
-        sock = self._udp_server._sock
-        if sock is None:
-            return
         from .stun import _build_binding_request, DEFAULT_STUN_SERVERS
         from .ip_utils import bounded_getaddrinfo
         for host, port in DEFAULT_STUN_SERVERS:
@@ -817,11 +814,9 @@ class MeshNode:
             if not infos:
                 continue
             request = _build_binding_request()
-            try:
-                sock.sendto(request, infos[0][4])
-                self._punch_stats["keepalives"] += 1
-            except (OSError, ConnectionError):
+            if not self._udp_server.send_raw(request, infos[0][4]):
                 continue
+            self._punch_stats["keepalives"] += 1
             # Remember what we asked, and who we asked. Without this the
             # response check compares the datagram's transaction id against
             # itself, so any datagram carrying the STUN magic cookie set our
@@ -839,15 +834,10 @@ class MeshNode:
 
     def udp_port(self) -> int | None:
         """The port our UDP server is listening on, if any."""
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             return None
-        sock = self._udp_server._sock.get_extra_info("socket")
-        if sock is None:
-            return None
-        try:
-            return sock.getsockname()[1]
-        except (OSError, IndexError):
-            return None
+        bound = self._udp_server.bound_endpoint()
+        return bound[1] if bound is not None else None
 
     async def discover_public_udp_addr(self) -> tuple[str, int] | None:
         """Use STUN to discover our public UDP reflexive address (fallback)."""
@@ -1081,7 +1071,7 @@ class MeshNode:
         parsed = _validate_uri(address)
         if (parsed is not None and parsed[0] == "udp"
                 and self._udp_server is not None
-                and self._udp_server._sock is not None):
+                and self._udp_server.bound_endpoint() is not None):
             hp = split_host_port(parsed[1])
             if hp is not None:
                 try:
@@ -1089,19 +1079,21 @@ class MeshNode:
                 except ValueError:
                     host = None
                 if host is not None and 0 < port < 65536:
-                    return self._udp_listener_transport(host, port)
+                    transport = self._udp_listener_transport(host, port)
+                    if transport is not None:
+                        return transport
+        # Either not udp://, or the shared listener could not take it (it is
+        # full, or it went away between the check above and the call) — so let
+        # the manager open an ordinary link rather than fail the join.
         return await self._transport_manager.connect(address)
 
-    def _udp_listener_transport(self, host: str, port: int) -> BaseTransport:
+    def _udp_listener_transport(self, host: str, port: int) -> BaseTransport | None:
         """Create a UDP transport bound to (host, port) on the *listener* socket
         and register it so the peer's replies route to it. Sends an initial
         keepalive burst to open our mapping and prod the peer to accept."""
-        from .transports.udp import UDPTransport
-        addr = (host, port)
-        transport = UDPTransport._from_server(self._udp_server._sock, addr,
-                                              self._udp_server)
-        self._udp_server._transports[addr] = transport
-        transport._start_tasks()
+        transport = self._udp_server.adopt((host, port))
+        if transport is None:
+            return None
         asyncio.create_task(self._udp_join_bridge(transport))
         return transport
 
@@ -1154,13 +1146,11 @@ class MeshNode:
         key = (host, port)
         while time.monotonic() < deadline:
             server = self._udp_server
-            if server is None or server._sock is None:
+            if server is None:
                 break
-            if key in server._transports:
+            if server.holds(key):
                 break  # a link to this endpoint is forming — stop opening
-            try:
-                server._sock.sendto(_HOLE_OPEN_MAGIC, (host, port))
-            except (OSError, ConnectionError):
+            if not server.send_raw(_HOLE_OPEN_MAGIC, key):
                 break
             entry = self._manual_holes.get(key)
             if entry is not None:
@@ -5777,7 +5767,7 @@ class MeshNode:
         # This used to guard only the call, and bound `stats` here rather than
         # where every other medium answer is bounded — two spellings of one
         # rule, and the one a new call site copies is whichever it happens to
-        # be sitting next to (`src/medium.py`).
+        # be sitting next to (`src/transports/medium.py`).
         endpoints = medium.endpoints(transport)
         stats = medium.stats(transport)
         return {
@@ -5802,8 +5792,11 @@ class MeshNode:
         scheme = scheme_of(peer.transport) if scheme_of is not None else None
         if scheme is not None:
             return scheme
-        from .transports.udp import UDPTransport
-        if isinstance(peer.transport, UDPTransport):
+        # A listener the node started itself need not be in the registry, so
+        # ask it whether the link is one of its own. This is the medium-agnostic
+        # form of the `isinstance(..., UDPTransport)` it replaces: a medium that
+        # registers nowhere is still able to name itself.
+        if self._udp_server is not None and self._udp_server.owns(peer.transport):
             return "udp"
         return None
 
@@ -12035,10 +12028,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     async def _send_punch_probes(self, state: '_PunchState') -> None:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
-        from .transports.udp import _host_port
-
         # No UDP listener → we can't punch at all.
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             self._punch_pending.pop(state.target, None)
             return
 
@@ -12056,12 +12047,19 @@ Hints come first (the ``have`` byte on an announce, from an
         # is probing us. Keep the pending state so an incoming probe completes
         # the punch from its source address; dropping it here strands the punch
         # exactly on the side (larger NodeID) that must drive the handshake.
+        # `split_host_port` returns None rather than raising, and `int(port)`
+        # can still reject a non-numeric one; both mean "no usable address",
+        # which is the same situation as the empty case handled above.
+        hp = split_host_port(state.remote_udp_addr) if state.remote_udp_addr else None
+        if hp is None:
+            return
         try:
-            host, port = _host_port(state.remote_udp_addr)
-        except ValueError:
+            host, port = hp[0], int(hp[1])
+        except (TypeError, ValueError):
+            return
+        if not host:
             return
 
-        sock = self._udp_server._sock
         target_addr = (host, port)
 
         for i in range(_PUNCH_PROBE_COUNT):
@@ -12072,9 +12070,7 @@ Hints come first (the ``have`` byte on an announce, from an
                 _PUNCH_PROBE_MAGIC, self._id.raw, state.target.raw, nonce,
                 _punch_minutes()[0]))
             probe = _build_punch_probe(self._id.raw, nonce, signature)
-            try:
-                sock.sendto(probe, target_addr)
-            except (OSError, ConnectionError):
+            if not self._udp_server.send_raw(probe, target_addr):
                 break
             state.probes_sent += 1
             if i < _PUNCH_PROBE_COUNT - 1:
@@ -12206,11 +12202,8 @@ Hints come first (the ``have`` byte on an announce, from an
             _PUNCH_ACK_MAGIC, self._id.raw, node_id_raw, ack_nonce,
             _punch_minutes()[0]))
         ack = _build_punch_ack(self._id.raw, ack_nonce, ack_sig)
-        if self._udp_server is not None and self._udp_server._sock is not None:
-            try:
-                self._udp_server._sock.sendto(ack, addr)
-            except (OSError, ConnectionError):
-                pass
+        if self._udp_server is not None:
+            self._udp_server.send_raw(ack, addr)
 
         # If we have a pending punch to this peer, complete it
         state = self._punch_pending.get(src_id)
@@ -12258,9 +12251,12 @@ Hints come first (the ``have`` byte on an announce, from an
         arrive. Its probe/ack exchange can also race ahead of the pending state
         set up from PUNCH_RELAY. Anchoring the completion to the handshake makes
         the counter reflect reality on both sides regardless of that race."""
-        from .transports.udp import UDPTransport
         target = peer.authenticated_id
-        if target is None or not isinstance(peer.transport, UDPTransport):
+        if target is None:
+            return
+        # Only a link on the punched listener can settle a punch; a link that
+        # arrived some other way says nothing about this attempt.
+        if self._udp_server is None or not self._udp_server.owns(peer.transport):
             return
         state = self._punch_pending.get(target)
         if state is None or state.completed:
@@ -12283,11 +12279,9 @@ Hints come first (the ``have`` byte on an announce, from an
         client connecting). The other side does nothing here — its UDP server
         accept loop creates the peer and challenges when the initiator's frames
         arrive, exactly as for any inbound UDP connection."""
-        from .transports.udp import UDPTransport
-
         if state.completed:
             return  # already handled (probe and ack both landed)
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             return
 
         state.completed = True  # guards re-entry from probe+ack
@@ -12301,22 +12295,16 @@ Hints come first (the ``have`` byte on an announce, from an
             return
 
         # Both peers may punch at once (each upgrades its own relayed traffic),
-        # so several attempts can complete toward the same endpoint. The server
-        # dispatch table is the one link per source address: if it already holds
-        # a live transport for this addr — a prior attempt, or the accept path —
-        # a second one here would race the first to a dead, never-authenticated
-        # link. Reuse the existing one instead of duplicating it.
-        existing_t = self._udp_server._transports.get(addr)
-        if existing_t is not None and not existing_t._closed:
+        # so several attempts can complete toward the same endpoint. There is
+        # one link per source address: if one is already live — a prior attempt,
+        # or the accept path — a second peer here would race the first to a
+        # dead, never-authenticated link. `holds` is that question, and this is
+        # the only caller that must *stop* rather than reuse.
+        if self._udp_server.holds(addr):
             return
-
-        # Initiator: open the transport, register it in the server dispatch
-        # table so the peer's frames route to it, and send an initial keepalive
-        # to trigger the responder's accept + challenge.
-        transport = UDPTransport._from_server(self._udp_server._sock, addr,
-                                              self._udp_server)
-        self._udp_server._transports[addr] = transport
-        transport._start_tasks()
+        transport = self._udp_server.adopt(addr)
+        if transport is None:
+            return
         peer = self._new_peer(transport, is_client_side=True)
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"

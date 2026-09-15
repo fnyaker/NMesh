@@ -43,7 +43,7 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   invitation → handshake → data on the 9 guests.
 - An A→B→C→D chain topology for multi-hop forwarding in real conditions.
 
-### Store-and-forward — a file medium (`src/spool_transport.py`, `src/spool.py`)
+### Store-and-forward — a file medium (`src/transports/spool.py`, `src/transports/bundle.py`)
 - The `spool://` transport: the whole mesh (invite/handshake/routing/E2E) runs
   over a **shared directory**, with no socket. Durable append journals (fsync),
   per-record CRC framing, resync on corruption, multi-client.
@@ -97,7 +97,7 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
 - **A STUN client** (`src/stun.py`): an RFC 5389 Binding Request over UDP,
   parsing XOR-MAPPED-ADDRESS (IPv4/IPv6). A fallback when no peer is available to
   observe our address. Stdlib only, opt-in (`--stun`).
-- **A UDP transport** (`src/udp_transport.py`): `UDPTransport` / `UDPServer`
+- **A UDP transport** (`src/transports/udp.py`): `UDPTransport` / `UDPServer`
   implementing `BaseTransport` / `BaseServer` over asyncio datagram sockets. A
   reliability layer: sequence numbers, cumulative ACK + SACK, retransmission with
   exponential backoff, a bounded reordering buffer, a 25 s keepalive to hold NAT

@@ -317,3 +317,68 @@ class BaseServer(ABC):
         opportunistic discovery when no relay is configured. Returns True if
         the transport actually broadcast. Default: not broadcast-capable."""
         return False
+
+    # -- the datagram capabilities the punch path asks for ------------------
+    # NAT traversal needs four things no stream medium can give, and they are
+    # declared here rather than reached for, so the core can ask a medium what
+    # it can do instead of asking whether it is UDP. See CLAUDE.md §3: this is
+    # the exception, written down as an interface rather than as a private
+    # member somebody had to know about.
+    #
+    # Every default is the safe, lawful answer for a medium that cannot punch
+    # (a stream, a file): the traversal simply does not happen, which is the
+    # honest outcome for a medium where a hole in a NAT is not a thing. A
+    # transport that *can* punch overrides these.
+
+    def bound_endpoint(self) -> tuple[str, int] | None:
+        """Where this listener is bound — ``(host, port)`` — or None.
+
+        The address a peer must reach to arrive at this very listener, which is
+        the address worth advertising and the one a punch has to aim at. A
+        medium that is not a socket (a spool directory, a stream) has no such
+        address and says so."""
+        return None
+
+    def holds(self, remote: tuple[str, int]) -> bool:
+        """Is there already a live link to *remote* on this listener?
+
+        Asked so that the traversal path can stop opening a hole the moment a
+        real link exists — the question "is the connection happening yet?", for
+        which the alternative was reading the dispatch table directly."""
+        return False
+
+    def adopt(self, remote: tuple[str, int]) -> BaseTransport | None:
+        """A transport to *remote* carried by this listener's own socket.
+
+        The whole point of punching: the frames must leave from the socket whose
+        NAT mapping was opened, so a fresh socket would traverse nothing. The
+        core can ask for that link here instead of building one out of the
+        class's private constructor and a table it does not own.
+
+        **Idempotent.** A live link to *remote* is returned as it is, never
+        replaced: a second transport for one source address would race the first
+        for the same datagrams, and the loser is a link that never authenticates.
+        Returns None when this medium cannot carry such a link.
+        """
+        return None
+
+    def send_raw(self, data: bytes, remote: tuple[str, int]) -> bool:
+        """Send one datagram straight out of this listener's socket.
+
+        For the signals that have no link yet — a punch probe, its ack, a STUN
+        keepalive — and therefore cannot go through ``BaseTransport.send``,
+        which speaks packets on an established link. Best-effort on purpose: a
+        punch that does not land is a punch that did not work, not an error
+        worth raising. Returns True if the datagram left."""
+        return False
+
+    def owns(self, transport: BaseTransport) -> bool:
+        """Did this listener create *transport*?
+
+        Asked by the label path: a link's scheme is normally whatever the
+        registry says, but a server the node started itself may not be in that
+        registry at all, and "which medium is this?" still has an answer. Asking
+        the server that made the link is the medium-agnostic form of the
+        ``isinstance`` this replaces, and it stays true for a medium that
+        registers nothing anywhere."""
+        return False
