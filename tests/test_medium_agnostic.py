@@ -24,7 +24,7 @@ These tests hold the *corrected* claim, which is narrower and true:
 **Where the exception lives now.** `node.py` used to be one 14,000-line module
 holding the whole core, so "the core's exception" and "what `node.py` names"
 were the same sentence. The core is now split into focused modules, and the
-exception moved with the code that needs it: `node_peer.py` defines
+exception moved with the code that needs it: `src/mesh/peers.py` defines
 `RelayedTransport`, the bank of codecs is medium-agnostic, and the datagram
 work sits in the node. So the rule names the modules that may know a medium
 rather than continuing to imply that one filename is the whole core.
@@ -44,11 +44,19 @@ IMPLEMENTATIONS = {"udp_transport.py", "tcp_transport.py", "spool_transport.py",
                    "transport.py", "transport_manager.py", "medium.py"}
 
 # The modules that *are* the core. `node.py` was one file; it is now split into
-# the node itself and the parts it is assembled from. Naming them is the point:
-# the rule below checks every other module in `src/` is medium-agnostic, so the
-# set of exceptions has to be written down rather than inferred from a filename.
-CORE = {"node.py", "node_messages.py", "node_constants.py", "node_codecs.py",
-        "node_peer.py"}
+# the node itself and the parts it is assembled from, some of which live in the
+# `src/mesh/` package. Naming them is the point: the rule below checks every
+# other module in `src/` is medium-agnostic, so the set of exceptions has to be
+# written down rather than inferred from a filename. Paths are relative to the
+# repo root, because "which file is this" is no longer answerable by basename
+# alone now that the core has a package of its own.
+CORE = {
+    "src/node.py",
+    "src/mesh/messages.py",
+    "src/mesh/constants.py",
+    "src/mesh/codecs.py",
+    "src/mesh/peers.py",
+}
 
 # Anything that names one particular way of moving bytes.
 CONCRETE = re.compile(
@@ -63,22 +71,22 @@ CONCRETE = re.compile(
 #              general enough to express it would be a UDP interface with
 #              another name.
 #   relayed  — the node's own transport, defined beside the link it tunnels
-#              through (`node_peer.py`): a link that is not a socket at all but
+#              through (`src/mesh/peers.py`): a link that is not a socket at all but
 #              another node carrying frames for two peers that cannot reach
 #              each other. It is core routing wearing the transport interface,
 #              not a medium.
 CORE_MAY_KNOW = {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"}
 
 # Which module of the core may know a medium, and the medium it may know. The
-# permission is per module on purpose: `node_peer.py` *defines* the relayed
+# permission is per module on purpose: `src/mesh/peers.py` *defines* the relayed
 # transport, the node does the datagram work and also asks "is this link
 # relayed?" (a `isinstance` check, which is the cheapest way to exclude a
 # tunnelled link from a count of physical ones), and nothing else in the core
 # has any business naming either. A new module added to CORE is medium-agnostic
 # until somebody says otherwise here.
 CORE_MEDIUM_SITES = {
-    "node.py": {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"},
-    "node_peer.py": {"RelayedTransport"},
+    "src/node.py": {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"},
+    "src/mesh/peers.py": {"RelayedTransport"},
 }
 
 
@@ -89,16 +97,22 @@ def _modules():
         yield path, path.read_text()
 
 
+def _rel(path):
+    """Where a file is, from the repo root — the only stable name for a module
+    now that the core is a package and a basename no longer identifies one."""
+    return str(path.relative_to(ROOT))
+
+
 def test_only_the_core_knows_a_concrete_medium():
     """Every other module in `src/` is medium-agnostic, and that is the half of
     the principle that actually holds everywhere."""
     offenders = {}
     for path, text in _modules():
-        if path.name in CORE:
+        if _rel(path) in CORE:
             continue
         found = {m.group(0) for m in CONCRETE.finditer(text)}
         if found:
-            offenders[str(path.relative_to(ROOT))] = sorted(found)
+            offenders[_rel(path)] = sorted(found)
     assert offenders == {}, (
         "these modules name a concrete transport, which the core may not: "
         f"{offenders}")
@@ -112,7 +126,7 @@ def test_the_core_knows_exactly_the_two_media_the_charter_declares():
     short, written down in `CLAUDE.md`, and checked."""
     named = set()
     for path, text in _modules():
-        if path.name in CORE:
+        if _rel(path) in CORE:
             named |= {m.group(0) for m in CONCRETE.finditer(text)}
     unexpected = named - CORE_MAY_KNOW
     assert unexpected == set(), (
@@ -130,10 +144,10 @@ def test_each_medium_the_core_knows_is_confined_to_the_module_that_owns_it():
     choosing it."""
     found = {}
     for path, text in _modules():
-        if path.name in CORE:
+        if _rel(path) in CORE:
             names = {m.group(0) for m in CONCRETE.finditer(text)}
             if names:
-                found[path.name] = names
+                found[_rel(path)] = names
     assert found == CORE_MEDIUM_SITES, (
         "the core's medium-naming sites moved. Expected "
         f"{CORE_MEDIUM_SITES}, found {found}. If a medium genuinely belongs in "

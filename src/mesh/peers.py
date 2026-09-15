@@ -11,14 +11,14 @@ import asyncio
 import os
 import time
 
-from . import medium
-from .crypto import SessionKey
-from .metrics import Counters, LinkQuality
-from .node_constants import *  # noqa: F401,F403
-from .node_id import NodeID
-from .node_messages import RELAY_CARRY
-from .packet import Packet
-from .transport import BaseTransport
+from .. import medium
+from ..crypto import SessionKey
+from ..metrics import Counters, LinkQuality
+from .constants import *  # noqa: F401,F403
+from ..node_id import NodeID
+from .messages import RELAY_CARRY
+from ..packet import Packet
+from ..transport import BaseTransport
 
 
 # ---------------------------------------------------------------------------

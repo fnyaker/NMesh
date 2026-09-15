@@ -14,14 +14,14 @@ import json
 import struct
 import time
 
-from .cert import Certificate, FINGERPRINT_LEN
-from .ip_utils import split_host_port
-from .node_constants import *  # noqa: F401,F403
-from .node_id import NodeID
-from .node_messages import INVITE_SEEK
-from .packet import Packet
-from .routing import NodeEntry
-from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
+from ..cert import Certificate, FINGERPRINT_LEN
+from ..ip_utils import split_host_port
+from .constants import *  # noqa: F401,F403
+from ..node_id import NodeID
+from .messages import INVITE_SEEK
+from ..packet import Packet
+from ..routing import NodeEntry
+from ..uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 
 def _encode_conn_block(kind: str, **fields) -> str:

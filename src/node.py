@@ -106,17 +106,26 @@ from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_ke
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
 # The core's parts live in their own modules now — the message vocabulary
-# (``node_messages``), the bounds (``node_constants``), the wire codecs
-# (``node_codecs``) and the link object (``node_peer``). They are re-exported
+# (``src/mesh/messages.py``), the bounds (``src/mesh/constants.py``), the wire codecs
+# (``src/mesh/codecs.py``) and the link object (``src/mesh/peers.py``). They are re-exported
 # here on purpose: this module is the node's public surface, and ``DATA``,
 # ``_decode_chain`` and ``_Peer`` have always been imported from ``src.node``.
 # Moving a definition is not a reason to move the door — see
 # ``Docs/Architecture/README.md``. New code should import the module that owns
 # the name; this block exists for what already imports it from here.
-from .node_messages import *  # noqa: F401,F403
-from .node_constants import *  # noqa: F401,F403
-from .node_codecs import *  # noqa: F401,F403
-from .node_peer import *  # noqa: F401,F403
+from . import mesh
+from .mesh import codecs as _codecs
+from .mesh import constants as _constants
+from .mesh import messages as _messages
+from .mesh import peers as _peers
+
+# Re-exported by their own ``__all__`` rather than with ``import *``: a star
+# import at module level would put these names in ``node.py``'s namespace but
+# leave ``dir()`` and any later audit unable to say which module owns them.
+for _part in (_messages, _constants, _codecs, _peers):
+    for _name in _part.__all__:
+        globals()[_name] = getattr(_part, _name)
+del _part, _name
 
 
 
