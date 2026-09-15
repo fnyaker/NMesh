@@ -12,8 +12,8 @@ import re
 import socket
 import struct
 
-from .core_release import PUBLISHER_ID_LEN as _RELEASE_ID_LEN
-from .node_messages import *  # noqa: F401,F403
+from ..core_release import PUBLISHER_ID_LEN as _RELEASE_ID_LEN
+from .messages import *  # noqa: F401,F403
 
 
 _HEADER_BYTES = 79  # fixed packet header size, for byte accounting
