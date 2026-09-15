@@ -352,6 +352,39 @@ not the same as being read.
     the node and its edges on the map. The selected row carries a **Details**
     button — selecting is not opening, so a tap that only meant to point at
     something does not throw a dialog over the map.
+  - **Past what this node can see** (the panel's *Beyond this node*). The
+    drawing stops at this node's neighbours and the sessions it routes, because
+    that is everything it can *measure*. While the map is open, the machines
+    this console manages that granted `links` report what **they** are connected
+    to — and say so again whenever it changes, rather than when something here
+    happens to ask.
+
+    What comes back is a **claim**, kept apart on every axis: its own outer
+    ring, a dashed hollow dot, an edge labelled "said by …" rather than with a
+    latency nobody here measured, its own rows in the panel, and each machine's
+    age beside it.
+
+    It is a picture of **now**. Fleet keeps a freshness book rather than a
+    history: a machine that has not confirmed its links in the last 45 seconds
+    has *no* links on the map, not old ones. Closing the map stops the follows
+    within seconds and drops what was held — so the map is never showing
+    something nobody has confirmed, and a map nobody has open costs nothing at
+    all.
+
+    The state lives in the fleet app, not in the page: a reload does not empty
+    the map, and two tabs do not each go asking every machine. It is memory
+    only — a claim about somebody else's neighbours is not something to keep
+    across a restart — and *Drop what was reported* empties it, after which
+    whatever is still true is reported again a moment later.
+
+    Only machines that granted `links` are asked, and only fleet offers any of
+    this. The three questions the map asks fleet (`map_links`, `map_targets`,
+    `map_overlay`) **do not travel**: together they hand over the list of
+    machines this node manages, so they are answered only for the console an
+    operator is sitting at.
+  - **What an app knows about a node is drawn beside it.** Fleet says "managed",
+    "controls this node", "log" — its own words, rendered by a map that holds no
+    idea of what any of them mean.
 - **Which link carries the traffic is chosen, not stumbled on.** A node reached
   over two media at once may have one of them losing every probe. The score that
   picks between them multiplies the address score by `(1 − loss)⁴`, so a tenth
@@ -689,6 +722,11 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only what moved (`src/console_feed.py`); without `proto` it is the flat snapshot it has always been |
 | GET     | `/api/fleet/shell` | `?sid=&offset=` → terminal bytes (base64); `&wait=1` holds the answer until there are some (bounded in time, and in how many are parked at once) |
 | POST    | `/api/fleet/docker` | `{node, op, …}` → one docker operation on a managed node (`docker` right). Reads are waited on; the ones that pull images hand back a `rid` watched in the job list |
+| GET     | `/api/fleet/logs`  | `?node=&level=&source=&contains=&since_time=&until_time=` → the lines this node has **already collected** from the machines it manages, newest first, with the policies and what is being followed. Reads our own rings: it never asks the network, so scrolling a log cannot become traffic towards forty machines. Naming a node here is also what says somebody is *looking* at it, which is what the `active` policy follows |
+| POST    | `/api/fleet/logs-fetch` | `{node}` → ask that machine for its log now, whatever its policy says about collecting it |
+| POST    | `/api/fleet/logs-policy` | `{policy?, megabytes?}` for the fleet-wide default, or `{node, policy?, megabytes?, inherit?}` for one machine |
+| POST    | `/api/fleet/logs-forget` | `{node?}` → drop what was collected, from one machine or from all |
+| POST    | `/api/fleet/links-forget` | `{node?}` → drop the links being reported; whatever is still true is reported again within seconds |
 | POST    | `/api/fleet/stacks` | `{node, stacks[]}` → which of that node's docker stacks *Update* also brings up |
 | POST    | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → this console's own names for sets of machines; nothing about a group travels |
 | POST    | `/api/fleet/update-group` | `{group}` → *Update* on every node in that group |
@@ -726,6 +764,9 @@ now answers `{"error": …}` with the same status.
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
 | GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export` |
+| —       | (plane only)     | `logs.status`, `logs.set`, `logs.query`, `logs.since`, `logs.sources` — the node's own log ring, off until asked, bounded in megabytes ([`../Architecture/logging.md`](../Architecture/logging.md)) |
+| —       | (plane only)     | `alerts.list`, `alerts.ack`, `alerts.drop` — the notice board, always on ([`../Architecture/alerts.md`](../Architecture/alerts.md)). It also rides `node.state` as `alerts`, so a page that reads the snapshot already has it |
+| POST    | `/api/apps/grant` | `{id, capability, granted}` — gives or takes back one grant from a built-in app — `apps.grant` |
 | POST    | `/api/password`  | `{current, new}` — changes the password; **the current one is required** even with a valid session |
 
 The **Expert — addressing & transports** section shows every concrete URI
@@ -820,6 +861,16 @@ Install / Enable / Disable / Uninstall actions and the **Open** link
 state; uninstalling **purges its encrypted drawer**) and **enabled** (the app is
 plugged into the mesh right now; disabling stops it, its state survives). The
 toggle is **live** — no node restart — and persisted in `<data>/apps.json`.
+
+Each installed card also carries its **grants** as tick boxes: what that app may
+ask of the node *beyond running*. They are rendered from what the node declares,
+never from a list held in the page, so a grant added tomorrow appears with the
+node's own words for it. Today there is one — `logs`, reading the node's log
+ring: every other app's lines and the core's, not only its own. Off for every
+app until an operator ticks it, and dropped when the app is uninstalled, so one
+reinstalled later starts from nothing rather than from what somebody allowed the
+app that used to have that name. Writing a line needs no grant: the node stamps
+the source, so an app can only ever be quoted as itself.
 
 Wiring: pass an `app_host` (a `src.app_registry.AppHost`) to `WebConsole(...)`.
 `scripts/nmesh_node.py` does it; the `chat_bridge` parameter stays supported for
@@ -1095,6 +1146,52 @@ who this node keeps company with, when, and how much. So: off by default, in
 memory, bounded in number of events *and* in time, it stops on its own, and it
 reaches the disk only if an operator asks (0600). The bounds the request asks
 for are **capped**, not obeyed.
+
+## What wants attention (Overview)
+
+Above everything else on the overview, and hidden when there is nothing: one
+card listing what this node noticed about itself and about the machines it talks
+to — a peer whose standing crossed, a guard that swallowed a failure, a problem
+an app reported about itself.
+
+Two things make it readable rather than a wall. It is **one row per problem**
+with a count ("300 times"), never one per occurrence — a board that grew a row
+per event would be a page an attacker writes. And it is **always on**, unlike
+the log beside it: a node cannot know in advance which problem somebody will
+wish they had been told about.
+
+*Seen* marks a row read and leaves it there, because "is it still happening?" is
+a question about the count. *Dismiss* forgets it; whatever raised it raises it
+again if it is still true. Nothing on this card acts on anything — it is a
+sentence for a person, and what acts on a peer is the reputation book.
+
+## The node's log (`logs.*`)
+
+Beside the trace, and answering the other half of the question: the trace says
+what crossed the wire, the log says what the node was thinking while it crossed
+— which gate refused a handshake, why a loop gave up on an address, whatever an
+app chose to say.
+
+Same posture as the trace, for the same reason, and two differences that matter:
+
+- **Nothing is kept until somebody asks**, and **stopping drops what was kept**
+  rather than leaving it readable. A trace is a recording an operator asked for
+  and then reads; a log ring is a by-product, and one left in memory after the
+  person reading it stopped is a record this node has no business holding.
+- **The bound is in megabytes**, not in lines, because that is the question an
+  operator has about their machine. It is compressed a block at a time, so eight
+  megabytes holds on the order of a hundred thousand lines; `logs.status`
+  reports the *measured* ratio rather than a claim.
+
+Starting the trace starts the log with it: "turn the trace on" is one thing an
+operator does. `logs.set` is there for what that cannot express — sizing the
+ring, or keeping the lines of a node whose packet headers you have no business
+recording.
+
+A reader asks `logs.since` with the last sequence number it saw, so a console
+four hops away follows a live log over the same one-question-one-answer channel
+as everything else, and is told how much it `lost` if it fell behind the ring.
+Full mechanics: [`../Architecture/logging.md`](../Architecture/logging.md).
 
 ## Joining / bridging two networks
 

@@ -96,13 +96,22 @@ const CHANNEL = {
   // view mounted inside a local app needs it: "what is my link to this person"
   // is *this* node's question, and answering it from the machine being managed
   // would be a different question with the same wording.
+  //
+  // `options.node` is the other direction: **one** call to a named machine,
+  // without moving the operator's context to it. The map grows that way — it
+  // asks a machine about its own links and comes straight back — and a page
+  // that used the context for it would have to leave and return between every
+  // question. It never judges the context on the answer: a machine somewhere
+  // else being slow says nothing about the console on screen.
   async frame(op, params, options){
     const opts = options || {};
     const at = CONTEXT.epoch;
     const here = !!opts.local;
+    const elsewhere = !here && !!opts.node && opts.node !== CONTEXT.node;
     const headers = {"Content-Type": "application/json"};
     if(TOKEN) headers.Authorization = "Bearer " + TOKEN;
-    if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
+    if(elsewhere) headers["X-NMesh-Node"] = opts.node;
+    else if(CONTEXT.node && !here) headers["X-NMesh-Node"] = CONTEXT.node;
     this.seq = (this.seq + 1) % 100000;
     let response;
     try{
@@ -131,7 +140,7 @@ const CHANNEL = {
     // A reply belongs to the node that was being driven when it was asked for,
     // and must not paint over the one that replaced it.
     if(!here && CONTEXT.epoch !== at) throw new StaleContext();
-    if(!here) this.judge(reply);
+    if(!here && !elsewhere) this.judge(reply);
     return reply;
   },
 

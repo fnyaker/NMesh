@@ -122,6 +122,14 @@ INDEX_HTML = """<!doctype html>
           <button id="go-join" class="primary">Add a node</button>
         </div>
       </div>
+      <article id="alerts-card" class="card" hidden>
+        <div class="card-head"><div class="grow"><h2>Wants attention
+          <span id="alerts-count" class="badge"></span></h2>
+          <div class="sub">What this node noticed about itself and about the
+            machines it talks to. One line per problem, with how often</div></div>
+          <button id="alerts-clear" class="sm">Clear all</button></div>
+        <div class="card-body tight"><div id="alerts-list" class="stack"></div></div>
+      </article>
       <article id="first-run" class="card" hidden>
         <div class="card-head"><div class="grow"><h2 id="first-run-title"></h2>
           <div class="sub" id="first-run-sub"></div></div></div>
@@ -988,6 +996,7 @@ INDEX_HTML = """<!doctype html>
         <span class="row"><i class="dot self"></i>this node</span>
         <span class="row"><i class="dot direct"></i>direct link</span>
         <span class="row"><i class="dot routed"></i>routed session</span>
+        <span class="row"><i class="dot reported"></i>reported by a machine you manage</span>
       </span>
       <span class="grow"></span>
       <span id="map-summary" class="badge"></span>
@@ -1007,6 +1016,19 @@ INDEX_HTML = """<!doctype html>
       <aside class="map-side">
         <h3>Links</h3>
         <div id="map-links" class="stack"></div>
+        <div id="map-reported" class="stack"></div>
+        <div id="map-grow" class="map-grow stack" hidden>
+          <h3>Beyond this node</h3>
+          <p class="tiny muted">While this map is open, the machines you manage
+            that granted <code>links</code> report what <i>they</i> are
+            connected to, and say so again whenever it changes. What comes back
+            is their word, not a measurement: it is drawn dashed, it names who
+            said it, and a machine that goes quiet leaves the map within
+            seconds rather than lingering.</p>
+          <div id="map-grow-list" class="stack"></div>
+          <div class="row">
+            <button id="map-grow-clear" class="sm">Drop what was reported</button></div>
+        </div>
       </aside>
     </div>
   </div>
@@ -1073,6 +1095,12 @@ CONSOLE_PAGE_CSS = """
 .mesh-graph .node circle.hit{fill:transparent;stroke:none;transition:none}
 .mesh-graph .node.direct circle:not(.hit){fill:var(--accent)}
 .mesh-graph .node.routed circle:not(.hit){fill:var(--warn)}
+/* A claim, drawn as one: hollow, faint, dashed. Nothing this node measured
+   looks like this, which is the whole point of the layer. */
+.mesh-graph .edge.reported{stroke-dasharray:2 5;opacity:.5;stroke-width:1}
+.mesh-graph .node.reported circle:not(.hit){fill:none;stroke:var(--text-faint);
+  stroke-dasharray:2 3}
+.mesh-graph .node.reported text{fill:var(--text-faint)}
 .mesh-graph .node.self circle:not(.hit){fill:var(--text)}
 .mesh-graph .node.self text{fill:var(--text);font-weight:700}
 /* Labels sit over the edges: painting the stroke first gives each one a halo of
@@ -1107,6 +1135,9 @@ CONSOLE_PAGE_CSS = """
 .map-legend .dot.self{background:var(--text)}
 .map-legend .dot.direct{background:var(--accent)}
 .map-legend .dot.routed{background:var(--warn)}
+.map-legend .dot.reported{background:transparent;border:1px dashed var(--text-faint)}
+.map-grow{border-top:1px solid var(--border);padding-top:var(--s-3);margin-top:var(--s-3)}
+.map-grow .row{gap:var(--s-2)}
 .map-link{border:1px solid var(--border);border-radius:var(--r-md);padding:var(--s-2) var(--s-3);
   cursor:pointer;font-size:var(--fs-sm);background:var(--surface)}
 .map-link:hover,.map-link.on{border-color:var(--accent);background:var(--accent-soft)}
@@ -1162,6 +1193,9 @@ CONSOLE_PAGE_CSS = """
 .app-tile h3{flex:1 1 auto;min-width:0}
 .app-tile p{font-size:var(--fs-sm);color:var(--text-muted);flex:1 1 auto}
 .app-tile .btn-row{margin-top:auto}
+.app-tile .grants{display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-4);
+  padding:var(--s-2) 0;border-top:1px solid var(--border)}
+.app-tile .grants .check{font-size:var(--fs-sm);color:var(--text-muted)}
 /* A watched row stays one line high: the version is a hint, not the row. The
    wrapper scrolls on a narrow screen rather than squeezing the name into a
    column one character wide. */
@@ -1292,7 +1326,7 @@ async function tick(sample){
     paintFeed(STATE);
     drawChart(); drawGraph(STATE);
     paintApps(STATE); paintReach(STATE); paintMap(); paintRestart(STATE);
-    paintBroken(STATE); paintJoinHint(STATE);
+    paintBroken(STATE); paintJoinHint(STATE); paintAlerts(STATE);
     refreshLive();
   }catch(error){
     // The rail is a verdict about the node on screen, so it has to name the
@@ -1349,6 +1383,53 @@ function paintBroken(state){
   if(names) toast("This node could not build: " + names, "danger",
                   "Its log says why. The rest of this page is still true.");
 }
+
+// ---- what wants attention -------------------------------------------------
+// The board, not the log: these are always collected, because a node cannot
+// know in advance which problem somebody will wish they had been told about.
+// One row per problem with a count, never one per occurrence — three hundred
+// refused handshakes are one sentence an operator can act on, and a page that
+// scrolled them would be a page an attacker writes.
+function paintAlerts(state){
+  const board = state.alerts || {};
+  const rows = board.alerts || [];
+  $("alerts-card").hidden = rows.length === 0;
+  $("alerts-count").textContent = board.unread
+    ? board.unread + " unread" : String(rows.length || "");
+  if(!rows.length) return;
+  setHTML("alerts-list", rows.map((alert) =>
+    '<div class="toolbar' + (alert.acknowledged ? " muted" : "") + '">' +
+    badge(alert.level, alert.level === "error" ? "danger" : "warn") +
+    '<span class="grow"><b>' + esc(alert.summary || alert.key) + "</b>" +
+    (alert.detail ? ' <span class="muted small">' + esc(alert.detail) +
+      "</span>" : "") + "</span>" +
+    (alert.count > 1 ? '<span class="muted small">' + esc(alert.count) +
+      " times</span>" : "") +
+    '<span class="muted small">' + esc(alert.source || "") + "</span>" +
+    '<span class="muted small">' + esc(fmtAgo(Date.now() / 1000 - alert.at)) +
+    "</span>" +
+    (alert.acknowledged ? "" : '<button data-alert-ack="' + esc(alert.key) +
+      '">Seen</button>') +
+    '<button data-alert-drop="' + esc(alert.key) + '">Dismiss</button>' +
+    "</div>").join(""));
+}
+document.addEventListener("click", (event) => {
+  const seen = event.target.closest("[data-alert-ack]");
+  const gone = event.target.closest("[data-alert-drop]");
+  if(!seen && !gone) return;
+  const button = seen || gone;
+  withBusy(button, async () => {
+    await CHANNEL.ask(seen ? "alerts.ack" : "alerts.drop",
+                      {key: button.dataset.alertAck || button.dataset.alertDrop});
+    await tick(false);
+  });
+});
+$("alerts-clear").addEventListener("click", (event) => {
+  withBusy(event.target, async () => {
+    await CHANNEL.ask("alerts.drop", {key: ""});
+    await tick(false);
+  });
+});
 
 // The rail is hidden on a phone and the same line shows in the ⋯ menu; written
 // once so the two cannot disagree about whether this node is up.
@@ -1555,9 +1636,13 @@ function svgEl(name, attrs){
 // is where the mesh is actually watched, so it labels every edge with the
 // medium and the latency, and thickens it with what it carries.
 const GRAPH_SMALL = {w:420, h:250, rx:96, ry:58, rx2:168, ry2:100, r:9, self:12,
-                     labels:false};
+                     rx3:216, ry3:124, labels:false};
 const GRAPH_BIG = {w:900, h:520, rx:250, ry:150, rx2:390, ry2:225, r:13, self:18,
-                   labels:true};
+                   // A third ring, for what other machines report. Placed
+                   // outside the two this node can vouch for, because distance
+                   // from the centre is exactly what it means here: how far
+                   // from what we saw ourselves.
+                   rx3:560, ry3:330, labels:true};
 
 function drawGraph(state){ renderGraph($("graph"), state, GRAPH_SMALL); }
 
@@ -1572,6 +1657,42 @@ function edgeLabelAt(from, to, share){
           y:from.y + dy * t + (dx / length) * 9 - 2};
 }
 
+// ---- the map, past what this node can see -----------------------------------
+// A node draws what it *measures*: its own links, and the sessions it routes.
+// Everything beyond is another machine's word about its own links, and this
+// page does not keep it — **fleet does**. Three reasons, and none of them is
+// tidiness:
+//
+//   * a reload must not empty the map, and two tabs must not each go asking
+//     forty machines the same question;
+//   * what is drawn has to be *now*. Fleet holds a freshness book, not a
+//     history: a machine that has not confirmed its links in the last few
+//     seconds has no links on this map rather than old ones
+//     (`src/apps/fleet_links.py`);
+//   * and asking for it is what tells this node somebody is looking, which is
+//     what makes those machines push. A map nobody has open costs nothing.
+//
+// So there is no store here at all. `MAP_LINKS` is the last answer, held only
+// until the next one.
+let MAP_LINKS = {edges:[], nodes:[], sources:[], following:[], may_ask:[]};
+
+// What the drawing needs, with anything this node can see itself taken out: a
+// reported edge to a machine we are talking to *is* our own link, and drawing
+// both would say the mesh is twice the size it is.
+function mapReported(state){
+  const known = new Set([state.id]);
+  const topology = state.topology || {};
+  (topology.direct || []).forEach((node) => known.add(node.id));
+  (topology.routed || []).forEach((node) => known.add(node.id));
+  const edges = (MAP_LINKS.edges || []).filter(
+    (edge) => !(known.has(edge.a) && known.has(edge.b)));
+  const drawn = new Set();
+  edges.forEach((edge) => { drawn.add(edge.a); drawn.add(edge.b); });
+  const nodes = (MAP_LINKS.nodes || []).filter(
+    (node) => drawn.has(node.id) && !known.has(node.id));
+  return {edges, nodes};
+}
+
 let MAP_NAMES = {};
 
 // What decides the drawing: which nodes are on it, where each sits, and what
@@ -1579,9 +1700,14 @@ let MAP_NAMES = {};
 // label, an uptime — is written into the drawing that is already there.
 function graphShape(state, size){
   const topology = state.topology || {};
+  const grown = size.labels ? mapReported(state) : {nodes:[], edges:[]};
   return JSON.stringify([size.w, !!size.labels, state.id,
     (topology.direct || []).map((node) => [node.id, node.pseudo || ""]),
-    (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""])]);
+    (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""]),
+    // Reported nodes and edges only on the expanded map: the card on the
+    // overview answers "am I connected", which is this node's own question.
+    grown.nodes.map((node) => node.id),
+    grown.edges.map((edge) => edge.a + "|" + edge.b)]);
 }
 
 // The numbers on a drawing that has not changed shape.
@@ -1638,6 +1764,7 @@ function renderGraph(svg, state, size){
   svg.dataset.graphShape = shape;
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 " + size.w + " " + size.h);
+  const grown = size.labels ? mapReported(state) : {nodes:[], edges:[]};
   const centre = {x:size.w / 2, y:size.h / 2}, place = new Map();
   direct.forEach((node, index) => {
     // Half a step off the top, so the centre node's own label has room.
@@ -1651,6 +1778,15 @@ function renderGraph(svg, state, size){
     const angle = step * index - Math.PI / 2 + step / 2 + .3;
     place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx2,
                         y:centre.y + Math.sin(angle) * size.ry2});
+  });
+  // The outer ring, in id order. Sorted rather than laid out by who reported
+  // them: a deterministic place is what keeps the map still between two polls,
+  // and a node that moves every two seconds is a node nobody can click.
+  grown.nodes.forEach((node, index) => {
+    const step = Math.PI * 2 / Math.max(1, grown.nodes.length);
+    const angle = step * index - Math.PI / 2 + step / 2;
+    place.set(node.id, {x:centre.x + Math.cos(angle) * size.rx3,
+                        y:centre.y + Math.sin(angle) * size.ry3});
   });
   // Colour carries health beside it: a thin amber line is a link losing probes.
   direct.forEach((node) => {
@@ -1678,6 +1814,23 @@ function renderGraph(svg, state, size){
       const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
                                                 {class:"elabel"}));
       label.textContent = "via " + shortId(node.via);
+      svg.appendChild(label);
+    }
+  });
+  // Reported edges, drawn before the dots so a claim never sits on top of
+  // something this node measured. Dashed, faint, and labelled with *who said
+  // so* rather than with a latency: we did not measure this and must not look
+  // as though we had.
+  grown.edges.forEach((edge) => {
+    const from = place.get(edge.a), to = place.get(edge.b);
+    if(!from || !to) return;
+    svg.appendChild(svgEl("line", {x1:from.x, y1:from.y, x2:to.x, y2:to.y,
+                                   class:"edge reported",
+                                   "data-reported":edge.a + "|" + edge.b}));
+    if(size.labels){
+      const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
+                                                {class:"elabel reported"}));
+      label.textContent = "said by " + shortId(edge.from);
       svg.appendChild(label);
     }
   });
@@ -1713,6 +1866,9 @@ function renderGraph(svg, state, size){
                                node.since ? "up " + fmtDuration(node.since) : ""));
   routed.forEach((node) => dot(node.id, place.get(node.id), "routed",
                                "Routed session with " + node.id + " via " + node.via, null));
+  grown.nodes.forEach((node) => dot(node.id, place.get(node.id), "reported",
+                                    "Reported by " + node.from + ": " + node.id,
+                                    "reported"));
   dot(state.id, centre, "self", "This node");
   if(!direct.length && !routed.length){
     const text = svgEl("text", {x:centre.x, y:centre.y + size.self + 34, class:"lonely"});
@@ -1732,6 +1888,7 @@ let MAP_PICK = null;
 function paintMap(){
   const dialog = $("map-dialog");
   if(!dialog.open || !STATE) return;
+  paintGrow();
   renderGraph($("map-svg"), STATE, GRAPH_BIG);
   // renderGraph resets the viewBox to the whole drawing; whatever the operator
   // had zoomed into has to survive the two-second poll, or the map is unusable
@@ -1741,6 +1898,18 @@ function paintMap(){
   // A pick that no longer exists is dropped — the one deselection a repaint is
   // allowed to make.
   if(MAP_PICK && !direct.some((node) => node.id === MAP_PICK)) MAP_PICK = null;
+  // Reported machines get a row of their own, under the links: they are on the
+  // drawing, so a panel that listed only what we measured would make half the
+  // map unclickable and unexplained.
+  const reported = mapReported(STATE).nodes;
+  setHTML("map-reported", reported.length ? reported.map((node) =>
+    '<div class="map-link" data-link="' + esc(node.id) + '">' +
+    '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo || "")) + "</b>" +
+    badge("reported", "") + overlayBadges(node.id) + "</div>" +
+    '<div class="tiny muted">said by ' + esc(shortId(node.from)) + " · " +
+    esc(fmtAgo((Date.now() - node.at) / 1000)) + "</div>" +
+    '<div class="btn-row"><button class="sm" data-link-details="' + esc(node.id) +
+    '">Details</button></div></div>').join("") : "");
   setHTML("map-links", direct.length ? direct.map((node) => {
     const quality = node.quality || {}, counters = node.counters || {};
     const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
@@ -1748,7 +1917,7 @@ function paintMap(){
       '" data-link="' + esc(node.id) + '">' +
       '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo)) + "</b>" +
       badge(node.transport || "?", "") +
-      (loss ? badge(loss + "%", "warn") : "") + "</div>" +
+      (loss ? badge(loss + "%", "warn") : "") + overlayBadges(node.id) + "</div>" +
       '<div class="tiny muted">' +
       (node.rtt_ms == null ? "no probe yet" : node.rtt_ms + " ms" +
         (quality.jitter_ms ? " ±" + quality.jitter_ms : "")) +
@@ -1762,6 +1931,99 @@ function paintMap(){
                           "Nothing to watch until this node has a neighbour."));
   highlightEdge();
   revealPick();
+}
+
+// ---- what fleet knows, and what it can reach -------------------------------
+// Asked of **fleet and only fleet**, deliberately: growing the map means
+// driving another machine's console, which is remote management under another
+// name. When that is something other apps may offer, this is the line that
+// changes — and the page will not have to, because it already renders whatever
+// words it is handed.
+let MAP_TARGETS = [], MAP_OVERLAY = {};
+// How often the open map asks fleet for what the machines are reporting. Well
+// inside the freshness window fleet keeps (`fleet_links.FRESH_FOR`), so what is
+// on screen is never something no machine has confirmed.
+const MAP_LINKS_EVERY = 5000;
+
+async function askFleet(op, args){
+  try{
+    const answer = await CHANNEL.call("apps.call",
+      {app:"fleet", op, args: args || {}});
+    return (answer || {}).result || {};
+  }catch(_){ return {}; }          // no fleet, or it is not running: no map
+}
+
+async function loadMapExtras(){
+  const [targets, overlay] = await Promise.all([askFleet("map_targets"),
+                                                askFleet("map_overlay")]);
+  MAP_TARGETS = targets.targets || [];
+  MAP_OVERLAY = overlay.nodes || {};
+  paintGrow();
+}
+
+// The live half, on its own cadence while the map is open. Asking is also how
+// this console says somebody is looking, which is what keeps the machines
+// pushing — so a map left open stays current, and a map nobody has open stops
+// costing anything within seconds of being closed.
+let MAP_LINKS_TIMER = null;
+
+async function refreshMapLinks(){
+  if(!$("map-dialog").open) return;
+  const answer = await askFleet("map_links");
+  if(answer && Array.isArray(answer.edges)) MAP_LINKS = answer;
+  if(STATE) paintMap();
+}
+
+function watchMapLinks(on){
+  clearInterval(MAP_LINKS_TIMER);
+  MAP_LINKS_TIMER = null;
+  if(!on) return;
+  refreshMapLinks();
+  MAP_LINKS_TIMER = setInterval(refreshMapLinks, MAP_LINKS_EVERY);
+}
+
+function paintGrow(){
+  const block = $("map-grow");
+  const may = MAP_LINKS.may_ask || [];
+  block.hidden = may.length === 0 && MAP_TARGETS.length === 0;
+  if(block.hidden) return;
+  const fresh = new Map((MAP_LINKS.sources || []).map((row) => [row.id, row]));
+  const following = new Set(MAP_LINKS.following || []);
+  setHTML("map-grow-list", may.map((id) => {
+    const target = MAP_TARGETS.find((row) => row.id === id) || {};
+    const name = target.label || target.pseudo || shortId(id);
+    const said = fresh.get(id);
+    // Three states and they are different things: it is telling us its links
+    // now, it has been asked and has not answered, or it never granted this.
+    const state = said
+      ? badge(plural(said.links, "link") + " · " + Math.round(said.age) + "s ago", "ok")
+      : (following.has(id) ? badge("waiting", "warn") : badge("idle", ""));
+    return '<div class="row"><span class="grow truncate">' + esc(name) + "</span>" +
+      state + "</div>";
+  }).join("") || '<p class="tiny muted">No machine here has granted <code>links</code>.</p>');
+}
+
+$("map-grow-clear").addEventListener("click", async (event) => {
+  await withBusy(event.target, async () => {
+    try{
+      await apiJson("/api/fleet/links-forget", "POST", {});
+      MAP_LINKS = {edges:[], nodes:[], sources:[], following:[],
+                   may_ask: MAP_LINKS.may_ask || []};
+      if(STATE) paintMap();
+      // Said plainly, because it is what happens: the machines are still
+      // following, so anything still true comes back within seconds.
+      toast("Dropped — whatever is still true will be reported again");
+    }catch(_){ toast("That could not be dropped", "danger"); }
+  });
+});
+
+// What an app says about a node, rendered in the app's own words. The map holds
+// no idea of what `managed` or a log policy means — which is what makes this the
+// shape a second app could fill without this file changing.
+function overlayBadges(id){
+  const row = MAP_OVERLAY[id];
+  if(!row || !(row.badges || []).length) return "";
+  return row.badges.map((word) => badge(word, row.tone || "")).join("");
 }
 
 // The drawing and the list are one selection, so picking on either has to bring
@@ -1919,8 +2181,17 @@ $("map-open").addEventListener("click", () => {
   MAP_VIEW = null;
   $("map-dialog").showModal();
   paintMap();
+  // Read when the map is opened, not on the cadence: what fleet can reach and
+  // what it knows are two local questions, and a map nobody is looking at
+  // should cost nothing at all.
+  loadMapExtras();
+  watchMapLinks(true);
 });
 $("map-close").addEventListener("click", () => $("map-dialog").close());
+// Closed by the button, by Escape, or by the dialog being dismissed: the one
+// place all three end up, so the machines stop being asked whichever way the
+// operator left.
+$("map-dialog").addEventListener("close", () => watchMapLinks(false));
 $("map-links").addEventListener("click", (event) => {
   const details = event.target.closest("[data-link-details]");
   if(details){ openNode(details.dataset.linkDetails); return; }
@@ -2969,8 +3240,44 @@ function appTile(app){
     '<span class="app-ic" aria-hidden="true">' + esc((app.name || "A").slice(0, 2).toUpperCase()) +
     "</span><h3>" + esc(app.name) + "</h3>" + badge(state[0], state[1]) + "</div>" +
     "<p>" + esc(app.description || "Built-in application.") + "</p>" +
+    grantsHTML(app) +
     '<div class="btn-row">' + buttons.join("") + "</div></article>";
 }
+// What an app may ask of the node beyond running — rendered from what the node
+// declared, never from a list held here: a grant this page has never heard of
+// still appears, with the node's own words for it.
+function grantsHTML(app){
+  const grants = Array.isArray(app.grants) ? app.grants : [];
+  if(!app.installed || !grants.length) return "";
+  return '<div class="grants">' + grants.map((grant) =>
+    '<label class="check" title="' + esc(grant.description || "") + '">' +
+    '<input type="checkbox" data-grant-app="' + esc(app.id) + '"' +
+    ' data-grant="' + esc(grant.name) + '"' + (grant.granted ? " checked" : "") +
+    "><span>" + esc(grant.title || grant.name) + "</span></label>").join("") +
+    "</div>";
+}
+$("builtin-apps").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-grant]");
+  if(!box) return;
+  const app = box.dataset.grantApp, capability = box.dataset.grant;
+  const granted = box.checked;
+  // The box is what the operator pressed, so it is what waits for the answer;
+  // a grant that was refused goes back to what the node says it is.
+  box.disabled = true;
+  try{
+    const {ok, error, data} = await CHANNEL.ask(
+      "apps.grant", {app:app, capability:capability, granted:granted});
+    if(ok){
+      toast(granted ? capability + " granted to " + app
+                    : capability + " taken back from " + app);
+      if(data.apps && STATE) STATE.apps = data.apps;
+    }else{
+      box.checked = !granted;
+      toast(error || "the grant was refused", "danger");
+    }
+  }catch(_){ box.checked = !granted; toast("the grant was refused", "danger"); }
+  finally{ box.disabled = false; if(STATE) paintApps(STATE); }
+});
 $("builtin-apps").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-builtin-action]");
   if(!button) return;

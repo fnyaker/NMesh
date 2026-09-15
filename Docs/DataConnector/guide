@@ -83,6 +83,15 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | ←    | `AUTH_PRINCIPAL`(0x8D)| the principal as JSON, or `null` | the `AUTH_VERIFY` answer |
 | →    | `ABUSE` (0x0F)       | `node_id(20) + weight(1) + kind(1) + reason(utf-8)` | reports a node abusing **this app**. No answer, by design |
 | →    | `ATTENDED` (0x10)    | `flag(1)`                   | is somebody **at** this app right now? No answer, by design |
+| →    | `LOG_WRITE` (0x11)   | `level(1) + topiclen(1) + topic + message(utf-8)` | says one line. No answer, by design |
+| →    | `LOG_QUERY` (0x12)   | a JSON filter               | the node's log ring, newest first — **needs the `logs` grant** |
+| →    | `LOG_SINCE` (0x13)   | JSON `{seq, …}`             | everything after a sequence number, oldest first — same grant |
+| →    | `LOG_WATCH` (0x14)   | `flag(1) + level(1)`        | subscribe to new lines at or above a floor, or stop — same grant |
+| ←    | `LOG_LINES` (0x8F)   | JSON `{lines, matched, returned, seq}` | the answer to the three above (`lost` on a `LOG_SINCE`, `refused: true` without the grant, `watching` for a `LOG_WATCH`) |
+| →    | `NOTIFY` (0x15)      | `level(1) + keylen(1) + key + JSON {summary, detail}` | puts one problem on this node's board. No answer, by design |
+| →    | `LINKS` (0x16)       | empty                       | which nodes this one is connected to — **needs the `links` grant** |
+| ←    | `LINKS_VIEW` (0x92)  | JSON `{links: [...], at}`   | the `LINKS` answer (`refused: true` without the grant) |
+| ←    | `LOG_LINE` (0x90)    | one line as JSON            | pushed to a watching client as it is recorded |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
 `SEND` frames and receives `RECV` frames from its section as they come. On the
@@ -122,6 +131,92 @@ The node's own built-in apps (chat, fleet) declare `attended=False`, because
 they are attached at boot by the node itself — the node wiring an enabled app to
 the mesh, not somebody sitting in front of it. What says a person is at chat is
 the chat *page*, and the console is what sees that.
+
+## Saying things, and reading what the node said (`LOG_*`)
+
+The node keeps a bounded, compressed ring of what it and its apps said, off
+until an operator turns it on
+([`Docs/Architecture/logging.md`](../Architecture/logging.md)). An app's access
+to it has two unequal halves, and the inequality is the design.
+
+**Writing needs no grant:**
+
+```python
+await client.log("upload finished", level="warn", topic="files")
+```
+
+The *node* stamps the source as `app:<app id[:16]>`. An app cannot choose it, so
+it can only ever be quoted as itself — one able to set its own source could
+write lines that read as the core's, and a log an operator cannot attribute is
+worse than no log. Like `ABUSE`, the frame is not answered: a line is cheap, and
+a reply would be a way to read the node's state back. A line written while
+nothing is being kept costs one dropped frame and nothing else.
+
+**Reading needs the `logs` grant**, given per app in the console's Apps page and
+off until an operator turns it on:
+
+```python
+answer = await client.logs_query(level="warn", contains="handshake")
+answer = await client.logs_since(seen, source="peers")   # after a gap
+if await client.logs_watch(True, level="warn"):          # follow it
+    line = client.next_log()                             # or None
+```
+
+Three things are worth knowing before writing against it:
+
+- **A refusal is answered, not dropped.** Without the grant every read comes
+  back `{"refused": true}`. An app that was left waiting on a reply that is
+  never coming cannot tell "not permitted" from "this node has wedged".
+- **`logs_watch` answers what is true now**, not what was asked: a node with
+  nothing being kept, an app without the grant and a node already holding as
+  many watchers as it will hold all answer `False`.
+- **Nothing is buffered for a subscriber.** The ring is the buffer: a client
+  that stops reading loses pushes — its own bounded queue, nobody else's — and
+  catches up with `logs_since(seq)`, which answers `lost` rather than handing
+  back a gap it cannot see.
+
+## Saying that something is wrong (`NOTIFY`)
+
+A log line is for whoever reads the log. A **notice** is for whoever is looking
+after this machine, and the difference matters because the log is off until an
+operator turns it on:
+
+```python
+await client.notify("uploads", "too many failed uploads",
+                    level="error", detail="12 in a minute")
+```
+
+Only this app knows what "too many" means for it — the same argument as
+`report_abuse`, and the same division: the app judges, the node decides what the
+board looks like. `key` names the **problem**, not the occurrence: the same key
+twice is one entry with a count, which is the sentence an operator can act on.
+
+The node namespaces the key with this client's app id, so one app can never
+overwrite another's entry or post as the core, and bounds every field. Like
+`ABUSE`, it is **answered by nothing**: a reply would let an app read the node's
+state back, and what else is wrong with this machine is the operator's business.
+Details and bounds: [`Docs/Architecture/alerts.md`](../Architecture/alerts.md).
+
+## Who this node is connected to (`LINKS`)
+
+```python
+answer = await client.links()      # {"links": [{id, pseudo, transport, rtt_ms, since}]}
+```
+
+Four fields per link and nothing else: an identity, a medium, a latency, an age.
+What an app is answered is the smallest thing that makes the question true.
+
+Behind the **`links` grant**, given per app in the Apps page like `logs` and for
+the same reason: who a machine keeps company with is routing metadata about its
+neighbours as much as about it. An app that shows a mesh map needs it; an app
+that sends messages does not. Without it the answer is `{"refused": true}` —
+answered, never dropped, so "not permitted" cannot be mistaken for a node that
+has wedged.
+
+The built-in fleet app uses exactly this to answer another operator's
+`LINKS_REQUEST`, which is why a machine can hold the fleet capability and still
+refuse: two grants, and the refusal says which one is missing
+([`Docs/Apps/fleet`](../Apps/fleet)).
 
 The `STORE_*` frames drive the **per-app local store** (the "drawer"): an
 encrypted key→value store, isolated per section. The `app_id` **does not appear**

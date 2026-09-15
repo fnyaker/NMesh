@@ -27,14 +27,14 @@ from collections import OrderedDict, deque
 
 from .. import app_api
 from ..node_id import NodeID
-from . import fleet_files
+from . import fleet_files, fleet_links, fleet_logs
 from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
     CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
     EnrolAnswered, EnrolRequested, Failure, FileTransferError, InviteIssued,
-    NodeAdopted, Revoked, ScanReceived, ShellClosed, ShellOpened, ShellOutput,
-    StatusReceived,
+    LinksReceived, LogsReceived, NodeAdopted, Revoked, ScanReceived,
+    ShellClosed, ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import (CAP_DESCRIPTIONS, CAPABILITIES, clean_caps,
                           clean_stack_names)
@@ -86,6 +86,16 @@ _CALL_TIMEOUT = 30.0
 # reading from a slow disk, and short enough that a page never hangs on a node
 # that has gone away.
 _FILE_TIMEOUT = 40.0
+# How often the follows are reconciled against the policies and renewed. Well
+# inside `fleet.LOG_FOLLOW_TTL`, so a node never stops sending between two
+# renewals, and long enough that following forty machines is forty frames a
+# minute rather than a conversation.
+_FOLLOW_INTERVAL = 60.0
+# The same for links, and far shorter: a link follow is meant to lapse quickly
+# when nobody is drawing the map (`fleet.LINK_FOLLOW_TTL`), so it has to be
+# renewed well inside that. Cheap while nothing is watching — with no page open
+# this loop asks nothing at all.
+_LINKS_INTERVAL = 12.0
 MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
 REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
 
@@ -128,15 +138,48 @@ class FleetBridge:
         # ``_call`` returns, so completion must not depend on that ordering.
         self._done_early: "OrderedDict[str, tuple]" = OrderedDict()
         self._notice: str = ""
+        # The logs of the machines we manage, one bounded ring each
+        # (`fleet_logs.LogArchive`). Memory only, like every ring in this
+        # product: what an operator chose to *collect* is persisted in the
+        # ledger, what was collected is not.
+        self._logs = fleet_logs.LogArchive()
+        self._logs.set_default_megabytes(
+            self._app.state.log_defaults().get("megabytes"))
+        self._follow_task: asyncio.Task | None = None
+        self._links_task: asyncio.Task | None = None
+        # What the machines we manage say they are connected to, while it is
+        # still true (`fleet_links.LinkMap`). Held here rather than in the page
+        # that draws it, so a reload does not empty the map and two tabs do not
+        # each go asking every machine — and in memory, because a claim about
+        # somebody else's neighbours is not something to still have after a
+        # restart.
+        self._links = fleet_links.LinkMap()
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
         self._app.add_listener(self._on_event)
+        # Armed *on* the loop, never from whatever thread called this: a task
+        # created from another thread is created outside the loop's own
+        # bookkeeping, and this is called from the console's start as readily
+        # as from the node's.
+        loop.call_soon_threadsafe(self._arm_follow_loop)
+
+    def _arm_follow_loop(self) -> None:
+        loop = asyncio.get_event_loop()
+        if self._follow_task is None or self._follow_task.done():
+            self._follow_task = loop.create_task(self._follow_loop())
+        if self._links_task is None or self._links_task.done():
+            self._links_task = loop.create_task(self._links_loop())
 
     def stop(self) -> None:
         self._app.remove_listener(self._on_event)
+        for name in ("_follow_task", "_links_task"):
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                setattr(self, name, None)
 
     @property
     def me(self) -> str:
@@ -178,6 +221,22 @@ class FleetBridge:
                     else "now lets us")
             self._say("warn", f"{short}… {what} {', '.join(event.caps)}",
                       node_hex)
+        elif isinstance(event, LinksReceived):
+            if event.links or event.pushed or event.following:
+                self._links.absorb(node_hex, event.links)
+                with self._lock:
+                    self._bump()
+            if not event.pushed and event.following is None:
+                self._finish(event.rid, "ok")
+        elif isinstance(event, LogsReceived):
+            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost)
+            if event.following is False:
+                self._say("warn", f"{short}… stopped sending its log", node_hex)
+            if kept or event.lost:
+                with self._lock:
+                    self._bump()
+            if not event.pushed and event.following is None:
+                self._finish(event.rid, "ok")
         elif isinstance(event, StatusReceived):
             self._finish(event.rid, "ok")
             with self._lock:
@@ -505,6 +564,40 @@ class FleetBridge:
             "request", "Ask a node we already manage for extra rights",
             [app_api.param("node", "node"), app_api.param("caps", "tokens")],
             changes=True),
+        # What this console collects from that machine, and the one decision
+        # about it. Read travels with `relation` (it is part of how the two
+        # nodes stand); the write does not, for the same reason `enrol` does
+        # not — it is a decision *this* operator makes about their own console.
+        app_api.operation(
+            "logs_policy", "Whether this console collects that machine's log",
+            [app_api.param("node", "node"),
+             app_api.param("policy", "text", required=False, default=""),
+             app_api.param("megabytes", "count", required=False, default=0)],
+            changes=True),
+        # The map, and the two questions it asks. Both read this console's own
+        # ledger and nothing else, so both are cheap and neither reaches the
+        # network. **Fleet only**, because growing a map means driving another
+        # machine's console — the same authority as remote management, not
+        # something every app gets to have.
+        #
+        # And **local only**, which is the harder half. Neither of these acts,
+        # so the instinct is to let them travel like `relation`. But `relation`
+        # answers about *one node the caller already named*, while these two
+        # hand over the whole list of machines this node manages and can reach
+        # — which is precisely how a node somebody manages becomes a way to
+        # reach the nodes *it* manages (`Docs/Apps/fleet`). A map grows on the
+        # console an operator is sitting at.
+        app_api.operation(
+            "map_targets", "Machines this console may grow the map through"),
+        app_api.operation(
+            "map_overlay", "What fleet knows about the nodes on the map"),
+        # The map's own data, and the one thing that makes it worth holding
+        # here: reading it is also how the page says somebody is looking, which
+        # is what keeps the machines pushing. A map nobody has open costs
+        # nothing at all.
+        app_api.operation(
+            "map_links", "What the machines we manage say they are linked to",
+            changes=True),
         app_api.operation(
             "invite", "Have a node we manage mint an invitation to its mesh",
             [app_api.param("node", "node"),
@@ -533,12 +626,102 @@ class FleetBridge:
             "waiting_on_them": asked is not None,
             "asked_caps": list((asked or {}).get("caps") or []),
             "waiting_on_us": inbound is not None,
+            # What we collect from it, and what we hold. Part of how the two
+            # nodes stand: "you hold `logs` on it" and "you are keeping its
+            # log" are different sentences and an operator needs both.
+            "logs": self._logs_relation(node) if managed else None,
             # Names *and* what each one lets through: a page offering a choice
             # of rights has to be able to say what it is asking for.
             "capabilities": [{"name": cap, "description": CAP_DESCRIPTIONS[cap]}
                              for cap in CAPABILITIES],
             "page": "/fleet#nodes",
         }
+
+    # -- the map -----------------------------------------------------------
+
+    def api_map_targets(self) -> dict:
+        """Which machines the map may be grown through, and whether it can be
+        now.
+
+        Two conditions and they are different: the *grant* (`manage`, which the
+        operator was given once) and the *session* (open now, or openable
+        without a password because `passwordless` was granted too). A page that
+        offered "expand" on a machine with no session would offer a button that
+        always fails."""
+        return {"targets": self.remote_targets()}
+
+    def api_map_links(self) -> dict:
+        """The links the machines we manage are reporting **right now**.
+
+        Declared as changing state, which looks wrong for a read and is not:
+        asking is what tells this node somebody is drawing the map, and that is
+        what makes it follow those machines. A caller that asks for this is
+        starting something, so it says so.
+
+        Nothing here reaches the network: it answers from what has already been
+        pushed to us, and anything a machine has not confirmed in the last
+        `fleet_links.FRESH_FOR` seconds is not in the answer at all."""
+        self._links.note_watching()
+        answer = self._links.view()
+        answer["following"] = self._app.following_links()
+        answer["may_ask"] = [row["id"] for row in self._app.state.managed()
+                             if "links" in (row.get("caps") or [])]
+        return answer
+
+    def forget_links(self, node: str = "") -> dict:
+        self._links.forget(str(node or ""))
+        with self._lock:
+            self._bump()
+        return self._links.view()
+
+    def api_map_overlay(self) -> dict:
+        """What fleet knows about each node, for the map to draw beside it.
+
+        Fleet's words, not the map's: the page renders the badges it is handed
+        and holds no idea of what `govern` or a log policy is. That is what
+        makes this the shape another app could fill later — and why nothing
+        here is computed twice from what the ledger already answers."""
+        out = {}
+        following = set(self._app.following())
+        for entry in self._app.state.managed():
+            node = entry.get("id") or ""
+            caps = list(entry.get("caps") or [])
+            badges = ["managed"]
+            if "logs" in caps and node in following:
+                badges.append("log")
+            out[node] = {"badges": badges, "label": entry.get("label") or "",
+                         "caps": caps, "tone": "ok"}
+        for entry in self._app.state.operators():
+            node = entry.get("id") or ""
+            row = out.setdefault(node, {"badges": [], "label": "", "caps": [],
+                                        "tone": ""})
+            row["badges"] = row["badges"] + ["controls this node"]
+            # An operator of *ours* outranks anything else this row says: it is
+            # the one line on a map that an operator must never have to look
+            # twice to see.
+            row["tone"] = "warn"
+        return {"nodes": out}
+
+    def _logs_relation(self, node: str) -> dict:
+        policy = self._app.state.log_policy(node)
+        held = (self._logs.status()["nodes"] or {}).get(node) or {}
+        return dict(policy,
+                    following=node in self._app.following(),
+                    records=held.get("records", 0),
+                    used_bytes=held.get("used_bytes", 0),
+                    policies=list(fleet_logs.POLICIES))
+
+    def api_logs_policy(self, node: str, policy: str = "",
+                        megabytes: int = 0) -> dict:
+        """Set what this console does about that machine's log.
+
+        Answered with the relation rather than with "ok": the caller is a panel
+        that has just drawn the old answer, and asking again is how two
+        descriptions of one decision start to disagree."""
+        answer = self.set_log_policy(node, policy or None, megabytes or None)
+        if answer is None:
+            return {"ok": False, "error": "that node is not managed here"}
+        return {"ok": True, "logs": self._logs_relation(node)}
 
     def api_enrol(self, node: str, caps, label: str = "") -> dict:
         return {"sent": bool(self.enrol(node, caps, label))}
@@ -781,6 +964,151 @@ class FleetBridge:
             self._say("ok", f"update started on {len(started)} node(s) "
                             f"in {name!r}")
         return {"group": name, "started": started, "refused": refused}
+
+    # -- the logs of the machines we manage ---------------------------------
+    #
+    # Collected rather than asked for, because the question a fleet has is
+    # "what happened while nobody was looking" and a ring on a node that has
+    # since rebooted cannot answer it. What is collected is a decision per node
+    # (`fleet_logs`): every machine an operator actually watches, only the ones
+    # with a page open, or none.
+
+    async def _follow_loop(self) -> None:
+        """Keep the follows matching the policies, and renew the ones we want.
+
+        Renewed rather than opened once: a follow on the far side expires
+        (`fleet.LOG_FOLLOW_TTL`), so a console that died stops costing that node
+        anything without it having to notice. The price is this loop, and it is
+        one signed frame per followed node per interval."""
+        while True:
+            await asyncio.sleep(_FOLLOW_INTERVAL)
+            try:
+                await self._reconcile_follows()
+            except asyncio.CancelledError:
+                raise
+            except Exception:               # noqa: BLE001 — never the reason
+                continue                    # the console stops updating
+
+    async def _links_loop(self) -> None:
+        """The same reconciliation for links, on a much faster beat.
+
+        Its own loop rather than a second call inside the one above, and the
+        numbers are why: a link follow lasts `fleet.LINK_FOLLOW_TTL` — forty
+        seconds — so that a console which stopped drawing stops being pushed
+        almost at once. Renewing that from a sixty-second loop would let every
+        follow lapse for twenty seconds of every minute, and the map would
+        blink. A bound at one layer is not a bound
+        (`Docs/Architecture/gotchas.md`)."""
+        while True:
+            await asyncio.sleep(_LINKS_INTERVAL)
+            try:
+                await self._reconcile_links()
+            except asyncio.CancelledError:
+                raise
+            except Exception:               # noqa: BLE001 — never the reason
+                continue
+
+    async def _reconcile_links(self) -> None:
+        """Follow the links of every machine we may ask, while somebody is
+        drawing the map — and stop the moment nobody is.
+
+        Tied to a page being open rather than to a stored policy, and that is
+        the difference between this and the log beside it: a log is a recording
+        an operator wants kept whether or not they are watching, and a map is
+        only ever a picture of *now*. Nothing to keep means nothing to ask
+        for."""
+        state = self._app.state
+        watched = self._links.watched()
+        following = set(self._app.following_links())
+        for row in state.managed():
+            node_hex = row.get("id") or ""
+            if not node_hex:
+                continue
+            wanted = watched and state.may_use(node_hex, "links")
+            if wanted:
+                # Renewed every pass: the follow on the far side outlives one
+                # interval and not much more (`fleet.LINK_FOLLOW_TTL`), so a
+                # console that stopped drawing stops being pushed almost at
+                # once rather than at the next sweep.
+                await self._app.follow_links(self._node(node_hex), True)
+            elif node_hex in following:
+                await self._app.follow_links(self._node(node_hex), False)
+                self._links.forget(node_hex)
+
+    async def _reconcile_follows(self) -> None:
+        state = self._app.state
+        following = set(self._app.following())
+        for row in state.managed():
+            node_hex = row.get("id") or ""
+            if not node_hex:
+                continue
+            policy = state.log_policy(node_hex)
+            wanted = (state.may_use(node_hex, "logs")
+                      and self._logs.wants(node_hex, policy.get("policy")))
+            if wanted:
+                # Always, not only when it is new: this *is* the renewal, and
+                # it carries what we hold so a node that restarted its ring, or
+                # a link that was down, resumes without a gap.
+                await self._app.follow_logs(self._node(node_hex), True,
+                                            seq=self._logs.seen(node_hex))
+            elif node_hex in following:
+                await self._app.follow_logs(self._node(node_hex), False)
+
+    def logs(self, node_hex: str = "", **filters) -> dict:
+        """What we hold, for the fleet log page. Never asks the network."""
+        answer = self._logs.query(node=str(node_hex or ""), **filters)
+        answer["policies"] = {
+            row["id"]: self._app.state.log_policy(row["id"])
+            for row in self._app.state.managed()}
+        answer["defaults"] = self._app.state.log_defaults()
+        answer["following"] = self._app.following()
+        answer["status"] = self._logs.status()
+        return answer
+
+    def logs_watching(self, node_hex: str) -> None:
+        """A page is open on this node — which is what the `active` policy
+        means. Said as it happens rather than stored: a page that was closed
+        stops saying it, and so does a browser that crashed."""
+        if node_hex:
+            self._logs.note_active(str(node_hex))
+
+    def logs_fetch(self, node_hex: str, **filters) -> str:
+        """Ask a node for its log now, whatever its policy says about
+        collecting it. This is the ``never`` policy's escape hatch, and the
+        answer lands in that node's ring like any other."""
+        return self._job(self._call(self._app.request_logs(
+            self._node(node_hex), op="since",
+            seq=self._logs.seen(node_hex), **filters)), "logs", node_hex)
+
+    def set_log_policy(self, node_hex: str, policy=None, megabytes=None,
+                       inherit: bool = False) -> dict | None:
+        answer = self._app.state.set_log_policy(
+            str(node_hex), policy=policy, megabytes=megabytes, inherit=inherit)
+        if answer is not None:
+            self._logs.set_megabytes(
+                str(node_hex), 0 if inherit or "megabytes" not in
+                (answer.get("own") or []) else answer.get("megabytes"))
+            with self._lock:
+                self._bump()
+        return answer
+
+    def set_log_defaults(self, policy=None, megabytes=None) -> dict:
+        answer = self._app.state.set_log_defaults(policy=policy,
+                                                  megabytes=megabytes)
+        self._logs.set_default_megabytes(answer.get("megabytes"))
+        with self._lock:
+            self._bump()
+        return answer
+
+    def forget_logs(self, node_hex: str = "") -> dict:
+        """Drop what we hold — one node's, or every node's."""
+        if node_hex:
+            self._logs.forget(str(node_hex))
+        else:
+            self._logs.clear()
+        with self._lock:
+            self._bump()
+        return self._logs.status()
 
     def set_update_stacks(self, node_hex: str, stacks) -> list[str]:
         return self._app.state.set_update_stacks(node_hex, stacks)

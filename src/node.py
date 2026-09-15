@@ -13,6 +13,10 @@ import threading
 import time
 from collections import OrderedDict
 from .app_auth import AppAuth
+from . import logbook
+from . import alerts
+from .alerts import AlertBook
+from .logbook import LogBook
 from .trace import Trace
 from .node_id import NodeID
 from . import faults
@@ -2216,6 +2220,23 @@ class MeshNode:
         # packet funnels (_Peer.send and _Peer._loop) can record without the
         # node having to know anything about tracing.
         self.trace = Trace()
+        # What this node *said*, beside what it sent. Off exactly like the
+        # trace, bounded in megabytes rather than in lines, and cleared when it
+        # stops — a ring of what a node was thinking, left in memory after
+        # somebody stopped looking, is a record it has no business holding
+        # (`src/logbook.py`).
+        self.logs = LogBook()
+        # What is wrong here, as a human would want it said — a notice board
+        # rather than a recording, so it is always on and deliberately poorer
+        # than the ring beside it (`src/alerts.py`). An operator must be able to
+        # learn that this node has a problem without having had the foresight
+        # to start a log first.
+        self.alerts = AlertBook()
+        # Every failure a guard swallows lands in the ring as well as on
+        # stderr. Those are the ones with no other reader at all
+        # (`src/faults.py`), which makes them the lines an operator turning a
+        # log on is most often looking for.
+        faults.watch(self._note_fault)
         # Opt-in E2E session persistence (encrypted at rest). Off by default:
         # keys stay in RAM only. When enabled, resume prior sessions on start.
         self._session_store = None
@@ -2947,6 +2968,12 @@ class MeshNode:
 
     async def stop(self) -> None:
         self._running = False
+        # Before anything else, and unconditionally: what the node kept about
+        # who it talked to goes with the node. `LogBook.stop` drops the ring
+        # rather than leaving it readable, which is the whole reason it is not
+        # `Trace`.
+        faults.unwatch(self._note_fault)
+        self.logs.stop()
         self._persist_state()
         # Cancel any in-flight address-gossip tasks before tearing down links.
         tasks = list(self._announce_tasks)
@@ -6051,6 +6078,39 @@ class MeshNode:
         await peer.start(self._handle_packet)
         return peer
 
+    def _note_fault(self, where: str, exc: BaseException) -> None:
+        """One swallowed failure, as a log line and as an alert. Never raises:
+        `faults.note` guards this, and a guard's guard is not a place to be
+        clever.
+
+        Keyed on *where*, so a guard failing in a loop is one line saying how
+        many times rather than a page of them."""
+        self.logs.record("faults", f"{where} failed", level=logbook.ERROR,
+                         topic="fault", fields={"error": type(exc).__name__})
+        self.alerts.raise_alert(f"fault:{where}", f"{where} failed",
+                                level=alerts.ERROR, source="faults",
+                                detail=type(exc).__name__)
+
+    def log(self, message: str, *, source: str = "node",
+            level: str = logbook.INFO, topic: str = "", **fields) -> None:
+        """Say one thing, if anybody is keeping a log. Never raises.
+
+        The one door, for the same reason `report_abuse` is the one door for
+        abuse: the node decides whether anything is kept, and a caller that had
+        to ask first would be a caller that forgets to."""
+        self.logs.record(source, message, level=level, topic=topic,
+                         fields=fields or None)
+
+    def alert(self, key: str, summary: str, *, level: str = alerts.WARN,
+              source: str = "node", node: str = "", detail: str = "") -> None:
+        """Put one problem on the board. Never raises, always on.
+
+        Separate from `log` rather than derived from it: a log is off until
+        somebody turns it on, and the conditions worth waking an operator for
+        are exactly the ones nobody knew to start recording."""
+        self.alerts.raise_alert(key, summary, level=level, source=source,
+                                node=node, detail=detail)
+
     def _new_peer(self, transport, *, is_client_side: bool,
                   on_dead=None) -> _Peer:
         """Build a peer this node owns, wired to this node.
@@ -6082,6 +6142,14 @@ class MeshNode:
         releases the transport. On-demand routing re-establishes any link that
         is needed again, so the mesh self-heals without explicit reconnect.
         """
+        # Read with `getattr`, and that is not defensive clutter: this runs on
+        # the path a link takes when it dies, including a link that died half
+        # built. A diagnostic that raises on the failure it is describing turns
+        # a dropped link into a dropped task.
+        who = getattr(peer, "authenticated_id", None)
+        self.log("link dropped", source="peers", topic="link",
+                 node=who.raw.hex()[:16] if who is not None else "",
+                 address=str(getattr(peer, "remote_addr", "") or "")[:64])
         try:
             self._peers.remove(peer)
         except ValueError:
@@ -6378,6 +6446,12 @@ class MeshNode:
                                {}),
             "abuse": section("abuse", lambda: self.abuse_status(),
                                {}),
+            # What a person should look at, beside everything a person *may*
+            # look at. Always in the snapshot because the board is always on:
+            # a node cannot know in advance which problem somebody will want to
+            # have been told about (`src/alerts.py`).
+            "alerts": section("alerts", lambda: self.alerts.status(),
+                               {}),
             "behaviour": section("behaviour", lambda: self.behaviour_status(),
                                {}),
             "reachability": section("reachability", lambda: self.reachability(),
@@ -6437,6 +6511,22 @@ class MeshNode:
                 "path_visibility": "first-hop-only",
             })
         return {"direct": direct, "routed": routed}
+
+    def links_view(self) -> list[dict]:
+        """Who this node is connected to, right now, in four fields.
+
+        Derived from `_console_topology` rather than walking the peers again:
+        the map, the console snapshot and this must not be able to disagree
+        about what a link is, and two expressions for one quantity is two
+        chances to be wrong.
+
+        Deliberately poorer than the snapshot — an identity, a medium, a
+        latency, an age. It is read by an app, and what an app is answered is
+        the smallest thing that makes the question true."""
+        return [{"id": link["id"], "pseudo": link["pseudo"],
+                 "transport": link["transport"], "rtt_ms": link["rtt_ms"],
+                 "since": round(link["since"], 1)}
+                for link in self._console_topology(time.monotonic())["direct"]]
 
     def console_nodes(self, scope: str) -> list[dict]:
         """A focused console view of direct or routing-table nodes."""
@@ -10641,6 +10731,14 @@ Hints come first (the ``have`` byte on an announce, from an
         because the receive loop already keeps the link's half and must not
         keep it twice."""
         if peer.authenticated_id is not None:
+            # Tested before the line is built, and only here: this runs once
+            # per violation, which under a flood is as often as an attacker
+            # likes. `record` would drop it anyway, but the hex conversion
+            # would already have been paid for.
+            if self.logs.enabled:
+                self.log("protocol violation charged to a peer", source="peers",
+                         level=logbook.WARN, topic="abuse",
+                         node=peer.authenticated_id.raw.hex()[:16])
             self.report_abuse(peer.authenticated_id, 1.0,
                               "protocol violations",
                               kind=accusation.KIND_MALFORMED)
@@ -13181,6 +13279,15 @@ Hints come first (the ``have`` byte on an announce, from an
         `_maybe_announce`, which only `report_abuse` calls."""
         if standing == OK:
             return
+        # On the board as well as in the reputation book: a peer this node has
+        # decided to stop enduring is a sentence an operator wants without
+        # having had the foresight to start a log first. Keyed per identity, so
+        # a peer that goes on trying is one line with a count.
+        short = node_id.raw.hex()[:16]
+        self.alert(f"standing:{short}", f"a peer is {standing}",
+                   level=alerts.ERROR if standing != "suspect" else alerts.WARN,
+                   source="peers", node=node_id.raw.hex(),
+                   detail=str(reason or "")[:120])
         for peer in [p for p in self._peers if p.authenticated_id == node_id]:
             self._tarpit(peer)
         self._note_change("links")
