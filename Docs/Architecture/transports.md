@@ -1,7 +1,7 @@
 # Transports, NAT & reachability
 
-Source: `transport.py`, `transport_manager.py`, `tcp_transport.py`,
-`udp_transport.py`, `spool_transport.py`, `stun.py`, `net_monitor.py`, and
+Source: `transports/` (`contract.py`, `manager.py`, `medium.py`, `registry.py`,
+`tcp.py`, `udp.py`, `spool.py`, `bundle.py`), `stun.py`, `net_monitor.py`, and
 inside `node.py`: hole punching, reachability, keepalive.
 
 ## The abstraction
@@ -9,9 +9,18 @@ inside `node.py`: hole punching, reachability, keepalive.
 - `BaseTransport`: `connect / send / receive / close` (one bidirectional link).
 - `BaseServer`: `listen / close` + an `on_new_connection(transport)` callback.
 - `TransportManager`: a registry **by URL scheme** (`tcp`, `udp`, `spool`, …).
-  Anyone implements the two interfaces and calls `register("scheme", T, S)`. The
-  core knows no concrete transport. Listeners are keyed by exact URI (a node may
-  listen on several addresses; a duplicate URI is refused).
+  Anyone implements the two interfaces and calls `register("scheme", T, S)`.
+  Listeners are keyed by exact URI (a node may listen on several addresses; a
+  duplicate URI is refused).
+- `src/transports/registry.py` is the single place the node declares which media
+  it speaks (`BUILT_IN`), and `register_all()` is how they reach a manager. The
+  core still names no concrete transport *for its own operation* — the two
+  bounded exceptions are in `CLAUDE.md` §3 and checked by the suite.
+
+The transports live in one package so that everything a new medium must satisfy
+is in a directory somebody can read in an evening; the old flat import paths
+(`src/transport.py`, `src/udp_transport.py`, …) remain as aliases, so a
+transport written against the guide keeps working.
 
 ## Configuring itself: `OPTIONS` / `configure()`
 
@@ -89,7 +98,7 @@ Two rules, because this is *polled*: the values are JSON-safe scalars, and
 reading them never blocks. The core protects itself anyway, and where it does
 that is worth knowing.
 
-## Everything the core asks a medium goes through `src/medium.py`
+## Everything the core asks a medium goes through `src/transports/medium.py`
 
 A transport is **somebody else's code** — that is the whole third principle — so
 the core runs beside implementations it has never seen. It always wrapped these
@@ -542,7 +551,7 @@ made the rule misfire is exactly a link that stopped answering, and it now goes
 on its own within a couple of minutes rather than waiting for a dial to trip
 over it.
 
-## TCP (`tcp_transport.py`)
+## TCP (`transports/tcp.py`)
 
 - Framing: a **2-byte** prefix (uint16 big-endian) = the size of the `Packet`
   that follows.
@@ -561,7 +570,7 @@ over it.
   matters). It lived here as `_wait_closed_bounded` until a second caller needed
   it and the connector was found still awaiting bare — see `gotchas.md` §1.
 
-## UDP (`udp_transport.py`)
+## UDP (`transports/udp.py`)
 
 UDP is connectionless and unreliable → a **reliability layer**:
 - Frame: `NUDP` (4-byte magic) + seq(4) + ack(4) + sack(4) + flags(1) +
@@ -611,7 +620,7 @@ UDP is connectionless and unreliable → a **reliability layer**:
   (`undecodable`, visible in `stats()`): a real peer's frames decode, so it is a
   fault worth seeing rather than silence.
 
-## Store-and-forward (`spool_transport.py`)
+## Store-and-forward (`transports/spool.py`)
 
 The mesh also runs over a **directory/file** (`spool://DIR`): each node writes
 its outgoing packets to a file and polls (`_POLL = 0.02 s`) the peer's file. For
@@ -630,8 +639,44 @@ writes (`sess-` + 16 hex characters, `_SESSION_RE`) is not a session at all.
 > through a stateful datagram NAT by sending from the very socket the listener
 > owns; there is no transport-agnostic way to say that.
 > `tests/test_medium_agnostic.py` holds the exception to exactly UDP and the
-> node's own relayed transport, and holds the punch path to the three UDP
-> internals it already reaches into.
+> node's own relayed transport, and holds the punch path to the interface: it
+> reads **no** private of a medium.
+
+What the punch path actually needs is declared on `BaseServer`, so the core asks
+rather than inspects (`src/transports/contract.py`):
+
+| capability | who calls it | why |
+|---|---|---|
+| `bound_endpoint()` | `udp_port`, the join check | the port a peer must reach — read off the socket, so a port-0 listener reports the real one |
+| `send_raw(data, remote)` | probes, acks, STUN keepalives, hole-openers | signals that have no link yet, so no `send()`; best-effort, never raises |
+| `holds(remote)` | the hole-opener | "is a link forming?" — so opening stops the moment one is |
+| `adopt(remote)` | join, `_complete_punch` | a link over the *listener's* socket (a fresh socket traverses nothing); idempotent, so one link per address |
+
+A medium that cannot punch inherits the defaults, which make the traversal
+simply not happen — the honest answer for a stream or a file. This is why the
+exception is one of *naming* a class and not of knowing its privates.
+
+Two further capabilities are declared on `BaseTransport`, because the keepalive
+bursts that open a punched link are the other place that used to reach in. They
+prod a link that cannot yet speak packets, so they are not `send()`:
+
+| capability | who calls it | why |
+|---|---|---|
+| `scheme()` | `_peer_scheme`, `_note_punch_link_up` | "what medium is this link?" — the replacement for an `isinstance`, carried by the *link* rather than the listener |
+| `is_closed()` | `_udp_join_bridge`, `_kick_punched_link` | stop the burst the moment the link dies, instead of sleeping out the count on a dead socket |
+| `keepalive()` | the same two | one link-level keepalive on the wire, before there is a session; returns False on a medium with no such notion, ending the burst |
+
+`scheme()` is on the transport, not the server, and that placement is the
+whole point: a link may be *dialled* (`UDPTransport.connect`), in which case no
+listener made it and asking a server which links it owns answers "no". An
+earlier draft of this contract asked `owns(transport)` of `BaseServer` and it
+was wrong for exactly that reason — the initiator half of every punch stopped
+being counted. A dialled link still knows what it is.
+
+The invariant watches the *name being read*, not the owner: the first sweep's
+reach-keyed-on-owner check missed `transport._closed` and `transport._link`
+inside a loop whose parameter was an unannotated local, so those two survived
+until the check was widened.
 
 The goal: establish a **direct UDP** link between two nodes behind NAT,
 coordinated by a shared relay. The machinery (`_PUNCH_*` constants):

@@ -97,7 +97,7 @@ class BareTransport(BaseTransport):
     """The minimum the interface asks for, and not one method more.
 
     A perfectly correct transport: `remote_ip`, `endpoints`, `idle_timeout` and
-    `stats` are all optional. The first version of `src/medium.py` read the
+    `stats` are all optional. The first version of `src/transports/medium.py` read the
     attribute *before* entering its own guard, so this one — the honest,
     minimal, documented case — was the one it broke on."""
 

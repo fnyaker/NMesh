@@ -3,9 +3,13 @@ Template for writing your own NMesh transport.
 
 Copy this file, rename the classes, implement the abstract methods. The TODO
 comments say what you have to write.
+
+The contract you are implementing lives in `src/transports/contract.py`
+(`BaseTransport`, `BaseServer`) — read that file's docstrings; they are the
+specification. `Docs/Transports/guide` restates it in prose.
 """
 import asyncio
-from src.transport import BaseTransport, BaseServer
+from src.transports.contract import BaseTransport, BaseServer
 from src.packet import Packet
 
 
@@ -108,21 +112,21 @@ class MyServer(BaseServer):
 if __name__ == "__main__":
     import asyncio
     from src import MeshNode
+    from src.transports.manager import TransportManager
+
+    def make_node() -> MeshNode:
+        manager = TransportManager()
+        manager.register("mine", MyTransport, MyServer)
+        return MeshNode(manager)
 
     async def demo():
         # The host node
-        host = MeshNode(
-            transport_factory=MyTransport,
-            server_factory=MyServer,
-        )
+        host = make_node()
         code = host.generate_invite()
-        await host.start("mine://address:1234")
+        await host.start(["mine://address:1234"])
 
         # The invited node
-        guest = MeshNode(
-            transport_factory=MyTransport,
-            server_factory=MyServer,
-        )
+        guest = make_node()
         await guest.join("mine://address:1234", code)
         await guest.wait_for_session(timeout=10.0)
 

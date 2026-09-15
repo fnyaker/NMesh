@@ -36,6 +36,41 @@ class FakeServer(BaseServer):
     async def close(self) -> None: ...
 
 
+class FakeUDPServer(BaseServer):
+    """A UDP listener that answers the contract without a kernel socket.
+
+    Tests that put a node in the punch path used to stub `_sock = None`, which
+    only worked because the node read that private directly. The node now asks
+    the medium (see `BaseServer`), so the stub answers the same questions a real
+    `UDPServer` does, and every test that needs one gets the same faithful
+    shape instead of the two lines each knew how to fake.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+        self.transports: dict[tuple[str, int], BaseTransport] = {}
+        self.bound: tuple[str, int] | None = None
+        self._closed = False
+
+    async def listen(self, address: str) -> None: ...
+    async def close(self) -> None:
+        self._closed = True
+
+    def bound_endpoint(self) -> tuple[str, int] | None:
+        return self.bound
+
+    def holds(self, remote: tuple[str, int]) -> bool:
+        return remote in self.transports
+
+    def adopt(self, remote: tuple[str, int]) -> BaseTransport | None:
+        return self.transports.get(remote)
+
+    def send_raw(self, data: bytes, remote: tuple[str, int]) -> bool:
+        self.sent.append((data, remote))
+        return True
+
+
 async def settle(node, timeout: float = 2.0) -> None:
     """Wait for the node's detached tasks to finish.
 
