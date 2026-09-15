@@ -30,6 +30,13 @@ BUILT_IN = (
     ("spool", "spool", "SpoolTransport", "SpoolServer"),
 )
 
+#: Where the built-in modules live: the *containing* package, not this module.
+#: ``__name__`` here is ``...transports.registry``, one level too deep to reach
+#: a sibling, so importing ``f"{__name__}.tcp"`` asks for a package that does
+#: not exist. Every built-in then hits the ``continue`` below, and a node comes
+#: up with no transports at all and nothing on screen saying why.
+_PKG = __package__
+
 
 def register_all(manager: TransportManager) -> TransportManager:
     """Register every built-in scheme onto ``manager``.
@@ -45,7 +52,7 @@ def register_all(manager: TransportManager) -> TransportManager:
 
     for scheme, module_name, transport_name, server_name in BUILT_IN:
         try:
-            module = importlib.import_module(f"{__name__}.{module_name}")
+            module = importlib.import_module(f"{_PKG}.{module_name}")
             transport_cls = getattr(module, transport_name)
             server_cls = getattr(module, server_name)
         except (ImportError, AttributeError) as exc:
