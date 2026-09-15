@@ -96,7 +96,7 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
     listener owns; there is no medium-agnostic spelling of that, and an
     interface general enough to express it would be a UDP interface under
     another name.
-  - **`RelayedTransport`**, defined by `src/src/mesh/peers.py` (the module that holds
+  - **`RelayedTransport`**, defined by `src/mesh/peers.py` (the module that holds
     a link and the pieces describing one): a link that is not a socket at all
     but another node carrying frames between two peers that cannot reach each
     other. That is core routing wearing the transport interface, not a medium.
