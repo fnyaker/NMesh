@@ -827,6 +827,78 @@ class UDPServer(BaseServer):
         for addr in [a for a, t in self._transports.items() if t._closed]:
             del self._transports[addr]
 
+    # -- the datagram capabilities the punch path asks for ------------------
+    # See `BaseServer` for what each is for and why the core asks rather than
+    # inspecting. These four are the whole of what NAT traversal needs, and
+    # naming them here is what lets `node.py` stop reading `_sock` and
+    # `_transports` — privates it had to know because there was no other door.
+
+    def bound_endpoint(self) -> tuple[str, int] | None:
+        """The host/port this listener is bound to, or None if it is not up.
+
+        Read off the socket rather than remembered, so a listener bound to port
+        0 reports the port the kernel actually gave it — the one a peer can
+        reach, not the 0 that was asked for."""
+        if self._sock is None:
+            return None
+        sock = self._sock.get_extra_info("socket")
+        if sock is None:
+            return None
+        try:
+            return sock.getsockname()[:2]
+        except (OSError, IndexError):
+            return None
+
+    def holds(self, remote: tuple[str, int]) -> bool:
+        """Whether a live link to ``remote`` already exists on this listener."""
+        if self._closed:
+            return False
+        transport = self._transports.get(remote)
+        return transport is not None and not transport._closed
+
+    def adopt(self, remote: tuple[str, int]) -> UDPTransport | None:
+        """A transport to ``remote`` over this listener's socket, or None.
+
+        Idempotent by construction: an existing live transport for this address
+        is returned untouched. That is not a convenience — two transports for
+        one source address would both be fed the same datagrams and race each
+        other's handshakes to a link that never authenticates, which is the
+        duplicate-peer bug this table exists to prevent."""
+        if self._closed or self._sock is None:
+            return None
+        existing = self._transports.get(remote)
+        if existing is not None and not existing._closed:
+            return existing
+        self._reap_closed()
+        if len(self._transports) >= _MAX_PEERS_UDP:
+            return None        # bounded: the table is full, as on the accept path
+        transport = UDPTransport._from_server(self._sock, remote, self)
+        self._transports[remote] = transport
+        transport._start_tasks()
+        return transport
+
+    def send_raw(self, data: bytes, remote: tuple[str, int]) -> bool:
+        """Send ``data`` as-is from this listener's socket. Best-effort.
+
+        Uses the listener socket on purpose — that is the mapping the punch
+        opened — and never raises: a probe or a keepalive that does not leave is
+        a punch that did not land, which the caller already treats as ordinary."""
+        if self._closed or self._sock is None:
+            return False
+        try:
+            self._sock.sendto(data, remote)
+            return True
+        except (OSError, ConnectionError):
+            return False
+
+    def owns(self, transport: UDPTransport) -> bool:
+        """Whether this listener made ``transport``.
+
+        The transport records the server it was built for, so this is a lookup
+        rather than a search — and it needs no assumption about which of the
+        three paths (accept, `adopt`, punch) created it."""
+        return getattr(transport, "_server", None) is self
+
     async def close(self) -> None:
         """Stop accepting connections and release resources."""
         self._closed = True

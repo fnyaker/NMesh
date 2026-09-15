@@ -7,6 +7,7 @@ sockets needed for the coordination layer).
 """
 import os
 import struct
+import time
 import pytest
 
 from src.node import (
@@ -21,7 +22,21 @@ from src.node import (
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_node, FakeTransport
+from tests.conftest import make_node, FakeTransport, FakeUDPServer
+
+
+def _routable_peer(node) -> NodeID:
+    """A target the node can punch toward: known, with a verify key.
+
+    `_send_punch_probes` gives up before it looks at the address when the target
+    is not in the routing table, so a test of the address handling has to put it
+    there first — otherwise it passes for the wrong reason.
+    """
+    ident = CryptoIdentity()
+    pub = ident.dsa_public_key
+    nid = NodeID.from_public_key(pub)
+    node._routing.add(nid, ["tcp://198.51.100.20:9000"], dsa_pub=pub)
+    return nid
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +193,40 @@ class TestPunchState:
 
     def test_max_pending_constant(self):
         assert _PUNCH_MAX_PENDING == 16
+
+
+    async def test_a_malformed_relayed_address_probes_nothing(self):
+        """The relay can hand us a peer address that is empty or junk. The probe
+        burst must treat that as "no address" and return, not raise out of a
+        path that runs on the receive loop — `split_host_port` returns None
+        rather than raising, and `int(port)` can still reject."""
+        for bad in ("", "198.51.100.9", "[2001:db8::1]", "host:notaport",
+                    ":9000"):
+            node, _ = await make_node()
+            node._punch_enabled = True
+            node._udp_server = FakeUDPServer()
+            target = _routable_peer(node)
+            state = _PunchState(target, bad, "203.0.113.7:9000")
+            state.deadline = time.monotonic() + 30.0   # time is not the reason
+            await node._send_punch_probes(state)   # must not raise
+            assert state.probes_sent == 0
+            assert not node._udp_server.sent
+            await node.stop()
+
+    async def test_a_usable_relayed_address_is_probed(self):
+        """The other half of the same guard: a well-formed address is still
+        probed, so the fix above cannot pass by refusing everything."""
+        from src.node import _PUNCH_PROBE_COUNT
+        node, _ = await make_node()
+        node._punch_enabled = True
+        node._udp_server = FakeUDPServer()
+        target = _routable_peer(node)
+        state = _PunchState(target, "198.51.100.9:40001", "203.0.113.7:9000")
+        state.deadline = time.monotonic() + 30.0
+        await node._send_punch_probes(state)
+        assert state.probes_sent == _PUNCH_PROBE_COUNT
+        assert len(node._udp_server.sent) == _PUNCH_PROBE_COUNT
+        await node.stop()
 
 
 class TestPunchDatagramsAreMetered:

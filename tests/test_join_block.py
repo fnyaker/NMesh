@@ -16,7 +16,7 @@ from src.node import MeshNode, _encode_punch_relay, PUNCH_RELAY
 from src.node_id import NodeID
 from src.packet import Packet
 from tests.conftest import (
-    make_manager, make_node, ConnectableFakeTransportManager,
+    make_manager, make_node, ConnectableFakeTransportManager, FakeUDPServer,
 )
 
 
@@ -153,9 +153,7 @@ class TestPunchControl:
         node, fake = await make_node()
         node.console_set_punch_enabled(False)
 
-        class _FakeUDPServer:
-            _sock = None
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         payload = _encode_punch_relay(b"\x01" * 20, "198.51.100.9:40001",
                                       "203.0.113.7")
         pkt = Packet.create(PUNCH_RELAY, b"\x02" * 20, node.id.raw, payload)

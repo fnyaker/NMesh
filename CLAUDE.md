@@ -96,6 +96,14 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
     listener owns; there is no medium-agnostic spelling of that, and an
     interface general enough to express it would be a UDP interface under
     another name.
+    What the punch path *needs* from such a medium is small, and it is declared
+    on the contract rather than reached for: `BaseServer.bound_endpoint`,
+    `holds`, `adopt`, `send_raw` and `owns`. Any medium may implement them — and
+    a medium that cannot punch inherits defaults that make the traversal simply
+    not happen, which is the honest answer for a stream or a file. So the
+    exception is one of *naming* a class, not of knowing its privates:
+    `node.py` may say `UDPServer`, and may not read `_sock`, `_transports` or
+    `_from_server`. The capability list lives in `src/transports/contract.py`.
   - **`RelayedTransport`**, defined by `src/mesh/peers.py` (the module that holds
     a link and the pieces describing one): a link that is not a socket at all
     but another node carrying frames between two peers that cannot reach each
@@ -106,11 +114,11 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   A **third** would be something else entirely, so the list is checked:
   `tests/test_medium_agnostic.py` fails if any other module names a medium, if
   the core names a third one, **if a medium spreads to a module that did not
-  previously own one**, or if the punch path reaches into more of UDP's
-  internals than it already does. Saying "no concrete transport" and meaning
-  "two, in two named places" is how a principle stops being one.
+  previously own one**, or **if the punch path reads any private of a medium**.
+  Saying "no concrete transport" and meaning "two, in two named places" is how a
+  principle stops being one.
 - Whatever a medium *answers* is checked on the way back, never trusted for its
-  annotated type (`src/medium.py`).
+  annotated type (`src/transports/medium.py`).
 - Routing is medium-agnostic: if A↔B is Bluetooth and B↔C is Wi-Fi, A talks to
   C by routing through B, choosing the best link.
 - Nodes announce themselves with URLs listing their transports; each node only

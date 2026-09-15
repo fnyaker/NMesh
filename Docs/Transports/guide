@@ -41,20 +41,43 @@ The callback to set before listen():
 
     server.on_new_connection = async def(transport: BaseTransport) -> None
 
+A server also carries five optional capabilities, which the core *asks* for
+rather than reaching into your object. Most media implement none of them and
+inherit the defaults; a datagram medium that wants NAT traversal implements
+some. All five are documented on `BaseServer` in `src/transports/contract.py`:
+
+| capability | default | what it is for |
+|---|---|---|
+| `bound_endpoint() -> (host, port) \| None` | `None` | where this listener can be reached |
+| `send_raw(data, remote) -> bool` | `False` (does nothing) | one datagram out of the listener's own socket, for signals with no link yet |
+| `holds(remote) -> bool` | `False` | is a link to `remote` already live here? |
+| `adopt(remote) -> transport \| None` | `None` | a link carried by this listener's socket |
+| `owns(transport) -> bool` | `False` | did this listener create that link? |
+
+Never override one to do something a stream cannot: return the default and the
+traversal it would have enabled does not happen, which is the correct outcome.
+
 ---
 
 ## Integrating with MeshNode
 
+The node takes a `TransportManager` — the registry of schemes it may speak — so
+the first thing to do is register yours:
+
 ```python
-node = MeshNode(
-    transport_factory=MyTransport,    # used by join()
-    server_factory=MyServer,          # used by start()
-)
+from src import MeshNode
+from src.transports.manager import TransportManager
+
+manager = TransportManager()
+manager.register("mine", MyTransport, MyServer)
+node = MeshNode(manager)
 await node.start("mine://address")
 await node.join("mine://other_address", code)
 ```
 
-By default: TCPTransport + TCPServer.
+The node ships with `tcp`, `udp` and `spool`; `scripts/nmesh_node.py` builds its
+manager from `src/transports/registry.py` (`register_all`), which is the single
+place those three are declared.
 
 ---
 

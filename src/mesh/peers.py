@@ -205,7 +205,7 @@ class _Peer:
             # which assumed one — so a transport answering `None` raised
             # outside this guard, took the link down and left an unretrieved
             # task behind it. A medium that answers nonsense is charged for it
-            # exactly like a frame that would not decode (`src/medium.py`).
+            # exactly like a frame that would not decode (`src/transports/medium.py`).
             packet = medium.received(packet)
             if packet is None:
                 self._charge_identity()

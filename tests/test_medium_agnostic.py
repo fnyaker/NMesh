@@ -204,16 +204,22 @@ def test_the_charter_and_the_transports_document_say_the_same_thing():
 
 
 def test_every_declared_medium_is_reached_only_through_the_interface():
-    """A transport's *methods* are called through `BaseTransport` or through
-    `src/medium.py`, never by reaching into another module's privates.
+    """The core never reaches into a transport's privates.
 
-    The exception above is about naming a class. It is not a licence to use one
-    — `medium.py` exists precisely so that the answer a medium gives is checked
-    wherever it comes from."""
+    The exception in the test above is about *naming* a class. This is the
+    stronger claim the code makes now: the punch path asks the medium for what
+    it needs (`BaseServer.bound_endpoint` / `holds` / `adopt` / `send_raw` /
+    `owns`) rather than reading `_sock`, `_transports` or calling the private
+    `_from_server`.
+
+    It used to allow three such reaches and record them, because the punch path
+    needed a socket and there was no door to ask through. There is one now, so
+    the allowance is gone and the set is empty — which is what makes this a
+    regression test rather than a ledger. If a future change wants a reach
+    back, `BaseServer` is where it goes.
+    """
     text = (SRC / "node.py").read_text()
     tree = ast.parse(text)
-    # Private members of the *UDP* pair the punch path reaches into, which is
-    # the concrete cost of the exception. Recorded so it cannot quietly grow.
     reaching = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or not node.attr.startswith("_"):
@@ -222,12 +228,11 @@ def test_every_declared_medium_is_reached_only_through_the_interface():
         name = getattr(owner, "attr", None) or getattr(owner, "id", None)
         if name in ("_udp_server", "UDPTransport"):
             reaching.add(f"{name}.{node.attr}")
-    allowed = {"_udp_server._sock", "_udp_server._transports",
-               "UDPTransport._from_server"}
-    assert reaching <= allowed, (
-        f"src/node.py reaches into {sorted(reaching - allowed)}. Every new one "
-        "is a place the punch path stops being portable — add it here only "
-        "with a reason in CLAUDE.md §3.")
+    assert not reaching, (
+        f"src/node.py reaches into {sorted(reaching)}. A transport's privates "
+        "are its own: ask the medium through `BaseServer` instead (see "
+        "CLAUDE.md §3), and add the capability there rather than the reach here."
+    )
 
 
 def test_a_peer_is_made_by_the_node_and_never_half_wired():
