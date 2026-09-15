@@ -11,7 +11,7 @@ import asyncio
 import os
 import time
 
-from .. import medium
+from ..transports import medium
 from ..crypto import SessionKey
 from ..metrics import Counters, LinkQuality
 from .constants import *  # noqa: F401,F403
