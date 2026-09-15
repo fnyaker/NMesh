@@ -57,6 +57,17 @@ some. All five are documented on `BaseServer` in `src/transports/contract.py`:
 Never override one to do something a stream cannot: return the default and the
 traversal it would have enabled does not happen, which is the correct outcome.
 
+A transport carries two more optional capabilities for the same reason. The
+keepalive burst that opens a punched link is sent before the link can speak
+packets, so it cannot go through `send()`; the core asks the link itself
+instead of reaching into it. Both default to "not a thing here", and a burst
+against a medium with no link-level liveness simply ends:
+
+| capability | default | what it is for |
+|---|---|---|
+| `is_closed() -> bool` | `False` | has this link been torn down? so a burst stops instead of sleeping out its count |
+| `keepalive() -> bool` | `False` (does nothing) | one link-level keepalive on the wire, before there is a session |
+
 ---
 
 ## Integrating with MeshNode

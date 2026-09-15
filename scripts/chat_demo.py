@@ -13,17 +13,15 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src import MeshNode
-from src.transport_manager import TransportManager
-from src.tcp_transport import TCPTransport, TCPServer
+from src.transports.manager import TransportManager
+from src.transports.registry import register_all
 from src.data_connector import DataConnector, ConnectorClient
 from src.app_channel import CHAT_APP_ID
 from src.apps.chat import ChatApp, TextMessage, FileReceived, Frame
 
 
 def _node() -> MeshNode:
-    mgr = TransportManager()
-    mgr.register("tcp", TCPTransport, TCPServer)
-    return MeshNode(mgr)
+    return MeshNode(register_all(TransportManager()))
 
 
 async def _chat_for(node):

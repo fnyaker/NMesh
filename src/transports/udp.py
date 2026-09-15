@@ -646,6 +646,22 @@ class UDPTransport(BaseTransport):
             return None
         return str(self._remote[0]).split("%", 1)[0]
 
+    def is_closed(self) -> bool:
+        """Whether this link has been torn down."""
+        return self._closed
+
+    def keepalive(self) -> bool:
+        """Put one reliable-link keepalive on the wire.
+
+        Goes straight out as a frame rather than through ``send``: the whole
+        point is to reach a peer whose accept loop has not challenged us yet,
+        so there is no session to speak packets in. Returns False once the
+        socket is gone, which is the caller's signal to stop its burst."""
+        if self._closed or self._sock is None or self._remote is None:
+            return False
+        self._send_raw(self._link.build_keepalive())
+        return True
+
     def remote_address(self) -> str | None:
         """The peer's full address as host:port string."""
         if self._remote is None:
