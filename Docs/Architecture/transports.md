@@ -651,7 +651,6 @@ rather than inspects (`src/transports/contract.py`):
 | `send_raw(data, remote)` | probes, acks, STUN keepalives, hole-openers | signals that have no link yet, so no `send()`; best-effort, never raises |
 | `holds(remote)` | the hole-opener | "is a link forming?" — so opening stops the moment one is |
 | `adopt(remote)` | join, `_complete_punch` | a link over the *listener's* socket (a fresh socket traverses nothing); idempotent, so one link per address |
-| `owns(transport)` | `_peer_scheme`, `_note_punch_link_up` | "is this link mine?" — the medium-agnostic replacement for an `isinstance` |
 
 A medium that cannot punch inherits the defaults, which make the traversal
 simply not happen — the honest answer for a stream or a file. This is why the
@@ -663,8 +662,16 @@ prod a link that cannot yet speak packets, so they are not `send()`:
 
 | capability | who calls it | why |
 |---|---|---|
+| `scheme()` | `_peer_scheme`, `_note_punch_link_up` | "what medium is this link?" — the replacement for an `isinstance`, carried by the *link* rather than the listener |
 | `is_closed()` | `_udp_join_bridge`, `_kick_punched_link` | stop the burst the moment the link dies, instead of sleeping out the count on a dead socket |
 | `keepalive()` | the same two | one link-level keepalive on the wire, before there is a session; returns False on a medium with no such notion, ending the burst |
+
+`scheme()` is on the transport, not the server, and that placement is the
+whole point: a link may be *dialled* (`UDPTransport.connect`), in which case no
+listener made it and asking a server which links it owns answers "no". An
+earlier draft of this contract asked `owns(transport)` of `BaseServer` and it
+was wrong for exactly that reason — the initiator half of every punch stopped
+being counted. A dialled link still knows what it is.
 
 The invariant watches the *name being read*, not the owner: the first sweep's
 reach-keyed-on-owner check missed `transport._closed` and `transport._link`

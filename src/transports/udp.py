@@ -340,6 +340,9 @@ class _ReliableLink:
 
 
 class UDPTransport(BaseTransport):
+
+    SCHEME = "udp"
+
     """
     A single bidirectional link over UDP with reliability.
 
@@ -906,14 +909,6 @@ class UDPServer(BaseServer):
             return True
         except (OSError, ConnectionError):
             return False
-
-    def owns(self, transport: UDPTransport) -> bool:
-        """Whether this listener made ``transport``.
-
-        The transport records the server it was built for, so this is a lookup
-        rather than a search — and it needs no assumption about which of the
-        three paths (accept, `adopt`, punch) created it."""
-        return getattr(transport, "_server", None) is self
 
     async def close(self) -> None:
         """Stop accepting connections and release resources."""

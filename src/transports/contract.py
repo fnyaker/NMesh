@@ -128,6 +128,15 @@ class BaseTransport(ABC):
     def __init__(self) -> None:
         self.on_connect: Callable[[], Coroutine[Any, Any, None]] | None = None
 
+    #: The scheme this medium is known by, or ``None`` for one that registers
+    #: nowhere. The core asks this to name a link's medium — "which medium is
+    #: this?" — where a class check used to be the only way to ask.
+    #:
+    #: Deliberately a fact the *transport* carries, not one the listener
+    #: answers: a link dialled straight out (``connect``) has no listener
+    #: behind it, and asking the server about it gets the wrong answer.
+    SCHEME: str | None = None
+
     @abstractmethod
     async def connect(self, address: str) -> None:
         """Open an outgoing connection to the given address."""
@@ -161,6 +170,14 @@ class BaseTransport(ABC):
         connection (mesh-native public-IP discovery). Media without a network
         address (e.g. spool files) return None."""
         return None
+
+    def scheme(self) -> str | None:
+        """Which medium this link runs over, or None if it does not say.
+
+        The question "is this UDP?" asked as "what are you?", so the core can
+        name and classify a link without a class check — and without asking a
+        listener that may not have made the link at all (see ``SCHEME``)."""
+        return self.SCHEME
 
     # -- the link's own state, for the paths that prod it alive -------------
     # A punched link is opened from outside the handshake: the node sends a
@@ -396,15 +413,4 @@ class BaseServer(ABC):
         which speaks packets on an established link. Best-effort on purpose: a
         punch that does not land is a punch that did not work, not an error
         worth raising. Returns True if the datagram left."""
-        return False
-
-    def owns(self, transport: BaseTransport) -> bool:
-        """Did this listener create *transport*?
-
-        Asked by the label path: a link's scheme is normally whatever the
-        registry says, but a server the node started itself may not be in that
-        registry at all, and "which medium is this?" still has an answer. Asking
-        the server that made the link is the medium-agnostic form of the
-        ``isinstance`` this replaces, and it stays true for a medium that
-        registers nothing anywhere."""
         return False
