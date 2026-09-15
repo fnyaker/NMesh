@@ -98,12 +98,14 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
     another name.
     What the punch path *needs* from such a medium is small, and it is declared
     on the contract rather than reached for: `BaseServer.bound_endpoint`,
-    `holds`, `adopt`, `send_raw` and `owns`. Any medium may implement them — and
-    a medium that cannot punch inherits defaults that make the traversal simply
-    not happen, which is the honest answer for a stream or a file. So the
-    exception is one of *naming* a class, not of knowing its privates:
-    `node.py` may say `UDPServer`, and may not read `_sock`, `_transports` or
-    `_from_server`. The capability list lives in `src/transports/contract.py`.
+    `holds`, `adopt`, `send_raw` and `owns`, plus `BaseTransport.is_closed` and
+    `keepalive` for the keepalive bursts that open a punched link. Any medium may
+    implement them — and a medium that cannot punch inherits defaults that make
+    the traversal simply not happen, which is the honest answer for a stream or
+    a file. So the exception is one of *naming* a class, not of knowing its
+    privates: `node.py` may say `UDPServer`, and may not read `_sock`,
+    `_transports` or `_from_server`. The capability list lives in
+    `src/transports/contract.py`.
   - **`RelayedTransport`**, defined by `src/mesh/peers.py` (the module that holds
     a link and the pieces describing one): a link that is not a socket at all
     but another node carrying frames between two peers that cannot reach each

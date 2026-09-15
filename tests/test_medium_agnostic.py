@@ -217,21 +217,29 @@ def test_every_declared_medium_is_reached_only_through_the_interface():
     the allowance is gone and the set is empty — which is what makes this a
     regression test rather than a ledger. If a future change wants a reach
     back, `BaseServer` is where it goes.
+
+    Keyed on the *name being read*, not on the owner: the reaches that survived
+    the first sweep did so as `transport._closed` and `transport._link` inside
+    a `_kick_punched_link` whose parameter happened to be an unannotated local,
+    so an owner-name check walked straight past them. A transport-typed
+    variable is spelled `transport`/`server` here, and that is what is watched.
     """
     text = (SRC / "node.py").read_text()
     tree = ast.parse(text)
     reaching = set()
+    owners = ("_udp_server", "UDPTransport", "transport", "server")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or not node.attr.startswith("_"):
             continue
         owner = node.value
         name = getattr(owner, "attr", None) or getattr(owner, "id", None)
-        if name in ("_udp_server", "UDPTransport"):
+        if name in owners:
             reaching.add(f"{name}.{node.attr}")
     assert not reaching, (
         f"src/node.py reaches into {sorted(reaching)}. A transport's privates "
-        "are its own: ask the medium through `BaseServer` instead (see "
-        "CLAUDE.md §3), and add the capability there rather than the reach here."
+        "are its own: ask the medium through `BaseServer`/`BaseTransport` "
+        "instead (see CLAUDE.md §3), and add the capability there rather than "
+        "the reach here."
     )
 
 

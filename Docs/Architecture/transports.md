@@ -657,6 +657,20 @@ A medium that cannot punch inherits the defaults, which make the traversal
 simply not happen — the honest answer for a stream or a file. This is why the
 exception is one of *naming* a class and not of knowing its privates.
 
+Two further capabilities are declared on `BaseTransport`, because the keepalive
+bursts that open a punched link are the other place that used to reach in. They
+prod a link that cannot yet speak packets, so they are not `send()`:
+
+| capability | who calls it | why |
+|---|---|---|
+| `is_closed()` | `_udp_join_bridge`, `_kick_punched_link` | stop the burst the moment the link dies, instead of sleeping out the count on a dead socket |
+| `keepalive()` | the same two | one link-level keepalive on the wire, before there is a session; returns False on a medium with no such notion, ending the burst |
+
+The invariant watches the *name being read*, not the owner: the first sweep's
+reach-keyed-on-owner check missed `transport._closed` and `transport._link`
+inside a loop whose parameter was an unannotated local, so those two survived
+until the check was widened.
+
 The goal: establish a **direct UDP** link between two nodes behind NAT,
 coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
 

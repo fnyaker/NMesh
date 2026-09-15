@@ -1101,11 +1101,9 @@ class MeshNode:
         """Send a short burst of keepalives so the peer accepts even if the two
         operators didn't open their holes at exactly the same instant."""
         for _ in range(10):
-            if transport._closed:
+            if transport.is_closed():
                 return
-            try:
-                transport._send_raw(transport._link.build_keepalive())
-            except Exception:
+            if not transport.keepalive():
                 return
             await asyncio.sleep(0.5)
 
@@ -12324,9 +12322,10 @@ Hints come first (the ``have`` byte on an announce, from an
         link authenticates (further kicks are harmless dedup'd keepalives) or
         the transport dies — bounded so a dead peer can't loop us forever."""
         for i in range(_PUNCH_KICK_COUNT):
-            if peer.authenticated_id is not None or transport._closed:
+            if peer.authenticated_id is not None or transport.is_closed():
                 return
-            transport._send_raw(transport._link.build_keepalive())
+            if not transport.keepalive():
+                return
             if i < _PUNCH_KICK_COUNT - 1:
                 await asyncio.sleep(_PUNCH_KICK_INTERVAL)
 

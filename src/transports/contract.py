@@ -162,6 +162,32 @@ class BaseTransport(ABC):
         address (e.g. spool files) return None."""
         return None
 
+    # -- the link's own state, for the paths that prod it alive -------------
+    # A punched link is opened from outside the handshake: the node sends a
+    # few keepalives so the responder's accept loop wakes and challenges. That
+    # loop needs exactly two facts about the link — is it still there, and put
+    # a keepalive on the wire — and both used to be answered by reading
+    # ``transport._closed`` and reaching through ``transport._link``. A medium
+    # that carries no link-level keepalive says so by leaving these as they
+    # are, and the prod is then simply a no-op rather than an error.
+
+    def is_closed(self) -> bool:
+        """Whether this link has been torn down.
+
+        Asked so a keepalive burst can stop as soon as the link dies, rather
+        than sleeping through the rest of its count on a dead socket."""
+        return False
+
+    def keepalive(self) -> bool:
+        """Send one link-level keepalive, if the medium has such a thing.
+
+        Not ``send``: this goes out before the link can authenticate, so it
+        cannot speak packets and cannot wait for a flush. Returns True if the
+        medium wrote something, False for a medium that has no link-level
+        liveness of its own — where prodding is meaningless and the caller's
+        burst ends instead of retrying for ever."""
+        return False
+
     # -- observability ----------------------------------------------------
     # Two optional hooks, both with the same shape as ``reachability``: the
     # medium describes itself, the core never interprets. A new transport
