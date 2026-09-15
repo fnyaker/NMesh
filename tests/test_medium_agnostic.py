@@ -38,10 +38,35 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
-# The modules that *are* a medium, plus the two that describe the abstraction.
-# These are allowed to name themselves.
-IMPLEMENTATIONS = {"udp_transport.py", "tcp_transport.py", "spool_transport.py",
-                   "transport.py", "transport_manager.py", "medium.py"}
+# The modules that *are* a medium, plus the ones that describe the abstraction
+# and declare which media exist. These are allowed to name themselves.
+#
+# The transports live in `src/transports/` as a package, so a basename no longer
+# identifies one: `src/transports/tcp.py` is a medium and `src/transports/tcp.py`'s
+# old address, `src/tcp_transport.py`, is now an alias that re-exports it. Paths
+# are relative to `src/`.
+IMPLEMENTATIONS = {
+    # the media themselves
+    "transports/tcp.py", "transports/udp.py", "transports/spool.py",
+    # the abstraction: the contract, the registry, and the checked accessor
+    "transports/contract.py", "transports/manager.py", "transports/medium.py",
+    # store-and-forward primitives — the container the spool medium reads and
+    # writes. Not a transport, but it exists only to be one's file format.
+    "transports/bundle.py",
+    # the registry names every scheme there is by definition — that is its job,
+    # and it is the single place a medium is declared (`registry.py`). It loads
+    # them lazily, so naming a scheme here does not pull the module in.
+    "transports/registry.py",
+    # `__init__.py` names RelayedTransport once, in prose, to say why it is *not*
+    # in this package. It imports no medium.
+    "transports/__init__.py",
+}
+
+# The old flat paths, kept as aliases so `Docs/Transports/guide` keeps working.
+# They are *not* exempt: an alias that could name a medium unseen would be a
+# hole in this rule. They pass on their own merits — each imports a module
+# rather than a class, so there is no concrete name in them to find. Listing
+# them here as a second category would only hide that, so there is no such list.
 
 # The modules that *are* the core. `node.py` was one file; it is now split into
 # the node itself and the parts it is assembled from, some of which live in the
@@ -75,7 +100,7 @@ CONCRETE = re.compile(
 #              another node carrying frames for two peers that cannot reach
 #              each other. It is core routing wearing the transport interface,
 #              not a medium.
-CORE_MAY_KNOW = {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"}
+CORE_MAY_KNOW = {"UDPTransport", "UDPServer", "RelayedTransport"}
 
 # Which module of the core may know a medium, and the medium it may know. The
 # permission is per module on purpose: `src/mesh/peers.py` *defines* the relayed
@@ -85,14 +110,22 @@ CORE_MAY_KNOW = {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport
 # has any business naming either. A new module added to CORE is medium-agnostic
 # until somebody says otherwise here.
 CORE_MEDIUM_SITES = {
-    "src/node.py": {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"},
+    "src/node.py": {"UDPTransport", "UDPServer", "RelayedTransport"},
     "src/mesh/peers.py": {"RelayedTransport"},
 }
 
 
+def _in_src(path):
+    """A module's address below `src/`, which is how IMPLEMENTATIONS names one.
+    A basename stopped being an identity when the transports became a package:
+    `udp_transport.py` and `transports/udp.py` are two different things now, and
+    only one of them is the medium."""
+    return str(path.relative_to(SRC))
+
+
 def _modules():
     for path in sorted(SRC.rglob("*.py")):
-        if path.name in IMPLEMENTATIONS:
+        if _in_src(path) in IMPLEMENTATIONS:
             continue
         yield path, path.read_text()
 

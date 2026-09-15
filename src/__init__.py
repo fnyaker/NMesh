@@ -1,4 +1,4 @@
 from .node import MeshNode
-from .transport import BaseTransport, BaseServer
+from .transports.contract import BaseTransport, BaseServer
 
 __all__ = ["MeshNode", "BaseTransport", "BaseServer"]

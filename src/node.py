@@ -20,10 +20,10 @@ from .logbook import LogBook
 from .trace import Trace
 from .node_id import NodeID
 from . import faults
-from . import medium
+from .transports import medium
 from . import routed
 from .routing import RoutingTable, NodeEntry
-from .transport import BaseTransport
+from .transports.contract import BaseTransport
 from .packet import Packet
 from .seen import SeenSet
 from .activity import Activity
@@ -41,7 +41,7 @@ from . import behaviour
 from . import features
 from . import mlo
 from .features import MAX_RECORD as _FEATURES_MAX
-from .transport_manager import TransportManager
+from .transports.manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
 from .ip_utils import (local_ip_addresses, expand_listen_uri,
@@ -716,7 +716,7 @@ class MeshNode:
 
     async def start_udp(self, port: int, host: str = "0.0.0.0") -> None:
         """Start a UDP listener for hole-punching and direct UDP links."""
-        from .udp_transport import UDPServer
+        from .transports.udp import UDPServer
         uri = f"udp://{host}:{port}"
         if self._udp_server is not None:
             return  # already listening
@@ -1096,7 +1096,7 @@ class MeshNode:
         """Create a UDP transport bound to (host, port) on the *listener* socket
         and register it so the peer's replies route to it. Sends an initial
         keepalive burst to open our mapping and prod the peer to accept."""
-        from .udp_transport import UDPTransport
+        from .transports.udp import UDPTransport
         addr = (host, port)
         transport = UDPTransport._from_server(self._udp_server._sock, addr,
                                               self._udp_server)
@@ -5802,7 +5802,7 @@ class MeshNode:
         scheme = scheme_of(peer.transport) if scheme_of is not None else None
         if scheme is not None:
             return scheme
-        from .udp_transport import UDPTransport
+        from .transports.udp import UDPTransport
         if isinstance(peer.transport, UDPTransport):
             return "udp"
         return None
@@ -12035,7 +12035,7 @@ Hints come first (the ``have`` byte on an announce, from an
 
     async def _send_punch_probes(self, state: '_PunchState') -> None:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
-        from .udp_transport import _host_port
+        from .transports.udp import _host_port
 
         # No UDP listener → we can't punch at all.
         if self._udp_server is None or self._udp_server._sock is None:
@@ -12258,7 +12258,7 @@ Hints come first (the ``have`` byte on an announce, from an
         arrive. Its probe/ack exchange can also race ahead of the pending state
         set up from PUNCH_RELAY. Anchoring the completion to the handshake makes
         the counter reflect reality on both sides regardless of that race."""
-        from .udp_transport import UDPTransport
+        from .transports.udp import UDPTransport
         target = peer.authenticated_id
         if target is None or not isinstance(peer.transport, UDPTransport):
             return
@@ -12283,7 +12283,7 @@ Hints come first (the ``have`` byte on an announce, from an
         client connecting). The other side does nothing here — its UDP server
         accept loop creates the peer and challenges when the initiator's frames
         arrive, exactly as for any inbound UDP connection."""
-        from .udp_transport import UDPTransport
+        from .transports.udp import UDPTransport
 
         if state.completed:
             return  # already handled (probe and ack both landed)
