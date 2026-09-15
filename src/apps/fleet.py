@@ -122,6 +122,12 @@ DOCKER_REPLY = 0x81
 LOGS_REQUEST = 0x90
 LOGS_REPLY = 0x91
 
+# Links: the same two shapes as the log — a question, and a standing answer —
+# because it is the same kind of thing. What a machine is connected to changes
+# on its own, so the standing answer is the one that matters here.
+LINKS_REQUEST = 0xA0
+LINKS_REPLY = 0xA1
+
 SCAN_REQUEST = 0x40
 SCAN_RESULT = 0x41
 PROVISION_REQUEST = 0x42
@@ -187,8 +193,20 @@ MAX_FILE_CALLS = 8                # file operations we host at once, per peer
 # console that went away — costs us nothing for longer than this.
 MAX_LOG_FOLLOWERS = 16
 LOG_FOLLOW_TTL = 300.0
+# Links. A follower is pushed the list when it *changes* and at least this
+# often anyway, so a map is never drawing something a machine stopped saying —
+# and a follow lasts only a little longer than that, so a console that went
+# away stops costing anything almost at once.
+MAX_LINK_FOLLOWERS = 16
+# How often the pump *looks* at this node's links, and how often it sends them
+# whether or not they moved. Looking is a local call and costs nothing; sending
+# is a frame per follower, so the two numbers are an order apart.
+LINKS_TICK = 1.0
+LINKS_EVERY = 10.0
+LINK_FOLLOW_TTL = 40.0
 LOG_LINES_PER_PUSH = 64           # lines carried in one pushed frame
 MAX_LOG_LINES = 500               # lines one answer may carry, whoever asks
+MAX_LINK_LINES = 256              # links one answer may carry, whoever asks
 # Remote console. A request must fit one frame; an answer is chunked, because a
 # node with a hundred peers has a snapshot that does not.
 CONSOLE_REQ_MAX = 24 * 1024       # proxied request body, one frame
@@ -301,6 +319,16 @@ class DockerReport:
     rid: str
     op: str
     data: dict
+
+
+@dataclass
+class LinksReceived:
+    """What a machine we manage says it is connected to, as of now."""
+    src: NodeID
+    rid: str
+    links: list
+    pushed: bool = False
+    following: bool | None = None
 
 
 @dataclass
@@ -514,6 +542,14 @@ class FleetApp:
         self._log_followers: dict[str, dict] = {}         # agent side
         self._log_pump: asyncio.Task | None = None        # agent side
         self._log_follows: dict[str, str] = {}            # operator side
+        # Links, the same three fields and the same reasons. The pump here
+        # compares rather than drains: a link list is a *state*, so what is
+        # worth sending is the fact that it changed.
+        self._link_followers: dict[str, dict] = {}        # agent side
+        self._link_pump: asyncio.Task | None = None       # agent side
+        self._link_said: list = []                        # agent side, last sent
+        self._link_said_at: float = 0.0                   # agent side, when
+        self._link_follows: dict[str, str] = {}           # operator side
         # What one sender may ask of us, and the one place a breach is reported.
         # Fleet has a single kind, because every inbound frame here costs the
         # same thing: one ML-DSA verification before any handler sees it.
@@ -563,11 +599,15 @@ class FleetApp:
         for upload in list(self._uploads.values()):
             upload.abort()
         self._uploads.clear()
-        if self._log_pump is not None:
-            self._log_pump.cancel()
-            self._log_pump = None
+        for pump in ("_log_pump", "_link_pump"):
+            task = getattr(self, pump)
+            if task is not None:
+                task.cancel()
+                setattr(self, pump, None)
         self._log_followers.clear()
         self._log_follows.clear()
+        self._link_followers.clear()
+        self._link_follows.clear()
         await self._client.close()
 
     async def _names_loop(self) -> None:
@@ -1588,6 +1628,161 @@ class FleetApp:
         following = document.get("following")
         self._emit(LogsReceived(
             src, rid, lines, lost=int(document.get("lost") or 0),
+            following=bool(following) if following is not None else None))
+
+    # ======================================================================
+    # Links — the mesh map, past what one node can see
+    # ======================================================================
+    #
+    # A node draws what it measures: its own links. Everything beyond is
+    # somebody else's word, and this is how that word is asked for — by name,
+    # under a capability of its own, from a machine the operator manages.
+    #
+    # A *standing* answer rather than a question repeated: what a machine is
+    # connected to changes by itself, and a map refreshed on a timer is a map
+    # that is wrong between two of them. So a follower is pushed the list when
+    # it changes, and anyway every `LINKS_EVERY` seconds so that "nothing has
+    # changed" is a thing the map is told rather than something it assumes.
+
+    async def request_links(self, target: NodeID) -> str:
+        rid = self._new_rid(target, "links")
+        await self._send(target, self._signed_frame(
+            LINKS_REQUEST, target, PURPOSE_BY_CAP["links"],
+            {"rid": rid, "op": "get"}))
+        return rid
+
+    async def follow_links(self, target: NodeID, on: bool = True) -> str:
+        """Be pushed that machine's links as they change, or stop."""
+        rid = self._new_rid(target, "links")
+        node_hex = target.raw.hex()
+        if on:
+            self._link_follows[node_hex] = rid
+            while len(self._link_follows) > MAX_INFLIGHT:
+                self._link_follows.pop(next(iter(self._link_follows)), None)
+        else:
+            self._link_follows.pop(node_hex, None)
+        await self._send(target, self._signed_frame(
+            LINKS_REQUEST, target, PURPOSE_BY_CAP["links"],
+            {"rid": rid, "op": "follow", "on": bool(on)}))
+        return rid
+
+    def following_links(self) -> list[str]:
+        return sorted(self._link_follows)
+
+    # -- the machine being asked -------------------------------------------
+
+    def _on_links_request(self, src: NodeID, principal, document: dict) -> None:
+        rid = _rid(document)
+        if not self._authorised(src, "links", rid):
+            return
+        if str(document.get("op") or "get") == "follow":
+            self._spawn(self._set_link_follower(src, rid, document))
+            return
+        self._spawn(self._answer_links(src, rid))
+
+    async def _answer_links(self, src: NodeID, rid: str,
+                            op: str = "get") -> list | None:
+        """This node's own links, read through the connector like everything
+        else this app touches — so it needs the node's `links` grant, and says
+        so plainly when it does not have it."""
+        try:
+            answer = await self._client.links()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._fail(src, rid, "this node's links are unavailable")
+            return None
+        if not isinstance(answer, dict) or answer.get("refused"):
+            self._fail(src, rid, "this node has not granted its fleet app the "
+                                 "right to read its links")
+            return None
+        links = list(answer.get("links") or [])[:MAX_LINK_LINES]
+        self._reply(src, LINKS_REPLY,
+                    {"rid": rid, "op": op, "ok": True, "links": links}, "links")
+        return links
+
+    async def _set_link_follower(self, src: NodeID, rid: str,
+                                 document: dict) -> None:
+        node_hex = src.raw.hex()
+        if not document.get("on"):
+            self._link_followers.pop(node_hex, None)
+            self._reply(src, LINKS_REPLY, {"rid": rid, "op": "follow",
+                                           "ok": True, "following": False})
+            return
+        if (node_hex not in self._link_followers
+                and len(self._link_followers) >= MAX_LINK_FOLLOWERS):
+            self._fail(src, rid, "too many consoles are following these links")
+            return
+        links = await self._answer_links(src, rid, "follow")
+        if links is None:
+            return          # refused, and said so: no follow on a dead question
+        # The follow's own answer *is* the first send, so the pump starts from
+        # it. Without this its first turn re-sent the same list a tick later,
+        # to every follower, for nothing.
+        self._link_said = links
+        self._link_said_at = time.monotonic()
+        self._link_followers[node_hex] = {
+            "id": src, "rid": rid,
+            "until": time.monotonic() + LINK_FOLLOW_TTL,
+        }
+        if self._link_pump is None or self._link_pump.done():
+            self._link_pump = asyncio.create_task(self._link_loop())
+
+    async def _link_loop(self) -> None:
+        """Push the link list to whoever is following, when it changes.
+
+        Compared rather than streamed: a link list is a state, so what is worth
+        a frame is the fact that it is a different one. The unchanged list goes
+        out anyway on the slow beat, because "still true" is something a map
+        has to be *told* — a map that assumed it would be drawing a mesh nobody
+        has confirmed for an hour."""
+        try:
+            while self._link_followers:
+                await asyncio.sleep(LINKS_TICK)
+                now = time.monotonic()
+                for node_hex, entry in list(self._link_followers.items()):
+                    if entry["until"] <= now:
+                        self._link_followers.pop(node_hex, None)
+                if not self._link_followers:
+                    break
+                try:
+                    answer = await self._client.links()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                links = list((answer or {}).get("links") or [])[:MAX_LINK_LINES]
+                changed = _link_shape(links) != _link_shape(self._link_said)
+                if not changed and now - self._link_said_at < LINKS_EVERY:
+                    continue
+                self._link_said = links
+                self._link_said_at = now
+                for entry in list(self._link_followers.values()):
+                    self._reply(entry["id"], LINKS_REPLY,
+                                {"rid": entry["rid"], "op": "push", "ok": True,
+                                 "links": links}, "links")
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._link_pump = None
+
+    # -- the operator reading ---------------------------------------------
+
+    def _on_links_reply(self, src: NodeID, document: dict) -> None:
+        rid = _rid(document)
+        links = document.get("links")
+        links = [link for link in links if isinstance(link, dict)][:MAX_LINK_LINES] \
+            if isinstance(links, list) else []
+        if document.get("op") == "push":
+            if self._link_follows.get(src.raw.hex()) != rid:
+                return          # a machine pushing links nobody asked it for
+            self._emit(LinksReceived(src, rid, links, pushed=True))
+            return
+        if not self._claim_inflight(src, document, "links"):
+            return
+        following = document.get("following")
+        self._emit(LinksReceived(
+            src, rid, links,
             following=bool(following) if following is not None else None))
 
     # ======================================================================
@@ -3045,6 +3240,17 @@ def _load_json(raw: bytes) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
+def _link_shape(links) -> tuple:
+    """What makes a link list a *different* link list.
+
+    The identities and the media, and nothing that moves on its own: a latency
+    changes on every probe, and a map that pushed a frame for that would be a
+    map costing a frame a second per follower for ever."""
+    return tuple(sorted((str(link.get("id") or ""),
+                         str(link.get("transport") or ""))
+                        for link in links if isinstance(link, dict)))
+
+
 def _rid(document: dict) -> str:
     rid = document.get("rid")
     return rid[:RID_LEN * 2] if isinstance(rid, str) else ""
@@ -3257,6 +3463,7 @@ _SIGNED_INBOUND = {
     PREAUTH_CLAIM: FleetApp._on_preauth_claim,
     STATUS_REQUEST: FleetApp._on_status_request,
     LOGS_REQUEST: FleetApp._on_logs_request,
+    LINKS_REQUEST: FleetApp._on_links_request,
     INVITE_REQUEST: FleetApp._on_invite_request,
     UPDATE_REQUEST: FleetApp._on_update_request,
     DOCKER_REQUEST: FleetApp._on_docker_request,
@@ -3277,6 +3484,7 @@ _PURPOSE_FOR = {
     PREAUTH_CLAIM: PURPOSE_PREAUTH,
     STATUS_REQUEST: PURPOSE_BY_CAP["status"],
     LOGS_REQUEST: PURPOSE_BY_CAP["logs"],
+    LINKS_REQUEST: PURPOSE_BY_CAP["links"],
     INVITE_REQUEST: PURPOSE_BY_CAP["invite"],
     UPDATE_REQUEST: PURPOSE_BY_CAP["update"],
     DOCKER_REQUEST: PURPOSE_BY_CAP["docker"],
@@ -3289,6 +3497,7 @@ _REPLY_INBOUND = {
     STATUS_REPORT: FleetApp._on_status_report,
     INVITE_ISSUED: FleetApp._on_invite_issued,
     LOGS_REPLY: FleetApp._on_logs_reply,
+    LINKS_REPLY: FleetApp._on_links_reply,
     UPDATE_OUTPUT: FleetApp._on_update_output,
     UPDATE_RESULT: FleetApp._on_update_result,
     DOCKER_REPLY: FleetApp._on_docker_reply,

@@ -38,6 +38,7 @@ import os
 import secrets
 import struct
 import threading
+import time
 
 from . import alerts
 from . import logbook
@@ -129,8 +130,13 @@ _AUTH_PRINCIPAL = 0x8D # body = JSON principal, or JSON null when it fails
 # could make an operator act on something the node never said.
 _NOTIFY = 0x15        # body = level(1) ‖ keylen(1) ‖ key ‖ JSON {summary, detail}
 _NOTIFY_KEY_MAX = 64
+# Who this node is connected to. Read-only, and behind a grant of its own: a
+# link list is who this machine keeps company with, which is the same kind of
+# thing as its log and not the kind of thing an app is owed for existing.
+_LINKS = 0x16         # body = empty
 _LOG_LINES = 0x8F     # body = JSON {lines, matched, returned, seq, lost?}
 _LOG_LINE = 0x90      # body = JSON one line, pushed to a watching client
+_LINKS_VIEW = 0x92    # body = JSON {links: [...]}, or {refused: true}
 
 
 def _number(raw) -> float:
@@ -142,6 +148,27 @@ def _number(raw) -> float:
     except (TypeError, ValueError):
         return 0.0
     return value if value == value and value > 0 else 0.0
+
+
+# Lines of a link list one answer may carry. A node with more links than this
+# has a map problem, not a listing problem.
+_MAX_LINKS = 256
+
+
+def _grant_check(log_access, grants):
+    """One callable answering ``(app_id, capability) -> bool``.
+
+    ``grants`` is what a node is built with now. ``log_access`` is the older
+    spelling — a callable that answered the *log* question alone — and it is
+    still honoured, because a runner written against it is not wrong, it is
+    early. Neither present means nothing is granted, which is the only safe
+    default for a question about somebody else's data."""
+    if callable(grants):
+        return grants
+    if callable(log_access):
+        return lambda app_id, capability: (capability == "logs"
+                                           and log_access(app_id))
+    return None
 
 
 def _fit(answer: dict) -> bytes:
@@ -176,16 +203,17 @@ async def _write_frame(writer: asyncio.StreamWriter, ftype: int, body: bytes) ->
 class DataConnector:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 0,
                  unix_path: str | None = None, token: str | None = None,
-                 ssl_context=None, log_access=None) -> None:
+                 ssl_context=None, log_access=None, grants=None) -> None:
         self._node = node
-        # Which apps may *read* the node's log ring. Writing is open to every
-        # app — a line is prefixed with the app's own id here, so one cannot
-        # speak as another — but reading is the whole node's diary, including
-        # every other app's lines and the core's, and that is a different
-        # question with a different answer. Closed unless somebody opens it:
-        # the callable is supplied by whoever builds the node (the registry's
-        # per-app permission), and no callable means no reader.
-        self._log_access = log_access if callable(log_access) else None
+        # What an app may *read* of the node's own data — its log, its links.
+        # Writing is open to every app, because what an app writes is stamped
+        # with its own id here and can only ever be attributed to it; reading
+        # is somebody else's data (the core's lines, every other app's, this
+        # machine's neighbours), which is a different question with a different
+        # answer. Closed unless somebody opens it: the callable is supplied by
+        # whoever builds the node — the registry's per-app grants — and no
+        # callable means nothing is granted.
+        self._grants = _grant_check(log_access, grants)
         # Clients that asked to be pushed new lines, and the floor each wants.
         self._log_watchers: dict = {}
         self._host = host
@@ -428,6 +456,8 @@ class DataConnector:
                     await self._handle_log_read(writer, app_id, ftype, body)
                 elif ftype == _NOTIFY:
                     self._handle_notify(app_id, body)
+                elif ftype == _LINKS:
+                    await self._handle_links(writer, app_id)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -608,10 +638,18 @@ class DataConnector:
         return book if book is not None and hasattr(book, "record") else None
 
     def _may_read_logs(self, app_id: bytes) -> bool:
-        if self._log_access is None:
+        return self._may(app_id, "logs")
+
+    def _may(self, app_id: bytes, capability: str) -> bool:
+        """Does this app hold this grant? **No** unless somebody says yes.
+
+        One question for every grant rather than one callable per grant: the
+        answer belongs to whoever built the node (the registry), and a second
+        way to ask it would be a second place for the answer to be wrong."""
+        if self._grants is None:
             return False
         try:
-            return bool(self._log_access(app_id))
+            return bool(self._grants(app_id, capability))
         except Exception:               # noqa: BLE001 — a refusal, never a crash
             return False
 
@@ -635,6 +673,25 @@ class DataConnector:
                         level=level, topic=topic)
         except Exception:               # noqa: BLE001
             pass          # a log line must never break a client's connection
+
+    async def _handle_links(self, writer, app_id: bytes) -> None:
+        """Who this node is connected to, if this app was granted it.
+
+        Answered either way, like a log read: an app that is simply not
+        permitted must not look like a node that has wedged."""
+        view = getattr(self._node, "links_view", None)
+        if view is None or not self._may(app_id, "links"):
+            await _write_frame(writer, _LINKS_VIEW,
+                               json.dumps({"links": [], "refused": True})
+                               .encode("utf-8"))
+            return
+        try:
+            links = view()
+        except Exception:               # noqa: BLE001 — a refusal, never a crash
+            links = []
+        await _write_frame(writer, _LINKS_VIEW,
+                           _fit({"links": list(links)[:_MAX_LINKS],
+                                 "at": time.time()}))
 
     def _handle_notify(self, app_id: bytes, body: bytes) -> None:
         """One problem, from an app. Fire and forget, like `_ABUSE`.
@@ -1000,6 +1057,19 @@ class ConnectorClient:
         await _write_frame(self._writer, _LOG_WRITE,
                            code + bytes([len(name)]) + name
                            + str(message or "").encode("utf-8"))
+
+    async def links(self) -> dict:
+        """Who this node is connected to. Needs the `links` grant.
+
+        A *read*, and a small one: an identity, a medium, a latency, an age. An
+        app that is not permitted is told so (`refused`) rather than handed an
+        empty list it would read as "this node has no links"."""
+        resp = await self._roundtrip(_LINKS, b"", _LINKS_VIEW)
+        try:
+            answer = json.loads(resp.decode("utf-8"))
+        except Exception:                   # noqa: BLE001
+            return {"links": [], "refused": True}
+        return answer if isinstance(answer, dict) else {"links": []}
 
     async def logs_query(self, **filters) -> dict:
         """The ring, newest first, through filters. Needs the `logs` grant."""

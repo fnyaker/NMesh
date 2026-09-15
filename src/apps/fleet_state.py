@@ -40,8 +40,9 @@ import time
 from . import fleet_logs
 
 # What an operator may be granted. Ordered from harmless to total.
-CAPABILITIES = ("status", "logs", "invite", "update", "scan", "provision",
-                "shell", "docker", "manage", "govern", "passwordless")
+CAPABILITIES = ("status", "logs", "links", "invite", "update", "scan",
+                "provision", "shell", "docker", "manage", "govern",
+                "passwordless")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
@@ -54,6 +55,10 @@ CAP_DESCRIPTIONS = {
     # who this node talked to and when — so it is asked for by name and taken
     # back by name, and it does not arrive with anything else.
     "logs": "read this node's log, and follow it live",
+    # The mesh map's third layer. Narrower than `manage` on purpose: an
+    # operator drawing a map of their fleet needs to know who each machine
+    # talks to, and needs nothing else about it.
+    "links": "read which nodes this one is connected to, and follow it live",
     "update": "run the system package manager's upgrade",
     "scan": "sweep this machine's LAN for SSH hosts",
     "provision": "install NMesh on machines on this LAN",

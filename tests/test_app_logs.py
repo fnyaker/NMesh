@@ -23,7 +23,7 @@ import pytest
 
 from src import logbook
 from src.app_channel import GENERIC_APP_ID, builtin_id
-from src.app_registry import AppRegistry
+from src.app_registry import GRANTS, AppRegistry
 from src.data_connector import (
     DataConnector, ConnectorClient, _read_frame, _write_frame,
     _AUTH, _AUTH_OK, _LOG_WRITE, _LOG_QUERY, _LOG_WATCH, _LOG_LINES,
@@ -358,8 +358,9 @@ class TestTheRegistryIsWhereAGrantLives:
     def test_nothing_is_granted_by_default(self, tmp_path):
         registry = AppRegistry(str(tmp_path))
         for app in registry.overview():
-            assert [grant["name"] for grant in app["grants"]] == ["logs"]
-            assert app["grants"][0]["granted"] is False
+            assert [grant["name"] for grant in app["grants"]] == \
+                [grant["name"] for grant in GRANTS]
+            assert all(grant["granted"] is False for grant in app["grants"])
             # Named and explained by the node, so a page never holds its own
             # copy of what a grant means.
             assert app["grants"][0]["title"]
