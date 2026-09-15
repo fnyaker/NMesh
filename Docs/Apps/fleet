@@ -58,6 +58,8 @@ From the most harmless to total. One never implies another.
 | Capability | What it allows |
 |---|---|
 | `status` | reading uptime, load, memory, disks |
+| `logs` | reading that node's log, and following it live as it is recorded |
+| `links` | reading which nodes that one is connected to, and following it live — the mesh map's third layer |
 | `invite` | minting a single-use invitation to **that node's** mesh, on its behalf — offered wherever somebody is inviting a machine, including the console's own *Add a node* page |
 | `update` | running the machine's package manager upgrade |
 | `scan` | scanning this machine's LAN for SSH hosts |
@@ -579,144 +581,80 @@ is the same view as in the console and in chat
 The "Message" button is there; the fleet buttons are not, since you are already
 inside fleet.
 
-## What you do with a managed node
+That card is also where a machine's **log collection** is decided, wherever the
+card is opened from — the console's map, chat, fleet, or `/node`. It reads the
+`logs` block of `fleet.relation` (what the policy is, whether we are following
+it now, how many lines are held here) and the one control changes it
+(`fleet.logs_policy`). The decision is about a machine, so it belongs on that
+machine's card rather than only in a settings panel; the same policy also shows
+on its node card in the Nodes tab and in Fleet → Logs.
 
-- **Status** — uptime, load, memory, disks, distro, package manager. The last
-  status is cached for display.
-- **Update** — the node derives its plan **itself** from its own facts
-  (`fleet_host.update_argv`): apt, dnf, yum, pacman, zypper, apk, xbps, brew,
-  pkg, with `sudo -n`/`doas` if it is not root. Every command is an **argv
-  list** from a fixed table — nothing the operator sends enters it, so there is
-  no injection surface. A machine with no known manager, or no route to root,
-  **refuses upfront** rather than starting something it cannot finish. The
-  output is streamed live.
-- **Shell** — a real pty. Bounds: `MAX_SHELLS = 4` at once per node, inactivity
-  `SHELL_IDLE_TIMEOUT` (15 min) → reaped, input capped, SIGHUP then kill on
-  close. The shell's environment is **cleaned**: the connector token living in
-  `os.environ` is never passed to a child.
-- **Docker** — containers, images and stacks on that machine, and the Portainer
-  that may own them. Below.
-- **LAN scan** / **Provisioning** — below.
+`relation` travels to another operator's console, as it always did — it is a
+read of this node's ledger. `logs_policy` does **not**: what this console
+collects is a decision about this operator's own machine, like `enrol`.
 
-Machine facts are detected **when the app is installed** (first start) and
-cached; `refresh_facts()` runs it again.
+## The map, past what one node can see
 
-## `docker`: a capability that is root, and says so
+The console's mesh map draws what its node can *measure*: its own links, and the
+sessions it routes through them. The layer past that is what the machines
+themselves say — and fleet is what asks, holds and refreshes it
+([`Docs/WebConsole/guide`](../WebConsole/guide)).
 
-A process that can talk to `/var/run/docker.sock` can start a privileged
-container bind-mounting `/`. That is the machine. So this is **not** "manage
-containers": it is "be root here", the capability description says exactly that,
-and it is separate from `update` and from `shell` so that an operator has to tick
-it deliberately rather than receive it folded into something smaller.
+### It is a subscription, not a poll
 
-### The capability needs the machine to agree
+`LINKS_REQUEST` with `op: "follow"` registers the asking console for
+`LINK_FOLLOW_TTL` (40 s). The machine then pushes its link list **when the list
+changes**, and again on a slow beat (`LINKS_EVERY`, 10 s) so that "still true"
+is something the map is *told* rather than something it assumes.
 
-A capability is permission to ask; it is not access. The node's own account has
-to be able to reach `/var/run/docker.sock`, and on any sane machine it cannot:
-that socket belongs to the `docker` group. So the grant is made **at install
-time**, on the machine itself:
+What counts as a change is the identities and the media, never the latencies: a
+round-trip time moves on every probe, and pushing for that would cost a frame
+per follower per second and say nothing.
 
-```
-./install.sh --docker        # …and --no-docker takes it back
-```
+Two grants, as with the log, and a refusal says which one is missing: the
+operator needs `links` in the ledger, and the machine's own fleet app needs the
+node's `links` grant (Apps page) to read it at all — an app is not trusted with
+the machine's neighbours because it happens to be fleet.
 
-It is off unless asked for, and it is never inferred from docker happening to be
-installed. It is also not the same kind of thing as the update grant beside it:
-that one is a single fixed command the node cannot rewrite, while this is
-membership of a group whose socket starts containers — and a container can
-bind-mount `/`. The installer says so where it grants it, the systemd unit
-carries `SupplementaryGroups=docker` with the reason written next to it, and the
-summary at the end names it.
+### What the operator keeps is a freshness book, not a history
 
-A node whose account is *not* in that group does not report "no docker": it says
-docker is running and this account cannot reach its socket, and names the switch.
-The two are one group membership apart and only one of them is something an
-operator fixes in a minute.
+`src/apps/fleet_links.py` holds one entry per machine, **in memory**, and drops
+anything not confirmed within `FRESH_FOR` (45 s). A map showing a link that died
+twenty minutes ago is worse than one missing it: one is incomplete, the other is
+wrong, and only one of them looks right.
 
-Three ways in, deliberately not interchangeable
-([`src/apps/fleet_docker.py`](../../src/apps/fleet_docker.py),
-[`src/apps/fleet_portainer.py`](../../src/apps/fleet_portainer.py)):
+A machine's answer **replaces** what it said before — a link it no longer names
+is a link that ended — and two machines reporting the same link draw one edge.
+Bounded at `MAX_SOURCES` machines, `MAX_LINKS_PER_SOURCE` links from any one
+answer, `MAX_EDGES` in total. Every field is bounded on arrival: a machine we
+manage is an adversary that happens to hold a grant.
 
-| Route | What it is for | Why not one of the others |
-|---|---|---|
-| the **Engine API**, over the machine's own socket | everything that reads or moves a container: list, inspect, logs, start/stop, pull, create | no CLI, no shell, no quoting surface — and it works on a machine with no `docker` binary on `PATH` |
-| **`docker compose`** | bringing a stack up to date, and deploying one | a stack *is* a compose file; pulling images under a project and restarting it is not the same act, and quietly does less |
-| **Portainer's API** | stacks Portainer owns | Portainer holds the file (or the git reference) and its own record of the stack; `compose up` behind its back leaves that record stale and the next thing it does undoes the update |
+It lives in fleet rather than in the page so that a reload does not empty the
+map and two tabs do not each go asking every machine — and in memory only,
+because a claim about somebody else's neighbours is not something to still have
+after a restart.
 
-### A stack is a compose project
+### Nothing is followed while nobody is looking
 
-No second source of truth: compose labels everything it creates
-(`com.docker.compose.project`, `.service`, `.project.config_files`), so the
-stacks on a machine are recovered from the containers that are running. Portainer
-deploys through compose too, so its stacks appear in the same list with no
-special case — what tells them apart is the label it adds, and that is what
-decides **who** is allowed to update them.
+Asking for the map (`map_links`) is what tells this node somebody is drawing it.
+That mark decays on its own — a page that was closed stops saying it, and a
+browser that died says nothing at all — and the reconciliation loop then takes
+the follows back and drops what was held. A map nobody has open costs nothing:
+no frames, no state, nothing kept.
 
-A stack deployed from here has its compose file written under the node's own
-state directory, named for the project, so a redeploy later finds it exactly
-where compose recorded it — and so nothing this deploys can be made to overwrite
-a path chosen by whoever sent the file.
-
-### Update, and the stacks it also brings up
-
-**Which stacks `Update` touches is a choice made here**, on this console, about
-that machine — ticked in the Docker panel, kept in our own ledger beside the
-grant, and shown on the node's card so the button never means two things at
-once. It rides the same signed `UPDATE_REQUEST` rather than a second one,
-because "bring this machine up to date" is one act with one proof over its own
-bytes.
-
-It is honoured only if that node **also** granted `docker`. The signature's
-purpose names `update` and it commits to the exact body, so it cannot be
-redirected — but the act it asks for is one the node may never have agreed to,
-and the ledger is what says so. A machine with no package manager and a dozen
-stacks still updates its stacks: refusing the whole thing because half of it does
-not apply would be refusing the half that does.
-
-Each name is charset-checked and bounded before it reaches an argv. What is not a
-name is **dropped, never escaped** — there is no escaping here to get wrong.
-
-### Portainer: one endpoint, one token, write-only
-
-Configured per node, from this console, and stored in that node's **encrypted
-drawer** — not in the ledger blob the console reads on every poll, because a
-token has no business travelling that path. What comes back says whether one is
-configured and where; **nothing ever reads the token back over the mesh.** A
-credential that could be read back would make this capability a way of *stealing*
-the Portainer rather than of using it.
-
-TLS is verified. A Portainer on a private network very often has a self-signed
-certificate, so there is a second way to accept one: **pin its fingerprint**
-(sha256). That is an anchor an operator chose, which is the only kind of trust
-this project has — "just don't check" is not offered, because a pin is strictly
-more information than an unchecked connection and costs the same click.
-
-The configuration is **proved before it is stored**: saving it lists the
-environments first. A configuration that has never worked is a button that fails
-later, somewhere nobody is looking.
-
-### What is validated, and where
-
-Everything an operator sends is hostile input, and each value is checked against
-a charset and a bound before it reaches a socket or an argv:
-
-| Value | Rule |
+| Operation | Answers |
 |---|---|
-| container / image / volume / network name | `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` |
-| image reference | `[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}` |
-| a container to create | **built field by field** from a validated shape. A body forwarded to the daemon would be every field this module does not know about, `Privileged` among them |
-| a bind mount | two absolute paths with no colon, or a volume name — the string reaches the daemon as one field, and a colon in the wrong place changes what is mounted where |
-| a command | `shlex`-split into an argv, never handed to a shell |
-| an environment variable | a name, and a value with no newline — one that carried one would be a second variable |
-| a compose file | text, bounded, never parsed here (compose is what understands compose; a half-implemented YAML reader deciding what is safe would be a worse gate than the capability in front of it) |
-| a Portainer address | `scheme://host[:port]` and nothing else — no path, no name to resolve later and point anywhere |
-| a Portainer token | printable ASCII only: it rides an HTTP header, and a control byte in it would be a second header |
+| `map_links` | the edges being reported right now, each with who said it and how old their word is; also what is being followed and which machines may be asked |
+| `map_targets` | machines that granted `manage`, and whether one can be driven now |
+| `map_overlay` | what fleet knows about each node — managed, controls this node, log being collected — in fleet's words |
 
-And the answers coming *back* are hostile too — large, deep, written by something
-this node does not control. Every shape handed on is built field by field and
-bounded, and one thing is deliberately left out: a container's **environment
-values**. Those routinely hold its secrets, so only the names travel. Somebody
-who needs a value has a shell.
+None of the three travels. That is the harder half of the decision and it is
+deliberate: none of them *acts*, so letting them ride to another operator's
+console looks harmless — but together they hand that operator the list of
+machines this node manages and can reach, which is precisely how a node somebody
+manages becomes a way to reach the nodes *it* manages. `relation` may travel
+because it answers about one node the caller already named; these answer about
+all of them.
 
 ## Groups: pointing at several machines at once
 
@@ -1106,6 +1044,8 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 | `CONSOLE_SESSION` / `_ISSUED` | 0x52 / 0x53 | → / ← | the request only (`fleet.passwordless`) |
 | `FILE_REQUEST` / `_REPLY` / `_DATA` | 0x70–0x72 | → / ← / ← | the request only (`fleet.shell`) |
 | `DOCKER_REQUEST` / `_REPLY` | 0x80 / 0x81 | → / ← | the request only (`fleet.docker`) |
+| `LOGS_REQUEST` / `_REPLY` | 0x90 / 0x91 | → / ← | the request only (`fleet.logs`) |
+| `LINKS_REQUEST` / `_REPLY` | 0xA0 / 0xA1 | → / ← | the request only (`fleet.links`) |
 
 `DOCKER_REQUEST` carries a **named operation** rather than having a message type
 per container verb: that would be twenty entries in the dispatch table for one

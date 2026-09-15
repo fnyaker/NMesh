@@ -61,7 +61,38 @@ BUILTIN_APPS = (
     },
 )
 
+# What an app may be *granted*, beyond running. Installing and enabling say
+# whether an app runs; a grant says what the node will answer when it asks for
+# something that is not its own. Off for every app until an operator turns it
+# on, and listed here rather than invented per app so the console has one place
+# to render and one word to render it with.
+#
+# ``logs`` — read the node's log ring: every other app's lines and the core's.
+#   Writing a line needs no grant (the connector stamps the source, so an app
+#   can only ever speak as itself); reading is the node's whole diary, which is
+#   a different question with a different answer.
+# ``links`` — read which nodes this one is connected to. Who a machine keeps
+#   company with, which is the same kind of thing as its log and is why it is
+#   asked for separately: an app that shows a mesh map needs it, and an app
+#   that sends messages does not.
+GRANTS = (
+    {
+        "name": "logs",
+        "title": "Read the node's log",
+        "description": ("Query and follow every line this node keeps — the "
+                        "core's and every other app's, not only its own."),
+    },
+    {
+        "name": "links",
+        "title": "Read this node's links",
+        "description": ("See which nodes this one is connected to right now, "
+                        "over which medium and at what latency."),
+    },
+)
+_GRANT_NAMES = tuple(grant["name"] for grant in GRANTS)
+
 _BY_NAME = {app["name"]: app for app in BUILTIN_APPS}
+_BY_APP_ID = {app["app_id"]: app["name"] for app in BUILTIN_APPS}
 _FILENAME = "apps.json"
 
 
@@ -90,9 +121,15 @@ class AppRegistry:
         for app in BUILTIN_APPS:
             stored = document.get(app["name"])
             stored = stored if isinstance(stored, dict) else {}
+            granted = stored.get("grants")
+            granted = granted if isinstance(granted, dict) else {}
             self._state[app["name"]] = {
                 "installed": _flag(stored.get("installed"), True),
                 "enabled": _flag(stored.get("enabled"), app["default_enabled"]),
+                # Never defaulted to true by anything a file can say: an
+                # unreadable or hostile state file must not be a way to grant.
+                "grants": {name: _flag(granted.get(name), False)
+                           for name in _GRANT_NAMES},
             }
 
     def _save(self) -> None:
@@ -144,8 +181,36 @@ class AppRegistry:
                     "installed": bool(entry.get("installed")),
                     "enabled": self.is_enabled(app["name"]),
                     "running": app["name"] in running,
+                    # Self-describing, like a transport's options: the page
+                    # renders what the node declares rather than holding its
+                    # own copy of what a grant is called.
+                    "grants": [dict(grant,
+                                    granted=bool((entry.get("grants") or {})
+                                                 .get(grant["name"])))
+                               for grant in GRANTS],
                 })
             return out
+
+    def granted(self, name: str, capability: str) -> bool:
+        """Does this app hold this grant? **No** for anything not recognised.
+
+        The one question the connector asks, and it is asked on a path an app
+        controls the arguments of, so every unknown app, unknown capability and
+        missing entry is a refusal rather than a lookup that happens to fail."""
+        with self._lock:
+            entry = self._state.get(name)
+            if entry is None or capability not in _GRANT_NAMES:
+                return False
+            return bool(entry.get("grants", {}).get(capability))
+
+    def granted_to_id(self, app_id: bytes, capability: str) -> bool:
+        """The same question, asked with the identifier a connector has.
+
+        An app the mesh deployed is not in this registry and is therefore
+        refused, which is the right answer: nothing here has granted it
+        anything."""
+        return self.granted(_BY_APP_ID.get(bytes(app_id) if app_id else b"", ""),
+                            capability)
 
     # -- mutations --------------------------------------------------------
 
@@ -158,9 +223,21 @@ class AppRegistry:
             self._save()
             return True
 
+    def set_grant(self, name: str, capability: str, granted: bool) -> bool:
+        """Give or take back one grant. Refused for anything not declared."""
+        with self._lock:
+            entry = self._state.get(name)
+            if entry is None or capability not in _GRANT_NAMES:
+                return False
+            entry.setdefault("grants", {})[capability] = bool(granted)
+            self._save()
+            return True
+
     def set_installed(self, name: str, installed: bool) -> bool:
-        """Uninstalling also disables: an app must never keep running once the
-        operator has asked for its state to be purged."""
+        """Uninstalling also disables **and drops every grant**: an app must
+        never keep running once the operator has asked for its state to be
+        purged, and one reinstalled later starts from nothing rather than from
+        what somebody allowed the app that used to have that name."""
         with self._lock:
             entry = self._state.get(name)
             if entry is None:
@@ -168,6 +245,7 @@ class AppRegistry:
             entry["installed"] = bool(installed)
             if not installed:
                 entry["enabled"] = False
+                entry["grants"] = {key: False for key in _GRANT_NAMES}
             self._save()
             return True
 

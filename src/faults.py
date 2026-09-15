@@ -22,6 +22,12 @@ So: **stderr, bounded, named.** A node already says what it has to say there, a
 management plane must never become a way to fill somebody's disk, and a line
 nobody can read past is a line nobody reads.
 
+A node that is keeping a log wants these lines in it as well, so there is one
+**sink** here: a callable set by whoever is keeping the log, handed the same
+name and the same exception, and dropped the moment they stop. It is a single
+global rather than a registry because stderr is one too — this is what the
+process says about itself, not what one object says about its own state.
+
 What does **not** go here is anything that travels. A reply is relayed, pasted
 into an issue and read by scripts, and `tests/test_control_plane.py` holds the
 plane to carrying nothing of this machine in one, whoever asked for it. A log is
@@ -35,6 +41,32 @@ import traceback
 # Enough to name the line that raised and how it was reached, and no more.
 MAX_FRAMES = 12
 
+# Whoever is keeping a log of this process, or None. Set by `MeshNode`; never
+# called for its answer, and never allowed to make a guard fail.
+_sink = None
+
+
+def watch(sink) -> None:
+    """Have every swallowed failure handed to ``sink(where, exc)`` as well.
+
+    Last one wins: a process runs one node. ``None`` stops it — and stops it
+    only for whoever is *currently* listening, which matters in a process
+    holding more than one node (every test in this suite): a node shutting down
+    must not take the log of the node still running with it."""
+    global _sink
+    _sink = sink if callable(sink) else None
+
+
+def unwatch(sink) -> None:
+    """Stop listening, if this is who is listening.
+
+    ``==``, never ``is``: a bound method is a fresh object on every attribute
+    access, so ``node._note_fault is node._note_fault`` is false and an
+    identity test here would never unhook anything."""
+    global _sink
+    if _sink == sink:
+        _sink = None
+
 
 def note(where: str, exc: BaseException) -> None:
     """Write one swallowed failure down. **Never raises** — a failed report is
@@ -47,3 +79,10 @@ def note(where: str, exc: BaseException) -> None:
         sys.stderr.flush()
     except Exception:                       # noqa: BLE001 — never the reason
         pass
+    sink = _sink
+    if sink is None:
+        return
+    try:
+        sink(where, exc)
+    except Exception:                       # noqa: BLE001 — same rule, and the
+        pass                                # sink is the newer of the two

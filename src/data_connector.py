@@ -31,12 +31,17 @@ container IPC; an ``ssl_context`` may be supplied to wrap the TCP listener.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hmac
 import json
 import os
 import secrets
 import struct
+import threading
+import time
 
+from . import alerts
+from . import logbook
 from .app_auth import CTX_LEN, MAX_PURPOSE_LEN
 from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
 from .ip_utils import wait_closed_bounded
@@ -66,6 +71,9 @@ _MAX_CLIENT_QUEUE = 64
 
 _KLEN = struct.Struct("!H")   # key-length prefix for STORE_PUT
 _MAX_LIST = 60_000            # cap on a serialised key list reply
+# Pushed log lines a client holds before the oldest are dropped. A subscriber
+# that stops reading is a subscriber with a gap, never a growing process.
+_CLIENT_LOG_INBOX = 1024
 _ASSERT_HEAD = struct.Struct("!20s32sI")     # audience, ctx, ttl
 _VERIFY_HEAD = struct.Struct("!B32sH")       # flags, ctx, purpose length
 
@@ -89,6 +97,18 @@ _AUTH_VERIFY = 0x0D   # body = flags(1) ‖ ctx(32) ‖ plen(2) ‖ purpose ‖ 
 _ABUSE = 0x0F         # body = node_id(20) ‖ weight(B) ‖ kind(B) ‖ reason(utf-8)
 _ABUSE_REASON_MAX = 64   # characters of explanation kept, for an operator to read
 _ATTENDED = 0x10      # body = flag(1) — is a person at this app, or is it ours?
+# Logs. Writing is open to every app, reading is not — see `_may_read_logs`.
+_LOG_WRITE = 0x11     # body = level(1) ‖ topiclen(1) ‖ topic ‖ message(utf-8)
+_LOG_QUERY = 0x12     # body = JSON filter  — the ring, newest first
+_LOG_SINCE = 0x13     # body = JSON {seq, …} — everything after a sequence
+_LOG_WATCH = 0x14     # body = flag(1) ‖ level(1) — push new lines, or stop
+_LOG_TOPIC_MAX = 48
+# One byte per level on the wire; anything else reads as `info`, which is what
+# `logbook.clean_level` does with a name it does not know and for the same
+# reason — a diagnostic lost to a typo is the wrong trade.
+_LEVEL_BY_CODE = {b"d": logbook.DEBUG, b"i": logbook.INFO,
+                  b"w": logbook.WARN, b"e": logbook.ERROR}
+_CODE_BY_LEVEL = {level: code for code, level in _LEVEL_BY_CODE.items()}
 # server → client
 _AUTH_OK = 0x81
 _AUTH_FAIL = 0x82
@@ -104,6 +124,65 @@ _PSEUDO_RESULTS = 0x8B # body = JSON [{id, pseudo, ts, match}]     (LOOKUP reply
 _PSEUDO_NAMES = 0x8E  # body = JSON {id_hex: pseudo}              (OF reply)
 _AUTH_ASSERTION = 0x8C # body = the signed assertion, or empty on refusal
 _AUTH_PRINCIPAL = 0x8D # body = JSON principal, or JSON null when it fails
+# A problem worth a person's attention. Open to every app, like a log line and
+# for the same reason: the node attributes it, bounds it, and decides what the
+# board looks like — an app that could post as the core would be an app that
+# could make an operator act on something the node never said.
+_NOTIFY = 0x15        # body = level(1) ‖ keylen(1) ‖ key ‖ JSON {summary, detail}
+_NOTIFY_KEY_MAX = 64
+# Who this node is connected to. Read-only, and behind a grant of its own: a
+# link list is who this machine keeps company with, which is the same kind of
+# thing as its log and not the kind of thing an app is owed for existing.
+_LINKS = 0x16         # body = empty
+_LOG_LINES = 0x8F     # body = JSON {lines, matched, returned, seq, lost?}
+_LOG_LINE = 0x90      # body = JSON one line, pushed to a watching client
+_LINKS_VIEW = 0x92    # body = JSON {links: [...]}, or {refused: true}
+
+
+def _number(raw) -> float:
+    """A number, or zero. Never a refusal and never an exception: a filter
+    field that is not a number is a caller mistake, and the answer to it is an
+    unfiltered axis rather than a reply that never comes."""
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value == value and value > 0 else 0.0
+
+
+# Lines of a link list one answer may carry. A node with more links than this
+# has a map problem, not a listing problem.
+_MAX_LINKS = 256
+
+
+def _grant_check(log_access, grants):
+    """One callable answering ``(app_id, capability) -> bool``.
+
+    ``grants`` is what a node is built with now. ``log_access`` is the older
+    spelling — a callable that answered the *log* question alone — and it is
+    still honoured, because a runner written against it is not wrong, it is
+    early. Neither present means nothing is granted, which is the only safe
+    default for a question about somebody else's data."""
+    if callable(grants):
+        return grants
+    if callable(log_access):
+        return lambda app_id, capability: (capability == "logs"
+                                           and log_access(app_id))
+    return None
+
+
+def _fit(answer: dict) -> bytes:
+    """One answer, serialised so that it fits a frame **and stays JSON**.
+
+    Truncating the serialised text would be shorter and would hand the client
+    half an object. So the lines are halved until what is left fits, exactly as
+    a long key list is, and the counts beside them still say how much matched."""
+    blob = json.dumps(answer).encode("utf-8")
+    while len(blob) > _MAX_LIST and answer.get("lines"):
+        answer = dict(answer, lines=answer["lines"][:len(answer["lines"]) // 2])
+        answer["returned"] = len(answer["lines"])
+        blob = json.dumps(answer).encode("utf-8")
+    return blob
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -124,8 +203,19 @@ async def _write_frame(writer: asyncio.StreamWriter, ftype: int, body: bytes) ->
 class DataConnector:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 0,
                  unix_path: str | None = None, token: str | None = None,
-                 ssl_context=None) -> None:
+                 ssl_context=None, log_access=None, grants=None) -> None:
         self._node = node
+        # What an app may *read* of the node's own data — its log, its links.
+        # Writing is open to every app, because what an app writes is stamped
+        # with its own id here and can only ever be attributed to it; reading
+        # is somebody else's data (the core's lines, every other app's, this
+        # machine's neighbours), which is a different question with a different
+        # answer. Closed unless somebody opens it: the callable is supplied by
+        # whoever builds the node — the registry's per-app grants — and no
+        # callable means nothing is granted.
+        self._grants = _grant_check(log_access, grants)
+        # Clients that asked to be pushed new lines, and the floor each wants.
+        self._log_watchers: dict = {}
         self._host = host
         self.port = port
         self._unix_path = unix_path
@@ -150,6 +240,12 @@ class DataConnector:
         self._outbox: dict[asyncio.StreamWriter, asyncio.Queue] = {}
         self._writers: dict[asyncio.StreamWriter, asyncio.Task] = {}
         self._pending: int = 0
+        # The loop this connector runs on, and the thread it runs on. A log
+        # line is recorded from wherever the code that wrote it happens to
+        # live — a receive loop, a console thread — and an `asyncio.Queue` is
+        # not thread-safe, so a line from off the loop is handed across.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: int = 0
 
     @property
     def host(self) -> str:
@@ -175,6 +271,8 @@ class DataConnector:
             self._server = await asyncio.start_server(
                 self._handle_client, self._host, self.port, ssl=self._ssl)
             self.port = self._server.sockets[0].getsockname()[1]
+        self._loop = asyncio.get_running_loop()
+        self._loop_thread = threading.get_ident()
         self._pump_task = asyncio.create_task(self._pump())
         # An app somebody is *at* is what "this node is being used" means from
         # here, and it is a *state* rather than an event: a chat window open
@@ -184,6 +282,13 @@ class DataConnector:
         hold = getattr(self._node, "hold_awake", None)
         if hold is not None:
             hold("app", lambda: self.attended_clients() > 0)
+        # Lines reach a subscriber as they are recorded rather than by being
+        # asked for. Registered here rather than by the node because this is
+        # the thing that has subscribers, and it costs nothing while there are
+        # none: with no watcher `push_log` returns on its first test.
+        book = self._book()
+        if book is not None:
+            book.sink = self.push_log
 
     async def stop(self) -> None:
         if self._pump_task is not None:
@@ -212,6 +317,10 @@ class DataConnector:
                 pass
         self._clients.clear()
         self._unattended.clear()
+        self._log_watchers.clear()
+        book = self._book()
+        if book is not None and getattr(book, "sink", None) == self.push_log:
+            book.sink = None
         if self._server is not None:
             self._server.close()
             await wait_closed_bounded(self._server)
@@ -247,29 +356,39 @@ class DataConnector:
                 for w, w_app in list(self._clients.items()):
                     if w_app != app_id:
                         continue  # not this client's section
-                    queue = self._outbox.get(w)
-                    if queue is None:
-                        continue
-                    try:
-                        queue.put_nowait(body)
-                    except asyncio.QueueFull:
-                        pass      # this client is behind; the others are not
+                    self._offer(w, _RECV, body)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 continue
+
+    def _offer(self, writer: asyncio.StreamWriter, ftype: int,
+               body: bytes) -> None:
+        """Queue one frame for a client, or drop it if that client is behind.
+
+        Never writes to the socket and never awaits: every caller here is on a
+        path — the inbound pump, a log line being recorded — where one client
+        that has stopped reading must cost that client and nobody else."""
+        queue = self._outbox.get(writer)
+        if queue is None:
+            return
+        try:
+            queue.put_nowait((ftype, body))
+        except asyncio.QueueFull:
+            pass          # this client is behind; the others are not
 
     async def _drain_client(self, writer: asyncio.StreamWriter,
                             queue: asyncio.Queue) -> None:
         """Write one client's frames, at that client's own pace."""
         try:
             while True:
-                body = await queue.get()
-                await _write_frame(writer, _RECV, body)
+                ftype, body = await queue.get()
+                await _write_frame(writer, ftype, body)
         except asyncio.CancelledError:
             raise
         except Exception:
             self._clients.pop(writer, None)
+            self._log_watchers.pop(writer, None)
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
@@ -331,6 +450,14 @@ class DataConnector:
                     self._handle_abuse(app_id, body)
                 elif ftype == _ATTENDED:
                     self._note_attended(writer, body)
+                elif ftype == _LOG_WRITE:
+                    self._handle_log_write(app_id, body)
+                elif ftype in (_LOG_QUERY, _LOG_SINCE, _LOG_WATCH):
+                    await self._handle_log_read(writer, app_id, ftype, body)
+                elif ftype == _NOTIFY:
+                    self._handle_notify(app_id, body)
+                elif ftype == _LINKS:
+                    await self._handle_links(writer, app_id)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -342,6 +469,7 @@ class DataConnector:
                 self._pending = max(0, self._pending - 1)
             self._clients.pop(writer, None)
             self._unattended.discard(writer)
+            self._log_watchers.pop(writer, None)
             self._outbox.pop(writer, None)
             task = self._writers.pop(writer, None)
             if task is not None:
@@ -497,6 +625,176 @@ class DataConnector:
         except Exception:
             pass          # a report must never break the client's connection
 
+    # -- logs --------------------------------------------------------------
+    #
+    # An app says things about itself, and may be allowed to read what the node
+    # said. The two halves are deliberately unequal: a line is cheap, bounded
+    # and attributed here rather than by the app, so writing costs nothing to
+    # give away; reading is this node's whole diary — every other app's lines
+    # and the core's — which is a privilege and is closed until granted.
+
+    def _book(self):
+        book = getattr(self._node, "logs", None)
+        return book if book is not None and hasattr(book, "record") else None
+
+    def _may_read_logs(self, app_id: bytes) -> bool:
+        return self._may(app_id, "logs")
+
+    def _may(self, app_id: bytes, capability: str) -> bool:
+        """Does this app hold this grant? **No** unless somebody says yes.
+
+        One question for every grant rather than one callable per grant: the
+        answer belongs to whoever built the node (the registry), and a second
+        way to ask it would be a second place for the answer to be wrong."""
+        if self._grants is None:
+            return False
+        try:
+            return bool(self._grants(app_id, capability))
+        except Exception:               # noqa: BLE001 — a refusal, never a crash
+            return False
+
+    def _handle_log_write(self, app_id: bytes, body: bytes) -> None:
+        """One line from an app. Fire and forget, like a report of abuse.
+
+        **The source is written here, never by the app.** `app:<id>` is what
+        every filter in the product groups by, so an app able to set it could
+        write lines that read as the core's — and a log an operator cannot
+        attribute is worse than no log."""
+        book = self._book()
+        if book is None or not body:
+            return
+        try:
+            level = _LEVEL_BY_CODE.get(body[:1], "info")
+            topic_len = body[1] if len(body) > 1 else 0
+            topic = body[2:2 + min(topic_len, _LOG_TOPIC_MAX)].decode(
+                "utf-8", "replace")
+            message = body[2 + topic_len:].decode("utf-8", "replace")
+            book.record(f"app:{app_id.hex()[:16]}", message,
+                        level=level, topic=topic)
+        except Exception:               # noqa: BLE001
+            pass          # a log line must never break a client's connection
+
+    async def _handle_links(self, writer, app_id: bytes) -> None:
+        """Who this node is connected to, if this app was granted it.
+
+        Answered either way, like a log read: an app that is simply not
+        permitted must not look like a node that has wedged."""
+        view = getattr(self._node, "links_view", None)
+        if view is None or not self._may(app_id, "links"):
+            await _write_frame(writer, _LINKS_VIEW,
+                               json.dumps({"links": [], "refused": True})
+                               .encode("utf-8"))
+            return
+        try:
+            links = view()
+        except Exception:               # noqa: BLE001 — a refusal, never a crash
+            links = []
+        await _write_frame(writer, _LINKS_VIEW,
+                           _fit({"links": list(links)[:_MAX_LINKS],
+                                 "at": time.time()}))
+
+    def _handle_notify(self, app_id: bytes, body: bytes) -> None:
+        """One problem, from an app. Fire and forget, like `_ABUSE`.
+
+        **Not answered**, deliberately: a reply would let an app read the node's
+        board back, and what else is wrong with this machine is nobody's
+        business but the operator's. The key is namespaced by the app here, so
+        one app's notice can never overwrite another's — or the core's."""
+        book = getattr(self._node, "alerts", None)
+        if book is None or not body:
+            return
+        try:
+            level = (alerts.ERROR if body[:1] == b"e" else alerts.WARN)
+            key_len = body[1] if len(body) > 1 else 0
+            key = body[2:2 + min(key_len, _NOTIFY_KEY_MAX)].decode(
+                "utf-8", "replace")
+            document = json.loads(body[2 + key_len:].decode("utf-8")) \
+                if len(body) > 2 + key_len else {}
+            if not isinstance(document, dict):
+                document = {}
+            source = f"app:{app_id.hex()[:16]}"
+            book.raise_alert(f"{source}:{key}",
+                             str(document.get("summary") or key),
+                             level=level, source=source,
+                             detail=str(document.get("detail") or ""))
+        except Exception:               # noqa: BLE001
+            pass          # a notice must never break a client's connection
+
+    async def _handle_log_read(self, writer, app_id: bytes, ftype: int,
+                               body: bytes) -> None:
+        book = self._book()
+        if book is None or not self._may_read_logs(app_id):
+            # Answered, and answered with nothing. A silent drop would leave a
+            # client waiting on a reply that is never coming, which is how an
+            # app that is simply not permitted looks exactly like a node that
+            # has wedged.
+            await _write_frame(writer, _LOG_LINES,
+                               json.dumps({"lines": [], "matched": 0,
+                                           "returned": 0, "seq": 0,
+                                           "refused": True}).encode("utf-8"))
+            return
+        if ftype == _LOG_WATCH:
+            on = bool(body[:1] == b"\x01") if body else False
+            if on and len(self._log_watchers) < _MAX_CLIENTS:
+                self._log_watchers[writer] = _LEVEL_BY_CODE.get(
+                    body[1:2], "info")
+            else:
+                on = False
+                self._log_watchers.pop(writer, None)
+            await _write_frame(writer, _LOG_LINES,
+                               json.dumps({"watching": bool(on)}).encode("utf-8"))
+            return
+        try:
+            asked = json.loads(body.decode("utf-8")) if body else {}
+            if not isinstance(asked, dict):
+                asked = {}
+        except Exception:               # noqa: BLE001
+            asked = {}
+        # Declared, coerced, bounded — the same three steps the control plane
+        # takes with an operation's arguments, because this is the same kind of
+        # caller: a local process supplying whatever it likes.
+        asked = {key: str(asked[key])[:_LOG_TOPIC_MAX * 4]
+                 for key in ("level", "source", "topic", "contains")
+                 if key in asked}
+        for key in ("since_time", "until_time"):
+            asked[key] = _number(asked.get(key))
+        seq = _number(asked.get("seq"))
+        asked["limit"] = int(_number(asked.get("limit"))) or logbook.MAX_QUERY
+        asked.pop("seq", None)
+        answer = (book.since(seq, **asked) if ftype == _LOG_SINCE
+                  else book.query(**asked))
+        await _write_frame(writer, _LOG_LINES, _fit(answer))
+
+    def push_log(self, line: dict) -> None:
+        """Hand one new line to every client watching, at or above its floor.
+
+        **Synchronous and non-blocking**, because of who calls it: this is a
+        `LogBook` sink, and `LogBook.record` runs inside receive loops and
+        handlers. Awaiting a socket there would make writing a log line cost a
+        round trip to whichever app was slowest to read.
+
+        Nothing is buffered per subscriber either. A client too slow for its own
+        queue loses pushes and catches up with `_LOG_SINCE` from the last
+        sequence it saw, which is the whole reason a line carries one."""
+        if not self._log_watchers or self._loop is None:
+            return
+        try:
+            severity = logbook.rank(line.get("level"))
+            blob = json.dumps(line).encode("utf-8")
+            if threading.get_ident() == self._loop_thread:
+                self._fan_log(severity, blob)
+            else:
+                self._loop.call_soon_threadsafe(self._fan_log, severity, blob)
+        except Exception:               # noqa: BLE001 — never the reason a
+            pass                        # loop that wrote a line dies
+
+    def _fan_log(self, severity: int, blob: bytes) -> None:
+        """Queue one serialised line for every watcher that asked for it. On
+        the loop's own thread, which is where the queues may be touched."""
+        for writer, floor in list(self._log_watchers.items()):
+            if severity >= logbook.rank(floor):
+                self._offer(writer, _LOG_LINE, blob)
+
     def _auth_for(self, app_id: bytes):
         """The app-auth service for this section, created once and kept.
 
@@ -641,6 +939,12 @@ class ConnectorClient:
         self._asking: asyncio.Lock | None = None
         self._dead: Exception | None = None
         self._names: dict[str, str] = {}    # node id (hex) -> pseudo, bounded
+        # Log lines pushed to this client because it subscribed. Bounded like
+        # every other queue: an app that subscribes and never reads loses the
+        # oldest lines and catches up with `logs_since`, rather than growing
+        # until the process dies.
+        self._log_inbox: collections.deque = collections.deque(
+            maxlen=_CLIENT_LOG_INBOX)
 
     @classmethod
     def from_env(cls, environ=None, app_id: bytes | None = None) -> "ConnectorClient":
@@ -690,6 +994,16 @@ class ConnectorClient:
                     self._inbox.append((NodeID(body[:20]), body[20:]))
                     self._arrived.set()
                     continue
+                if ftype == _LOG_LINE:
+                    # Unsolicited, like an inbound message: nobody is waiting
+                    # on a future for it, so matching it by order would hand it
+                    # to whoever asked the last question.
+                    try:
+                        self._log_inbox.append(json.loads(body.decode("utf-8")))
+                    except Exception:       # noqa: BLE001 — drop the line only
+                        pass
+                    self._arrived.set()
+                    continue
                 waiters = self._waiting.get(ftype)
                 if waiters:
                     future = waiters.pop(0)
@@ -724,6 +1038,100 @@ class ConnectorClient:
             return
         await _write_frame(self._writer, _ATTENDED,
                            b"\x01" if self._attended else b"\x00")
+
+    # -- logs -------------------------------------------------------------
+    #
+    # Writing needs no grant: the node stamps the source with this client's own
+    # app id, so a line can only ever be attributed to whoever wrote it.
+    # Reading is the node's whole diary and needs the `logs` grant — without it
+    # every read answers ``{"refused": True}`` rather than nothing, so an app
+    # that is not allowed does not look like a node that has wedged.
+
+    async def log(self, message: str, *, level: str = "info",
+                  topic: str = "") -> None:
+        """Say one line. Fire and forget — nothing answers, and nothing waits."""
+        if self._writer is None:
+            return
+        code = _CODE_BY_LEVEL.get(str(level or "").strip().lower(), b"i")
+        name = str(topic or "").encode("utf-8")[:_LOG_TOPIC_MAX]
+        await _write_frame(self._writer, _LOG_WRITE,
+                           code + bytes([len(name)]) + name
+                           + str(message or "").encode("utf-8"))
+
+    async def links(self) -> dict:
+        """Who this node is connected to. Needs the `links` grant.
+
+        A *read*, and a small one: an identity, a medium, a latency, an age. An
+        app that is not permitted is told so (`refused`) rather than handed an
+        empty list it would read as "this node has no links"."""
+        resp = await self._roundtrip(_LINKS, b"", _LINKS_VIEW)
+        try:
+            answer = json.loads(resp.decode("utf-8"))
+        except Exception:                   # noqa: BLE001
+            return {"links": [], "refused": True}
+        return answer if isinstance(answer, dict) else {"links": []}
+
+    async def logs_query(self, **filters) -> dict:
+        """The ring, newest first, through filters. Needs the `logs` grant."""
+        return await self._logs_read(_LOG_QUERY, filters)
+
+    async def logs_since(self, seq: int = 0, **filters) -> dict:
+        """Everything after ``seq``, oldest first — what a subscriber asks for
+        after a gap. ``lost`` says how much went past while it was away."""
+        return await self._logs_read(_LOG_SINCE, dict(filters, seq=int(seq)))
+
+    async def _logs_read(self, ftype: int, asked: dict) -> dict:
+        body = json.dumps(asked).encode("utf-8")
+        resp = await self._roundtrip(ftype, body, _LOG_LINES)
+        try:
+            answer = json.loads(resp.decode("utf-8"))
+        except Exception:                   # noqa: BLE001
+            return {"lines": [], "matched": 0, "returned": 0, "seq": 0}
+        return answer if isinstance(answer, dict) else {}
+
+    async def logs_watch(self, on: bool = True, *, level: str = "info") -> bool:
+        """Subscribe to new lines, or stop. Lines arrive through `next_log`.
+
+        The answer says whether this client is watching *now*, which is not the
+        same as what was asked: a node with no ring, an app without the grant
+        and a node already holding as many watchers as it will hold all answer
+        no, and an app that believed its own request would sit waiting for
+        lines that are never coming."""
+        code = _CODE_BY_LEVEL.get(str(level or "").strip().lower(), b"i")
+        resp = await self._roundtrip(
+            _LOG_WATCH, (b"\x01" if on else b"\x00") + code, _LOG_LINES)
+        try:
+            return bool(json.loads(resp.decode("utf-8")).get("watching"))
+        except Exception:                   # noqa: BLE001
+            return False
+
+    def next_log(self) -> dict | None:
+        """One pushed line, or ``None``. Never blocks, never raises."""
+        return self._log_inbox.popleft() if self._log_inbox else None
+
+    async def notify(self, key: str, summary: str = "", *,
+                     level: str = "warn", detail: str = "") -> None:
+        """Put one problem on this node's board, for a person to see.
+
+        Not a log line: a log is off until an operator turns it on, and the
+        conditions worth telling somebody about are the ones nobody knew to
+        start recording. Bounded, attributed to this app by the node, and — like
+        an abuse report — answered by nothing, so it is never a way to read the
+        node's state back.
+
+        ``key`` names the *problem*, not the occurrence: the same key twice is
+        one entry with a count, which is what an operator can act on."""
+        if self._writer is None:
+            return
+        name = str(key or "").encode("utf-8")[:_NOTIFY_KEY_MAX]
+        if not name:
+            return
+        document = json.dumps({"summary": str(summary or "")[:200],
+                               "detail": str(detail or "")[:400]})
+        await _write_frame(
+            self._writer, _NOTIFY,
+            (b"e" if str(level).strip().lower() == "error" else b"w")
+            + bytes([len(name)]) + name + document.encode("utf-8"))
 
     async def whoami(self) -> NodeID:
         return NodeID(await self._roundtrip(_WHOAMI, b"", _WHOAMI_RESP))

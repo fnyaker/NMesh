@@ -275,11 +275,30 @@ class TestTheShippedApps:
     def test_fleet_offers_exactly_what_the_details_view_needs(self):
         from src.apps.fleet_web import FleetBridge
         operations = {op["name"]: op for op in app_api.declared(FleetBridge)}
-        assert set(operations) == {"relation", "enrol", "request", "invite"}
+        assert set(operations) == {"relation", "enrol", "request", "invite",
+                                   "logs_policy", "map_targets", "map_overlay",
+                                   "map_links"}
         assert operations["relation"]["changes"] is False
         assert operations["enrol"]["changes"] is True
         assert operations["request"]["changes"] is True
         assert operations["invite"]["changes"] is True
+        assert operations["logs_policy"]["changes"] is True
+        # And only the one that reads travels: the others act through this
+        # node's identity towards another, which a node somebody manages must
+        # not become a way to do (`Docs/Apps/fleet`). Collecting a log is this
+        # operator's decision about their own console, so it stays here.
+        assert operations["relation"]["remote"] is True
+        assert operations["logs_policy"]["remote"] is False
+        # The two the map asks read this console's own ledger and act on
+        # nothing — and still do not travel: they hand over the whole list of
+        # machines this node manages, which is the pivot the fleet guide names.
+        for name in ("map_targets", "map_overlay", "map_links"):
+            assert operations[name]["remote"] is False
+        assert operations["map_overlay"]["changes"] is False
+        # `map_links` is a read that *starts* something — asking is what makes
+        # this node follow those machines — so it says so rather than looking
+        # free.
+        assert operations["map_links"]["changes"] is True
 
     def test_no_shipped_operation_takes_a_free_form_blob(self):
         """Every argument that crosses this boundary has a shape. If one ever

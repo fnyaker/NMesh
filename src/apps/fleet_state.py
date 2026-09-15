@@ -37,15 +37,28 @@ import re
 import threading
 import time
 
+from . import fleet_logs
+
 # What an operator may be granted. Ordered from harmless to total.
-CAPABILITIES = ("status", "invite", "update", "scan", "provision", "shell",
-                "docker", "manage", "govern", "passwordless")
+CAPABILITIES = ("status", "logs", "links", "invite", "update", "scan",
+                "provision", "shell", "docker", "manage", "govern",
+                "passwordless")
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
     # so they can mint an invitation is a grant out of all proportion to the
     # thing they wanted. This one does that and nothing else.
     "invite": "mint a single-use invitation to this node's mesh, on its behalf",
+    # Separate from `manage`, and deliberately near the bottom of the list: a
+    # log is what the machine said about itself, which is closer to `status`
+    # than to driving it. It is still a real grant — a log is routing metadata,
+    # who this node talked to and when — so it is asked for by name and taken
+    # back by name, and it does not arrive with anything else.
+    "logs": "read this node's log, and follow it live",
+    # The mesh map's third layer. Narrower than `manage` on purpose: an
+    # operator drawing a map of their fleet needs to know who each machine
+    # talks to, and needs nothing else about it.
+    "links": "read which nodes this one is connected to, and follow it live",
     "update": "run the system package manager's upgrade",
     "scan": "sweep this machine's LAN for SSH hosts",
     "provision": "install NMesh on machines on this LAN",
@@ -170,6 +183,10 @@ class FleetState:
         # each node: two places saying who is in a group is two chances for
         # them to disagree, and the group is the thing an operator acts on.
         self._groups: dict[str, dict] = {}
+        # What we collect from the machines we manage, and how much of it we
+        # keep. A decision an operator made, so it is persisted here beside the
+        # grants; what is *collected* is memory only (`fleet_logs.LogArchive`).
+        self._log_defaults: dict = _clean_log_entry({})
         self._version = 0
         self._load()
 
@@ -205,6 +222,9 @@ class FleetState:
             for name, entry in _load_map(document.get("groups"), MAX_GROUPS).items()
             if clean_group(name)
         }
+        defaults = document.get("log_defaults")
+        self._log_defaults = _clean_log_entry(
+            defaults if isinstance(defaults, dict) else {})
         self._expire_pending()
 
     def _save(self) -> None:
@@ -219,6 +239,7 @@ class FleetState:
             "provisioned": self._provisioned,
             "ssh_keys": self._ssh_keys,
             "groups": self._groups,
+            "log_defaults": self._log_defaults,
         }
         try:
             blob = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -371,6 +392,69 @@ class FleetState:
         with self._lock:
             entry = self._managed.get(node_hex)
             return list(entry.get("update_stacks") or []) if entry else []
+
+    # -- logs we collect from the machines we manage -----------------------
+    #
+    # Two decisions, and they are not the same one: *whether* to follow a node's
+    # log, and *how much* of it to keep here. Both have a fleet-wide default and
+    # a per-node override, because a fleet is not uniform — two machines an
+    # operator actually watches, and four hundred they would rather not hear
+    # from until something is wrong.
+
+    def log_defaults(self) -> dict:
+        with self._lock:
+            return dict(self._log_defaults)
+
+    def set_log_defaults(self, policy=None, megabytes=None) -> dict:
+        with self._lock:
+            entry = dict(self._log_defaults)
+            if policy is not None:
+                entry["policy"] = fleet_logs.clean_policy(policy)
+            if megabytes is not None:
+                entry["megabytes"] = fleet_logs.clean_megabytes(megabytes)
+            self._log_defaults = _clean_log_entry(entry)
+            self._save()
+            return dict(self._log_defaults)
+
+    def log_policy(self, node_hex: str) -> dict:
+        """What we do about this node's log: the default, unless it has its own.
+
+        Answered for a node we do not manage as well, and answered with the
+        default: a policy is what we *would* do, and asking is not a way to find
+        out who is in the ledger."""
+        with self._lock:
+            entry = self._managed.get(node_hex) or {}
+            own = entry.get("logs")
+            own = own if isinstance(own, dict) else {}
+            merged = dict(self._log_defaults)
+            merged.update({key: value for key, value in own.items()
+                           if key in ("policy", "megabytes")})
+            merged = _clean_log_entry(merged)
+            merged["own"] = sorted(key for key in ("policy", "megabytes")
+                                   if key in own)
+            return merged
+
+    def set_log_policy(self, node_hex: str, policy=None, megabytes=None,
+                       *, inherit: bool = False) -> dict | None:
+        """Give one node its own policy, or (``inherit``) hand it back to the
+        default. Refused for a node we do not manage: a policy about a machine
+        nobody granted us anything on is a row nothing will ever fill."""
+        with self._lock:
+            entry = self._managed.get(node_hex)
+            if entry is None:
+                return None
+            if inherit:
+                entry.pop("logs", None)
+            else:
+                own = entry.get("logs")
+                own = dict(own) if isinstance(own, dict) else {}
+                if policy is not None:
+                    own["policy"] = fleet_logs.clean_policy(policy)
+                if megabytes is not None:
+                    own["megabytes"] = fleet_logs.clean_megabytes(megabytes)
+                entry["logs"] = own
+            self._save()
+        return self.log_policy(node_hex)
 
     # -- groups (an operator's own names for sets of machines) -------------
     #
@@ -737,6 +821,14 @@ def _is_node_hex(value) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _clean_log_entry(raw) -> dict:
+    """A log policy from anywhere — a file, a page, the network. Both fields
+    always present and always valid, so no reader has to guess a default."""
+    entry = raw if isinstance(raw, dict) else {}
+    return {"policy": fleet_logs.clean_policy(entry.get("policy")),
+            "megabytes": fleet_logs.clean_megabytes(entry.get("megabytes"))}
 
 
 def _load_map(raw, limit: int) -> dict[str, dict]:
