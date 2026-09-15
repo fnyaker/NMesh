@@ -12,17 +12,22 @@ either of them to anything.
 
 These tests hold the *corrected* claim, which is narrower and true:
 
-* every module in `src/` **except** `node.py` and the transport implementations
-  is medium-agnostic — it never names a concrete transport at all;
-* `node.py`'s exception is bounded to exactly two media, and the bound is what
+* every module in `src/` **except** the core's own modules (below) and the
+  transport implementations is medium-agnostic — it never names a concrete
+  transport at all;
+* the core's exception is bounded to exactly two media, and the bound is what
   is checked. NAT traversal cannot be written without knowing it is speaking
   datagrams; a *third* concrete transport appearing in the core would be
   something else entirely, and this is what makes that visible on the day it is
   written rather than on the day somebody reads the file.
 
-Written from the charter and not from the code, which is the point: if the code
-grows a new dependency on a medium, this fails and somebody has to either
-justify it in `CLAUDE.md` or take it out.
+**Where the exception lives now.** `node.py` used to be one 14,000-line module
+holding the whole core, so "the core's exception" and "what `node.py` names"
+were the same sentence. The core is now split into focused modules, and the
+exception moved with the code that needs it: `node_peer.py` defines
+`RelayedTransport`, the bank of codecs is medium-agnostic, and the datagram
+work sits in the node. So the rule names the modules that may know a medium
+rather than continuing to imply that one filename is the whole core.
 """
 import ast
 import pathlib
@@ -38,6 +43,13 @@ SRC = ROOT / "src"
 IMPLEMENTATIONS = {"udp_transport.py", "tcp_transport.py", "spool_transport.py",
                    "transport.py", "transport_manager.py", "medium.py"}
 
+# The modules that *are* the core. `node.py` was one file; it is now split into
+# the node itself and the parts it is assembled from. Naming them is the point:
+# the rule below checks every other module in `src/` is medium-agnostic, so the
+# set of exceptions has to be written down rather than inferred from a filename.
+CORE = {"node.py", "node_messages.py", "node_constants.py", "node_codecs.py",
+        "node_peer.py"}
+
 # Anything that names one particular way of moving bytes.
 CONCRETE = re.compile(
     r"\b(UDPTransport|TCPTransport|SpoolTransport|RelayedTransport|UDPServer"
@@ -50,11 +62,24 @@ CONCRETE = re.compile(
 #              no medium-agnostic spelling of that, and a transport interface
 #              general enough to express it would be a UDP interface with
 #              another name.
-#   relayed  — the node's own transport, defined in `node.py`: a link that is
-#              not a socket at all but another node carrying frames for two
-#              peers that cannot reach each other. It is core routing wearing
-#              the transport interface, not a medium.
+#   relayed  — the node's own transport, defined beside the link it tunnels
+#              through (`node_peer.py`): a link that is not a socket at all but
+#              another node carrying frames for two peers that cannot reach
+#              each other. It is core routing wearing the transport interface,
+#              not a medium.
 CORE_MAY_KNOW = {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"}
+
+# Which module of the core may know a medium, and the medium it may know. The
+# permission is per module on purpose: `node_peer.py` *defines* the relayed
+# transport, the node does the datagram work and also asks "is this link
+# relayed?" (a `isinstance` check, which is the cheapest way to exclude a
+# tunnelled link from a count of physical ones), and nothing else in the core
+# has any business naming either. A new module added to CORE is medium-agnostic
+# until somebody says otherwise here.
+CORE_MEDIUM_SITES = {
+    "node.py": {"UDPTransport", "UDPServer", "udp_transport", "RelayedTransport"},
+    "node_peer.py": {"RelayedTransport"},
+}
 
 
 def _modules():
@@ -64,12 +89,12 @@ def _modules():
         yield path, path.read_text()
 
 
-def test_only_the_node_knows_a_concrete_medium():
+def test_only_the_core_knows_a_concrete_medium():
     """Every other module in `src/` is medium-agnostic, and that is the half of
     the principle that actually holds everywhere."""
     offenders = {}
     for path, text in _modules():
-        if path.name == "node.py":
+        if path.name in CORE:
             continue
         found = {m.group(0) for m in CONCRETE.finditer(text)}
         if found:
@@ -79,20 +104,40 @@ def test_only_the_node_knows_a_concrete_medium():
         f"{offenders}")
 
 
-def test_the_node_knows_exactly_the_two_media_the_charter_declares():
+def test_the_core_knows_exactly_the_two_media_the_charter_declares():
     """And no third one appears without somebody saying why.
 
     This is not a style rule. A core that knows a medium cannot be ported to
     one it has never seen, which is the whole third principle — so the list is
     short, written down in `CLAUDE.md`, and checked."""
-    text = (SRC / "node.py").read_text()
-    named = {m.group(0) for m in CONCRETE.finditer(text)}
+    named = set()
+    for path, text in _modules():
+        if path.name in CORE:
+            named |= {m.group(0) for m in CONCRETE.finditer(text)}
     unexpected = named - CORE_MAY_KNOW
     assert unexpected == set(), (
-        f"src/node.py names {sorted(unexpected)}. The core may know "
+        f"the core names {sorted(unexpected)}. It may know "
         f"{sorted(CORE_MAY_KNOW)} and nothing else — see CLAUDE.md §3. If this "
         "is genuinely unavoidable, say so there first; if it is not, it belongs "
         "behind BaseTransport.")
+
+
+def test_each_medium_the_core_knows_is_confined_to_the_module_that_owns_it():
+    """The exception used to be one module wide because the core was one module.
+    It is not any more, so the permission is written per module: this asserts
+    that splitting the file did not quietly spread the exception across the new
+    modules, which is the way a refactor weakens a rule without anybody
+    choosing it."""
+    found = {}
+    for path, text in _modules():
+        if path.name in CORE:
+            names = {m.group(0) for m in CONCRETE.finditer(text)}
+            if names:
+                found[path.name] = names
+    assert found == CORE_MEDIUM_SITES, (
+        "the core's medium-naming sites moved. Expected "
+        f"{CORE_MEDIUM_SITES}, found {found}. If a medium genuinely belongs in "
+        "another module, add it here and record why in CLAUDE.md §3.")
 
 
 def test_the_charter_and_the_transports_document_say_the_same_thing():
@@ -105,7 +150,7 @@ def test_the_charter_and_the_transports_document_say_the_same_thing():
     assert "NAT traversal" in charter, \
         "CLAUDE.md §3 must name the one exception it allows"
     assert "knows **no** concrete transport" not in charter, \
-        "that absolute is false — src/node.py names UDPTransport"
+        "that absolute is false — the core names UDPTransport"
     # And the document that describes the exception must point back at it.
     assert "CLAUDE.md" in transports, \
         "transports.md must cite the charter clause that permits this"
@@ -120,7 +165,6 @@ def test_every_declared_medium_is_reached_only_through_the_interface():
     wherever it comes from."""
     text = (SRC / "node.py").read_text()
     tree = ast.parse(text)
-    lines = text.splitlines()
     # Private members of the *UDP* pair the punch path reaches into, which is
     # the concrete cost of the exception. Recorded so it cannot quietly grow.
     reaching = set()
@@ -146,16 +190,16 @@ def test_a_peer_is_made_by_the_node_and_never_half_wired():
     every relayed peer were invisible to the one diagnostic an operator turns
     on. Nobody chose that; the shape did.
 
-    So there is one constructor call in the whole module, and it is the
-    factory's."""
-    text = (SRC / "node.py").read_text()
-    built = re.findall(r"_Peer\(", text)
-    # The class statement, its own type annotations and the factory. Anything
-    # more is a second place that has to remember the wiring.
-    made_outside = len([m for m in re.finditer(r"^\s+\w+ = _Peer\(", text,
-                                               re.MULTILINE)])
-    assert made_outside == 1, (
-        f"{made_outside} places build a `_Peer`. The node builds its own peers "
+    So there is one constructor call in the core, and it is the factory's. The
+    core is now several modules, so this counts across all of them rather than
+    letting a new module add a second site out of sight."""
+    built = 0
+    for page in sorted(SRC.glob("node*.py")):
+        text = page.read_text()
+        built += len([m for m in re.finditer(r"^\s+\w+ = _Peer\(", text,
+                                             re.MULTILINE)])
+    assert built == 1, (
+        f"{built} places build a `_Peer`. The node builds its own peers "
         "(`_new_peer`) so a half-wired one cannot exist — see CLAUDE.md, "
         '"Name the thing, then count the thing".')
 
