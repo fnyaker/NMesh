@@ -504,7 +504,14 @@ class MeshNode:
         # the question no single loss can — "did several go at once", which is
         # evidence about our own addressing rather than about any of them.
         self._recent_losses: OrderedDict[NodeID, float] = OrderedDict()
-        self._last_loss_burst: float = 0.0
+        # When the last burst was *acted on*, or ``None`` if none ever was.
+        # ``None`` and not ``0.0``: the cooldown below is measured against
+        # ``time.monotonic()``, whose zero is the machine's boot, so a 0.0
+        # sentinel is not "never" — it is "a burst at boot", which suppresses
+        # the first real one for the first `_LOSS_BURST_COOLDOWN` seconds of
+        # uptime. A node started on a freshly booted machine therefore missed
+        # the one thing this mechanism exists to catch.
+        self._last_loss_burst: float | None = None
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -3059,7 +3066,11 @@ class MeshNode:
             self._recent_losses.popitem(last=False)
         if len(self._recent_losses) < _LOSS_BURST_NODES:
             return
-        if now - self._last_loss_burst < _LOSS_BURST_COOLDOWN:
+        # `is not None` first: the sentinel means no burst has ever been acted
+        # on, and an unstarted cooldown must not read as an expired one — see
+        # the initialiser.
+        if (self._last_loss_burst is not None
+                and now - self._last_loss_burst < _LOSS_BURST_COOLDOWN):
             return
         self._last_loss_burst = now
         self._activity.note(
