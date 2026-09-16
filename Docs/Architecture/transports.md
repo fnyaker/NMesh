@@ -599,6 +599,17 @@ UDP is connectionless and unreliable → a **reliability layer**:
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
   killed when the phases lined up (route flapping).
+- **Every frame is an arrival, not only the ones carrying data.** The death
+  verdict above is measured from the last frame `process_incoming` saw, and
+  `_process_frame` used to hand it the data frames alone — so a link was judged
+  on the traffic *above* it while the keepalives the timeout is named after were
+  dropped on the floor. An idle link, which sends nothing else, died after 75 s
+  with a peer answering every one of them; the 20 s mesh PING is what hid it,
+  which is why the timeout had to be stated against a *traffic* cadence rather
+  than against three missed keepalives. A keepalive, an ack and a fin now record
+  the arrival and deliver nothing — the branch in `process_incoming` that says
+  so was unreachable from the transport until they did. A DATA frame declaring
+  no payload is the one frame dropped before it is seen: no sender builds one.
 - `UDPServer`: **one shared socket**, multiplexed by source `(ip, port)`. A
   datagram from an unknown source creates a `UDPTransport` +
   `on_new_connection` — like a TCP accept. `NPPB`/`NPAK`/STUN datagrams are

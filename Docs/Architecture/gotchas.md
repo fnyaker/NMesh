@@ -1127,6 +1127,35 @@ intermittent "ping stopped working" in both directions.
 → `_KEEPALIVE_TIMEOUT = 75 s` (3 × the interval). **A death timeout must always
 be ≥ 3 × the largest legitimate traffic cadence.**
 
+### 7b. …and the keepalives it was named after were never counted
+The rule above is right, and it was written against the wrong cadence, because
+of the bug underneath it: `_process_frame` called `process_incoming` under
+`if flags & FLAG_DATA and payload`, and `process_incoming` is the only place
+`_last_recv_time` is set. So the timeout named "3 missed keepalives" never saw a
+keepalive at all — it measured the **mesh traffic above the link**, and a link
+with nothing but the 25 s keepalives crossing it died after 75 s with a peer
+answering every single one. The 20 s PING is what kept ordinary links up and
+what made the symptom intermittent, which is why §7 had to phrase the bound
+against a traffic cadence instead of against the keepalives.
+
+Two tells, both visible without a packet capture:
+
+- `process_incoming` opens with `if flags & (FLAG_ACK_ONLY | FLAG_KEEPALIVE |
+  FLAG_FIN): return []`. A branch written for frames that can never arrive is a
+  caller that disagrees with its callee — one of the two is wrong, and the
+  branch says which.
+- `tests/test_udp_transport.py::_opened_link` feeds `process_incoming` a
+  keepalive directly, with a docstring saying the cursor is learned "from the
+  first frame of any kind". The whole suite exercised the reliability layer on a
+  path the transport never took, so every test agreed with the design and none
+  of them touched the bug.
+
+→ Every frame reaches `process_incoming`; it already returns nothing to deliver
+for a keepalive, an ack and a fin. **A test helper that reaches past the caller
+tests the callee's design, not the caller's behaviour** — when a fixture has to
+hand-feed an input production would have supplied, ask who was meant to supply
+it.
+
 ### 8. UDP sequence window: modular comparison, not an infinite set
 Receiver deduplication used an **unbounded** `_recv_seen` (a spray of sequence
 numbers → memory) and broke the link at the 2³² wrap (every post-wrap sequence

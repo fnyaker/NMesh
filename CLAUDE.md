@@ -98,7 +98,8 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
     another name.
     What the punch path *needs* from such a medium is small, and it is declared
     on the contract rather than reached for: `BaseServer.bound_endpoint`,
-    `holds`, `adopt`, `send_raw` and `owns`, plus `BaseTransport.is_closed` and
+    `holds`, `adopt` and `send_raw`, plus `BaseTransport.scheme` — carried by the
+    *link*, because a dialled one has no listener to ask — and `is_closed` and
     `keepalive` for the keepalive bursts that open a punched link. Any medium may
     implement them — and a medium that cannot punch inherits defaults that make
     the traversal simply not happen, which is the honest answer for a stream or

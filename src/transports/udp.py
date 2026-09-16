@@ -340,15 +340,14 @@ class _ReliableLink:
 
 
 class UDPTransport(BaseTransport):
-
-    SCHEME = "udp"
-
     """
     A single bidirectional link over UDP with reliability.
 
     One instance = one peer connection. Uses a shared datagram socket
     (provided by UDPServer or created on connect) and a remote address.
     """
+
+    SCHEME = "udp"
 
     OPTIONS = (
         option("keepalive_interval", "float", _KEEPALIVE_INTERVAL,
@@ -534,8 +533,16 @@ class UDPTransport(BaseTransport):
         # Process ACK info
         self._link.process_ack(ack, sack)
 
-        # Process data payload
-        if flags & FLAG_DATA and payload:
+        # Every frame is handed over, not only the ones carrying data: an idle
+        # link sends nothing but keepalives, and `process_incoming` is where an
+        # arrival is recorded — the time `is_alive` reads for its death verdict,
+        # and the peer's cursor, adopted from the first frame of any kind. It
+        # returns nothing to deliver for a keepalive, an ack or a fin, so the
+        # loop below does not run for them.
+        # A DATA frame declaring no payload is the one exception: no sender
+        # builds one, so it is dropped with no side effect rather than moving
+        # the cursor on.
+        if payload or not (flags & FLAG_DATA):
             delivered = self._link.process_incoming(seq, flags, payload)
             for raw in delivered:
                 try:
