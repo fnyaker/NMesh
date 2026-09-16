@@ -19,10 +19,8 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 from src import MeshNode
-from src.transport_manager import TransportManager
-from src.tcp_transport import TCPTransport, TCPServer
-from src.spool_transport import SpoolTransport, SpoolServer
-from src.udp_transport import UDPTransport, UDPServer
+from src.transports.manager import TransportManager
+from src.transports.registry import register_all
 from src.reputation import DEFAULT_HALFLIFE, DEFAULT_HOSTILE, DEFAULT_SUSPECT
 from src.webconsole import WebConsole
 from src.data_connector import DataConnector, ConnectorClient
@@ -336,10 +334,10 @@ async def main() -> None:
     if args.data:
         os.makedirs(args.data, exist_ok=True)
 
-    mgr = TransportManager()
-    mgr.register("tcp", TCPTransport, TCPServer)
-    mgr.register("spool", SpoolTransport, SpoolServer)
-    mgr.register("udp", UDPTransport, UDPServer)
+    # Which transports exist is declared in one place (`transports/registry.py`),
+    # not here: the node's own answer to "what can I speak?" should not depend on
+    # a launcher script remembering to import each medium.
+    mgr = register_all(TransportManager())
     transport_problems = _apply_transport_settings(mgr, transport_values)
     node = MeshNode(
         mgr,

@@ -15,7 +15,7 @@ import pytest
 
 from src.net_monitor import NetMonitor
 from src.node import MeshNode
-from tests.conftest import make_manager
+from tests.conftest import make_manager, FakeUDPServer
 
 
 class _Probes:
@@ -206,9 +206,7 @@ class TestNodeIntegration:
 
         node = MeshNode(transport_manager=make_manager())
 
-        class _FakeUDPServer:
-            _sock = None
-        node._udp_server = _FakeUDPServer()
+        node._udp_server = FakeUDPServer()
         node._udp_listen_uri = "udp://0.0.0.0:9999"
         target = NodeID(b"\x01" * 20)
         state = _PunchState(target, "198.51.100.9:40001", "203.0.113.7")

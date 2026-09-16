@@ -1,4 +1,6 @@
 import asyncio
+import time
+
 import pytest
 from src.transport import BaseTransport, BaseServer
 from src.transport_manager import TransportManager
@@ -34,6 +36,41 @@ class FakeTransport(BaseTransport):
 class FakeServer(BaseServer):
     async def listen(self, address: str) -> None: ...
     async def close(self) -> None: ...
+
+
+class FakeUDPServer(BaseServer):
+    """A UDP listener that answers the contract without a kernel socket.
+
+    Tests that put a node in the punch path used to stub `_sock = None`, which
+    only worked because the node read that private directly. The node now asks
+    the medium (see `BaseServer`), so the stub answers the same questions a real
+    `UDPServer` does, and every test that needs one gets the same faithful
+    shape instead of the two lines each knew how to fake.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+        self.transports: dict[tuple[str, int], BaseTransport] = {}
+        self.bound: tuple[str, int] | None = None
+        self._closed = False
+
+    async def listen(self, address: str) -> None: ...
+    async def close(self) -> None:
+        self._closed = True
+
+    def bound_endpoint(self) -> tuple[str, int] | None:
+        return self.bound
+
+    def holds(self, remote: tuple[str, int]) -> bool:
+        return remote in self.transports
+
+    def adopt(self, remote: tuple[str, int]) -> BaseTransport | None:
+        return self.transports.get(remote)
+
+    def send_raw(self, data: bytes, remote: tuple[str, int]) -> bool:
+        self.sent.append((data, remote))
+        return True
 
 
 async def settle(node, timeout: float = 2.0) -> None:
@@ -149,3 +186,59 @@ def _no_public_network_probes(monkeypatch):
         return None
     monkeypatch.setattr(MeshNode, "discover_public_ip", _none, raising=False)
     monkeypatch.setattr(MeshNode, "_probe_stun_if_udp", _none, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# Run as a freshly booted machine
+# ---------------------------------------------------------------------------
+
+FRESH_BOOT_UPTIME = 7.0
+
+
+class _ShiftedClock:
+    """A clock that starts just after boot, and still advances normally.
+
+    Not a frozen clock: tests that wait for a deadline must still see time
+    move. Only the *origin* is shifted."""
+
+    def __init__(self, base: float):
+        self._base = base
+        self._real_start = time.monotonic()
+
+    def monotonic(self) -> float:
+        return self._base + (time.monotonic() - self._real_start)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def fresh_boot(request, monkeypatch):
+    """Read the node's clock as a machine up for a few seconds.
+
+    ``time.monotonic()`` is measured from the machine's boot, so a developer
+    machine up for days and a CI container up for seconds see wildly different
+    numbers for the same code. Anything comparing an *absolute* uptime against
+    a recorded one — a cooldown seeded with a ``0.0`` sentinel, a window opened
+    at import — behaves differently in the two places. That gap is how a test
+    suite goes green locally and red in CI, which is exactly what happened here:
+    `_last_loss_burst` started at ``0.0``, so on a container booted seconds ago
+    the node's first real loss burst fell inside a cooldown that had never run.
+
+    Both the node *and the test module that asked for this fixture* are pointed
+    at the shifted clock, and that second half is not optional: a test that
+    writes a deadline with its own ``time.monotonic()`` would otherwise place it
+    days in the node's future, since the node is reading a clock a few seconds
+    past boot. Nothing global is touched, so pytest's own duration reporting and
+    timeouts are unaffected.
+    """
+    import src.node as node_module
+
+    clock = _ShiftedClock(FRESH_BOOT_UPTIME)
+    monkeypatch.setattr(node_module, "time", clock, raising=False)
+    # The caller's module reads the same clock, or "100 s ago" lands in the
+    # future. `module` is absent for some node types; that is fine.
+    module = getattr(request.node, "module", None)
+    if module is not None and hasattr(module, "time"):
+        monkeypatch.setattr(module, "time", clock, raising=False)
+    yield clock

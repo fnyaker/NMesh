@@ -20,10 +20,10 @@ from .logbook import LogBook
 from .trace import Trace
 from .node_id import NodeID
 from . import faults
-from . import medium
+from .transports import medium
 from . import routed
 from .routing import RoutingTable, NodeEntry
-from .transport import BaseTransport
+from .transports.contract import BaseTransport
 from .packet import Packet
 from .seen import SeenSet
 from .activity import Activity
@@ -41,7 +41,7 @@ from . import behaviour
 from . import features
 from . import mlo
 from .features import MAX_RECORD as _FEATURES_MAX
-from .transport_manager import TransportManager
+from .transports.manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
 from .ip_utils import (local_ip_addresses, expand_listen_uri,
@@ -105,1820 +105,27 @@ from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_ke
                          PseudoDirError)
 from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
 
-_HEADER_BYTES = 79  # fixed packet header size, for byte accounting
-
-
-def _is_ip_address(s: str) -> bool:
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            socket.inet_pton(family, s)
-            return True
-        except OSError:
-            continue
-    return False
-
-DATA          = 0x00
-PING          = 0x01
-PONG          = 0x02
-FIND_NODE     = 0x03
-FOUND_NODE    = 0x04
-FIND_VALUE    = 0x05
-FOUND_VALUE   = 0x06
-STORE         = 0x07
-HANDSHAKE     = 0x08
-HANDSHAKE_ACK = 0x09
-INVITE        = 0x0A
-INVITE_ACK    = 0x0B
-CHALLENGE         = 0x0C
-E2E_HANDSHAKE     = 0x0D
-E2E_HANDSHAKE_ACK = 0x0E
-OBSERVED_ADDR     = 0x0F
-PUNCH_REQUEST     = 0x10
-PUNCH_RELAY       = 0x11
-PUNCH_PROBE       = 0x12
-PUNCH_ACK         = 0x13
-INVITE_SEEK       = 0x14   # relayed invitation seek — routable PRE-auth, token-gated
-RELAY_CARRY       = 0x15   # carries a handshake packet between two nodes via a relay
-REACH_PROBE       = 0x16   # ask a peer to dial us back and confirm we're reachable
-REACH_PROBE_ACK   = 0x17   # reply: did the dial-back succeed?
-CATALOG_ANNOUNCE  = 0x18   # gossip a signed app-store release descriptor
-DIR_STORE         = 0x19   # store a signed pseudo-directory claim
-DIR_FIND          = 0x1A   # look up pseudo-directory claims by key
-DIR_FOUND         = 0x1B   # reply: the claims held for a pseudo key
-ECHO_REQUEST      = 0x1C   # routed liveness probe to a node id (multi-hop)
-ECHO_REPLY        = 0x1D   # routed reply to an ECHO_REQUEST
-RELEASE_ANNOUNCE  = 0x1E   # gossip a signed descriptor for the node's own code
-RELEASE_FETCH     = 0x1F   # "send me this release's package, from here"
-RELEASE_DATA      = 0x20   # a slice of a package, answering a fetch
-PSEUDO_ANNOUNCE   = 0x21   # gossip a signed claim binding a pseudo to its node
-CERT_RENEW        = 0x22   # "re-issue the membership certificate you signed for me"
-CERT_RENEWED      = 0x23   # reply: the fresh certificate
-CERT_REVOKE       = 0x24   # gossip a signed revocation of a membership
-ABUSE_REPORT      = 0x25   # gossip a signed accusation: "this node is misbehaving"
-CAPABILITIES      = 0x26   # "here is what I can speak" — the base negotiation
-KA_PROPOSE        = 0x27   # "the keepalive cadences I can work with" (min, max)
-KA_REQUEST        = 0x28   # "slow your keepalive down to this" — never speed up
-PKG_STORE         = 0x29   # store a signed package-directory record
-PKG_FIND          = 0x2A   # look up package-directory records by key
-PKG_FOUND         = 0x2B   # reply: the records held for a package key
-PKG_ANNOUNCE      = 0x2C   # gossip a signed record: "this key publishes that"
-KEY_OFFER         = 0x2D   # "I hold this publisher key and offer it to you"
-KEY_ACCEPT        = 0x2E   # "I want it — seal it to this KEM key" (signed)
-KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
-INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a relay
-SPEED_PROBE       = 0x31   # padding, to measure a link by loading it
-SPEED_ECHO        = 0x32   # the same padding back — one for one, never more
-
-# Built from this module's own constants so a message type added above can never
-# be missing here — a trace showing "0x1e" for a type the code knows the name of
-# is exactly the moment a trace stops being useful.
-MESSAGE_NAMES = {
-    value: name for name, value in list(globals().items())
-    if isinstance(value, int) and name.isupper() and not name.startswith("_")
-    and 0x00 <= value <= 0xFF
-}
-
-_ACK_ACCEPTED = 0x00
-_ACK_REJECTED = 0x01
-
-# HANDSHAKE: kem_len(H) | dsa_len(H) | chain_bytes_len(H)
-_HS_HEADER   = struct.Struct('!HHH')
-# HANDSHAKE_ACK: ct_len(H) | dsa_len(H) | chain_bytes_len(H) | issued_cert_len(H)
-_ACK_HEADER  = struct.Struct('!HHHH')
-# FOUND_NODE entry: node_id(20) | addr_count(B) | chain_len in pool indices(B)
-_ENTRY_HEADER = struct.Struct('!20sBB')
-# FOUND_NODE cert pool: pool_count(H) then per-cert length prefixes; entries
-# reference certs by index (H) instead of repeating them.
-_POOL_COUNT   = struct.Struct('!H')
-_POOL_INDEX   = struct.Struct('!H')
-_ENTRY_POOL_MAX  = 32   # distinct certs one FOUND_NODE may carry (bounds verify work)
-# A pooled certificate may travel as a fingerprint instead of as ~7 kB, when the
-# querier said it already holds it. `cert_len == 0` is free as the marker: a
-# certificate shorter than its own header cannot be parsed, so no real one is
-# ever zero-length.
-_CERT_REF        = 0
-_CERT_HINT_MAX   = 32   # fingerprints a FIND_NODE may carry
-# One byte on the end of a FOUND_NODE saying "you may send me fingerprints".
-# Trailing bytes are what a build without this reads it as, and `_decode_entries`
-# has always stopped at the last entry — so this is how the two ends find out
-# about each other without a link-level negotiation they cannot have: a lookup
-# is routed, and the node that answers it may be several hops away.
-_HINTS_OK        = b"\x01"
-_HINT_PEERS_MAX  = 256  # nodes we remember as understanding fingerprints
-_ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
-_ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
-# Certificate renewal. A membership certificate lasts a year
-# (`CryptoIdentity.issue_cert`) and nothing renewed it: at T+365 days a node went
-# on presenting a chain every peer refuses, dropped out of the mesh with no
-# diagnostic anywhere, and only a fresh invitation could bring it back.
-# The two windows differ on purpose. A node starts asking a month out; the
-# issuer will act on anything within three, so clock skew, a slow relayed path
-# and a few missed sweeps can never turn a request made in time into a refusal.
-_CERT_RENEW_WINDOW  = 30 * 86400    # we start asking this long before expiry
-_CERT_RENEW_ACCEPT  = 90 * 86400    # we serve a request this close to expiry
-_CERT_RENEW_TICK    = 6 * 3600.0    # seconds between renewal sweeps
-_CERT_RENEW_FIRST   = 30.0          # first sweep, shortly after start
-_CERT_RENEW_MIN_GAP = 3600.0        # one renewal served per subject per hour
-_CERT_RENEW_TRACKED = 512           # subjects whose last renewal we remember
-_CERT_RENEW_MAX     = 16 * 1024     # bytes of a renewal payload, before any parse
-# Per-cert length prefix inside a chain blob
-_CERT_LEN    = struct.Struct('!H')
-# Address length prefix inside address lists
-_ADDR_LEN    = struct.Struct('!H')
-# E2E handshake: nonce(32) || var1_len(H) || var2_len(H) || chain_bytes_len(H)
-_E2E_HEADER  = struct.Struct('!32sHHH')
-
-# PUNCH_REQUEST payload: target_id(20) | my_udp_port(H)
-_PUNCH_REQ = struct.Struct('!20sH')
-# PUNCH_RELAY payload: peer_id(20) | peer_addr_len(H) | peer_addr | my_observed_addr_len(H) | my_observed_addr
-# PUNCH_PROBE (raw UDP datagram, not a mesh Packet): magic(4) | node_id(20) | nonce(16) | signature(64)
-_PUNCH_PROBE_MAGIC = b"NPPB"
-_PUNCH_PROBE = struct.Struct('!4s20s16s')
-# ML-DSA-65 signatures are 3309 bytes; keep a generous upper bound so a
-# malformed/oversized datagram is rejected before we hand it to verify().
-_PUNCH_SIG_MAX = 5000
-# PUNCH_ACK (raw UDP datagram): magic(4) | node_id(20) | nonce(16) | signature(64)
-_PUNCH_ACK_MAGIC = b"NPAK"
-
-# Direct types travel one authenticated hop (src must be the immediate peer):
-# per-link liveness, NAT punch signalling, and the catalog gossip (re-stamped
-# each hop). Everything else that addresses a *node id* is routable — forwarded
-# multi-hop across any transport toward its dst — so the DHT, the pseudo
-# directory and Kademlia discovery all work when the target is only reachable
-# through relays (A→…→X), not just a direct peer.
-_DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
-                    REACH_PROBE, REACH_PROBE_ACK, CATALOG_ANNOUNCE,
-                    RELEASE_ANNOUNCE, PSEUDO_ANNOUNCE, PKG_ANNOUNCE,
-                    CERT_REVOKE, ABUSE_REPORT,
-                    # The keepalive accord is about *this link* and nothing
-                    # else: a cadence is a property of the pair, so it can only
-                    # ever be stated by the peer at the other end of it.
-                    KA_PROPOSE, KA_REQUEST}
-_CATALOG_RATE_WINDOW = 10.0     # seconds
-_CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
-_RELEASE_RATE_WINDOW = 10.0     # seconds
-_RELEASE_RATE_MAX    = 32       # release announces one link may push per window
-# "Never go looking" (`update_check_minutes = 0`). Not an infinite wait: the
-# loop must still come round to notice the setting changed, and a day is far
-# enough away to be "never" while staying a number the loop can survive.
-_RELEASE_NEVER_TICK  = 86400.0
-# A release that arrives wakes the pass instead of waiting out a whole sweep,
-# and the first pass runs shortly after start rather than five minutes in — a
-# node that reboots into an update it was told to take should not spend the
-# next tick running the version it was meant to leave behind. The settle is
-# what keeps a burst of announces (a peer catching us up) to one pass.
-_RELEASE_FIRST_TICK  = 20.0     # seconds before the first pass after start
-_RELEASE_SETTLE      = 3.0      # seconds an announce waits for its neighbours
-_AUTO_PUBLISH_RETRY  = 3600.0   # before re-attempting a version that failed
-_RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
-_RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
-_RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
-_RELEASE_SERVE_WINDOW  = 10.0   # seconds
-_RELEASE_SERVE_MAX     = 64     # slices one link may pull from us per window
-_RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
-_RELEASE_SOURCES_TRACKED = 64   # releases we remember any sources for at all
-_RELEASE_ASK_MAX       = 12     # nodes one fetch may ask before giving up
-_PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
-_HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
-_HEX_PKG = re.compile(r"[0-9a-f]{40}")     # a package-directory entry id
-_DIR_RATE_WINDOW     = 10.0     # seconds
-_DIR_RATE_MAX        = 128      # DIR_STORE claims one link may push per window
-_DIR_K               = 6        # replicate/query the pseudo directory across K
-_DIR_PUBLISH_MAX     = 24       # nodes one directory publish may reach in total
-# How often a node re-files what it publishes into the directory. Not "once, at
-# startup": the K nodes closest to a key change as the mesh does, a directory
-# holder may restart, and a node that published before it had any peer published
-# to nobody. Cheap — a claim is one packet to a bounded set of nodes.
-_DIR_REPUBLISH       = 900.0    # seconds between directory publishes
-_DIR_FIRST_PUBLISH   = 20.0     # …and how long after start the first one waits
-# The whole "ask the network" round: a Kademlia lookup plus one query to every
-# target. Bounded, and it returns what it has: a caller behind a 10-second
-# bridge must get a partial answer rather than a timeout, which is what turned
-# a slow directory lookup into "the search does not work".
-_DIR_LOOKUP_BUDGET   = 6.0      # seconds one directory lookup may take
-_DIR_LOOKUP_ROUNDS   = 3        # Kademlia rounds a directory lookup may spend
-_PSEUDO_RATE_WINDOW  = 10.0     # seconds
-_PSEUDO_RATE_MAX     = 64       # pseudo claims one link may gossip at us per window
-_PSEUDO_SEARCH_MAX   = 50       # results one search may return
-_PKG_RATE_WINDOW     = 10.0     # seconds
-_PKG_RATE_MAX        = 64       # package records one link may push at us per window
-_PKG_SEARCH_MAX      = 50       # results one package search may return
-_PKG_SYNC_MAX        = 64       # records pushed at a peer when it authenticates
-_PKG_OWN_MAX         = 32       # records this node signs and keeps re-filing
-_KEY_SHARE_WINDOW    = 60.0     # seconds
-_KEY_SHARE_MAX       = 8        # key-share messages one link may push per window
-# Offers held at once, in each direction. Small: each is a decision waiting for
-# a human, and an outgoing one holds an unlocked secret until it is answered.
-_MAX_KEY_OFFERS      = 8
-_PSEUDO_SYNC_MAX     = 128      # claims pushed at a peer when it authenticates
-_REVOKE_RATE_WINDOW  = 10.0     # seconds
-_REVOKE_RATE_MAX     = 64       # revocations one link may gossip at us per window
-_REVOKE_SYNC_MAX     = 256      # revocations pushed at a peer when it authenticates
-_ABUSE_RATE_WINDOW   = 10.0     # seconds
-_ABUSE_RATE_MAX      = 32       # accusations one link may gossip at us per window
-# How long traffic from a peer we hold as suspect is dropped before the link is
-# quietly let go. Randomised per link so the delay itself is not a signal an
-# attacker can time — a fixed one is a message, just a slower one.
-_TARPIT_MIN          = 45.0
-_TARPIT_MAX          = 180.0
-# We say something about a node at most this often, however much it does. An
-# accusation is a broadcast: a node under attack must not answer by becoming the
-# flood itself.
-_ACCUSE_MIN_GAP      = 300.0
-_ACCUSE_TRACKED      = 256
-_ACCUSE_SEEN_MAX     = 4096     # accusation digests remembered (epidemic dedup)
-# How much of a quorum may descend from one issuer before it stops being a
-# quorum. Above half is the honest line: at half, two families disagree and a
-# human decides; above it, one family decides alone while looking like several.
-_FAMILY_SHARE        = 0.5
-_BEHAVIOUR_NOTICES   = 64       # findings held for the operator, never scored
-# Subjects whose arrival under an issuer we remember between two sweeps (rule
-# A1). A bound and not a target: a real window holds a handful, and a peer
-# pushing certificates at us must not be able to grow this one.
-_CERT_ARRIVALS_MAX   = 4096
-_MAX_DETACHED        = 64       # fire-and-forget tasks alive at once
-_MAX_EXTRA_ADDRS = 8
-_ROUTABLE_TYPES  = {DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK, ECHO_REQUEST, ECHO_REPLY,
-                    FIND_NODE, FOUND_NODE, FIND_VALUE, FOUND_VALUE, STORE,
-                    DIR_STORE, DIR_FIND, DIR_FOUND,
-                    PKG_STORE, PKG_FIND, PKG_FOUND,
-                    # Handing a publisher key to somebody is a conversation
-                    # between two operators who may be several hops apart.
-                    KEY_OFFER, KEY_ACCEPT, KEY_GRANT,
-                    # A package comes from whoever has it, which may be several
-                    # hops away — the publisher, or any node that kept a copy.
-                    RELEASE_FETCH, RELEASE_DATA,
-                    # The issuer of a membership is rarely still a neighbour by
-                    # the time it needs renewing.
-                    CERT_RENEW, CERT_RENEWED}
-_DHT_K              = 6      # replication: store/fetch across this many closest nodes
-_DHT_QUERY_TIMEOUT  = 5.0
-_POST_AUTH_TYPES = _DIRECT_TYPES | _ROUTABLE_TYPES
-_BROADCAST_ID    = b"\xff" * 20
-_MSG_DEDUP_MAX         = 10_000
-_MAX_PEERS             = 128    # open links, not distinct nodes: a node may hold several
-# Of those, how many may be links that have not authenticated yet. They must
-# never be able to crowd out the ones that have: a full `_peers` also stops
-# `_dial_uri` dialling, so the node cannot re-join the mesh it was pushed out of.
-_MAX_UNAUTH_PEERS      = 32
-# How long a link has to finish its handshake before the sweep above cuts it.
-# Generous: a relayed join crosses the mesh, and a slow medium is the normal
-# case here, not the exception.
-_HANDSHAKE_DEADLINE    = 60.0
-_MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
-_MAX_HANDSHAKE_ATTEMPTS = 8     # handshakes one link may make us verify
-_MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
-_MAX_PENDING_TARGETS    = 256   # distinct half-open destinations kept in RAM
-# Decrypted application payloads waiting for whoever calls receive_data(). A
-# node relaying with no app attached has no consumer at all, so without a
-# ceiling any peer holding an E2E session grows this until the node dies. The
-# E2E plane offers no delivery guarantee, so overflow drops rather than blocks —
-# awaiting a full queue inside _handle_data would freeze the ingress link.
-_MAX_DATA_QUEUE         = 512
-# Live E2E sessions. `src_id` is checked against the key inside the payload, not
-# against the link, so an adversary mints a fresh identity per handshake and
-# each one used to add a permanent entry — and re-wrote the whole session store
-# on the way (see _persist_state). Bounded and LRU, with anything that still has
-# data queued for it held back from eviction.
-_MAX_E2E_SESSIONS       = 512
-_ON_DEMAND_TIMEOUT     = 5.0    # transport open + handshake
-_KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
-_KAD_LOOKUP_MAX_ROUNDS = 4
-_AUTH_POLL_INTERVAL    = 0.05
-_QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
-_PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe
-_DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallback
-# Measuring a link by loading it. Every figure here is a *refusal* first and a
-# measurement second, because this is the one plane whose purpose is to spend
-# somebody else's bandwidth.
-#
-#   * one chunk is well under what a packet carries (`packet.py`, 60 000), so a
-#     probe is a probe and never a way to find the framing's edge;
-#   * an echo is the same size as its probe — **one for one**. A reflector that
-#     answered more than it was sent is an amplifier, which is the single worst
-#     thing this pair could be, so the handler copies the payload rather than
-#     generating one;
-#   * a test is bounded by bytes *and* by seconds, whichever ends first, so a
-#     fast link cannot be asked for an unbounded amount and a dead one cannot
-#     hold the caller;
-#   * and the answering side rate-limits per identity, so a peer cannot make us
-#     echo without end however politely it asks.
-_SPEED_CHUNK           = 16 * 1024
-_SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
-_SPEED_MAX_SECONDS     = 10.0
-_SPEED_WINDOW          = 60.0              # what the *answering* side allows…
-_SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
-_SPEED_INFLIGHT        = 8                 # probes outstanding at once
-# A transport reaps an idle link once no data arrives for its read timeout
-# (TCP: 60s). A healthy but quiet link would die on its own, so ping every
-# established peer well inside that window — both sides do it, so each link
-# carries a packet each way and a few misses still leave margin.
-_LINK_KEEPALIVE_INTERVAL = 20.0
-# When probes stop coming back, the link is gone whatever the socket believes.
-# A half-open TCP connection and a UDP mapping a NAT has forgotten both look
-# alive from here — nothing errors, nothing closes — so the only evidence is
-# silence, and the only honest reading of it is to cut the link and dial again.
-# Counted as a run rather than a share: a link that carried traffic for an hour
-# and then died never shows a high lifetime loss, because a thousand good
-# probes outvote the dead ones. Four in a row is over a minute of one-way
-# silence on a link whose own transport reaps at sixty seconds.
-_DEAD_LINK_PROBES = 4
-# …and the time that run always stood for. A probe count answers "is this link
-# still a link" only while every link is probed on one interval; once a link can
-# negotiate its own cadence (below), four probes is four hundred milliseconds on
-# a bundle member and a minute and a half on a sleeping one. A link has to fail
-# both tests, so the verdict means the same thing at any cadence.
-_DEAD_LINK_SILENCE = _DEAD_LINK_PROBES * _LINK_KEEPALIVE_INTERVAL
-# -- multi-link operation and the keepalive accord (see mlo.py) -------------
-# The sweep the keepalive loop has always done — reap the silent, expire the
-# tarpits, judge behaviour — still runs on `_LINK_KEEPALIVE_INTERVAL`. What
-# changed is that each *link* now has its own due time, because a bundle
-# member needs a probe ten times a second and everything else must go on
-# costing exactly one wake-up every twenty seconds.
-#
-# A due-time loop with no floor is a busy loop (gotchas): a pass that finds
-# nothing due still waits this long, so nothing here can spin however the
-# arithmetic comes out.
-_KA_TICK_FLOOR = 0.02
-# The floor under "a probe with no answer is lost". The deadline itself is
-# three times *that link's* cadence (see `_link_keepalive_loop`) — a constant
-# would call every probe on a slow medium lost while the link works — and this
-# is what keeps a fast-probed link from giving up in three hundred
-# milliseconds. `LinkQuality.answered` keeps the late ones honest either way;
-# this only decides when to stop waiting.
-_KA_PROBE_DEADLINE = 3.0
-# How long after an accord changes nothing is held against a peer for speaking
-# under the old one. A proposal crosses the link at the speed of the link, and
-# both ends re-propose *before* their first probe at a new cadence — so this is
-# the width of the crossing, not a tolerance for being wrong.
-_KA_GRACE = 10.0
-# Cadence requests one link may make of us per window. A request costs us a
-# change of behaviour, which makes it the cheapest thing on this plane to send
-# and one of the more annoying to receive.
-_KA_REQUEST_WINDOW = 60.0
-_KA_REQUEST_MAX = 8
-# How long a cadence request holds before it lapses. A request is a "go quiet
-# for now", not a setting: the durable way for a node not to be probed hard is
-# the fast range it *declares*, which no request can override. Long enough that
-# repeating it costs nothing against the meter above, short enough that a peer
-# that went away does not leave a link sleeping for ever.
-_KA_TOLD_TTL = 300.0
-# How often a probe re-carries this node's advertised addresses to one peer,
-# whether or not they changed. The address gossip rides the probe; it is not
-# what a probe is *for*, and at ten probes a second re-sending an unchanged
-# list is 71% of the packet and half of what answering it costs.
-#
-# A duration and not a probe count, for the reason `_DEAD_LINK_SILENCE` exists:
-# "every Nth probe" means one cadence at rest and another while striping. At
-# the classic interval this is every probe, which is exactly what the node did
-# before — so nothing changes for a link nobody is bundling. It is also the net
-# under a lost PING: a peer that missed the update is told again within it,
-# rather than never.
-_ADDR_GOSSIP_INTERVAL = _LINK_KEEPALIVE_INTERVAL
-# How long a sign of somebody actually using this node keeps it awake for MLO.
-# Long enough that a console left open on a dashboard does not flap, short
-# enough that a laptop shut at six is back to one probe per link per twenty
-# seconds by ten past.
-_MLO_AWAKE_TTL = 120.0
-_MLO_SOURCES_MAX = 16       # distinct things that can say "somebody is here"
-# Asking for the second link a bundle is made of. Nothing else in this node
-# ever opens it: `_ensure_route_to` stops at the first address that answers and
-# the retry loop skips a node it is already linked to — neither is wrong, one
-# link is all routing needs. So a bundle only ever formed when the pair
-# happened to dial each other over two media, or when an operator pressed
-# "retry every address" by hand.
-_MLO_DIAL_MIN = 60.0        # backoff after an address that did not answer…
-_MLO_DIAL_MAX = 900.0       # …doubling to here, so a dead address costs little
-_MLO_DIAL_TRACKED = 64      # identities remembered, in either book
-_MLO_DIAL_PER_PASS = 1      # dials one pass may make…
-_MLO_DIAL_FLOOR = 5.0       # …and the shortest gap between two passes
-_MLO_DIAL_IDLE_MAX = 300.0  # ceiling on a wait nothing is expected to end
-# Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
-# session with, re-initiate on this cadence. Without it, a single lost handshake
-# (peer offline at send time, an ACK dropped in transit) stranded the queued data
-# until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
-# self-repair / delay tolerance).
-_E2E_RETRY_INTERVAL = 5.0
-# How often the persisted snapshot is written at most. A handshake marks the
-# state dirty; one task writes. Anything shorter and a burst of handshakes is
-# back to one full serialise-and-fsync each.
-_STATE_WRITE_INTERVAL = 2.0
-# Responder-side E2E re-key candidates (see _handle_e2e_handshake): when a valid
-# handshake arrives for a peer we ALREADY have a session with, answering naively
-# would overwrite the live session while the initiator (which keeps no matching
-# pending state for a stale/duplicate handshake) ignores our ACK — both ends
-# then hold different keys and every DATA packet is dropped on GCM failure,
-# silently and permanently. So a re-key is derived as a *candidate* only: it is
-# promoted to the live session exclusively by a DATA packet that successfully
-# decrypts under it (proof the peer actually completed that handshake). Bounded
-# and short-lived so a flood of valid-but-useless handshakes can't grow it.
-_E2E_REKEY_TTL = 30.0        # seconds a candidate session awaits proof
-_E2E_REKEY_MAX = 64          # distinct peers with a pending re-key candidate
-# Initiator side of the same problem. A retry generates a fresh nonce and ML-KEM
-# keypair — it has to, an identical packet would be dropped by the receiver's
-# msg_id dedup — and used to overwrite the attempt it was retrying. The answer to
-# that first attempt then had nothing left to decapsulate with and was refused,
-# while the far end had already installed that session and flushed everything it
-# had queued for us under it. Nothing in the E2E plane retransmits, so those
-# payloads were lost for good, in one direction only, on a link both ends
-# considered healthy. A replaced attempt therefore stays answerable for a while,
-# bounded and short-lived like the candidate table above.
-_E2E_ATTEMPT_TTL = 30.0      # seconds a replaced attempt can still be answered
-_E2E_ATTEMPT_MAX = 64        # replaced attempts kept, across all peers
-# When our advertised address set changes, push it to this many most-recently
-# seen peers (targeted Kademlia-style gossip). Bounded → no storm.
-_ANNOUNCE_FANOUT       = 5
-# Peers one gossip hop reaches. An epidemic still covers a connected mesh at
-# this width; sending to *every* peer instead made one accepted claim cost
-# (peers − 1) transmissions of ~5.3 kB, and an adversary that mints identities
-# offline can make every claim it sends genuinely new.
-_GOSSIP_FANOUT         = 6
-# A bounded XOR-nearest link set is recovered at startup and refreshed while
-# the node runs. Failed identities back off independently so dead addresses do
-# not turn maintenance into a dial storm.
-_NEIGHBOR_TARGET          = 5
-# Floor of live maintained links. Below it the node is *searching*: it runs a
-# discovery cycle every _NEIGHBOR_REFRESH. At or above it the neighbourhood is
-# considered joined and the cycle stays quiet — a node that keeps looking up its
-# own id forever is pure traffic, and a mesh that never settles is a mesh an
-# adversary can keep busy. The floor is also what the keepalive guarantees.
-_NEIGHBOR_FLOOR           = 3
-# Identities seen carrying traffic that are XOR-closer to us than the least
-# interesting slot we hold. Bounded: a peer relaying for the whole network must
-# never grow our state (src ids in routed packets are not authenticated).
-_NEIGHBOR_WATCH_TRACKED   = 64
-_NEIGHBOR_REFRESH         = 30.0
-# A wake may shorten the wait, never remove it. Without this floor a cycle whose
-# own replies wake it runs flat out: FIND_NODE → FOUND_NODE → wake → FIND_NODE,
-# and since a FOUND_NODE carries certificate chains (~15 kB) that loop fills a
-# link entirely. **No loop driven by what a peer sends us may run unbounded.**
-_NEIGHBOR_MIN_INTERVAL    = 5.0
-# A mesh smaller than the floor can never reach it, so "searching" would stay
-# true for the life of the node. Cycles that discover nothing back off to here.
-_NEIGHBOR_IDLE_MAX        = 300.0
-_NEIGHBOR_RETRY_MIN       = 2.0
-_NEIGHBOR_RETRY_MAX       = 60.0
-_NEIGHBOR_RETRY_TRACKED   = 128
-# Getting a node back after its link died under us. Neighbourhood maintenance
-# does not cover this and is not meant to: it dials to hold `_NEIGHBOR_FLOOR`
-# links and to promote an XOR-nearer identity, so the node a person was
-# actually talking to — usually neither — produced no dial at all when its link
-# went, and the address-retry loop below only runs on media that declared a
-# `retry_interval` (0, off, by default). The link went away and nothing went
-# looking for it until an app happened to send again.
-# So an established link lost involuntarily enrols its identity here and is
-# chased hard for a short while: the first attempt within a second, doubling
-# from there, and after `_RECONNECT_WINDOW` the ordinary machinery has it back.
-# Everything about it is bounded — this is a loop that a peer disconnecting can
-# start, and no such loop may run flat out (see gotchas §12).
-_RECONNECT_FIRST_DELAY    = 0.5    # a socket still closing is not dialled
-_RECONNECT_BACKOFF_MAX    = 15.0
-_RECONNECT_WINDOW         = 120.0  # how long one identity is chased at this rate
-_RECONNECT_NODES_TRACKED  = 16
-_RECONNECT_MAX_IN_FLIGHT  = 4      # dials this loop may hold open at once
-# A pass leaves whatever the in-flight cap did not reach still due, so the wait
-# it computes can be zero. The floor is what keeps that from spinning.
-_RECONNECT_MIN_TICK       = 0.25
-# …and what happens when that window runs out. It used to be: nothing. The
-# identity left the book, and the only thing left that could dial it was the
-# address-retry loop below — which no stock node runs, because `retry_interval`
-# ships at 0 on every transport. So a peer that came back four minutes later
-# stayed unreached until somebody pressed "retry every address" by hand, which
-# is not self-repair, it is an operator standing in for it.
-# The chase therefore does not end; it slows down. Same ladder, second ceiling:
-# hard for `_RECONNECT_WINDOW`, then patiently, for as long as we still hold an
-# address to dial. One dial per identity per five minutes, against a book of
-# sixteen, is a cost that does not move — and it is the difference between a
-# node that comes back on its own and one that waits for a human.
-_RECONNECT_PATIENT_MAX    = 300.0
-# Losing several nodes at once says something none of the losses says alone.
-# They cannot all have gone down together, so the thing that moved is *us*: a
-# DHCP lease renewed, a VPN dropped, a laptop resumed on another network, an
-# interface that changed under the process. Every address this node advertises
-# and every address it dials out of is then suspect, and the reconnect ladder
-# above is patiently dialling from a hole. So a burst re-verifies our own
-# addressing at once instead of waiting out the monitor's ordinary rate limit.
-# Bounded twice, because a peer flapping its link is what can trigger it: a
-# cooldown here, and a floor of its own inside `NetMonitor`.
-_LOSS_BURST_NODES         = 3      # distinct identities…
-_LOSS_BURST_WINDOW        = 20.0   # …lost within this of each other
-_LOSS_BURST_TRACKED       = 16
-_LOSS_BURST_COOLDOWN      = 60.0
-_ROUTE_SEND_FANOUT        = 5
-_ROUTE_HINT_MAX           = 256
-_ROUTE_HINT_TTL           = 120.0
-# Measuring a routed path instead of assuming it (see `routed.py`).
-#
-# A direct link is probed and a routed one was not, so the send path could not
-# tell a relay that delivers from one that accepts and drops: `peer.send()`
-# returns either way. The first hop was whichever peer traffic last arrived
-# through, then XOR distance — two guesses about topology, neither of which can
-# notice a path that stopped working. A node that had been reachable a minute
-# ago simply stopped answering, and the fix was to make a direct link by hand.
-#
-# So a path is probed end to end, on the same terms as a link: an ECHO to the
-# target forced down one chosen neighbour, charged as lost when nothing comes
-# back. Bounded like everything a peer's behaviour can drive — the book is
-# bounded on both axes in `routed.py`, and this is what a pass may cost.
-# Echo probes in flight, across the console's reachability check and the path
-# prober below. Named because two callers share it, and a literal in one of
-# them is a bound the other can silently exceed.
-_PENDING_ECHO_MAX         = 128
-_PATH_PROBE_INTERVAL      = 10.0   # per path, at rest
-# …and the cadence of a path kept warm *behind a working direct link*. That is
-# the hybrid: one physical link and one routed path measured at the same time,
-# so losing the physical one costs a turn of the send order rather than a
-# reconnect. It has to cost a great deal less than the link it stands behind —
-# nothing is riding on it — so it gets its own, slower clock, and only one such
-# path is opened per identity.
-_PATH_STANDBY_INTERVAL    = 60.0
-_PATH_PROBE_TIMEOUT       = 6.0    # …and when a probe is charged as lost
-_PATH_PROBES_PER_PASS     = 4
-_PATH_FLOOR               = 1.0    # shortest gap between two passes
-_PATH_IDLE_MAX            = 300.0  # ceiling on a wait nothing is expected to end
-_DIAL_LOG_NODES           = 128    # nodes whose address outcomes we remember
-_DIAL_LOG_ADDRESSES       = 8      # addresses remembered per node
-# Re-dialling addresses that went quiet. The *interval* is a per-transport
-# setting (`retry_interval`, 0 = off) — a medium that costs a coin cell per dial
-# and one that costs a TCP SYN have no business sharing a number. What is fixed
-# here is the shape of the loop, so an operator's setting can never turn it into
-# a flood: a slow tick, and a hard cap of dials per pass however many nodes are
-# waiting.
-_RETRY_TICK               = 5.0
-_RETRY_MAX_PER_PASS       = 4
-_RETRY_NODES_SCANNED      = 64
-_RETRY_IDLE_MAX           = 300.0  # ceiling on a wait nothing is expected to end
-_RETRY_DIAL_TIMEOUT       = 8.0
-# What a dial **nobody is waiting on** may take, all addresses together.
-#
-# This is the difference the console's button had over every automatic path,
-# and it was not a better idea about which address to try. `_ON_DEMAND_TIMEOUT`
-# is five seconds because a packet is queued behind it — right for that — and
-# `_connect_routing` splits whatever it is given across *every* address of the
-# node. A peer advertising four of them therefore got 1.25 s each, which is
-# less than opening a socket and completing a post-quantum handshake takes on
-# any real WAN link: the recovery loops dialled, failed on time rather than on
-# merit, and the operator pressed "retry every address" — where each address
-# gets `_RETRY_DIAL_TIMEOUT` to itself — and watched it connect first go.
-#
-# Recovery is background work, so it is given what the button gives: a full
-# per-address budget for a whole walk. Nothing is blocked meanwhile —
-# `_pending_connections` makes a concurrent on-demand caller wait on its *own*
-# timeout, not on this one.
-_RECOVERY_TIMEOUT         = _RETRY_DIAL_TIMEOUT * _DIAL_LOG_ADDRESSES
-# Proving our own public address instead of guessing it.
-#
-# `_extra_addrs` holds IPs somebody reported seeing us at — an HTTPS probe, a
-# peer's `OBSERVED_ADDR`, a STUN reflexive address — and `advertised_uris`
-# paired each of them with the **local listener port**. That is not an address.
-# It is a claim that the NAT in front of this machine forwards that port, made
-# from no evidence at all, and the mesh carried it to everybody.
-#
-# Two nodes behind one household or office IP therefore announced the *same
-# URI*, and took turns being wrong about it: whoever the router forwards to
-# answers, so the other one's entry is struck off ("dropped an address of … —
-# it answers as somebody else"), and a node whose own router forwards back to
-# itself dials its own public address and refuses its own handshake ("the
-# challenge presents our own identity"). Both were read as bugs in the mesh.
-# Neither was: the mesh was doing exactly the right thing with a false claim.
-#
-# `public_endpoints()` — what a join ticket carries — already held the rule:
-# *we think this address is public* is not the same as *an inbound connection
-# arrived on it*. The gossip path simply never applied it. It does now, and
-# what counts as proof is one thing: somebody **out on the open internet**
-# opened this transport to us. A peer on our own LAN reaching our LAN address
-# proves the listener works and says nothing whatever about the NAT.
-#
-# That proof has to be *produced*, not waited for. AutoNAT existed and was
-# reachable from one console button and from nothing else (gotchas: "a feature
-# whose precondition nothing produces"), so a node with a correctly forwarded
-# port could sit for ever with no confirmation. It is asked for on a timer now,
-# backed off per failure, and only while there is somebody off our networks to
-# ask — a probe costs that peer a dial back, so it is not free to them either.
-_AUTONAT_FIRST            = 5.0    # after start, once there is somebody to ask
-_AUTONAT_RETRY_MIN        = 30.0   # …then backing off per round that proved nothing
-_AUTONAT_RETRY_MAX        = 900.0
-_AUTONAT_REFRESH          = 1800.0 # a confirmation is re-proved this often
-_AUTONAT_IDLE_MAX         = 300.0  # ceiling on a wait nothing is expected to end
-# Distinct refusal reasons remembered. The vocabulary is this file's own, so
-# the bound is a formality — it is here so that adding a reason can never turn
-# a counter into a leak.
-_REFUSALS_KEPT            = 24
-# Moving a live link to a better address. Off by default: switching costs a
-# dial, a handshake and a moment with two links to the same node, which is only
-# worth it when the gain is real and lasting.
-_ADDR_STEER_INTERVAL      = 60.0   # one candidate examined per pass, at most
-_ADDR_STEER_COOLDOWN      = 300.0  # per address, after it has been measured
-_ADDR_STEER_PROBES        = 3      # pings averaged before believing a number
-# Steering compares *scores*, not milliseconds, so "this medium is preferred"
-# and "this address is faster" are weighed on one scale (see `_address_score`).
-_ADDR_STEER_MIN_GAIN      = 0.05   # below this, the difference is noise
-# How hard losing probes counts against a link. Loss is not "a slower link" —
-# it is a link that does not work — so it *multiplies* the score rather than
-# shifting it: at this exponent one probe in ten lost costs more than any
-# latency difference a real network produces (0.9^4 ≈ 0.66), and a link nothing
-# comes back from scores exactly zero, so it is never chosen while anything
-# else exists. It stays listed, and stays connected: probes lost is not proof
-# that data is, and an operator who can see "100% loss" can act on it.
-_LOSS_PENALTY_EXP         = 4.0
-# Replacing a link that is losing too much to still be one.
-#
-# The score above keeps a rotten link out of the traffic, and
-# `_reap_silent_links` cuts one that answers *nothing*. Between the two sits
-# the link an operator actually complains about: it answers four probes in
-# five, so it is never cut — and when it is the only link to that node, a score
-# has nothing to prefer over it. Nothing dialled anything, and getting a
-# working link back meant pressing "retry every address" by hand.
-#
-# So the keepalive sweep names it and a bounded pass does by itself what that
-# button does: work down that identity's addresses, open a link, and keep
-# whichever of the two `_link_score` prefers. Dialling the address already in
-# use is not a mistake here and is often the whole fix — a half-open TCP
-# connection and a NAT mapping that expired both need a *new* connection, not a
-# different address.
-#
-# Every bound is one the second-link dial already uses, because it is the same
-# risk: a loop a peer's behaviour can start. One identity per pass, a floor
-# between passes, a backoff per identity, a book that cannot grow.
-_LOSS_RESCUE_SHARE        = 0.20   # of the recent window, above which a link is failing
-_LOSS_RESCUE_PROBES       = 10     # …judged over at least this many outcomes
-_RESCUE_TRACKED           = 16     # identities remembered, in either book
-_RESCUE_MIN               = 60.0   # backoff after a rescue that changed nothing…
-_RESCUE_MAX               = 900.0  # …doubling to here
-_RESCUE_DIALS_PER_PASS    = 4      # addresses one rescue may try before giving up
-_RESCUE_FLOOR             = 5.0    # shortest gap between two passes
-_RESCUE_IDLE_MAX          = 300.0  # ceiling on a wait nothing is expected to end
-
-# Choosing between the addresses of one node. Two things matter and they are not
-# the same kind of thing: what the *medium* is worth (a priority the operator
-# sets per transport, e.g. never prefer a USB spool over Wi-Fi) and what the
-# *address* measures. The balance between them is the operator's to set, because
-# only they know whether a slow preferred link beats a fast unwanted one.
-_PRIORITY_SPAN            = 254    # a priority runs -254..254
-_LATENCY_HALF_MS          = 25.0   # the latency worth exactly half a point
-_BALANCE_DEFAULT          = 50     # 0 = latency alone, 100 = priority alone
-# Acquiring a route (Kademlia lookup + dial + hole punch) takes seconds. It must
-# never run inside a peer's receive loop: that link would process nothing else
-# meanwhile — and the FOUND_NODE the lookup waits for often has to come back
-# over that very link, so an inline lookup can only time out. Handlers hand the
-# slow path to a bounded set of background tasks instead.
-_MAX_DEFERRED_ROUTES      = 64
-# Cap on waiting for one peer's cancelled receive task to actually exit. Never
-# unbounded: shutdown must always finish (see _Peer.stop).
-_PEER_STOP_TIMEOUT        = 2.0
-# A post-quantum certificate is ~7 KB (ML-DSA-65 subject + issuer key +
-# signature), so a chain to a root is ~15 KB. Packing Kademlia's k=20 entries
-# into one FOUND_NODE therefore blows the 60 000-byte packet cap: Packet.create
-# raised, the reply was never sent, and *every* lookup in a mesh holding more
-# than four certified nodes silently timed out. Entries are packed closest-first
-# under a hard byte budget instead (certs shared through a pool, see
-# _EntryPacker) — fewer per reply, but the lookup converges over its rounds
-# instead of dying. Also caps the CPU one FIND_NODE can buy (one chain-to-root
-# BFS per packed entry) and the reflection an attacker gets out of a 28-byte
-# query addressed with someone else's src_id.
-_FOUND_NODE_MAX_BYTES     = 32_000
-# Candidates scanned to fill that budget. Only entries with a chain to a root
-# are usable (the receiver drops the rest), and those are scattered through the
-# table — scanning exactly k left replies empty whenever the k nearest happened
-# to be chain-less. Kademlia's k bounds what we *return*, not what we look at.
-_FIND_NODE_SCAN           = 64
-# Answering FIND_NODE/FIND_VALUE is the most expensive thing a single small
-# packet can ask of us (chain building, a DHT value up to the packet cap), and
-# the reply is routed to an *unverified* src_id — so it is also a reflection
-# lever. Bound it per ingress link, like the seek/catalog/directory planes.
-# This is a flood valve, NOT traffic shaping: one peer's legitimate peak is a
-# lookup's alpha × rounds plus a few concurrent lookups — measured at ~66 per
-# window on a relay star, and flat as the mesh grows, since it is bounded by one
-# node's lookup behaviour rather than by how many nodes exist. Set it well above
-# that; a cap near the legitimate peak silently kills real lookups, which is the
-# very failure mode this file is trying to remove.
-_QUERY_RATE_WINDOW        = 10.0
-_QUERY_RATE_MAX           = 512
-# Storing is cheap for us and cheap for the sender, but the store it fills is
-# where app chunks and release content live and eviction is one global LRU — so
-# a peer that can spray STOREs can evict the distribution layer. Well above any
-# legitimate publish (`dht_put_many` sends `_PUBLISH_CONCURRENCY` at a time).
-_STORE_RATE_WINDOW        = 10.0
-_STORE_RATE_MAX           = 256
-# One PUNCH_REQUEST costs us two packets, one of them on a link the requester
-# does not pay for. A punch is a handful of requests, never a stream.
-_PUNCH_REQ_WINDOW         = 10.0
-_PUNCH_REQ_MAX            = 32
-# Raw punch datagrams, per source address. A punch is `_PUNCH_PROBE_COUNT`
-# probes and an ack, repeated at most `_PUNCH_MAX_RETRIES` times, so this is far
-# above anything legitimate and still far below what an unmetered verification
-# flood would cost.
-_PUNCH_DGRAM_WINDOW       = 10.0
-_PUNCH_DGRAM_MAX          = 64
-_PUNCH_DGRAM_TRACKED      = 256
-
-# Invite blocks (base64 join bundles: advertised URIs + invite code)
-_JOIN_BLOCK_MAX_LEN  = 8192   # base64 length cap before decode
-_JOIN_BLOCK_MAX_URIS = 16     # candidate addresses tried per block
-_JOIN_TRY_TIMEOUT    = 6.0    # per-URI connect + session wait
-
-# Relayed invitation (INVITE_SEEK): a joiner routes a signed seek toward the
-# inviter through the mesh. Everything here is bounded and rate-limited — a
-# pre-auth packet crossing the mesh is a sensitive surface.
-_SEEK_TAG          = b"NMESH-INVITE-SEEK-v1"  # domain separation for the token
-_SEEK_MAX_PAYLOAD  = 8192      # cert + token, bounded before any parse
-_SEEK_MAX_FUTURE   = 3600.0    # exp accepted at most this far ahead (replay window)
-_SEEK_TTL          = 16        # max hops a seek travels
-# …and what an *unauthenticated* link's seek is worth. One packet handed to the
-# edge of the mesh was carried by up to _SEEK_TTL authenticated links, by
-# somebody who had not joined it; a joiner needs enough hops to find an inviter,
-# not the diameter of the network.
-_SEEK_TTL_PREAUTH  = 6
-# Neighbours one seek is handed to at each hop. One was greedy XOR, which fails
-# precisely when that neighbour has no path — and a seek has no reply, no retry
-# and no second attempt. Two, because a node forwards a given seek at most once
-# (node-wide dedup), so this is a factor on the packets a join costs and never
-# an exponent.
-_SEEK_FANOUT       = 2
-_RDV_MAX           = 512       # bounded reverse-path (rendezvous) table
-_RDV_TTL           = 120.0     # rendezvous entry lifetime, seconds
-_SEEK_RATE_MAX     = 20        # max seeks accepted per ingress link per window
-_SEEK_RATE_WINDOW  = 10.0      # rate-limit window, seconds
-_MAX_PENDING_SEEKS = 128       # bounded record of seeks addressed to us
-_CARRY_RATE_MAX    = 256       # max relay-carry packets per ingress link per window
-# AutoNAT: confirm reachability by having a peer dial us back at the address it
-# observed us come from (never an arbitrary address → no amplification).
-_REACH_DIAL_TIMEOUT   = 3.0    # per dial-back attempt
-# Opening packets a dial-back will look through for the challenge. Small: a node
-# answering a fresh connection says a couple of things and one of them is the
-# challenge. What this bounds is a peer answering with an endless dribble.
-_REACH_DIAL_PACKETS   = 4
-_REACH_PROBE_RATE_MAX = 5      # dial-backs we perform per requesting peer / window
-_REACH_DIALS_MAX      = 8      # concurrent dial-backs across all peers (bounded)
-# How long an answer to a probe we sent is still worth believing, and how many
-# outstanding probes we track. A dial-back is bounded by _REACH_DIAL_TIMEOUT
-# twice over, so anything much later than this is not an answer to our question.
-_REACH_PENDING_TTL    = 30.0
-_REACH_PENDING_MAX    = 64
-# A rendezvous an inviter left with a relay: "a joiner will come asking for
-# this code; here is the proof I authorised it". It is what lets an invitation
-# reach a node with no address of its own from a string short enough to put in a
-# QR code — the heavy part (an ML-DSA key and a signature, five kilobytes) stays
-# with the relay, and the ticket carries an identity and a seed.
-_SHORT_SEEK_LEN    = 40        # exp(8) | h_code(32) — nothing else fits in it
-_OFFER_MAX         = 256       # rendezvous offers one node holds for others
-_OFFER_RATE_MAX    = 8         # offers one peer may leave us per window
-_SHORT_SEEK_GAP    = 2.0       # seconds between two forwards of one rendezvous
-_RELAY_INVITE_TTL  = 300       # relay-invite block lifetime, seconds (== code TTL)
-_RELAY_BLOCK_MAX_LEN = 32768   # v3 block cap (carries an ML-DSA key + signature)
-_RELAY_JOIN_TIMEOUT = 12.0     # per-relay attempt: seek + tunnelled handshake
-_RELAY_TRIES       = 3         # relays a ticket's rendezvous is offered to
-_MAX_RELAY_PEERS   = 64        # bounded virtual (relayed) peer table
-_RELAY_QUEUE_MAX   = 32        # packets a relayed tunnel may hold undelivered
-
-# Hole punching
-_PUNCH_PROBE_COUNT     = 5     # probes sent in rapid succession
-_PUNCH_PROBE_INTERVAL  = 0.1   # seconds between probes
-_PUNCH_TIMEOUT         = 10.0  # overall hole-punch attempt timeout
-_PUNCH_MAX_PENDING     = 16    # max concurrent hole-punch attempts
-_PUNCH_MAX_RETRIES     = 3     # max retries per target
-_PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
-# The initiator opens the punched link by sending a keepalive frame the
-# responder's accept path turns into a challenge. UDP can drop that datagram
-# (a loaded receiver's buffer overflows), and a single loss strands the whole
-# punch — the responder never challenges and the initiator's link self-closes
-# on its keepalive timeout. Kick in a bounded, spaced burst instead so a few
-# consecutive drops can't sink the handshake (CLAUDE.md: retry, self-repair).
-_PUNCH_KICK_COUNT      = 8     # keepalive kicks to open the punched link
-_PUNCH_KICK_INTERVAL   = 0.3   # seconds between kicks (burst spans ~2.4s)
-_PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
-# STUN requests we remember having sent. A binding response arrives in
-# milliseconds; anything much later is not an answer to our question.
-_STUN_PENDING_TTL         = 15.0
-_STUN_PENDING_MAX         = 8
-# Manual (out-of-band) hole punching: open a NAT mapping toward a peer whose
-# public UDP endpoint an operator supplies by hand — no relay needed.
-_HOLE_OPEN_MAGIC    = b"NHOL"  # ignored by the receiver; only opens our mapping
-_HOLE_OPEN_INTERVAL = 2.0      # cadence for keeping a hole fresh (< NAT timeout)
-_HOLE_OPEN_DEFAULT  = 30.0     # default sustain for a bare manual open
-# The two-step connect exchange has a human copy-paste round-trip between the
-# accept and the complete, so the host must hold its hole open long enough to
-# span it — kept under the 5-min invite-code TTL.
-_CONN_HOLE_SUSTAIN  = 180.0
-_MANUAL_HOLE_MAX    = 32       # bounded table of manual-punch targets
-_UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
-_UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
-
-# Two-step connect exchange blocks
-_CONN_BLOCK_VERSION = 2
-
-
-def _encode_conn_block(kind: str, **fields) -> str:
-    """base64(JSON) block for the two-step connect exchange."""
-    payload = {"v": _CONN_BLOCK_VERSION, "kind": kind, **fields}
-    return base64.b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
-
-
-def _decode_conn_block(block: str, expect_kind: str) -> dict:
-    """Decode + validate a connect block (hostile input). Raises ValueError."""
-    if not isinstance(block, str) or not (0 < len(block) <= _JOIN_BLOCK_MAX_LEN):
-        raise ValueError("invalid block")
-    try:
-        data = json.loads(base64.b64decode("".join(block.split()), validate=True))
-    except Exception:
-        raise ValueError("invalid or corrupt block") from None
-    if not isinstance(data, dict) or data.get("v") != _CONN_BLOCK_VERSION:
-        raise ValueError("unsupported block version")
-    if data.get("kind") != expect_kind:
-        what = {"req": "a connection request", "inv": "an invite"}.get(expect_kind, expect_kind)
-        raise ValueError(f"that block is not {what} block")
-    return data
-
-
-# ---------------------------------------------------------------------------
-# INVITE_SEEK codec (relayed invitation)
-# ---------------------------------------------------------------------------
-#
-# Payload: exp(uint64) | h_code(32) | pub_len(H) | inviter_pub | token_len(H) | token
-# Routing uses the packet header: src_id = seeker (B), dst_id = inviter (A). We
-# carry the inviter's raw ML-DSA public key (not a full cert — leaner): any node
-# checks NodeID(inviter_pub) == dst_id and that the token is the inviter's
-# signature over TAG||h_code||exp. So a seek is verifiably authorised by the key
-# whose hash is the inviter id — no shared secret, no impersonation.
-
-def _uri_preference(uri: str) -> int:
-    """Connect-order key: 0 = global IPv6 (no NAT, prefer), 1 = anything else.
-    A global IPv6 endpoint is directly reachable end-to-end, so trying it first
-    lets two IPv6-capable nodes skip NAT punching / relaying entirely."""
-    parsed = _validate_uri(uri)
-    if parsed is None:
-        return 1
-    hp = split_host_port(parsed[1])
-    if hp is None:
-        return 1
-    try:
-        import ipaddress
-        ip = ipaddress.ip_address(hp[0])
-    except ValueError:
-        return 1
-    return 0 if (ip.version == 6 and ip.is_global) else 1
-
-
-def _order_by_preference(uris: list[str]) -> list[str]:
-    """Stable sort putting global-IPv6 endpoints first."""
-    return sorted(uris, key=_uri_preference)
-
-
-def _h_code(code: str) -> bytes:
-    """Recogniser tag for an invite code (only the inviter resolves it)."""
-    return hashlib.sha256(code.encode("utf-8")).digest()
-
-
-def _seek_signed_blob(h_code: bytes, exp: int) -> bytes:
-    return _SEEK_TAG + h_code + struct.pack("!Q", exp)
-
-
-def _encode_seek(exp: int, h_code: bytes, inviter_pub: bytes, token: bytes) -> bytes:
-    return (struct.pack("!Q", exp) + h_code
-            + struct.pack("!H", len(inviter_pub)) + inviter_pub
-            + struct.pack("!H", len(token)) + token)
-
-
-def _decode_seek(payload: bytes):
-    """Parse an INVITE_SEEK payload (hostile input). Returns
-    (exp, h_code, inviter_pub, token) or None. Fully bounds-checked."""
-    if not (40 < len(payload) <= _SEEK_MAX_PAYLOAD):
-        return None
-    try:
-        off = 0
-        exp = struct.unpack_from("!Q", payload, off)[0]; off += 8
-        h_code = payload[off:off + 32]; off += 32
-        if len(h_code) != 32:
-            return None
-        plen = struct.unpack_from("!H", payload, off)[0]; off += 2
-        inviter_pub = payload[off:off + plen]; off += plen
-        if len(inviter_pub) != plen or plen == 0:
-            return None
-        tlen = struct.unpack_from("!H", payload, off)[0]; off += 2
-        token = payload[off:off + tlen]; off += tlen
-        if len(token) != tlen or tlen == 0:
-            return None
-    except struct.error:
-        return None
-    return exp, h_code, inviter_pub, token
-
-
-def _make_invite_seek(inviter_identity, seeker_id, code: str, exp: int,
-                      ttl: int = _SEEK_TTL) -> 'Packet':
-    """Build a signed INVITE_SEEK from the inviter's own identity (used by the
-    inviter's block generator and by tests). Routed toward the inviter id."""
-    pub = inviter_identity.dsa_public_key
-    inviter_id = NodeID.from_public_key(pub)
-    h = _h_code(code)
-    token = inviter_identity.sign(_seek_signed_blob(h, exp))
-    payload = _encode_seek(exp, h, pub, token)
-    return Packet.create(INVITE_SEEK, seeker_id.raw, inviter_id.raw,
-                         payload, ttl=ttl)
-
-
-# ---------------------------------------------------------------------------
-# Chain codec
-# ---------------------------------------------------------------------------
-
-def _encode_chain(chain: list[Certificate]) -> bytes:
-    """count(B) || [cert_len(H) || cert_bytes]*count"""
-    parts: list[bytes] = [bytes([len(chain)])]
-    for cert in chain:
-        cert_bytes = cert.serialize()
-        parts.append(_CERT_LEN.pack(len(cert_bytes)))
-        parts.append(cert_bytes)
-    return b"".join(parts)
-
-
-def _decode_chain(data: bytes) -> list[Certificate]:
-    """Parse a certificate chain. Every certificate is verified as it is built
-    (``Certificate._build``), so this is the expensive half of a handshake —
-    hence the explicit ceiling. It used to be bounded only by the packet size,
-    which is a bound by accident: it moves the day a smaller signature scheme
-    is added, and every other decoder in this file states its own."""
-    if not data:
-        return []
-    count = data[0]
-    if count > _ENTRY_CHAIN_MAX:
-        raise ValueError(f"chain too long: {count}")
-    offset = 1
-    certs: list[Certificate] = []
-    for _ in range(count):
-        if offset + 2 > len(data):
-            raise ValueError("chain truncated at length field")
-        cert_len = _CERT_LEN.unpack_from(data, offset)[0]
-        offset += 2
-        if offset + cert_len > len(data):
-            raise ValueError("chain truncated at cert data")
-        certs.append(Certificate.deserialize(data[offset:offset + cert_len]))
-        offset += cert_len
-    return certs
-
-
-# ---------------------------------------------------------------------------
-# Handshake codec
-# ---------------------------------------------------------------------------
-
-def _encode_handshake(kem_pub: bytes, dsa_pub: bytes,
-                      chain: list[Certificate], signature: bytes) -> bytes:
-    chain_bytes = _encode_chain(chain)
-    return (_HS_HEADER.pack(len(kem_pub), len(dsa_pub), len(chain_bytes))
-            + kem_pub + dsa_pub + chain_bytes + signature)
-
-
-def _split_handshake(data: bytes) -> tuple[bytes, bytes, bytes, bytes]:
-    """Slice a HANDSHAKE into its four fields, **without** parsing the chain.
-
-    Parsing a chain verifies every certificate in it, which is the most
-    expensive thing in the packet — and `_handle_handshake` can rule the packet
-    out with two SHA-256s before spending any of it. Keeping the slice and the
-    verification apart is what lets the cheap test come first."""
-    if len(data) < _HS_HEADER.size:
-        raise ValueError("handshake payload too short")
-    kem_len, dsa_len, chain_len = _HS_HEADER.unpack_from(data, 0)
-    offset = _HS_HEADER.size
-    if offset + kem_len + dsa_len + chain_len > len(data):
-        raise ValueError("handshake payload truncated")
-    kem_pub     = data[offset:offset + kem_len];   offset += kem_len
-    dsa_pub     = data[offset:offset + dsa_len];   offset += dsa_len
-    chain_bytes = data[offset:offset + chain_len]; offset += chain_len
-    return kem_pub, dsa_pub, chain_bytes, data[offset:]
-
-
-def _decode_handshake(data: bytes) -> tuple[bytes, bytes, list[Certificate], bytes]:
-    kem_pub, dsa_pub, chain_bytes, signature = _split_handshake(data)
-    return kem_pub, dsa_pub, _decode_chain(chain_bytes), signature
-
-
-def _encode_handshake_ack(ciphertext: bytes, dsa_pub: bytes,
-                          chain: list[Certificate],
-                          issued_cert: Certificate | None,
-                          signature: bytes) -> bytes:
-    chain_bytes  = _encode_chain(chain)
-    issued_bytes = issued_cert.serialize() if issued_cert is not None else b""
-    return (_ACK_HEADER.pack(len(ciphertext), len(dsa_pub),
-                             len(chain_bytes), len(issued_bytes))
-            + ciphertext + dsa_pub + chain_bytes + issued_bytes + signature)
-
-
-def _decode_handshake_ack(data: bytes) -> tuple[bytes, bytes, list[Certificate],
-                                                 Certificate | None, bytes]:
-    if len(data) < _ACK_HEADER.size:
-        raise ValueError("handshake_ack payload too short")
-    ct_len, dsa_len, chain_len, issued_len = _ACK_HEADER.unpack_from(data, 0)
-    offset = _ACK_HEADER.size
-    if offset + ct_len + dsa_len + chain_len + issued_len > len(data):
-        raise ValueError("handshake_ack payload truncated")
-    ciphertext   = data[offset:offset + ct_len];     offset += ct_len
-    dsa_pub      = data[offset:offset + dsa_len];    offset += dsa_len
-    chain_bytes  = data[offset:offset + chain_len];  offset += chain_len
-    issued_bytes = data[offset:offset + issued_len]; offset += issued_len
-    chain       = _decode_chain(chain_bytes)
-    issued_cert = Certificate.deserialize(issued_bytes) if issued_bytes else None
-    return ciphertext, dsa_pub, chain, issued_cert, data[offset:]
-
-
-# ---------------------------------------------------------------------------
-# Address list codec
-# addr_count(B) || [addr_len(H) || addr_bytes]*addr_count
-# ---------------------------------------------------------------------------
-
-def _encode_addresses(addresses: list[str]) -> bytes:
-    count = min(len(addresses), _MAX_ADDRESSES)
-    parts: list[bytes] = [bytes([count])]
-    for addr in addresses[:count]:
-        b = addr.encode('utf-8')
-        parts.append(_ADDR_LEN.pack(len(b)))
-        parts.append(b)
-    return b"".join(parts)
-
-
-def _decode_addresses_at(data: bytes) -> tuple[list[str], int]:
-    """Decode a packed address list and say where it ended.
-
-    The offset is what lets a PING carry something *after* its addresses (see
-    :data:`_KA_TAIL`). Split out rather than duplicated: two walks over one
-    encoding is two chances for them to disagree about where it stops."""
-    if not data:
-        raise ValueError("empty address payload")
-    count = data[0]
-    if count > _MAX_ADDRESSES:
-        raise ValueError(f"too many addresses: {count}")
-    offset = 1
-    addresses: list[str] = []
-    for _ in range(count):
-        if offset + 2 > len(data):
-            raise ValueError("truncated addr_len")
-        addr_len = _ADDR_LEN.unpack_from(data, offset)[0]
-        offset += 2
-        if addr_len > _MAX_URI_LEN:
-            raise ValueError(f"addr_len too large: {addr_len}")
-        if offset + addr_len > len(data):
-            raise ValueError("truncated addr_bytes")
-        addr = data[offset:offset + addr_len].decode('utf-8')
-        addresses.append(addr)
-        offset += addr_len
-    return addresses, offset
-
-
-def _decode_addresses(data: bytes) -> list[str]:
-    """Decode a packed address list. Raises ValueError on structural errors or count > _MAX_ADDRESSES."""
-    return _decode_addresses_at(data)[0]
-
-
-# What a PING carries after its addresses: how long until the next one, and a
-# token the answer echoes so a probe can be matched to *its own* answer.
-#
-# It is a trailer, and that is the whole compatibility story: `_decode_addresses`
-# has always stopped at the last address and ignored whatever followed, so a
-# build without this reads a tailed PING as exactly the PING it always read.
-# The same trick as the `_HINTS_OK` byte on a FOUND_NODE, for the same reason —
-# there is no version to bump and nothing to negotiate for the *reader*.
-#
-# The tail is only ever *sent* to a peer that announced the `keepalive` feature,
-# which is a different question: a peer that cannot echo the token would have
-# every probe charged as a loss. See `MeshNode.peer_announces`.
-_KA_TAIL = struct.Struct("!IQ")          # next_ms, token
-_KA_TOKEN = struct.Struct("!Q")
-# fast_min, fast_max, slow_min, slow_max — a KA_PROPOSE body. Four numbers,
-# not two: see `mlo.Bounds` for why a single range leaves the ceiling as a
-# lever anybody can pull.
-_KA_BOUNDS = struct.Struct("!IIII")
-_KA_WANTED = struct.Struct("!I")         # a KA_REQUEST body
-
-
-#: A probe carrying no addresses — the one byte `_encode_addresses([])` builds,
-#: hoisted because it is now the common case and a probe should not allocate to
-#: say "nothing new". Exactly what a node with no announceable address has
-#: always sent, so no build anywhere reads it as anything unusual.
-_NO_ADDRESSES = _encode_addresses([])
-
-
-def _encode_ping_tail(next_ms: int, token: int) -> bytes:
-    return _KA_TAIL.pack(max(0, min(0xFFFFFFFF, int(next_ms))), token)
-
-
-def _decode_ping_tail(data: bytes, offset: int):
-    """``(next_ms, token)`` from a PING's trailer, or ``None`` when there is
-    none.
-
-    Anything that is not exactly this trailer is *ignored*, never charged: a
-    longer tail is what a build newer than this one looks like, and the one
-    thing the negotiation exists to stop is treating that as misbehaviour."""
-    if len(data) - offset != _KA_TAIL.size:
-        return None
-    try:
-        return _KA_TAIL.unpack_from(data, offset)
-    except struct.error:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# E2E handshake codecs
-# E2E_HANDSHAKE payload:  nonce(32) || kem_pub_len(H) || dsa_pub_len(H) || chain_len(H)
-#                          || kem_pub || dsa_pub || chain_bytes || signature
-# E2E_HANDSHAKE_ACK payload: same struct, fields are ct_len / dsa_len / chain_len
-#                          || ciphertext || dsa_pub || chain_bytes || signature
-# ---------------------------------------------------------------------------
-
-def _encode_e2e_handshake(nonce: bytes, kem_pub: bytes, dsa_pub: bytes,
-                           chain: list[Certificate], signature: bytes) -> bytes:
-    chain_bytes = _encode_chain(chain)
-    return (_E2E_HEADER.pack(nonce, len(kem_pub), len(dsa_pub), len(chain_bytes))
-            + kem_pub + dsa_pub + chain_bytes + signature)
-
-
-def _decode_e2e_handshake(data: bytes) -> tuple[bytes, bytes, bytes, list[Certificate], bytes]:
-    if len(data) < _E2E_HEADER.size:
-        raise ValueError("e2e_handshake payload too short")
-    nonce, kem_len, dsa_len, chain_len = _E2E_HEADER.unpack_from(data, 0)
-    offset = _E2E_HEADER.size
-    if offset + kem_len + dsa_len + chain_len > len(data):
-        raise ValueError("e2e_handshake payload truncated")
-    kem_pub     = data[offset:offset + kem_len];   offset += kem_len
-    dsa_pub     = data[offset:offset + dsa_len];   offset += dsa_len
-    chain_bytes = data[offset:offset + chain_len]; offset += chain_len
-    return nonce, kem_pub, dsa_pub, _decode_chain(chain_bytes), data[offset:]
-
-
-def _encode_e2e_handshake_ack(nonce: bytes, ciphertext: bytes, dsa_pub: bytes,
-                               chain: list[Certificate], signature: bytes) -> bytes:
-    chain_bytes = _encode_chain(chain)
-    return (_E2E_HEADER.pack(nonce, len(ciphertext), len(dsa_pub), len(chain_bytes))
-            + ciphertext + dsa_pub + chain_bytes + signature)
-
-
-def _decode_e2e_handshake_ack(data: bytes) -> tuple[bytes, bytes, bytes, list[Certificate], bytes]:
-    if len(data) < _E2E_HEADER.size:
-        raise ValueError("e2e_handshake_ack payload too short")
-    nonce, ct_len, dsa_len, chain_len = _E2E_HEADER.unpack_from(data, 0)
-    offset = _E2E_HEADER.size
-    if offset + ct_len + dsa_len + chain_len > len(data):
-        raise ValueError("e2e_handshake_ack payload truncated")
-    ciphertext  = data[offset:offset + ct_len];    offset += ct_len
-    dsa_pub     = data[offset:offset + dsa_len];   offset += dsa_len
-    chain_bytes = data[offset:offset + chain_len]; offset += chain_len
-    return nonce, ciphertext, dsa_pub, _decode_chain(chain_bytes), data[offset:]
-
-
-# ---------------------------------------------------------------------------
-# Hole-punching codecs
-# ---------------------------------------------------------------------------
-
-def _encode_punch_request(target_id: bytes, my_udp_port: int) -> bytes:
-    return _PUNCH_REQ.pack(target_id, my_udp_port)
-
-
-def _decode_punch_request(data: bytes) -> tuple[bytes, int] | None:
-    if len(data) < _PUNCH_REQ.size:
-        return None
-    target_id, port = _PUNCH_REQ.unpack_from(data, 0)
-    return target_id, port
-
-
-def _encode_punch_relay(peer_id: bytes, peer_addr: str,
-                        observed_addr: str) -> bytes:
-    pa = peer_addr.encode('utf-8')
-    oa = observed_addr.encode('utf-8')
-    return (peer_id + _ADDR_LEN.pack(len(pa)) + pa
-            + _ADDR_LEN.pack(len(oa)) + oa)
-
-
-def _decode_punch_relay(data: bytes) -> tuple[bytes, str, str] | None:
-    if len(data) < 20 + 2:
-        return None
-    peer_id = data[:20]
-    offset = 20
-    if offset + 2 > len(data):
-        return None
-    pa_len = _ADDR_LEN.unpack_from(data, offset)[0]
-    offset += 2
-    if offset + pa_len > len(data):
-        return None
-    peer_addr = data[offset:offset + pa_len].decode('utf-8')
-    offset += pa_len
-    if offset + 2 > len(data):
-        return None
-    oa_len = _ADDR_LEN.unpack_from(data, offset)[0]
-    offset += 2
-    if offset + oa_len > len(data):
-        return None
-    observed_addr = data[offset:offset + oa_len].decode('utf-8')
-    return peer_id, peer_addr, observed_addr
-
-
-def _punch_signed_blob(magic: bytes, src: bytes, dst: bytes, nonce: bytes,
-                       minute: int) -> bytes:
-    """What a punch probe or ack actually signs.
-
-    It names the **recipient** and the minute it was made. Signing only
-    ``magic ‖ src ‖ nonce`` made every probe a token valid anywhere, for ever:
-    one captured datagram could be replayed at any node that knew the sender,
-    and each replay bought a signature and a ~3.4 kB answer sent to whatever
-    source address the replayer forged."""
-    return magic + src + dst + nonce + struct.pack("!Q", minute)
-
-
-def _punch_minutes(now: float | None = None) -> tuple[int, ...]:
-    """The minute stamps a fresh probe may carry: this one and the last.
-
-    Two, not one, because a probe crossing a minute boundary is not a replay —
-    and not more, because the window is the whole freshness guarantee."""
-    minute = int((now if now is not None else time.time()) // 60)
-    return (minute, minute - 1)
-
-
-def _build_punch_probe(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
-    """Build a raw UDP probe datagram (not a mesh Packet)."""
-    return _PUNCH_PROBE.pack(_PUNCH_PROBE_MAGIC, node_id, nonce) + signature
-
-
-def _parse_punch_probe(data: bytes) -> tuple[bytes, bytes, bytes] | None:
-    """Parse a raw UDP probe datagram. Returns (node_id, nonce, signature) or None."""
-    return _parse_punch_frame(data, _PUNCH_PROBE_MAGIC)
-
-
-def _parse_punch_frame(data: bytes, expect_magic: bytes
-                       ) -> tuple[bytes, bytes, bytes] | None:
-    """Shared probe/ack parse. The signature is the variable-length tail after
-    the fixed header (ML-DSA-65 = 3309 bytes), bounded by _PUNCH_SIG_MAX."""
-    sig_len = len(data) - _PUNCH_PROBE.size
-    if sig_len <= 0 or sig_len > _PUNCH_SIG_MAX:
-        return None
-    magic, node_id, nonce = _PUNCH_PROBE.unpack_from(data, 0)
-    if magic != expect_magic:
-        return None
-    signature = data[_PUNCH_PROBE.size:]
-    return node_id, nonce, signature
-
-
-def _build_punch_ack(node_id: bytes, nonce: bytes, signature: bytes) -> bytes:
-    """Build a raw UDP punch-ack datagram."""
-    return _PUNCH_PROBE.pack(_PUNCH_ACK_MAGIC, node_id, nonce) + signature
-
-
-def _parse_punch_ack(data: bytes) -> tuple[bytes, bytes, bytes] | None:
-    """Parse a raw UDP punch-ack datagram. Returns (node_id, nonce, signature) or None."""
-    return _parse_punch_frame(data, _PUNCH_ACK_MAGIC)
-
-
-# ---------------------------------------------------------------------------
-# FOUND_NODE entry codec
-# pool_count(H) | [cert_len(H) | cert_bytes]*pool_count
-#   | entry_count(B)
-#   | [ node_id(20) | addr_count(B) | chain_len(B)
-#       | [addr_len(H) | addr_bytes]*addr_count
-#       | pool_index(H)*chain_len ]*entry_count
-# ---------------------------------------------------------------------------
-
-class _EntryPacker:
-    """Packs NodeEntry records for a FOUND_NODE under a byte budget.
-
-    Certificates are shared through a pool the entries index into. Chains
-    overwhelmingly end on the same network root and a post-quantum certificate
-    is ~7 KB, so repeating each chain per entry made the root alone half the
-    packet — and pushed the answer past the packet cap (see
-    ``_FOUND_NODE_MAX_BYTES``). Pooling also bounds how many signatures one
-    hostile FOUND_NODE can make a receiver verify.
-    """
-
-    def __init__(self, budget: int, known: frozenset = frozenset()) -> None:
-        self._budget = budget
-        self._known = known
-        # Keyed on the fingerprint rather than on the serialised bytes: it is
-        # what the store already treats as a certificate's identity, it is
-        # computed once per certificate, and it is what a reference names.
-        self._pool: list[bytes] = []
-        self._index: dict[bytes, int] = {}
-        self._entries: list[bytes] = []
-        # pool_count(H) + entry_count(B)
-        self._used = _POOL_COUNT.size + 1
-
-    def add(self, entry: NodeEntry) -> bool:
-        """Append ``entry``; False (and nothing added) if it wouldn't fit."""
-        if (len(self._entries) >= _ENTRY_COUNT_MAX
-                or len(entry.cert_chain) > _ENTRY_CHAIN_MAX):
-            return False
-        addrs = entry.addresses[:_MAX_ADDRESSES]
-        blob = _ENTRY_HEADER.pack(entry.node_id.raw, len(addrs),
-                                  len(entry.cert_chain))
-        for addr in addrs:
-            b = addr.encode('utf-8')
-            blob += _ADDR_LEN.pack(len(b)) + b
-        added: list[tuple[bytes, bytes]] = []
-        cost = len(blob) + _POOL_INDEX.size * len(entry.cert_chain)
-        prints = [cert.fingerprint() for cert in entry.cert_chain]
-        for cert, digest in zip(entry.cert_chain, prints):
-            if digest in self._index or any(digest == d for d, _ in added):
-                continue
-            if len(self._pool) + len(added) >= _ENTRY_POOL_MAX:
-                return False
-            if digest in self._known:
-                # The querier told us it holds this one. Ten bytes instead of
-                # seven thousand, and no `serialize()` at all — which is the
-                # other half of the saving: rebuilding a chain used to cost the
-                # responder a ~7 kB blob per certificate per query.
-                body = _CERT_LEN.pack(_CERT_REF) + digest
-            else:
-                raw = cert.serialize()
-                body = _CERT_LEN.pack(len(raw)) + raw
-            added.append((digest, body))
-            cost += len(body)
-        if self._used + cost > self._budget:
-            return False
-        for digest, body in added:
-            self._index[digest] = len(self._pool)
-            self._pool.append(body)
-        for digest in prints:
-            blob += _POOL_INDEX.pack(self._index[digest])
-        self._entries.append(blob)
-        self._used += cost
-        return True
-
-    def encode(self) -> bytes:
-        return (_POOL_COUNT.pack(len(self._pool)) + b"".join(self._pool)
-                + bytes([len(self._entries)]) + b"".join(self._entries))
-
-
-def _encode_cert_hints(prints: list[bytes]) -> bytes:
-    """The tail of a FIND_NODE: fingerprints of certificates we already hold."""
-    return b"".join(prints[:_CERT_HINT_MAX])
-
-
-def _decode_cert_hints(tail: bytes) -> frozenset | None:
-    """Read that tail. ``None`` means the payload is not a FIND_NODE at all.
-
-    An empty tail is the classic question and must stay valid for ever: a node
-    that has never heard of fingerprints asks exactly that, and refusing it
-    would cut every older build out of the lookup."""
-    if not tail:
-        return frozenset()
-    if len(tail) % FINGERPRINT_LEN or len(tail) > _CERT_HINT_MAX * FINGERPRINT_LEN:
-        return None
-    return frozenset(tail[i:i + FINGERPRINT_LEN]
-                     for i in range(0, len(tail), FINGERPRINT_LEN))
-
-
-def _encode_entries(entries: list[NodeEntry], known: frozenset = frozenset()) -> bytes:
-    packer = _EntryPacker(1 << 30, known)
-    for entry in entries:
-        packer.add(entry)
-    return packer.encode()
-
-
-def _decode_entries(data: bytes, resolve=None) -> tuple[list[NodeEntry], int]:
-    """Parse a FOUND_NODE body. Returns the entries and how many bytes they took.
-
-    ``resolve(fingerprint) -> Certificate | None`` looks up a certificate the
-    sender referred to instead of sending. It can only ever find one this node
-    already holds and verified, so a reference adds no authority: naming one we
-    do not have voids that chain exactly as an unparseable certificate does.
-
-    The consumed length is returned because what follows the entries is how the
-    two ends discover each other (see ``_HINTS_OK``) — and because a build
-    without that marker has always simply stopped reading here."""
-    if len(data) < _POOL_COUNT.size:
-        raise ValueError("empty payload")
-    pool_count = _POOL_COUNT.unpack_from(data, 0)[0]
-    if pool_count > _ENTRY_POOL_MAX:
-        raise ValueError(f"too many pooled certs: {pool_count}")
-    offset = _POOL_COUNT.size
-    pool: list[Certificate | None] = []
-    for _ in range(pool_count):
-        if offset + _CERT_LEN.size > len(data):
-            raise ValueError("truncated pooled cert length")
-        cert_len = _CERT_LEN.unpack_from(data, offset)[0]
-        offset += _CERT_LEN.size
-        if cert_len == _CERT_REF:
-            if offset + FINGERPRINT_LEN > len(data):
-                raise ValueError("truncated cert reference")
-            digest = data[offset:offset + FINGERPRINT_LEN]
-            offset += FINGERPRINT_LEN
-            pool.append(resolve(digest) if resolve is not None else None)
-            continue
-        if offset + cert_len > len(data):
-            raise ValueError("truncated pooled cert")
-        try:
-            pool.append(Certificate.deserialize(data[offset:offset + cert_len]))
-        except Exception:
-            pool.append(None)   # unusable cert: entries referencing it lose their chain
-        offset += cert_len
-    if offset >= len(data):
-        raise ValueError("missing entry count")
-    count = data[offset]
-    offset += 1
-    if count > _ENTRY_COUNT_MAX:
-        raise ValueError(f"too many entries: {count}")
-    entries: list[NodeEntry] = []
-    for _ in range(count):
-        if offset + _ENTRY_HEADER.size > len(data):
-            raise ValueError("truncated entry header")
-        raw_id, addr_count, chain_len = _ENTRY_HEADER.unpack_from(data, offset)
-        offset += _ENTRY_HEADER.size
-        if addr_count > _MAX_ADDRESSES:
-            raise ValueError(f"too many addresses in entry: {addr_count}")
-        if chain_len > _ENTRY_CHAIN_MAX:
-            raise ValueError(f"chain too long in entry: {chain_len}")
-        addresses: list[str] = []
-        valid = True
-        for _ in range(addr_count):
-            if offset + 2 > len(data):
-                raise ValueError("truncated addr_len in entry")
-            addr_len = _ADDR_LEN.unpack_from(data, offset)[0]
-            offset += 2
-            if addr_len > _MAX_URI_LEN:
-                valid = False
-            if offset + addr_len > len(data):
-                raise ValueError("truncated addr_bytes in entry")
-            try:
-                addr = data[offset:offset + addr_len].decode('utf-8')
-            except UnicodeDecodeError:
-                valid = False
-                addr = ""
-            offset += addr_len
-            if _validate_uri(addr) is None:
-                valid = False
-            addresses.append(addr)
-        chain: list[Certificate] = []
-        chain_ok = True
-        for _ in range(chain_len):
-            if offset + _POOL_INDEX.size > len(data):
-                raise ValueError("truncated chain index in entry")
-            idx = _POOL_INDEX.unpack_from(data, offset)[0]
-            offset += _POOL_INDEX.size
-            if idx >= len(pool):
-                raise ValueError("chain index out of range")
-            cert = pool[idx]
-            if cert is None:
-                chain_ok = False   # one unusable cert voids the whole chain
-            elif chain_ok:
-                chain.append(cert)
-        if not chain_ok:
-            chain = []
-        if not valid:
-            continue  # drop entry with any malformed URI
-        entries.append(NodeEntry(NodeID(raw_id), addresses, b"", chain))
-    return entries, offset
-
-
-# ---------------------------------------------------------------------------
-# Peer state
-# ---------------------------------------------------------------------------
-
-class _Peer:
-
-    def __init__(self, transport: BaseTransport, is_client_side: bool = False) -> None:
-        self.transport = transport
-        self.session: SessionKey | None = None
-        self.pending_kem_secret: bytes | None = None
-        self.join_code: str | None = None
-        self.pending_challenge: bytes | None = None
-        self.received_challenge: bytes | None = None
-        self.authenticated_id: NodeID | None = None
-        # Who this link proved to be, whether or not we went on to serve it.
-        # `authenticated_id` is only set for a link we keep; one refused because
-        # it answered as somebody else — or as us — has still proved an identity
-        # (the signature over our own challenge), and that is the one thing that
-        # tells the dialler "wrong address" from "nobody answered".
-        self.answered_as: NodeID | None = None
-        # The challenge on this link named our own id. Not proof of anything —
-        # nothing has authenticated yet — so it names the dial outcome for an
-        # operator and never strikes an address off. See `_handle_challenge`.
-        self.claimed_self: bool = False
-        self.invite_accepted: bool = False
-        self.invite_sent: bool = False
-        # Our code came back rejected. Read only by the join that presented it,
-        # to tell an operator the one thing that goes wrong most: a code is used
-        # once and expires. The far end chose to send that byte, so keeping it
-        # discloses nothing new — throwing it away only cost the person holding
-        # a dead ticket any way of finding out.
-        self.invite_refused: bool = False
-        # We presented an invitation code on THIS link and it was accepted.
-        # Only then may the answer's issued certificate make its self-signed
-        # root a root of ours: the alternative — believing whoever we happen to
-        # have dialled — is a trust anchor anybody we contact can plant. See
-        # `_handle_handshake_ack`, and Docs/Architecture/security.md.
-        self.joined_by_invite: bool = False
-        self.is_client_side: bool = is_client_side
-        # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
-        # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
-        self.relay_only: bool = False
-        # A second link to a node we already reach, opened to measure it
-        # (address steering). It is a duplicate on purpose and the pass that
-        # opened it closes the loser, so the duplicate reaper leaves it alone.
-        self.probation: bool = False
-        self.remote_addr: str | None = None   # dialled URI, for routing/reconnect
-        # When this link stopped being served. Non-zero means everything that
-        # arrives is dropped without a word — the link stays open and quiet
-        # rather than closing, so the far end cannot tell "I have been found
-        # out" from "the network is bad today", and keeps spending its effort
-        # on a socket that leads nowhere. Cleared only by the link ending.
-        self.tarpit_until: float = 0.0
-        # What this peer said it can speak, and what that leaves us both able to
-        # use. `None` — not an empty set — means it has said nothing, which is a
-        # node from before the negotiation existed and must keep working exactly
-        # as it did. Absence is never read as refusal (see `features.py`).
-        self.features: frozenset | None = None
-        self.agreed: frozenset | None = None
-        # What the behavioural sweep reads. Three integers, incremented in the
-        # receive loop and nowhere else: everything they feed is computed later,
-        # on a timer that already runs. A detector that costs the hot path
-        # anything has already done more damage than what it detects.
-        self.undeclared: int = 0        # messages of a plane it said it lacks
-        self.found_entries: int = 0     # routing candidates it has handed us
-        self.found_self: int = 0        # …of which it named itself
-        # Rule E2: answers we could hold beside other peers' answers to the
-        # same question, and how many of them shared almost nothing with any of
-        # them. Incremented once per lookup round, never per packet.
-        self.answers_judged: int = 0
-        self.answers_disjoint: int = 0
-        self._invite_failures: int = 0
-        self._invite_lockout_ts: float = 0.0
-        # Handshakes this link has been allowed to make us verify. A joiner
-        # legitimately needs more than one (the invite exchange re-drives it,
-        # and a lost packet is retried), but not without end: the work is a
-        # post-quantum verification per certificate plus one for the handshake
-        # itself, and nothing above this handler is authenticated.
-        self._handshake_attempts: int = 0
-        self.dsa_pub: bytes = b""
-        self._malformed: int = 0
-        # Liveness / round-trip: set when we PING, cleared+measured on the PONG.
-        self.ping_sent_at: float | None = None
-        self.last_rtt: float | None = None
-        self.quality = LinkQuality()  # latency spread and probe loss
-        # -- the keepalive accord (see mlo.py) ------------------------------
-        # What the peer proposed, and what that leaves the two of us held to.
-        # `None` — not a default window — means it has proposed nothing, which
-        # is a node from before this existed and keeps the classic cadence.
-        self.ka_window: tuple | None = None
-        self.ka_accord: tuple | None = None
-        # When the accord last moved. A proposal crosses the link at the speed
-        # of the link, so nothing is held against a peer for a short while
-        # afterwards (`_KA_GRACE`).
-        self.ka_accord_at: float = 0.0
-        # The gap it last announced before its next probe, and what we last
-        # asked it for. A request is cancelled by the peer announcing the
-        # accord's floor: that is the one refusal the protocol allows, and it
-        # is what keeps "I want the fast lane back" from looking like silence.
-        self.ka_next_ms: int | None = None
-        self.ka_asked_ms: int | None = None
-        self.ka_asked_at: float = 0.0
-        # What the far end asked *us* for, and when. Only ever slower than what
-        # we were doing — a request can never make this node spend more (see
-        # `_handle_ka_request`) — and it lapses at `_KA_TOLD_TTL` rather than
-        # holding for ever: a request is a "go quiet for now", and a peer that
-        # still wants it says so again.
-        self.ka_told_ms: int | None = None
-        self.ka_told_at: float = 0.0
-        # What this link was last told about where we are, and when. `None` is
-        # "nothing yet", which no advertised set can equal — so the first probe
-        # on a link always carries the addresses.
-        self.addrs_sent: tuple | None = None
-        self.addrs_sent_at: float = 0.0
-        # When this link is next probed. A fresh one is due at the classic
-        # interval, exactly as it was when one interval served every link; what
-        # moves it in is the sweep deciding this link has a twin worth
-        # measuring against.
-        self.ka_due: float = time.monotonic() + _LINK_KEEPALIVE_INTERVAL
-        # …and what cadence that role calls for. Written by `_update_bundles`
-        # on the sweep and read per probe: deciding it per probe would walk
-        # every link to find out whether this one has a twin — ten times a
-        # second, per link.
-        self.ka_wanted_ms: int | None = None
-        # Counters the behaviour sweep reads (rules K1–K3). Integers bumped in
-        # the two handlers, never anything computed there.
-        self.ka_outside: int = 0
-        self.ka_ignored: int = 0
-        self.ka_impossible: int = 0
-        self.connected_at: float = time.monotonic()
-        self.counters = Counters()   # per-link throughput
-        self.total = None            # node-wide Counters, set by the node
-        # Node-wide Trace, set by the node alongside `total`. None (or disabled)
-        # costs one attribute test per packet, which is the point: this sits on
-        # the hot path of every packet in and out.
-        self.trace = None
-        # Invoked when the receive loop exits on its own (dead link or abuse),
-        # so the node can prune this peer. Cleared on intentional stop().
-        self.on_dead = None
-        # Invoked when a *frame* would not decode. The link's own counter below
-        # is all this object can keep, and `CLAUDE.md` is explicit that a count
-        # kept per link is a count a peer sheds by reconnecting — so the node
-        # hangs its identity-wide book here. Set by `MeshNode._new_peer`; a peer
-        # nobody owns simply counts locally, which is the honest fallback.
-        self.on_abuse = None
-        self._task: asyncio.Task | None = None
-
-    async def start(self, on_packet) -> None:
-        self._task = asyncio.create_task(self._run(on_packet))
-
-    async def _run(self, on_packet) -> None:
-        try:
-            await self._loop(on_packet)
-        finally:
-            cb = self.on_dead
-            if cb is not None:
-                self.on_dead = None
-                try:
-                    await cb(self)
-                except Exception:
-                    pass
-
-    async def _loop(self, on_packet) -> None:
-        while True:
-            try:
-                packet = await self.transport.receive()
-            except asyncio.CancelledError:
-                raise
-            except (asyncio.IncompleteReadError, ConnectionError, OSError, EOFError):
-                return  # link is dead — exit so the node reaps this peer
-            except Exception:
-                # Malformed frame on a still-live link (e.g. bad length prefix,
-                # oversized payload). One bad packet must never kill the link:
-                # drop it, count the abuse, and keep serving. Persistent garbage
-                # is treated as hostile and the peer is cut.
-                self._charge_identity()
-                if self.note_abuse():
-                    return
-                continue
-            # …and what came back has to *be* a packet. Everything below counts
-            # its length, traces it and hands it to a handler, all three of
-            # which assumed one — so a transport answering `None` raised
-            # outside this guard, took the link down and left an unretrieved
-            # task behind it. A medium that answers nonsense is charged for it
-            # exactly like a frame that would not decode (`src/medium.py`).
-            packet = medium.received(packet)
-            if packet is None:
-                self._charge_identity()
-                if self.note_abuse():
-                    return
-                continue
-            nbytes = _HEADER_BYTES + len(packet.payload)
-            self.counters.on_in(nbytes)
-            if self.total is not None:
-                self.total.on_in(nbytes)
-            if self.trace is not None:
-                self.trace.record("in", packet, nbytes, self.authenticated_id)
-            try:
-                await on_packet(self, packet)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass  # malformed payload or handler bug — drop, loop continues
-
-    def _charge_identity(self) -> None:
-        """Tell the node a frame would not decode, so the *identity* is charged.
-
-        Every other violation in this product goes through
-        `MeshNode._charge_abuse`, which charges the link **and** the node's
-        reputation book. Frames that fail to decode were the exception: they
-        were counted here, on the link, and nowhere else — so an authenticated
-        peer could send noise up to the cut, reconnect, and start again, for
-        ever, without its standing ever moving. That is exactly the shape
-        `CLAUDE.md` names when it says a count is kept per identity and not per
-        link.
-
-        Never raises: this is the receive loop, and a bookkeeping failure must
-        not be a way to end one."""
-        hook = self.on_abuse
-        if hook is None or self.authenticated_id is None:
-            return          # nothing better than the link counter to charge
-        try:
-            hook(self)
-        except Exception:                       # noqa: BLE001 — never the reason
-            pass
-
-    def note_handshake_attempt(self) -> bool:
-        """Claim one handshake attempt on this link. False once they run out."""
-        self._handshake_attempts += 1
-        return self._handshake_attempts <= _MAX_HANDSHAKE_ATTEMPTS
-
-    def note_abuse(self) -> bool:
-        """Count one thing this peer did that a correct node never does, and say
-        whether it has now earned being cut.
-
-        The receive loop counts frames it could not even decode; handlers count
-        what decoded but was a lie — a claim signed by nobody, a name in a form
-        the protocol forbids. Both are the same judgement ("this peer is not
-        playing the protocol") so both feed the same counter, and the console
-        shows it under one heading."""
-        self._malformed += 1
-        return self._malformed > _MAX_MALFORMED
-
-    async def send(self, packet: Packet) -> None:
-        await self.transport.send(packet)
-        nbytes = _HEADER_BYTES + len(packet.payload)
-        self.counters.on_out(nbytes)
-        if self.total is not None:
-            self.total.on_out(nbytes)
-        if self.trace is not None:
-            self.trace.record("out", packet, nbytes, self.authenticated_id)
-
-    async def stop(self) -> None:
-        self.on_dead = None  # intentional shutdown — do not trigger reaping
-        if self._task:
-            self._task.cancel()
-            # Bounded. A cancelled receive task normally dies at once, but when
-            # the cancellation lands on a read future that was already cancelled
-            # the task is left flagged "cancelling", waiting for a wake-up that
-            # never comes — and stop() waited with it, forever (seen roughly one
-            # teardown in three with several peers). Closing the transport below
-            # tears the link down regardless, so give up waiting and finish.
-            try:
-                async with asyncio.timeout(_PEER_STOP_TIMEOUT):
-                    await self._task
-            except (asyncio.CancelledError, TimeoutError, Exception):
-                pass
-        await self.transport.close()
-
-
-# ---------------------------------------------------------------------------
-# Relayed transport — a virtual link tunnelled through a relay
-# ---------------------------------------------------------------------------
-
-class RelayedTransport(BaseTransport):
-    """A BaseTransport that carries mesh packets to a *remote* node through a
-    *relay* link, by wrapping each outgoing packet in a RELAY_CARRY and letting
-    the relay route it. Incoming packets are fed by the node when a RELAY_CARRY
-    addressed to us and originating from ``remote`` is unwrapped.
-
-    This lets the entire existing invite/handshake run, unchanged, between two
-    nodes that share no direct link — the relay only sees signed ciphertext."""
-
-    def __init__(self, node: 'MeshNode', remote: NodeID, via: '_Peer') -> None:
-        super().__init__()
-        self._node = node
-        self._remote = remote
-        self._via = via
-        # Bounded: `feed` is reached from `_handle_relay_carry`, which runs
-        # *before* the authentication gates, so an unauthenticated peer that
-        # knows the seeker's id can push into this. A relayed handshake is a
-        # handful of packets; anything past that is not a handshake.
-        self._queue: asyncio.Queue = asyncio.Queue(_RELAY_QUEUE_MAX)
-        self._closed = False
-
-    async def connect(self, address: str) -> None:  # never dialled directly
-        ...
-
-    async def listen(self, address: str) -> None:
-        ...
-
-    async def send(self, packet: Packet) -> None:
-        if self._closed:
-            raise ConnectionError("relayed transport closed")
-        carrier = Packet.create(RELAY_CARRY, self._node.id.raw,
-                                self._remote.raw, packet.pack(), ttl=_SEEK_TTL)
-        await self._via.send(carrier)
-
-    def feed(self, inner: Packet) -> None:
-        if self._closed:
-            return
-        try:
-            self._queue.put_nowait(inner)
-        except asyncio.QueueFull:
-            pass       # the tunnel is not a buffer — drop, the join retries
-
-    async def receive(self) -> Packet:
-        while True:
-            if self._closed:
-                raise ConnectionError("relayed transport closed")
-            # asyncio.timeout, not wait_for: on a path that must stay
-            # cancellable, wait_for can swallow the outer cancellation when the
-            # inner get completes in the same loop step, and the receive task
-            # then never dies (gotchas.md §3b).
-            try:
-                async with asyncio.timeout(1.0):
-                    return await self._queue.get()
-            except asyncio.TimeoutError:
-                continue
-
-    def remote_ip(self) -> str | None:
-        return None
-
-    async def close(self) -> None:
-        self._closed = True
-
-
-# ---------------------------------------------------------------------------
-# Hole-punching state
-# ---------------------------------------------------------------------------
-
-class _PunchState:
-    """Tracks an in-progress NAT hole-punch attempt."""
-
-    def __init__(self, target: NodeID, remote_udp_addr: str,
-                 my_udp_addr: str) -> None:
-        self.target = target
-        self.remote_udp_addr = remote_udp_addr   # peer's public UDP addr (from relay)
-        self.my_udp_addr = my_udp_addr           # our public UDP addr (observed by relay)
-        self.probes_sent: int = 0
-        self.probes_received: int = 0
-        self.ack_received: bool = False
-        self.deadline: float = 0.0
-        self.completed: bool = False   # hole open, mesh handshake handed off
-        self.nonce: bytes = os.urandom(16)
-        self.peer_nonce: bytes | None = None
+# The core's parts live in their own modules now — the message vocabulary
+# (``src/mesh/messages.py``), the bounds (``src/mesh/constants.py``), the wire codecs
+# (``src/mesh/codecs.py``) and the link object (``src/mesh/peers.py``). They are re-exported
+# here on purpose: this module is the node's public surface, and ``DATA``,
+# ``_decode_chain`` and ``_Peer`` have always been imported from ``src.node``.
+# Moving a definition is not a reason to move the door — see
+# ``Docs/Architecture/README.md``. New code should import the module that owns
+# the name; this block exists for what already imports it from here.
+from . import mesh
+from .mesh import codecs as _codecs
+from .mesh import constants as _constants
+from .mesh import messages as _messages
+from .mesh import peers as _peers
+
+# Re-exported by their own ``__all__`` rather than with ``import *``: a star
+# import at module level would put these names in ``node.py``'s namespace but
+# leave ``dir()`` and any later audit unable to say which module owns them.
+for _part in (_messages, _constants, _codecs, _peers):
+    for _name in _part.__all__:
+        globals()[_name] = getattr(_part, _name)
+del _part, _name
 
 
 
@@ -2297,7 +504,14 @@ class MeshNode:
         # the question no single loss can — "did several go at once", which is
         # evidence about our own addressing rather than about any of them.
         self._recent_losses: OrderedDict[NodeID, float] = OrderedDict()
-        self._last_loss_burst: float = 0.0
+        # When the last burst was *acted on*, or ``None`` if none ever was.
+        # ``None`` and not ``0.0``: the cooldown below is measured against
+        # ``time.monotonic()``, whose zero is the machine's boot, so a 0.0
+        # sentinel is not "never" — it is "a burst at boot", which suppresses
+        # the first real one for the first `_LOSS_BURST_COOLDOWN` seconds of
+        # uptime. A node started on a freshly booted machine therefore missed
+        # the one thing this mechanism exists to catch.
+        self._last_loss_burst: float | None = None
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -2509,7 +723,7 @@ class MeshNode:
 
     async def start_udp(self, port: int, host: str = "0.0.0.0") -> None:
         """Start a UDP listener for hole-punching and direct UDP links."""
-        from .udp_transport import UDPServer
+        from .transports.udp import UDPServer
         uri = f"udp://{host}:{port}"
         if self._udp_server is not None:
             return  # already listening
@@ -2591,9 +805,6 @@ class MeshNode:
         monitor — because only that socket's mapping is the one peers reach."""
         if not self._punch_enabled or self._udp_server is None:
             return
-        sock = self._udp_server._sock
-        if sock is None:
-            return
         from .stun import _build_binding_request, DEFAULT_STUN_SERVERS
         from .ip_utils import bounded_getaddrinfo
         for host, port in DEFAULT_STUN_SERVERS:
@@ -2610,11 +821,9 @@ class MeshNode:
             if not infos:
                 continue
             request = _build_binding_request()
-            try:
-                sock.sendto(request, infos[0][4])
-                self._punch_stats["keepalives"] += 1
-            except (OSError, ConnectionError):
+            if not self._udp_server.send_raw(request, infos[0][4]):
                 continue
+            self._punch_stats["keepalives"] += 1
             # Remember what we asked, and who we asked. Without this the
             # response check compares the datagram's transaction id against
             # itself, so any datagram carrying the STUN magic cookie set our
@@ -2632,15 +841,10 @@ class MeshNode:
 
     def udp_port(self) -> int | None:
         """The port our UDP server is listening on, if any."""
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             return None
-        sock = self._udp_server._sock.get_extra_info("socket")
-        if sock is None:
-            return None
-        try:
-            return sock.getsockname()[1]
-        except (OSError, IndexError):
-            return None
+        bound = self._udp_server.bound_endpoint()
+        return bound[1] if bound is not None else None
 
     async def discover_public_udp_addr(self) -> tuple[str, int] | None:
         """Use STUN to discover our public UDP reflexive address (fallback)."""
@@ -2874,7 +1078,7 @@ class MeshNode:
         parsed = _validate_uri(address)
         if (parsed is not None and parsed[0] == "udp"
                 and self._udp_server is not None
-                and self._udp_server._sock is not None):
+                and self._udp_server.bound_endpoint() is not None):
             hp = split_host_port(parsed[1])
             if hp is not None:
                 try:
@@ -2882,19 +1086,21 @@ class MeshNode:
                 except ValueError:
                     host = None
                 if host is not None and 0 < port < 65536:
-                    return self._udp_listener_transport(host, port)
+                    transport = self._udp_listener_transport(host, port)
+                    if transport is not None:
+                        return transport
+        # Either not udp://, or the shared listener could not take it (it is
+        # full, or it went away between the check above and the call) — so let
+        # the manager open an ordinary link rather than fail the join.
         return await self._transport_manager.connect(address)
 
-    def _udp_listener_transport(self, host: str, port: int) -> BaseTransport:
+    def _udp_listener_transport(self, host: str, port: int) -> BaseTransport | None:
         """Create a UDP transport bound to (host, port) on the *listener* socket
         and register it so the peer's replies route to it. Sends an initial
         keepalive burst to open our mapping and prod the peer to accept."""
-        from .udp_transport import UDPTransport
-        addr = (host, port)
-        transport = UDPTransport._from_server(self._udp_server._sock, addr,
-                                              self._udp_server)
-        self._udp_server._transports[addr] = transport
-        transport._start_tasks()
+        transport = self._udp_server.adopt((host, port))
+        if transport is None:
+            return None
         asyncio.create_task(self._udp_join_bridge(transport))
         return transport
 
@@ -2902,11 +1108,9 @@ class MeshNode:
         """Send a short burst of keepalives so the peer accepts even if the two
         operators didn't open their holes at exactly the same instant."""
         for _ in range(10):
-            if transport._closed:
+            if transport.is_closed():
                 return
-            try:
-                transport._send_raw(transport._link.build_keepalive())
-            except Exception:
+            if not transport.keepalive():
                 return
             await asyncio.sleep(0.5)
 
@@ -2947,13 +1151,11 @@ class MeshNode:
         key = (host, port)
         while time.monotonic() < deadline:
             server = self._udp_server
-            if server is None or server._sock is None:
+            if server is None:
                 break
-            if key in server._transports:
+            if server.holds(key):
                 break  # a link to this endpoint is forming — stop opening
-            try:
-                server._sock.sendto(_HOLE_OPEN_MAGIC, (host, port))
-            except (OSError, ConnectionError):
+            if not server.send_raw(_HOLE_OPEN_MAGIC, key):
                 break
             entry = self._manual_holes.get(key)
             if entry is not None:
@@ -4864,7 +3066,11 @@ class MeshNode:
             self._recent_losses.popitem(last=False)
         if len(self._recent_losses) < _LOSS_BURST_NODES:
             return
-        if now - self._last_loss_burst < _LOSS_BURST_COOLDOWN:
+        # `is not None` first: the sentinel means no burst has ever been acted
+        # on, and an unstarted cooldown must not read as an expired one — see
+        # the initialiser.
+        if (self._last_loss_burst is not None
+                and now - self._last_loss_burst < _LOSS_BURST_COOLDOWN):
             return
         self._last_loss_burst = now
         self._activity.note(
@@ -7570,7 +5776,7 @@ class MeshNode:
         # This used to guard only the call, and bound `stats` here rather than
         # where every other medium answer is bounded — two spellings of one
         # rule, and the one a new call site copies is whichever it happens to
-        # be sitting next to (`src/medium.py`).
+        # be sitting next to (`src/transports/medium.py`).
         endpoints = medium.endpoints(transport)
         stats = medium.stats(transport)
         return {
@@ -7595,10 +5801,13 @@ class MeshNode:
         scheme = scheme_of(peer.transport) if scheme_of is not None else None
         if scheme is not None:
             return scheme
-        from .udp_transport import UDPTransport
-        if isinstance(peer.transport, UDPTransport):
-            return "udp"
-        return None
+        # A listener the node started itself need not be in the registry, so
+        # ask the link what medium it runs over. This is the medium-agnostic
+        # form of the `isinstance(..., UDPTransport)` it replaces, and unlike
+        # asking a server which links it owns, it holds for a dialled link too
+        # — a dialled transport has no server behind it at all.
+        ask = getattr(peer.transport, "scheme", None)
+        return ask() if ask is not None else None
 
     def _transport_details(self) -> list[dict]:
         """Per-scheme view of the transport layer for the console: listeners,
@@ -13828,10 +12037,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     async def _send_punch_probes(self, state: '_PunchState') -> None:
         """Send a burst of UDP probe datagrams to punch the NAT hole."""
-        from .udp_transport import _host_port
-
         # No UDP listener → we can't punch at all.
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             self._punch_pending.pop(state.target, None)
             return
 
@@ -13849,12 +12056,19 @@ Hints come first (the ``have`` byte on an announce, from an
         # is probing us. Keep the pending state so an incoming probe completes
         # the punch from its source address; dropping it here strands the punch
         # exactly on the side (larger NodeID) that must drive the handshake.
+        # `split_host_port` returns None rather than raising, and `int(port)`
+        # can still reject a non-numeric one; both mean "no usable address",
+        # which is the same situation as the empty case handled above.
+        hp = split_host_port(state.remote_udp_addr) if state.remote_udp_addr else None
+        if hp is None:
+            return
         try:
-            host, port = _host_port(state.remote_udp_addr)
-        except ValueError:
+            host, port = hp[0], int(hp[1])
+        except (TypeError, ValueError):
+            return
+        if not host:
             return
 
-        sock = self._udp_server._sock
         target_addr = (host, port)
 
         for i in range(_PUNCH_PROBE_COUNT):
@@ -13865,9 +12079,7 @@ Hints come first (the ``have`` byte on an announce, from an
                 _PUNCH_PROBE_MAGIC, self._id.raw, state.target.raw, nonce,
                 _punch_minutes()[0]))
             probe = _build_punch_probe(self._id.raw, nonce, signature)
-            try:
-                sock.sendto(probe, target_addr)
-            except (OSError, ConnectionError):
+            if not self._udp_server.send_raw(probe, target_addr):
                 break
             state.probes_sent += 1
             if i < _PUNCH_PROBE_COUNT - 1:
@@ -13999,11 +12211,8 @@ Hints come first (the ``have`` byte on an announce, from an
             _PUNCH_ACK_MAGIC, self._id.raw, node_id_raw, ack_nonce,
             _punch_minutes()[0]))
         ack = _build_punch_ack(self._id.raw, ack_nonce, ack_sig)
-        if self._udp_server is not None and self._udp_server._sock is not None:
-            try:
-                self._udp_server._sock.sendto(ack, addr)
-            except (OSError, ConnectionError):
-                pass
+        if self._udp_server is not None:
+            self._udp_server.send_raw(ack, addr)
 
         # If we have a pending punch to this peer, complete it
         state = self._punch_pending.get(src_id)
@@ -14051,9 +12260,16 @@ Hints come first (the ``have`` byte on an announce, from an
         arrive. Its probe/ack exchange can also race ahead of the pending state
         set up from PUNCH_RELAY. Anchoring the completion to the handshake makes
         the counter reflect reality on both sides regardless of that race."""
-        from .udp_transport import UDPTransport
         target = peer.authenticated_id
-        if target is None or not isinstance(peer.transport, UDPTransport):
+        if target is None:
+            return
+        # Only a link on the UDP medium can settle a punch; a link that arrived
+        # over TCP or a spool file says nothing about this attempt. Asked of the
+        # link itself: the initiator's dialled link has no listener behind it,
+        # so asking the server which links it owns answers "no" for half the
+        # punches and loses the completion entirely.
+        ask = getattr(peer.transport, "scheme", None)
+        if ask is None or ask() != "udp":
             return
         state = self._punch_pending.get(target)
         if state is None or state.completed:
@@ -14076,11 +12292,9 @@ Hints come first (the ``have`` byte on an announce, from an
         client connecting). The other side does nothing here — its UDP server
         accept loop creates the peer and challenges when the initiator's frames
         arrive, exactly as for any inbound UDP connection."""
-        from .udp_transport import UDPTransport
-
         if state.completed:
             return  # already handled (probe and ack both landed)
-        if self._udp_server is None or self._udp_server._sock is None:
+        if self._udp_server is None:
             return
 
         state.completed = True  # guards re-entry from probe+ack
@@ -14094,22 +12308,16 @@ Hints come first (the ``have`` byte on an announce, from an
             return
 
         # Both peers may punch at once (each upgrades its own relayed traffic),
-        # so several attempts can complete toward the same endpoint. The server
-        # dispatch table is the one link per source address: if it already holds
-        # a live transport for this addr — a prior attempt, or the accept path —
-        # a second one here would race the first to a dead, never-authenticated
-        # link. Reuse the existing one instead of duplicating it.
-        existing_t = self._udp_server._transports.get(addr)
-        if existing_t is not None and not existing_t._closed:
+        # so several attempts can complete toward the same endpoint. There is
+        # one link per source address: if one is already live — a prior attempt,
+        # or the accept path — a second peer here would race the first to a
+        # dead, never-authenticated link. `holds` is that question, and this is
+        # the only caller that must *stop* rather than reuse.
+        if self._udp_server.holds(addr):
             return
-
-        # Initiator: open the transport, register it in the server dispatch
-        # table so the peer's frames route to it, and send an initial keepalive
-        # to trigger the responder's accept + challenge.
-        transport = UDPTransport._from_server(self._udp_server._sock, addr,
-                                              self._udp_server)
-        self._udp_server._transports[addr] = transport
-        transport._start_tasks()
+        transport = self._udp_server.adopt(addr)
+        if transport is None:
+            return
         peer = self._new_peer(transport, is_client_side=True)
         host, port = addr
         peer.remote_addr = f"udp://{host}:{port}"
@@ -14129,9 +12337,10 @@ Hints come first (the ``have`` byte on an announce, from an
         link authenticates (further kicks are harmless dedup'd keepalives) or
         the transport dies — bounded so a dead peer can't loop us forever."""
         for i in range(_PUNCH_KICK_COUNT):
-            if peer.authenticated_id is not None or transport._closed:
+            if peer.authenticated_id is not None or transport.is_closed():
                 return
-            transport._send_raw(transport._link.build_keepalive())
+            if not transport.keepalive():
+                return
             if i < _PUNCH_KICK_COUNT - 1:
                 await asyncio.sleep(_PUNCH_KICK_INTERVAL)
 
