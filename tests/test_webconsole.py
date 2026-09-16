@@ -1901,12 +1901,27 @@ class TestRestartingOntoNewCode:
         finally:
             console.stop(); await node.stop()
 
-    async def test_a_mesh_install_says_whether_it_is_restarting(self,
-                                                                monkeypatch):
-        """The page prints the node's answer, so the answer has to be in it."""
+    @pytest.mark.parametrize("plan, restarting", [
+        (("", (), "no way back"), False),
+        ((updater.RESTART_REEXEC, ("/usr/bin/python3", ["x.py"], "/"), ""), True),
+    ])
+    async def test_a_mesh_install_says_whether_it_is_restarting(
+            self, monkeypatch, plan, restarting):
+        """The page prints the node's answer, so the answer has to be in it —
+        and *whether* means both answers, or a constant would pass.
+
+        `restart_plan` is pinned rather than left to the environment. It reads
+        `updater._LAUNCH`, captured at import from `sys.argv`, so under a test
+        runner it describes the runner: `python -m pytest` leaves an `argv[0]`
+        that exists on disk and reads as re-execable, while an xdist worker's
+        does not. Asserting on that is asserting on how the suite happened to be
+        invoked — the same trap the sibling above pins `_LAUNCH` to avoid."""
         node, console = await _make_console()
         try:
             monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
+            monkeypatch.setattr(updater, "restart_plan", lambda: plan)
+            monkeypatch.setattr(type(console), "_restart_worker",
+                                lambda self, mode: None)
             _, token = await _login(console)
 
             async def installed(release_key):
@@ -1917,7 +1932,7 @@ class TestRestartingOntoNewCode:
             status, _, _, body = await asyncio.to_thread(
                 _request, console, "POST", "/api/releases/install", token,
                 {"release": "aa" * 20, "confirm": True})
-            assert status == 200 and body["restarting"] is False
+            assert status == 200 and body["restarting"] is restarting
         finally:
             console.stop(); await node.stop()
 
