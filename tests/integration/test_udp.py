@@ -418,3 +418,49 @@ class TestHolePunching:
         tcp_peer.authenticated_id = other
         node._note_punch_link_up(tcp_peer)
         assert node._punch_stats["completed"] == before + 1
+
+    async def test_punch_counted_for_a_dialled_link_with_no_listener(self):
+        """A punch completed by the *initiator* is still counted.
+
+        The initiator's punched link is dialled (``UDPTransport.connect``), so
+        nothing owns it: `transport._server` is None and no listener made it.
+        Asking a server which links it owns therefore answers "no" for the
+        initiator half of every punch — the completion is dropped silently.
+        The medium must be identified by the link itself."""
+        from src.node import _PunchState, _Peer
+
+        node = make_node()
+        target = make_node().id
+
+        dialled = UDPTransport()
+        assert getattr(dialled, "_server", None) is None  # nothing owns this
+
+        node._punch_pending[target] = _PunchState(target, "127.0.0.1:1", "127.0.0.1")
+        before = node._punch_stats["completed"]
+
+        peer = _Peer(dialled, is_client_side=True)
+        peer.authenticated_id = target
+        node._note_punch_link_up(peer)
+
+        assert node._punch_stats["completed"] == before + 1
+        assert target not in node._punch_pending
+
+    async def test_peer_scheme_names_a_dialled_udp_link(self):
+        """The console can name the medium of a link the registry cannot place.
+
+        `_peer_scheme` falls back to asking a listener which links it owns,
+        which has no answer for a dialled transport — the link would show as
+        "?" even though its medium is plain UDP. Uses a manager that does not
+        register udp, so `scheme_of` cannot answer and the fallback is what
+        must name the medium."""
+        from src.node import _Peer
+
+        node = MeshNode(TransportManager())  # nothing registered at all
+        assert node._transport_manager.scheme_of(UDPTransport()) is None
+
+        dialled = UDPTransport()
+        assert getattr(dialled, "_server", None) is None  # nothing owns this
+
+        peer = _Peer(dialled, is_client_side=True)
+        peer.remote_addr = ""  # no scheme:// to split, so the fallback runs
+        assert node._peer_scheme(peer) == "udp"

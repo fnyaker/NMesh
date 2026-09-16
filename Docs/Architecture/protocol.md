@@ -1,6 +1,7 @@
 # Inter-node protocol
 
-Source of truth: `src/packet.py`, `src/node.py` (constants + `_handle_packet`).
+Source of truth: `src/packet.py`, `src/mesh/messages.py` (the type table),
+`src/mesh/constants.py` (the bounds), `src/node.py` (`_handle_packet`).
 
 ## Packet format
 
@@ -61,7 +62,7 @@ receipt for routable types (see the gates).
   `gcm_tag` covers AAD + payload.
 - The header is therefore *in the clear but authenticated*.
 
-## Type table (`src/node.py`)
+## Type table (`src/mesh/messages.py`)
 
 | Type | Val | Role |
 |---|---|---|

@@ -1318,7 +1318,7 @@ same shape, four more times:
 | `reachability()` | a server answers descriptors | a `TypeError` in the console, the join ticket and the addressing logic |
 | `AppHost._start` | a factory answers `(app, bridge)` | `app, bridge = built` raised through `apply()`, which on start-up is the node |
 
-All of them now go through one reader — `src/medium.py` for a medium,
+All of them now go through one reader — `src/transports/medium.py` for a medium,
 an explicit shape check for a factory — which guards the call *and* the answer,
 bounds it, and writes the failure down. The rule to carry:
 

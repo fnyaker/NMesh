@@ -7,6 +7,7 @@ sockets needed for the coordination layer).
 """
 import os
 import struct
+import time
 import pytest
 
 from src.node import (
@@ -21,7 +22,21 @@ from src.node import (
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_node, FakeTransport
+from tests.conftest import make_node, FakeTransport, FakeUDPServer
+
+
+def _routable_peer(node) -> NodeID:
+    """A target the node can punch toward: known, with a verify key.
+
+    `_send_punch_probes` gives up before it looks at the address when the target
+    is not in the routing table, so a test of the address handling has to put it
+    there first — otherwise it passes for the wrong reason.
+    """
+    ident = CryptoIdentity()
+    pub = ident.dsa_public_key
+    nid = NodeID.from_public_key(pub)
+    node._routing.add(nid, ["tcp://198.51.100.20:9000"], dsa_pub=pub)
+    return nid
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +195,40 @@ class TestPunchState:
         assert _PUNCH_MAX_PENDING == 16
 
 
+    async def test_a_malformed_relayed_address_probes_nothing(self):
+        """The relay can hand us a peer address that is empty or junk. The probe
+        burst must treat that as "no address" and return, not raise out of a
+        path that runs on the receive loop — `split_host_port` returns None
+        rather than raising, and `int(port)` can still reject."""
+        for bad in ("", "198.51.100.9", "[2001:db8::1]", "host:notaport",
+                    ":9000"):
+            node, _ = await make_node()
+            node._punch_enabled = True
+            node._udp_server = FakeUDPServer()
+            target = _routable_peer(node)
+            state = _PunchState(target, bad, "203.0.113.7:9000")
+            state.deadline = time.monotonic() + 30.0   # time is not the reason
+            await node._send_punch_probes(state)   # must not raise
+            assert state.probes_sent == 0
+            assert not node._udp_server.sent
+            await node.stop()
+
+    async def test_a_usable_relayed_address_is_probed(self):
+        """The other half of the same guard: a well-formed address is still
+        probed, so the fix above cannot pass by refusing everything."""
+        from src.node import _PUNCH_PROBE_COUNT
+        node, _ = await make_node()
+        node._punch_enabled = True
+        node._udp_server = FakeUDPServer()
+        target = _routable_peer(node)
+        state = _PunchState(target, "198.51.100.9:40001", "203.0.113.7:9000")
+        state.deadline = time.monotonic() + 30.0
+        await node._send_punch_probes(state)
+        assert state.probes_sent == _PUNCH_PROBE_COUNT
+        assert len(node._udp_server.sent) == _PUNCH_PROBE_COUNT
+        await node.stop()
+
+
 class TestPunchDatagramsAreMetered:
     """A raw punch datagram is the cheapest thing an attacker can send: no
     link, no session, no handshake. Each one that names a node we know used to
@@ -227,3 +276,101 @@ class TestPunchDatagramsAreMetered:
             _punch_signed_blob(_PUNCH_PROBE_MAGIC, src, intended, nonce,
                                minute - 60),
             signature, sender.dsa_public_key)
+
+
+# ---------------------------------------------------------------------------
+# The keepalive burst asks the link, it does not read it
+# ---------------------------------------------------------------------------
+
+class _CountingLink:
+    """A link that answers the two questions the burst asks, and counts."""
+
+    def __init__(self, keepalives_until=3, closes_after=None):
+        self.authenticated = None
+        self.sent = 0
+        self._keepalives_until = keepalives_until
+        self._closes_after = closes_after
+
+    @property
+    def authenticated_id(self):
+        return self.authenticated
+
+    def is_closed(self) -> bool:
+        return (self._closes_after is not None
+                and self.sent >= self._closes_after)
+
+    def keepalive(self) -> bool:
+        if self.sent >= self._keepalives_until:
+            return False
+        self.sent += 1
+        return True
+
+
+class TestKeepaliveBurstAsksTheLink:
+    """`_kick_punched_link` must prod a punched link through the contract.
+
+    It used to read `transport._closed` and call
+    `transport._send_raw(transport._link.build_keepalive())`. Both are private
+    to the medium; the burst runs before the link can authenticate, so it
+    cannot go through `send()`. The two questions it actually has — is the link
+    gone, and put a keepalive out — are `is_closed()` and `keepalive()` on
+    `BaseTransport`, and a medium with neither simply ends the burst.
+    """
+
+    async def test_burst_stops_when_the_medium_refuses_more_kicks(self):
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=3)
+        # A burst that ignored the refusal would run _PUNCH_KICK_COUNT times.
+        await node._kick_punched_link(link, link)
+        assert link.sent == 3, "the burst did not stop when the medium said stop"
+        await node.stop()
+
+    async def test_burst_stops_when_the_link_closes(self):
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=99, closes_after=2)
+        await node._kick_punched_link(link, link)
+        assert link.sent == 2, "the burst kept kicking a closed link"
+        await node.stop()
+
+    async def test_burst_stops_once_the_link_authenticates(self):
+        import asyncio
+        node, _fake = await make_node()
+        link = _CountingLink(keepalives_until=99)
+
+        async def _authenticate():
+            await asyncio.sleep(0.4)      # let a couple of kicks land
+            link.authenticated = NodeID.from_public_key(
+                CryptoIdentity().dsa_public_key)
+
+        task = asyncio.create_task(_authenticate())
+        await node._kick_punched_link(link, link)
+        await task
+        assert link.sent < 8, "the burst did not stop at authentication"
+        await node.stop()
+
+    def test_a_medium_without_link_liveness_ends_the_burst_not_raises(self):
+        """The defaults are the honest answer for a stream or a file: the
+        traversal just does not happen. `keepalive()` returning False must end
+        the burst, and the base implementation must not raise."""
+        from src.transports.contract import BaseTransport
+
+        class _Plain(BaseTransport):
+            async def connect(self, address):
+                pass
+
+            async def listen(self, address):
+                pass
+
+            async def send(self, packet):
+                raise AssertionError("the burst must not reach send()")
+
+            async def receive(self):
+                raise AssertionError("the burst must not receive")
+
+            async def close(self):
+                pass
+
+        link = _Plain()
+        assert link.is_closed() is False
+        assert link.keepalive() is False
+
