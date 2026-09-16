@@ -47,6 +47,28 @@ def register_all(manager: TransportManager) -> TransportManager:
     A scheme that cannot be imported is skipped, and *recorded*: a transport
     that silently failed to register is a scheme the console does not offer and
     nobody can explain, which is the failure mode ``src/faults.py`` exists for.
+
+    **One entry failing costs exactly that entry.** Everything a single entry
+    can do — importing, resolving its two classes, and the registration itself
+    — is inside the one guard below, and the loop moves to the next entry
+    whatever went wrong. Two ways this was not true, and both lost transports:
+
+    * the guard named ``ImportError`` and ``AttributeError`` only. A medium
+      whose native dependency refuses to initialise raises ``RuntimeError`` or
+      ``OSError``; one whose file is half-written raises ``SyntaxError`` or
+      ``ValueError``. None of those were caught, so it did not skip the entry —
+      it propagated, and **every entry after it was never reached**. The loop
+      dies in the middle of the list, which is why losing one medium looks
+      like losing an arbitrary suffix of them.
+    * ``manager.register`` was *outside* the guard. It raises ``TransportError``
+      for a duplicate or malformed scheme, which aborted the loop the same way.
+      So a scheme a plug-in had already claimed took the built-ins after it
+      down with it.
+
+    A node is meant to hold as many media as its operator cares to declare, and
+    a declaration list only works if one bad line is one bad line. ``Exception``
+    and not ``BaseException`` on purpose: a shutdown or a ``KeyboardInterrupt``
+    is the caller's business, not something to swallow and carry on from.
     """
     import importlib
 
@@ -55,8 +77,8 @@ def register_all(manager: TransportManager) -> TransportManager:
             module = importlib.import_module(f"{_PKG}.{module_name}")
             transport_cls = getattr(module, transport_name)
             server_cls = getattr(module, server_name)
-        except (ImportError, AttributeError) as exc:
+            manager.register(scheme, transport_cls, server_cls)
+        except Exception as exc:
             faults.note(f"transports.register.{scheme}", exc)
             continue        # this medium is unavailable here; the others are not
-        manager.register(scheme, transport_cls, server_cls)
     return manager
