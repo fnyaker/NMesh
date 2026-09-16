@@ -104,3 +104,86 @@ class TestRegisterAll:
         assert lost == {}, (
             "a built-in transport failed to import and was silently skipped; "
             f"register_all then brings the node up without it: {lost}")
+
+
+def _blow_up_on(monkeypatch, module_name: str, exc: BaseException) -> None:
+    """Make importing ``transports.<module_name>`` raise ``exc``, and nothing
+    else. The failure has to happen inside the entry being tested, so only that
+    one name is intercepted."""
+    import importlib
+
+    real = importlib.import_module
+
+    def fake(name, *args, **kwargs):
+        if name.endswith(f".{module_name}"):
+            raise exc
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fake)
+
+
+class TestOneEntryCannotCostTheOthers:
+    """A declaration list is only worth having if one bad line is one bad line.
+
+    Both cases below were real, and both lose an *arbitrary suffix* of the
+    transport list rather than the one medium that misbehaved — which is why a
+    node came up with a medium an operator could plainly see disappear, and no
+    entry in the file that explained it.
+    """
+
+    def test_an_unexpected_import_error_does_not_abort_the_loop(self, monkeypatch):
+        """Not everything that fails to load is an ``ImportError``.
+
+        A native dependency that refuses to initialise raises ``RuntimeError``;
+        a half-written file raises ``SyntaxError``. Catching only
+        ``ImportError``/``AttributeError`` let those propagate — so the entries
+        *after* the broken one were never registered at all.
+        """
+        _blow_up_on(monkeypatch, "udp", RuntimeError("liboqs init failed"))
+        manager = register_all(TransportManager())
+
+        # `spool` is declared after `udp`, so it is the entry that proves the
+        # loop kept going rather than stopping where the failure was.
+        assert manager.is_supported("tcp")
+        assert manager.is_supported("spool")
+        assert not manager.is_supported("udp")
+
+    def test_a_refused_registration_does_not_abort_the_loop(self, monkeypatch):
+        """``manager.register`` raises ``TransportError``, and it used to be
+        called *outside* the guard.
+
+        A scheme that some plug-in had already claimed therefore took every
+        built-in declared after it down with it, although nothing was wrong
+        with any of them.
+        """
+        from src.transports.manager import TransportError
+
+        def refuse(scheme, transport_cls, server_cls):
+            raise TransportError(f"scheme already registered: {scheme!r}")
+
+        manager = TransportManager()
+        monkeypatch.setattr(manager, "register", refuse)
+        register_all(manager)
+
+        # Nothing registered, but the call returned rather than raising: the
+        # point is that the failure is contained per entry.
+        assert manager.schemes() == []
+
+    def test_a_contained_failure_is_recorded_not_swallowed(self, monkeypatch,
+                                                          recorded_faults):
+        """Containing a failure and *hiding* it are different things.
+
+        The node must keep running the media it can, and the one it could not
+        must be named in the faults — otherwise the console quietly offers one
+        transport fewer and no machine can say why.
+        """
+        _blow_up_on(monkeypatch, "spool", OSError("no such directory"))
+        register_all(TransportManager())
+
+        recorded = {
+            where.rsplit(".", 1)[-1]: exc
+            for where, exc in recorded_faults
+            if where.startswith("transports.register.")
+        }
+        assert set(recorded) == {"spool"}
+        assert isinstance(recorded["spool"], OSError)
