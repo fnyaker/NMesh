@@ -357,7 +357,11 @@ class TestSeveralNodesLostAtOnce:
         self._lose_many(node, _LOSS_BURST_NODES - 1)
         assert seen == []
 
-    def test_enough_of_them_re_verifies_our_own_addresses(self):
+    def test_enough_of_them_re_verifies_our_own_addresses(self, fresh_boot):
+        # `fresh_boot`: this asserts on the *first* burst the node ever sees,
+        # which is the one the 0.0 cooldown sentinel used to swallow on a
+        # just-booted machine — the exact failure CI reported and a long-running
+        # machine could not reproduce.
         node = _node()
         seen = self._pokes(node)
         self._lose_many(node, _LOSS_BURST_NODES)
@@ -383,9 +387,13 @@ class TestSeveralNodesLostAtOnce:
         _lose(node, _link(node, OTHER))
         assert seen == []
 
-    def test_a_peer_flapping_cannot_buy_a_probe_per_flap(self):
+    def test_a_peer_flapping_cannot_buy_a_probe_per_flap(self, fresh_boot):
         """The poke is urgent, which is a shorter bound and not the absence of
-        one; this is the second of the two."""
+        one; this is the second of the two.
+
+        `fresh_boot` for the same reason as its sibling above: the first burst
+        here must happen, and on a just-booted machine it did not.
+        """
         node = _node()
         seen = self._pokes(node)
         for round_ in range(6):
@@ -396,6 +404,25 @@ class TestSeveralNodesLostAtOnce:
         node._recent_losses.clear()
         self._lose_many(node, _LOSS_BURST_NODES)
         assert len(seen) == 2
+
+    def test_a_first_burst_is_not_suppressed_by_the_machine_uptime(self,
+                                                                   fresh_boot):
+        """The cooldown records a *burst*, and none has happened yet.
+
+        `_last_loss_burst` used to start at ``0.0`` and be compared against
+        ``time.monotonic()``, whose zero is the machine's boot. On a machine up
+        for less than `_LOSS_BURST_COOLDOWN` seconds, ``now - 0.0`` is inside
+        the cooldown, so the very first burst a node ever sees was discarded by
+        a cooldown that had never been started. CI runs in fresh containers and
+        failed here while a machine up for days did not — see ``tests/conftest``
+        for the `fresh_boot` fixture that makes the difference visible.
+        """
+        node = _node()
+        seen = self._pokes(node)
+        self._lose_many(node, _LOSS_BURST_NODES)
+        assert seen, ("a first burst on a just-booted machine produced no "
+                      "re-verification: the cooldown read the 0.0 sentinel as "
+                      "a burst that never happened")
 
     def test_the_count_is_bounded(self):
         node = _node()
