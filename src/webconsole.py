@@ -50,7 +50,8 @@ from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
                         CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS,
-                        TERM_HTML, TERM_JS, TERM_CSS)
+                        TERM_HTML, TERM_JS, TERM_CSS,
+                        NETWORK_HTML, NETWORK_JS, NETWORK_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
@@ -835,6 +836,13 @@ _STATIC = {
     "/node": ("text/html; charset=utf-8", NODE_HTML),
     "/node.js": ("application/javascript; charset=utf-8", NODE_JS),
     "/node.css": ("text/css; charset=utf-8", NODE_CSS),
+    # The whole network, live: every node this console can see, and the log
+    # lines arriving from the ones it collects. Served with the rest rather than
+    # behind the fleet app, because its first half — this node's own links and
+    # its own ring — is true on a machine that manages nothing at all.
+    "/network": ("text/html; charset=utf-8", NETWORK_HTML),
+    "/network.js": ("application/javascript; charset=utf-8", NETWORK_JS),
+    "/network.css": ("text/css; charset=utf-8", NETWORK_CSS),
     # One package, described — the same rule: a view before it is a page.
     "/package": ("text/html; charset=utf-8", PKG_HTML),
     "/package.js": ("application/javascript; charset=utf-8", PKG_JS),

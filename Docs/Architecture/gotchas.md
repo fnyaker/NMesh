@@ -1576,6 +1576,43 @@ before and after.
   on the route change and on a context switch, beside the trace polling that
   already was.
 
+## Two answer shapes, one character apart
+
+The console reaches the plane two ways, and they hand back different things.
+`CHANNEL.call` answers with **the operation's own result** and throws when it is
+refused. `CHANNEL.ask` wraps that same result in an **envelope** —
+`{ok, code, error, detail, data}` — for a caller that paints a refusal in place
+instead of as a toast. Each page picks one in its `op()` helper, and every call
+in that page then has to be read the way the helper answers.
+
+The node card's speed test read the wrong one:
+
+```js
+const {ok, error, data} = await this.op("node.speedtest", {node:id});
+if(!ok || data.ok === false){ …                 // `data` is undefined → throws
+```
+
+`this.op` there is `CHANNEL.call`, so `ok` was the measurement's own `ok`,
+`data` was never set, and the `data.ok` on the next line threw a `TypeError`.
+The `catch` written for a dead link turned that into **"The speed test
+failed"** — on every run, for everybody.
+
+What makes it worth a section is how it looked from the outside. A trace of the
+failing seconds showed 768 probes out and 761 echoes back at about a megabyte a
+second, one per cent lost: a link working exactly as designed, under a page
+saying it did not work. **Nothing in the packets could have been fixed to make
+that button work.** Two days can go into a protocol that was never wrong.
+
+- **A destructuring is a claim about a shape**, and a wrong one fails as
+  `undefined`, quietly, one line later — never where it was written.
+- **A `catch` around a network call will happily report a programming error as a
+  network failure.** That is what hid this: the message named the link, and the
+  link was fine. If a `catch` can only say one thing, say the thing it actually
+  knows.
+- Checked now rather than left to the next reader:
+  `test_a_bare_plane_answer_is_never_read_as_an_envelope` scans each page's own
+  JS for an envelope destructured off a bare answer.
+
 ## The terminal in a browser
 
 - **One request per keystroke delivers them out of order.** Every key fired its

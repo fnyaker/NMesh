@@ -330,6 +330,50 @@ not the same as being read.
 
 ## Watching the mesh live
 
+### The whole network, on one page (`/network`)
+
+Every other page answers a question about *one* thing, when asked. This one
+answers **what is happening, anywhere, right now**, and keeps answering it — a
+screen to leave open beside the work rather than a panel to switch to. Reached
+from *Network → Watch it live*, and opened in a tab of its own because that is
+what it is for.
+
+Two live regions and one switch:
+
+- **The board** — every node this console can see, in one list: this node first,
+  then the machines the fleet collects logs from, then everything in the routing
+  table. One row per identity, whichever ledger it came from, carrying where it
+  stands (connected, silent, known), its transport and round trip, and — in the
+  one place a reader looks for it — whether its log reaches here at all.
+- **The stream** — the lines those nodes are saying, oldest at the top, arriving
+  as they arrive. It follows the newest line until you scroll up, and then says
+  how many it is holding back rather than yanking you forward every second.
+- **The switch** says whether this node is keeping a log of itself, and is the
+  only thing on the page that changes anything. Nothing starts recording because
+  a page was opened: a console that began keeping a record of who this node
+  talks to because a tab was left open would be the wrong default, whoever left
+  it open. Stopping asks first, because stopping **drops** what was kept.
+
+Three things worth knowing about what it shows:
+
+- **The filters are a view of what the page is holding, not a subscription.**
+  Both halves are followed by sequence number, and a cursor consumes what it
+  passes — so a filtered subscription would have already thrown away the lines a
+  *new* filter wanted, with nothing to say it had. Changing a filter therefore
+  costs no call and loses nothing.
+- **It answers for this console**, not for whichever node the console next door
+  is driving. The collected rings are on this machine; a managed node's idea of
+  the network is a different question with the same wording.
+- **The numbers say what they count.** "Nodes connected" and "links held" are
+  two figures, not one under two labels — a node may hold several links — and
+  "in view" means in the page's own bounded buffer, which is also what the
+  board's per-node counts are drawn from, so the two cannot disagree.
+
+The page reads `logs.since`, `logs.status`, `node.state` and the fleet's
+`logs_stream` / `logs_machines`. All of them read structures this machine
+already holds: a page following forty machines is not forty machines' worth of
+traffic.
+
 - **The map** (Overview → Topology) opens large in one click — on the map
   itself, or on **Expand**. The expanded map labels each link with its medium,
   latency and loss, thickens the stroke with the volume carried, turns a link
@@ -650,6 +694,7 @@ node must not be something the network can do to it.
 | `/`, `/style.css`, `/app.js` | the console |
 | `/chat`, `/chat.css`, `/chat.js` | the chat app, if enabled |
 | `/fleet`, `/fleet.css`, `/fleet.js` | the fleet app, if enabled |
+| `/network`, `/network.css`, `/network.js` | the whole network, live: the board of every node this console can see, and the log lines arriving from the ones it collects |
 | `/node`, `/node.css`, `/node.js` | the node card as a page (`/node#<id>`) |
 | `/package`, `/package.css`, `/package.js` | one signed package, described (`/package#<record id>`) — mounted by Settings → Updates, Apps → Find an app and the node card, and served on its own for the window or tab an operator prefers |
 | `/theme.js` | sets the chosen theme **before the first paint** (blocking in `<head>`) |
@@ -1191,7 +1236,8 @@ recording.
 A reader asks `logs.since` with the last sequence number it saw, so a console
 four hops away follows a live log over the same one-question-one-answer channel
 as everything else, and is told how much it `lost` if it fell behind the ring.
-Full mechanics: [`../Architecture/logging.md`](../Architecture/logging.md).
+That is what `/network` follows — see *Watching the mesh live* above. Full
+mechanics: [`../Architecture/logging.md`](../Architecture/logging.md).
 
 ## Joining / bridging two networks
 

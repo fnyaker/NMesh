@@ -827,18 +827,6 @@ function paintPickers(){
     managed.filter((node) => (node.caps || []).includes("scan"))
            .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)])));
 }
-// Rewritten only when the options actually differ. This runs on every poll, and
-// replacing the options of a `<select>` closes it — so a dropdown opened to pick
-// a node shut itself a second later, every second, on the page whose whole job
-// is picking a node.
-function fill(select, pairs){
-  const keep = select.value;
-  const html = pairs.map((pair) =>
-    '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
-  if(select.innerHTML === html) return;
-  select.innerHTML = html;
-  if(pairs.some((pair) => pair[0] === keep)) select.value = keep;
-}
 function paintLog(){
   const lines = ST.log || [];
   const box = $("log");

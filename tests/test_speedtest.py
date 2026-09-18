@@ -246,3 +246,85 @@ class TestItIsNegotiated:
                 node._peers.remove(link)
         finally:
             await node.stop()
+
+
+class TestWhatTheConsoleReadsBack:
+    """The answer *is* the measurement. There is no envelope around it.
+
+    Written because the packets were never the problem. A node card reported
+    "The speed test failed" for every test anybody ran, while a trace of the
+    same seconds showed probes going out and echoes coming back at a megabyte a
+    second with one per cent lost — a measurement that worked, read by a page
+    that could not read it.
+
+    The console speaks two shapes and they are one character apart at the call
+    site. `CHANNEL.ask` and the HTTP routes answer `{ok, error, data}`, an
+    envelope *around* a result. `CHANNEL.call` — which is what a page's `op()`
+    helper is here — answers the operation's own dictionary. Destructure the
+    first off the second and `data` is `undefined`, the `data.ok` after it
+    throws, and the `catch` written for a dead link calls that a failed test.
+
+    So the contract is pinned from this end: the keys the card renders are on
+    the answer itself, and none of them is called `data`."""
+
+    async def _pair(self):
+        from tests.conftest import ConnectableFakeTransportManager
+
+        manager = ConnectableFakeTransportManager()
+        here = MeshNode(transport_manager=manager)
+        there = MeshNode(transport_manager=make_manager())
+        for a, b in ((here, there), (there, here)):
+            b._cert_store.add(a._identity.self_signed_cert())
+            b._cert_store.add_root(a.id)
+        manager.register_target("fake://there", there)
+        here._routing.add(there.id, ["fake://there"],
+                          there._identity.dsa_public_key)
+        assert await here._ensure_route_to(there.id) is not None
+        return here, there
+
+    async def test_the_measurement_is_the_answer(self):
+        here, there = await self._pair()
+        try:
+            answer = await here.console_speedtest(there.id.raw.hex())
+            assert answer["ok"] is True, answer
+            # Every key the card renders, on the answer itself. A page reading
+            # `answer["data"]` would read nothing at all.
+            assert "data" not in answer
+            for key in ("one_way_bps", "round_trip_bps", "sent_bytes",
+                        "echoed_bytes", "lost_bytes", "seconds", "transport"):
+                assert key in answer, key
+            assert answer["echoed_bytes"] > 0
+            assert answer["one_way_bps"] > 0
+        finally:
+            await here.stop()
+            await there.stop()
+
+    async def test_a_refusal_travels_as_an_answer_that_says_so(self):
+        """`ok: False` is a *result*, not a refused call — which is why the
+        card has a branch for it. A plane that turned it into a refusal would
+        send the page down the `catch` that says "failed" about a link that is
+        simply not there."""
+        import asyncio as _asyncio
+
+        from src import control
+
+        here, there = await self._pair()
+        try:
+            channel = control.LocalChannel(control.build(control.Context(
+                node=here, loop=_asyncio.get_running_loop())))
+            # Never dialled, so there is no direct link to it: the one refusal
+            # this operation makes that a page is meant to render in place.
+            stranger = NodeID.generate().raw.hex()
+            reply = await _asyncio.to_thread(
+                channel.call, "node.speedtest", {"node": stranger})
+            assert reply.ok is True, reply
+            assert reply.result["ok"] is False
+            assert reply.result["error"]
+            # And the measurement itself comes back the same way round.
+            good = await _asyncio.to_thread(
+                channel.call, "node.speedtest", {"node": there.id.raw.hex()})
+            assert good.ok is True and good.result["ok"] is True
+            assert "data" not in good.result
+        finally:
+            await here.stop()
+            await there.stop()

@@ -18,7 +18,8 @@ from src.webassets import ui
 
 NODE = shutil.which("node")
 
-SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS", "TERM_JS")
+SCRIPTS = ("APP_JS", "CHAT_JS", "FLEET_JS", "NODE_JS", "TERM_JS",
+           "NETWORK_JS")
 
 
 @pytest.mark.skipif(NODE is None, reason="node is needed to parse the JS")
@@ -54,7 +55,8 @@ def test_every_element_the_scripts_reach_for_exists():
     script with it."""
     import re
     pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML",
-             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML"}
+             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML",
+             "NETWORK_JS": "NETWORK_HTML"}
     for script_name, html_name in pages.items():
         html = getattr(webassets, html_name)
         # Only the page's own part: the shared runtime keeps every access behind
@@ -189,7 +191,8 @@ def test_every_status_line_a_script_writes_to_exists():
     that leaves a handler writing into nowhere."""
     import re
     pages = {"APP_JS": "INDEX_HTML", "CHAT_JS": "CHAT_HTML",
-             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML"}
+             "FLEET_JS": "FLEET_HTML", "NODE_JS": "NODE_HTML",
+             "NETWORK_JS": "NETWORK_HTML"}
     for script_name, html_name in pages.items():
         html = getattr(webassets, html_name)
         source = getattr(webassets, script_name)[len(webassets.ui.JS):]
@@ -301,9 +304,10 @@ STYLE_ATTRIBUTE = re.compile(r"""style\s*=\s*["']""")
 
 
 @pytest.mark.parametrize("name", ["INDEX_HTML", "CHAT_HTML", "FLEET_HTML",
-                                  "NODE_HTML", "APP_JS", "CHAT_JS", "FLEET_JS",
-                                  "NODE_JS", "STYLE_CSS", "CHAT_CSS",
-                                  "FLEET_CSS", "NODE_CSS"])
+                                  "NODE_HTML", "NETWORK_HTML", "APP_JS",
+                                  "CHAT_JS", "FLEET_JS", "NODE_JS",
+                                  "NETWORK_JS", "STYLE_CSS", "CHAT_CSS",
+                                  "FLEET_CSS", "NODE_CSS", "NETWORK_CSS"])
 def test_no_inline_style_attribute_anywhere(name):
     source = getattr(webassets, name)
     # The comment explaining the rule is allowed to quote it.
@@ -323,22 +327,23 @@ def test_the_console_still_forbids_inline_anything():
 def test_every_page_offers_a_skip_link_and_a_focus_ring():
     """Two keyboard guarantees that are lost without anyone noticing: skipping
     the rail to reach the content, and seeing where the focus is."""
-    for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML):
+    for html in (webassets.INDEX_HTML, webassets.CHAT_HTML, webassets.FLEET_HTML,
+                 webassets.NETWORK_HTML):
         assert 'class="skip"' in html
         assert 'id="main"' in html
     for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS,
-                webassets.NODE_CSS):
+                webassets.NODE_CSS, webassets.NETWORK_CSS):
         assert ":focus-visible{outline:2px solid var(--ring)" in css
 
 
-def test_the_three_pages_share_one_design_system():
+def test_every_page_shares_one_design_system():
     """The package's contract: one source for the tokens, the components and the
     runtime. If a page stopped loading it, it would diverge silently."""
     for css in (webassets.STYLE_CSS, webassets.CHAT_CSS, webassets.FLEET_CSS,
-                webassets.NODE_CSS):
+                webassets.NODE_CSS, webassets.NETWORK_CSS):
         assert css.startswith(webassets.ui.CSS)
     for script in (webassets.APP_JS, webassets.CHAT_JS, webassets.FLEET_JS,
-                   webassets.NODE_JS):
+                   webassets.NODE_JS, webassets.NETWORK_JS):
         assert script.startswith(webassets.ui.JS)
 
 
@@ -366,7 +371,7 @@ def test_the_console_renders_whatever_a_transport_reports():
 # so it does not come back.
 
 PAGES = {"INDEX_HTML": "APP_JS", "CHAT_HTML": "CHAT_JS", "FLEET_HTML": "FLEET_JS",
-         "NODE_HTML": "NODE_JS"}
+         "NODE_HTML": "NODE_JS", "NETWORK_HTML": "NETWORK_JS"}
 
 
 @pytest.mark.parametrize("html_name", list(PAGES))
@@ -1021,7 +1026,8 @@ def _tracks(value: str):
     return out
 
 
-@pytest.mark.parametrize("name", ["STYLE_CSS", "CHAT_CSS", "FLEET_CSS", "NODE_CSS"])
+@pytest.mark.parametrize("name", ["STYLE_CSS", "CHAT_CSS", "FLEET_CSS", "NODE_CSS",
+                                  "NETWORK_CSS"])
 def test_no_grid_track_takes_its_minimum_from_its_content(name):
     """A bare `1fr` track is sized `minmax(auto,1fr)`, and that `auto` minimum is
     the content's *min-content* width. One pasted URL in such a track is one very
@@ -1101,8 +1107,9 @@ def _emoji_in(text: str) -> set:
 
 
 @pytest.mark.parametrize("name", ["INDEX_HTML", "CHAT_HTML", "FLEET_HTML", "NODE_HTML",
-                                  "STYLE_CSS", "CHAT_CSS", "FLEET_CSS", "NODE_CSS",
-                                  "APP_JS", "FLEET_JS", "NODE_JS"])
+                                  "NETWORK_HTML", "STYLE_CSS", "CHAT_CSS",
+                                  "FLEET_CSS", "NODE_CSS", "NETWORK_CSS",
+                                  "APP_JS", "FLEET_JS", "NODE_JS", "NETWORK_JS"])
 def test_no_emoji_in_the_interface(name):
     """An emoji is a different picture on every platform, nothing at all to a
     screen reader, and it makes a product look cheap. Icons are SVG, from the one
@@ -1415,3 +1422,213 @@ def test_a_transport_opens_on_its_status_then_its_settings():
     assert 'data-panel="status"' in source and 'data-panel="settings"' in source
     # The chosen view survives a redraw, like the fold.
     assert "views[scheme] || \"status\"" in source
+
+
+# The console speaks two answer shapes and they are one character apart at the
+# call site. `CHANNEL.call` (and `CHANNEL.run` under it) hand back the
+# operation's **own** result. `CHANNEL.ask` wraps that same result in an
+# envelope — `{ok, code, error, detail, data}` — for a caller that paints a
+# refusal in place. Each page reaches the plane through its own `op()` helper,
+# so which of the two a module speaks is decided once, where that helper is
+# written; every call in the module then has to be read that way.
+_PLANE_READERS = (
+    ("console", "CONSOLE_PAGE_JS"),
+    ("nodeview", "JS"),
+    ("nodeview", "PAGE_JS"),
+    ("packages", "JS"),
+    ("packages", "PAGE_JS"),
+    ("fleet", "FLEET_PAGE_JS"),
+    ("chat", "CHAT_PAGE_JS"),
+    ("network", "JS"),
+)
+
+
+def _bare_answer_calls(source):
+    """The names in this module whose answer is the operation's own result."""
+    calls = ["CHANNEL.call(", "CHANNEL.run("]
+    at = source.find("async op(")
+    if at < 0:
+        at = source.find("\n  op(")
+    # A module's own helper is an envelope only when `ask` is what it is built
+    # on; anything else hands the result straight through.
+    if at >= 0 and "CHANNEL.ask(" not in source[at:at + 400]:
+        calls.append("this.op(")
+    return calls
+
+
+@pytest.mark.parametrize("module,constant", _PLANE_READERS)
+def test_a_bare_plane_answer_is_never_read_as_an_envelope(module, constant):
+    """Reading the envelope off a bare answer is a page that always fails.
+
+    The node card's speed test did exactly that. It destructured
+    `{ok, error, data}` from `this.op("node.speedtest", …)`, which is
+    `CHANNEL.call` — so `ok` was the measurement's own `ok`, `data` was
+    `undefined`, and the `data.ok` on the next line threw. The `catch` written
+    for a dead link turned that into "The speed test failed", on every run, on a
+    link a trace of the same seconds showed carrying a megabyte a second.
+
+    Nothing in the packets could have been fixed to make that button work, which
+    is why the rule is checked here rather than left to whoever reads the two
+    helpers next: a bare answer's fields are the operation's own, and one of
+    them is never called `data`."""
+    import importlib
+
+    source = getattr(importlib.import_module(f"src.webassets.{module}"),
+                     constant)
+    for call in _bare_answer_calls(source):
+        pattern = (r"(?:const|let|var)\s*\{([^}]*)\}\s*=\s*await\s+"
+                   + re.escape(call))
+        for match in re.finditer(pattern, source):
+            names = {name.split(":")[0].strip()
+                     for name in match.group(1).split(",")}
+            assert "data" not in names, (
+                f"{module}.{constant} reads an envelope off {call}: "
+                f"{match.group(0)!r}")
+
+
+# ── /network: the whole network, live ───────────────────────────────────────
+# The three rules `src/webassets/network.py` is written around. Each of them is
+# the sort that holds until somebody adds a feature in a hurry, which is why
+# they are here and not only in the docstring.
+
+def test_the_network_page_never_starts_recording_by_itself():
+    """A node keeps no log of itself until an operator asks (`logbook.py`), and
+    a page that turned that on by being *loaded* would be a console that starts
+    keeping a record of who this node talks to because a tab was left open.
+
+    So `logs.set` appears exactly once, inside a handler on the switch, and the
+    two cadences that run without anybody pressing anything only ever read."""
+    from src.webassets import network
+
+    source = network.JS
+    assert source.count('"logs.set"') == 1
+    # The call sits after the listener that owns it and before the next one, so
+    # nothing on a timer can reach it.
+    handler = source.split('$("net-keep").addEventListener')[1]
+    assert '"logs.set"' in handler.split("$(\"login-form\")")[0]
+    for tick in ("async function tickStream(", "async function tickBoard("):
+        body = source.split(tick)[1].split("\n}\n")[0]
+        assert "logs.set" not in body
+
+
+def test_the_network_page_subscribes_unfiltered():
+    """A filter here is a *view*, never a subscription.
+
+    Both streams are read by cursor, and a cursor consumes what it passes. Ask
+    for a filtered stream and the lines a *new* filter wanted have already gone
+    by — they are not coming back, and nothing says so. So the wire carries the
+    cursor and the ceiling and nothing else, and every filter on the page looks
+    only at what the page is already holding."""
+    from src.webassets import network
+
+    source = network.JS
+    for call in ('call("logs.since"', '"logs_stream"'):
+        asked = source.split(call)[1].split(")")[0]
+        for filtered in ("level", "source", "contains", "node:"):
+            assert filtered not in asked, (call, asked)
+    # And the filters are read where the page draws, not where it asks.
+    matching = source.split("function matches(")[1].split("\n}\n")[0]
+    for reader in ("net-filter-level", "net-filter-text", "net-filter-node"):
+        assert reader in matching, reader
+
+
+def test_the_network_page_answers_for_this_console():
+    """The fleet's rings are on *this* machine. A page that followed the
+    console's context would answer "what is the network doing" with one node's
+    idea of it and the other node's collected logs — one screen, two subjects."""
+    from src.webassets import network
+
+    source = network.JS
+    assert "{local:true}" in source.replace(" ", "")
+    # Every plane call on this page goes through the one helper that says so,
+    # so a call added later cannot quietly leave the rule behind.
+    assert source.count("CHANNEL.call(") == 1
+    assert 'function call(op, params){ return CHANNEL.call(op, params, {local:true}); }' \
+        in source
+
+
+def test_the_live_stream_is_appended_to_rather_than_repainted():
+    """The same rule as `test_no_page_paints_a_live_container_with_raw_innerhtml`
+    and the one place it matters most: this container is what somebody is
+    reading, a second at a time. Assigning over it takes their selection and
+    their scroll position with it."""
+    from src.webassets import network
+
+    source = network.JS
+    assert '$("net-lines").innerHTML' not in source
+    assert 'holder.innerHTML' not in source
+    assert 'insertAdjacentHTML("beforeend"' in source
+    # Bounded in the document and in the page, so a tab open for a week costs
+    # what a tab open for a minute costs.
+    assert "while(holder.childElementCount > DRAWN_LINES)" in source
+    assert "NET.lines.length > HELD_LINES" in source
+
+
+# ── the node card's speed test, run rather than read ────────────────────────
+
+def _card_method(name):
+    """One method of the node card, lifted out of the shipped JS.
+
+    Sliced from the bundle rather than retyped, for the same reason the terminal
+    suite is: what a test proves has to be the code a browser runs."""
+    from src.webassets import nodeview
+
+    opening = f"  async {name}(element, button, id){{"
+    body = nodeview.JS.split(opening)[1]
+    return opening + body.split("\n  },\n")[0] + "\n  }"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
+@pytest.mark.parametrize("answer,expected,bad", [
+    # What the plane actually answers — the measurement itself. This is the case
+    # that was broken: `data` was read off an envelope that is not there, the
+    # `data.ok` after it threw, and the `catch` reported a working link as a
+    # failed test.
+    ({"ok": True, "one_way_bps": 4_200_000, "round_trip_bps": 8_400_000,
+      "sent_bytes": 8_388_608, "echoed_bytes": 8_388_608, "lost_bytes": 0,
+      "rtt_ms": 31.2, "best_ms": 28.0, "transport": "tcp"},
+     "4.2 MB/s one way", False),
+    # A refusal the node phrases itself is a *result*, painted in place.
+    ({"ok": False, "error": "no direct link to that node"},
+     "no direct link to that node", True),
+    # And a measurement of a link too slow to reach a megabyte still reads.
+    ({"ok": True, "one_way_bps": 240_000, "round_trip_bps": 480_000,
+      "sent_bytes": 1000, "echoed_bytes": 990, "lost_bytes": 10,
+      "rtt_ms": 90.0, "best_ms": 80.0, "transport": "udp"},
+     "240 kB/s one way", False),
+])
+def test_the_speed_test_reports_what_the_node_measured(answer, expected, bad,
+                                                       tmp_path):
+    """The button, run against the shape the plane hands it.
+
+    Every other check on this is a read of the source; this one executes it. For
+    months it reported "The speed test failed" on links a trace of the same
+    seconds showed carrying a megabyte a second — nothing in the packets could
+    have been changed to fix that, and nothing that only *reads* the JS would
+    have noticed the throw."""
+    import json
+
+    harness = tmp_path / "speedtest.js"
+    harness.write_text(
+        "const said = [];\n"
+        "const withBusy = (button, work) => work();\n"
+        "const isStale = () => false;\n"
+        f"const ANSWER = {json.dumps(answer)};\n"
+        "const NODEVIEW = {\n"
+        "  op(){ return Promise.resolve(ANSWER); },\n"
+        "  say(element, text, bad){ said.push([text, !!bad]); },\n"
+        + _card_method("speedtest") + ",\n"
+        "};\n"
+        'NODEVIEW.speedtest(null, null, "ab".repeat(20)).then(() => {\n'
+        "  console.log(JSON.stringify(said));\n"
+        "});\n",
+        encoding="utf-8")
+    result = subprocess.run([NODE, str(harness)], capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    said = json.loads(result.stdout.strip().splitlines()[-1])
+    # The first line is "Loading the link…"; the verdict is the last.
+    text, was_bad = said[-1]
+    assert expected in text, said
+    assert was_bad is bad, said
+    assert "failed" not in text.lower(), said

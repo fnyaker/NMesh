@@ -37,9 +37,27 @@ wanted:
     Do not follow it at all. Its log is still readable on demand, by asking; it
     is simply never pushed here. For a node whose log is none of our business,
     or one on a metered link.
+
+**And one ring more, which is not one of those.** The rings above answer "what
+happened on that machine"; a console watching the whole network asks "what is
+happening, anywhere, right now", and that is a different question with a
+different shape. Answering it by merging N rings on every tick needs a cursor
+per ring — a map the operator's page would have to carry and every layer between
+would have to be widened for. So arrivals are written a second time, in order,
+into one small ring of their own: :meth:`LogArchive.stream` is then
+``LogBook.since`` on that ring, which is the subscriber shape the rest of this
+product already speaks (`Docs/Architecture/logging.md`).
+
+It is a second copy and that is the cost. It buys a single integer cursor, a
+`lost` count a reader can act on, and the one property a live tail must have and
+a fair merge must not: **the loudest machine wins**. A per-node budget exists so
+that a node saying a great deal cannot push out a node saying little — that is
+right for history and wrong for a tail, where a machine screaming *is* the news.
+The two rules live in two rings rather than fighting over one.
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from .. import logbook
@@ -53,6 +71,31 @@ MAX_MEGABYTES = 64.0
 
 # Rings held at once. A fleet may hold `MAX_MANAGED` nodes; their logs may not.
 MAX_NODES = 128
+
+# The live tail, shared by every machine. Small on purpose: it is what a page
+# has missed since it last asked, never a history — that is what the per-node
+# rings above are, and a tail sized like one would be a second copy of them.
+TAIL_MEGABYTES = 1.0
+
+
+def _tagged(fields, **ours) -> dict:
+    """One line's fields, under ours, bounded where the ring bounds them.
+
+    ``ours`` goes on **first** and nothing that arrived may displace it or
+    overwrite it. `clean_fields` keeps the first `MAX_FIELDS` entries, so a
+    machine sending eight fields of its own — or one called ``node`` — could
+    otherwise push out, or rewrite, who said the line and when. A machine we
+    manage is an adversary that happens to hold a grant, and a line whose
+    attribution its sender can set is a line that can be read as somebody
+    else's."""
+    out = dict(ours)
+    room = max(0, logbook.MAX_FIELDS - len(out))
+    if isinstance(fields, dict):
+        for key, value in list(fields.items())[:room]:
+            if key not in out:
+                out[key] = value
+    return out
+
 
 ALWAYS, ACTIVE, NEVER = "always", "active", "never"
 POLICIES = (ALWAYS, ACTIVE, NEVER)
@@ -83,7 +126,18 @@ class LogArchive:
 
     Holds no policy of its own: what to collect from whom is a decision an
     operator made and the ledger persists (`FleetState`), and a second copy here
-    would be a second answer to one question."""
+    would be a second answer to one question.
+
+    **Written from one thread and read from another.** Lines arrive on the
+    node's loop (`FleetBridge._drain`) and every reader here is a console
+    thread, so the table of rings is mutated under whoever is iterating it —
+    which in CPython is a `RuntimeError`, not a stale answer, and a reader that
+    can be made to raise by a machine speaking at the right moment is a crash
+    somebody else can time. The lock is held to take a snapshot of *which*
+    rings there are and released before any of them is read or written: each
+    `LogBook` has its own lock for its own contents, and holding this one across
+    a compression would put a page's poll in front of the loop that is
+    writing."""
 
     def __init__(self) -> None:
         self._books: dict[str, LogBook] = {}
@@ -92,6 +146,14 @@ class LogArchive:
         self._active: dict[str, float] = {}    # node -> when a page last looked
         self._sizes: dict[str, float] = {}     # node -> megabytes, when set
         self._default = DEFAULT_MEGABYTES
+        # Re-entrant: making room for a ring forgets one, and both take it.
+        self._lock = threading.RLock()
+        # Every arrival, once more, in the order this machine received them.
+        # Started here rather than on demand: it is what a page subscribes to,
+        # and a subscription that only begins working after the first line is a
+        # page that shows nothing until something happens.
+        self._tail = LogBook()
+        self._tail.start(megabytes=TAIL_MEGABYTES)
 
     # -- sizing ------------------------------------------------------------
 
@@ -102,7 +164,9 @@ class LogArchive:
     def set_default_megabytes(self, megabytes) -> float:
         """Resize every ring that has no size of its own."""
         self._default = clean_megabytes(megabytes)
-        for node, book in self._books.items():
+        with self._lock:
+            rings = list(self._books.items())
+        for node, book in rings:
             if node not in self._sizes:
                 book.start(megabytes=self._default)
         return self._default
@@ -155,37 +219,61 @@ class LogArchive:
     # -- the rings ---------------------------------------------------------
 
     def book(self, node: str) -> LogBook:
-        book = self._books.get(node)
-        if book is None:
-            while len(self._books) >= MAX_NODES:
-                self._drop_quietest()
-            book = LogBook()
-            book.start(megabytes=self.megabytes_for(node))
-            self._books[node] = book
-        self._touched[node] = time.monotonic()
-        return book
+        with self._lock:
+            book = self._books.get(node)
+            if book is None:
+                while len(self._books) >= MAX_NODES:
+                    self._drop_quietest()
+                book = LogBook()
+                book.start(megabytes=self.megabytes_for(node))
+                self._books[node] = book
+            self._touched[node] = time.monotonic()
+            return book
 
     def _drop_quietest(self) -> None:
         """The ring nobody has heard from for longest. Dropping the *largest*
         would be the other option and it is the wrong one: it rewards a node
-        for flooding by keeping its log and throwing away a quiet neighbour's."""
+        for flooding by keeping its log and throwing away a quiet neighbour's.
+
+        Called with the lock held. Making room is **not** forgetting: it is this
+        machine running out of rings, not an operator saying they want a log
+        gone, so the live tail is left alone. Clearing it here would mean a
+        fleet at `MAX_NODES` wiping everybody's tail every time a new machine
+        spoke."""
         if not self._touched:
             self._books.clear()
             return
-        node = min(self._touched, key=self._touched.get)
-        self.forget(node)
+        self._drop(min(self._touched, key=self._touched.get))
 
-    def forget(self, node: str) -> None:
-        book = self._books.pop(node, None)
+    def _drop(self, node: str) -> None:
+        """Stop holding this node's ring. The table only."""
+        with self._lock:
+            book = self._books.pop(node, None)
+            self._touched.pop(node, None)
+            self._seen.pop(node, None)
+            self._active.pop(node, None)
         if book is not None:
             book.stop()
-        self._touched.pop(node, None)
-        self._seen.pop(node, None)
-        self._active.pop(node, None)
+
+    def forget(self, node: str) -> None:
+        """An operator saying they want this machine's log gone.
+
+        The tail goes with it. It holds one node's lines mixed into every
+        other's and cannot drop a part, so the choice is between dropping all of
+        it and going on answering with lines from a machine somebody asked us to
+        forget — including handing them back the moment that machine speaks
+        again and its ring is recreated. A reader loses the last few seconds of
+        tail, which `since` reports as nothing lost, because nothing was lost
+        that this console still holds."""
+        self._drop(node)
+        self._tail.clear()
 
     def clear(self) -> None:
-        for node in list(self._books):
-            self.forget(node)
+        with self._lock:
+            held = list(self._books)
+        for node in held:
+            self._drop(node)
+        self._tail.clear()
 
     def seen(self, node: str) -> int:
         """The last sequence number we hold from this node — what a reconnecting
@@ -201,11 +289,13 @@ class LogArchive:
         somebody else's history."""
         if not isinstance(lines, (list, tuple)):
             return 0
-        book = self._books.get(node) or self.book(node)
+        book = self.book(node)
         kept, highest = 0, self._seen.get(node, 0)
         if lost:
-            book.record("fleet", f"{int(lost)} lines were lost before this one",
-                        level=logbook.WARN, topic="gap")
+            gap = f"{int(lost)} lines were lost before this one"
+            for ring in (book, self._tail):
+                ring.record("fleet", gap, level=logbook.WARN, topic="gap",
+                            fields={"node": node})
         for line in lines[:logbook.MAX_QUERY]:
             if not isinstance(line, dict):
                 continue
@@ -223,10 +313,16 @@ class LogArchive:
             # read and ordered by nothing, because a machine we manage is an
             # adversary that happens to hold a grant — one ordering by a time
             # it supplied could pin its lines to the top of the page for ever.
+            tagged = _tagged(fields, node=node, seq=seq,
+                             said_at=line.get("at"))
             book.record(line.get("source"), line.get("message"),
                         level=line.get("level"), topic=line.get("topic"),
-                        fields=dict(fields if isinstance(fields, dict) else {},
-                                    seq=seq, said_at=line.get("at")))
+                        fields=tagged)
+            # The same line, in the order it arrived here, for whoever is
+            # watching the whole network rather than one machine.
+            self._tail.record(line.get("source"), line.get("message"),
+                              level=line.get("level"), topic=line.get("topic"),
+                              fields=tagged)
             highest = max(highest, seq)
             kept += 1
         self._seen[node] = highest
@@ -243,10 +339,14 @@ class LogArchive:
         node is carried on each line: a fleet page filtering by node, by level
         and by text is asking one question, and answering it three times over
         three rings is how the three answers come back disagreeing."""
-        wanted = [node] if node else list(self._books)
+        with self._lock:
+            # Name *and* ring together: looking the name up again afterwards is
+            # a second chance for it to have gone.
+            wanted = ([(node, self._books.get(node))] if node
+                      else list(self._books.items()))
+            held = sorted(self._books)
         rows = []
-        for name in wanted:
-            book = self._books.get(name)
+        for name, book in wanted:
             if book is None:
                 continue
             for line in book.query(limit=logbook.MAX_QUERY, **filters)["lines"]:
@@ -258,11 +358,47 @@ class LogArchive:
         bound = max(1, min(int(limit or logbook.MAX_QUERY), logbook.MAX_QUERY))
         return {"lines": rows[:bound], "matched": len(rows),
                 "returned": min(len(rows), bound),
-                "nodes": sorted(self._books)}
+                "nodes": held}
+
+    def stream(self, seq: int = 0, *,
+               limit: int = logbook.MAX_QUERY) -> dict:
+        """Everything that has arrived since ``seq``, from every machine.
+
+        Oldest first, which is the order a tail is read in, and bounded like
+        every other read here. A reader that fell behind the ring is told how
+        much went past (``lost``) rather than handed a gap it cannot see.
+
+        Lines from a machine whose ring we no longer hold are dropped on the
+        way out, not left for the cursor: a node forgotten and then heard from
+        again gets a new ring, and the tail must not answer for it with what it
+        said before somebody pressed forget."""
+        answer = self._tail.since(seq, limit=limit)
+        with self._lock:
+            held = set(self._books)
+        lines = []
+        for line in answer["lines"]:
+            node = str((line.get("fields") or {}).get("node") or "")
+            if node not in held:
+                continue
+            # On the line rather than only in its fields: every other reader
+            # here is handed `node` that way, and one shape for one thing is
+            # what keeps a page from having to know which reader answered it.
+            line["node"] = node
+            lines.append(line)
+        return {"lines": lines,
+                # What was *consumed*, not what was returned: a line dropped
+                # above has still gone past, and a cursor that did not move
+                # over it would hand it back for ever.
+                "seq": answer["seq"] or seq,
+                "lost": answer["lost"],
+                "nodes": sorted(held)}
+
 
     def status(self) -> dict:
         nodes = {}
-        for name, book in self._books.items():
+        with self._lock:
+            rings = list(self._books.items())
+        for name, book in rings:
             state = book.status()
             nodes[name] = {"records": state["records"],
                            "used_bytes": state["used_bytes"],
@@ -270,8 +406,17 @@ class LogArchive:
                            "megabytes": state["megabytes"],
                            "seen": self._seen.get(name, 0),
                            "active": self.is_active(name)}
+        tail = self._tail.status()
         return {"default_megabytes": self._default,
                 "max_nodes": MAX_NODES,
                 "used_bytes": sum(n["used_bytes"] for n in nodes.values()),
                 "records": sum(n["records"] for n in nodes.values()),
-                "nodes": nodes}
+                "nodes": nodes,
+                # Counted apart, because it is a second copy and an operator
+                # reading "how much of this machine is this costing" is owed
+                # both halves rather than one of them quietly folded into the
+                # other.
+                "tail": {"records": tail["records"],
+                         "used_bytes": tail["used_bytes"],
+                         "megabytes": tail["megabytes"],
+                         "seq": tail["seq"]}}

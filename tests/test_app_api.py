@@ -276,8 +276,8 @@ class TestTheShippedApps:
         from src.apps.fleet_web import FleetBridge
         operations = {op["name"]: op for op in app_api.declared(FleetBridge)}
         assert set(operations) == {"relation", "enrol", "request", "invite",
-                                   "logs_policy", "map_targets", "map_overlay",
-                                   "map_links"}
+                                   "logs_policy", "logs_stream", "logs_machines",
+                                   "map_targets", "map_overlay", "map_links"}
         assert operations["relation"]["changes"] is False
         assert operations["enrol"]["changes"] is True
         assert operations["request"]["changes"] is True
@@ -299,6 +299,14 @@ class TestTheShippedApps:
         # this node follow those machines — so it says so rather than looking
         # free.
         assert operations["map_links"]["changes"] is True
+        # The two the live network page watches. Reads, both of them — they
+        # touch rings this console already holds and never the mesh — and local
+        # for the same reason the map's two are: between them they hand over
+        # every machine this node manages *and what it is saying*, which is the
+        # pivot the fleet guide names, with the log attached.
+        for name in ("logs_stream", "logs_machines"):
+            assert operations[name]["remote"] is False
+            assert operations[name]["changes"] is False
 
     def test_no_shipped_operation_takes_a_free_form_blob(self):
         """Every argument that crosses this boundary has a shape. If one ever

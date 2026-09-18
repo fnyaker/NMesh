@@ -179,6 +179,12 @@ INDEX_HTML = """<!doctype html>
         <div class="grow"><p class="eyebrow">Mesh</p><h1>Network</h1>
           <p class="lede">Who this node is connected to, how it can be reached, and how to bring
             another node in.</p></div>
+        <div class="actions">
+          <!-- The same network, watched instead of read. A tab of its own
+               because that is what it is for: a screen left open beside the
+               work, not a panel somebody switches to and back from. -->
+          <a class="btn" href="/network" target="_blank" rel="noopener">Watch it live</a>
+        </div>
       </div>
       <nav class="subnav" role="tablist" aria-label="Network views">
         <button role="tab" data-subtab="peers" aria-selected="true">Peers</button>

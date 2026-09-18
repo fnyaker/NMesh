@@ -328,6 +328,259 @@ class TestTheArchiveHoldsOneRingPerNode:
         assert archive.query()["matched"] <= 1
 
 
+class TestTheLiveTail:
+    """One question the per-node rings do not answer.
+
+    They answer "what happened on that machine". A console watching the whole
+    network asks "what is happening, anywhere, right now" — and answering that
+    by merging N rings needs a cursor per ring, a map the page would carry and
+    every layer between would be widened for. So arrivals are written once more
+    into one small ring of their own, and the answer is `LogBook.since` on that:
+    the subscriber shape the rest of the product already speaks, and one integer
+    for a page to hold.
+    """
+
+    def _archive(self):
+        return fleet_logs.LogArchive()
+
+    def test_every_machine_comes_back_on_one_cursor(self):
+        archive = self._archive()
+        first, second = "aa" * 20, "bb" * 20
+        archive.absorb(first, [{"seq": 1, "at": 1.0, "message": "one",
+                                "source": "node", "level": "info"}])
+        archive.absorb(second, [{"seq": 1, "at": 2.0, "message": "two",
+                                 "source": "node", "level": "error"}])
+        answer = archive.stream(0)
+        # Oldest first: a tail is read downwards, unlike the query a person
+        # makes, which is newest first.
+        assert [line["message"] for line in answer["lines"]] == ["one", "two"]
+        assert [line["node"] for line in answer["lines"]] == [first, second]
+        assert answer["seq"] > 0 and answer["lost"] == 0
+        assert answer["nodes"] == sorted([first, second])
+
+    def test_a_cursor_is_not_handed_the_same_line_twice(self):
+        archive = self._archive()
+        node = "cc" * 20
+        archive.absorb(node, [{"seq": 1, "at": 1.0, "message": "once",
+                               "source": "node", "level": "info"}])
+        first = archive.stream(0)
+        assert len(first["lines"]) == 1
+        again = archive.stream(first["seq"])
+        assert again["lines"] == [] and again["seq"] == first["seq"]
+        archive.absorb(node, [{"seq": 2, "at": 2.0, "message": "twice",
+                               "source": "node", "level": "info"}])
+        assert [line["message"] for line in archive.stream(first["seq"])["lines"]] \
+            == ["twice"]
+
+    def test_the_tail_is_ordered_by_arrival_here(self):
+        """Not by the time a machine claims. Same rule as the merged query, and
+        it matters more here: a live view is read from the bottom, so a line a
+        machine could place at the bottom is a line it could put in front of
+        everybody else's."""
+        archive = self._archive()
+        archive.absorb("ee" * 20, [{"seq": 1, "at": 9_000_000.0,
+                                    "message": "claims the future",
+                                    "source": "node", "level": "info"}])
+        archive.absorb("ff" * 20, [{"seq": 1, "at": 1.0, "message": "honest",
+                                    "source": "node", "level": "info"}])
+        assert [line["message"] for line in archive.stream(0)["lines"]] \
+            == ["claims the future", "honest"]
+
+    def test_a_machine_cannot_sign_a_line_with_somebody_elses_name(self):
+        """The one thing a merged view must never get wrong. Every line in it
+        carries who said it, and `clean_fields` keeps the *first* `MAX_FIELDS`
+        entries — so a machine sending a field called `node`, or simply sending
+        eight of its own, could otherwise displace or overwrite the attribution
+        and be read as a neighbour."""
+        archive = self._archive()
+        liar, victim = "ab" * 20, "cd" * 20
+        archive.absorb(victim, [{"seq": 1, "at": 1.0, "message": "innocent",
+                                 "source": "node", "level": "info"}])
+        archive.absorb(liar, [{
+            "seq": 1, "at": 1.0, "message": "it was them", "source": "node",
+            "level": "info",
+            "fields": dict({"node": victim, "seq": 9999, "said_at": 0.0},
+                           **{f"pad{n}": n for n in range(logbook.MAX_FIELDS)})}])
+        lines = {line["message"]: line for line in archive.stream(0)["lines"]}
+        forged = lines["it was them"]
+        assert forged["node"] == liar
+        assert forged["fields"]["node"] == liar
+        assert forged["fields"]["seq"] == 1
+        # And the per-node ring says the same thing, because it is stamped by
+        # the same helper rather than by a second copy of the rule.
+        [held] = archive.query(node=liar, contains="it was them")["lines"]
+        assert held["fields"]["node"] == liar
+
+    def test_a_machine_we_were_told_to_forget_is_not_answered_for(self):
+        archive = self._archive()
+        gone, kept = "aa" * 20, "bb" * 20
+        archive.absorb(gone, [{"seq": 1, "at": 1.0, "message": "before",
+                               "source": "node", "level": "info"}])
+        archive.forget(gone)
+        archive.absorb(kept, [{"seq": 1, "at": 2.0, "message": "after",
+                               "source": "node", "level": "info"}])
+        # And speaking again gets a fresh ring, which must not come with what
+        # was said before somebody pressed forget.
+        archive.absorb(gone, [{"seq": 2, "at": 3.0, "message": "returned",
+                               "source": "node", "level": "info"}])
+        messages = [line["message"] for line in archive.stream(0)["lines"]]
+        assert "before" not in messages
+        assert messages == ["after", "returned"]
+
+    def test_a_reader_that_fell_behind_is_told_rather_than_lied_to(self):
+        """The ring is the buffer, and nothing is held per subscriber. So a page
+        that was away comes back with the number it last saw and is told how much
+        went past — never handed a gap it cannot see."""
+        import os
+
+        archive = self._archive()
+        node = "dd" * 20
+        archive.absorb(node, [{"seq": 1, "at": 1.0, "message": "kept",
+                               "source": "node", "level": "info"}])
+        held = archive.stream(0)["seq"]
+        # A tail at its floor, filled with lines that do not compress: what a
+        # page away for a minute over a busy fleet comes back to.
+        archive._tail.start(megabytes=logbook.MIN_BYTES / 1024 / 1024)
+        seq = 2
+        for _batch in range(4):
+            archive.absorb(node, [{"seq": seq + n, "at": 2.0,
+                                   "source": "node", "level": "info",
+                                   "message": os.urandom(200).hex()}
+                                  for n in range(logbook.MAX_QUERY)])
+            seq += logbook.MAX_QUERY
+        answer = archive.stream(held)
+        assert answer["lost"] > 0
+        assert len(answer["lines"]) <= logbook.MAX_QUERY
+        # And the cursor still moves, so a reader told about the gap resumes
+        # rather than asking for the same missing lines for ever.
+        assert answer["seq"] > held
+
+    def test_the_tail_is_bounded_and_counted_apart(self):
+        """It is a second copy, so an operator asking what this costs is owed
+        both halves rather than one quietly folded into the other."""
+        archive = self._archive()
+        node = "ee" * 20
+        archive.absorb(node, [{"seq": n, "at": 1.0, "message": "y" * 400,
+                               "source": "node", "level": "info"}
+                              for n in range(1, logbook.MAX_QUERY)])
+        status = archive.status()
+        assert status["tail"]["megabytes"] == fleet_logs.TAIL_MEGABYTES
+        assert status["tail"]["used_bytes"] <= \
+            fleet_logs.TAIL_MEGABYTES * 1024 * 1024
+        assert status["tail"]["records"] > 0
+        # Counted apart from the per-node rings, not inside them.
+        assert "tail" not in status["nodes"]
+
+    def test_making_room_is_not_forgetting(self):
+        """A fleet at `MAX_NODES` evicts its quietest ring whenever a new
+        machine speaks. If that also cleared the live tail, a console watching a
+        busy fleet would lose the whole stream every time an unfamiliar node
+        said anything — so eviction drops the ring and leaves the tail, and only
+        an operator saying *forget* drops both."""
+        archive = self._archive()
+        speaker = "aa" * 20
+        archive.absorb(speaker, [{"seq": 1, "at": 1.0, "message": "still here",
+                                  "source": "node", "level": "info"}])
+        for number in range(fleet_logs.MAX_NODES + 4):
+            archive.absorb(f"{number:040x}",
+                           [{"seq": 1, "at": 2.0, "message": "crowding in",
+                             "source": "node", "level": "info"}])
+        # Rings were evicted — that bound still holds…
+        assert len(archive.status()["nodes"]) == fleet_logs.MAX_NODES
+        # …and the tail kept running through all of it.
+        assert len(archive.stream(0)["lines"]) > 1
+        # The operator's verb is the one that drops it.
+        archive.forget(f"{fleet_logs.MAX_NODES:040x}")
+        assert archive.stream(0)["lines"] == []
+
+    def test_a_reader_and_the_loop_writing_do_not_collide(self):
+        """Lines arrive on the node's loop and every reader here is a console
+        thread, so the table of rings is iterated by one while the other adds to
+        it and evicts from it. In CPython that is
+        `RuntimeError: dictionary keys changed during iteration` — a crash, not
+        a stale answer, and one a machine could time by speaking while somebody
+        has the page open. The charter calls a crash a security bug.
+
+        A live page reads this once a second, which is what turned a race nobody
+        had hit into one worth writing down.
+
+        Every thread runs the same number of rounds from a barrier and yields
+        between them, which is what makes the overlap real: the first draft of
+        this test let the writer finish in ten milliseconds, before a reader had
+        been scheduled at all, and proved nothing while passing.
+
+        It is attempted more than once because a race is caught by luck, not by
+        construction — the unguarded version survives a single attempt often
+        enough that one would be a coin toss wearing a guard's clothes. Even so
+        this is a *guard*, not a proof: what makes the lock correct is that a
+        dict cannot be iterated while another thread resizes it, and the test is
+        here to notice if somebody takes it back out."""
+        import threading
+        import time as clock
+
+        for _attempt in range(3):
+            archive = self._archive()
+            rounds = 400
+            seq, made, failures = [0], [0], []
+
+            def churn():
+                made[0] += 1
+                # A new identity every round, so the table is growing *and*
+                # evicting under the readers rather than merely changing.
+                archive.absorb(f"{made[0]:040x}",
+                               [{"seq": 1, "at": float(made[0]),
+                                 "source": "node", "level": "info",
+                                 "message": f"line {made[0]}"}])
+
+            def follow():
+                seq[0] = archive.stream(seq[0])["seq"]
+
+            work = {"churn": churn, "follow": follow, "status": archive.status,
+                    "query": archive.query,
+                    "resize": lambda: archive.set_default_megabytes(2.0)}
+            ready = threading.Barrier(len(work))
+
+            def run(name):
+                ready.wait(timeout=30)
+                try:
+                    for _ in range(rounds):
+                        work[name]()
+                        clock.sleep(0)      # hand the interpreter over
+                except Exception as exc:           # noqa: BLE001 — the point
+                    failures.append((name, repr(exc)))
+
+            threads = [threading.Thread(target=run, args=(name,))
+                       for name in work]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+            assert not failures, failures
+            assert not any(thread.is_alive() for thread in threads)
+            # And it still answers afterwards, rather than merely not raising: a
+            # lock that made every read return nothing would pass everything
+            # above and none of the point of it.
+            assert made[0] == rounds
+            follow()
+            assert seq[0] > 0
+            assert len(archive.status()["nodes"]) == fleet_logs.MAX_NODES
+
+    def test_nothing_hostile_in_a_body_reaches_the_tail_unbounded(self):
+        archive = self._archive()
+        node = "ba" * 20
+        for junk in (None, "lines", 42, [None, 3, "x"], [{"no": "seq"}]):
+            archive.stream(junk if isinstance(junk, int) else 0)   # must not raise
+            archive.absorb(node, junk)
+        archive.absorb(node, [{"seq": 1, "message": "m" * 10_000,
+                               "source": "s" * 500, "level": "invented",
+                               "at": "soon",
+                               "fields": {f"k{n}": "v" * 900 for n in range(40)}}])
+        for line in archive.stream(0)["lines"]:
+            assert len(line["message"]) <= logbook.MAX_MESSAGE
+            assert len(line["fields"]) <= logbook.MAX_FIELDS
+            assert line["level"] in logbook.LEVELS
+
+
 class TestThePolicyIsPerNodeWithADefault:
     def test_the_default_is_active_and_a_node_inherits_it(self):
         from src.apps.fleet_state import FleetState
@@ -437,6 +690,52 @@ class TestTheConsoleSideOfIt:
             assert answer["defaults"]["policy"] == fleet_logs.DEFAULT_POLICY
             assert machine in answer["policies"]
             assert answer["status"]["nodes"][machine]["records"] == 1
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_the_live_page_is_answered_from_here_and_never_the_mesh(self):
+        """Two operations, one for each half of what a network page shows: what
+        has arrived, and who it arrives from. Both read rings this console
+        already holds — a page following forty machines is not forty machines'
+        worth of traffic."""
+        node, app, bridge = await self._bridge()
+        machine = "ab" * 20
+        try:
+            app.state.add_managed(machine, caps=["logs"], label="the relay")
+            app._log_follows[machine] = "rid"
+            app._on_logs_reply(
+                fleet.NodeID.from_hex(machine),
+                {"rid": "rid", "op": "push", "ok": True,
+                 "lines": [{"seq": 1, "at": 10.0, "level": "warn",
+                            "source": "peers", "topic": "link",
+                            "message": "a link flapped", "fields": {}}]})
+            await settle()
+            stream = bridge.api_logs_stream()
+            assert [line["message"] for line in stream["lines"]] \
+                == ["a link flapped"]
+            assert stream["lines"][0]["node"] == machine
+            # And the cursor it hands back is the one to come back with.
+            assert bridge.api_logs_stream(seq=stream["seq"])["lines"] == []
+
+            board = bridge.api_logs_machines()
+            [row] = board["machines"]
+            assert row["id"] == machine and row["label"] == "the relay"
+            assert row["records"] == 1 and row["caps"] == ["logs"]
+            assert row["policy"] == fleet_logs.DEFAULT_POLICY
+            # The choices belong to the form that offers them, once — not to
+            # every row in a list that may be a hundred long.
+            assert "policies" not in row and board["policies"]
+            assert board["held"]["tail"]["records"] == 1
+        finally:
+            bridge.stop()
+            await node.stop()
+
+    async def test_a_machine_nobody_manages_is_on_neither_answer(self):
+        node, app, bridge = await self._bridge()
+        try:
+            assert bridge.api_logs_stream()["lines"] == []
+            assert bridge.api_logs_machines()["machines"] == []
         finally:
             bridge.stop()
             await node.stop()

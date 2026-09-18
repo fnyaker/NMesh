@@ -593,6 +593,29 @@ on its node card in the Nodes tab and in Fleet → Logs.
 read of this node's ledger. `logs_policy` does **not**: what this console
 collects is a decision about this operator's own machine, like `enrol`.
 
+### Every machine at once, live
+
+Fleet → Logs answers "what did that machine say", through filters, newest first
+— the question a person asks. The console's `/network` page asks the other one,
+"what is happening, anywhere, right now", and two operations answer it:
+
+| Operation | Answers |
+|---|---|
+| `logs_stream` | everything that has arrived since a sequence number, from every machine, oldest first — with `lost` when the reader fell behind |
+| `logs_machines` | who we collect from and what we hold of each: the same `logs` block the node card reads, one row per managed machine |
+
+Both read rings this console already holds and neither touches the mesh, so a
+page following forty machines is not forty machines' worth of traffic. Neither
+takes a filter, deliberately: a cursor consumes what it passes, so a *filtered*
+subscription would have already discarded the lines a new filter wanted, with
+nothing to say it had. The page filters what it has been handed instead, which
+is also why changing a filter there costs no call.
+
+Neither travels, for the reason the map's three do not: between them they hand
+over every machine this node manages **and what it is saying**. How the merged
+tail behind `logs_stream` is kept, and what stops a machine signing a line with
+a neighbour's name: [`../Architecture/logging.md`](../Architecture/logging.md).
+
 ## The map, past what one node can see
 
 The console's mesh map draws what its node can *measure*: its own links, and the
@@ -648,7 +671,8 @@ no frames, no state, nothing kept.
 | `map_targets` | machines that granted `manage`, and whether one can be driven now |
 | `map_overlay` | what fleet knows about each node — managed, controls this node, log being collected — in fleet's words |
 
-None of the three travels. That is the harder half of the decision and it is
+None of the three travels (nor do the two log readers above, for the same
+reason). That is the harder half of the decision and it is
 deliberate: none of them *acts*, so letting them ride to another operator's
 console looks harmless — but together they hand that operator the list of
 machines this node manages and can reach, which is precisely how a node somebody

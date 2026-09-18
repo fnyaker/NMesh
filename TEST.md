@@ -16,7 +16,7 @@ ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
 hand: `python3 -m venv .venv && . .venv/bin/activate &&
 pip install -r requirements.txt`.)
 
-Around 3700 tests in ~30 seconds. (The figure is prose, not a promise —
+Around 3800 tests in ~30 seconds. (The figure is prose, not a promise —
 what is held to a number is in the suite itself.)
 
 ---
@@ -32,9 +32,9 @@ one fails the argument is about the rule:
 | `test_charter.py` | the supply chain (no third dependency arrives in a commit that needed a helper), the language, a floor under the framing hot path, and the two security absolutes that had exceptions — the session token's comparison and where noise is charged |
 | `test_medium_agnostic.py` | "transport-agnostic": no module outside the core may name a medium, the core may name exactly the two the charter declares, **each in the one module that owns it** (so a split cannot spread the exception), and the charter and `transports.md` must say the same thing |
 | `test_hostile_plugins.py` | a transport or an app that throws, lies about types, answers enormously, or implements the bare minimum must not break the node |
-| `test_speedtest.py` | every refusal that makes "measure a link by loading it" safe to offer |
+| `test_speedtest.py` | every refusal that makes "measure a link by loading it" safe to offer — and the shape of the answer, because the measurement worked for months under a page that could not read it |
 | `test_control_plane.py` | the reach of every operation, against the ledger in `control-plane.md` |
-| `test_webassets.py` | no emoji in an interface |
+| `test_webassets.py` | no emoji in an interface, and that a page never reads one plane answer shape as the other (`CHANNEL.call` hands back the result, `CHANNEL.ask` an envelope around it) |
 | `test_updater.py` | the version, in the two files that carry it |
 
 ## Integration tests

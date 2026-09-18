@@ -143,6 +143,42 @@ offered wherever that machine appears: on its node card, in Fleet → Logs, and 
 the shared node card the console's map opens (`fleet.relation` carries it,
 `fleet.logs_policy` changes it).
 
+### And one ring more: the live tail
+
+The rings above answer "what happened on that machine". A console watching the
+**whole network** (`/network`, see
+[`Docs/WebConsole/guide`](../WebConsole/guide)) asks a different question —
+"what is happening, anywhere, right now" — and a merge of N rings has no cursor
+a subscriber can carry: it would need one sequence number per ring, a map the
+page holds and every layer between is widened for.
+
+So an arrival is written a second time, in order, into one small ring of its
+own, and `LogArchive.stream` is `LogBook.since` on that: **one integer**, the
+same subscriber shape as everything else here, and a `lost` count a reader can
+act on.
+
+It is a second copy, and that is the cost. What it buys is the one property a
+live tail must have and a fair merge must not: **the loudest machine wins.** A
+budget per node exists so that a node saying a great deal cannot push out a node
+saying little — right for a history, wrong for a tail, where a machine screaming
+*is* the news. The two rules live in two rings rather than fighting over one,
+and `logs.status` counts the tail apart from the rings so an operator asking
+what this costs is owed both halves.
+
+Three rules hold it together:
+
+- **Ours go on first.** Every line in the tail carries `node`, `seq` and
+  `said_at`, and `clean_fields` keeps the *first* `MAX_FIELDS` entries — so a
+  machine sending eight fields of its own, or one called `node`, could otherwise
+  displace or overwrite who said it. A merged view whose attribution a
+  contributor can set is a way to be read as your neighbour.
+- **Ordered by arrival here.** Same reason the per-node merge is, and it matters
+  more: a live tail is read from the bottom, so a line a machine could place at
+  the bottom is a line it could put in front of everybody else's.
+- **A machine forgotten is not answered for.** The tail holds one node's lines
+  mixed into every other's and cannot drop a part, so `forget` drops all of it —
+  and a node that speaks again gets a new ring rather than its old lines back.
+
 ## What this is not
 
 * **Not a file.** Nothing is written to disk, by design. A ring in memory dies

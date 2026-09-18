@@ -844,9 +844,11 @@ CSS = TOKENS + BASE + COMPONENTS + SHELL
 # Markup every page shares
 # ---------------------------------------------------------------------------
 # The strip saying which machine the controls on this page now point at. One
-# definition, embedded by each page: three pages writing it three times is three
-# chances for one of them to say it differently, and this is the one line on
-# screen that must never be wrong.
+# definition, embedded by each page that follows a context: a page writing it
+# for itself is another chance to say it differently, and this is the one line
+# on screen that must never be wrong. (`/network` embeds none of it: it answers
+# for this console whatever is being driven, and a strip naming another machine
+# would be exactly the claim the page is not making.)
 #
 # `data-ctx-local` on the page's <body> says what this particular page cannot do
 # for that node — chat and fleet run here whatever is on screen, because the far
@@ -1519,6 +1521,19 @@ function patchValues(root, values){
 // `<li>`, `<option>`, `<div>` and `<img>` the two agree exactly; for `<tr>`
 // only the template is right.
 const HTML_PROBE = document.createElement("template");
+// Rewritten only when the options actually differ. This runs on every poll, and
+// replacing the options of a `<select>` closes it — so a dropdown opened to pick
+// a node shut itself a second later, every second, on the page whose whole job
+// is picking a node.
+function fill(select, pairs){
+  const keep = select.value;
+  const html = pairs.map((pair) =>
+    '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>").join("");
+  if(select.innerHTML === html) return;
+  select.innerHTML = html;
+  if(pairs.some((pair) => pair[0] === keep)) select.value = keep;
+}
+
 function setHTML(target, html){
   const element = typeof target === "string" ? $(target) : target;
   if(!element) return element;

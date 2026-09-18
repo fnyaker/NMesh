@@ -1,5 +1,5 @@
 """
-Embedded web assets — one design system, three pages.
+Embedded web assets — one design system, every page in it.
 
 Everything the browser loads lives here as Python strings: the console is often
 installed read-only, and a page that reads files at runtime is a page that can
@@ -16,15 +16,15 @@ Layout, and the rule that keeps it from drifting:
   target rather than a second set of paths. It ships with every page, right
   after ``ui.JS``, because a page that could not reach the plane could not read
   the node at all.
-* :mod:`.console`, :mod:`.chat`, :mod:`.fleet` and :mod:`.nodeview` hold one
-  page each: markup, the page's own JS, and only the CSS that genuinely belongs
-  to that page.
+* :mod:`.console`, :mod:`.chat`, :mod:`.fleet`, :mod:`.network` and
+  :mod:`.nodeview` hold one page each: markup, the page's own JS, and only the
+  CSS that genuinely belongs to that page.
 * :mod:`.terminal` is the other shared piece: the emulator, the session driver
   and the styles a terminal needs, mounted by ``/fleet`` for its panel and by
   ``/term`` for the full-screen page it also carries. Two terminals would be two
   copies of every bug in one.
 * :mod:`.nodeview` is the exception that proves the rule: it is a *view* before
-  it is a page. All three pages mount it — the console in a dialog, chat in a
+  it is a page. The console, chat and fleet all mount it — the console in a dialog, chat in a
   panel, fleet in its sheet — and it also serves itself at ``/node`` for the
   window or tab a viewer may prefer. One description of a node, not four that
   drift.
@@ -35,14 +35,19 @@ Layout, and the rule that keeps it from drifting:
   off the table: nothing is listed, so there is nothing to fill.
 
 Each page's stylesheet is ``ui.CSS`` plus its own, and each page's script is
-``ui.JS`` plus its own. So a token changed once changes all three pages, and a
-page cannot quietly grow a second button style: there is one to reach for.
+``ui.JS`` plus its own. So a token changed once changes every page, and a page
+cannot quietly grow a second button style: there is one to reach for. A helper
+two pages both want moves *into* :mod:`.ui` rather than being copied — ``fill``
+went there the day the network page needed the same `<select>` that does not
+close under an open dropdown.
 """
 from . import ui
 from . import channel
 from .chat import CHAT_HTML, CHAT_PAGE_CSS, CHAT_PAGE_JS
 from .console import INDEX_HTML, CONSOLE_PAGE_CSS, CONSOLE_PAGE_JS
 from .fleet import FLEET_HTML, FLEET_PAGE_CSS, FLEET_PAGE_JS
+from .network import (HTML as NETWORK_HTML, CSS as _NETWORK_PAGE_CSS,
+                      JS as _NETWORK_PAGE_JS)
 from .nodeview import (NODE_PAGE_CSS_FULL as _NODE_PAGE_CSS,
                        PAGE_HTML as NODE_HTML, PAGE_JS as _NODE_PAGE_JS)
 from .packages import PAGE_HTML as PKG_HTML
@@ -75,9 +80,16 @@ NODE_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + _NODE_PAGE_JS
 PKG_CSS = ui.CSS + packages.CSS + packages.PAGE_CSS
 PKG_JS = ui.JS + channel.JS + packages.JS + packages.PAGE_JS
 
+# The whole network, live. It reads the plane and nothing else — no node card,
+# no package card, no terminal — so it carries the design system and the channel
+# and stops there.
+NETWORK_CSS = ui.CSS + _NETWORK_PAGE_CSS
+NETWORK_JS = ui.JS + channel.JS + _NETWORK_PAGE_JS
+
 __all__ = ["INDEX_HTML", "STYLE_CSS", "APP_JS",
            "CHAT_HTML", "CHAT_CSS", "CHAT_JS",
            "FLEET_HTML", "FLEET_CSS", "FLEET_JS",
            "TERM_HTML", "TERM_CSS", "TERM_JS",
            "NODE_HTML", "NODE_CSS", "NODE_JS",
-           "PKG_HTML", "PKG_CSS", "PKG_JS", "channel", "ui"]
+           "PKG_HTML", "PKG_CSS", "PKG_JS",
+           "NETWORK_HTML", "NETWORK_CSS", "NETWORK_JS", "channel", "ui"]

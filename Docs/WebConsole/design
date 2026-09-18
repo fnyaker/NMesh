@@ -1,14 +1,16 @@
 # The console's design system
 
-Five pages (`/`, `/chat`, `/fleet`, `/node`, `/term`) served by the same server,
-which have to look like the same product. This document describes **the contract**
-that keeps them that way — what lives where, and what is not allowed.
+Six pages (`/`, `/chat`, `/fleet`, `/network`, `/node`, `/term`) served by the
+same server, which have to look like the same product. This document describes
+**the contract** that keeps them that way — what lives where, and what is not
+allowed.
 
 Code: [`src/webassets/`](../../src/webassets/) —
 [`ui.py`](../../src/webassets/ui.py) (the system),
 [`console.py`](../../src/webassets/console.py),
 [`chat.py`](../../src/webassets/chat.py),
-[`fleet.py`](../../src/webassets/fleet.py) (one page each),
+[`fleet.py`](../../src/webassets/fleet.py),
+[`network.py`](../../src/webassets/network.py) (one page each),
 [`nodeview.py`](../../src/webassets/nodeview.py) (a *view* before it is a page:
 the console, chat and fleet all mount it, and it also serves itself at `/node`)
 and [`terminal.py`](../../src/webassets/terminal.py) (the same shape for the
@@ -27,7 +29,15 @@ FLEET_CSS = ui.CSS + nodeview.CSS + terminal.CSS      FLEET_JS = ui.JS + channel
           + FLEET_PAGE_CSS                                      + FLEET_PAGE_JS
 NODE_CSS  = ui.CSS + nodeview.CSS + NODE_PAGE_CSS      NODE_JS  = ui.JS + channel.JS + nodeview.JS + NODE_PAGE_JS
 TERM_CSS  = ui.CSS + terminal.CSS + terminal.PAGE_CSS  TERM_JS  = ui.JS + channel.JS + terminal.JS + terminal.PAGE_JS
+NETWORK_CSS = ui.CSS + NETWORK_PAGE_CSS              NETWORK_JS = ui.JS + channel.JS + NETWORK_PAGE_JS
 ```
+
+A page carries only the shared pieces it actually mounts — `/network` draws
+nodes as rows rather than as cards, so it takes the system and the channel and
+stops there. And the traffic goes the other way too: a helper a second page
+wants moves **into** `ui.py` rather than being copied. `fill` — the `<select>`
+painter that leaves an open dropdown open — did exactly that the day `/network`
+needed the one fleet already had.
 
 A token changed once changes every page. A page cannot quietly grow a second
 button style: there is one within reach.
@@ -225,7 +235,8 @@ What each of the pages used to solve on its own:
   number registers itself instead of waiting to be remembered;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
-  and `CTX_BAR`, the strip that says so on all three pages. `CONTEXT.trouble()`
+  and `CTX_BAR`, the strip that says so on every page that follows a context
+  (`/network` deliberately does not: it answers for this console). `CONTEXT.trouble()`
   marks a node that has gone quiet and `CONTEXT.lost()` hands the context back
   when it is gone for good;
 - `OPEN` / `openLinked` — how a link into another app opens (a window, a tab, or

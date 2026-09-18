@@ -1155,8 +1155,8 @@ class TestAppApiOverHttp:
             assert "fleet" in apps
             names = {op["name"] for op in apps["fleet"]["operations"]}
             assert names == {"relation", "enrol", "request", "invite",
-                             "logs_policy", "map_targets", "map_overlay",
-                             "map_links"}
+                             "logs_policy", "logs_stream", "logs_machines",
+                             "map_targets", "map_overlay", "map_links"}
         finally:
             console.stop(); await host.stop_all(); await node.stop()
 

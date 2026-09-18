@@ -995,10 +995,13 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       this.say(element, "Loading the link — up to ten seconds…");
       try{
-        const {ok, error, data} = await this.op("node.speedtest", {node:id});
-        if(!ok || data.ok === false){
-          this.say(element, (data && data.error) || error || "Could not measure",
-                   true);
+        // The plane answers with the measurement itself, not with an envelope
+        // around it. Reading one that was never there is how this button
+        // reported a failure for every test that worked: `data.ok` on an
+        // undefined `data` throws, and the catch below calls that "failed".
+        const data = await this.op("node.speedtest", {node:id});
+        if(data.ok === false){
+          this.say(element, data.error || "Could not measure", true);
           return;
         }
         const rate = (bps) => bps >= 1e6 ? (bps / 1e6).toFixed(1) + " MB/s"

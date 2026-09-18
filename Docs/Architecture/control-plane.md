@@ -501,6 +501,13 @@ const {ok, error, detail, data} =
 CHANNEL.has("node.retry");                           // draw the button, or do not
 ```
 
+The two are not interchangeable, and mixing them up does not fail where it is
+written: destructure `ask`'s envelope off a `call` and `data` is `undefined`,
+the field read off it throws one line later, and whatever `catch` stands around
+the call reports it as the network's fault. That is exactly how the node card's
+speed test came to report a failure for every measurement that worked
+(`Docs/Architecture/gotchas.md`, "Two answer shapes, one character apart").
+
 `{local: true}` forces one call to this node whatever is being driven — a view
 mounted inside a local app needs it, because "what is my link to this person" is
 *this* node's question. `CHANNEL.operations()` reads the catalogue once per

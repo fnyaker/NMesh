@@ -598,6 +598,23 @@ class FleetBridge:
         app_api.operation(
             "map_links", "What the machines we manage say they are linked to",
             changes=True),
+        # The whole network, watched rather than asked after. Both read rings
+        # this console already holds and neither touches the mesh, so a page
+        # following forty machines is not forty machines' worth of traffic.
+        #
+        # **Local only**, for the reason `map_targets` and `map_overlay` are:
+        # each hands over the whole list of machines this node manages and what
+        # they are saying, which is precisely how a node somebody manages
+        # becomes a way to reach — and to listen to — the nodes *it* manages
+        # (`Docs/Apps/fleet`).
+        app_api.operation(
+            "logs_stream", "What has arrived from every machine since a "
+                           "sequence number",
+            [app_api.param("seq", "count", required=False, default=0),
+             app_api.param("limit", "count", required=False, default=0)]),
+        app_api.operation(
+            "logs_machines", "Every machine whose log this console collects, "
+                             "and how much of it it holds"),
         app_api.operation(
             "invite", "Have a node we manage mint an invitation to its mesh",
             [app_api.param("node", "node"),
@@ -701,6 +718,39 @@ class FleetBridge:
             # twice to see.
             row["tone"] = "warn"
         return {"nodes": out}
+
+    def api_logs_stream(self, seq: int = 0, limit: int = 0) -> dict:
+        """The live tail of every machine at once, since ``seq``.
+
+        No filters, deliberately. A filter here would be a *different
+        subscription*: change it and the cursor has already consumed the lines
+        the new filter wanted, so they are gone and nothing says so. The tail is
+        bounded, the page keeps what it has been handed, and a filter is a view
+        of that — which is also why changing one never costs a call."""
+        return self._logs.stream(
+            seq, limit=limit or fleet_logs.logbook.MAX_QUERY)
+
+    def api_logs_machines(self) -> dict:
+        """Who we collect from, and what we hold of each.
+
+        The rows are `_logs_relation` — the same answer the node card reads, so
+        a machine cannot be described one way here and another way there."""
+        state = self._app.state
+        machines = []
+        for entry in state.managed():
+            node = entry.get("id") or ""
+            if not node:
+                continue
+            row = self._logs_relation(node)
+            # The choices belong to the form that offers them, once, not to
+            # every row in a list of a hundred.
+            row.pop("policies", None)
+            row.update(id=node, label=entry.get("label") or "",
+                       caps=list(entry.get("caps") or []))
+            machines.append(row)
+        return {"machines": machines, "held": self._logs.status(),
+                "defaults": state.log_defaults(),
+                "policies": list(fleet_logs.POLICIES)}
 
     def _logs_relation(self, node: str) -> dict:
         policy = self._app.state.log_policy(node)
