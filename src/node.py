@@ -454,6 +454,10 @@ class MeshNode:
         # somebody stopped looking, is a record it has no business holding
         # (`src/logbook.py`).
         self.logs = LogBook()
+        # A trace keeps the log on while it runs (`trace.set`); this is the
+        # other end of that hold, for a trace that runs out on its own as well
+        # as one somebody stopped.
+        self.trace.on_stop = lambda: self.logs.release(logbook.TRACE)
         # What is wrong here, as a human would want it said — a notice board
         # rather than a recording, so it is always on and deliberately poorer
         # than the ring beside it (`src/alerts.py`). An operator must be able to

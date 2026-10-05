@@ -565,6 +565,7 @@ INDEX_HTML = """<!doctype html>
         <button role="tab" data-subtab="appearance" aria-selected="false">This browser</button>
         <button role="tab" data-subtab="config" aria-selected="false">Configuration</button>
         <button role="tab" data-subtab="diagnostics" aria-selected="false">Diagnostics</button>
+        <button role="tab" data-subtab="logs" aria-selected="false">Logs</button>
         <button role="tab" data-subtab="advanced" aria-selected="false">Advanced</button>
       </nav>
 
@@ -953,6 +954,58 @@ INDEX_HTML = """<!doctype html>
         </article>
       </div>
 
+      <div data-sub="logs" class="stack" hidden>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Recording</h2>
+            <div class="sub">What this node says about itself — kept only while somebody asks</div></div>
+            <span id="nlog-pill" class="badge"></span></div>
+          <div class="card-body">
+            <p class="muted small">Nothing is kept until it is started, and what was kept is dropped
+              when the last one keeping it stops: an operator here, a trace that is running, or a
+              console following this log from elsewhere. It lives in memory only, compressed, and
+              is bounded by the size below.</p>
+            <div class="toolbar">
+              <button id="nlog-start" class="primary">Start recording</button>
+              <button id="nlog-stop">Stop</button>
+              <label class="field narrow"><span>Size, MB</span>
+                <input id="nlog-size" type="number" min="1" max="512" step="1" aria-label="Ring size in megabytes"></label>
+              <button id="nlog-resize">Apply size</button>
+              <span class="grow"></span>
+              <button id="nlog-clear">Clear</button>
+            </div>
+            <p id="nlog-state" class="msg"></p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Live</h2>
+            <div class="sub">Oldest at the top, follows the end as lines are written</div></div>
+            <span id="nlog-live" class="badge"></span></div>
+          <div class="card-body">
+            <div class="toolbar">
+              <button id="nlog-follow" aria-pressed="true">Pause</button>
+              <label class="field"><span>Level</span>
+                <select id="nlog-level">
+                  <option value="">Everything</option>
+                  <option value="info">info and above</option>
+                  <option value="warn">warnings and errors</option>
+                  <option value="error">errors only</option>
+                </select></label>
+              <label class="field"><span>Source</span>
+                <input id="nlog-source" type="search" list="nlog-sources" placeholder="node, peers, app:…"></label>
+              <datalist id="nlog-sources"></datalist>
+              <label class="field"><span>Contains</span>
+                <input id="nlog-contains" type="search" placeholder="text or a field value"></label>
+              <span class="grow"></span>
+              <button id="nlog-older">Load older</button>
+              <button id="nlog-save">Download</button>
+              <button id="nlog-wipe">Clear view</button>
+            </div>
+            <div id="nlog-view" class="logview" role="log" aria-live="off" tabindex="0"></div>
+            <p id="nlog-note" class="muted small"></p>
+          </div>
+        </article>
+      </div>
+
       <div data-sub="advanced" class="stack" hidden>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Content-addressed transfer</h2>
@@ -1073,6 +1126,29 @@ INDEX_HTML = """<!doctype html>
 # starts to look reusable, it belongs in `ui.py`, not in a second copy.
 CONSOLE_PAGE_CSS = """
 #chart{width:100%;height:236px;display:block}
+/* The node's own log, live. A grid per line so the columns hold while the
+   message wraps; capped in height, and scrolled by the page only while the
+   reader is already at the end. */
+.logview{max-height:62vh;min-height:220px;overflow:auto;font:var(--fs-xs)/1.55 var(--mono);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);
+  padding:var(--s-2) var(--s-3)}
+.logview .ll{display:grid;grid-template-columns:96px 44px minmax(64px,140px) minmax(0,1fr);
+  gap:var(--s-3);padding:1px 0;border-bottom:1px solid var(--border)}
+.logview .ll:last-child{border-bottom:0}
+.logview .ll time,.logview .ll .src{color:var(--text-muted);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.logview .ll .lvl{font-weight:700;text-transform:uppercase;color:var(--text-muted)}
+.logview .ll.warn .lvl{color:var(--warn)}
+.logview .ll.error .lvl{color:var(--danger)}
+.logview .ll.error .msg{color:var(--danger)}
+.logview .ll .msg{white-space:pre-wrap;word-break:break-word}
+.logview .ll .fields{color:var(--text-muted)}
+.logview .gap{color:var(--warn);padding:var(--s-1) 0;font-style:italic}
+.logview .empty{font-family:var(--font)}
+@media (max-width:640px){
+  .logview .ll{grid-template-columns:64px minmax(0,1fr)}
+  .logview .ll .lvl,.logview .ll .src{display:none}
+}
 /* A node's own links, unfolded under it: indented, quieter, and not clickable
    as a row — the node above is the thing you open. */
 .link-row.group>td:first-child{display:flex;align-items:center;gap:var(--s-2)}
@@ -1282,6 +1358,7 @@ function onRoute(section, sub){
   // a stale form would offer to save values they no longer hold.
   if(section === "settings" && sub === "config") loadConfig();
   if(section === "settings" && sub === "diagnostics") loadTrace();
+  if(section === "settings" && sub === "logs") NLOG.enter(); else NLOG.leave();
   if(section === "settings" && sub === "updates"){ refreshReleases(); refreshKeys(); }
   if(section === "settings" && sub === "identity") refreshPseudo();
 }
@@ -4292,7 +4369,341 @@ $("trace-start").addEventListener("click", () =>
   traceAction("start", {seconds:Number($("trace-seconds").value) || 120}));
 $("trace-stop").addEventListener("click", () => traceAction("stop"));
 $("trace-clear").addEventListener("click", () => traceAction("clear"));
-$("trace-export").addEventListener("click", () => { window.location = "/api/trace/export"; });
+// Through the channel, not a navigation: a navigation cannot carry the header
+// that says which node is being driven, so it downloaded *this* machine's trace
+// while the page described another one.
+$("trace-export").addEventListener("click", (event) => withBusy(event.target, async () => {
+  try{
+    const data = await CHANNEL.call("trace.export");
+    saveBytes("nmesh-trace.json",
+              new TextEncoder().encode(JSON.stringify(data, null, 1)),
+              "application/json");
+  }catch(error){
+    if(!isStale(error)) toast("The trace could not be read", "danger");
+  }
+}));
+
+// ---- the node's own log, live ---------------------------------------------
+// Two questions, and they are the ring's two readers. When the view opens or a
+// filter changes: the end of the log, newest first (`logs.query`), painted
+// oldest at the top. Then, on a cadence: everything after where that left off
+// (`logs.since`), appended at the bottom. The cursor is the node's own — `head`
+// from the first answer, `seq` from every one after — so a filter that matches
+// nothing still moves forward instead of asking for the whole ring again, and a
+// node that restarted (`run`) is read from the start of its new life with a
+// line saying so. Through the channel like everything else, so it follows a
+// node four hops away the same way, only less often: there every question is a
+// signed frame that node verifies and counts against us.
+//
+// Lines are built with `textContent`, never markup. What an app writes to the
+// log is the app's text, and a log view is the last place a script should run.
+const NLOG_HOLDERS = {operator:"an operator (Start)", trace:"a running trace",
+                      watch:"a console or app following it"};
+const NLOG = {
+  EVERY: 1000,
+  REMOTE_EVERY: 2500,
+  STATUS_EVERY: 5000,
+  PAGE: 200,
+  MAX_LINES: 3000,
+  seq: 0, run: "", timer: null, gen: 0, on: false, following: true,
+  busy: false, statusAt: 0, status: null, sources: "",
+
+  filters(){
+    return {level: $("nlog-level").value,
+            source: $("nlog-source").value.trim(),
+            contains: $("nlog-contains").value.trim()};
+  },
+  enter(){ if(!this.on){ this.on = true; this.reload(); } },
+  leave(){ this.on = false; this.halt(); },
+  // A switch of node: everything on screen was the other machine's.
+  forget(){
+    this.halt();
+    this.status = null; this.statusAt = 0; this.seq = 0; this.run = "";
+    this.sources = "";
+    $("nlog-view").textContent = "";
+    if(this.on) this.reload();
+  },
+  halt(){
+    this.gen += 1;
+    if(this.timer){ clearTimeout(this.timer); this.timer = null; }
+  },
+  live(){ return this.on && this.following && !document.hidden; },
+  schedule(delay){
+    if(this.timer){ clearTimeout(this.timer); this.timer = null; }
+    if(!this.live()) return;
+    const gen = this.gen;
+    const wait = delay == null
+      ? (CONTEXT.remote ? this.REMOTE_EVERY : this.EVERY) : delay;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if(gen === this.gen) this.tick();
+    }, wait);
+  },
+
+  // The end of the log, then follow from it.
+  async reload(){
+    this.halt();
+    const gen = this.gen;
+    $("nlog-view").textContent = "";
+    await this.readStatus();
+    if(gen !== this.gen) return;
+    try{
+      const data = await CHANNEL.call("logs.query",
+        Object.assign({limit: this.PAGE}, this.filters()));
+      if(gen !== this.gen) return;
+      this.run = data.run || "";
+      this.seq = data.head || 0;
+      this.append((data.lines || []).slice().reverse(), true);
+      this.note(data.more ? "Older lines are kept — Load older reaches them." : "");
+    }catch(error){
+      if(isStale(error)) return;
+      this.note(error.message || "The log could not be read", true);
+    }
+    this.paintEmpty();
+    this.paintLive();
+    this.schedule();
+  },
+
+  async tick(){
+    if(this.busy){ this.schedule(); return; }
+    const gen = this.gen;
+    let again = null;
+    this.busy = true;
+    try{
+      if(Date.now() - this.statusAt >= this.STATUS_EVERY) await this.readStatus();
+      if(gen !== this.gen) return;
+      if(this.status && !this.status.running){ this.paintEmpty(); return; }
+      const data = await CHANNEL.call("logs.since",
+        Object.assign({seq: this.seq, run: this.run, limit: 500}, this.filters()));
+      if(gen !== this.gen) return;
+      if(data.restarted && this.run)
+        this.gap("The node restarted — its log starts again here.");
+      else if(data.lost)
+        this.gap(plural(data.lost, "line") + " went past before they could be read.");
+      this.run = data.run || this.run;
+      if(typeof data.seq === "number") this.seq = data.seq;
+      this.append(data.lines || [], false);
+      this.paintEmpty();
+      this.paintLive();
+      // A page cut at the limit: the rest is waiting, so ask again at once
+      // rather than a whole interval behind.
+      if(data.more) again = 0;
+    }catch(error){
+      if(isStale(error)) return;
+      this.paintLive("not answering");
+    }finally{
+      this.busy = false;
+      if(gen === this.gen) this.schedule(again);
+    }
+  },
+
+  async readStatus(){
+    try{
+      const status = await CHANNEL.call("logs.status");
+      this.status = status;
+      this.statusAt = Date.now();
+      this.paintStatus(status);
+      if(status.running){
+        const {sources} = await CHANNEL.call("logs.sources");
+        const joined = (sources || []).join("\n");
+        if(joined !== this.sources){
+          this.sources = joined;
+          const list = $("nlog-sources");
+          list.textContent = "";
+          (sources || []).forEach((name) => {
+            const option = document.createElement("option");
+            option.value = name;
+            list.appendChild(option);
+          });
+        }
+      }
+    }catch(error){
+      if(!isStale(error)) this.paintLive("not answering");
+    }
+  },
+
+  paintStatus(status){
+    const holders = status.held_by || [];
+    const mine = holders.includes("operator");
+    const pill = $("nlog-pill");
+    pill.textContent = status.running ? "recording" : "off";
+    pill.className = "badge " + (status.running ? "ok" : "");
+    if(document.activeElement !== $("nlog-size"))
+      $("nlog-size").value = Math.max(1, Math.round(status.megabytes || 8));
+    $("nlog-start").disabled = mine;
+    $("nlog-stop").disabled = !mine;
+    if(!status.running){
+      setMessage("nlog-state", "Not recording. Nothing is kept until somebody " +
+        "starts it — here, by starting a trace, or by following it from another console.");
+      return;
+    }
+    const who = holders.map((name) => NLOG_HOLDERS[name] || name);
+    setMessage("nlog-state",
+      "Kept for " + who.join(", ") + ". " + plural(status.records || 0, "line") +
+      " held, " + fmtBytes(status.used_bytes || 0) + " of " + status.megabytes + " MB" +
+      (status.ratio ? " (" + status.ratio + "× compressed)" : "") +
+      (status.dropped ? "; " + plural(status.dropped, "older line") +
+        " pushed out to make room" : "") + "." +
+      (mine ? "" : " Stop is not yours to press here: it goes when " +
+        who.join(" and ") + " does."));
+  },
+
+  paintLive(trouble){
+    const pill = $("nlog-live");
+    if(trouble){ pill.textContent = trouble; pill.className = "badge warn"; return; }
+    pill.textContent = this.following ? "following" : "paused";
+    pill.className = "badge " + (this.following ? "ok" : "");
+  },
+
+  paintEmpty(){
+    const view = $("nlog-view");
+    if(view.querySelector(".ll, .gap")){
+      const empty = view.querySelector(".empty");
+      if(empty) empty.remove();
+      return;
+    }
+    const filtered = Object.values(this.filters()).some((value) => value);
+    const [title, detail] = !this.status || !this.status.running
+      ? ["Not recording", "Start recording above, and lines appear here as they are written."]
+      : filtered
+        ? ["Nothing matches", "Nothing kept matches these filters yet; new lines that do appear here."]
+        : ["Nothing said yet", "Lines appear here as the node writes them."];
+    if(view.dataset.empty === title && view.querySelector(".empty")) return;
+    view.dataset.empty = title;
+    view.innerHTML = emptyHTML(title, detail);
+  },
+
+  note(text, bad){ setMessage("nlog-note", text, bad); },
+
+  row(line){
+    const element = document.createElement("div");
+    element.className = "ll " + (["debug", "info", "warn", "error"]
+      .includes(line.level) ? line.level : "info");
+    element.dataset.seq = String(line.seq || 0);
+    const when = document.createElement("time");
+    const at = new Date((line.at || 0) * 1000);
+    when.textContent = at.toLocaleTimeString([], {hour12:false}) + "." +
+      String(at.getMilliseconds()).padStart(3, "0");
+    when.title = at.toLocaleString();
+    const level = document.createElement("span");
+    level.className = "lvl";
+    level.textContent = line.level || "";
+    const source = document.createElement("span");
+    source.className = "src";
+    source.textContent = line.source + (line.topic ? "/" + line.topic : "");
+    source.title = source.textContent;
+    const message = document.createElement("span");
+    message.className = "msg";
+    message.textContent = line.message || "";
+    const fields = Object.entries(line.fields || {});
+    if(fields.length){
+      const extra = document.createElement("span");
+      extra.className = "fields";
+      extra.textContent = " " + fields.map(([key, value]) => key + "=" + value).join(" ");
+      message.appendChild(extra);
+    }
+    element.append(when, level, source, message);
+    return element;
+  },
+
+  append(lines, toEnd){
+    if(!lines.length) return;
+    const view = $("nlog-view");
+    const atEnd = toEnd || view.scrollTop + view.clientHeight >= view.scrollHeight - 24;
+    const empty = view.querySelector(".empty");
+    if(empty){ empty.remove(); delete view.dataset.empty; }
+    const batch = document.createDocumentFragment();
+    lines.forEach((line) => batch.appendChild(this.row(line)));
+    view.appendChild(batch);
+    while(view.childElementCount > this.MAX_LINES) view.removeChild(view.firstChild);
+    if(atEnd) view.scrollTop = view.scrollHeight;
+  },
+
+  gap(text){
+    const element = document.createElement("div");
+    element.className = "gap";
+    element.textContent = text;
+    $("nlog-view").appendChild(element);
+  },
+
+  async older(button){
+    const view = $("nlog-view");
+    const first = view.querySelector(".ll");
+    if(!first){ this.reload(); return; }
+    await withBusy(button, async () => {
+      try{
+        const data = await CHANNEL.call("logs.query", Object.assign(
+          {limit: this.PAGE, before_seq: Number(first.dataset.seq) || 0},
+          this.filters()));
+        const lines = (data.lines || []).slice().reverse();
+        if(!lines.length){ this.note("Nothing older is kept."); return; }
+        const height = view.scrollHeight;
+        const batch = document.createDocumentFragment();
+        lines.forEach((line) => batch.appendChild(this.row(line)));
+        view.insertBefore(batch, view.firstChild);
+        view.scrollTop += view.scrollHeight - height;
+        this.note(data.more ? "Older lines are kept — Load older again reaches them."
+                            : "That is the oldest line kept.");
+      }catch(error){
+        if(!isStale(error)) this.note(error.message || "The log could not be read", true);
+      }
+    });
+  },
+
+  save(){
+    const rows = [...$("nlog-view").querySelectorAll(".ll, .gap")].map((row) =>
+      row.classList.contains("gap") ? "-- " + row.textContent
+        : [...row.children].map((cell) => cell.textContent).join("  "));
+    if(!rows.length){ toast("Nothing to download yet", "warn"); return; }
+    saveBytes("nmesh-log.txt", new TextEncoder().encode(rows.join("\n") + "\n"),
+              "text/plain");
+  },
+
+  async act(action, button, extra){
+    await withBusy(button, async () => {
+      const {ok, error, data} = await CHANNEL.ask("logs.set",
+        Object.assign({action}, extra || {}));
+      if(!ok){ setMessage("nlog-state", error || "That did not work", true); return; }
+      this.status = data; this.statusAt = Date.now();
+      this.paintStatus(data);
+      if(action === "start" || action === "clear") this.reload();
+      else this.paintEmpty();
+    });
+  },
+};
+$("nlog-start").addEventListener("click", (event) => NLOG.act("start", event.target));
+$("nlog-stop").addEventListener("click", (event) => NLOG.act("stop", event.target));
+$("nlog-resize").addEventListener("click", (event) => NLOG.act("resize", event.target,
+  {megabytes: Math.max(1, Math.round(Number($("nlog-size").value) || 0))}));
+$("nlog-clear").addEventListener("click", async (event) => {
+  if(!await confirmAction({title:"Clear this node's log?",
+      body:'<p class="muted small">What is kept is dropped; recording goes on.</p>',
+      confirmLabel:"Clear", danger:true})) return;
+  NLOG.act("clear", event.target);
+});
+$("nlog-follow").addEventListener("click", (event) => {
+  NLOG.following = !NLOG.following;
+  event.target.textContent = NLOG.following ? "Pause" : "Follow";
+  event.target.setAttribute("aria-pressed", String(NLOG.following));
+  NLOG.paintLive();
+  if(NLOG.following) NLOG.schedule(0); else NLOG.schedule();
+});
+$("nlog-older").addEventListener("click", (event) => NLOG.older(event.target));
+$("nlog-save").addEventListener("click", () => NLOG.save());
+$("nlog-wipe").addEventListener("click", () => {
+  $("nlog-view").textContent = "";
+  NLOG.paintEmpty();
+});
+let NLOG_TYPING = null;
+["nlog-level", "nlog-source", "nlog-contains"].forEach((id) =>
+  $(id).addEventListener("input", () => {
+    clearTimeout(NLOG_TYPING);
+    NLOG_TYPING = setTimeout(() => { if(NLOG.on) NLOG.reload(); }, 300);
+  }));
+// A hidden tab asks nothing; coming back catches up at once.
+document.addEventListener("visibilitychange", () => {
+  if(NLOG.on && !document.hidden) NLOG.schedule(0);
+});
 
 // ---- manual connection, relay, trust ---------------------------------------
 $("cx-request").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -4482,6 +4893,8 @@ CONTEXT.subscribe(() => {
   MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
   stopTracePolling();
+  // The log on screen is that machine's: start again from the new one's end.
+  NLOG.forget();
   // A camera is not something to leave running behind a hidden panel.
   stopScan();
   ["active", "known", "installed"].forEach((kind) => {
@@ -4565,6 +4978,7 @@ $("ctx-node").addEventListener("change", (event) => {
  ["Console password", "settings", "security"],
  ["Configuration", "settings", "config"],
  ["Protocol trace", "settings", "diagnostics"],
+ ["Logs", "settings", "logs"],
  ["Advanced transfer", "settings", "advanced"],
 ].forEach(([label, section, sub]) =>
   PALETTE.add(label, "Go to", () => ROUTER.go(section, sub)));

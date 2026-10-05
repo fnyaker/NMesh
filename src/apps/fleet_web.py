@@ -235,7 +235,10 @@ class FleetBridge:
             if not event.pushed and event.following is None:
                 self._finish(event.rid, "ok")
         elif isinstance(event, LogsReceived):
-            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost)
+            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost,
+                                     run=event.run)
+            if event.following is True and self._logs.clear_problem(node_hex):
+                kept = kept or 1          # the page has news: it sends again
             if event.following is False:
                 self._say("warn", f"{short}… stopped sending its log", node_hex)
             if kept or event.lost:
@@ -318,6 +321,16 @@ class FleetBridge:
                 self._bump()
             self._say("warn", f"shell closed on {short}…", node_hex)
         elif isinstance(event, Failure):
+            if self._app.is_log_follow(node_hex, event.rid):
+                # A follow refused — renewed every minute, so said once, on the
+                # machine's own line in the log page, instead of an error in the
+                # activity feed sixty times an hour.
+                if self._logs.note_problem(node_hex, event.error):
+                    self._say("warn", f"{short}… will not send its log: "
+                                      f"{event.error}", node_hex)
+                    with self._lock:
+                        self._bump()
+                return
             self._finish(event.rid, "failed", event.error)
             self._say("err", f"{short}…: {event.error}", node_hex)
 
@@ -1112,7 +1125,8 @@ class FleetBridge:
                 # it carries what we hold so a node that restarted its ring, or
                 # a link that was down, resumes without a gap.
                 await self._app.follow_logs(self._node(node_hex), True,
-                                            seq=self._logs.seen(node_hex))
+                                            seq=self._logs.seen(node_hex),
+                                            run=self._logs.run_of(node_hex))
             elif node_hex in following:
                 await self._app.follow_logs(self._node(node_hex), False)
 
@@ -1140,7 +1154,8 @@ class FleetBridge:
         answer lands in that node's ring like any other."""
         return self._job(self._call(self._app.request_logs(
             self._node(node_hex), op="since",
-            seq=self._logs.seen(node_hex), **filters)), "logs", node_hex)
+            seq=self._logs.seen(node_hex), run=self._logs.run_of(node_hex),
+            **filters)), "logs", node_hex)
 
     def set_log_policy(self, node_hex: str, policy=None, megabytes=None,
                        inherit: bool = False) -> dict | None:

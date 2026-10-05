@@ -168,7 +168,11 @@ class TestFiltersAnswerTheQuestionAsked:
         _fill(book, logbook.MAX_QUERY * 3)
         answer = book.query(limit=10_000_000)
         assert answer["returned"] == logbook.MAX_QUERY
-        assert answer["matched"] == logbook.MAX_QUERY * 3
+        # A page, and the word that there is more: counting every match would
+        # mean unpacking the whole ring to show its last screen.
+        assert answer["more"] is True
+        older = book.query(before_seq=answer["lines"][-1]["seq"])
+        assert older["lines"][0]["seq"] == answer["lines"][-1]["seq"] - 1
 
     def test_a_query_answers_newest_first_and_since_oldest_first(self):
         book = LogBook()
@@ -351,3 +355,175 @@ class TestASwallowedFailureHasAReaderAtLast:
         await node.stop()
         assert faults._sink is None
         faults.note("nobody.is.listening", ValueError("no"))   # must not raise
+
+
+class TestWhoKeepsItOn:
+    """Three things want a log kept — an operator, a trace, a follower — and
+    none may switch off what another asked for."""
+
+    def test_stop_from_one_holder_leaves_another_s_lines(self):
+        book = LogBook()
+        book.hold(logbook.OPERATOR)
+        book.hold(logbook.TRACE)
+        book.record("node", "kept")
+        status = book.release(logbook.TRACE)       # the trace ran out
+        assert status["running"] and status["held_by"] == ["operator"]
+        assert book.query()["returned"] == 1
+
+    def test_the_last_one_to_let_go_takes_the_lines_with_it(self):
+        book = LogBook()
+        book.hold(logbook.WATCH)
+        book.record("node", "seen once")
+        status = book.release(logbook.WATCH)
+        assert not status["running"] and status["held_by"] == []
+        assert status["records"] == 0 and book.query()["returned"] == 0
+
+    def test_a_follower_alone_is_enough_to_record(self):
+        """A machine nobody had started a log on handed its followers
+        nothing at all."""
+        book = LogBook()
+        seen = []
+        book.sink = seen.append
+        book.hold(logbook.WATCH)
+        book.record("peers", "link up")
+        assert [line["message"] for line in seen] == ["link up"]
+
+    def test_releasing_a_hold_nobody_took_changes_nothing(self):
+        book = LogBook()
+        book.hold(logbook.OPERATOR)
+        book.record("node", "x")
+        assert book.release(logbook.TRACE)["running"] is True
+        assert book.query()["returned"] == 1
+
+    def test_a_hard_stop_ends_every_hold(self):
+        book = LogBook()
+        book.hold(logbook.OPERATOR)
+        book.hold(logbook.WATCH)
+        assert book.stop()["held_by"] == []
+        book.record("node", "nobody keeps this")
+        assert book.status()["records"] == 0
+
+    def test_holders_are_bounded(self):
+        book = LogBook()
+        for index in range(logbook.MAX_HOLDERS + 5):
+            book.hold(f"h{index}")
+        assert len(book.status()["held_by"]) == logbook.MAX_HOLDERS
+
+
+class TestFollowingWithoutDuplicates:
+    def test_a_filter_matching_nothing_still_moves_the_cursor(self):
+        """The cursor came back as 0 when nothing in the window matched, and a
+        reader that followed it asked for the whole ring again, every time."""
+        book = LogBook()
+        book.start()
+        for _ in range(20):
+            book.record("node", "chatter", level="info")
+        answer = book.since(0, level="error")
+        assert answer["lines"] == [] and answer["seq"] == 20
+        book.record("node", "boom", level="error")
+        again = book.since(answer["seq"], level="error")
+        assert [line["message"] for line in again["lines"]] == ["boom"]
+        assert again["seq"] == 21
+
+    def test_a_page_cut_at_the_limit_resumes_where_it_stopped(self):
+        book = LogBook()
+        book.start()
+        _fill(book, 25)
+        seen, cursor = [], 0
+        for _ in range(10):
+            answer = book.since(cursor, limit=10)
+            seen += [line["seq"] for line in answer["lines"]]
+            cursor = answer["seq"]
+            if not answer["more"]:
+                break
+        assert seen == list(range(1, 26))
+
+    def test_a_number_from_another_run_is_answered_from_the_start(self):
+        """A node restarts every time it updates, and its numbers start again
+        from one. Asked "since 5000" by a reader from before, it used to answer
+        nothing until it had written five thousand lines."""
+        book = LogBook()
+        book.start()
+        _fill(book, 3)
+        answer = book.since(5000, run="0123456789abcdef")
+        assert answer["restarted"] is True and answer["returned"] == 3
+        same = book.since(1, run=book.run)
+        assert same["restarted"] is False and same["returned"] == 2
+
+    def test_lines_written_from_several_threads_keep_unique_numbers(self):
+        import threading
+        book = LogBook()
+        book.start()
+        workers = [threading.Thread(
+            target=lambda: [book.record("node", "x") for _ in range(300)])
+            for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        numbers = []
+        cursor = 0
+        while True:
+            answer = book.since(cursor)
+            numbers += [line["seq"] for line in answer["lines"]]
+            cursor = answer["seq"]
+            if not answer["more"]:
+                break
+        assert sorted(numbers) == list(range(1, 1201))
+
+
+class TestReadingTheEnd:
+    def test_older_pages_are_reached_by_asking_before_a_number(self):
+        book = LogBook()
+        book.start()
+        _fill(book, logbook.BLOCK_RECORDS * 3)
+        page = book.query(limit=50)
+        assert page["lines"][0]["seq"] == logbook.BLOCK_RECORDS * 3
+        older = book.query(limit=50, before_seq=page["lines"][-1]["seq"])
+        assert older["lines"][0]["seq"] == page["lines"][-1]["seq"] - 1
+
+    def test_the_sources_a_filter_offers_outlive_a_pack(self):
+        """They were read off the open block, which empties every few hundred
+        lines — so right after one the filter offered almost nothing."""
+        book = LogBook()
+        book.start()
+        book.record("peers", "early")
+        _fill(book, logbook.BLOCK_RECORDS)
+        assert "peers" in book.sources()
+
+    def test_the_sources_are_bounded(self):
+        book = LogBook()
+        book.start()
+        for index in range(logbook.MAX_SOURCES + 50):
+            book.record(f"src{index}", "x")
+        assert len(book.sources()) == logbook.MAX_SOURCES
+
+    def test_shrinking_the_ring_applies_at_once(self):
+        book = LogBook()
+        book.start(megabytes=8)
+        import os
+        for _ in range(logbook.BLOCK_RECORDS * 20):
+            book.record("node", os.urandom(40).hex())
+        assert book.status()["used_bytes"] > logbook.MIN_BYTES
+        status = book.resize(0)                    # down to the floor
+        assert status["used_bytes"] <= logbook.MIN_BYTES
+        assert status["dropped"] > 0
+
+
+class TestTheNumbersOnTheCard:
+    def test_a_fresh_ring_says_what_it_holds(self):
+        """It read "0 B of 8 MB" over seventeen lines: only packed blocks were
+        counted, and the newest lines are not packed yet."""
+        book = LogBook()
+        book.start()
+        _fill(book, 17)
+        status = book.status()
+        assert status["records"] == 17 and status["used_bytes"] > 0
+        assert status["ratio"] is None          # nothing compressed yet to measure
+
+    def test_what_is_held_stays_inside_the_size_counting_the_open_block(self):
+        book = LogBook()
+        book.start(megabytes=logbook.MIN_BYTES / 1024 / 1024)
+        for number in range(5000):
+            book.record("node", "y" * 480 + str(number))
+            assert book.status()["used_bytes"] <= logbook.MIN_BYTES

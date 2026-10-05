@@ -1543,6 +1543,38 @@ one chain, and every link in it was a reasonable decision on its own.
   backwards as a restart and replay this run from zero; and a stream that comes
   back after any gap repaints every view.
 
+## The log: five bugs that all looked like "there is nothing there"
+
+Every one of these showed an empty log or a log that stopped, and none raised.
+
+- **An envelope read as the answer.** The fleet Logs panel did
+  `LOGS = await apiJson(...)`, and `apiJson` answers `{ok, status, data}`. Every
+  field the panel read was `undefined`, so it said "Nothing collected yet" over a
+  node holding thousands of lines. **A helper that wraps its answer is a helper
+  every caller has to destructure** — `const {ok, data} = …`, then check both.
+- **A cursor that was the last line *returned*.** With a filter that matched
+  nothing, `since` answered `seq: 0`, and a reader following it asked for the
+  whole ring again, every time. The number a reader asks from next is the last
+  line the answer *looked at*.
+- **Numbers that start again.** A process numbers its lines from one; a node
+  restarts on every update. The operator's copy dropped every line numbered at or
+  below the highest it had seen, so after the first restart of a managed machine
+  nothing was ever kept again — and a follow asked "since 5000" of a ring at 3.
+  **A sequence number is only a cursor together with the run it came from.**
+- **One switch, three owners.** Stopping a trace stopped a log an operator had
+  started; a trace running out left the log on for ever; and a follower got
+  nothing because recording was off and following did not turn it on. Each owner
+  holds the ring under its own name now, and releases only its own hold.
+- **A bound that left out what it was bounding.** `used_bytes` counted packed
+  blocks only: a fresh ring read "0 B of 8 MB", and the open block — up to 512
+  uncompressed lines — sat outside the limit, so a 64 kB ring held a few hundred
+  kB. Room for the open block is reserved now, and it is packed early when it
+  grows.
+
+And the one that was not a bug but a gap: the node's own log had a control plane
+and **no page**. Settings → Logs is that page; it was verified in Chromium against
+a node writing lines, not only in the suite.
+
 ## The console's pages: what a repaint quietly destroys
 
 Four bugs of one family, all invisible until somebody is *using* the page while

@@ -887,11 +887,12 @@ document.addEventListener("change", async (event) => {
   if(!picker) return;
   const node = picker.dataset.logPolicy;
   try{
-    await apiJson("/api/fleet/logs-policy", "POST",
-                  {node, policy: picker.value});
-    toast("Log collection for " + shortId(node) + ": " + picker.value);
+    const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
+                               {node, policy: picker.value});
+    if(ok) toast("Log collection for " + shortId(node) + ": " + picker.value);
+    else toast("That could not be changed", "danger");
   }catch(_){ toast("That could not be changed", "danger"); }
-  refreshLogs();
+  refreshLogs(true);
 });
 
 // ---- the logs of the machines we manage ------------------------------------
@@ -913,14 +914,21 @@ function logsFilters(){
           contains: $("logs-contains").value.trim(),
           since_time: stamp("logs-since"), until_time: stamp("logs-until")};
 }
-async function refreshLogs(){
-  if(ROUTER.section !== "logs") return;
+// `apiJson` answers `{ok, status, data}`, and this assigned that envelope as
+// though it were the answer: `lines`, `policies` and `status` were never there,
+// so the panel said "Nothing collected yet" over a node holding thousands of
+// lines, and the per-machine lines on the cards never knew a policy. Read the
+// body, and only a body that is one — an error keeps what is on screen.
+async function refreshLogs(force){
+  if(ROUTER.section !== "logs" && !force) return;
   const filters = logsFilters();
   const query = Object.entries(filters)
     .filter(([_k, value]) => value !== "" && value !== 0)
     .map(([key, value]) => key + "=" + encodeURIComponent(value)).join("&");
   try{
-    LOGS = await apiJson("/api/fleet/logs" + (query ? "?" + query : ""));
+    const {ok, data} = await apiJson("/api/fleet/logs" + (query ? "?" + query : ""));
+    if(!ok || !data || !Array.isArray(data.lines)) return;
+    LOGS = data;
   }catch(_){ return; }            // keep what is on screen; it was true a moment ago
   paintLogs();
 }
@@ -937,14 +945,21 @@ function paintLogs(){
   const nodes = Object.keys(held.nodes || {}).length;
   $("logs-collection").textContent =
     nodes ? nodes + " machine(s) held, " + fmtBytes(held.used_bytes || 0) +
-            " compressed, " + (held.records || 0) + " line(s); following " +
+            " in memory, " + (held.records || 0) + " line(s); following " +
             (LOGS.following || []).length
           : "Nothing is being kept yet.";
-  const policy = LOGS.policies && LOGS.policies[$("logs-node").value];
+  const chosen = $("logs-node").value;
+  const policy = LOGS.policies && LOGS.policies[chosen];
+  const problems = held.problems || {};
+  const refusing = Object.keys(problems);
   $("logs-policy").textContent = policy
     ? "This machine: " + policy.policy + ", " + policy.megabytes + " MB" +
-      ((policy.own || []).length ? " (its own setting)" : " (the default)")
-    : "";
+      ((policy.own || []).length ? " (its own setting)" : " (the default)") +
+      (problems[chosen] ? " — it sends nothing: " + problems[chosen] : "")
+    : refusing.length
+      ? refusing.length + " machine(s) followed but sending nothing: " +
+        refusing.map((id) => shortId(id) + " (" + problems[id] + ")").join(", ")
+      : "";
   const defaults = LOGS.defaults || {};
   if(document.activeElement !== $("logs-default-policy") && defaults.policy)
     $("logs-default-policy").value = defaults.policy;
@@ -975,10 +990,14 @@ function paintLogNodes(){
     (ST.managed || []).map((node) =>
       [node.id, node.label || node.pseudo || shortId(node.id)])));
 }
-// While the panel is open, on its own cadence. Reading a node's log is also
-// what *keeps* an `active` follow alive on that machine, so a page left open
-// is a page still receiving — which is the behaviour the policy promises.
-setInterval(() => { if(ROUTER.section === "logs") refreshLogs(); }, 5000);
+// While the panel is open and the tab is on screen, every two seconds: it reads
+// what this node already holds, so it costs no traffic towards the machines.
+// Reading a node's log is also what *keeps* an `active` follow alive on that
+// machine, so a page left open is a page still receiving — which is the
+// behaviour the policy promises.
+setInterval(() => {
+  if(ROUTER.section === "logs" && !document.hidden) refreshLogs();
+}, 2000);
 for(const id of ["logs-node", "logs-level", "logs-source", "logs-contains",
                  "logs-since", "logs-until"]){
   $(id).addEventListener("input", () => {
@@ -987,13 +1006,19 @@ for(const id of ["logs-node", "logs-level", "logs-source", "logs-contains",
   });
 }
 $("logs-default-policy").addEventListener("change", async () => {
-  await apiJson("/api/fleet/logs-policy", "POST",
-                {policy: $("logs-default-policy").value});
+  try{
+    const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
+                               {policy: $("logs-default-policy").value});
+    if(!ok) toast("The default could not be changed", "danger");
+  }catch(_){ toast("The default could not be changed", "danger"); }
   refreshLogs();
 });
 $("logs-default-size").addEventListener("change", async () => {
-  await apiJson("/api/fleet/logs-policy", "POST",
-                {megabytes: Number($("logs-default-size").value) || 0});
+  try{
+    const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
+                               {megabytes: Number($("logs-default-size").value) || 0});
+    if(!ok) toast("The size could not be changed", "danger");
+  }catch(_){ toast("The size could not be changed", "danger"); }
   refreshLogs();
 });
 $("logs-fetch").addEventListener("click", async (event) => {
@@ -1001,8 +1026,9 @@ $("logs-fetch").addEventListener("click", async (event) => {
   if(!node){ toast("Choose a machine first", "warn"); return; }
   await withBusy(event.target, async () => {
     try{
-      await apiJson("/api/fleet/logs-fetch", "POST", {node});
-      toast("Asked " + shortId(node) + " for its log");
+      const {ok} = await apiJson("/api/fleet/logs-fetch", "POST", {node});
+      if(ok) toast("Asked " + shortId(node) + " for its log");
+      else toast("That machine could not be asked", "danger");
     }catch(_){ toast("That machine did not answer", "danger"); }
   });
   setTimeout(refreshLogs, 1200);
