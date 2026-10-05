@@ -11,13 +11,14 @@ import asyncio
 import os
 import time
 
+from .. import features
 from ..transports import medium
 from ..crypto import SessionKey
 from ..metrics import Counters, LinkQuality
 from .constants import *  # noqa: F401,F403
 from ..node_id import NodeID
 from .messages import RELAY_CARRY
-from ..packet import Packet
+from ..packet import MSG_ID_BLAKE2B, MSG_ID_SHA256, Packet
 from ..transport import BaseTransport
 
 
@@ -264,7 +265,17 @@ class _Peer:
         self._malformed += 1
         return self._malformed > _MAX_MALFORMED
 
+    def msg_id_algorithm(self) -> int:
+        """The hash this link's `msg_id` is sent under: BLAKE2b once the peer
+        has *said* it accepts it, SHA-256 otherwise — silence here is a node
+        that would drop the new id (`features.SINCE_NEGOTIATION`)."""
+        agreed = self.agreed
+        if agreed is not None and features.BLAKE2B_IDS in agreed:
+            return MSG_ID_BLAKE2B
+        return MSG_ID_SHA256
+
     async def send(self, packet: Packet) -> None:
+        packet = packet.for_link(self.msg_id_algorithm())
         await self.transport.send(packet)
         nbytes = _HEADER_BYTES + len(packet.payload)
         self.counters.on_out(nbytes)

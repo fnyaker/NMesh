@@ -12,6 +12,30 @@ HEADER_FORMAT = '!BBB20s20sQ12s16s'   # msg_id is now a uint64 (8 bytes)
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 MSG_ID_FORMAT = '!BB20s20s12s16s'
 
+# The two hashes a `msg_id` may be computed with — the same 64-bit commitment to
+# the same bytes, so neither is weaker than the other. SHA-256 is the one every
+# build has always spoken and the only one a link that agreed nothing may carry.
+# BLAKE2b is the one a link carries once both ends announced it
+# (`features.BLAKE2B_IDS`): it hashes 60 kB in about half the time of SHA-256 on
+# a CPU without SHA instructions, and the hash was over half of what a large
+# packet cost a node. See `Docs/Architecture/protocol.md`.
+MSG_ID_SHA256 = 0
+MSG_ID_BLAKE2B = 1
+_BLAKE2B_PERSON = b"nmesh-msg-id"
+
+
+def _sha256_id(prefix: bytes, payload: bytes) -> int:
+    digest = hashlib.sha256(prefix)
+    digest.update(payload)
+    return int.from_bytes(digest.digest()[:8], 'big')
+
+
+def _blake2b_id(prefix: bytes, payload: bytes) -> int:
+    digest = hashlib.blake2b(prefix, digest_size=8, person=_BLAKE2B_PERSON)
+    digest.update(payload)
+    return int.from_bytes(digest.digest(), 'big')
+
+
 class PacketError(Exception):
     pass
 
@@ -78,8 +102,18 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_nonce_pool)
 
 class Packet:
+    """One mesh packet.
+
+    ``msg_id`` is the header *as one link carries it*: the id of the content
+    under the hash that link agreed, rewritten per hop exactly like the TTL and
+    outside the AAD for the same reason. ``None`` means no link has carried it
+    yet; reading it then gives the SHA-256 id, which every build accepts. The
+    id under each hash is computed at most once per packet and travels with its
+    TTL-decremented and per-link copies, so a relay that tries five candidates
+    hashes once, not five times."""
+
     def __init__(self, version: int, type: int, ttl: int, src_id: bytes,
-                 dst_id: bytes, msg_id: int, nonce: bytes, gcm_tag: bytes,
+                 dst_id: bytes, msg_id: int | None, nonce: bytes, gcm_tag: bytes,
                  payload: bytes) -> None:
         self.__version = version
         self.__type = type
@@ -100,6 +134,8 @@ class Packet:
         if len(payload) > 60000:
             raise PacketError("payload too big")
         self.__payload = payload
+        self.__sha256_id: int | None = None
+        self.__blake2b_id: int | None = None
 
     def pack(self) -> bytes:
         header = struct.pack(
@@ -109,7 +145,7 @@ class Packet:
             self.__ttl,
             self.__src_id,
             self.__dst_id,
-            self.__msg_id,
+            self.msg_id,
             self.__nonce,
             self.__gcm_tag,
         )
@@ -127,31 +163,80 @@ class Packet:
 
     @staticmethod
     def msg_id_over(version: int, type: int, src_id: bytes, dst_id: bytes,
-                    nonce: bytes, gcm_tag: bytes, payload: bytes) -> int:
-        """The id of a packet with these fields, without needing the packet.
+                    nonce: bytes, gcm_tag: bytes, payload: bytes,
+                    algorithm: int = MSG_ID_SHA256) -> int:
+        """The id of a packet with these fields, without needing the packet."""
+        prefix = struct.pack(MSG_ID_FORMAT, version, type, src_id, dst_id,
+                             nonce, gcm_tag)
+        if algorithm == MSG_ID_BLAKE2B:
+            return _blake2b_id(prefix, payload)
+        return _sha256_id(prefix, payload)
 
-        `create` used to build one `Packet` purely to ask it for its own id and
-        then build a second one to keep — two constructions, and eight length
-        checks, for one packet. Neither the id nor the checks changed; only the
-        instance nobody kept."""
-        data = struct.pack(MSG_ID_FORMAT, version, type, src_id, dst_id,
-                           nonce, gcm_tag) + payload
-        return int.from_bytes(hashlib.sha256(data).digest()[:8], 'big')
+    def id_under(self, algorithm: int) -> int:
+        """This packet's id under one hash, computed at most once."""
+        if algorithm == MSG_ID_BLAKE2B:
+            if self.__blake2b_id is None:
+                self.__blake2b_id = self.msg_id_over(
+                    self.__version, self.__type, self.__src_id, self.__dst_id,
+                    self.__nonce, self.__gcm_tag, self.__payload, MSG_ID_BLAKE2B)
+            return self.__blake2b_id
+        if self.__sha256_id is None:
+            self.__sha256_id = self.msg_id_over(
+                self.__version, self.__type, self.__src_id, self.__dst_id,
+                self.__nonce, self.__gcm_tag, self.__payload, MSG_ID_SHA256)
+        return self.__sha256_id
 
     def compute_msg_id(self) -> int:
-        return self.msg_id_over(self.__version, self.__type, self.__src_id,
-                                self.__dst_id, self.__nonce, self.__gcm_tag,
-                                self.__payload)
+        """The SHA-256 id: the one every build, old or new, accepts."""
+        return self.id_under(MSG_ID_SHA256)
+
+    def replay_key(self) -> int | None:
+        """What a replay window files this packet under, or ``None`` when the
+        header ``msg_id`` does not commit to the content.
+
+        **Either hash is accepted, whatever the link agreed.** The two ends of a
+        link learn each other's features at different moments, so a receiver
+        that held the sender to the agreement would drop everything sent in the
+        gap. Accepting both costs nothing in safety: neither is a secret, both
+        bind the same bytes, and anyone could compute either.
+
+        **The key is always the BLAKE2b id, never the header.** One packet can
+        reach a node down a link speaking SHA-256 and again down one speaking
+        BLAKE2b; filed under the header it would be two packets, and a relay
+        holding one link of each kind could replay anything once more. So a
+        packet from a SHA-256 link costs both hashes — the price of a mesh that
+        is not all on one build yet, and only for as long as it is not."""
+        key = self.id_under(MSG_ID_BLAKE2B)
+        header = self.msg_id
+        if header == key or header == self.id_under(MSG_ID_SHA256):
+            return key
+        return None
+
+    def for_link(self, algorithm: int) -> 'Packet':
+        """This packet as a link carrying ``algorithm`` sends it."""
+        msg_id = self.id_under(algorithm)
+        if self.__msg_id is None and algorithm == MSG_ID_SHA256:
+            self.__msg_id = msg_id          # what `msg_id` would have read
+        if msg_id == self.__msg_id:
+            return self
+        return self._twin(self.__ttl, msg_id)
+
+    def _twin(self, ttl: int, msg_id: int | None) -> 'Packet':
+        twin = Packet(self.__version, self.__type, ttl, self.__src_id,
+                      self.__dst_id, msg_id, self.__nonce, self.__gcm_tag,
+                      self.__payload)
+        twin.__sha256_id = self.__sha256_id
+        twin.__blake2b_id = self.__blake2b_id
+        return twin
 
     @classmethod
     def create(cls, type: int, src_id: bytes, dst_id: bytes,
                payload: bytes, ttl: int = 64, version: int = 1) -> 'Packet':
-        nonce = _nonce()
-        gcm_tag = _EMPTY_TAG
-        return cls(version, type, ttl, src_id, dst_id,
-                   cls.msg_id_over(version, type, src_id, dst_id, nonce,
-                                   gcm_tag, payload),
-                   nonce, gcm_tag, payload)
+        """A new packet. No id yet: which hash it is sent under is the link's
+        to say, and hashing it here would be a hash the first link may throw
+        away."""
+        return cls(version, type, ttl, src_id, dst_id, None, _nonce(),
+                   _EMPTY_TAG, payload)
 
     @property
     def type(self) -> int:
@@ -175,6 +260,8 @@ class Packet:
 
     @property
     def msg_id(self) -> int:
+        if self.__msg_id is None:
+            self.__msg_id = self.id_under(MSG_ID_SHA256)
         return self.__msg_id
 
     @property
@@ -199,8 +286,8 @@ class Packet:
         nonce = os.urandom(12)
         partial_aad = struct.pack('!BB20s20s12s', version, type, src_id, dst_id, nonce)
         ciphertext, gcm_tag = session.encrypt(plaintext, nonce, partial_aad)
-        p = cls(version, type, ttl, src_id, dst_id, 0, nonce, gcm_tag, ciphertext)
-        return cls(version, type, ttl, src_id, dst_id, p.compute_msg_id(), nonce, gcm_tag, ciphertext)
+        return cls(version, type, ttl, src_id, dst_id, None, nonce, gcm_tag,
+                   ciphertext)
 
     def decrypt_payload(self, session: SessionKey) -> bytes:
         return session.decrypt(self.__payload, self.__nonce, self.__gcm_tag, self.aad())
@@ -215,12 +302,4 @@ class Packet:
         `msg_id` pre-image — so the packet stays exactly as authentic as it
         was, and dedup still recognises it. That is the whole reason those two
         exclusions exist."""
-        return Packet(self.__version, self.__type, ttl,
-                      self.__src_id, self.__dst_id, self.__msg_id,
-                      self.__nonce, self.__gcm_tag, self.__payload)
-        
-    
-
-
-
-
+        return self._twin(ttl, self.__msg_id)

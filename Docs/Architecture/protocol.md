@@ -15,7 +15,7 @@ payload.
 | ttl | 1 | decremented at every hop; **excluded from the AAD and from `msg_id`** |
 | src_id | 20 | sender NodeID |
 | dst_id | 20 | recipient NodeID (`0xff…ff` = broadcast) |
-| msg_id | 8 | uint64, see below |
+| msg_id | 8 | uint64, see below — **per link**, rewritten at each hop like the TTL |
 | nonce | 12 | `os.urandom(12)`, unique per packet (AES-GCM) |
 | gcm_tag | 16 | AES-256-GCM authenticity tag |
 | payload | ≤ 60000 | in the clear for control, encrypted for DATA/E2E |
@@ -47,12 +47,53 @@ Two rules about those meters:
 
 ### `msg_id` (anti-replay / anti-amplification)
 
-`msg_id = int(sha256(version‖type‖src‖dst‖nonce‖gcm_tag‖payload)[:8])`
-(`Packet.compute_msg_id`). **TTL and msg_id are excluded** from the computation.
+The id of a packet's content, under one of two hashes of the same pre-image:
+
+```
+pre-image = version‖type‖src‖dst‖nonce‖gcm_tag‖payload
+SHA-256 id = int(sha256(pre-image)[:8])                              # every build
+BLAKE2b id = int(blake2b(pre-image, digest_size=8, person="nmesh-msg-id"))
+```
+
+(`Packet.id_under`, `Packet.msg_id_over`). **TTL and msg_id are excluded** from
+both.
 
 It *binds the content* of the packet: a relay cannot forge a new `msg_id` for
 the same payload to sidestep deduplication and amplify a flood. Verified on
 receipt for routable types (see the gates).
+
+**Which hash, per link.** SHA-256 is the one every build has always computed and
+the only one a link may carry until the peer has *said* it accepts the other —
+the feature `msgid_b2b` (`features.BLAKE2B_IDS`, in `SINCE_NEGOTIATION`, so
+silence means no). Once it has, everything this node sends on that link carries
+the BLAKE2b id (`_Peer.send` → `Packet.for_link`). The reason is cost: on a
+60 kB packet SHA-256 took 175 µs against 20 µs for the AES-GCM beside it — over
+half of what the packet cost a node — and BLAKE2b binds the same bytes in 97 µs
+(4-core Xeon VM without SHA instructions; on a CPU with them SHA-256 is the
+faster of the two, and the mesh optimises for the slow relay, not the fast one).
+The two are equally strong — each is a 64-bit truncation of a hash nobody can
+invert — so the name chooses a speed, never a check (`features.py`, rule 3).
+
+The id is therefore **rewritten per hop**, exactly like the TTL and for the same
+reason it can be: it is outside the AAD. A relay between a link that speaks
+BLAKE2b and one that does not re-heads the packet for the old one, which is what
+lets an updated node keep talking to every node that has not updated. Each hash
+is computed at most once per packet and travels with its TTL-decremented and
+per-link copies, so a relay trying five candidates hashes once.
+
+**The receiver accepts either id, whatever the link agreed** (`Packet.replay_key`).
+The two ends learn each other's record at different moments; holding the sender
+to the agreement would drop everything sent in that gap. Accepting both costs
+nothing: neither is a secret, both bind the same bytes, anyone could compute
+either.
+
+**The replay window never keys on the header.** It keys on the BLAKE2b id, which
+the node computes itself. One packet can reach a node down a SHA-256 link and
+again down a BLAKE2b one; filed under the header it would be two packets, and a
+relay holding one link of each kind could replay anything once more. So a packet
+arriving with a SHA-256 header costs an updated node both hashes — the price of
+a mesh that is not all on one build yet, paid on traffic from old links only,
+and gone once they update.
 
 ### AAD and encryption (`Packet.aad`, `create_encrypted`, `decrypt_payload`)
 
@@ -182,8 +223,9 @@ The exact order applied to every packet received:
    `src_id != authenticated_id`. ("reject by default".)
 4. If `type ∈ _ROUTABLE_TYPES`:
    - an authenticated peer is required;
-   - `msg_id == compute_msg_id()` or reject (anti-amplification);
-   - `_is_seen(msg_id)` → already seen → reject (bounded deduplication,
+   - `replay_key()` — the header `msg_id` is the content's SHA-256 *or*
+     BLAKE2b id, or reject (anti-amplification);
+   - `_is_seen(replay_key)` → already seen → reject (bounded deduplication,
      `_MSG_DEDUP_MAX = 10 000`, generational eviction — see `seen.py` and the
      note below);
    - `_learn_reverse_path`: the ingress link is remembered as the return path
@@ -308,7 +350,7 @@ hot path and how much it holds is how far back the window reaches. It was an
 eight, almost all of it CPython boxing. That overhead is what capped
 `_MSG_DEDUP_MAX` at ten thousand.
 
-A `msg_id` is already 64 bits, so it fits a flat table with no boxing: one
+A replay key is already 64 bits, so it fits a flat table with no boxing: one
 `bytearray` of 8-byte slots, open addressing, linear probing, sixteen bytes an
 entry at half load. Eviction is generational rather than FIFO — everything new
 goes into the young table, a lookup asks both, and a full young table becomes
@@ -324,7 +366,7 @@ Two properties are deliberate:
   on, and a false positive on anything punitive is an innocent node cut off with
   no way to find out. See also `gotchas.md`.
 - **The bucket is seeded.** The obvious index is the id's own low bits, and they
-  are uniform — it is a SHA-256 truncation. But the attacker chooses the payload
+  are uniform — it is a BLAKE2b digest. But the attacker chooses the payload
   the digest covers, so they can grind ids into one bucket for a few thousand
   hashes each and turn every lookup into a walk. The index goes through a
   per-process random seed instead. The stored value is still the whole id, so
@@ -334,7 +376,9 @@ Two properties are deliberate:
 
 - The header is in the clear but **authenticated** (AAD). The application
   payload is E2E encrypted.
-- `msg_id` binds the content, and is **verified on receipt**.
-- TTL decremented per hop, outside the AAD and outside `msg_id`.
+- `msg_id` binds the content, and is **verified on receipt** — under either
+  hash; the replay window keys on the node's own BLAKE2b id, never the header.
+- TTL decremented per hop, outside the AAD and outside `msg_id`. The `msg_id`
+  itself is per link, outside the AAD too.
 - Bounded deduplication. Reject by default for any malformed/unauthorised
   packet.

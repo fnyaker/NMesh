@@ -104,16 +104,26 @@ HANDOVER = "handover"
 # everything here except this.
 SPEEDTEST = "speed"
 
+# The `msg_id` of a packet on this link may be its BLAKE2b id rather than its
+# SHA-256 one (`packet.MSG_ID_BLAKE2B`). Not a plane but a property of the link,
+# and it sits within rule 3 because it chooses between two equally strong
+# hashes of the same bytes: stripping it costs speed, never a check. It only
+# ever decides what a node *sends* — a receiver accepts either id whatever was
+# agreed, because the two ends learn each other's set at different moments and
+# a packet sent in that gap must not be lost (`Packet.replay_key`).
+BLAKE2B_IDS = "msgid_b2b"
+
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENDEZVOUS, RENEW, REVOKE, ABUSE,
-                    KEEPALIVE, MLO, PACKAGES, HANDOVER, SPEEDTEST})
+                    KEEPALIVE, MLO, PACKAGES, HANDOVER, SPEEDTEST,
+                    BLAKE2B_IDS})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
 SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS,
-                               SPEEDTEST})
+                               SPEEDTEST, BLAKE2B_IDS})
 
 
 class FeatureError(Exception):

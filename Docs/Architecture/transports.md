@@ -1107,6 +1107,38 @@ because it feeds `msg_id` and a guessable `msg_id` is a way to seed a relay's
 dedup window so a *later* legitimate packet is dropped as a replay. The pool is
 dropped in a forked child, or both sides would hand out the same bytes.
 
+## What choosing a link costs
+
+`_route_candidates` runs per packet sent or forwarded, and it scores **every**
+authenticated link to keep the best one per identity (`_authenticated_peers` →
+`_link_score`). Two pieces of that score were doing per-packet work that only
+changes per probe or never:
+
+- **The medium's priority re-parsed the link's URI** — `_validate_uri`, a regex
+  and a walk over every character — to recover a scheme that is a pure function
+  of the string. `uri.uri_scheme` remembers it. There is nothing to invalidate:
+  the priority *setting* is still read live, so an operator moving it is obeyed
+  on the next packet; only the parse is kept. Bounded twice, because the strings
+  can come from the network: nothing longer than `_MAX_URI_LEN` characters is
+  stored, and a full table (`_SCHEME_MEMO_MAX`) is dropped rather than walked.
+- **`recent_loss` counted the lost probes in the window** on every read — fifty
+  outcomes, per link, per packet. It now keeps the count as outcomes go in and
+  fall out (`LinkQuality._record`), and a test holds the count against a
+  recount through every way an outcome enters.
+
+Measured on the same VM (`_route_candidates`, links with a measured RTT):
+
+| links | before | after |
+|---|---|---|
+| 1 | 11.4 µs | **6.4 µs** |
+| 10 | 84.0 µs | **26.4 µs** |
+| 40 | 230.1 µs | **95.7 µs** |
+
+What remains is linear and is plain arithmetic, about 2.4 µs a link. Caching
+the whole score would remove it, at the price of an invalidation on every probe,
+every setting and every link that comes or goes — the kind of cache that is
+wrong the day somebody adds a fourth input. Not taken.
+
 ## Multi-link operation (`mlo.py`)
 
 A node holds several links to one peer as a matter of course — a LAN address
