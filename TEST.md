@@ -307,8 +307,10 @@ tests/
 │     `logs` grant that `status` and `manage` do not imply, a follow that
 │     expires rather than running for ever, a push carrying a rid nobody asked
 │     for, one bounded ring per machine so a chatty one cannot push out a quiet
-│     one's, and a merged view ordered by *our* clock rather than by the time
-│     the far machine supplied
+│     one's, a merged view ordered by *our* clock rather than by the time
+│     the far machine supplied, a machine collected across its own restart (the
+│     run travels with the number), a refusal said once on the machine's line,
+│     and the panel reading the body rather than the envelope
 ├── test_map_growth.py                                 — the link map past one
 │     node's eyes: only a machine that granted `links` is asked, the map is a
 │     freshness book (a source that went quiet leaves it rather than ageing on
@@ -325,16 +327,21 @@ tests/
 │     kept until asked and what was kept dropped when it stops, a flood that
 │     never grows past the megabytes an operator allowed, a reader too slow for
 │     the ring told how much it lost, a source refused rather than truncated
-│     into somebody else's, and `record` that never raises whatever it is handed
+│     into somebody else's, and `record` that never raises whatever it is handed;
+│     plus the holds (each owner stops only its own), a cursor that moves past
+│     lines a filter left out, a number from another run answered from the start,
+│     paging back with `before_seq`, and a size that counts the open block
 ├── test_control_logs.py                               — the same ring driven
 │     from a console: sized before it is started, read newest-first by a person
 │     and oldest-first by a subscriber, the trace's switch that starts both
-│     recordings, and the grant that decides what an app may read
+│     recordings — and stops only its own, including when it runs out — and the
+│     grant that decides what an app may read
 ├── test_app_logs.py                                   — an app's half: the node
 │     stamps the source so one app cannot be quoted as another, a read without
 │     the grant is *answered* and refused rather than dropped, a grant asked per
 │     frame rather than captured once, a watcher forgotten when its socket goes,
-│     and a line recorded off the loop that still reaches one
+│     a line recorded off the loop that still reaches one, and a watcher that
+│     keeps the ring on by itself and lets it go when it leaves
 ├── test_session_store.py                              — persistence (encrypted)
 ├── test_start_script.py / test_install_script.py      — both scripts, sourced in
 │     library mode (nothing is installed): distro, sudo, venv probe for one;

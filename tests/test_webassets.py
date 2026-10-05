@@ -1449,3 +1449,48 @@ def test_the_change_stream_repaints_after_a_gap_and_reopens_after_a_refusal(tmp_
     result = subprocess.run([NODE, str(EVENTS_SUITE), str(source)],
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── the node's own log, live ────────────────────────────────────────────────
+
+def _nlog_source() -> str:
+    return webassets.APP_JS.split("const NLOG = {")[1].split("\n};\n")[0]
+
+
+def test_the_console_has_a_live_view_of_the_nodes_own_log():
+    """The ring had a control plane and no page: the only log anybody could
+    look at in the product was the copy a fleet console collected from
+    somebody else."""
+    html = webassets.console.INDEX_HTML
+    body = webassets.console.CONSOLE_PAGE_JS
+    assert 'if(section === "settings" && sub === "logs") NLOG.enter();' in body
+    assert "NLOG.forget()" in body          # a switch of node starts again
+    for control in ("nlog-start", "nlog-stop", "nlog-resize", "nlog-clear",
+                    "nlog-follow", "nlog-older", "nlog-view"):
+        assert f'id="{control}"' in html, control
+
+
+def test_the_live_view_follows_with_the_nodes_own_cursor():
+    source = _nlog_source()
+    # The end first, then everything after it, by the number and run the node
+    # gave back — never a re-derived one, never "since zero" again.
+    assert '"logs.query"' in source and '"logs.since"' in source
+    assert "this.seq = data.head" in source
+    assert "seq: this.seq, run: this.run" in source
+    assert "data.restarted" in source and "data.lost" in source
+
+
+def test_a_log_line_is_never_markup():
+    """What an app writes to the log is the app's text, and a log view is the
+    last place a script should run."""
+    row = _nlog_source().split("  row(line){")[1].split("\n  },")[0]
+    assert "innerHTML" not in row
+    assert "textContent" in row
+
+
+def test_the_trace_is_downloaded_from_the_node_on_screen():
+    """A navigation cannot carry the header that names the node being driven,
+    so the button downloaded this machine's trace under another one's page."""
+    body = webassets.console.CONSOLE_PAGE_JS
+    assert 'window.location = "/api/trace/export"' not in body
+    assert 'CHANNEL.call("trace.export")' in body

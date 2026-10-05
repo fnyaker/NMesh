@@ -41,13 +41,33 @@ loses its connection catches up by asking from the number it last saw, rather
 than by anybody having to buffer for it.
 
 Blocks carry their own sequence and time range, so a query decompresses only the
-blocks that can contain an answer. A search over eight megabytes touches the
-handful of blocks whose range overlaps and leaves the rest packed.
+blocks that can contain an answer — and a person's question, newest first,
+stops decompressing as soon as it has a page of them. A search over eight
+megabytes touches the handful of blocks it needs and leaves the rest packed.
+
+Who keeps it on
+---------------
+Three different things want a log kept, and none of them may switch off what
+another asked for: an operator who pressed *Start*, a trace that is running, and
+somebody following the log as it is written (an app, a fleet console). Each one
+**holds** the ring under its own name and releases only its own hold; the ring
+records while anybody holds it, and drops what it kept when the last one lets
+go. A trace that stopped used to stop a log an operator had started on purpose,
+and a follower was handed nothing at all, because nobody had happened to start
+the ring on that machine.
+
+A run, not only a number
+------------------------
+Sequence numbers start again from one when the process does — and a node
+restarts every time it updates. So every answer names the **run** its numbers
+belong to, and a reader that comes back with a number from another run is
+answered from the start of this one instead of being told nothing moved.
 """
 from __future__ import annotations
 
 import json
 import re
+import secrets
 import threading
 import time
 import zlib
@@ -73,6 +93,14 @@ MAX_FIELD_KEY = 32
 MAX_FIELD_TEXT = 128
 # What one query may answer with, whoever asks and however wide the filter.
 MAX_QUERY = 500
+# Names a filter can offer, remembered for as long as the ring runs. Bounded:
+# a source is chosen by whoever writes, and an app is a writer.
+MAX_SOURCES = 256
+# The names a hold is taken under. Short and closed in spirit; bounded anyway,
+# since a hold is the one thing that keeps lines being written.
+MAX_HOLDER = 16
+MAX_HOLDERS = 8
+OPERATOR, TRACE, WATCH = "operator", "trace", "watch"
 
 DEBUG, INFO, WARN, ERROR = "debug", "info", "warn", "error"
 LEVELS = (DEBUG, INFO, WARN, ERROR)
@@ -141,7 +169,7 @@ def as_line(entry) -> dict:
 
 
 class LogBook:
-    """A bounded, compressed ring of what this node said. Off until started.
+    """A bounded, compressed ring of what this node said. Off until held.
 
     Touched from the node's loop, from the console's threads and from whatever
     thread an app's connector runs on, so everything here takes the lock. The
@@ -157,50 +185,124 @@ class LogBook:
         # already has to bound its own readers. Never allowed to raise —
         # `record()` is called from receive loops.
         self.sink = None
+        # Which run of this process the sequence numbers belong to. They start
+        # again from one when the process does, so a number alone cannot tell
+        # a reader whether it is behind or from another life of this node.
+        self.run = secrets.token_hex(8)
         self._clock = clock
         self._lock = threading.Lock()
         self._limit = DEFAULT_BYTES
         self._seq = 0
         self._open: list = []          # the newest records, still readable raw
+        self._open_bytes = 0           # …and about how much memory they take
         self._blocks: list = []   # [(first, last, at_first, at_last, n, gz, raw)]
         self._packed = 0               # bytes held by those blocks
         self._raw = 0                  # what those blocks held before deflate
         self._dropped = 0              # lines lost to eviction, ever
         self._started_at = 0.0
+        self._holders: set = set()     # who asked for lines to be kept
+        self._sources: dict = {}       # every source heard since it started
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self, *, megabytes: float | None = None) -> dict:
-        """Begin keeping lines, in a ring of this many megabytes."""
+    def hold(self, holder: str = OPERATOR, *,
+             megabytes: float | None = None) -> dict:
+        """Keep lines on behalf of ``holder``, in a ring of this many
+        megabytes if given. Holding twice under one name is holding once."""
+        name = str(holder or OPERATOR)[:MAX_HOLDER]
         with self._lock:
             if megabytes is not None:
-                self._limit = max(MIN_BYTES,
-                                  min(int(float(megabytes) * 1024 * 1024),
-                                      MAX_BYTES))
-            self._started_at = self._clock()
+                self._resize(megabytes)
+            if name not in self._holders and len(self._holders) >= MAX_HOLDERS:
+                return self._status()
+            if not self.enabled:
+                self._started_at = self._clock()
+            self._holders.add(name)
             self.enabled = True
-        return self.status()
+            return self._status()
 
-    def stop(self) -> dict:
-        """Stop keeping lines. **What was kept is dropped**, not left to read.
+    def start(self, *, megabytes: float | None = None,
+              holder: str = OPERATOR) -> dict:
+        """Begin keeping lines — an operator's hold unless another is named."""
+        return self.hold(holder, megabytes=megabytes)
+
+    def release(self, holder: str = OPERATOR) -> dict:
+        """Let go of one hold. When it was the last, **what was kept is
+        dropped**, not left to read.
 
         The opposite of `Trace.stop`, and on purpose: a trace is a recording an
         operator asked for and then reads. A log ring is a by-product, and one
-        left sitting in memory after somebody stopped looking is exactly the
-        record this node should not be holding."""
+        left sitting in memory after everybody stopped looking is exactly the
+        record this node should not be holding. Releasing a hold somebody else
+        took is not possible: an operator's *Stop* must not take the lines from
+        under a trace, nor a trace ending from under an operator."""
         with self._lock:
-            self.enabled = False
-            self._open = []
-            self._blocks = []
-            self._packed = self._raw = 0
-        return self.status()
+            self._holders.discard(str(holder or OPERATOR)[:MAX_HOLDER])
+            if not self._holders:
+                self._drop()
+            return self._status()
+
+    def stop(self) -> dict:
+        """Every hold at once, and everything kept with them. What a node
+        stopping does, and a ring that is somebody else's copy."""
+        with self._lock:
+            self._holders.clear()
+            self._drop()
+            return self._status()
+
+    def resize(self, megabytes) -> dict:
+        """A new size, applied now — the oldest blocks go at once rather than
+        at the next write — whether or not anything is being kept."""
+        with self._lock:
+            self._resize(megabytes)
+            return self._status()
 
     def clear(self) -> None:
+        """Drop what is kept and go on keeping."""
         with self._lock:
             self._open = []
+            self._open_bytes = 0
             self._blocks = []
             self._packed = self._raw = 0
             self._dropped = 0
+            self._sources = {}
+
+    def _drop(self) -> None:
+        """Under the lock: stop, and keep nothing."""
+        self.enabled = False
+        self._open = []
+        self._open_bytes = 0
+        self._blocks = []
+        self._packed = self._raw = 0
+        self._sources = {}
+
+    def _resize(self, megabytes) -> None:
+        """Under the lock."""
+        try:
+            asked = float(megabytes)
+        except (TypeError, ValueError):
+            return
+        self._limit = max(MIN_BYTES, min(int(asked * 1024 * 1024), MAX_BYTES))
+        self._evict()
+
+    def _open_cap(self) -> int:
+        """How much the open block may weigh before it is packed."""
+        return max(_MIN_OPEN, self._limit // 8)
+
+    def _evict(self) -> None:
+        """Under the lock. Whole blocks, oldest first. A ring that dropped
+        single lines would have to decompress a block to do it, which is the
+        one thing this shape exists to avoid.
+
+        The open block counts against the size like the packed ones: it is
+        memory this node holds, and leaving it out let a small ring hold a few
+        hundred kilobytes it said it did not. So room for a whole open block is
+        kept free: the packed ones may use the size less that."""
+        while self._packed > max(0, self._limit - self._open_cap()) and self._blocks:
+            _first, _last, _af, _al, count, gz, raw_size = self._blocks.pop(0)
+            self._packed -= len(gz)
+            self._raw -= raw_size
+            self._dropped += count
 
     # -- writing -----------------------------------------------------------
 
@@ -227,8 +329,16 @@ class LogBook:
                 if not self.enabled:
                     return
                 self._seq += 1
+                entry = (self._seq,) + entry[1:]
                 self._open.append(entry)
-                if len(self._open) >= BLOCK_RECORDS:
+                self._open_bytes += _weight(entry)
+                said = self._sources.get(entry[3])
+                if said is not None or len(self._sources) < MAX_SOURCES:
+                    self._sources[entry[3]] = (said or 0) + 1
+                # By count, and by size: a block of long lines in a small ring
+                # would otherwise be most of the ring before it was compressed.
+                if (len(self._open) >= BLOCK_RECORDS
+                        or self._open_bytes >= self._open_cap()):
                     self._pack()
                 sink = self.sink
         except Exception:               # noqa: BLE001 — never the reason
@@ -254,136 +364,241 @@ class LogBook:
         self._packed += len(packed)
         self._raw += len(raw)
         self._open = []
-        # Evict whole blocks, oldest first. A ring that dropped single lines
-        # would have to decompress a block to do it, which is the one thing
-        # this shape exists to avoid.
-        while self._packed > self._limit and self._blocks:
-            _first, _last, _af, _al, count, gz, raw_size = self._blocks.pop(0)
-            self._packed -= len(gz)
-            self._raw -= raw_size
-            self._dropped += count
+        self._open_bytes = 0
+        self._evict()
 
     # -- reading -----------------------------------------------------------
 
     def status(self) -> dict:
         with self._lock:
-            held = len(self._open) + sum(b[4] for b in self._blocks)
-            # What the blocks held **before** deflate, measured at the moment
-            # each was packed. Adding up the compressed sizes instead made the
-            # ratio read 1.0 on a ring compressing forty to one — a number with
-            # a label that was not true of it.
-            raw = self._raw + len(json.dumps(self._open, separators=(",", ":")))
-            oldest = (self._blocks[0][0] if self._blocks
-                      else (self._open[0][0] if self._open else 0))
-            return {
-                "running": self.enabled,
-                "megabytes": round(self._limit / 1024 / 1024, 2),
-                "used_bytes": self._packed,
-                "records": held,
-                "blocks": len(self._blocks),
-                "dropped": self._dropped,
-                "seq": self._seq,
-                "oldest_seq": oldest,
-                "started_at": self._started_at or None,
-                # What the compression is actually buying, measured rather than
-                # claimed. An operator sizing a ring deserves the real number.
-                "ratio": round(raw / self._packed, 1) if self._packed else None,
-            }
+            return self._status()
 
-    def since(self, seq: int, *, limit: int = MAX_QUERY, **filters) -> dict:
+    def _status(self) -> dict:
+        """Under the lock."""
+        held = len(self._open) + sum(b[4] for b in self._blocks)
+        return {
+            "running": self.enabled,
+            # Who is keeping it on. A ring that goes on recording after an
+            # operator pressed Stop has to say whose it is, or *Stop* reads as
+            # broken.
+            "held_by": sorted(self._holders),
+            "megabytes": round(self._limit / 1024 / 1024, 2),
+            # Everything held: the packed blocks and the open one. It was the
+            # packed blocks alone, so a fresh ring read "0 B of 8 MB" over
+            # lines it was plainly holding.
+            "used_bytes": self._packed + self._open_bytes,
+            "records": held,
+            "blocks": len(self._blocks),
+            "dropped": self._dropped,
+            "seq": self._seq,
+            "run": self.run,
+            "oldest_seq": self._oldest(),
+            "started_at": self._started_at or None,
+            # What the compression is actually buying, measured rather than
+            # claimed: what the packed blocks held before deflate over what
+            # they hold now. Dividing the compressed size by itself read 1.0
+            # on a ring compressing forty to one; counting the open block's raw
+            # bytes on top read better than it was.
+            "ratio": round(self._raw / self._packed, 1) if self._packed else None,
+        }
+
+    def _oldest(self) -> int:
+        """Under the lock."""
+        if self._blocks:
+            return self._blocks[0][0]
+        return self._open[0][0] if self._open else 0
+
+    def since(self, seq: int, *, run: str = "", limit: int = MAX_QUERY,
+              **filters) -> dict:
         """Everything after ``seq``, oldest first — the subscriber's question.
 
         A reader that was away comes back with the number it last saw and gets
         what it missed, or is told plainly that some of it is gone (`lost`).
         Nothing is buffered per subscriber: the ring is the buffer, and a reader
-        too slow for it learns so rather than being lied to."""
+        too slow for it learns so rather than being lied to.
+
+        The ``seq`` that comes back is **where to ask from next**: the last
+        line this answer looked at, matched or not. It used to be the newest
+        line *returned*, so a filter that matched nothing in the window
+        answered 0 — and a reader that took that at its word asked for the
+        whole ring again, every time. ``more`` says a page was cut at ``limit``
+        and the next question will have more to give.
+
+        ``run`` is the run the reader's number came from. A different one means
+        this node restarted since: the number is from another life, and the
+        answer starts from the beginning of this one (``restarted``)."""
         try:
             after = max(0, int(seq))
         except (TypeError, ValueError):
             after = 0
-        rows, oldest = self._rows(after)
-        answer = self._filter(rows, limit=limit, **filters)
-        answer["lost"] = max(0, oldest - after - 1) if after and oldest else 0
-        return answer
-
-    def query(self, *, limit: int = MAX_QUERY, **filters) -> dict:
-        """The whole ring, newest first — the question a person asks."""
-        rows, _oldest = self._rows(0)
-        answer = self._filter(rows, limit=limit, newest_first=True, **filters)
-        return answer
-
-    def _rows(self, after: int) -> tuple:
-        """Every kept record after ``after``, decompressing only what can hold
-        one. The lock is held to copy the block list and released before any
-        deflate work: a query must never stall a loop that is writing."""
+        restarted = bool(run) and str(run) != self.run
+        if restarted:
+            after = 0
+        bound = _bound(limit)
+        keep = _matcher(**filters)
         with self._lock:
             blocks = [b for b in self._blocks if b[1] > after]
             open_rows = [e for e in self._open if e[0] > after]
-            oldest = (self._blocks[0][0] if self._blocks
-                      else (self._open[0][0] if self._open else 0))
-        rows = []
-        for _first, _last, _af, _al, _count, gz, _raw in blocks:
-            try:
-                for entry in json.loads(zlib.decompress(gz).decode("utf-8")):
-                    if entry[0] > after:
-                        rows.append(tuple(entry))
-            except Exception:           # noqa: BLE001 — a lost block is not a crash
-                continue
-        rows.extend(open_rows)
-        return rows, oldest
+            oldest = self._oldest()
+            newest = self._seq
+        out, cursor, more = [], max(after, newest), False
 
-    @staticmethod
-    def _filter(rows, *, limit: int = MAX_QUERY, newest_first: bool = False,
-                level: str = "", source: str = "", topic: str = "",
-                contains: str = "", since_time: float = 0.0,
-                until_time: float = 0.0) -> dict:
-        floor = _RANK.get(str(level or "").strip().lower(), 0)
-        want_source = str(source or "").strip().lower()
-        want_topic = str(topic or "").strip().lower()
-        needle = str(contains or "").strip().lower()
+        def rows():
+            for block in blocks:
+                yield from _unpack(block)
+            yield from open_rows
+
+        for entry in rows():
+            if entry[0] <= after:
+                continue
+            if len(out) >= bound:
+                more = True
+                break
+            cursor = entry[0]
+            if keep(entry):
+                out.append(as_line(entry))
+        if more:
+            cursor = out[-1]["seq"] if out else after
+        return {"lines": out, "matched": len(out), "returned": len(out),
+                "seq": cursor, "more": more, "run": self.run,
+                "restarted": restarted,
+                "lost": max(0, oldest - after - 1) if after and oldest else 0}
+
+    def query(self, *, limit: int = MAX_QUERY, before_seq: int = 0,
+              **filters) -> dict:
+        """The ring, newest first, through filters — the question a person asks.
+
+        Decompresses from the newest block backwards and **stops once it has a
+        page**: a person reading a log reads its end, and a query used to
+        unpack the whole ring to show them its last screen. ``more`` says there
+        is older matching material than this page holds; ``before_seq`` asks
+        for the page before it (lines numbered below that). Blocks entirely
+        outside the asked time range are skipped without being opened."""
+        bound = _bound(limit)
+        keep = _matcher(**filters)
         try:
-            after_at = float(since_time or 0.0)
-            before_at = float(until_time or 0.0)
+            below = max(0, int(before_seq or 0))
         except (TypeError, ValueError):
-            after_at = before_at = 0.0
-        out = []
-        for entry in rows:
-            seq, at, lvl, src, top, message, fields = entry
-            if _RANK.get(lvl, 1) < floor:
+            below = 0
+        after_at, before_at = _times(filters)
+        with self._lock:
+            blocks = list(self._blocks)
+            open_rows = list(self._open)
+            head = self._seq
+        out, more = [], False
+
+        def newest_first():
+            yield from reversed(open_rows)
+            for block in reversed(blocks):
+                first, _last, at_first, at_last = block[:4]
+                if below and first >= below:
+                    continue
+                if before_at and at_first > before_at:
+                    continue
+                if after_at and at_last < after_at:
+                    break       # every older block ends earlier still
+                yield from reversed(_unpack(block))
+
+        for entry in newest_first():
+            if below and entry[0] >= below:
                 continue
-            if want_source and want_source not in src.lower():
+            if not keep(entry):
                 continue
-            if want_topic and want_topic != top.lower():
-                continue
-            if after_at and at < after_at:
-                continue
-            if before_at and at > before_at:
-                continue
-            if needle and needle not in message.lower() \
-                    and needle not in json.dumps(fields).lower():
-                continue
+            if len(out) >= bound:
+                more = True
+                break
             out.append(as_line(entry))
-        total = len(out)
-        try:
-            bound = max(1, min(int(limit or MAX_QUERY), MAX_QUERY))
-        except (TypeError, ValueError):
-            # A limit that is not a number is a caller mistake, and the answer
-            # to it is the ceiling rather than an exception: every reader here
-            # is a socket, and a reply that never comes reads as a hung node.
-            bound = MAX_QUERY
-        if newest_first:
-            out.reverse()
-        cut = out[:bound]
-        return {"lines": cut, "matched": total, "returned": len(cut),
-                "seq": max((row["seq"] for row in cut), default=0)}
+        # `head` is the newest line the ring held when this answer was taken:
+        # where a reader that has just painted the end of the log follows
+        # from with `since`, so nothing written meanwhile is lost and nothing
+        # shown is shown twice — whatever the filter matched.
+        return {"lines": out, "matched": len(out), "returned": len(out),
+                "more": more, "run": self.run, "head": head,
+                "seq": max((row["seq"] for row in out), default=0)}
 
     # -- what a filter can offer ------------------------------------------
 
     def sources(self) -> list:
-        """Every source that has said something, for a filter to offer.
+        """Every source that has said something since the ring started, for a
+        filter to offer.
 
-        Read off the *open* block only. A filter listing names from a ring that
-        may be an hour old would offer choices that match nothing, and finding
-        that out costs a decompression of the whole ring."""
+        Counted as lines are written rather than read off the ring: the open
+        block is emptied every few hundred lines, so reading it offered almost
+        nothing just after a pack, and reading the packed blocks would cost a
+        decompression of the whole ring to fill a drop-down."""
         with self._lock:
-            return sorted({entry[3] for entry in self._open})
+            return sorted(self._sources)
+
+
+# The open block is packed early once it weighs an eighth of the ring, but
+# never below this: compressing every handful of lines finds nothing to repeat.
+_MIN_OPEN = 16 * 1024
+
+
+def _weight(entry) -> int:
+    """About what one record costs to hold, without serialising it: the text
+    it carries plus a tuple's worth of overhead. A bound, not an invoice."""
+    _seq, _at, level, source, topic, message, fields = entry
+    extra = sum(len(str(key)) + len(str(value)) + 8
+                for key, value in fields.items())
+    return 64 + len(level) + len(source) + len(topic) + len(message) + extra
+
+
+def _bound(limit) -> int:
+    try:
+        return max(1, min(int(limit or MAX_QUERY), MAX_QUERY))
+    except (TypeError, ValueError):
+        # A limit that is not a number is a caller mistake, and the answer
+        # to it is the ceiling rather than an exception: every reader here
+        # is a socket, and a reply that never comes reads as a hung node.
+        return MAX_QUERY
+
+
+def _times(filters) -> tuple:
+    try:
+        return (float(filters.get("since_time") or 0.0),
+                float(filters.get("until_time") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def _unpack(block) -> list:
+    """One block's records, or none: a lost block is not a crash."""
+    try:
+        return [tuple(entry) for entry in
+                json.loads(zlib.decompress(block[5]).decode("utf-8"))]
+    except Exception:                   # noqa: BLE001
+        return []
+
+
+def _matcher(*, level: str = "", source: str = "", topic: str = "",
+             contains: str = "", since_time: float = 0.0,
+             until_time: float = 0.0):
+    """One predicate over a record, from the filters every reader shares."""
+    floor = _RANK.get(str(level or "").strip().lower(), 0)
+    want_source = str(source or "").strip().lower()
+    want_topic = str(topic or "").strip().lower()
+    needle = str(contains or "").strip().lower()
+    after_at, before_at = _times({"since_time": since_time,
+                                  "until_time": until_time})
+
+    def keep(entry) -> bool:
+        _seq, at, lvl, src, top, message, fields = entry
+        if _RANK.get(lvl, 1) < floor:
+            return False
+        if want_source and want_source not in src.lower():
+            return False
+        if want_topic and want_topic != top.lower():
+            return False
+        if after_at and at < after_at:
+            return False
+        if before_at and at > before_at:
+            return False
+        # Message *and* fields: a field must not be a place to put something a
+        # search can never find.
+        if needle and needle not in message.lower() \
+                and needle not in json.dumps(fields).lower():
+            return False
+        return True
+
+    return keep

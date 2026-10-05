@@ -401,3 +401,60 @@ class TestTheRegistryIsWhereAGrantLives:
         assert AppRegistry(str(tmp_path)).granted("fleet", "logs") is False
         (tmp_path / "apps.json").write_text("not json at all")
         assert AppRegistry(str(tmp_path)).granted("fleet", "logs") is False
+
+
+class TestAWatcherKeepsTheRingOn:
+    """A follower is somebody looking, which is exactly when a node keeps a
+    log. The ring being off was why a fleet console following a machine
+    received nothing: nobody had happened to start it there."""
+
+    async def test_a_watcher_alone_is_pushed_lines_on_a_node_nobody_started(self):
+        node, _fake = await make_node()
+        assert node.logs.status()["running"] is False
+        conn = DataConnector(node, host="127.0.0.1", port=0, token=TOKEN,
+                             log_access=lambda app_id: True)
+        await conn.start()
+        client = await _client(conn)
+        try:
+            assert await client.logs_watch(True) is True
+            assert client.log_run == node.logs.run
+            assert node.logs.status()["held_by"] == [logbook.WATCH]
+            node.log("live without anybody pressing start")
+            assert await _until(lambda: client.next_log() is not None)
+            # The last watcher leaving takes the lines with it.
+            assert await client.logs_watch(False) is False
+            status = node.logs.status()
+            assert status["running"] is False and status["records"] == 0
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_a_watcher_leaving_does_not_stop_an_operators_log(self):
+        node, conn = await _make()                 # started by an operator
+        client = await _client(conn)
+        try:
+            await client.logs_watch(True)
+            node.log("kept")
+            await client.logs_watch(False)
+            status = node.logs.status()
+            assert status["running"] and status["held_by"] == [logbook.OPERATOR]
+            assert status["records"] >= 1
+        finally:
+            await client.close()
+            await conn.stop()
+            await node.stop()
+
+    async def test_a_watcher_whose_socket_dies_lets_go_too(self):
+        node, _fake = await make_node()
+        conn = DataConnector(node, host="127.0.0.1", port=0, token=TOKEN,
+                             log_access=lambda app_id: True)
+        await conn.start()
+        client = await _client(conn)
+        await client.logs_watch(True)
+        await client.close()
+        try:
+            assert await _until(lambda: not node.logs.status()["running"])
+        finally:
+            await conn.stop()
+            await node.stop()

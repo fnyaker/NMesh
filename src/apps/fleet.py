@@ -349,6 +349,10 @@ class LogsReceived:
     lost: int = 0
     pushed: bool = False
     following: bool | None = None       # set only by the answer to a follow
+    # Which run of that machine's log the line numbers belong to. They start
+    # again from one when it restarts, so a number alone cannot say whether a
+    # line is old news or the first thing a restarted machine said.
+    run: str = ""
 
 
 @dataclass
@@ -1425,11 +1429,11 @@ class FleetApp:
     # mesh that partitions, rather than only over a link that stays up.
 
     async def request_logs(self, target: NodeID, *, op: str = "query",
-                           seq: int = 0, **filters) -> str:
+                           seq: int = 0, run: str = "", **filters) -> str:
         """Ask a machine we manage for its log. Returns the request id."""
         rid = self._new_rid(target, "logs")
         document = {"rid": rid, "op": "since" if op == "since" else "query",
-                    "seq": max(0, int(seq or 0))}
+                    "seq": max(0, int(seq or 0)), "run": _log_run(run)}
         document.update({key: value for key, value in filters.items()
                          if key in ("level", "source", "topic", "contains",
                                     "since_time", "until_time", "limit")})
@@ -1438,7 +1442,8 @@ class FleetApp:
         return rid
 
     async def follow_logs(self, target: NodeID, on: bool = True, *,
-                          level: str = "info", seq: int = 0) -> str:
+                          level: str = "info", seq: int = 0,
+                          run: str = "") -> str:
         """Start or stop being pushed a machine's lines as it records them.
 
         ``seq`` is what we already hold: a follow that starts by handing back
@@ -1455,12 +1460,17 @@ class FleetApp:
         await self._send(target, self._signed_frame(
             LOGS_REQUEST, target, PURPOSE_BY_CAP["logs"],
             {"rid": rid, "op": "follow", "on": bool(on),
-             "level": str(level or "info")[:8], "seq": max(0, int(seq or 0))}))
+             "level": str(level or "info")[:8], "seq": max(0, int(seq or 0)),
+             "run": _log_run(run)}))
         return rid
 
     def following(self) -> list[str]:
         """The nodes we are following, as this node believes it."""
         return sorted(self._log_follows)
+
+    def is_log_follow(self, node_hex: str, rid: str) -> bool:
+        """Is this the request id of the follow we hold open with that node?"""
+        return bool(rid) and self._log_follows.get(node_hex) == rid
 
     # -- the machine being read -------------------------------------------
 
@@ -1492,7 +1502,8 @@ class FleetApp:
         try:
             if op == "since":
                 answer = await self._client.logs_since(
-                    max(0, int(document.get("seq") or 0)), **asked)
+                    max(0, int(document.get("seq") or 0)),
+                    run=_log_run(document.get("run")), **asked)
             else:
                 answer = await self._client.logs_query(**asked)
         except asyncio.CancelledError:
@@ -1509,6 +1520,7 @@ class FleetApp:
                      "lines": answer.get("lines") or [],
                      "lost": int(answer.get("lost") or 0),
                      "seq": int(answer.get("seq") or 0),
+                     "run": _log_run(answer.get("run")),
                      "matched": int(answer.get("matched") or 0)},
                     "lines")
 
@@ -1541,14 +1553,21 @@ class FleetApp:
         # Sent as a *push* under the follow's own rid, because that is what the
         # far side is now expecting on it — answering it as a question would be
         # an answer to a question the operator's book has already closed.
-        await self._push_backlog(src, rid, document.get("seq"))
+        await self._push_backlog(src, rid, document.get("seq"),
+                                 _log_run(document.get("run")))
 
-    async def _push_backlog(self, src: NodeID, rid: str, seq) -> None:
+    async def _push_backlog(self, src: NodeID, rid: str, seq,
+                            run: str = "") -> None:
         """Hand a new follower what its ring missed. Best effort: a follow that
-        is live is worth more than the backlog, so this never un-does it."""
+        is live is worth more than the backlog, so this never un-does it.
+
+        ``run`` is the run the follower's number came from: after this machine
+        restarted (an update ends in that), the number is from another life and
+        the backlog is this run's from the start — it used to be "everything
+        after 5000" asked of a ring at 3, which is nothing."""
         try:
             answer = await self._client.logs_since(
-                max(0, int(seq or 0)), limit=MAX_LOG_LINES)
+                max(0, int(seq or 0)), run=run, limit=MAX_LOG_LINES)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1559,6 +1578,7 @@ class FleetApp:
         self._reply(src, LOGS_REPLY,
                     {"rid": rid, "op": "push", "ok": True,
                      "lines": lines or [],
+                     "run": _log_run(answer.get("run")),
                      "lost": int(answer.get("lost") or 0)}, "lines")
 
     async def _start_log_pump(self) -> bool:
@@ -1623,6 +1643,8 @@ class FleetApp:
             if wanted:
                 self._reply(entry["id"], LOGS_REPLY,
                             {"rid": entry["rid"], "op": "push", "ok": True,
+                             "run": _log_run(getattr(self._client, "log_run",
+                                                     "")),
                              "lines": wanted}, "lines")
 
     # -- the operator reading ---------------------------------------------
@@ -1639,14 +1661,16 @@ class FleetApp:
             if self._log_follows.get(src.raw.hex()) != rid:
                 return
             self._emit(LogsReceived(src, rid, lines, pushed=True,
-                                    lost=int(document.get("lost") or 0)))
+                                    lost=int(document.get("lost") or 0),
+                                    run=_log_run(document.get("run"))))
             return
         if not self._claim_inflight(src, document, "logs"):
             return
         following = document.get("following")
         self._emit(LogsReceived(
             src, rid, lines, lost=int(document.get("lost") or 0),
-            following=bool(following) if following is not None else None))
+            following=bool(following) if following is not None else None,
+            run=_log_run(document.get("run"))))
 
     # ======================================================================
     # Links — the mesh map, past what one node can see
@@ -3276,6 +3300,14 @@ def _link_shape(links) -> tuple:
                          str(link.get("transport") or ""))
                         for link in links if isinstance(link, dict)))
 
+
+
+def _log_run(raw) -> str:
+    """A log run as it may travel: short hex, or nothing. It names which life of
+    a machine's log a number belongs to and is compared, never interpreted —
+    so anything else is simply no run at all."""
+    text = str(raw or "")[:32].lower()
+    return text if text and all(c in "0123456789abcdef" for c in text) else ""
 
 def _rid(document: dict) -> str:
     rid = document.get("rid")

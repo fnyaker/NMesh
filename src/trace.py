@@ -50,6 +50,9 @@ class Trace:
         self._stops_at: float = 0.0
         self._dropped = 0
         self._name_of = {}
+        # Told once whenever a running trace ends, however it ends — by a
+        # press, or by running out of time on its own. Never allowed to raise.
+        self.on_stop = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -73,9 +76,15 @@ class Trace:
 
     def stop(self) -> dict:
         """Stop recording. What was captured stays available to read."""
+        was = self.enabled
         if self.enabled and not self._ended_at:
             self._ended_at = time.time()
         self.enabled = False
+        if was and self.on_stop is not None:
+            try:
+                self.on_stop()
+            except Exception:           # noqa: BLE001 — a listener, never a risk
+                pass
         return self.status()
 
     def clear(self) -> None:

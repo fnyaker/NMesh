@@ -88,6 +88,8 @@ class LogArchive:
     def __init__(self) -> None:
         self._books: dict[str, LogBook] = {}
         self._seen: dict[str, int] = {}        # node -> last sequence absorbed
+        self._runs: dict[str, str] = {}        # node -> the run those belong to
+        self._problems: dict[str, str] = {}    # node -> why it sends nothing
         self._touched: dict[str, float] = {}   # node -> when it last said anything
         self._active: dict[str, float] = {}    # node -> when a page last looked
         self._sizes: dict[str, float] = {}     # node -> megabytes, when set
@@ -181,6 +183,8 @@ class LogArchive:
             book.stop()
         self._touched.pop(node, None)
         self._seen.pop(node, None)
+        self._runs.pop(node, None)
+        self._problems.pop(node, None)
         self._active.pop(node, None)
 
     def clear(self) -> None:
@@ -192,17 +196,52 @@ class LogArchive:
         follower asks from, so the node hands back only what we missed."""
         return self._seen.get(node, 0)
 
-    def absorb(self, node: str, lines, *, lost: int = 0) -> int:
+    def note_problem(self, node: str, problem: str) -> bool:
+        """Why a machine we follow sends nothing — a refusal it answered with.
+        Returns whether this is news, so it is said once rather than at every
+        renewal of the follow."""
+        text = str(problem or "")[:200]
+        if self._problems.get(node) == text:
+            return False
+        self._problems[node] = text
+        while len(self._problems) > MAX_NODES:
+            self._problems.pop(next(iter(self._problems)), None)
+        return True
+
+    def clear_problem(self, node: str) -> bool:
+        return self._problems.pop(node, None) is not None
+
+    def run_of(self, node: str) -> str:
+        """Which run of that node's log `seen` counts in — sent with it, so a
+        node that restarted since answers from the start of its new run."""
+        return self._runs.get(node, "")
+
+    def absorb(self, node: str, lines, *, lost: int = 0, run: str = "") -> int:
         """Take lines from one managed node. Returns how many were kept.
 
         Their sequence numbers are **that node's**, and they are kept as a field
         rather than re-used here: two nodes number their lines independently, so
         one ring numbered by whoever spoke last would answer `since` with
-        somebody else's history."""
+        somebody else's history.
+
+        And a node numbers them again from one every time it restarts — which
+        is every update. Lines were dropped here as "already held" whenever
+        their number was not above the highest seen, so after the first restart
+        of a managed machine nothing it said was ever kept again. ``run`` says
+        which life the numbers belong to; a new one starts the count over, and
+        says so in the ring."""
         if not isinstance(lines, (list, tuple)):
             return 0
+        self._problems.pop(node, None)
         book = self._books.get(node) or self.book(node)
         kept, highest = 0, self._seen.get(node, 0)
+        known = self._runs.get(node, "")
+        if run and run != known:
+            if known:
+                book.record("fleet", "this machine restarted; its log starts "
+                            "again here", level=logbook.WARN, topic="restart")
+            self._runs[node] = run
+            highest = 0
         if lost:
             book.record("fleet", f"{int(lost)} lines were lost before this one",
                         level=logbook.WARN, topic="gap")
@@ -231,6 +270,8 @@ class LogArchive:
             kept += 1
         self._seen[node] = highest
         self._touched[node] = time.monotonic()
+        while len(self._runs) > MAX_NODES:
+            self._runs.pop(next(iter(self._runs)), None)
         return kept
 
     # -- reading -----------------------------------------------------------
@@ -274,4 +315,9 @@ class LogArchive:
                 "max_nodes": MAX_NODES,
                 "used_bytes": sum(n["used_bytes"] for n in nodes.values()),
                 "records": sum(n["records"] for n in nodes.values()),
-                "nodes": nodes}
+                "nodes": nodes,
+                # Machines followed that answered with a refusal instead of
+                # lines — a grant missing over there, most often. Kept apart
+                # from `nodes` because a machine that never sent a line has no
+                # ring here to hang it on.
+                "problems": dict(self._problems)}
