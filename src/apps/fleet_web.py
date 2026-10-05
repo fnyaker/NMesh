@@ -31,7 +31,8 @@ from . import fleet_files, fleet_links, fleet_logs
 from .. import console_feed
 from .fleet_docker import DockerError
 from .fleet import (
-    CapsChanged, CommandOutput, CommandResult, ConsoleProxyError, DockerReport,
+    CapsChanged, CommandOutput, CommandResult, ConsoleProxyError,
+    ConsoleProxyTimeout, DockerReport,
     EnrolAnswered, EnrolRequested, Failure, FileTransferError, InviteIssued,
     LinksReceived, LogsReceived, NodeAdopted, Revoked, ScanReceived,
     ShellClosed, ShellOpened, ShellOutput, StatusReceived,
@@ -98,6 +99,11 @@ _FOLLOW_INTERVAL = 60.0
 _LINKS_INTERVAL = 12.0
 MAX_REMOTE_SESSIONS = 8       # remote consoles one browser session may hold
 REMOTE_IDLE = 3600.0          # a remote session forgotten after an hour idle
+# Shortest gap between two attempts to get a fresh session from a node that
+# dropped ours. A node restarting is silent for a while, and every page on the
+# console is asking it something; one attempt per gap is enough to notice it is
+# back.
+REMOTE_REISSUE_EVERY = 5.0
 
 
 class FleetBridge:
@@ -229,7 +235,10 @@ class FleetBridge:
             if not event.pushed and event.following is None:
                 self._finish(event.rid, "ok")
         elif isinstance(event, LogsReceived):
-            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost)
+            kept = self._logs.absorb(node_hex, event.lines, lost=event.lost,
+                                     run=event.run)
+            if event.following is True and self._logs.clear_problem(node_hex):
+                kept = kept or 1          # the page has news: it sends again
             if event.following is False:
                 self._say("warn", f"{short}… stopped sending its log", node_hex)
             if kept or event.lost:
@@ -312,6 +321,16 @@ class FleetBridge:
                 self._bump()
             self._say("warn", f"shell closed on {short}…", node_hex)
         elif isinstance(event, Failure):
+            if self._app.is_log_follow(node_hex, event.rid):
+                # A follow refused — renewed every minute, so said once, on the
+                # machine's own line in the log page, instead of an error in the
+                # activity feed sixty times an hour.
+                if self._logs.note_problem(node_hex, event.error):
+                    self._say("warn", f"{short}… will not send its log: "
+                                      f"{event.error}", node_hex)
+                    with self._lock:
+                        self._bump()
+                return
             self._finish(event.rid, "failed", event.error)
             self._say("err", f"{short}…: {event.error}", node_hex)
 
@@ -886,23 +905,79 @@ class FleetBridge:
 
     def remote_call(self, session: str, node_hex: str, method: str, path: str,
                     body: bytes | None) -> tuple:
-        """Relay one console call. ``(status, content_type, body)``."""
+        """Relay one console call. ``(status, content_type, body)``.
+
+        A node that granted ``passwordless`` keeps being driven across its own
+        restart. Its console forgets every session when it comes back — which
+        is what an update ends in — and the call answered 401, the page read
+        that as "that node threw us out", and the operator was back on their
+        own machine with a password field nobody had a password for. The grant
+        is what minted the session in the first place, so it mints the next
+        one: the same three gates on the far side, asked again."""
         with self._lock:
             self._prune_remote()
             entry = self._remote.get((session, node_hex))
             if entry is not None:
                 entry["at"] = time.monotonic()
             token = entry["token"] if entry else None
-        if token is None:
+        if entry is None:
             return 409, "application/json", _dump(
                 {"error": "no session on that node — connect to it again"})
+        if token is None:
+            token = self._reissue_remote(session, node_hex)
+            if token is None:
+                return self._not_back_yet()
         status, ctype, payload = self._remote_raw(node_hex, token, method,
                                                   path, body)
         if status == 401:
+            if self._app.state.may_use(node_hex, "passwordless"):
+                fresh = self._reissue_remote(session, node_hex, force=True)
+                if fresh is None:
+                    return self._not_back_yet()
+                return self._remote_raw(node_hex, fresh, method, path, body)
             # Its console dropped our session (restart, password change): forget
             # it here too, so the page asks for the password instead of looping.
             self.remote_disconnect(session, node_hex)
         return status, ctype, payload
+
+    @staticmethod
+    def _not_back_yet() -> tuple:
+        return 502, "application/json", _dump(
+            {"error": "that node is not answering — it will be picked up again "
+                      "when it does"})
+
+    def _reissue_remote(self, session: str, node_hex: str, *,
+                        force: bool = False) -> str | None:
+        """A fresh passwordless session on a node that dropped ours, or None.
+
+        None while the node is silent (asked again on a later call, at most
+        every `REMOTE_REISSUE_EVERY`), and the remote session is dropped
+        outright when the node *refuses* — a grant taken back is not something
+        to keep asking about."""
+        key = (session, node_hex)
+        now = time.monotonic()
+        with self._lock:
+            entry = self._remote.get(key)
+            if entry is None:
+                return None
+            if not force and now - entry.get("reissued", 0.0) < REMOTE_REISSUE_EVERY:
+                return None
+            entry["reissued"] = now
+            entry["token"] = None
+        try:
+            token = self._call(self._app.console_session(self._node(node_hex)),
+                               timeout=_CALL_TIMEOUT)
+        except ConsoleProxyTimeout:
+            return None
+        except Exception:                       # noqa: BLE001 — a refusal, or worse
+            self.remote_disconnect(session, node_hex)
+            return None
+        with self._lock:
+            entry = self._remote.get(key)
+            if entry is None:
+                return None              # the operator left meanwhile
+            entry["token"] = token
+        return token
 
     def _remote_raw(self, node_hex: str, token, method: str, path: str,
                     body: bytes | None) -> tuple:
@@ -1050,7 +1125,8 @@ class FleetBridge:
                 # it carries what we hold so a node that restarted its ring, or
                 # a link that was down, resumes without a gap.
                 await self._app.follow_logs(self._node(node_hex), True,
-                                            seq=self._logs.seen(node_hex))
+                                            seq=self._logs.seen(node_hex),
+                                            run=self._logs.run_of(node_hex))
             elif node_hex in following:
                 await self._app.follow_logs(self._node(node_hex), False)
 
@@ -1078,7 +1154,8 @@ class FleetBridge:
         answer lands in that node's ring like any other."""
         return self._job(self._call(self._app.request_logs(
             self._node(node_hex), op="since",
-            seq=self._logs.seen(node_hex), **filters)), "logs", node_hex)
+            seq=self._logs.seen(node_hex), run=self._logs.run_of(node_hex),
+            **filters)), "logs", node_hex)
 
     def set_log_policy(self, node_hex: str, policy=None, megabytes=None,
                        inherit: bool = False) -> dict | None:

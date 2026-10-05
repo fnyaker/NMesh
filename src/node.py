@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import functools
 import hashlib
 import heapq
 import hmac
@@ -137,6 +138,16 @@ def _running_version() -> str:
     to be one lookup, not a constant copied at startup."""
     from .version import __version__
     return __version__
+
+
+def _newest_release_first(left: dict, right: dict) -> int:
+    """Order two catalogue entries newest version first, then newest
+    signature — the order an unattended install wants to try them in."""
+    if _is_newer(left["version"], right["version"]):
+        return -1
+    if _is_newer(right["version"], left["version"]):
+        return 1
+    return (right.get("ts") or 0) - (left.get("ts") or 0)
 
 # ---------------------------------------------------------------------------
 # MeshNode
@@ -367,8 +378,18 @@ class MeshNode:
         self._release_serve_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._release_task: asyncio.Task | None = None
         self._directory_task: asyncio.Task | None = None
-        self._release_tried: OrderedDict[bytes, str] = OrderedDict()
+        # Release id → (failures, monotonic time it may be tried again). A
+        # failure is tried again later rather than never: most of them are the
+        # mesh's, not the release's. `inf` is "not again in this process" — a
+        # release installed and waiting for a restart, or one the journal gave
+        # up on.
+        self._release_tried: OrderedDict[bytes, tuple[int, float]] = OrderedDict()
         self._release_log: list[dict] = []
+        # What the tree this node runs hashes to, once per version: the source
+        # digest a hold record carries, and the SHA-256 of the package it packs
+        # to — which is how a node that never fetched its own release finds out
+        # it can serve it anyway. Reading and packing the tree is not free.
+        self._own_tree: tuple[str, bytes, str] | None = None
         # An automatic install only takes effect when the node comes back on
         # the tree it wrote, so the loop restarts the node — and the journal is
         # what stops that pair from becoming a loop: it survives the exit the
@@ -433,6 +454,10 @@ class MeshNode:
         # somebody stopped looking, is a record it has no business holding
         # (`src/logbook.py`).
         self.logs = LogBook()
+        # A trace keeps the log on while it runs (`trace.set`); this is the
+        # other end of that hold, for a trace that runs out on its own as well
+        # as one somebody stopped.
+        self.trace.on_stop = lambda: self.logs.release(logbook.TRACE)
         # What is wrong here, as a human would want it said — a notice board
         # rather than a recording, so it is always on and deliberately poorer
         # than the ring beside it (`src/alerts.py`). An operator must be able to
@@ -8446,7 +8471,17 @@ Hints come first (the ``have`` byte on an announce, from an
             raise ReleaseError("the release content could not be fetched")
         _entry, files = fetched
         publisher_id_hex = entry["publisher_id"].hex()
-        result = await updater.apply_files(files, entry["version"])
+        try:
+            result = await updater.apply_files(files, entry["version"])
+        except updater.PreflightError:
+            # The tree went in, would not import, and came straight out again:
+            # the node never left the version it runs. Counted all the same —
+            # a release that cannot start here will not start because it was
+            # offered again — so the journal ends it after its attempts.
+            if unattended:
+                self._auto_journal.record(entry["release_id"].hex(),
+                                          entry["version"], refused=True)
+            raise
         if unattended:
             # Written before we leave: an attempt recorded after the exit is an
             # attempt nobody ever counts, and counting them is the whole guard.
@@ -8496,6 +8531,7 @@ Hints come first (the ``have`` byte on an announce, from an
             " or a subscription is allowed to",
             "a release was announced")
         delay = _RELEASE_FIRST_TICK
+        looked = False
         while self._running:
             job.ran()
             woken = True
@@ -8519,18 +8555,46 @@ Hints come first (the ``have`` byte on an announce, from an
             # on a phone is the whole cost.
             if not woken and self._update_when_active and not self.awake():
                 continue
-            try:
-                await self._auto_publish_pass()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
-            try:
-                await self._release_pass()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+            await self._release_step(self._auto_publish_pass())
+            await self._release_step(self._recommend_pass())
+            # Going to *look* — a directory lookup per watched package — is the
+            # sweep's job; an announce has already put what it carried in the
+            # book. The first pass looks too: a node that has just started knows
+            # nothing yet, and the sweep is minutes away. `update_check_minutes
+            # = 0` means never going to look, first pass included.
+            if self._update_check_seconds > 0 and (not woken or not looked):
+                looked = True
+                await self._release_step(self._subscription_pass())
+            installed = await self._release_step(self._release_pass())
+            if installed is None:
+                await self._release_step(self._subscribed_install_pass())
+            # A failed install is due again before the sweep comes round; the
+            # loop wakes for it rather than leaving it to the next sweep.
+            retry = self._release_retry_delay()
+            if retry is not None:
+                delay = min(delay, retry)
+
+    async def _release_step(self, coro):
+        """One pass of the release loop, whatever it raises.
+
+        Separately for each pass: the loop dying would silently stop the
+        updates an operator asked for, and one pass failing must not cost the
+        others their turn."""
+        try:
+            return await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    def _release_retry_delay(self) -> float | None:
+        """Seconds until a failed install may be tried again, or None."""
+        now = time.monotonic()
+        due = [at for _failures, at in self._release_tried.values()
+               if at != float("inf")]
+        if not due:
+            return None
+        return max(1.0, min(due) - now)
 
     def _release_sweep_delay(self) -> float:
         """How long until the next sweep for an installable update.
@@ -8701,7 +8765,20 @@ Hints come first (the ``have`` byte on an announce, from an
         that from becoming a loop is the journal: an attempt is written down
         before the node leaves, and a release that has been installed
         :data:`MAX_AUTO_ATTEMPTS` times without ever becoming the running
-        version is abandoned instead of tried again."""
+        version is abandoned instead of tried again.
+
+        **The newest first.** Several releases may be installable at once — a
+        node back after a week away has heard of every one published since —
+        and installing them oldest first is one restart per version to arrive
+        where the newest would have taken it in one.
+
+        **A failure is tried again, later and later.** It used to be tried once
+        per process: a holder unreachable for the minute the download ran, or a
+        link being rebuilt underneath it, and the update the operator asked for
+        sat uninstalled until somebody restarted the node by hand. The release
+        bytes are kept once they arrive, so a retry after a failure past the
+        download costs no network at all."""
+        candidates = []
         for listed in self._releases.list():
             entry = self._releases.get(listed["key"])
             if entry is None:
@@ -8710,33 +8787,92 @@ Hints come first (the ``have`` byte on an announce, from an
             if state != "available":
                 continue
             allowed, _why = self.may_auto_install(entry)
-            if not allowed:
-                continue
+            if allowed:
+                candidates.append(entry)
+        candidates.sort(key=functools.cmp_to_key(_newest_release_first))
+        for entry in candidates:
             release_id = entry["release_id"]
-            if release_id in self._release_tried:
-                continue        # already tried this one — don't loop on it
+            if not self._may_try(release_id):
+                continue        # waiting out its back-off, or done with
             if self._auto_journal.exhausted(release_id.hex()):
                 # Installed before, and this node is still not running it.
                 # Trying again would only cost another restart. Said once, and
                 # in the log the operator already reads: an automatic update
                 # that has quietly given up looks exactly like one that never
                 # started.
-                self._release_tried[release_id] = entry["version"]
+                self._note_tried(release_id, 0, float("inf"))
                 self._note_release(
                     entry["version"], "abandoned",
                     f"installed {MAX_AUTO_ATTEMPTS} times and never became the "
                     f"running version — install it by hand to try again")
                 continue
-            self._release_tried[release_id] = entry["version"]
-            while len(self._release_tried) > _RELEASE_TRIED_MAX:
-                self._release_tried.popitem(last=False)
-            try:
-                await self.install_release_entry(entry, unattended=True)
-                return entry["version"]
-            except Exception as exc:
-                self._note_release(entry["version"], "failed", str(exc))
-                return None
+            return entry["version"] if await self._install_unattended(entry) else None
         return None
+
+    def _may_try(self, release_id: bytes) -> bool:
+        """Is this release past its back-off, and not done with?"""
+        tried = self._release_tried.get(release_id)
+        return tried is None or time.monotonic() >= tried[1]
+
+    async def _install_unattended(self, entry: dict) -> bool:
+        """One unattended install, with its outcome written down either way.
+
+        A failure is tried again after a back-off that doubles each time; a
+        success is not tried again in this process — either it restarts onto
+        the new tree, or there is nothing to restart it and the operator has
+        been told so, and installing the same tree every pass would not help."""
+        release_id = entry["release_id"]
+        tried = self._release_tried.get(release_id)
+        try:
+            await self.install_release_entry(entry, unattended=True)
+        except Exception as exc:
+            failures = (tried[0] if tried is not None else 0) + 1
+            wait = min(_RELEASE_RETRY_MAX,
+                       _RELEASE_RETRY_MIN * 2 ** min(failures - 1, 16))
+            self._note_tried(release_id, failures, time.monotonic() + wait)
+            self._note_release(entry["version"], "failed",
+                               f"{exc} — trying again in {max(1, int(wait // 60))} min")
+            return False
+        self._note_tried(release_id, 0, float("inf"))
+        return True
+
+    def _note_tried(self, release_id: bytes, failures: int, until: float) -> None:
+        self._release_tried[release_id] = (failures, until)
+        self._release_tried.move_to_end(release_id)
+        while len(self._release_tried) > _RELEASE_TRIED_MAX:
+            self._release_tried.popitem(last=False)
+
+    def note_rollback(self, note: dict) -> None:
+        """An update undid itself before this process started — say so.
+
+        The boot guard (`src/boot_guard.py`) runs before there is a node to
+        tell, so it leaves a note and the launcher hands it here once. Said in
+        the release log and on the board, because an update that quietly put
+        the old version back looks exactly like one that never arrived; and the
+        version is given up on, because it has just used its chances in one
+        go."""
+        version = str(note.get("version") or "?")[:64]
+        if note.get("restored"):
+            detail = (f"{note.get('reason') or 'it did not stay up'} — back on "
+                      f"{note.get('previous') or _running_version()}")
+            self._auto_journal.abandon(version)
+            self._note_release(version, "rolled back", detail)
+            self.alert(f"update:rollback:{version}",
+                       f"the update to {version} was rolled back",
+                       level=alerts.ERROR, source="updates", detail=detail)
+        else:
+            detail = (f"{note.get('reason') or 'it did not stay up'} — "
+                      f"{note.get('detail') or 'nothing to go back to'}")
+            self._note_release(version, "not rolled back", detail)
+            self.alert(f"update:rollback:{version}",
+                       f"the update to {version} is failing and could not be "
+                       "undone", level=alerts.ERROR, source="updates",
+                       detail=detail)
+
+    def note_trial_passed(self) -> None:
+        """The tree an update put in place has stayed up: it is the tree now."""
+        self._note_release(_running_version(), "confirmed",
+                           "stayed up after the update")
 
     def set_restart_hook(self, hook) -> None:
         """Who can make this process leave so something starts it again.
@@ -10348,7 +10484,16 @@ Hints come first (the ``have`` byte on an announce, from an
         never reached us, or a node we met long after it filed its record.
         Asked **by name**, because that is what a subscription names — so a new
         signer of a watched package is found without anybody having subscribed
-        to them. Bounded by the subscription count, which an operator sets."""
+        to them. Bounded by the subscription count, which an operator sets.
+
+        A key pinned for automatic install is a subscription to this node's own
+        software in all but name, and it is looked for the same way
+        (:meth:`_seek_pinned_releases`): an update an operator asked to take on
+        its own must not depend on an announce happening to reach this node."""
+        try:
+            await self._seek_pinned_releases()
+        except Exception:
+            pass          # the watched packages are still worth asking after
         for subscription in self._subscriptions.list():
             try:
                 await self._lookup_package_key(
@@ -10367,6 +10512,39 @@ Hints come first (the ``have`` byte on an announce, from an
             self._activity.note(
                 "release", f"{entry['name']} {entry['version']} is offered")
             self._note_change("packages")
+
+    async def _seek_pinned_releases(self) -> int:
+        """Go and look for node software signed by a key pinned ``auto``.
+
+        Announces are gossip: a node that was offline, or reached through a
+        peer that does not relay releases, never hears one, and the sweep used
+        to cover only what had already been gossiped into the book. So it asks
+        the directory, by this software's name, and follows the records whose
+        publication proof is a key this operator pinned for automatic install
+        to their descriptor — which puts the release in the book, where the
+        install pass and every one of its gates take over. A record from any
+        other key is not followed: a name anybody may file under must not buy
+        a lookup per record. Returns how many descriptors it fetched."""
+        if not any(entry["auto"] and entry["code"]
+                   for entry in self._publishers.list()):
+            return 0
+        records = await self._lookup_package_key(_pkg_name_key(_CORE_NAME))
+        fetched = 0
+        for record in records:
+            if fetched >= _SEEK_RESOLVE_MAX:
+                break
+            if (record["kind"] != _PKG_CORE or not record["published"]
+                    or record["signer"] is None
+                    or not self._publishers.auto_for(record["signer"])
+                    or not _is_newer(record["version"], _running_version())
+                    or self._releases.get(record["release"]) is not None):
+                continue
+            fetched += 1
+            described, _release = await self._resolve_record(
+                _pkg_entry_key(record).hex())
+            if described is not None:
+                self._wake_release_pass()
+        return fetched
 
     async def _subscribed_install_pass(self) -> None:
         """Install what a subscription is allowed to install on its own.
@@ -10409,66 +10587,107 @@ Hints come first (the ``have`` byte on an announce, from an
             if release is None:
                 continue
             allowed, _why = self.may_auto_install(release)
-            if not allowed:
+            if not allowed or not self._may_try(release["release_id"]):
                 continue
-            try:
-                await self.install_release_entry(release, unattended=True)
-            except Exception as exc:
-                self._note_release(entry["version"], "failed", str(exc))
+            if self._auto_journal.exhausted(release["release_id"].hex()):
+                continue      # the release pass says so, once
+            await self._install_unattended(release)
             return
 
     async def _recommend_pass(self) -> None:
-        """Say which release this node runs and will serve, if asked to.
+        """Serve the release this node runs, and say so — on by default.
 
         A recommendation is a **package**, not a publisher, and saying it is a
         promise: whoever finds this record can ask this node for those bytes.
-        What makes it worth anything on top is the **source digest of the tree
-        actually running here** — a second party saying "this code is what I am
-        executing", which is the one thing in a supply chain an attacker cannot
-        obtain by minting identities.
+        So the bytes come first. A node holds its release when it fetched it
+        from the mesh; one that updated any other way — from GitHub, by hand —
+        packs the tree it runs, and if that packs to exactly what a signed
+        descriptor names (the archive is deterministic, so the same tree is the
+        same bytes on any machine) it holds that release too, and serves it.
+        This is what makes every node running a version somewhere the next
+        node can get it, instead of only the ones that happened to download it.
 
-        A release nobody here can point at is not recommended at all. There is
-        no zero reference any more: a record whose pointer resolves to nothing
-        is a source that wastes everybody's round trip, and the whole value of
-        the record is that it can be followed.
+        What makes the record worth anything on top is the **source digest of
+        the tree actually running here** — a second party saying "this code is
+        what I am executing", which is the one thing in a supply chain an
+        attacker cannot obtain by minting identities.
 
-        Once per version: reading and hashing the tree is not free, and the
-        answer cannot change while the version does not."""
+        A release nobody signed is not recommended at all, and neither is one
+        whose bytes this node cannot produce: a record whose pointer resolves to
+        nothing, or to bytes this node does not have, is a source that wastes
+        everybody's round trip.
+
+        Once per version: reading and packing the tree is not free, and the
+        answer cannot change while the version does not. Both run off the event
+        loop."""
         if not self._recommend_version:
             return
         version = _running_version()
         if self._recommended == version:
             return
-        # The descriptor's own content key, not the package's: a record points at
-        # something `dht_get` can resolve, and the package moves on the release
-        # transfer instead. Keeping it locally is what makes the pointer good —
-        # the directory sweep replicates it a moment later.
-        release = None
-        for entry in self._releases.list():
-            if entry["version"] != version:
+        candidates = []
+        for listed in self._releases.list():
+            if listed["version"] != version:
                 continue
-            held = self._releases.get(entry["key"])
-            if held is None:
-                continue
-            release = held["key"]
-            self._dht_store.put(release, held["release"])
-            break
-        if release is None:
-            return
+            held = self._releases.get(listed["key"])
+            if held is not None:
+                candidates.append(held)
+        if not candidates:
+            return          # nobody signed what we run, or we have not heard yet
+        from . import updater
         try:
-            from . import updater
-            files = _core_read_tree(updater.install_root())
-            digest = _pkg_source_digest(files)
+            digest, packed_sha = await self._own_tree_facts(version)
         except Exception:
             return          # a tree we cannot read is not a tree we can vouch for
+        chosen = next((entry for entry in candidates
+                       if self._packages.has(entry["release_id"].hex())), None)
+        if chosen is None:
+            chosen = next((entry for entry in candidates
+                           if entry["sha256"] == packed_sha), None)
+            if chosen is None:
+                return      # signed releases of this version, none of them ours
+            try:
+                package = await updater._bounded(
+                    lambda: _core_build_package(
+                        _core_read_tree(updater.install_root())),
+                    _OWN_TREE_TIMEOUT, what="packing this node's own tree")
+            except Exception:
+                return
+            if not self._packages.put(chosen["release_id"].hex(), package,
+                                      chosen["sha256"]):
+                return      # the tree moved under us; next pass reads it again
+        # The descriptor's own content key, not the package's: a record points
+        # at something `dht_get` can resolve, and the package moves on the
+        # release transfer instead. Keeping it locally is what makes the pointer
+        # good — the directory sweep replicates it a moment later.
+        release = chosen["key"]
+        self._dht_store.put(release, chosen["release"])
         try:
             self.sign_package_record(_PKG_CORE, _CORE_NAME, version, release,
-                                     digest)
+                                     digest, notes=chosen.get("notes") or "")
         except Exception:
             return
         self._recommended = version
-        self._activity.note("release", "published which version this node runs ("
+        self._activity.note("release", "serving the version this node runs ("
                             + version + ")")
+
+    async def _own_tree_facts(self, version: str) -> tuple[bytes, str]:
+        """``(source digest, sha256 of its package)`` for the tree running here,
+        read once per version, off the event loop."""
+        cached = self._own_tree
+        if cached is not None and cached[0] == version:
+            return cached[1], cached[2]
+        from . import updater
+
+        def read():
+            files = _core_read_tree(updater.install_root())
+            return (_pkg_source_digest(files),
+                    hashlib.sha256(_core_build_package(files)).hexdigest())
+
+        digest, packed_sha = await updater._bounded(
+            read, _OWN_TREE_TIMEOUT, what="reading this node's own tree")
+        self._own_tree = (version, digest, packed_sha)
+        return digest, packed_sha
 
     # -- application packages ---------------------------------------------
 

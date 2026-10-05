@@ -18,6 +18,50 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
+
+_BOOT_GUARD = None
+
+
+def _boot_guard():
+    """`src/boot_guard.py`, loaded by path and on its own.
+
+    It has to work exactly when the rest of `src` cannot be trusted to import,
+    and importing it through the package would import the whole node first."""
+    global _BOOT_GUARD
+    if _BOOT_GUARD is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "nmesh_boot_guard", os.path.join(ROOT, "src", "boot_guard.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BOOT_GUARD = module
+    return _BOOT_GUARD
+
+
+def _count_this_start() -> None:
+    """Count this start against a tree on trial, before anything of it loads.
+
+    `start.sh` counts the starts it makes and says so in the environment; the
+    variable is taken out here, so a re-exec after an update — which runs this
+    script again without `start.sh` — is counted like any other start. When the
+    tree has had its chances and the previous one is back, this process
+    replaces itself with that tree's launcher rather than go on with this one."""
+    if os.environ.pop("NMESH_BOOT_COUNTED", None) == "1":
+        return
+    try:
+        guard = _boot_guard()
+        outcome = guard.begin(ROOT)
+    except Exception:
+        return          # a guard that cannot run must never be why a node did not
+    if outcome == guard.ROLLED_BACK:
+        print("  Boot guard    : the new version did not stay up — back on the "
+              "previous one", flush=True)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+if __name__ == "__main__":
+    _count_this_start()
+
 from src import MeshNode
 from src.transports.manager import TransportManager
 from src.transports.registry import register_all
@@ -257,6 +301,30 @@ def _settle(args) -> tuple:
     return path, problems, overridden, values.get("transports") or {}
 
 
+def _settle_the_trial(node) -> None:
+    """Say what the boot guard did, and end a trial this start has passed.
+
+    A rollback happened before this process had a node to tell, so it left a
+    note; the node reads it once and puts it where an operator looks. A tree
+    that has been up for `HEALTHY_AFTER` is the tree this machine runs."""
+    try:
+        guard = _boot_guard()
+        note = guard.take_note(ROOT)
+    except Exception:
+        return
+    if note is not None:
+        node.note_rollback(note)
+
+    def healthy() -> None:
+        try:
+            if guard.confirm(ROOT):
+                node.note_trial_passed()
+        except Exception:
+            pass
+
+    asyncio.get_running_loop().call_later(guard.HEALTHY_AFTER, healthy)
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     # Defaults live in src/config.py, not here: the parser must be able to say
@@ -367,7 +435,7 @@ async def main() -> None:
         # while nobody is using it.
         update_check_minutes=getattr(args, "update_check_minutes", 5),
         update_when_active=bool(getattr(args, "update_when_active", False)),
-        recommend_version=bool(getattr(args, "recommend_version", False)),
+        recommend_version=bool(getattr(args, "recommend_version", True)),
     )
     # `--listen` takes host:port, but "tcp://host:port" is the spelling every
     # other address in this project uses, so it gets typed here too. Accept it
@@ -470,6 +538,7 @@ async def main() -> None:
     # manager bring it back), so the node borrows it rather than growing a
     # second way to end the process.
     node.set_restart_hook(console.restart)
+    _settle_the_trial(node)
 
     if preauth is not None and host is not None:
         await _adopt_operator(node, host, preauth, preauth_path)

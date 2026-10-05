@@ -1415,3 +1415,82 @@ def test_a_transport_opens_on_its_status_then_its_settings():
     assert 'data-panel="status"' in source and 'data-panel="settings"' in source
     # The chosen view survives a redraw, like the fold.
     assert "views[scheme] || \"status\"" in source
+
+
+# ── the control channel's loops ─────────────────────────────────────────────
+CHANNEL_SUITE = pathlib.Path(__file__).with_name("channel_test.js")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
+def test_the_channel_keeps_one_poll_and_survives_a_restart(tmp_path):
+    """Driving another node: a poll that outlived its `stop()` ran twice, then
+    three times, against a node that counts every frame; a node restarting was
+    answered "nothing moved"; and a link being rebuilt threw the operator off a
+    node that was back seconds later. Run on the code the pages ship."""
+    source = tmp_path / "channel.js"
+    source.write_text(webassets.channel.JS, encoding="utf-8")
+    result = subprocess.run([NODE, str(CHANNEL_SUITE), str(source)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+EVENTS_SUITE = pathlib.Path(__file__).with_name("events_test.js")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
+def test_the_change_stream_repaints_after_a_gap_and_reopens_after_a_refusal(tmp_path):
+    """What moved while the stream was down was told to nobody, so coming back
+    repaints everything; and a stream the browser gave up on (a 503, a 401) is
+    opened again instead of leaving the page on its timer for good."""
+    events = webassets.ui.JS.split("const EVENTS = {")[1]
+    events = "const EVENTS = {" + events.split("// ---- the statistics cadence")[0]
+    source = tmp_path / "events.js"
+    source.write_text(events, encoding="utf-8")
+    result = subprocess.run([NODE, str(EVENTS_SUITE), str(source)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── the node's own log, live ────────────────────────────────────────────────
+
+def _nlog_source() -> str:
+    return webassets.APP_JS.split("const NLOG = {")[1].split("\n};\n")[0]
+
+
+def test_the_console_has_a_live_view_of_the_nodes_own_log():
+    """The ring had a control plane and no page: the only log anybody could
+    look at in the product was the copy a fleet console collected from
+    somebody else."""
+    html = webassets.console.INDEX_HTML
+    body = webassets.console.CONSOLE_PAGE_JS
+    assert 'if(section === "settings" && sub === "logs") NLOG.enter();' in body
+    assert "NLOG.forget()" in body          # a switch of node starts again
+    for control in ("nlog-start", "nlog-stop", "nlog-resize", "nlog-clear",
+                    "nlog-follow", "nlog-older", "nlog-view"):
+        assert f'id="{control}"' in html, control
+
+
+def test_the_live_view_follows_with_the_nodes_own_cursor():
+    source = _nlog_source()
+    # The end first, then everything after it, by the number and run the node
+    # gave back — never a re-derived one, never "since zero" again.
+    assert '"logs.query"' in source and '"logs.since"' in source
+    assert "this.seq = data.head" in source
+    assert "seq: this.seq, run: this.run" in source
+    assert "data.restarted" in source and "data.lost" in source
+
+
+def test_a_log_line_is_never_markup():
+    """What an app writes to the log is the app's text, and a log view is the
+    last place a script should run."""
+    row = _nlog_source().split("  row(line){")[1].split("\n  },")[0]
+    assert "innerHTML" not in row
+    assert "textContent" in row
+
+
+def test_the_trace_is_downloaded_from_the_node_on_screen():
+    """A navigation cannot carry the header that names the node being driven,
+    so the button downloaded this machine's trace under another one's page."""
+    body = webassets.console.CONSOLE_PAGE_JS
+    assert 'window.location = "/api/trace/export"' not in body
+    assert 'CHANNEL.call("trace.export")' in body

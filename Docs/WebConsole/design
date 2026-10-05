@@ -219,10 +219,15 @@ What each of the pages used to solve on its own:
 - `THEME` — light / dark / system, remembered per browser;
 - `EVENTS` — the node's change stream (`/api/events`): what moved, coalesced into
   at most ten repaints a second, one handler call per frame. Structure only —
-  the numbers that never stop moving stay on `REFRESH`'s interval;
+  the numbers that never stop moving stay on `REFRESH`'s interval. Coming back
+  after a gap repaints every view (`EVENTS.everything()`), and a stream the
+  browser closed for good is reopened with a growing wait
+  (`tests/events_test.js`);
 - `REFRESH` — that interval, and the **list** of views on it (`REFRESH.on`,
   `REFRESH.mount`). A list rather than one job, so a view that shows a moving
-  number registers itself instead of waiting to be remembered;
+  number registers itself instead of waiting to be remembered. While another
+  node is driven it never runs faster than `REMOTE_MIN` (5 s), re-armed by
+  `CONTEXT.set`;
 - `CONTEXT` — **which node this page is driving**: the header every call carries,
   the epoch that makes a switch atomic, the subscription every view resets on,
   and `CTX_BAR`, the strip that says so on all three pages. `CONTEXT.trouble()`
@@ -279,13 +284,20 @@ reload.
   answer is not drawn, rather than drawn and refused on the press;
 - `CHANGES` — the change topics, *pulled*, when there is no stream to listen to:
   driving another node, the relay carries one bounded call and its answer, so
-  the topics arrive on a cadence and land in the same handlers `EVENTS` feeds;
+  the topics arrive on a cadence (3 s) and land in the same handlers `EVENTS`
+  feeds. Each loop carries a **run number**: `stop()` cannot recall a question
+  already on the relay, and that question used to come back and re-arm its own
+  loop, so every switch left one more poll running against a node that counts
+  every frame. A counter that comes back **lower** than the one asked from is a
+  node that restarted, and is asked again from zero;
 - `CHANNEL.judge` — what a refusal from *over there* means for being there at
   all. A session that node dropped (`unauthorized`), or no session left to it
   (`conflict`), ends the context immediately; silence (`unavailable`) is said in
-  the strip and ends it after three in a row. A page driving a node that has
-  gone answers nothing and looks alive, which is the other half of "I had to
-  reload".
+  the strip and ends it once nothing has answered for `LOST_AFTER` (90 s) — a
+  run in time, not a count, because a page asks several things at once and one
+  link being rebuilt fails them together. A page driving a node that has gone
+  answers nothing and looks alive, which is the other half of "I had to
+  reload". `tests/channel_test.js` drives both loops under Node.
 
 Three rules a caller can rely on, and should not re-implement: a refusal carries
 a **code** from a closed set (so "that node will not do this" and "that node did

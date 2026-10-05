@@ -1626,6 +1626,36 @@ class TestTheChangeStream:
         finally:
             console.stop(); await node.stop()
 
+    async def test_a_page_from_before_a_restart_hears_what_this_run_moved(self):
+        """The node restarted — an update ends in exactly that — and a page
+        reconnects naming a sequence from the run before. Everything this run
+        has noted is news to it; clamping the id to "now" answered "nothing
+        moved" about a node that had just rebuilt every link it has."""
+        node, console = await _make_console()
+        try:
+            _status, token = await _login(console)
+            node._note_change("links")
+            node._note_change("names")
+
+            def read():
+                connection, response = self._open(console, token,
+                                                  last_id=10 ** 9)
+                lines = []
+                while len(lines) < 2:
+                    line = response.fp.readline().decode("utf-8", "replace")
+                    if line.startswith("data:"):
+                        lines.append(json.loads(line[5:]))
+                connection.close()
+                return lines
+
+            ready, change = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, read),
+                timeout=8)
+            assert ready["seq"] == 0
+            assert {"links", "names"} <= set(change["topics"])
+        finally:
+            console.stop(); await node.stop()
+
     async def test_a_burst_is_one_message(self):
         """Forty link events between two reads is one answer naming one topic:
         the page re-reads the same list either way."""

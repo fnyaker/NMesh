@@ -593,6 +593,64 @@ on its node card in the Nodes tab and in Fleet → Logs.
 read of this node's ledger. `logs_policy` does **not**: what this console
 collects is a decision about this operator's own machine, like `enrol`.
 
+## The logs of the machines it manages (Fleet → Logs)
+
+A machine's own log answers "what is happening there, now". What a fleet wants
+is "what happened on any of them while nobody was looking", which a ring on a
+machine that has since rebooted cannot answer — so the operator's node keeps a
+copy: one bounded ring per machine (`src/apps/fleet_logs.py`), filled by
+**following** the machine, and read by the Logs panel without ever asking the
+network.
+
+**Two grants, on the machine being read.** Its human grants this operator the
+`logs` capability (the ledger), *and* gives its own fleet app the `logs` read
+grant in its Apps page — the fleet app reads the machine's log through the data
+connector like any app, and is not trusted with the machine's diary because of
+its name. A machine missing the second answers every follow with a refusal; the
+panel says so **once, on that machine's line** ("followed but sending nothing:
+…"), rather than as an error in the activity feed every time the follow is
+renewed.
+
+**Following keeps the machine's log on.** Nothing is kept there by default, and
+a follow used to receive nothing at all on a machine where nobody had pressed
+*Start*: the fleet app's subscription is now a hold on that ring
+([`../Architecture/logging.md`](../Architecture/logging.md#who-keeps-it-on)),
+taken while anybody follows and let go — with what was kept — when the last
+follower goes. The machine's own console shows that it is being kept "for a
+console or app following it".
+
+**Which machines are followed** is a policy per machine with a fleet-wide
+default: `always`, `active` (only while a page is open on it — the default), or
+`never` (asked only when somebody presses *Ask this machine now*). Follows are
+reconciled and renewed every minute (`_FOLLOW_INTERVAL`) and expire on the
+machine unless renewed (`LOG_FOLLOW_TTL`), so a console that died stops costing
+anything without the machine having to notice.
+
+**A restart is not the end of the log.** A machine numbers its lines again from
+one every time it restarts, which is every update. Every answer and every push
+names the **run** its numbers belong to, and a follow carries the number *and*
+the run this node holds: a machine that restarted answers from the start of its
+new run, and the copy here starts its count over with a line saying so. Before,
+the copy dropped every line numbered at or below the highest it had seen, and a
+follow asked "since 5000" of a ring at 3 — after the first restart of a managed
+machine, nothing it said was ever collected again.
+
+**The panel** reads `GET /api/fleet/logs` every two seconds while it is open and
+the tab is on screen — what this node holds, merged across machines, newest
+first by **this** node's clock (a machine supplies its own `said_at`, shown but
+never sorted on: a machine we manage is an adversary that happens to hold a
+grant). It used to assign the request's envelope (`{ok, status, data}`) as the
+answer, so it showed "Nothing collected yet" over thousands of held lines and the
+per-machine policy lines on the cards never knew a policy.
+
+| Bound | Value |
+|---|---|
+| `MAX_LOG_FOLLOWERS` | 16 consoles following one machine |
+| `LOG_FOLLOW_TTL` | 300 s, renewed every 60 s |
+| `LOG_LINES_PER_PUSH` / `MAX_LOG_LINES` | 64 lines per push / 500 per answer |
+| `fleet_logs.DEFAULT_MEGABYTES` / `MAX_MEGABYTES` | 2 / 64 MB per machine here |
+| `fleet_logs.MAX_NODES` | 128 machines' rings at once; the quietest goes first |
+
 ## The map, past what one node can see
 
 The console's mesh map draws what its node can *measure*: its own links, and the
@@ -1068,6 +1126,8 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `SHELL_IDLE_TIMEOUT` | 900 s |
 | `SHELL_INPUT_MAX` | 8192 B per input frame |
 | `MAX_INFLIGHT` | 64 requests tracked on the operator side |
+| `MAX_REQUESTS` / `REQUEST_WINDOW` | 64 signed requests per 10 s from a sender this node granted nothing; a breach is reported to the node at weight 2 |
+| `MAX_OPERATOR_REQUESTS` | 1024 per 10 s from a node a human here granted a capability to (`FleetState.is_operator`), reported at weight 1 — see below |
 | `MAX_OPERATORS` / `MAX_MANAGED` | 64 / 4096 |
 | `MAX_PENDING` | 256 pending requests (TTL 7 days) |
 | `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
@@ -1092,6 +1152,21 @@ A reply that will not fit one frame is **cut**, never sent whole and dropped:
 key from the front — a log is read from its end, and no fixed ceiling on it
 would do, because under JSON escaping one `ESC` becomes six characters and a
 screen of colour codes is six times its own length on the wire.
+
+**Two ceilings on signed requests, chosen from the ledger.** Every signed frame
+costs an ML-DSA verification before a handler sees it, and node ids are free to
+mint, so a stranger is held to 64 per 10 s. That number was also applied to
+operators, and an operator doing nothing but their job crossed it: a console
+driving this node asks one frame per read and polls for changes, and a file goes
+over in 24 KiB slices, so a few megabytes are a hundred frames in a few seconds.
+Every spent window was reported to the node as a flood — four of them and the
+node being managed held its own operator *suspect*, dropped their traffic and
+let their links go. "My remote console keeps dropping" and "my links are
+unstable" were that. A node this one granted anything is now counted against
+`MAX_OPERATOR_REQUESTS` instead: still a ceiling, still reported, sized for a
+transfer at full speed. Which ceiling applies is read from **our ledger**, keyed
+by the end-to-end session's identity — never from the frame — so a stranger
+cannot claim it, and revoking a grant makes that node a stranger again at once.
 
 The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
 ledger (we forget who we believed, rather than trusting a forged list), and an

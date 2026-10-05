@@ -625,3 +625,98 @@ class TestTheDecisionIsOfferedWhereTheMachineIs:
         # is: "collected always" with nothing kept is the state an operator
         # most needs to be able to see.
         assert "logs.records" in block and "logs.following" in block
+
+
+class TestAMachineThatRestartsIsStillCollected:
+    """A machine numbers its lines again from one every time it restarts —
+    which is every update. The archive dropped every line whose number was not
+    above the highest it had seen, and a follow asked "since 5000" of a ring at
+    3: after the first restart of a managed machine, nothing it said was kept
+    again."""
+
+    def _line(self, seq, message):
+        return {"seq": seq, "at": float(seq), "level": "info",
+                "source": "node", "topic": "", "message": message, "fields": {}}
+
+    def test_a_new_run_starts_the_count_over(self):
+        archive = fleet_logs.LogArchive()
+        archive.absorb("n", [self._line(n, f"before {n}") for n in range(1, 6)],
+                       run="aa" * 8)
+        kept = archive.absorb("n", [self._line(1, "after"), self._line(2, "more")],
+                              run="bb" * 8)
+        assert kept == 2
+        assert archive.seen("n") == 2 and archive.run_of("n") == "bb" * 8
+        messages = [line["message"] for line in archive.query(node="n")["lines"]]
+        assert messages[:3] == ["more", "after",
+                                "this machine restarted; its log starts again here"]
+
+    def test_the_same_run_still_drops_what_is_already_held(self):
+        archive = fleet_logs.LogArchive()
+        archive.absorb("n", [self._line(1, "once")], run="aa" * 8)
+        assert archive.absorb("n", [self._line(1, "once")], run="aa" * 8) == 0
+
+    async def test_a_follow_from_before_a_restart_gets_this_runs_lines(
+            self, operator, agent):
+        await enrol(operator, agent, caps=["logs"])
+        source = _logs(agent)
+        source.book.record("node", "first thing after the restart")
+        await operator.app.follow_logs(agent.id, True, seq=5000,
+                                       run="00" * 8)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        events = _received(operator)
+        messages = [line["message"] for event in events for line in event.lines]
+        assert "first thing after the restart" in messages
+        assert any(event.run == source.book.run for event in events)
+
+    async def test_pushed_lines_say_which_run_they_belong_to(self, operator,
+                                                            agent):
+        await enrol(operator, agent, caps=["logs"])
+        source = _logs(agent)
+        agent.client.log_run = source.book.run
+        await operator.app.follow_logs(agent.id, True)
+        await deliver(operator, agent)
+        await deliver(agent, operator)
+        operator.drain_events()
+        source.book.record("node", "live")
+        await _pump_once(agent.app)
+        await deliver(agent, operator)
+        pushed = [event for event in _received(operator) if event.pushed]
+        assert pushed and pushed[-1].run == source.book.run
+
+
+class TestARefusalIsSaidOnceWhereTheMachineIs:
+    async def test_a_follow_refused_is_on_the_machines_line_not_the_feed(self):
+        bridge_test = TestTheConsoleSideOfIt()
+        node, app, bridge = await bridge_test._bridge()
+        machine = "cd" * 20
+        try:
+            app.state.add_managed(machine, caps=["logs"])
+            app._log_follows[machine] = "rid1"
+            failure = fleet.Failure(fleet.NodeID.from_hex(machine), "rid1",
+                                    "this node has not granted its fleet app "
+                                    "the right to read its log")
+            bridge._on_event(failure)
+            bridge._on_event(failure)               # the renewal, a minute on
+            problems = bridge.logs()["status"]["problems"]
+            assert "granted" in problems[machine]
+            said = [line for line in bridge._log if "will not send" in
+                    line.get("text", "")]
+            assert len(said) == 1
+            # It starts sending again: the problem goes.
+            bridge._on_event(LogsReceived(fleet.NodeID.from_hex(machine), "rid1",
+                                          [], following=True))
+            assert bridge.logs()["status"]["problems"] == {}
+        finally:
+            bridge.stop()
+            await node.stop()
+
+
+def test_the_page_reads_the_body_not_the_envelope():
+    """`apiJson` answers `{ok, status, data}`. The page assigned that envelope
+    as the answer, so `lines` was never there and the panel said "Nothing
+    collected yet" over a node holding thousands of lines."""
+    source = webassets.FLEET_JS
+    body = source.split("async function refreshLogs(")[1].split("\nfunction ")[0]
+    assert "LOGS = await apiJson" not in body
+    assert "const {ok, data} = await apiJson(\"/api/fleet/logs\"" in body

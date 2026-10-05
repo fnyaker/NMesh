@@ -176,6 +176,17 @@ class TestServiceUnits:
         assert "NMESH_SERVICE_MANAGED=1" in out
         assert 'OQS_INSTALL_PATH="/opt/nmesh/_oqs"' in out
 
+    def test_openrc_starts_the_node_again_when_it_leaves(self, tmp_path):
+        """The unit tells the node something will restart it, so it must be
+        true: `command_background` is start-stop-daemon's start-and-forget, and
+        a node that exited to come back on an update stayed down for good."""
+        out = run_snippet(
+            tmp_path,
+            'openrc_service /opt/nmesh /var/lib/nmesh nm "--fleet" nmesh').stdout
+        assert "supervisor=supervise-daemon" in out
+        assert "respawn_max=0" in out
+        assert "command_background" not in out
+
     def test_runit_service_says_something_will_restart_it(self, tmp_path):
         """Android has no init a package can reach; runsv is what watches a node
         under Termux. Without this the node refuses to leave after installing an

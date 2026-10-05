@@ -147,7 +147,7 @@ class TestReadingItFromAConsole:
         for asked in (10 ** 9, logbook.MAX_QUERY, 0):
             answer = chan.call("logs.query", {"limit": asked}).result
             assert answer["returned"] == logbook.MAX_QUERY
-            assert answer["matched"] > logbook.MAX_QUERY
+            assert answer["more"] is True
 
     async def test_a_node_with_no_book_is_a_refusal_rather_than_a_crash(self):
         class _Bare:
@@ -240,3 +240,90 @@ class TestWhatAnAppMayRead:
         choices = next(p for p in declared["params"]
                        if p["name"] == "capability")["choices"]
         assert tuple(grant["name"] for grant in GRANTS) == tuple(choices)
+
+
+class TestEachHolderStopsOnlyItsOwn:
+    """*Stop* used to stop the log outright — a trace ending took the lines an
+    operator had started on purpose, and a trace running out on its own left
+    the log running for ever."""
+
+    async def test_stopping_the_trace_leaves_an_operators_log(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("logs.set", {"action": "start"})
+        chan.call("trace.set", {"action": "start"})
+        node.logs.record("node", "kept")
+        chan.call("trace.set", {"action": "stop"})
+        status = chan.call("logs.status").result
+        assert status["running"] and status["held_by"] == ["operator"]
+        assert status["records"] == 1
+
+    async def test_the_operators_stop_says_who_still_keeps_it(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("trace.set", {"action": "start"})
+        chan.call("logs.set", {"action": "start"})
+        answer = chan.call("logs.set", {"action": "stop"}).result
+        assert answer["running"] is True and answer["held_by"] == ["trace"]
+
+    async def test_a_trace_that_runs_out_lets_go_of_the_log(self, monkeypatch):
+        from src.node import MeshNode
+        from tests.conftest import make_manager
+        node = MeshNode(transport_manager=make_manager())
+        try:
+            chan = _chan(node)
+            chan.call("trace.set", {"action": "start", "seconds": 1})
+            assert node.logs.status()["held_by"] == ["trace"]
+            import src.trace as trace_module
+            monkeypatch.setattr(trace_module.time, "monotonic",
+                                lambda: 10 ** 9)
+            node.trace.status()                  # notices it has run out
+            assert node.logs.status()["running"] is False
+        finally:
+            await node.stop()
+
+    async def test_resizing_a_running_ring_keeps_it_running(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("logs.set", {"action": "start"})
+        node.logs.record("node", "kept")
+        answer = chan.call("logs.set", {"action": "resize", "megabytes": 1}).result
+        assert answer["running"] and answer["megabytes"] == 1.0
+        assert answer["records"] == 1
+
+
+class TestFollowingFromAConsole:
+    async def test_the_cursor_moves_past_lines_a_filter_left_out(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("logs.set", {"action": "start"})
+        for _ in range(5):
+            node.logs.record("node", "noise", level="debug")
+        first = chan.call("logs.since", {"seq": 0, "level": "error"}).result
+        assert first["lines"] == [] and first["seq"] == 5
+        node.logs.record("peers", "link lost", level="error", topic="link")
+        second = chan.call("logs.since", {"seq": first["seq"], "level": "error",
+                                          "topic": "link",
+                                          "contains": "lost"}).result
+        assert [line["message"] for line in second["lines"]] == ["link lost"]
+
+    async def test_a_page_from_before_a_restart_is_answered_from_the_start(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("logs.set", {"action": "start"})
+        node.logs.record("node", "after the restart")
+        answer = chan.call("logs.since", {"seq": 9000,
+                                          "run": "00" * 8}).result
+        assert answer["restarted"] is True and answer["returned"] == 1
+        assert answer["run"] == node.logs.run
+
+    async def test_older_lines_are_paged_from_a_number(self):
+        node = _Node()
+        chan = _chan(node)
+        chan.call("logs.set", {"action": "start"})
+        for index in range(30):
+            node.logs.record("node", f"line {index}")
+        page = chan.call("logs.query", {"limit": 10}).result
+        older = chan.call("logs.query", {"limit": 10,
+                                         "before_seq": page["lines"][-1]["seq"]}).result
+        assert [line["seq"] for line in older["lines"]] == list(range(20, 10, -1))

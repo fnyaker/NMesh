@@ -8,10 +8,12 @@ Four operations, and the shape of them is the whole design.
     operator sizing a ring deserves the measured ratio rather than a claim.
 
 ``logs.set``
-    Start, stop, resize, clear. **Nothing is kept until this says so**, and
+    Start, stop, resize, clear. **Nothing is kept until somebody asks**, and
     stopping drops what was kept rather than leaving it in memory — a log ring
     outliving the person reading it is a record this node has no business
-    holding (`src/logbook.py`).
+    holding (`src/logbook.py`). *Start* and *Stop* are the operator's own hold:
+    a trace that is running, or a console following this log, keeps the ring
+    on for itself, and ``held_by`` in every answer says who.
 
 ``logs.query``
     The question a person asks: the ring, newest first, through filters.
@@ -65,14 +67,18 @@ class LogsModule:
                    param("contains", "text", required=False, default=""),
                    param("since_time", "count", required=False, default=0),
                    param("until_time", "count", required=False, default=0),
+                   param("before_seq", "count", required=False, default=0),
                    param("limit", "count", required=False, default=0,
                          limit=logbook.MAX_QUERY)],
                   remote=True, timeout=_READ),
         operation("since", "Everything after a sequence number, oldest first",
                   [param("seq", "count", required=False, default=0),
+                   param("run", "hex", required=False, default="", limit=32),
                    param("level", "choice", required=False, default="",
                          choices=("",) + logbook.LEVELS),
                    param("source", "text", required=False, default=""),
+                   param("topic", "text", required=False, default=""),
+                   param("contains", "text", required=False, default=""),
                    param("limit", "count", required=False, default=0,
                          limit=logbook.MAX_QUERY)],
                   remote=True, timeout=_READ),
@@ -96,26 +102,34 @@ class LogsModule:
             # Zero means "leave the size alone", which is what a caller who
             # only wanted it on has said. Inventing a number here would resize
             # a ring somebody had already sized on purpose.
-            return book.start(megabytes=megabytes or None)
+            return book.hold(logbook.OPERATOR, megabytes=megabytes or None)
         if action == "resize":
-            # Resizing a stopped ring is how an operator sets the size *before*
-            # turning it on, which is the order anybody would use.
-            was = book.status()["running"]
-            book.start(megabytes=megabytes or None)
-            return book.status() if was else book.stop()
+            # Applied whether or not anything is kept: sizing a stopped ring is
+            # how an operator sets the size *before* turning it on, which is the
+            # order anybody would use. It used to go through `start` and `stop`,
+            # which on a running ring did not shrink anything until the next
+            # block was written, and on a stopped one dropped every other hold.
+            return book.resize(megabytes) if megabytes else book.status()
         if action == "stop":
-            return book.stop()
+            # The operator's hold, not everybody's: a trace that is running and
+            # a console following this log keep it for themselves, and the
+            # answer's `held_by` says so instead of leaving *Stop* looking
+            # broken.
+            return book.release(logbook.OPERATOR)
         book.clear()
         return book.status()
 
     def op_query(self, level, source, topic, contains, since_time, until_time,
-                 limit) -> dict:
+                 before_seq, limit) -> dict:
         return self._book.query(level=level, source=source, topic=topic,
                                 contains=contains, since_time=since_time,
-                                until_time=until_time, limit=limit)
+                                until_time=until_time, before_seq=before_seq,
+                                limit=limit)
 
-    def op_since(self, seq, level, source, limit) -> dict:
-        return self._book.since(seq, level=level, source=source, limit=limit)
+    def op_since(self, seq, run, level, source, topic, contains,
+                 limit) -> dict:
+        return self._book.since(seq, run=run, level=level, source=source,
+                                topic=topic, contains=contains, limit=limit)
 
     def op_sources(self) -> dict:
         return {"sources": self._book.sources()}

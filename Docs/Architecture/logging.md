@@ -16,10 +16,10 @@ connector.
 nothing. `LogBook.record` off is one attribute test and a return. A node keeping
 a log of itself is a node carrying evidence about who it talked to and when,
 which is exactly the material the threat model says to hold as little of as
-possible. So it is off, an operator turns it on for as long as they are looking,
-and **stopping drops what was kept** rather than leaving it in memory. That is
-the opposite of `Trace.stop`, deliberately: a trace is a recording somebody asked
-for and then reads; a log ring is a by-product.
+possible. So it is off, it is kept while somebody is looking, and **when the last
+one keeping it lets go, what was kept is dropped** rather than left in memory.
+That is the opposite of `Trace.stop`, deliberately: a trace is a recording
+somebody asked for and then reads; a log ring is a by-product.
 
 **The bound is in megabytes**, because that is the question an operator actually
 has. "How many lines" is a number nobody can convert into "how much of this
@@ -36,6 +36,28 @@ about eight to one and repetitive ones far more, so eight megabytes holds
 somewhere between one and several million of them. `logs.status` reports the **measured**
 ratio — what the blocks held before deflate over what they hold now — rather
 than a claim, because an operator sizing a ring deserves the real number.
+
+## Who keeps it on
+
+Three different things want lines kept, and none may switch off what another
+asked for. Each **holds** the ring under its own name (`LogBook.hold` /
+`release`), the ring records while anybody holds it, and it drops what it kept
+when the last hold goes:
+
+| Hold | Taken by | Let go by |
+|---|---|---|
+| `operator` | *Start recording*, `logs.set start` | *Stop*, `logs.set stop` |
+| `trace` | `trace.set start` | `trace.set stop`, **and the trace running out on its own** (`Trace.on_stop`) |
+| `watch` | the first app subscribing over the connector (`_LOG_WATCH`) — which is how a fleet console following this machine reads it | the last subscriber leaving, or its socket dying |
+
+Every status says who holds it (`held_by`), so a *Stop* that leaves the ring
+running says why instead of looking broken. Three things went wrong before this,
+and each was one switch doing another's job: stopping a trace stopped a log an
+operator had started on purpose; a trace that ran out on its own left the log
+running for ever; and a fleet console following a machine received nothing at
+all, because recording was off there and nobody had happened to start it.
+`LogBook.stop` still exists for what really means "everybody": the node
+stopping, and the operator's own copy of somebody else's ring.
 
 ## Writing
 
@@ -70,23 +92,53 @@ the same shape as `control.changes`, and it is deliberate: it works over a
 channel that carries one bounded question and its answer, so a console four hops
 away follows a log exactly as a page on the machine does.
 
+Two details make the cursor trustworthy, and both were missing:
+
+- **The number that comes back is where to ask from next** — the last line the
+  answer *looked at*, matched or not — with `more` when a page was cut at its
+  limit. It used to be the newest line *returned*, so a filter that matched
+  nothing answered 0, and a reader that followed it asked for the whole ring
+  again, every time.
+- **A number belongs to a run.** Sequence numbers start again from one when the
+  process does, and a node restarts every time it updates. Every answer names
+  its `run` (random, per process); a reader that comes back with a number and
+  the run it came from is answered from the start of this run if that run is
+  over (`restarted`), instead of "nothing after 5000" from a ring at 3.
+
 | Operation | The question it answers |
 |---|---|
 | `logs.status` | Is anything kept, how much, how well does it compress |
-| `logs.set` | `start` / `stop` / `clear` / `resize` (`megabytes`) |
-| `logs.query` | The ring, newest first, through filters — what a person asks |
-| `logs.since` | Everything after a sequence number, oldest first — what a subscriber asks |
+| `logs.set` | `start` / `stop` (the operator's hold) / `clear` / `resize` (`megabytes`, applied at once) |
+| `logs.query` | The ring, newest first, through filters — what a person asks. Stops at a page (`more`); `before_seq` asks for the page before; `head` is where to follow from |
+| `logs.since` | Everything after a sequence number (and its `run`), oldest first — what a subscriber asks |
 | `logs.sources` | The names a filter can offer |
 
-Filters: `level` (a **floor**, not an equality), `source` (substring), `topic`
-(exact), `contains` (message *and* fields — a field must not be a place to put
-something a search can never find), `since_time`, `until_time`, `limit`
-(bounded by `MAX_QUERY` whoever asks).
+Filters, the same for both readers: `level` (a **floor**, not an equality),
+`source` (substring), `topic` (exact), `contains` (message *and* fields — a field
+must not be a place to put something a search can never find), `since_time`,
+`until_time`, `limit` (bounded by `MAX_QUERY` whoever asks).
 
-Blocks carry their own sequence and time range, so a query decompresses only the
-blocks that can hold an answer and leaves the rest packed. The lock is held to
-copy the block list and released before any decompression: a query must never
-stall a loop that is writing.
+Blocks carry their own sequence and time range. A query reads **from the newest
+block backwards and stops once it has a page** — a person reads the end of a
+log, and it used to unpack the whole ring to show them its last screen —
+skipping blocks outside the asked time range unopened. `matched` is therefore
+what this page found, with `more` saying there is older material; it is not a
+count of the ring. The lock is held to copy the block list and released before
+any decompression: a query must never stall a loop that is writing.
+
+The **source** names a filter offers (`logs.sources`) are counted as lines are
+written, bounded by `MAX_SOURCES`, for as long as the ring runs. They used to be
+read off the open block, which empties every few hundred lines.
+
+## What the size counts
+
+`used_bytes` is everything held: the packed blocks **and** the open one. It was
+the packed blocks alone, so a fresh ring read "0 B of 8 MB" over lines it was
+plainly holding — and the open block, up to 512 uncompressed lines, sat outside
+the bound entirely, so a 64 kB ring could hold a few hundred kB. The open block
+is now packed early once it weighs an eighth of the ring (never below 16 kB),
+and room for it is kept free: the packed blocks may use the size less that. The
+compression `ratio` is measured over packed blocks only.
 
 Nothing is buffered per subscriber. **The ring is the buffer**: a reader that
 was away comes back with the number it last saw, and `since` answers `lost` —
@@ -95,11 +147,23 @@ cannot see.
 
 ## One switch for two recordings
 
-`trace.set` drives the log ring with it: starting a trace starts the log,
-stopping stops both. "Turn the trace on" is one thing an operator does, and
-finding out afterwards that half of it was off is the failure worth designing
-out. `logs.set` remains for what that cannot express — sizing the ring, or
-keeping the lines of a node whose packet headers you have no business recording.
+`trace.set` drives the log ring with it: starting a trace takes the `trace` hold,
+and the trace ending — pressed or run out — lets it go. "Turn the trace on" is
+one thing an operator does, and finding out afterwards that half of it was off
+is the failure worth designing out. It does not reach past its own hold: a log
+an operator started is still running when the trace stops. `logs.set` remains
+for what that cannot express — sizing the ring, or keeping the lines of a node
+whose packet headers you have no business recording.
+
+## Looking at it
+
+Console → **Settings → Logs** ([`../WebConsole/guide`](../WebConsole/guide)).
+The ring had a control plane and no page: the only log anybody could look at in
+the product was the copy a fleet console collected from somebody else. The page
+has two halves — the recording (start, stop, size, clear, and who is keeping
+it) and a live view that reads the end of the log and then follows it — and
+both go through the channel, so they work the same on a node being driven from
+another console.
 
 ## An app's half
 
@@ -122,7 +186,10 @@ is synchronous and non-blocking on the node's side, because the caller is a
 receive loop: a line is queued on the client's own bounded outbox and a client
 that has stopped reading loses pushes, alone, then catches up with `_LOG_SINCE`.
 Watchers are forgotten when the socket goes, and the table is bounded like every
-other one here.
+other one here. **While any app watches, the ring is held** (`watch`): a
+subscriber is somebody looking, which is exactly when a node keeps a log. The
+watch answer names the `run` the pushed lines are numbered in
+(`ConnectorClient.log_run`), since a line does not carry it.
 
 ## A fleet's half
 
@@ -133,9 +200,13 @@ was looking* — and a ring on a node that has since rebooted cannot answer it.
 So the fleet app collects: a machine grants `logs` by name, the operator's node
 follows it (always, only while a page is open on it, or never), and what arrives
 is kept in **one bounded ring per machine** on the operator's node. A follow
-expires unless renewed, carries the sequence number the operator already holds,
-and is answered from the far ring — so a partition costs a gap that is reported
-(`lost`) rather than a silence that is not. Details, bounds and the two grants it
+expires unless renewed, carries the sequence number the operator already holds
+**and the run it belongs to**, and is answered from the far ring — so a
+partition costs a gap that is reported (`lost`) rather than a silence that is
+not, and a machine that restarted is collected from the start of its new run.
+Before the run travelled, the operator's copy dropped every line numbered at or
+below the highest it had seen, and after the first restart of a managed machine
+nothing it said was ever kept again. Details, bounds and the two grants it
 needs: [`Docs/Apps/fleet`](../Apps/fleet).
 
 The per-machine decision — always, only while its page is open, never — is

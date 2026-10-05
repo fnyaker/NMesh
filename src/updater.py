@@ -62,6 +62,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import threading
@@ -69,7 +70,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import config
+from . import boot_guard, config
 from .version import __version__, is_newer, parse as parse_version
 
 DEFAULT_REPO = "fnyaker/NMesh"
@@ -93,15 +94,23 @@ _VERSION_TEXT = re.compile(r"[A-Za-z0-9.+-]{1,64}")
 REQUIRED_ENTRIES = ("src", "start.sh")
 # What we swap in. Deliberately not the whole archive: the node's state, its
 # virtualenv and anything an operator left in the install directory stay put.
-REPLACE_ENTRIES = ("src", "scripts", "start.sh", "install.sh",
-                   "requirements.txt", "pyproject.toml", "Docs", "docker",
-                   "README.md", "CLAUDE.md")
-_BACKUP_DIR = ".nmesh-previous"
+# Defined by the boot guard, which has to put exactly this back.
+REPLACE_ENTRIES = boot_guard.REPLACE_ENTRIES
+_BACKUP_DIR = boot_guard.BACKUP_DIR
 _STAGE_DIR = ".nmesh-update"
+# How long the new tree has to show it imports before the swap is undone. A
+# small machine importing liboqs and every module cold is a few seconds; this
+# is for one that is merely slow, not one that hangs.
+PREFLIGHT_TIMEOUT = 120.0
 
 
 class UpdateError(Exception):
     """Anything that stops an update, phrased for the operator."""
+
+
+class PreflightError(UpdateError):
+    """The new tree was put in place and would not start, so it was taken out
+    again. The node is still on the version it was running."""
 
 
 def repo() -> str:
@@ -492,18 +501,25 @@ def _tree_version(path: str, expected: str) -> None:
                           f"not {expected} — check again and re-confirm")
 
 
-def _swap_tree(source: str, root: str) -> str:
+def _swap_tree(source: str, root: str, version: str = "") -> str:
     """Put ``source`` in place of the installed tree, and return the backup dir.
 
     The previous tree is moved aside, not deleted, and restored if the swap
     fails part-way — a half-replaced install is the one outcome worth ruling
     out. Shared by every way of obtaining a release, so the recovery path is
     written once: a second, weaker swap is how one route ends up less solid
-    than the other."""
+    than the other.
+
+    Two checks follow, because a tree that is in place is not yet a tree that
+    runs. The new tree must **import** (:func:`preflight`) or it is taken out
+    again before anything restarts onto it; and once it is in, it is **on
+    trial** (:mod:`src.boot_guard`) until a node started from it has stayed up,
+    so one that dies after importing is put back too."""
     backup = os.path.join(root, _BACKUP_DIR)
     shutil.rmtree(backup, ignore_errors=True)
     os.makedirs(backup, exist_ok=True)
     moved: list[str] = []
+    added: list[str] = []
     try:
         for entry in REPLACE_ENTRIES:
             incoming = os.path.join(source, entry)
@@ -513,6 +529,8 @@ def _swap_tree(source: str, root: str) -> str:
             if os.path.exists(current):
                 shutil.move(current, os.path.join(backup, entry))
                 moved.append(entry)
+            else:
+                added.append(entry)
             if os.path.isdir(incoming):
                 shutil.copytree(incoming, current, symlinks=True)
             else:
@@ -520,13 +538,7 @@ def _swap_tree(source: str, root: str) -> str:
     except Exception as exc:
         # Put back exactly what we took, so a failed update leaves the node
         # running the version it was running before.
-        for entry in moved:
-            target = os.path.join(root, entry)
-            if os.path.isdir(target):
-                shutil.rmtree(target, ignore_errors=True)
-            elif os.path.exists(target):
-                os.unlink(target)
-            shutil.move(os.path.join(backup, entry), target)
+        _restore(root, backup, moved, added)
         raise UpdateError(f"could not replace the tree: {exc}") from exc
 
     for script in ("start.sh", "install.sh"):
@@ -534,7 +546,64 @@ def _swap_tree(source: str, root: str) -> str:
         if os.path.exists(path):
             os.chmod(path, 0o755)
     _precompile(root)
+    problem = preflight(root)
+    if problem:
+        _restore(root, backup, moved, added)
+        raise PreflightError(f"the new version would not start: {problem}")
+    try:
+        boot_guard.start_trial(root, version, __version__, added)
+    except OSError:
+        pass        # unguarded is still installed; the preflight already ran
     return backup
+
+
+def _restore(root: str, backup: str, moved: list, added: list) -> None:
+    """Undo a swap: what was taken goes back, what was brought is removed."""
+    for entry in moved + added:
+        target = os.path.join(root, entry)
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+        elif os.path.lexists(target):
+            os.unlink(target)
+    for entry in moved:
+        shutil.move(os.path.join(backup, entry), os.path.join(root, entry))
+
+
+def preflight(root: str) -> str:
+    """Does the tree at ``root`` start? ``""`` when it does, otherwise what
+    Python said about it.
+
+    Runs the launcher the service runs, the way the service runs it, with
+    ``--help``: every module the node is built from is imported, the argument
+    parser is built, and it exits before anything is bound or written. A
+    release whose code raises on import, or that needs a dependency this
+    machine does not have, fails here — on a node that is still running the
+    old code and can simply put it back — instead of after the restart, where
+    the only thing left to do is crash again.
+
+    Not proof that it *runs*: that is what the trial after the restart is for
+    (:mod:`src.boot_guard`)."""
+    script = os.path.join(root, "scripts", "nmesh_node.py")
+    if not os.path.isfile(script):
+        return "the release has no scripts/nmesh_node.py to start from"
+    env = dict(os.environ)
+    # Not a start: the launcher's boot guard must not count this one against
+    # whatever tree is on trial.
+    env["NMESH_BOOT_COUNTED"] = "1"
+    try:
+        result = subprocess.run(
+            [sys.executable, script, "--help"], cwd=root, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, timeout=PREFLIGHT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"it did not finish importing within {int(PREFLIGHT_TIMEOUT)} s"
+    except OSError as exc:
+        return f"it could not be run ({exc.strerror or exc})"
+    if result.returncode == 0:
+        return ""
+    lines = [line for line in result.stderr.decode("utf-8", "replace")
+             .strip().splitlines() if line.strip()]
+    return (" / ".join(lines[-3:]) or f"exit status {result.returncode}")[:400]
 
 
 def _precompile(root: str) -> None:
@@ -578,7 +647,7 @@ def apply_sync(tag: str, *, root: str | None = None, branch=None) -> dict:
         _verify_tree(source)
         if branch:
             _tree_version(source, tag)
-        backup = _swap_tree(source, root)
+        backup = _swap_tree(source, root, tag)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -624,7 +693,7 @@ def apply_files_sync(files: dict, version: str, *,
             with open(dest, "wb") as handle:
                 handle.write(content)
         _verify_tree(source)
-        backup = _swap_tree(source, root)
+        backup = _swap_tree(source, root, version)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
