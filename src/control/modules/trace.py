@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from ...node import MESSAGE_NAMES
 from ...trace import MAX_EVENTS, MAX_SECONDS
+from ... import logbook
 from ..params import param
 from ..plane import operation
 
@@ -77,11 +78,17 @@ class TraceModule:
         trace = self._trace
         book = getattr(self._context.node, "logs", None)
         if book is not None:
+            # The trace's own hold. Stopping a trace used to stop the log
+            # outright, taking the lines from under an operator who had
+            # started it on purpose; and a trace that ran out on its own left
+            # the log running for ever. Both ends are the trace's now: this
+            # takes the hold, and `Trace.on_stop` lets go of it however the
+            # trace ends.
             try:
                 if action == "start":
-                    book.start()
+                    book.hold(logbook.TRACE)
                 elif action == "stop":
-                    book.stop()
+                    book.release(logbook.TRACE)
                 else:
                     book.clear()
             except Exception:           # noqa: BLE001 — never the reason

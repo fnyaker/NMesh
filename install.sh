@@ -408,9 +408,15 @@ name="$name"
 description="NMesh node"
 command="$prefix/start.sh"
 command_args="$args"
-command_background=true
 command_user="${user:-root}"
 directory="$prefix"
+# Supervised, not backgrounded: start-stop-daemon starts a process and forgets
+# it, so a node that exited to come back on an update — which is what the line
+# below tells it it may do — simply stayed down. supervise-daemon starts it
+# again, as systemd's Restart=always does.
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
 export NMESH_DATA="$data"
 export HOME="$prefix"
 export OQS_INSTALL_PATH="$prefix/_oqs"

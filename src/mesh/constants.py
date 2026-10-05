@@ -122,6 +122,20 @@ _RELEASE_FIRST_TICK  = 20.0     # seconds before the first pass after start
 _RELEASE_SETTLE      = 3.0      # seconds an announce waits for its neighbours
 _AUTO_PUBLISH_RETRY  = 3600.0   # before re-attempting a version that failed
 _RELEASE_TRIED_MAX   = 32       # release ids we remember failing to install
+# An automatic install that failed is tried again, later and later — never
+# given up on for the life of the process. Most failures are the mesh's, not the
+# release's: no holder reachable this minute, a link being rebuilt mid-download.
+# Giving up on the first one meant an update a peer flapped through was never
+# installed until somebody restarted the node by hand.
+_RELEASE_RETRY_MIN   = 60.0     # seconds before the first retry…
+_RELEASE_RETRY_MAX   = 3600.0   # …doubling to here
+# Directory records one sweep may follow to their descriptor when it goes
+# looking for node software signed by a key pinned for automatic install. Each
+# is a DHT lookup; a name anybody may file under must not buy more than this.
+_SEEK_RESOLVE_MAX    = 4
+# Reading and packing this node's own tree to find out whether it can serve the
+# release it runs. Seconds on a small machine; this is for one that is stuck.
+_OWN_TREE_TIMEOUT    = 120.0
 _RELEASE_SLICE       = 48 * 1024   # bytes of package per RELEASE_DATA packet
 _RELEASE_SLICE_TIMEOUT = 20.0   # waiting for one slice before trying elsewhere
 _RELEASE_SERVE_WINDOW  = 10.0   # seconds
@@ -899,6 +913,7 @@ __all__ = [
     "_OFFER_MAX",
     "_OFFER_RATE_MAX",
     "_ON_DEMAND_TIMEOUT",
+    "_OWN_TREE_TIMEOUT",
     "_PATH_FLOOR",
     "_PATH_IDLE_MAX",
     "_PATH_PROBES_PER_PASS",
@@ -971,6 +986,8 @@ __all__ = [
     "_RELEASE_NEVER_TICK",
     "_RELEASE_RATE_MAX",
     "_RELEASE_RATE_WINDOW",
+    "_RELEASE_RETRY_MAX",
+    "_RELEASE_RETRY_MIN",
     "_RELEASE_SERVE_MAX",
     "_RELEASE_SERVE_WINDOW",
     "_RELEASE_SETTLE",
@@ -1002,6 +1019,7 @@ __all__ = [
     "_SEEK_MAX_PAYLOAD",
     "_SEEK_RATE_MAX",
     "_SEEK_RATE_WINDOW",
+    "_SEEK_RESOLVE_MAX",
     "_SEEK_TAG",
     "_SEEK_TTL",
     "_SEEK_TTL_PREAUTH",

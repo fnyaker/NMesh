@@ -268,6 +268,12 @@ class FleetState:
         with self._lock:
             return [dict(entry, id=key) for key, entry in self._operators.items()]
 
+    def is_operator(self, node_hex: str) -> bool:
+        """Did a human here grant this node anything at all? Asked once per
+        inbound frame, so it copies nothing."""
+        with self._lock:
+            return bool(self._operators.get(node_hex))
+
     def allows(self, node_hex: str, capability: str) -> bool:
         """The authorisation gate. Both the enrolment *and* the specific
         capability must be present — an enrolled operator is not an omnipotent

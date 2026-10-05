@@ -451,8 +451,15 @@ const PACKAGES = {
         "<div>Accepted for</div><div>" +
         esc(core ? "this node’s own code" : "apps signed by it") +
         "</div></div>" +
-        (core ? '<label class="check"><input id="pkg-pin-auto" type="checkbox">' +
-          "<span>Let this key install its releases without asking</span></label>"
+        // Ticked: pinning a key for this node's code is deciding to run what
+        // it signs, and a node is meant to keep itself current once that is
+        // decided — every release still has to be newer, verify byte for
+        // byte, import before the restart, and stay up after it or be put
+        // back. Unticking keeps installs a press each.
+        (core ? '<label class="check"><input id="pkg-pin-auto" type="checkbox" checked>' +
+          "<span>Install its releases on its own (recommended)</span></label>" +
+          '<p class="muted small">A new version installs, restarts this node, ' +
+          "and is put back automatically if it does not stay up.</p>"
           : ""),
     });
     if(!agreed) return;

@@ -318,6 +318,7 @@ class DataConnector:
         self._clients.clear()
         self._unattended.clear()
         self._log_watchers.clear()
+        self._watching_changed()
         book = self._book()
         if book is not None and getattr(book, "sink", None) == self.push_log:
             book.sink = None
@@ -388,7 +389,7 @@ class DataConnector:
             raise
         except Exception:
             self._clients.pop(writer, None)
-            self._log_watchers.pop(writer, None)
+            self._drop_log_watcher(writer)
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
@@ -469,7 +470,7 @@ class DataConnector:
                 self._pending = max(0, self._pending - 1)
             self._clients.pop(writer, None)
             self._unattended.discard(writer)
-            self._log_watchers.pop(writer, None)
+            self._drop_log_watcher(writer)
             self._outbox.pop(writer, None)
             task = self._writers.pop(writer, None)
             if task is not None:
@@ -741,8 +742,11 @@ class DataConnector:
             else:
                 on = False
                 self._log_watchers.pop(writer, None)
+            self._watching_changed()
             await _write_frame(writer, _LOG_LINES,
-                               json.dumps({"watching": bool(on)}).encode("utf-8"))
+                               json.dumps({"watching": bool(on),
+                                           "run": getattr(book, "run", "")})
+                               .encode("utf-8"))
             return
         try:
             asked = json.loads(body.decode("utf-8")) if body else {}
@@ -753,6 +757,8 @@ class DataConnector:
         # Declared, coerced, bounded — the same three steps the control plane
         # takes with an operation's arguments, because this is the same kind of
         # caller: a local process supplying whatever it likes.
+        run = str(asked.get("run") or "")[:32]
+        before = int(_number(asked.get("before_seq")))
         asked = {key: str(asked[key])[:_LOG_TOPIC_MAX * 4]
                  for key in ("level", "source", "topic", "contains")
                  if key in asked}
@@ -761,9 +767,33 @@ class DataConnector:
         seq = _number(asked.get("seq"))
         asked["limit"] = int(_number(asked.get("limit"))) or logbook.MAX_QUERY
         asked.pop("seq", None)
-        answer = (book.since(seq, **asked) if ftype == _LOG_SINCE
-                  else book.query(**asked))
+        answer = (book.since(seq, run=run, **asked) if ftype == _LOG_SINCE
+                  else book.query(before_seq=before, **asked))
         await _write_frame(writer, _LOG_LINES, _fit(answer))
+
+    def _drop_log_watcher(self, writer) -> None:
+        if self._log_watchers.pop(writer, None) is not None:
+            self._watching_changed()
+
+    def _watching_changed(self) -> None:
+        """Keep the ring on while anybody is watching it, and let go when the
+        last one leaves.
+
+        A follower is somebody looking, which is exactly when the node keeps a
+        log — and the ring being off was why a fleet console following a
+        machine received nothing: nobody had happened to start it there. The
+        hold is the watchers' own, so it neither stops a log an operator
+        started nor survives the last watcher's going."""
+        book = self._book()
+        if book is None:
+            return
+        try:
+            if self._log_watchers:
+                book.hold(logbook.WATCH)
+            else:
+                book.release(logbook.WATCH)
+        except Exception:               # noqa: BLE001 — never a client's problem
+            pass
 
     def push_log(self, line: dict) -> None:
         """Hand one new line to every client watching, at or above its floor.
@@ -945,6 +975,7 @@ class ConnectorClient:
         # until the process dies.
         self._log_inbox: collections.deque = collections.deque(
             maxlen=_CLIENT_LOG_INBOX)
+        self.log_run = ""
 
     @classmethod
     def from_env(cls, environ=None, app_id: bytes | None = None) -> "ConnectorClient":
@@ -1101,7 +1132,11 @@ class ConnectorClient:
         resp = await self._roundtrip(
             _LOG_WATCH, (b"\x01" if on else b"\x00") + code, _LOG_LINES)
         try:
-            return bool(json.loads(resp.decode("utf-8")).get("watching"))
+            answer = json.loads(resp.decode("utf-8"))
+            # Which run of the node the pushed lines are numbered in. Lines do
+            # not carry it each, so whoever forwards them says it once.
+            self.log_run = str(answer.get("run") or "")[:32]
+            return bool(answer.get("watching"))
         except Exception:                   # noqa: BLE001
             return False
 

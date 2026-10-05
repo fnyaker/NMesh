@@ -337,10 +337,18 @@ service does not fail the installation: it is a warning, and the installed tree
 stays runnable by hand.
 
 **Every** unit written exports `NMESH_SERVICE_MANAGED=1`, next to
-`Restart=always` (systemd), `KeepAlive` (launchd) or `runsv`'s own restarting
-(runit): that pair is what lets a node install an update and then **exit to come
-back on the new code**. Replacing the tree does nothing to a process that already
-has the old code loaded, so leaving is the update.
+`Restart=always` (systemd), `KeepAlive` (launchd), `supervisor=supervise-daemon`
+with `respawn_max=0` (OpenRC) or `runsv`'s own restarting (runit): that pair is
+what lets a node install an update and then **exit to come back on the new
+code**. Replacing the tree does nothing to a process that already has the old
+code loaded, so leaving is the update.
+
+OpenRC was the other unit where the pair did not hold. It was written with
+`command_background=true`, which is `start-stop-daemon` starting the node and
+forgetting it: the unit said something would restart the node, the node believed
+it, left to come back on an update — and stayed down. It is supervised now, so a
+node that exits, or crashes, is started again five seconds later like everywhere
+else.
 
 The runit service under Termux was the one that did not export it, and the
 consequence was invisible in the worst way: `runsv` would have restarted the
@@ -397,7 +405,11 @@ file would refuse means "follow the releases" rather than a guess.
 What is replaced: **only** the code and documentation directories of the
 installed tree. The node's state, the venv and everything else are left intact.
 The previous tree is moved to `.nmesh-previous` and restored if the replacement
-fails halfway.
+fails halfway — or if the new tree does not import (the launcher is run from it
+with `--help` before anything restarts), or does not stay up after the restart
+(put back after three starts that did not last two minutes). The same checks
+apply whichever way the release arrived; see
+[`../Updates/guide`](../Updates/guide#when-the-new-version-does-not-start).
 
 Explicit refusals (`updatable()`), rather than breaking an installation:
 
@@ -430,6 +442,15 @@ this file in the same commit.
 ./start.sh                     # installs everything then runs the node
 NMESH_SETUP_ONLY=1 ./start.sh  # installs and verifies, without running the node (CI)
 ```
+
+Before it installs a dependency or verifies an import, it counts this start
+against a tree an update has just put **on trial** (`src/boot_guard.py`, run as a
+file — importing the package would import the very code on trial). A tree
+started three times without staying up two minutes is replaced by the previous
+one and the script starts again on it; see
+[`../Updates/guide`](../Updates/guide#when-the-new-version-does-not-start). It
+is the first thing that has to work after an update, so it comes before
+everything an update can break.
 
 ## The traps, per distribution
 
@@ -575,16 +596,22 @@ update_check_minutes = 60
 update_when_active = true
 ```
 
-### `recommend_version` — saying which version this node runs
+### `recommend_version` — serving the version this node runs
 
-Off by default. On, the node publishes a signed record pointing at the release
-id it runs, carrying the **source digest of the tree actually running here**.
+**On by default.** The node serves the release it runs to whoever asks, and
+files a signed record saying so, carrying the **source digest of the tree
+actually running here**. A node that updated from GitHub or by hand holds that
+release too, as long as its tree packs to exactly the bytes a publisher signed
+(the archive is deterministic); one whose tree differs offers nothing.
 
-It publishes no code and authorises nothing. What it is worth is corroboration:
-a second party saying "this code is what I am executing" is the one thing in a
-supply chain an attacker cannot obtain by minting identities. Whoever reads it
-decides what their own subscriptions make of it — see
-[`../Updates/guide`](../Updates/guide).
+It publishes no code and authorises nothing: whoever installs from this node
+still checks the publisher's signature against their own pins. What it is worth
+is twofold — every node running a version is somewhere the next node can get it,
+instead of the publisher alone, and a second party saying "this code is what I
+am executing" is the one thing in a supply chain an attacker cannot obtain by
+minting identities. It does say which version this node runs; set
+`recommend_version = false` to keep that to yourself. See
+[`../Updates/guide`](../Updates/guide#serving-what-it-runs).
 
 One report is worth at most 4, so it always takes several to reach either
 threshold. What the numbers mean, and why an accusation from a stranger counts

@@ -692,6 +692,25 @@ fi
 . "$VENV/bin/activate"
 ok "Virtualenv active ($VENV)"
 
+# ── step 4b: a tree on trial ─────────────────────────────────────────────────
+# An update writes the new tree and restarts onto it. If that tree cannot start
+# — a dependency it needs will not install, a module raises on import — every
+# step below fails on it, the service manager starts us again, and a machine
+# nobody is watching stays down for good. So each start is counted against a
+# tree on trial before anything else touches it, and after its chances the
+# previous tree is put back (src/boot_guard.py, standard library only, run as a
+# file because importing the package would import the very code on trial).
+# A start counted here is not counted again by the launcher.
+if [ -z "${NMESH_SETUP_ONLY:-}" ] && [ -f src/boot_guard.py ]; then
+    guard_status=0
+    python src/boot_guard.py begin "$PWD" || guard_status=$?
+    if [ "$guard_status" -eq 3 ]; then
+        warn "The new version did not stay up — the previous one is back; starting it"
+        exec bash "$PWD/start.sh" "$@"
+    fi
+    export NMESH_BOOT_COUNTED=1
+fi
+
 # Unknown distro, or one whose cmake is too old: pip ships official cmake and
 # ninja wheels, and the venv is ours to install into.
 if ! have_build_tools; then

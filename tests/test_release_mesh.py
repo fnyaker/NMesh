@@ -565,6 +565,11 @@ class TestRecommendingIsHolding:
             descriptor = publisher._releases.get(info["release"])["release"]
             node._releases.offer(descriptor, node._identity.verify,
                                  node._trusts_publisher)
+            # A mirror: it holds the bytes, as everything that recommends must.
+            entry = node._releases.get(info["release"])
+            node._packages.put(info["release_id"],
+                               publisher._packages.get(info["release_id"]),
+                               entry["sha256"])
             node._recommend_version = True
             monkey = _running_version_is(node, info["version"])
             await node._recommend_pass()
@@ -1114,8 +1119,8 @@ class TestAutomaticInstall:
         finally:
             await publisher.stop(); await node.stop()
 
-    async def test_a_failing_release_is_recorded_and_not_retried(self, tmp_path,
-                                                                 monkeypatch):
+    async def test_a_failing_release_is_recorded_and_not_retried_at_once(
+            self, tmp_path, monkeypatch):
         publisher, node, _info, _entry, _installed = await self._ready(
             tmp_path, monkeypatch)
         try:
@@ -1559,3 +1564,268 @@ class TestPinningFromAnAppsPage:
                 await node.install_release_entry(release)
         finally:
             await node.stop()
+
+
+class TestUnattendedUpdatesThatHoldUp:
+    """An update the operator asked to take on its own has to land on a mesh
+    that flaps, and must never cost them the machine.
+
+    Each test here is a way it used to fail: tried once and never again after a
+    link dropped mid-download, one restart per version for a node back after a
+    week away, a tree that would not start installed again and again, and an
+    update that undid itself without a word."""
+
+    async def _ready(self, tmp_path, monkeypatch, versions=("9.9.9",),
+                     state=None):
+        publisher, node = _node(), _node(str(state) if state else None)
+        infos = []
+        for index, version in enumerate(versions):
+            infos.append(await publisher.publish_release(
+                _tree(str(tmp_path / f"tree{index}"), version),
+                ts=int(time.time()) + index))
+        node._packages = publisher._packages
+        node.trust_publisher(publisher._identity.dsa_public_key.hex(), "them",
+                             auto=True)
+        for info in infos:
+            node._releases.offer(publisher._releases.get(info["release"])["release"],
+                                 node._identity.verify, node._trusts_publisher)
+        installed = []
+
+        async def fake_apply(files, version, **kwargs):
+            installed.append(version)
+            return {"applied": version, "restart_required": True}
+
+        monkeypatch.setattr(updater, "apply_files", fake_apply)
+        node.set_restart_hook(lambda: True)
+        return publisher, node, infos, installed
+
+    async def test_a_failed_install_is_tried_again_rather_than_never(
+            self, tmp_path, monkeypatch):
+        publisher, node, infos, installed = await self._ready(tmp_path, monkeypatch)
+        try:
+            calls = []
+
+            async def flaky(files, version, **kwargs):
+                calls.append(version)
+                if len(calls) == 1:
+                    raise updater.UpdateError("nobody holding it answered")
+                installed.append(version)
+                return {"applied": version, "restart_required": True}
+
+            monkeypatch.setattr(updater, "apply_files", flaky)
+            assert await node._release_pass() is None
+            assert "trying again" in node.release_overview()["log"][-1]["detail"]
+            # Not at once: a mesh that just failed is given a minute.
+            assert await node._release_pass() is None and len(calls) == 1
+            assert 0 < node._release_retry_delay() <= 60.0
+            monkeypatch.setattr("src.node._RELEASE_RETRY_MIN", 0.0)
+            rid = node._releases.get(infos[0]["release"])["release_id"]
+            node._release_tried[rid] = (1, 0.0)
+            assert await node._release_pass() == "9.9.9"
+            assert installed == ["9.9.9"]
+            # Installed: not again in this process, and nothing left to retry.
+            assert await node._release_pass() is None
+            assert node._release_retry_delay() is None
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_the_wait_doubles_and_stops_growing(self, tmp_path, monkeypatch):
+        publisher, node, infos, _installed = await self._ready(tmp_path, monkeypatch)
+        try:
+            async def boom(files, version, **kwargs):
+                raise updater.UpdateError("disk full")
+
+            monkeypatch.setattr(updater, "apply_files", boom)
+            entry = node._releases.get(infos[0]["release"])
+            waits = []
+            for _ in range(10):
+                await node._install_unattended(entry)
+                failures, until = node._release_tried[entry["release_id"]]
+                waits.append(round(until - time.monotonic()))
+            assert waits[:3] == [60, 120, 240]
+            assert max(waits) == 3600 and waits[-1] == 3600
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_the_newest_release_is_the_one_installed(self, tmp_path,
+                                                           monkeypatch):
+        """A node back after a week has heard of every version published since;
+        oldest first is one restart per version."""
+        publisher, node, _infos, installed = await self._ready(
+            tmp_path, monkeypatch, versions=("9.9.9", "9.9.11", "9.9.10"))
+        try:
+            assert await node._release_pass() == "9.9.11"
+            assert installed == ["9.9.11"]
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_a_tree_that_would_not_start_uses_up_its_attempts(
+            self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        publisher, node, infos, _installed = await self._ready(
+            tmp_path, monkeypatch, state=state)
+        try:
+            async def refuses(files, version, **kwargs):
+                raise updater.PreflightError("the new version would not start: x")
+
+            monkeypatch.setattr(updater, "apply_files", refuses)
+            monkeypatch.setattr("src.node._RELEASE_RETRY_MIN", 0.0)
+            rid = node._releases.get(infos[0]["release"])["release_id"]
+            for _ in range(cr.MAX_AUTO_ATTEMPTS):
+                node._release_tried.pop(rid, None)
+                assert await node._release_pass() is None
+            assert node._auto_journal.exhausted(rid.hex())
+            node._release_tried.pop(rid, None)
+            assert await node._release_pass() is None
+            assert node.release_overview()["log"][-1]["outcome"] == "abandoned"
+        finally:
+            await publisher.stop(); await node.stop()
+        # Nothing restarted, so the next start does not report it as an install
+        # that "did not take".
+        again = _node(str(state))
+        try:
+            assert all(row["outcome"] != "did not take"
+                       for row in again.release_overview()["log"])
+        finally:
+            await again.stop()
+
+    async def test_a_rollback_is_said_and_the_release_given_up(self, tmp_path,
+                                                               monkeypatch):
+        state = tmp_path / "state"
+        publisher, node, infos, _installed = await self._ready(
+            tmp_path, monkeypatch, state=state)
+        try:
+            rid = node._releases.get(infos[0]["release"])["release_id"]
+            node._auto_journal.record(rid.hex(), "9.9.9")
+            node.note_rollback({"version": "9.9.9", "previous": "0.0.1",
+                                "restored": True,
+                                "reason": "started 3 times without staying up"})
+            assert node._auto_journal.exhausted(rid.hex())
+            row = node.release_overview()["log"][-1]
+            assert row["outcome"] == "rolled back" and "0.0.1" in row["detail"]
+            summaries = [a["summary"] for a in node.alerts.alerts()]
+            assert any("rolled back" in text for text in summaries)
+            assert await node._release_pass() is None
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_the_sweep_goes_looking_for_what_a_pinned_key_published(
+            self, tmp_path):
+        """An announce is gossip and can miss a node entirely. A key pinned for
+        automatic install is a subscription to this software in all but name,
+        so the directory is asked."""
+        from src import pkg_dir
+        publisher, node = _node(), _node()
+        try:
+            info = await publisher.publish_release(_tree(str(tmp_path)))
+            blob = publisher._releases.get(info["release"])["release"]
+            # What a directory answer would leave behind: the record, and the
+            # descriptor it points at. Nothing was announced.
+            for raw in publisher._package_records.values():
+                node._package_book.offer(
+                    pkg_dir.parse_record(raw, node._identity.verify), raw)
+            node._dht_store.put(bytes.fromhex(info["release"]), blob)
+            assert await node._seek_pinned_releases() == 0     # nothing pinned
+            node.trust_publisher(publisher._identity.dsa_public_key.hex(),
+                                 "them", auto=False)
+            assert await node._seek_pinned_releases() == 0     # pinned, not auto
+            node.trust_publisher(publisher._identity.dsa_public_key.hex(),
+                                 "them", auto=True)
+            assert node._releases.get(info["release"]) is None
+            assert await node._seek_pinned_releases() == 1
+            assert node._releases.get(info["release"]) is not None
+            assert node._release_wake.is_set()
+            # Already in the book: not fetched again.
+            assert await node._seek_pinned_releases() == 0
+        finally:
+            await publisher.stop(); await node.stop()
+
+    async def test_the_loop_runs_every_pass(self, tmp_path, monkeypatch):
+        """The subscription and recommendation passes existed, were tested, and
+        were never called by anything but the tests."""
+        monkeypatch.setattr("src.node._RELEASE_FIRST_TICK", 0.01)
+        monkeypatch.setattr("src.node._RELEASE_SETTLE", 0.0)
+        node = _node()
+        node._release_sweep_delay = lambda: 0.01
+        node._running = True
+        ran = []
+        for name in ("_auto_publish_pass", "_recommend_pass",
+                     "_subscription_pass", "_release_pass",
+                     "_subscribed_install_pass"):
+            async def record(name=name):
+                ran.append(name)
+            setattr(node, name, record)
+        task = asyncio.create_task(node._release_loop())
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if len(set(ran)) == 5:
+                    break
+            assert set(ran) == {"_auto_publish_pass", "_recommend_pass",
+                                "_subscription_pass", "_release_pass",
+                                "_subscribed_install_pass"}
+        finally:
+            node._running = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            await node.stop()
+
+
+class TestServingWhatItRuns:
+    """A node is meant to carry the mesh's updates onward, not leave every
+    download to whoever published. One that fetched its release holds it; one
+    that updated any other way packs the tree it runs, and if that is exactly
+    what a signed descriptor names, it holds that release too."""
+
+    async def _runs(self, tmp_path, monkeypatch, tree, publisher_tree=None):
+        publisher, node = _node(), _node()
+        info = await publisher.publish_release(publisher_tree or tree)
+        node._releases.offer(publisher._releases.get(info["release"])["release"],
+                             node._identity.verify, node._trusts_publisher)
+        monkeypatch.setattr(updater, "install_root", lambda: tree)
+        node._recommend_version = True
+        undo = _running_version_is(node, info["version"])
+        return publisher, node, info, undo
+
+    async def test_it_is_on_unless_an_operator_turns_it_off(self):
+        from src import config
+        assert config.defaults()["recommend_version"] is True
+
+    async def test_a_node_that_never_fetched_its_release_serves_it_anyway(
+            self, tmp_path, monkeypatch):
+        tree = _tree(str(tmp_path / "running"))
+        publisher, node, info, undo = await self._runs(tmp_path, monkeypatch,
+                                                       tree)
+        try:
+            assert not node._packages.has(info["release_id"])
+            await node._recommend_pass()
+            assert node._packages.has(info["release_id"])
+            row = node.find_packages("nmesh")[0]
+            assert row["release"] == info["release"]
+            assert row["published"] is False          # a mirror, not a signer
+            # Once per version: the tree is not read again.
+            node._own_tree = None
+            await node._recommend_pass()
+            assert node._own_tree is None
+        finally:
+            undo(); await publisher.stop(); await node.stop()
+
+    async def test_a_tree_that_packs_to_other_bytes_is_not_vouched_for(
+            self, tmp_path, monkeypatch):
+        """Same version number, different code: offering it would be a record
+        whose bytes nobody signed."""
+        signed = _tree(str(tmp_path / "signed"))
+        running = _tree(str(tmp_path / "running"),
+                        extra={"src/patched.py": "# local change\n"})
+        publisher, node, info, undo = await self._runs(
+            tmp_path, monkeypatch, running, publisher_tree=signed)
+        try:
+            await node._recommend_pass()
+            assert not node._packages.has(info["release_id"])
+            assert node.find_packages("nmesh") == []
+            assert node._recommended == ""
+        finally:
+            undo(); await publisher.stop(); await node.stop()
