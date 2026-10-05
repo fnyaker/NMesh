@@ -104,7 +104,7 @@ from .pseudo_dir import (PseudoBook, MAX_CLAIM as _MAX_CLAIM, dir_key as _dir_ke
                          parse_claim as _dir_parse_claim,
                          encode_claims as _dir_encode, decode_claims as _dir_decode,
                          PseudoDirError)
-from .uri import _validate_uri, _MAX_URI_LEN, _MAX_ADDRESSES
+from .uri import _validate_uri, uri_scheme, _MAX_URI_LEN, _MAX_ADDRESSES
 
 # The core's parts live in their own modules now — the message vocabulary
 # (``src/mesh/messages.py``), the bounds (``src/mesh/constants.py``), the wire codecs
@@ -5110,11 +5110,11 @@ class MeshNode:
         A number the operator sets per transport, not a ranking the core
         invents: only the person running the node knows whether their LoRa link
         is the precious one or the last resort."""
-        result = _validate_uri(uri)
-        if result is None:
+        scheme = uri_scheme(uri)
+        if scheme is None:
             return -_PRIORITY_SPAN
         try:
-            value = int(self._transport_manager.setting(result[0], "priority") or 0)
+            value = int(self._transport_manager.setting(scheme, "priority") or 0)
         except Exception:
             # A medium that cannot answer is not a reason to stop dialling: it
             # scores neutral, exactly like one that never declared a priority.
@@ -6482,14 +6482,17 @@ class MeshNode:
         except Exception:
             pass          # a disk problem must not take the node down
 
-    def _is_seen(self, msg_id: int) -> bool:
+    def _is_seen(self, key: int) -> bool:
         """Have we handled this exact packet already? Records it if not.
+
+        ``key`` is `Packet.replay_key` — the BLAKE2b id, whichever hash the
+        header arrived under, so one packet is one entry however it came.
 
         One pass over a flat table rather than a lookup and an insert into an
         `OrderedDict` — the ids are already 64 bits, and boxing each one cost
         about a hundred bytes to store eight (`seen.py`). Still exact: this is
         not a place to spend a false positive."""
-        return self._seen_msgs.add(msg_id)
+        return self._seen_msgs.add(key)
 
     async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
         if packet.ttl <= 1:
@@ -6543,9 +6546,10 @@ class MeshNode:
             # msg_id must commit to the packet's content. This stops a relay from
             # minting fresh msg_ids for the same payload to slip past dedup and
             # amplify a flood — any tampering to change the id also breaks it.
-            if packet.msg_id != packet.compute_msg_id():
+            key = packet.replay_key()
+            if key is None:
                 return
-            if self._is_seen(packet.msg_id):
+            if self._is_seen(key):
                 return
             # Past the gates the packet is well-formed, fresh, and came off an
             # authenticated link: record that link as a path back to its source
@@ -6652,9 +6656,10 @@ class MeshNode:
         # a routed packet looping and a relay re-injecting the same payload.
         if not self._seek_allowed(peer):
             return
-        if packet.msg_id != packet.compute_msg_id():
+        key = packet.replay_key()
+        if key is None:
             return  # msg_id must commit to content (anti-amplification)
-        if self._is_seen(packet.msg_id):
+        if self._is_seen(key):
             return
         # A *short* seek: the joiner holds a ticket, not five kilobytes of key
         # and signature. It only means anything to a node the inviter left a
@@ -6772,7 +6777,7 @@ class MeshNode:
             return
         if not self._offer_allowed(peer):
             return
-        if packet.msg_id != packet.compute_msg_id():
+        if packet.replay_key() is None:
             return
         decoded = _decode_seek(packet.payload)
         if decoded is None:
@@ -6918,9 +6923,10 @@ class MeshNode:
         # pre-auth, and `_is_seen` mutates a node-wide table.
         if not self._carry_allowed(peer):
             return
-        if packet.msg_id != packet.compute_msg_id():
+        key = packet.replay_key()
+        if key is None:
             return
-        if self._is_seen(packet.msg_id):
+        if self._is_seen(key):
             return
         if packet.dst_id == self._id.raw:
             vp = self._relay_peers.get(packet.src_id)

@@ -261,8 +261,10 @@ Three rules, and they are load-bearing:
    happens *before* anybody has proved anything, so a name that could weaken
    something would be the way in. What is negotiated is only which **optional
    messages** are worth sending — the gossip planes, the directory, renewal,
-   revocation, abuse reports, the keepalive accord, multi-link operation and the
-   publisher-key handover. A test asserts no feature name reads like a check.
+   revocation, abuse reports, the keepalive accord, multi-link operation, the
+   publisher-key handover — and which of two equally strong hashes a link's
+   `msg_id` is sent under (below). A test asserts no feature name reads like a
+   check.
 
    That test is blunt on purpose, and it should stay blunt. The handover plane
    was first called `keyshare`, which the guard refuses because "key" is one of
@@ -285,6 +287,21 @@ Three rules, and they are load-bearing:
    would have to hold for the plane to be safe, so it is the one the tests
    state — `test_no_declaration_at_all_can_lower_either_cadence` sweeps every
    corner of the hard range rather than arguing it.
+
+   `msgid_b2b` is the second, and the first to touch something every relay
+   *verifies*: the hash a link's `msg_id` is computed with (`protocol.md`). It
+   passes the rule on three properties, each tested in `test_msg_id_hash.py`.
+   **It chooses between two equally strong hashes**: both are 64-bit
+   truncations, so stripping the name costs speed and never a check. **It only
+   decides what this node sends**: a receiver accepts either id whatever was
+   agreed, so no record — forged, stripped or late — can make it accept a packet
+   it would otherwise refuse. **The replay window keys on the node's own
+   BLAKE2b id**, never on the header, so the choice of hash cannot be used to
+   get one packet through dedup twice. What a forged record *can* do is what a
+   forged record could always do with any name in `SINCE_NEGOTIATION`: make this
+   node send a silent old peer something it drops — here, ids it cannot verify.
+   That needs a frame injected into the link, by which point dropping the
+   traffic was already on offer.
 
 Mechanics: the announcement rides the round trip that was happening anyway (the
 server sends it with its `CHALLENGE`, the client answers it on receiving one), so

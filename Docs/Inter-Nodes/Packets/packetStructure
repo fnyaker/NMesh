@@ -18,12 +18,13 @@
 | TTL          | 1 byte    | Decremented at each hop — excluded from the AAD          |
 | src_id       | 20 bytes  | The sender's Kademlia ID (160 bits)                      |
 | dst_id       | 20 bytes  | The recipient's Kademlia ID (160 bits)                   |
-| msg_id       | 4 bytes   | CRC32(header + payload) without TTL or msg_id            |
+| msg_id       | 8 bytes   | Id of the content, per link — see below                  |
 | nonce        | 12 bytes  | Random per packet (os.urandom), required by AES-GCM      |
 | gcm_tag      | 16 bytes  | The AES-256-GCM authentication tag                       |
-| **Total**    | **75 bytes** |                                                       |
+| **Total**    | **79 bytes** |                                                       |
 
-**Encrypted payload available: 437 bytes**
+The source of truth for every field is
+[`Docs/Architecture/protocol.md`](../../Architecture/protocol.md).
 
 ---
 
@@ -31,7 +32,8 @@
 
 - **Key**: derived from the session key negotiated at the handshake (ML-KEM)
 - **Nonce**: 12 random bytes from `os.urandom()` — unique per packet
-- **AAD** (authenticated but not encrypted): the whole header without the TTL
+- **AAD** (authenticated but not encrypted): `version‖type‖src_id‖dst_id‖nonce` —
+  neither the TTL nor the `msg_id`, both of which a relay rewrites
 - **Payload**: encrypted
 - **GCM tag**: covers AAD + payload → guarantees integrity and authenticity
 
@@ -41,8 +43,11 @@ The TTL is excluded from the AAD because relaying nodes decrement it at each hop
 
 ## Computing msg_id
 
-`msg_id` = CRC32(header + payload), with TTL and msg_id excluded from the
-calculation.
+`msg_id` = the first 8 bytes of SHA-256 or BLAKE2b over
+`version‖type‖src_id‖dst_id‖nonce‖gcm_tag‖payload` — TTL and msg_id excluded.
+Which of the two is negotiated per link (`msgid_b2b`), a receiver accepts
+either, and the replay window keys on the node's own BLAKE2b id. See
+[`protocol.md`](../../Architecture/protocol.md#msg_id-anti-replay--anti-amplification).
 
 It serves deduplication across the mesh: a packet that loops is detected and
 dropped.
