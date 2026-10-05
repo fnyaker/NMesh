@@ -8,7 +8,7 @@ a hundred bytes an entry — almost all of it CPython object overhead wrapped
 around eight bytes of actual information. That overhead is the reason the window
 was capped at ten thousand ids.
 
-A ``msg_id`` is already 64 bits (``Packet.compute_msg_id``), so it fits a flat
+A packet's id is already 64 bits (``Packet.replay_key``), so it fits a flat
 table with no boxing at all: one ``bytearray`` of 8-byte slots, open addressing,
 linear probing. Sixteen bytes an entry at half load — six times smaller for the
 same answers, which is the same memory buying a window six times longer.
@@ -27,7 +27,7 @@ a fresh table takes its place. An id therefore survives between ``capacity`` and
 gave, without paying to order them.
 
 **The bucket is seeded.** The obvious index is the id's own low bits, and they
-are uniform: it is a SHA-256 truncation. But the attacker chooses the payload
+are uniform: it is a BLAKE2b digest. But the attacker chooses the payload
 the digest is taken over, so they can grind ids that land in one bucket — a few
 thousand hashes each — and turn every lookup into a walk. The index is therefore
 derived through a per-process random seed they cannot see. The stored value is

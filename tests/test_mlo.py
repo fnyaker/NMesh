@@ -347,6 +347,31 @@ class TestMatchingAProbeToItsAnswer:
     def test_an_unproven_link_reports_no_loss_rather_than_none_lost(self):
         assert LinkQuality().recent_loss() is None
 
+    def test_the_running_loss_count_matches_a_recount(self):
+        """`recent_loss` is read per link per packet sent — routes are chosen
+        by scoring every link — so it keeps a running count instead of walking
+        the window. A running count is a second number that can drift from the
+        thing it counts, so it is held against a recount through every way an
+        outcome enters the window: answered, expired, and pushed out of flight."""
+        import random
+        rng = random.Random(0x10557)
+        quality = LinkQuality()
+        token, now = 0, 0.0
+        for _ in range(5000):
+            now += 0.01
+            roll = rng.random()
+            if roll < 0.55:
+                token += 1
+                quality.sent(token, now)
+            elif roll < 0.85:
+                quality.answered(rng.randint(max(0, token - 80), token), now)
+            else:
+                quality.expire(now, rng.choice((0.0, 0.05, 1.0)))
+            window = list(quality._window)
+            if len(window) >= 2:
+                lost = sum(1 for outcome in window if outcome is None)
+                assert quality.recent_loss() == pytest.approx(lost / len(window))
+
 
 # ---------------------------------------------------------------------------
 # What a peer has to have said

@@ -97,11 +97,13 @@ class LinkQuality:
     individually — and one that is never resolved is charged as a loss by
     ``expire`` rather than left pending for ever.
 
-    Every method is O(1) and called at most once per liveness probe, never on
-    the packet path."""
+    Every method that records is O(1) and called at most once per liveness
+    probe. ``recent_loss`` is the one reading on the packet path — a route is
+    chosen by scoring every link, per packet — so the window's losses are
+    counted as they go in and out rather than recounted per read."""
 
     __slots__ = ("_samples", "pings", "pongs", "last", "since_pong",
-                 "answered_at", "_window", "_pending")
+                 "answered_at", "_window", "_window_lost", "_pending")
 
     HISTORY = 32
     #: Probes the *recent* window is judged over. Fifty, because that is the
@@ -129,6 +131,7 @@ class LinkQuality:
         # Outcome per probe: the round trip, or None for one that never came
         # back. Bounded by construction.
         self._window: deque = deque(maxlen=self.WINDOW)
+        self._window_lost = 0
         # token -> when it went out. Insertion order is time order, so expiry
         # stops at the first probe still young enough.
         self._pending: OrderedDict = OrderedDict()
@@ -165,7 +168,7 @@ class LinkQuality:
             # Overtaken by that many later probes: whatever happened to it, it
             # is not coming back in time to mean anything.
             self._pending.popitem(last=False)
-            self._window.append(None)
+            self._record(None)
 
     def answered(self, token, at: float) -> float | None:
         """A probe came back. Returns its round trip, or ``None`` when the
@@ -181,7 +184,7 @@ class LinkQuality:
             return None
         rtt = max(0.0, at - sent_at)
         self.on_pong(rtt)
-        self._window.append(rtt)
+        self._record(rtt)
         return rtt
 
     def expire(self, now: float, after: float) -> int:
@@ -196,9 +199,18 @@ class LinkQuality:
             if now - at <= after:
                 break          # insertion order is time order
             del self._pending[token]
-            self._window.append(None)
+            self._record(None)
             lost += 1
         return lost
+
+    def _record(self, outcome: float | None) -> None:
+        """One outcome into the window, the oldest out, the loss count kept."""
+        window = self._window
+        if len(window) == window.maxlen and window[0] is None:
+            self._window_lost -= 1
+        window.append(outcome)
+        if outcome is None:
+            self._window_lost += 1
 
     def recent_ms(self) -> float | None:
         """Mean round trip over the recent window, in milliseconds.
@@ -218,8 +230,7 @@ class LinkQuality:
         how an unproven link gets handed half of somebody's traffic."""
         if len(self._window) < max(1, int(minimum)):
             return None
-        lost = sum(1 for rtt in self._window if rtt is None)
-        return lost / len(self._window)
+        return self._window_lost / len(self._window)
 
     def recent_probes(self) -> int:
         """How many outcomes the recent window actually holds."""

@@ -474,6 +474,21 @@ Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
   emits, not just probes. No wire format changed.
 - Docs: `Docs/Architecture/transports.md`, `Docs/Setup/guide`.
 
+### A cheaper packet path, negotiated (`src/packet.py`) — done
+- The `msg_id` hash, per link. SHA-256 over a 60 kB packet was over half of what
+  the packet cost a node; BLAKE2b binds the same bytes in about half the time
+  on a CPU without SHA instructions. Negotiated (`msgid_b2b`, silence means
+  no), so an updated node keeps talking to every node that has not updated: a
+  relay re-heads a packet for an old link, a receiver accepts either id
+  whatever was agreed, and the replay window keys on the node's own BLAKE2b id.
+- Choosing a link no longer re-parses every link's URI and recounts its losses
+  per packet: the scheme is remembered, the loss share is a running count.
+- Measured between two nodes in one process: **94 → 134 MB/s** at 59 kB
+  payloads, **69 → 100 MB/s** at 16 kB, **12.8 → 17.9 MB/s** at 1 kB; route
+  choice over 40 links **230 → 96 µs**.
+- Docs: `Docs/Architecture/protocol.md`, `security.md`, `transports.md`,
+  `gotchas.md`.
+
 ### Long term
 - **Signing GitHub releases too** (or dropping that route once a node can always
   reach a publisher it trusts on the mesh).

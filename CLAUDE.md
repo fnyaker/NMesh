@@ -231,7 +231,9 @@ something.
 - The header is in the clear but **authenticated** (as the GCM AAD); the payload
   is encrypted.
 - `msg_id` binds the packet's content (anti-replay, anti-amplification); it is
-  verified on receipt, not only when sending.
+  verified on receipt, not only when sending. Its hash is negotiated per link
+  and rewritten per hop; a receiver accepts either, and dedup keys on the
+  node's own id of the content, never on the header.
 - TTL is decremented at every hop, excluded from authentication and from
   `msg_id`.
 - Bounded deduplication of routed messages (anti-loop, anti-flood).
