@@ -208,9 +208,9 @@ def test_every_declared_medium_is_reached_only_through_the_interface():
 
     The exception in the test above is about *naming* a class. This is the
     stronger claim the code makes now: the punch path asks the medium for what
-    it needs (`BaseServer.bound_endpoint` / `holds` / `adopt` / `send_raw` /
-    `owns`) rather than reading `_sock`, `_transports` or calling the private
-    `_from_server`.
+    it needs (`BaseServer.bound_endpoint` / `holds` / `adopt` / `send_raw`, and
+    `BaseTransport.scheme` / `is_closed` / `keepalive`) rather than reading
+    `_sock`, `_transports` or calling the private `_from_server`.
 
     It used to allow three such reaches and record them, because the punch path
     needed a socket and there was no door to ask through. There is one now, so

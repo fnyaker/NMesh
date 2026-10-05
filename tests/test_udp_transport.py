@@ -12,7 +12,7 @@ import pytest
 
 from src.udp_transport import (
     UDPTransport, UDPServer, _ReliableLink, _FRAME, _MAGIC,
-    FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE,
+    FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE, FLAG_FIN,
     _MAX_UNACKED, _MAX_REORDER, _MAX_REORDER_BYTES,
     _MAX_DECODED_BYTES, _MAX_SEND_QUEUE, _MAX_PEERS_UDP,
 )
@@ -423,3 +423,125 @@ class TestSequenceIsNotGuessable:
             _MAGIC + _FRAME.pack(0, 0, 0, FLAG_DATA, len(rubbish)) + rubbish)
         assert transport.undecodable == 1
         assert transport.stats()["undecodable"] == 1
+
+
+class TestAKeepaliveKeepsTheLinkAlive:
+    """A keepalive is the only thing an idle link ever sends, and it is what
+    the death verdict is measured against — `_KEEPALIVE_TIMEOUT` is three times
+    the interval precisely so that three of them may go missing.
+
+    `_process_frame` handed the reliability layer the frames carrying data and
+    nothing else, so the arrival that `is_alive` reads was recorded for mesh
+    traffic alone. A link with a peer answering every keepalive was declared
+    dead the moment the traffic above it paused for the timeout, and the branch
+    inside `process_incoming` that exists to return nothing for a keepalive was
+    unreachable from the transport.
+    """
+
+    def _transport(self) -> UDPTransport:
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        return transport
+
+    def _aged(self, transport: UDPTransport, seconds: float) -> float:
+        """Push the last arrival back, as a quiet link does by itself."""
+        transport._link._last_recv_time -= seconds
+        return transport._link._last_recv_time
+
+    def test_a_keepalive_is_an_arrival(self):
+        transport = self._transport()
+        silent = self._aged(transport, 50.0)
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_KEEPALIVE, 0))
+        assert transport._link._last_recv_time > silent
+
+    def test_a_link_answering_keepalives_is_not_declared_dead(self):
+        transport = self._transport()
+        self._aged(transport, UDPTransport.setting("keepalive_timeout") + 10.0)
+        assert not transport._link.is_alive()
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_KEEPALIVE, 0))
+        assert transport._link.is_alive()
+
+    def test_a_peer_that_stopped_answering_still_dies(self):
+        """The fix must not make a link immortal: silence is still silence."""
+        transport = self._transport()
+        self._aged(transport, UDPTransport.setting("keepalive_timeout") + 10.0)
+        assert not transport._link.is_alive()
+
+    def test_an_ack_and_a_fin_are_arrivals_too(self):
+        for flag in (FLAG_ACK_ONLY, FLAG_FIN):
+            transport = self._transport()
+            silent = self._aged(transport, 50.0)
+            transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, flag, 0))
+            assert transport._link._last_recv_time > silent, flag
+
+    def test_the_cursor_is_adopted_from_the_opening_keepalive(self):
+        """`connect()` sends a keepalive before any data, and that is the frame
+        the receiver is meant to learn the peer's random starting point from.
+        Learning it from the first *data* frame instead means a reordered
+        opening frame moves the cursor past its predecessors, and those are
+        then dropped as duplicates for ever."""
+        transport = self._transport()
+        transport._process_frame(
+            _MAGIC + _FRAME.pack(9_000, 0, 0, FLAG_KEEPALIVE, 0))
+        assert transport._link._recv_started
+        assert transport._link._recv_next == 9_000
+
+    def test_a_keepalive_delivers_nothing_and_answers_nothing(self):
+        """Seeing a frame is not replying to one: a keepalive must not schedule
+        an ack, or two idle links would answer each other for ever."""
+        transport = self._transport()
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_KEEPALIVE, 0))
+        assert not transport._decoded
+        assert not transport._link.needs_ack()
+
+    def test_a_data_frame_with_no_payload_moves_nothing(self):
+        """No sender builds one, so it is malformed — and malformed input is
+        dropped with no side effect, cursor included."""
+        transport = self._transport()
+        transport._process_frame(
+            _MAGIC + _FRAME.pack(7, 0, 0, FLAG_KEEPALIVE, 0))   # opens the cursor
+        transport._process_frame(_MAGIC + _FRAME.pack(7, 0, 0, FLAG_DATA, 0))
+        assert transport._link._recv_next == 7
+        assert transport.undecodable == 0
+
+    async def test_a_quiet_link_survives_on_keepalives_alone(self, monkeypatch):
+        """Over real sockets, with the real keepalive loop, and no traffic.
+
+        This is the property the unit tests above assert one frame at a time:
+        two nodes that say nothing to each other for longer than the death
+        timeout must still hold the link, because the keepalive loop is talking
+        underneath them. The cadence is shortened so the test costs a second
+        rather than the 75 s the shipped bound is — `SETTINGS` is replaced
+        rather than edited, as `configure()` does, so nothing leaks to the next
+        test."""
+        monkeypatch.setattr(UDPTransport, "SETTINGS",
+                            {"keepalive_interval": 0.2, "keepalive_timeout": 0.6})
+
+        server = UDPServer()
+        accepted: list[UDPTransport] = []
+        landed = asyncio.Event()
+
+        async def on_new_conn(transport):
+            accepted.append(transport)
+            landed.set()
+
+        server.on_new_connection = on_new_conn
+        await server.listen("127.0.0.1:0")
+        port = server._sock.get_extra_info("socket").getsockname()[1]
+
+        client = UDPTransport()
+        await client.connect(f"127.0.0.1:{port}")
+        await asyncio.wait_for(landed.wait(), timeout=2.0)
+        accepted_transport = accepted[0]
+
+        try:
+            # Three death timeouts' worth of silence, carried by keepalives.
+            await asyncio.sleep(0.6 * 3)
+            assert not client.is_closed(), "the dialled half died while quiet"
+            assert not accepted_transport.is_closed(), \
+                "the accepted half died while quiet"
+            assert client._link.is_alive() and accepted_transport._link.is_alive()
+        finally:
+            await client.close()
+            await accepted_transport.close()
+            await server.close()

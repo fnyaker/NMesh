@@ -148,6 +148,39 @@ Audit scope when hunting this class: the dangerous direction is
 `now - field < LIMIT` (a cooldown), not `now - field >= LIMIT` (elapsed). The
 `0.0` defaults throughout `src/mesh/peers.py` are mostly the safe direction.
 
+## A test must not assert on how the suite was invoked
+
+The same shape as the clock-origin bug above, with the runner in place of the
+clock: a module-level capture of the *process* is a capture of whatever started
+it, and under a test runner that is the runner.
+
+`updater._LAUNCH = (sys.executable, list(sys.argv), os.getcwd())` is read at
+import, and `restart_plan()` decides "is there a way back?" from it — chiefly
+whether `argv[0]` still exists on disk. That answer depends on the invocation:
+
+- `python -m pytest ...` leaves `argv[0]` as pytest's own `__main__.py`, which
+  **does** exist → `restart_plan()` says `reexec`;
+- a `pytest-xdist` worker is started through execnet's bootstrap, which does
+  not → `restart_plan()` says there is no way back.
+
+`test_a_mesh_install_says_whether_it_is_restarting` asserted
+`body["restarting"] is False` without pinning either. It passed for one reason
+only: `pyproject.toml` puts `-n auto` in `addopts`, so the suite always ran in a
+worker. Run that file with `-n 0` — one test, one file, an IDE runner, anything
+that bypasses xdist — and it failed, on a product that was behaving correctly.
+The test two above it pins `updater._LAUNCH` for exactly this reason and says so
+in a comment; this one did not, and nothing made the omission visible.
+
+→ Pin the premise (`restart_plan`, or `_LAUNCH`) rather than inherit the
+runner's. And when a test is named "says **whether** X", parametrise both
+answers: asserting one of them lets a constant pass, which is what let this sit
+behind a green suite.
+
+Audit scope for this class: anything captured at **import** from `sys.argv`,
+`sys.executable`, `os.getcwd()`, `os.environ` or `__main__`, then asserted on.
+`-n 0` is the cheap way to find it — if a test's verdict changes between `-n 0`
+and `-n auto`, it is reading the runner, not the code.
+
 ## `register_all`: one bad entry must cost only itself
 
 `BUILT_IN` is ordered `tcp, udp, spool`. A failure that propagates out of the
