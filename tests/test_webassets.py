@@ -280,6 +280,38 @@ def test_the_terminal_pane_takes_real_keystrokes():
     assert 'tabindex="0"' in webassets.FLEET_HTML
 
 
+def test_the_keyboard_belongs_to_the_session_not_to_each_page():
+    """Each page read keys off its own element, two different ways, and the
+    fleet panel dropped every AltGr character — `|`, `~`, `#` on an AZERTY
+    keyboard. Text now arrives through an editable element's `input` event,
+    which is the one path every keyboard types through."""
+    driver = terminal.JS.split("// ---- one shell session")[1]
+    assert 'input.addEventListener("keydown"' in driver
+    assert 'input.addEventListener("input"' in driver
+    assert 'input.addEventListener("compositionend"' in driver
+    assert "if(keyIsText(event)) return;" in driver
+    # And neither page grew its own reading of keys back.
+    assert '$("term").addEventListener("keydown"' not in webassets.fleet.FLEET_PAGE_JS
+    assert '$("term").addEventListener("keydown"' not in terminal.PAGE_JS
+
+
+def test_a_paste_cannot_close_its_own_bracket():
+    """Clipboard text carrying the end-of-paste marker would end the bracket
+    early, and whatever followed would run as though it were typed."""
+    paste = terminal.JS.split("ShellSession.prototype.paste =")[1].split("\nShellSession")[0]
+    assert r'replace(/\x1b\[20[01]~/g, "")' in paste
+    assert paste.index("replace(") < paste.index("this.term.bracketed")
+
+
+def test_a_click_is_not_a_selection():
+    """A press and a release on the same spot left an empty selection behind,
+    and a selection hides the cursor."""
+    screen = terminal.JS.split("// ---- the screen")[1].split("// ---- one shell session")[0]
+    end = screen.split("TermScreen.prototype.endSelect =")[1].split("\n};")[0]
+    assert "return this.clearSelect();" in end
+    assert "!this.select" not in screen.split("TermScreen.prototype.draw =")[1].split("\n};")[0]
+
+
 def test_the_rights_panel_is_wired_to_a_real_element():
     """The "who can control this node" view is the only place a right is added:
     if its container is missing, it disappears silently."""

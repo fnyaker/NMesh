@@ -400,6 +400,53 @@ occasion interprets the escape sequences. That is what makes a password prompt
 correct: the remote pty turns echo off, and there is nothing on this side to
 display it — where a line-by-line text field would have shown it in the clear.
 
+The shell is started with **`TERM=xterm-256color`**, `COLORTERM=truecolor` and a
+UTF-8 locale, whatever the node process itself inherited. `TERM` names the
+terminal at the other end, and that is always the console's emulator: a node
+started from a Linux console used to pass on `TERM=linux`, every program then
+drew with that console's sequences, and `top` set its cursor shape with one the
+emulator mistook for a question — and answered, into `top`'s input, for as long
+as it ran.
+
+### The keyboard
+
+Text arrives the way it arrives in any editable field: the session keeps a
+transparent `textarea` on the cursor, and what is typed into it is read from its
+`input` event. Only what is not text — Enter, the arrows, a function key, a
+control chord — is read off the key itself. That is the one path every keyboard
+actually types through: **AltGr** (`|`, `~`, `#`, `{` on an AZERTY keyboard, which
+the panel used to drop), a **dead key**, an **input method** (whose candidate
+window opens on the cursor because the field is there), and a **phone's**
+keyboard, which names no key at all. On a Mac, Option types characters rather
+than acting as Meta. Modified keys carry their modifier (Ctrl-Left is
+`CSI 1;5 D`, which is how readline jumps a word).
+
+| Keys | What they do |
+|---|---|
+| Ctrl-C | copies while something is selected, `^C` otherwise |
+| Ctrl-Shift-C | copies the selection |
+| Ctrl-V, Ctrl-Shift-V, Shift-Insert | paste — bracketed when the program asked for it, with any bracket markers *inside* the pasted text removed so a clipboard cannot close the bracket early and run what follows |
+| Shift-PageUp / PageDown, the wheel | scroll the scrollback |
+| double / triple click | select a word (a path, an address, an identifier) / a line |
+| Enter, after a session ended | opens a new one on the same machine |
+
+### When the session ends, or the link does
+
+What the session is doing is said **over** the screen, never painted into it:
+"Opening a shell…", "Connection lost — trying again…", "Session closed (exit
+1). Press Enter to open a new one." — the way a terminal window offers to
+reconnect rather than going dead. A page that opened a shell reads it by the
+**request's id** (`?rid=`), not by node: reading by node picked up whichever
+shell on that machine was newest, a forgotten one from another tab as readily
+as the one just asked for. And a refusal from the far node — no `shell` right,
+too many open — comes back at once with its reason (409, `failed: true`)
+instead of twenty empty reads and "That session is gone".
+
+Re-attaching to a shell this console already holds replays its recent output
+into a fresh screen **without answering** the questions in it: they were asked
+of a terminal that is gone, and answering them again types the answers into
+whatever is running now.
+
 ### What a full-screen program needs, and gets
 
 A log pane shows what a shell *printed*. A terminal shows what a program
@@ -414,7 +461,9 @@ missing is a screen of garbage rather than a missing feature:
 | paints panels and gauges | **backgrounds**, from the eight colours through the 256-colour cube to 24-bit — and *erase* painting the current background, or every panel comes back the colour of the page |
 | lays its whole screen out once | the **size**, pushed to the pty, so the boxes are drawn to the width that exists |
 | responds to a click or a wheel | **mouse reporting** (`?1000`/`?1002`/`?1003`, SGR encoding), and only while it asked for it |
-| asks the terminal a question | an **answer** — a cursor-position report it never gets is a hang, not a missing feature |
+| asks the terminal a question | an **answer** — a cursor-position report it never gets is a hang, not a missing feature. And *only* a question: `CSI ? … c` and the `>`/`=`/`<` families are other sequences that happen to share a final byte, and reading `CSI > 4;2 m` (vim negotiating its keyboard) as an attribute dimmed everything after it |
+| changes the cursor between modes | `DECSCUSR` (`CSI n SP q`): a block, an underline or a bar |
+| asks what colour the background is | an `OSC 11` answer, so an editor picks the right scheme. `OSC 52` (a remote program writing this machine's clipboard) is swallowed, never obeyed |
 | draws with the old line-drawing set | `ESC ( 0`, mapped to the Unicode box characters |
 
 Two of those are why a pane that resizes has to say so. A pty carries
@@ -1235,7 +1284,8 @@ All behind the console session (Bearer or cookie). Details:
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
-| GET | `/api/fleet/shell?node=` | the live session on that node — the page has just asked for one and knows the node, not the sid |
+| GET | `/api/fleet/shell?node=` | the live session on that node — what a page re-attaching to a shell it did not open asks |
+| GET | `/api/fleet/shell?rid=[&wait=1]` | the shell *this* request opened, or `409 {error, failed: true}` once the far node refused it |
 | GET | `/api/fleet/files?node=&path=` | one directory, as rows |
 | GET | `/api/fleet/file?node=&path=` | one file, as an attachment |
 | POST | `/api/fleet/mkdir` | `{node, path, name}` |
