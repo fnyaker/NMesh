@@ -49,6 +49,13 @@ cryptography; relays never see the content.
   way comes up trusting the operator who installed it, accepting their release
   publishers, and reachable from their console without a password nobody ever
   typed on it.
+- **App permissions** — an app asks in a manifest (`readstate.logs`,
+  `control.network`, `modding`…), a person grants on the Apps page, and only what
+  was asked is shown. A grant is held by the app's own identity, never by whoever
+  holds the shared connector token, and nothing an app can call grants anything.
+- **MCP** — the *MCP* app turns the node's operations into tools an AI client can
+  call, generated from the same catalogue the console's front end reads and limited
+  to what it was granted. Loopback and a bearer token by default.
 - **Minimal dependencies** — Python stdlib + `liboqs-python` + `cryptography`.
 
 ## Quick start
@@ -228,6 +235,12 @@ bridge.
 An app can also expose named operations that other apps, the core and the
 console can call — one door, declared by the app itself, rejecting by default.
 → [`Docs/AppAPI/guide`](Docs/AppAPI/guide)
+
+What an app may do — read the node's state, drive it, replace one of its
+operations — is a permission it asks for and a person grants; the node's own
+operations are an internal API it reaches through the connector.
+→ [`Docs/AppPermissions/guide`](Docs/AppPermissions/guide) ·
+[`Docs/Apps/mcp`](Docs/Apps/mcp)
 
 ## Transports
 

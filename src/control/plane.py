@@ -119,6 +119,27 @@ class Origin:
     REMOTE = "remote"
     ALL = (LOCAL, GOVERN, REMOTE)
 
+    # An app on this machine, reaching the plane through the data connector
+    # under the identity it authenticated as. Its reach is not a distance at
+    # all — it is the permissions a human granted that app id, asked of the
+    # gate the plane is given (:meth:`ControlPlane.set_app_gate`). Spelled
+    # with the id in it so a job, which is visible to exactly the origin that
+    # started it, is one app's and no other's.
+    APP_PREFIX = "app:"
+
+    @staticmethod
+    def app(app_hex: str) -> str:
+        return Origin.APP_PREFIX + str(app_hex)
+
+
+def app_of(origin) -> str:
+    """The app id an app origin names, or ``""`` for any other origin."""
+    if isinstance(origin, str) and origin.startswith(Origin.APP_PREFIX):
+        ident = origin[len(Origin.APP_PREFIX):]
+        if len(ident) == 16 and all(ch in "0123456789abcdef" for ch in ident):
+            return ident
+    return ""
+
 
 # What each origin may call, by the reach an operation declares. Written out
 # rather than computed from an ordering: a table a reader can check against the
@@ -132,7 +153,11 @@ REACHED_BY = {
 
 
 def reaches(origin: str, entry: dict) -> bool:
-    """May ``origin`` call an operation declared like ``entry``?"""
+    """May ``origin`` call an operation declared like ``entry``?
+
+    For a console. An app origin is not in this table, so it reaches nothing
+    by *distance*; what it may call is the plane's gate to answer
+    (:meth:`ControlPlane.permits`)."""
     return entry.get("reach") in REACHED_BY.get(origin, ())
 
 
@@ -233,6 +258,40 @@ class ControlPlane:
 
     def __init__(self) -> None:
         self._modules: dict = {}
+        # What an app may call: ``gate(app_hex, op, entry, params)`` answers a
+        # refusal (a sentence) or ``None``. No gate means no app reaches
+        # anything — reject by default, as everywhere else here.
+        self._app_gate = None
+        # Operations an app has asked to stand in front of (`modding`).
+        # ``hooks.lookup(op)`` answers one or ``None``; see :meth:`invoke`.
+        self._hooks = None
+
+    def set_app_gate(self, gate) -> None:
+        self._app_gate = gate
+
+    def set_hooks(self, hooks) -> None:
+        self._hooks = hooks
+
+    def permits(self, origin: str, op: str, entry: dict, params=None) -> bool:
+        """May ``origin`` call ``op``? One answer for every kind of caller."""
+        return self._refusal(origin, op, entry, params) is None
+
+    def _refusal(self, origin: str, op: str, entry: dict, params=None):
+        app_hex = app_of(origin)
+        if app_hex:
+            gate = self._app_gate
+            if gate is None:
+                return "no app may drive this node"
+            try:
+                reason = gate(app_hex, op, entry, params)
+            except Exception as exc:            # noqa: BLE001 — a refusal
+                faults.note(f"app gate on {op}", exc)
+                reason = "refused"
+            return reason or None
+        if reaches(origin, entry):
+            return None
+        return (f"{op} needs the govern capability" if entry["reach"] == "govern"
+                else f"{op} cannot be driven from a remote console")
 
     # -- what exists ------------------------------------------------------
 
@@ -291,7 +350,7 @@ class ControlPlane:
             entries = [{key: value for key, value in entry.items()
                         if key != "wants_origin"}
                        for entry in declared(self._modules[name])
-                       if reaches(origin, entry)]
+                       if self.permits(origin, name + "." + entry["name"], entry)]
             if entries:
                 out.append({"module": name, "operations": entries})
         return out
@@ -329,17 +388,15 @@ class ControlPlane:
         ticket that fails a minute later, and once again in the thread that
         runs it, because between the two the answer is allowed to have
         changed."""
-        if origin not in Origin.ALL:
+        if origin not in Origin.ALL and not app_of(origin):
             raise ControlError("bad_request", "unknown origin")
         found = self.find(op)
         if found is None:
             raise ControlError("not_found", "no such operation")
         module, entry = found
-        if not reaches(origin, entry):
-            raise ControlError(
-                "refused", f"{op} needs the govern capability"
-                if entry["reach"] == "govern"
-                else f"{op} cannot be driven from a remote console")
+        refusal = self._refusal(origin, op, entry, params)
+        if refusal is not None:
+            raise ControlError("refused", refusal)
         arguments = bind(entry["params"],
                          params if isinstance(params, dict) else {})
         if entry.get("wants_origin"):
@@ -356,6 +413,9 @@ class ControlPlane:
         handler = getattr(module, "op_" + entry["name"], None)
         if not callable(handler):
             raise ControlError("not_found", "operation is unavailable")
+        hook = self._hook_for(op, origin)
+        if hook is not None:
+            return self._modded(hook, op, entry, arguments, handler)
         try:
             result = handler(**arguments)
         except ControlError:
@@ -377,6 +437,77 @@ class ControlPlane:
                 f"where") from None
         return result if isinstance(result, dict) else {"result": result}
 
+    # -- mods ---------------------------------------------------------------
+    #
+    # An app holding `modding` may stand in front of an operation: see its
+    # arguments first (`before`), answer instead of it (`replace`), or see its
+    # answer and change it (`after`). Three rules make that something a node
+    # survives rather than something it is at the mercy of:
+    #
+    #   * **the native operation is the fallback.** A mod that fails, times
+    #     out or answers something that is not an answer is ignored, and the
+    #     call is answered as if there were none — written down, never felt;
+    #   * **what a mod hands on is checked again.** Arguments rewritten by a
+    #     `before` hook are bound against the declaration exactly as a caller's
+    #     are, so a mod cannot smuggle in a parameter the operation never had;
+    #   * **a mod never sees its own calls.** The app that installed a hook is
+    #     answered natively, or a hook that calls what it hooks would recurse.
+
+    def _hook_for(self, op: str, origin: str):
+        hooks = self._hooks
+        if hooks is None:
+            return None
+        try:
+            hook = hooks.lookup(op)
+        except Exception as exc:                # noqa: BLE001
+            faults.note(f"mod lookup on {op}", exc)
+            return None
+        if hook is None or getattr(hook, "app_hex", "") == app_of(origin):
+            return None
+        return hook
+
+    def _modded(self, hook, op: str, entry: dict, arguments: dict, handler) -> dict:
+        public = {key: value for key, value in arguments.items() if key != "origin"}
+        mode = getattr(hook, "mode", "")
+        if mode == "before":
+            changed = self._ask_hook(hook, op, {"params": public})
+            if isinstance(changed, dict) and isinstance(changed.get("params"), dict):
+                try:
+                    rebound = bind(entry["params"], changed["params"])
+                    if "origin" in arguments:
+                        rebound["origin"] = arguments["origin"]
+                    arguments = rebound
+                except ControlError as exc:
+                    faults.note(f"mod on {op} handed back bad arguments", exc)
+        elif mode == "replace":
+            answer = self._ask_hook(hook, op, {"params": public})
+            if isinstance(answer, dict) and isinstance(answer.get("result"), dict):
+                return answer["result"]
+        try:
+            result = handler(**arguments)
+        except ControlError:
+            raise
+        except Exception as exc:                # noqa: BLE001 — never leak
+            faults.note(f"control operation {op}", exc)
+            raise ControlError(
+                "failed",
+                f"{op} failed: {type(exc).__name__} — this node's log says "
+                f"where") from None
+        result = result if isinstance(result, dict) else {"result": result}
+        if mode == "after":
+            answer = self._ask_hook(hook, op, {"params": public, "result": result})
+            if isinstance(answer, dict) and isinstance(answer.get("result"), dict):
+                return answer["result"]
+        return result
+
+    @staticmethod
+    def _ask_hook(hook, op: str, payload: dict):
+        try:
+            return hook.call(op, payload)
+        except Exception as exc:                # noqa: BLE001 — the native answer stands
+            faults.note(f"mod on {op}", exc)
+            return None
+
     def call(self, op: str, params=None, *, origin: str = Origin.LOCAL) -> dict:
         """Invoke a declared operation, raising :class:`ControlError`.
 
@@ -391,7 +522,8 @@ class ControlPlane:
         # `check` binds anything, because the answer does not depend on the
         # arguments and an operator should hear the one thing that is wrong.
         if (found is not None and found[1]["background"]
-                and origin != Origin.LOCAL and reaches(origin, found[1])):
+                and origin != Origin.LOCAL
+                and self.permits(origin, op, found[1], params)):
             raise ControlError(
                 "refused", f"{op} takes longer than one call across the mesh — "
                 f"start it as a job", {"background": True, "job": op})

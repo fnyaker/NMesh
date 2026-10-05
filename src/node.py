@@ -7807,6 +7807,11 @@ class MeshNode:
     def installed_list(self) -> list[dict]:
         return self._installed.list()
 
+    def installed_app_dir(self, app_id_hex: str) -> str | None:
+        """Where an installed app's files are, or ``None`` — what the Apps page
+        reads an app's manifest from before the app ever runs."""
+        return self._installed.app_dir(app_id_hex)
+
     def store_overview(self) -> dict:
         """The full store view for a UI, with all decisions made here (Python):
         each catalog app is annotated with its ``state`` (``install`` /

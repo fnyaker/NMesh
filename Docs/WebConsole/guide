@@ -894,15 +894,29 @@ state; uninstalling **purges its encrypted drawer**) and **enabled** (the app is
 plugged into the mesh right now; disabling stops it, its state survives). The
 toggle is **live** — no node restart — and persisted in `<data>/apps.json`.
 
-Each installed card also carries its **grants** as tick boxes: what that app may
-ask of the node *beyond running*. They are rendered from what the node declares,
-never from a list held in the page, so a grant added tomorrow appears with the
-node's own words for it. Today there is one — `logs`, reading the node's log
-ring: every other app's lines and the core's, not only its own. Off for every
-app until an operator ticks it, and dropped when the app is uninstalled, so one
-reinstalled later starts from nothing rather than from what somebody allowed the
-app that used to have that name. Writing a line needs no grant: the node stamps
-the source, so an app can only ever be quoted as itself.
+Each card says how many **permissions** the app asked for and how many it holds,
+and **Permissions** opens them: only what that app asked for in its manifest, each
+with its level (*ordinary*, *reads this node*, *dangerous*), the node's own words
+for it and the app's reason. They are rendered from what the node declares
+(`apps.permissions`), never from a list held in the page. A dangerous one asks
+before the switch moves. Off for every app until an operator ticks it — except the
+ordinary ones every app always had — and dropped when the app is uninstalled, so
+one reinstalled later starts from nothing rather than from what somebody allowed
+the app that used to have that name. *Connected apps* lists every app that is not
+built in and declared a manifest — attached right now (with its own token, or only
+the shared one), installed with a `nmesh.json`, or remembered — with its connector
+token (this machine only) and a way to forget it. The model, the tree and the
+manifest are in [`../AppPermissions/guide`](../AppPermissions/guide).
+
+### Apps → Internal API
+
+Every operation the node exposes — the console's own, the operations apps declare,
+and the routes of apps that declare none (read off their page bundles) — with what
+it does, the permission an app needs for it, any app modding it, and the MCP tool it
+becomes (`apps.api`). Above it, the **MCP server** card: whether it runs, where it
+listens (loopback only unless moved), the client configuration with its token —
+shown only on a press — a new token, and *Listen elsewhere*, which asks before
+exposing the node beyond this machine. See [`../Apps/mcp`](../Apps/mcp).
 
 Wiring: pass an `app_host` (a `src.app_registry.AppHost`) to `WebConsole(...)`.
 `scripts/nmesh_node.py` does it; the `chat_bridge` parameter stays supported for

@@ -11,6 +11,10 @@ speaks on, and then exchanges end-to-end mesh messages:
     → WHOAMI
     ← WHOAMI <our_node_id:20>
     ← RECV   <src_id:20><payload>          (only for this client's app section)
+    → MANIFEST <json>                      (what this app asks to be allowed)
+    ← PERMS    <json>                      (what it holds)
+    → CONTROL  <control frame>             (the internal API: the console's own
+    ← CONTROL_REPLY <reply frame>           operations, as far as it was granted)
 
 This is the *data* plane (distinct from the web console, which is the management
 plane). It is fully asyncio and lives on the node's event loop, so it talks to
@@ -31,9 +35,12 @@ container IPC; an ``ssl_context`` may be supplied to wrap the TCP listener.
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
+import hashlib
 import hmac
 import json
+import re
 import os
 import secrets
 import struct
@@ -41,6 +48,9 @@ import threading
 import time
 
 from . import alerts
+from . import app_api
+from . import app_perms
+from . import faults
 from . import logbook
 from .app_auth import CTX_LEN, MAX_PURPOSE_LEN
 from .app_channel import APP_ID_LEN, GENERIC_APP_ID, frame as _frame, unframe as _unframe
@@ -134,9 +144,63 @@ _NOTIFY_KEY_MAX = 64
 # link list is who this machine keeps company with, which is the same kind of
 # thing as its log and not the kind of thing an app is owed for existing.
 _LINKS = 0x16         # body = empty
+# Permissions and the internal API (`src/app_perms.py`, `src/control/`).
+_MANIFEST = 0x17      # body = JSON manifest — what this app asks to be allowed
+_PERMS_QUERY = 0x18   # body = empty — what does this app hold right now?
+_CONTROL = 0x19       # body = one control-plane request frame (JSON)
+_MOD_HOOK = 0x1A      # body = JSON {op, mode} or {op, remove: true}
+_RETURN = 0x1B        # body = JSON {call, ok, result | params | error}
 _LOG_LINES = 0x8F     # body = JSON {lines, matched, returned, seq, lost?}
 _LOG_LINE = 0x90      # body = JSON one line, pushed to a watching client
 _LINKS_VIEW = 0x92    # body = JSON {links: [...]}, or {refused: true}
+_PERMS = 0x93         # body = JSON {app_id, identified, granted, requested, error?}
+_CONTROL_REPLY = 0x94 # body = the plane's reply frame, carrying the request's id
+_MOD_ACK = 0x95       # body = JSON {ok, error?, hooks}
+_CALL = 0x96          # body = JSON {call, kind, op, mode?, params, result?}
+
+# Control calls one client may have in flight at once. Each one is a thread
+# while it runs, and a client is one app: more than this is an app flooding the
+# plane, and the answer is a refusal it can read rather than a queue it cannot.
+_MAX_CONTROL_INFLIGHT = 4
+# Questions the node is waiting for clients to answer (a mod's, an app API
+# call), all clients together, and how long each may take. A client that does
+# not answer in time is answered *for*: a mod falls back to the node's own
+# operation, an app call is refused.
+_MAX_CALLS = 64
+_MOD_TIMEOUT = 5.0
+_API_TIMEOUT = 10.0
+# What a client reads in one frame. Larger than what it may send: a control
+# reply is up to `frame.MAX_REPLY` (512 kB), and a reply cut short would be a
+# client hung on an answer it already received.
+_MAX_REPLY_FRAME = 600_000
+_ID_PEEK = re.compile(rb'"id"\s*:\s*"([^"\\]{0,64})"')
+
+# What each frame needs, beyond having authenticated. The ordinary ones are
+# what every client always had, and an app with no manifest keeps them all;
+# an app with one gets what it asked for. Reading the node's own data needs a
+# grant whatever the manifest says.
+_FRAME_PERMISSION = {
+    _SEND: "network",
+    _STORE_GET: "storage", _STORE_PUT: "storage", _STORE_DEL: "storage",
+    _STORE_LIST: "storage",
+    _APP_DHT_PUT: "dht", _APP_DHT_GET: "dht",
+    _PSEUDO_MINE: "names", _PSEUDO_LOOKUP: "names", _PSEUDO_OF: "names",
+    _AUTH_ASSERT: "identity", _AUTH_VERIFY: "identity",
+    _ABUSE: "report", _LOG_WRITE: "log", _NOTIFY: "notify",
+}
+# A refused question is still answered — with the empty answer — so an app
+# that is not permitted never looks like a node that has wedged.
+_REFUSED_ANSWER = {
+    _STORE_GET: (_STORE_VALUE, b"\x00"), _STORE_PUT: (_STORE_OK, b"\x00"),
+    _STORE_DEL: (_STORE_OK, b"\x00"), _STORE_LIST: (_STORE_KEYS, b"[]"),
+    _APP_DHT_PUT: (_APP_DHT_KEY, b""), _APP_DHT_GET: (_APP_DHT_VALUE, b"\x00"),
+    _PSEUDO_MINE: (_PSEUDO_MINE_RESP, b""), _PSEUDO_LOOKUP: (_PSEUDO_RESULTS, b"[]"),
+    _PSEUDO_OF: (_PSEUDO_NAMES, b"{}"),
+    _AUTH_ASSERT: (_AUTH_ASSERTION, b""), _AUTH_VERIFY: (_AUTH_PRINCIPAL, b"null"),
+}
+# The two grants that came before permissions, for a connector built with the
+# older `grants=` callable and no permission book.
+_LEGACY_GRANT = {"readstate.logs": "logs", "readstate.links": "links"}
 
 
 def _number(raw) -> float:
@@ -185,10 +249,11 @@ def _fit(answer: dict) -> bytes:
     return blob
 
 
-async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
+async def _read_frame(reader: asyncio.StreamReader,
+                      limit: int = _MAX_FRAME) -> tuple[int, bytes]:
     header = await reader.readexactly(_LEN.size)
     (length,) = _LEN.unpack(header)
-    if length < 1 or length > _MAX_FRAME:
+    if length < 1 or length > limit:
         raise ValueError("frame length out of bounds")
     body = await reader.readexactly(length)
     return body[0], body[1:]
@@ -203,8 +268,33 @@ async def _write_frame(writer: asyncio.StreamWriter, ftype: int, body: bytes) ->
 class DataConnector:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 0,
                  unix_path: str | None = None, token: str | None = None,
-                 ssl_context=None, log_access=None, grants=None) -> None:
+                 ssl_context=None, log_access=None, grants=None,
+                 perms=None, app_secret: bytes | None = None,
+                 reserved_names=()) -> None:
         self._node = node
+        # What each app asked for and was granted (`src/app_perms.py`). With
+        # one, every frame is checked against it; without one — a connector
+        # built the older way — every client keeps what it always had.
+        self._perms = perms
+        # The key per-app tokens are derived from. Never sent anywhere, and
+        # distinct from the shared token on purpose: a process holding the
+        # shared token must not be able to work out what any app's is.
+        self._app_secret = app_secret or secrets.token_bytes(32)
+        # Clients that authenticated *as* their app — with that app's own
+        # token. Only these are ever answered anything above `normal`.
+        self._identified: set = set()
+        # Names an attached app may not take for its API: the built-ins'.
+        self._reserved = frozenset(reserved_names)
+        # The control plane apps drive the node through (`bind_plane`).
+        self._plane = None
+        self._control_inflight: dict = {}
+        # What attached apps expose: writer -> (name, operations).
+        self._apis: dict = {}
+        # Questions put to clients and not yet answered: call id -> future.
+        self._calls: dict = {}
+        # Control calls running: held so a task is never collected mid-call.
+        self._control_tasks: set = set()
+        self.hooks = ModHooks(self)
         # What an app may *read* of the node's own data — its log, its links.
         # Writing is open to every app, because what an app writes is stamped
         # with its own id here and can only ever be attributed to it; reading
@@ -250,6 +340,22 @@ class DataConnector:
     @property
     def host(self) -> str:
         return self._host
+
+    def token_for(self, app_id: bytes) -> str:
+        """The token one app authenticates *as itself* with.
+
+        Derived, so nothing has to be stored per app, and stable for as long as
+        the secret is — which the node keeps in its state, so an app in a
+        container keeps working across a restart. Holding it is what makes a
+        client that app: grants are held by an app id, and the shared token
+        only ever says "a local process"."""
+        digest = hmac.new(self._app_secret, b"nmesh-app-token\x00" + bytes(app_id),
+                          hashlib.sha256).digest()
+        return "app-" + base64.urlsafe_b64encode(digest[:24]).decode("ascii")
+
+    def bind_plane(self, plane) -> None:
+        """Let identified clients drive the node through ``plane``."""
+        self._plane = plane
 
     async def start(self) -> None:
         if self._unix_path:
@@ -316,6 +422,13 @@ class DataConnector:
             except Exception:
                 pass
         self._clients.clear()
+        self._identified.clear()
+        self._apis.clear()
+        self.hooks.clear()
+        for future in list(self._calls.values()):
+            if not future.done():
+                future.cancel()
+        self._calls.clear()
         self._unattended.clear()
         self._log_watchers.clear()
         self._watching_changed()
@@ -357,6 +470,8 @@ class DataConnector:
                 for w, w_app in list(self._clients.items()):
                     if w_app != app_id:
                         continue  # not this client's section
+                    if not self._permitted(w, "network"):
+                        continue  # an app that may not exchange messages
                     self._offer(w, _RECV, body)
             except asyncio.CancelledError:
                 raise
@@ -406,15 +521,27 @@ class DataConnector:
             async with asyncio.timeout(_AUTH_DEADLINE):
                 ftype, body = await _read_frame(reader)
             # AUTH body = app_id(APP_ID_LEN) ‖ token. The token is compared in
-            # constant time; the app id names this client's section.
-            if ftype != _AUTH or len(body) < APP_ID_LEN or not hmac.compare_digest(
-                    body[APP_ID_LEN:], self._token_bytes):
+            # constant time; the app id names this client's section. Either
+            # token opens the connector: the shared one says "a local process",
+            # the app's own says "this app" — and only that one is answered
+            # anything a human granted to the app (`_permitted`).
+            if ftype != _AUTH or len(body) < APP_ID_LEN:
                 await _write_frame(writer, _AUTH_FAIL, b"")
                 writer.close()
                 return
             app_id = body[:APP_ID_LEN]
+            offered = body[APP_ID_LEN:]
+            shared = hmac.compare_digest(offered, self._token_bytes)
+            own = hmac.compare_digest(offered,
+                                      self.token_for(app_id).encode("ascii"))
+            if not (shared or own):
+                await _write_frame(writer, _AUTH_FAIL, b"")
+                writer.close()
+                return
             await _write_frame(writer, _AUTH_OK, b"")
             self._clients[writer] = app_id
+            if own:
+                self._identified.add(writer)
             queue: asyncio.Queue = asyncio.Queue(_MAX_CLIENT_QUEUE)
             self._outbox[writer] = queue
             self._writers[writer] = asyncio.create_task(
@@ -422,6 +549,12 @@ class DataConnector:
             self._pending -= 1
             while True:
                 ftype, body = await _read_frame(reader)
+                needed = _FRAME_PERMISSION.get(ftype)
+                if needed is not None and not self._permitted(writer, needed):
+                    refused = _REFUSED_ANSWER.get(ftype)
+                    if refused is not None:
+                        await _write_frame(writer, *refused)
+                    continue
                 if ftype == _SEND:
                     if len(body) < 20:
                         continue
@@ -459,6 +592,14 @@ class DataConnector:
                     self._handle_notify(app_id, body)
                 elif ftype == _LINKS:
                     await self._handle_links(writer, app_id)
+                elif ftype in (_MANIFEST, _PERMS_QUERY):
+                    await self._handle_manifest(writer, app_id, ftype, body)
+                elif ftype == _CONTROL:
+                    await self._start_control(writer, app_id, body)
+                elif ftype == _MOD_HOOK:
+                    await self._handle_mod_hook(writer, app_id, body)
+                elif ftype == _RETURN:
+                    self._handle_return(writer, body)
                 # unknown types are ignored
         except (asyncio.IncompleteReadError, ConnectionError, ValueError,
                 OSError, asyncio.TimeoutError):
@@ -469,6 +610,11 @@ class DataConnector:
             if writer not in self._outbox:
                 self._pending = max(0, self._pending - 1)
             self._clients.pop(writer, None)
+            self._identified.discard(writer)
+            self._apis.pop(writer, None)
+            self._control_inflight.pop(writer, None)
+            self.hooks.drop(writer)
+            self._fail_calls(writer)
             self._unattended.discard(writer)
             self._drop_log_watcher(writer)
             self._outbox.pop(writer, None)
@@ -638,8 +784,23 @@ class DataConnector:
         book = getattr(self._node, "logs", None)
         return book if book is not None and hasattr(book, "record") else None
 
-    def _may_read_logs(self, app_id: bytes) -> bool:
-        return self._may(app_id, "logs")
+    def _permitted(self, writer, permission: str) -> bool:
+        """May the app this client authenticated as do this? **No** for
+        anything not recognised, and never above ``normal`` for a client that
+        holds only the shared token."""
+        app_id = self._clients.get(writer)
+        if app_id is None:
+            return False
+        if self._perms is None:
+            if app_perms.level(permission) == app_perms.NORMAL:
+                return True
+            legacy = _LEGACY_GRANT.get(permission)
+            return legacy is not None and self._may(app_id, legacy)
+        try:
+            return bool(self._perms.allows(app_id.hex(), permission,
+                                           identified=writer in self._identified))
+        except Exception:               # noqa: BLE001 — a refusal, never a crash
+            return False
 
     def _may(self, app_id: bytes, capability: str) -> bool:
         """Does this app hold this grant? **No** unless somebody says yes.
@@ -681,7 +842,7 @@ class DataConnector:
         Answered either way, like a log read: an app that is simply not
         permitted must not look like a node that has wedged."""
         view = getattr(self._node, "links_view", None)
-        if view is None or not self._may(app_id, "links"):
+        if view is None or not self._permitted(writer, "readstate.links"):
             await _write_frame(writer, _LINKS_VIEW,
                                json.dumps({"links": [], "refused": True})
                                .encode("utf-8"))
@@ -724,7 +885,7 @@ class DataConnector:
     async def _handle_log_read(self, writer, app_id: bytes, ftype: int,
                                body: bytes) -> None:
         book = self._book()
-        if book is None or not self._may_read_logs(app_id):
+        if book is None or not self._permitted(writer, "readstate.logs"):
             # Answered, and answered with nothing. A silent drop would leave a
             # client waiting on a reply that is never coming, which is how an
             # app that is simply not permitted looks exactly like a node that
@@ -929,6 +1090,326 @@ class DataConnector:
         await _write_frame(writer, _PSEUDO_RESULTS,
                            json.dumps(results).encode("utf-8"))
 
+    # -- permissions --------------------------------------------------------
+    #
+    # An app says what it wants; the node records it and answers with what the
+    # app holds. Asking grants nothing above `normal` — a human does that, on
+    # the Apps page — and the answer is the app's own standing, which is its
+    # business, unlike what a report of abuse added up to.
+
+    def _perm_state(self, writer, app_id: bytes) -> dict:
+        identified = writer in self._identified
+        if self._perms is None:
+            return {"app_id": app_id.hex(), "identified": identified,
+                    "granted": [], "requested": []}
+        app_hex = app_id.hex()
+        return {"app_id": app_hex, "identified": identified,
+                "granted": [name for name in app_perms.NAMES
+                            if self._permitted(writer, name)],
+                "requested": sorted(self._perms.requested(app_hex))}
+
+    async def _handle_manifest(self, writer, app_id: bytes, ftype: int,
+                               body: bytes) -> None:
+        answer = {}
+        if ftype == _MANIFEST:
+            if self._perms is None:
+                answer["error"] = "this node keeps no app permissions"
+            else:
+                try:
+                    manifest = app_perms.parse_manifest(body)
+                    self._perms.declare(app_id.hex(), manifest, source="connector")
+                    error = self._register_api(writer, manifest)
+                    if error:
+                        answer["error"] = error
+                except app_perms.ManifestError as exc:
+                    answer["error"] = str(exc)[:200]
+        answer.update(self._perm_state(writer, app_id))
+        await _write_frame(writer, _PERMS, json.dumps(answer).encode("utf-8"))
+
+    def _register_api(self, writer, manifest: dict) -> str:
+        """Operations this app answers, from its manifest. ``""`` or why not.
+
+        Only for a client that authenticated as its app: an app's API is
+        reached by its *name*, and a name anybody holding the shared token
+        could claim is a name anybody could answer for."""
+        if not manifest.get("api"):
+            self._apis.pop(writer, None)
+            return ""
+        if writer not in self._identified:
+            return "an app's own token is needed to expose operations"
+        name = manifest["name"]
+        if name in self._reserved:
+            return f"{name} is a built-in app's name"
+        app_id = self._clients.get(writer)
+        for other, (taken, _ops) in self._apis.items():
+            if other is not writer and taken == name and self._clients.get(other) != app_id:
+                return f"another app already answers as {name}"
+        try:
+            operations = app_api.declare_all(manifest["api"])
+        except app_api.AppAPIError as exc:
+            return str(exc)[:200]
+        self._apis[writer] = (name, operations)
+        return ""
+
+    def attached(self) -> dict:
+        """What the Apps page says about the apps attached right now, by id."""
+        out = {}
+        hooks = self.hooks.listing()
+        for writer, app_id in list(self._clients.items()):
+            app_hex = app_id.hex()
+            entry = out.setdefault(app_hex, {"clients": 0, "identified": False,
+                                             "api": [], "hooks": []})
+            entry["clients"] += 1
+            entry["identified"] = entry["identified"] or writer in self._identified
+            if writer in self._apis:
+                name, operations = self._apis[writer]
+                entry["api"] = [name + "." + row["name"] for row in operations]
+        for op, app_hex in hooks.items():
+            if app_hex in out:
+                out[app_hex]["hooks"].append(op)
+        return out
+
+    # -- the internal API: driving the node ---------------------------------
+    #
+    # The same plane a page reaches, under an origin that names the app
+    # (`Origin.app`), so every operation is answered — or refused — by the same
+    # code, against the permissions a human granted that app id. Each call
+    # runs on a worker thread: a control operation waits on the node's loop,
+    # and this handler *is* on it.
+
+    async def _start_control(self, writer, app_id: bytes, body: bytes) -> None:
+        from .control import ControlError, Origin, Reply, decode_request, encode
+        from .control.errors import FrameError
+        try:
+            request = decode_request(body)
+        except FrameError as exc:
+            peek = _ID_PEEK.search(body[:4096])
+            ident = peek.group(1).decode("utf-8", "replace") if peek else ""
+            await _write_frame(writer, _CONTROL_REPLY,
+                               encode(Reply.refusal(exc, ident=ident).document()))
+            return
+        refusal = None
+        if self._plane is None:
+            refusal = ControlError("unavailable", "this node offers no control plane")
+        elif writer not in self._identified:
+            refusal = ControlError(
+                "unauthorized", "authenticate with this app's own token to drive the node")
+        elif self._control_inflight.get(writer, 0) >= _MAX_CONTROL_INFLIGHT:
+            refusal = ControlError("conflict", "too many calls in flight from this app")
+        if refusal is not None:
+            await _write_frame(writer, _CONTROL_REPLY,
+                               encode(Reply.refusal(refusal, ident=request.id).document()))
+            return
+        self._control_inflight[writer] = self._control_inflight.get(writer, 0) + 1
+        origin = Origin.app(app_id.hex())
+        plane = self._plane
+
+        async def run() -> None:
+            try:
+                reply = await asyncio.to_thread(plane.dispatch, request, origin)
+                blob = encode(reply.document())
+            except Exception as exc:            # noqa: BLE001 — dispatch never raises
+                faults.note("connector control", exc)
+                blob = encode(Reply.refusal(
+                    ControlError("failed", "the call could not be answered"),
+                    ident=request.id).document())
+            finally:
+                if writer in self._control_inflight:
+                    self._control_inflight[writer] = max(
+                        0, self._control_inflight[writer] - 1)
+            self._offer(writer, _CONTROL_REPLY, blob)
+        # Not awaited here: a call that waits on a mod's answer would wait on a
+        # frame this very loop has to read. Answered through the client's
+        # queue, matched by the request's own id.
+        task = asyncio.create_task(run())
+        self._control_tasks.add(task)
+        task.add_done_callback(self._control_tasks.discard)
+
+    # -- modding ------------------------------------------------------------
+
+    async def _handle_mod_hook(self, writer, app_id: bytes, body: bytes) -> None:
+        answer = {"ok": False}
+        try:
+            asked = json.loads(body.decode("utf-8")) if body else {}
+        except (UnicodeDecodeError, ValueError):
+            asked = None
+        if not isinstance(asked, dict):
+            answer["error"] = "not a hook"
+        elif writer not in self._identified or not self._permitted(writer, "modding"):
+            answer["error"] = "this app does not hold the modding permission"
+        else:
+            op = str(asked.get("op") or "")[:64]
+            if asked.get("remove") is True:
+                self.hooks.remove(writer, op)
+                answer["ok"] = True
+            else:
+                error = self.hooks.add(writer, app_id.hex(), op,
+                                       str(asked.get("mode") or ""))
+                answer["ok"] = not error
+                if error:
+                    answer["error"] = error
+        answer["hooks"] = sorted(op for op, holder in self.hooks.held().items()
+                                 if holder is writer)
+        await _write_frame(writer, _MOD_ACK, json.dumps(answer).encode("utf-8"))
+
+    # -- asking a client ----------------------------------------------------
+
+    async def call_client(self, writer, document: dict, timeout: float):
+        """Put one question to a client and wait for its ``RETURN``.
+
+        Raises on no answer, a refusal, or a client that is gone — every caller
+        has a fallback, and a question nobody answered is not an answer."""
+        if writer not in self._clients or len(self._calls) >= _MAX_CALLS:
+            raise ConnectionError("that app cannot be asked right now")
+        ident = secrets.token_hex(8)
+        future = asyncio.get_running_loop().create_future()
+        self._calls[ident] = (writer, future)
+        try:
+            self._offer(writer, _CALL, json.dumps(dict(document, call=ident))
+                        .encode("utf-8"))
+            answer = await asyncio.wait_for(asyncio.shield(future), timeout)
+        finally:
+            self._calls.pop(ident, None)
+            if not future.done():
+                future.cancel()
+        if not isinstance(answer, dict) or answer.get("ok") is not True:
+            reason = answer.get("error") if isinstance(answer, dict) else None
+            raise RuntimeError(str(reason or "the app refused")[:200])
+        return answer
+
+    def call_client_sync(self, writer, document: dict, timeout: float):
+        """:meth:`call_client` from a thread — the plane's, which is where a
+        mod and an app call are asked from."""
+        loop = self._loop
+        if loop is None or threading.get_ident() == self._loop_thread:
+            raise RuntimeError("a client is asked from a worker thread")
+        future = asyncio.run_coroutine_threadsafe(
+            self.call_client(writer, document, timeout), loop)
+        return future.result(timeout + 1.0)
+
+    def _handle_return(self, writer, body: bytes) -> None:
+        try:
+            answer = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(answer, dict):
+            return
+        pending = self._calls.get(str(answer.get("call") or ""))
+        # Only the client that was asked can answer: another app naming the
+        # same call id is dropped, as a peer naming another's shell is.
+        if pending is None or pending[0] is not writer or pending[1].done():
+            return
+        pending[1].set_result(answer)
+
+    def _fail_calls(self, writer) -> None:
+        for ident, (asked, future) in list(self._calls.items()):
+            if asked is writer and not future.done():
+                future.set_exception(ConnectionError("that app went away"))
+
+    # -- what attached apps expose --------------------------------------------
+
+    def api_catalogue(self) -> list:
+        """Operations attached apps declared, as the app API lists them."""
+        out, seen = [], set()
+        for writer, (name, operations) in list(self._apis.items()):
+            if name in seen or writer not in self._clients:
+                continue
+            seen.add(name)
+            out.append({"app": name, "operations": [dict(row) for row in operations]})
+        return out
+
+    def api_call(self, app: str, op: str, args: dict) -> dict:
+        """Ask the attached app called ``app`` to answer ``op``. From a thread.
+
+        The arguments arrive already declared, coerced and bounded by
+        :class:`~src.app_api.AppAPI`; what comes back is checked to be an
+        answer rather than trusted to be one."""
+        for writer, (name, operations) in list(self._apis.items()):
+            if name == app and any(row["name"] == op for row in operations):
+                answer = self.call_client_sync(
+                    writer, {"kind": "api", "op": op, "params": args}, _API_TIMEOUT)
+                result = answer.get("result")
+                return result if isinstance(result, dict) else {"result": result}
+        raise app_api.AppAPIError("no such operation")
+
+
+class ModHooks:
+    """Which app stands in front of which operation (`modding`).
+
+    One hook per operation: two mods racing to rewrite one answer is a node
+    whose behaviour depends on who connected first. A hook belongs to the
+    client that installed it and goes when it does, and it is asked of the
+    permission book *at every call* — taking `modding` back takes every hook
+    with it at once, not at the next reconnect."""
+
+    MODES = ("before", "after", "replace")
+    MAX = 64
+
+    def __init__(self, connector) -> None:
+        self._connector = connector
+        self._hooks: dict = {}          # op -> (writer, app_hex, mode)
+
+    def add(self, writer, app_hex: str, op: str, mode: str) -> str:
+        if mode not in self.MODES:
+            return "mode: before, after or replace"
+        if not app_perms.moddable(op):
+            return f"{op} cannot be modded"
+        plane = self._connector._plane
+        if plane is None or plane.find(op) is None:
+            return f"no operation called {op}"
+        holder = self._hooks.get(op)
+        if holder is not None and holder[0] is not writer:
+            return f"{op} is already modded by {holder[1]}"
+        if holder is None and len(self._hooks) >= self.MAX:
+            return "too many hooks"
+        self._hooks[op] = (writer, app_hex, mode)
+        return ""
+
+    def remove(self, writer, op: str) -> None:
+        holder = self._hooks.get(op)
+        if holder is not None and holder[0] is writer:
+            del self._hooks[op]
+
+    def drop(self, writer) -> None:
+        for op, holder in list(self._hooks.items()):
+            if holder[0] is writer:
+                del self._hooks[op]
+
+    def clear(self) -> None:
+        self._hooks.clear()
+
+    def held(self) -> dict:
+        return {op: holder[0] for op, holder in self._hooks.items()}
+
+    def listing(self) -> dict:
+        """``{op: app id}`` — what the Apps page and the API list show."""
+        return {op: holder[1] for op, holder in self._hooks.items()}
+
+    def lookup(self, op: str):
+        holder = self._hooks.get(op)
+        if holder is None:
+            return None
+        writer, app_hex, mode = holder
+        if not self._connector._permitted(writer, "modding"):
+            return None
+        return _Hook(self._connector, writer, app_hex, mode)
+
+
+class _Hook:
+    """One installed hook, as the plane asks it (`ControlPlane._modded`)."""
+
+    __slots__ = ("_connector", "_writer", "app_hex", "mode")
+
+    def __init__(self, connector, writer, app_hex: str, mode: str) -> None:
+        self._connector = connector
+        self._writer = writer
+        self.app_hex = app_hex
+        self.mode = mode
+
+    def call(self, op: str, payload: dict):
+        document = {"kind": "mod", "op": op, "mode": self.mode}
+        document.update(payload)
+        return self._connector.call_client_sync(self._writer, document, _MOD_TIMEOUT)
 
 # ---------------------------------------------------------------------------
 # Client library — what an application uses to talk to the connector.
@@ -976,6 +1457,15 @@ class ConnectorClient:
         self._log_inbox: collections.deque = collections.deque(
             maxlen=_CLIENT_LOG_INBOX)
         self.log_run = ""
+        # Control replies are matched by the request's id, not by order: they
+        # may come back in any order, and one waiting on a mod must not hold
+        # the rest. Bounded by `_MAX_CONTROL_INFLIGHT` on the node's side.
+        self._control_waiting: dict = {}
+        self._control_seq = 0
+        # What this app answers when the node asks: a mod's hooks by op, and
+        # the operations its manifest declared.
+        self._handlers: dict = {}
+        self._call_tasks: set = set()
 
     @classmethod
     def from_env(cls, environ=None, app_id: bytes | None = None) -> "ConnectorClient":
@@ -1020,7 +1510,13 @@ class ConnectorClient:
         reads, and hands each frame to whoever is owed it."""
         try:
             while True:
-                ftype, body = await _read_frame(self._reader)
+                ftype, body = await _read_frame(self._reader, _MAX_REPLY_FRAME)
+                if ftype == _CONTROL_REPLY:
+                    self._control_arrived(body)
+                    continue
+                if ftype == _CALL:
+                    self._called(body)
+                    continue
                 if ftype == _RECV and len(body) >= 20:
                     self._inbox.append((NodeID(body[:20]), body[20:]))
                     self._arrived.set()
@@ -1055,6 +1551,10 @@ class ConnectorClient:
                 if not future.done():
                     future.set_exception(self._dead)
         self._waiting.clear()
+        for future in self._control_waiting.values():
+            if not future.done():
+                future.set_exception(self._dead)
+        self._control_waiting.clear()
         if self._arrived is not None:
             self._arrived.set()
 
@@ -1167,6 +1667,119 @@ class ConnectorClient:
             self._writer, _NOTIFY,
             (b"e" if str(level).strip().lower() == "error" else b"w")
             + bytes([len(name)]) + name + document.encode("utf-8"))
+
+    # -- permissions and the internal API -----------------------------------
+
+    async def declare(self, manifest: dict) -> dict:
+        """Say what this app asks to be allowed (`src/app_perms.py`).
+
+        Answers what it holds now — ``granted`` may well be less than
+        ``requested``: asking is not getting, and a human on that node decides.
+        ``error`` names what was refused in the manifest, if anything was."""
+        blob = json.dumps(manifest).encode("utf-8")
+        return json.loads((await self._roundtrip(_MANIFEST, blob, _PERMS)).decode("utf-8"))
+
+    async def permissions(self) -> dict:
+        """What this app holds right now."""
+        return json.loads((await self._roundtrip(_PERMS_QUERY, b"", _PERMS)).decode("utf-8"))
+
+    async def control(self, op: str, params: dict | None = None, *,
+                      timeout: float = 30.0) -> dict:
+        """Call one of the node's own operations — the internal API.
+
+        The answer is the control plane's reply document: ``{"ok": true,
+        "result": …}`` or ``{"ok": false, "code": …, "error": …}``. Refusals are
+        answers here, not exceptions: an app is told *why* (no permission, no
+        such operation, a job to start instead) and decides what to do. Needs
+        this app's own token; the shared one is answered ``unauthorized``."""
+        if self._dead is not None:
+            raise self._dead
+        if self._writer is None:
+            raise ConnectionError("connector client is not connected")
+        self._control_seq += 1
+        ident = f"c{self._control_seq}"
+        future = asyncio.get_running_loop().create_future()
+        self._control_waiting[ident] = future
+        try:
+            await _write_frame(self._writer, _CONTROL, json.dumps(
+                {"v": 1, "id": ident, "op": str(op),
+                 "params": params or {}}).encode("utf-8"))
+            return await asyncio.wait_for(asyncio.shield(future), timeout)
+        finally:
+            self._control_waiting.pop(ident, None)
+            if not future.done():
+                future.cancel()
+
+    def _control_arrived(self, body: bytes) -> None:
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(document, dict):
+            return
+        future = self._control_waiting.get(str(document.get("id") or ""))
+        if future is not None and not future.done():
+            future.set_result(document)
+
+    async def hook(self, op: str, mode: str, handler) -> dict:
+        """Stand in front of one of the node's operations (needs ``modding``).
+
+        ``handler(payload)`` — a function or a coroutine — is called with
+        ``{"op", "mode", "params"[, "result"]}`` and answers ``{"params": …}``
+        (``before``), ``{"result": …}`` (``replace``, ``after``) or ``None`` to
+        let the node answer as it would have. Whatever it raises, or a reply
+        that takes longer than the node waits, is the same as ``None``."""
+        self._handlers[("mod", str(op))] = handler
+        blob = json.dumps({"op": op, "mode": mode}).encode("utf-8")
+        answer = json.loads((await self._roundtrip(_MOD_HOOK, blob, _MOD_ACK)).decode("utf-8"))
+        if not answer.get("ok"):
+            self._handlers.pop(("mod", str(op)), None)
+        return answer
+
+    async def unhook(self, op: str) -> dict:
+        self._handlers.pop(("mod", str(op)), None)
+        blob = json.dumps({"op": op, "remove": True}).encode("utf-8")
+        return json.loads((await self._roundtrip(_MOD_HOOK, blob, _MOD_ACK)).decode("utf-8"))
+
+    def serve(self, op: str, handler) -> None:
+        """Answer one operation this app declared in its manifest's ``api``.
+        ``handler(params)`` answers a mapping, sync or async."""
+        self._handlers[("api", str(op))] = handler
+
+    def _called(self, body: bytes) -> None:
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(document, dict):
+            return
+        task = asyncio.create_task(self._answer(document))
+        self._call_tasks.add(task)
+        task.add_done_callback(self._call_tasks.discard)
+
+    async def _answer(self, document: dict) -> None:
+        ident = str(document.get("call") or "")
+        handler = self._handlers.get((str(document.get("kind")), str(document.get("op"))))
+        reply = {"call": ident, "ok": False}
+        if handler is None:
+            reply["error"] = "this app does not answer that"
+        else:
+            try:
+                payload = (document if document.get("kind") == "mod"
+                           else document.get("params") or {})
+                result = handler(payload)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if document.get("kind") == "mod":
+                    reply = dict(result or {}, call=ident, ok=result is not None)
+                else:
+                    reply = {"call": ident, "ok": True, "result": result}
+            except Exception as exc:            # noqa: BLE001 — the node falls back
+                reply["error"] = type(exc).__name__
+        try:
+            await _write_frame(self._writer, _RETURN, json.dumps(reply).encode("utf-8"))
+        except Exception:                       # noqa: BLE001 — the link is gone
+            pass
 
     async def whoami(self) -> NodeID:
         return NodeID(await self._roundtrip(_WHOAMI, b"", _WHOAMI_RESP))

@@ -43,6 +43,11 @@ class ChatBridge:
 the app still decides — but it lets a caller present a confirmation, and it
 keeps read-only calls distinguishable at a glance.
 
+`operator=True` says only a **person** may call it — never another app,
+whatever that app holds. For an answer that is a credential: the MCP app's bearer
+token is readable by whoever runs the node, and an app that could read it would
+hold every permission the MCP app holds.
+
 `remote=True` says an operator at **another node's console** may ask for this
 one. It defaults to no, and that default is the interesting half: an app added
 tomorrow is unreachable from a distance until its author decides, operation by
@@ -127,6 +132,10 @@ work out whether its caller is at the keyboard.
 | `fleet` | `enrol` | yes | no | ask a node for the right to manage it |
 | `fleet` | `request` | yes | no | ask a node already managed for extra rights |
 | `fleet` | `invite` | yes | no | have a node we manage mint an invitation to its mesh |
+| `mcp` | `status` | no | no | where the MCP server listens, and how it is doing |
+| `mcp` | `token` | no | no | the bearer token — **`operator`** |
+| `mcp` | `rotate` | yes | no | a new bearer token — **`operator`** |
+| `mcp` | `configure` | yes | no | listen on another address or port — **`operator`** |
 
 `tests/test_app_api.py` and `tests/test_control_plane.py` pin these: renaming
 one breaks a page, and *widening* one — `changes` or `remote` — is a security
@@ -161,6 +170,20 @@ Where a link *leaves* the app — Message opens chat, Open in Fleet opens fleet 
 the operator chooses a window or a tab (Settings → This browser), and chat has
 its own choice for where node details appear. Both live in `localStorage`, like
 the theme: they are preferences about one screen, not properties of the node.
+
+## Apps outside the node declare operations too
+
+An app attached to the data connector declares its operations in its manifest's
+`api` ([`../AppPermissions/guide`](../AppPermissions/guide)), with exactly the
+fields above, brought through the same checks (`app_api.declare_all`). It answers
+them over the connector (`ConnectorClient.serve`, a `CALL` the node sends and a
+`RETURN` it answers), and they appear in the catalogue under the manifest's name —
+reached through `apps.call` like a built-in's, after the same coercion. Only an app
+connected with its own token may expose any, and never under a built-in's name.
+
+What an *app* may call through `apps.call` is a permission of its own:
+`readstate.apps` for an operation that only reads, `control.apps` for one that
+changes something, and nothing at all for one declared `operator`.
 
 ## Adding an operation
 
